@@ -10,8 +10,7 @@ description: |
   static marketing page ("build a dentist landing page", "a marketing page for
   my bakery") — that is the common case and belongs to the html track
   (create_html_site) or pocketpaw-create-paw-site. When you DO use it: YOU
-  write the React components (Hero, Pricing, Faq, ...) at the quality bar set
-  by pocketpaw-design-taste, assemble them into a source map rooted at
+  write the React components, assemble them into a source map rooted at
   src/App.tsx, and a deterministic tool persists the pocket stamped
   type="site" + pattern="landing" + engine="react". You do NOT compose a
   rippleSpec, do NOT call get_widget_spec, do NOT use the pocket specialist.
@@ -42,29 +41,13 @@ difference is the **payload**:
 
 **The one rule that changes everything: there is NO rippleSpec and NO
 catalog.** You are not picking widgets from a catalog or drafting a spec a
-validator gates. You write premium React — a `Hero`, a `Pricing`, an `Faq` —
-exactly as a senior frontend engineer would, and hand the files to a
-deterministic tool. The component files ARE the page.
+validator gates. You write React components exactly as a senior frontend
+engineer would, and hand the files to a deterministic tool. The component files
+ARE the page.
 
 So: **do NOT call `get_widget_spec`. Do NOT draft a `rippleSpec`. Do NOT call
 `pocket_specialist__create`. Do NOT delegate to a subagent.** Author the
 components, assemble the `source` map, and call `create_react_site`.
-
-## The quality bar
-
-**Run `pocketpaw-design-taste` FIRST — before you author a line.** It is the
-engine-agnostic creative-director system: the Vision Ledger and the one-line
-Design Read, the aesthetic direction family, the
-three dials, the layout-variance and materiality rules, the CSS-first motion
-vocabulary, and the anti-slop copy discipline. Everything it says about taste
-applies here unchanged — this skill does not restate it and does not override
-it. Author the sections honouring the direction it produces.
-
-The only thing THIS skill owns is what React does differently: the prerender
-contract, the source-map shape, and the interactivity flag below.
-
-Write **real, concrete copy** — never "TBD" or "Lorem ipsum". A dentist gets
-real service names, real testimonial quotes with names, real tier prices.
 
 ## ⚠️ THE PRERENDER AUTHORING RULE (read this before you write a line)
 
@@ -161,11 +144,11 @@ flashes instead of staying broken. Both rules apply, always.
 
 ## STEP 1 — Author the components
 
-Write the page as React components under `src/components/`, one per section, in
-conversion order. A strong default funnel:
+Which sections the page carries is decided from the brief before this step; this
+step only covers how each one is written.
 
-`Nav` → `Hero` → `Features` → `HowItWorks` → `Pricing` → `Testimonial` →
-`Faq` → `FinalCta` → `Footer`
+Write the page as React components under `src/components/`, one component per
+section.
 
 `src/App.tsx` is the **composition root** — it imports the sections, imports
 your stylesheet, and returns them in order. It is the one file the generator
@@ -175,14 +158,9 @@ Each component is a normal function component: props typed inline, the markup
 returned, and its styling from your stylesheet (plain CSS — there is no CSS
 framework installed; see "What the project has" below).
 
-Conversion essentials the page should carry:
-
-- A **hero** with a real headline promise + subtitle + a primary CTA that is an
-  **anchor** (`href="#pricing"`), not a bare `onClick` button.
-- A **pricing** section with real tiers and a highlighted recommended tier.
-- A **lead form** — see "Lead capture" below; it is a native form POST, not an
-  `onSubmit` handler.
-- Every CTA is an anchor (`#book`, `tel:`, `mailto:`).
+A CTA must be a real anchor (`href="#book"`, `tel:`, `mailto:`) rather than a
+click handler, because a page that ships no JavaScript has nothing to run the
+handler. The lead form is a native form POST — see "Lead capture" below.
 
 ### Sourcing photography (real images, not placeholders)
 
@@ -241,10 +219,10 @@ There **is** a capture endpoint, and it is the shared one. Post to it natively:
   <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__" />
   <input type="hidden" name="paw_redirect" value="/thank-you" />
 
-  <label>Your name<input name="full_name" required /></label>
-  <label>Email<input type="email" name="email" required /></label>
-  <label>Phone<input type="tel" name="phone" /></label>
-  <label>How can we help?<textarea name="message" /></label>
+  <input name="full_name" required />
+  <input type="email" name="email" required />
+  <input type="tel" name="phone" />
+  <textarea name="message" />
 
   <button type="submit">Send</button>
 </form>
@@ -255,13 +233,16 @@ publish substitutes the real capture URL, site id and signed key. You do not
 have those values while authoring (on a create the site does not exist yet, and
 the key is minted at publish), so never invent one or leave the action empty.
 
-**The visible field names are fixed**: `full_name`, `email`, `phone`, `message`.
-They are the names the lead pipeline maps; a field named anything else is stored
-empty and the business never sees what the visitor typed.
+**The field names are fixed**: `full_name`, `email`, `phone`, `message`. They are
+the names the lead pipeline maps; a field named anything else is stored empty and
+the business never sees what the visitor typed. The NAMES are the contract —
+labels, grouping, order and styling are yours to choose.
 
-**`paw_redirect` must be a relative path on this site** — an absolute URL is
-rejected with a 400 — so author the page it points at (a small `thank-you`
-route or `thank-you.html` confirming the message was sent).
+**If the page carries a form, `paw_redirect` must be a relative path on this
+site** — an absolute URL is rejected with a 400 — so author the page it points
+at (a small `thank-you` route or `thank-you.html`). The destination exists
+because the form does: a page with no form needs no `paw_redirect` and no such
+page.
 
 Do **not** wire an `onSubmit` handler that fetches. A static page should capture
 the lead whether or not JavaScript ran, and this is a plain native browser POST.
@@ -291,7 +272,7 @@ src/App.tsx                  the composition root — imports the stylesheet + r
 Add as needed:
 
 ```
-src/components/*.tsx         your section components (Hero.tsx, Pricing.tsx, Faq.tsx, ...)
+src/components/*.tsx         your section components (SectionA.tsx, SectionB.tsx, ...)
 src/index.css                the design system — tokens (CSS vars), @font-face / font imports, base reset
 public/*                     static assets served at the site root
 ```
@@ -315,8 +296,8 @@ A minimal valid map:
 
 ```json
 {
-  "src/App.tsx": "import './index.css';\nimport Hero from './components/Hero';\n\nexport default function App() {\n  return (\n    <main>\n      <Hero />\n    </main>\n  );\n}\n",
-  "src/components/Hero.tsx": "export default function Hero() {\n  return (\n    <section className=\"hero\">\n      <h1>...</h1>\n    </section>\n  );\n}\n",
+  "src/App.tsx": "import './index.css';\nimport SectionA from './components/SectionA';\n\nexport default function App() {\n  return (\n    <main>\n      <SectionA />\n    </main>\n  );\n}\n",
+  "src/components/SectionA.tsx": "export default function SectionA() {\n  return (\n    <section className=\"section-a\">\n      <h1>...</h1>\n    </section>\n  );\n}\n",
   "src/index.css": ":root { --ink: #17130f; ... }\n/* fonts, reset, base type */\n"
 }
 ```
@@ -337,7 +318,7 @@ with no rippleSpec and no specialist.
 ```
 mcp__pocketpaw_sites_manager__create_react_site(
   source      = <the source map from STEP 2>,
-  name        = "Bright Smile Dental",   // optional; defaults to "React site"
+  name        = "<the business name>",   // optional; defaults to "React site"
   interactive = true                     // declare it: true when any component
                                          // needs the browser, false to opt a
                                          // purely static page out of the bundle
@@ -369,7 +350,7 @@ only a publish runs. **Do not tell the user they can look at their page.** Say
 the draft is ready, be specific that /sites shows the source until it is built,
 and offer to build and publish it.
 
-So **do NOT call `publish` by default.** e.g. *"Your Bright Smile site is ready
+So **do NOT call `publish` by default.** e.g. *"Your site is ready
 as a draft — you'll find its code under /sites; React sites render once they're
 built, so say **publish** when you want me to build it and put it live."* Then
 stop.
@@ -446,21 +427,19 @@ The full edit brain is `pocketpaw-edit-react-site` — load it when the user is 
 the site's own refine chat. The essentials are inlined here because this create
 surface loads only the skill you are reading.
 
-## Quality bar — done right when
+## Done when
 
-- The Design Read and direction came from `pocketpaw-design-taste`, and the page
-  honours them — not a default clean house style.
-- With **all JavaScript disabled**, every section looks finished: real copy,
-  real images, the first accordion panel open, counters at their real values.
-- `interactive` is declared either way — `true` when something actually needs
-  the browser, `false` for a purely static page — rather than left to the
-  default. Every interactive component still rests correctly in markup.
-- Real copy throughout. No "TBD", no "Lorem ipsum", no invented testimonials or
-  fabricated statistics.
-- Every CTA is an anchor; the lead form is a native `<form>` with flat named
-  fields.
-- The source map writes only `src/**` and `public/**` — never a generator-owned
-  path.
+- Every component's resting state is in its returned markup: with all JavaScript
+  disabled, nothing renders empty or waiting on an effect.
+- The source map is complete — every import reachable from `src/App.tsx`
+  resolves to a key in the map.
+- No reserved path was written; the map writes only `src/**` and `public/**`.
+- `interactive` is declared explicitly and matches what the components actually
+  need — `true` when any of them requires the browser, `false` when none does.
+- If the page carries a lead form, it posts to
+  `__CAPTURE_API_BASE__/capture/form` with its three hidden inputs and the four
+  fixed field names.
+- The run stopped at the draft, unless publishing was explicitly asked for.
 
 ## Related tools (via MCP)
 

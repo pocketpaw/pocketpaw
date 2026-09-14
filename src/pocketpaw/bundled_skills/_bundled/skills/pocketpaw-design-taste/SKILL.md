@@ -4,8 +4,7 @@ description: |
   The SINGLE engine-agnostic Creative Director system for authoring marketing
   landing pages on ANY Paw Sites engine - hand-written static HTML/CSS (the
   default), ripple specs, React, or Svelte/SvelteKit components. Invoke it
-  whenever you design or build a site's sections (Hero, Features, Pricing,
-  Testimonial, Faq, CTA, Footer). It governs SCOPE first: sections come from
+  whenever you design or build a site's sections. It governs SCOPE first: sections come from
   the brief and the page stops there, no real-world fact is invented, and
   anything the user supplied ships verbatim. Then the craft: reading brand
   intent (Vision Ledger), the three dials, the six aesthetic-direction
@@ -29,7 +28,7 @@ LLMs fail here in two directions: they reach for a handful of cliches and one de
 
 The request is the spec. Every other module says how to build well; this one says what to build at all, and it wins wherever they disagree. A four-section page that answers the brief beats an eight-section page that pads it.
 
-*   **Sections come from the brief.** Build what the request names or plainly implies, then stop. A testimonial wall, a logo strip, a stats band, an FAQ, a pricing table, a newsletter signup and a "trusted by" row are not a default page shape: each ships only where the brief asks for it or hands you the content that fills it.
+*   **Sections come from the brief.** Build what the request names or plainly implies, then stop. Every section on the page traces to something the brief asked for or handed you content for. There is no default page shape and no section a page is expected to have: a section you cannot trace does not ship.
 *   **Never invent a fact about the business.** Prices, hours, addresses, phone numbers, headcounts, client names, certifications, awards and testimonials are claims a real business has to stand behind. If the brief did not supply one, leave the section out. Where a placeholder is unavoidable, make it obviously generic and say in your reply that you placeheld it.
 *   **Ship what you were handed, as handed.** A name, colour, font, tagline or line of copy the user supplied goes in verbatim. Do not rename the business, rewrite a tagline you were given, or swap a stated brand colour because the palette would be tidier.
 *   **Length follows content.** No section quota, no word count to reach. Say the thing once, at the length it takes.
@@ -145,7 +144,7 @@ The family below sets the whole token system so each site looks *designed for th
 ## MODULE 3: LAYOUT & MOTION ENGINE
 
 ### 3.A Section Composition Diversification
-**The default AI sequence (Hero -> 3 cards -> CTA -> FAQ -> Footer) is banned**, and no two consecutive sections use the same pattern. Rotate among: magazine split (hard rule columns framing raw type and imagery), asymmetric bento (`grid-template-columns: 1.6fr 0.8fr 1.2fr`), pinned sidebar (a locked left declaration while content flows right), offset cards (selective negative margins breaking the container), sticky showcase (text crossing a large anchored media block), a hairline-divided list, and a full-width band.
+**Do not reach for the sequence that comes to mind first** - it is the one every generated page already uses - and no two consecutive sections use the same pattern. Rotate among: magazine split (hard rule columns framing raw type and imagery), asymmetric bento (`grid-template-columns: 1.6fr 0.8fr 1.2fr`), pinned sidebar (a locked left declaration while content flows right), offset cards (selective negative margins breaking the container), sticky showcase (text crossing a large anchored media block), a hairline-divided list, and a full-width band.
 
 Rotation applies to the sections you HAVE. Three well-differentiated sections beat six drawn off this list to reach a count (MODULE 0).
 

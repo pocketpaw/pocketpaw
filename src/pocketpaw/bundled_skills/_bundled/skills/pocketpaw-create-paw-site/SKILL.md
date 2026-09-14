@@ -32,15 +32,9 @@ the edge.
 You write the **copy** — the business name, the headline, the services,
 the testimonials, the prices — and hand it to a deterministic tool
 (`mcp__pocketpaw_sites_manager__create_landing_site`). **CODE** assembles
-the page structure (every marketing widget, the conversion order, the SSR
+the page structure (every marketing widget, the section order, the SSR
 rules) from your copy. The structure is fixed and cannot be downgraded —
-so your whole job is to write a sales page worth of words and let the tool
-build the page.
-
-This is **not** a dashboard. A landing page sells. It reads top to bottom
-as a conversion funnel: grab attention, explain the offer, prove it,
-price it, and capture the lead. The tool emits exactly that funnel from
-your copy.
+the copy is your only input.
 
 ## Opt-in: the raw-HTML track (only when explicitly asked)
 
@@ -78,10 +72,10 @@ and the lead is lost with no error. Author the form exactly like this:
   <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__">
   <input type="hidden" name="paw_redirect" value="/thank-you.html">
 
-  <label>Your name<input name="full_name" required></label>
-  <label>Email<input type="email" name="email" required></label>
-  <label>Phone<input type="tel" name="phone"></label>
-  <label>How can we help?<textarea name="message"></textarea></label>
+  <input name="full_name" required>
+  <input type="email" name="email" required>
+  <input type="tel" name="phone">
+  <textarea name="message"></textarea>
 
   <button type="submit">Send</button>
 </form>
@@ -92,13 +86,15 @@ publish substitutes with the real capture URL, site id and signed key. You have
 none of those values while authoring, so never invent one or leave `action`
 empty.
 
-**The visible field names are fixed**: `full_name`, `email`, `phone`, `message`.
-A field named anything else is stored empty, and the business never sees what
-the visitor typed.
+**The field names are fixed**: `full_name`, `email`, `phone`, `message`. A
+field named anything else is stored empty, and the business never sees what the
+visitor typed. The NAMES are the contract — labels, grouping, order, wording and
+styling are yours to decide.
 
-**`paw_redirect` must be a relative path on this site** (an absolute URL is
-rejected with a 400), so include the page it names — a small `thank-you.html`
-confirming the message was sent — as another entry in the `source` map.
+**`paw_redirect` exists because this form does.** It must be a relative path on
+this site (an absolute URL is rejected with a 400), so whatever page it names has
+to be another entry in the `source` map. A site that has no form of this kind has
+no submission to acknowledge, so it needs neither the token nor the extra page.
 
 No JavaScript: this is a plain native browser POST, so never add an onSubmit
 handler or a `fetch`.
@@ -174,39 +170,39 @@ giving it real, on-domain words. The shape:
 
 ```json
 {
-  "brand": "Bright Smile Dental",
+  "brand": "<the business name>",
   "hero": {
-    "eyebrow": "Family & cosmetic dentistry",
-    "title": "Care that fits your whole family",
-    "subtitle": "Gentle, modern dentistry in downtown Austin. Same-week appointments, transparent pricing, no surprises.",
-    "cta_label": "Book a visit"
+    "eyebrow": "<short category line>",
+    "title": "<the headline promise>",
+    "subtitle": "<one sentence on the offer>",
+    "cta_label": "<primary button label>"
   },
   "services": [
-    { "title": "New Patient Exams", "desc": "Full exam, digital X-rays, and a cleaning in one visit.", "icon": "tooth" },
-    { "title": "Teeth Whitening",   "desc": "In-office whitening up to 8 shades brighter in an hour.",   "icon": "sparkles" },
-    { "title": "Invisalign",        "desc": "Clear aligners with a custom plan and a free consult.",      "icon": "smile" },
-    { "title": "Emergency Care",    "desc": "Same-day relief for pain, chips, and lost fillings.",        "icon": "shield" }
+    { "title": "<service name>", "desc": "<one line on what it covers>", "icon": "tooth" },
+    { "title": "<service name>", "desc": "<one line on what it covers>", "icon": "sparkles" },
+    { "title": "<service name>", "desc": "<one line on what it covers>", "icon": "smile" },
+    { "title": "<service name>", "desc": "<one line on what it covers>", "icon": "shield" }
   ],
   "testimonials": [
-    { "quote": "Best dental experience I've had. They explained every option and the cleaning was painless.", "author": "Maria G.", "role": "Patient since 2023" },
-    { "quote": "Booking went from a phone-tag headache to one tap. The team is wonderful.",                   "author": "James T.", "role": "Patient since 2021" }
+    { "quote": "<a quote the user gave you, verbatim>", "author": "<who said it>", "role": "<who they are>" },
+    { "quote": "<a quote the user gave you, verbatim>", "author": "<who said it>", "role": "<who they are>" }
   ],
   "tiers": [
-    { "name": "New Patient Exam", "price": "89",    "period": "one-time", "features": ["Full exam", "Digital X-rays", "Cleaning"],              "cta_label": "Book" },
-    { "name": "Whitening",        "price": "299",   "period": "one-time", "features": ["In-office session", "Up to 8 shades", "Take-home trays"], "popular": true, "cta_label": "Book" },
-    { "name": "Invisalign",       "price": "3,900", "period": "full plan", "features": ["Custom aligners", "All visits", "Retainers included"],   "cta_label": "Free consult" }
+    { "name": "<tier name>", "price": "<price, no currency symbol>", "period": "<billing period>", "features": ["<what is included>", "<what is included>", "<what is included>"], "cta_label": "<button label>" },
+    { "name": "<tier name>", "price": "<price, no currency symbol>", "period": "<billing period>", "features": ["<what is included>", "<what is included>", "<what is included>"], "popular": true, "cta_label": "<button label>" },
+    { "name": "<tier name>", "price": "<price, no currency symbol>", "period": "<billing period>", "features": ["<what is included>", "<what is included>", "<what is included>"], "cta_label": "<button label>" }
   ],
   "cta_band": {
-    "headline": "Ready for a healthier smile?",
-    "subtext": "Same-week appointments are filling up.",
-    "button_label": "Request an appointment"
+    "headline": "<the mid-page nudge>",
+    "subtext": "<one supporting line>",
+    "button_label": "<button label>"
   },
   "contact": {
-    "address": "421 Congress Ave, Austin TX",
-    "phone": "(555) 010-1234",
-    "email": "hello@brightsmile.com"
+    "address": "<street address>",
+    "phone": "<phone number>",
+    "email": "<email address>"
   },
-  "footer": { "copyright": "© 2026 Bright Smile Dental" }
+  "footer": { "copyright": "© <year> <the business name>" }
 }
 ```
 
@@ -220,8 +216,8 @@ giving it real, on-domain words. The shape:
 - **`services`** — a list of `{title, desc, icon}`. `icon` is a **lucide
   icon name** (e.g. `tooth`, `sparkles`, `shield`, `smile`); omit it and
   the tool picks one. Variable length — give as many as the business has.
-- **`testimonials`** — a list of `{quote, author, role}`. Real-sounding
-  quotes with names. Variable length.
+- **`testimonials`** — a list of `{quote, author, role}`. Use only what the
+  user gave you. Variable length.
 - **`tiers`** — pricing plans: `{name, price, period, features[],
   popular?, cta_label}`. `price` is a string or number **without** a
   currency symbol (the tool renders `$`); `features` is a list of strings;
@@ -232,14 +228,29 @@ giving it real, on-domain words. The shape:
   form placeholders.
 - **`footer`** — `{copyright}` (the legal line).
 
-### Write real copy — never placeholders
+### Copy rules — no placeholder text, no invented facts
 
-Vague briefs get **plausible, concrete copy**, never "TBD" or "Lorem
-ipsum". A dentist gets real service names (New Patient Exam, Whitening,
-Invisalign), real testimonial quotes with names (Maria G., James T.), real
-tier prices. The page must read like a finished business site. The tool
-will fill any field you omit, but it can't invent the business's real
-offer — that's your job.
+**Placeholder text must never ship.** "TBD", "Lorem ipsum", `[insert here]`
+and the like are defects: every word that reaches the page is a word a
+visitor will read.
+
+**A fact you were not given is not yours to supply.** Prices, addresses,
+phone numbers, email addresses, hours, statistics, credentials, and words
+quoted from a named person are claims about a real business that the user
+is about to publish under their own name. A specific-looking value they
+never told you is a defect, not a finishing touch — and it is worse than an
+empty field, because it looks settled and ships unread.
+
+So when the brief is missing something a field needs, write an obviously
+generic stand-in (`Your street address`, `Price on request`) and say plainly
+in your reply which fields you filled that way and what you need back. You
+can also just omit the field — but the tool fills a gap with plausible copy
+of its own, so for anything that carries a fact, prefer the stand-in you can
+point at.
+
+Whatever the user DID give you ships verbatim.
+
+The JSON above shows the shape of each field. It is not content to reuse.
 
 ## STEP 2 — Call `create_landing_site`
 
@@ -249,7 +260,7 @@ persists the pocket stamped `type="site"` + `pattern="landing"`.
 ```
 mcp__pocketpaw_sites_manager__create_landing_site(
   content = <the copy object from STEP 1>,
-  name    = "Bright Smile Dental"      // optional; defaults to content.brand
+  name    = "<the business name>"      // optional; defaults to content.brand
 )
 ```
 
@@ -287,7 +298,7 @@ created `pocket_id` to it instead of publishing here.
 ## What the tool builds (so you know what your copy becomes)
 
 You don't assemble any of this — it's here so you understand how your copy
-maps to the page. The tool emits, top to bottom (the conversion funnel):
+maps to the page. The tool emits, top to bottom:
 
 | # | Section | Built from your copy |
 |---|---------|----------------------|
@@ -319,7 +330,7 @@ construction, so you never have to think about them:
   marketing page, not an internal tool.
 
 Because all of that is fixed in code, the page can't be downgraded, and
-your copy is the only variable. Write it well.
+your copy is the only variable.
 
 ## Related tools (via MCP)
 
