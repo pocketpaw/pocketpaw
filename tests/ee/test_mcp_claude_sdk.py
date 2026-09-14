@@ -153,6 +153,7 @@ from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
@@ -172,7 +173,6 @@ from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SE
 from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
-from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.timeline import SERVER_NAME as _TIMELINE_MCP_SERVER_NAME
