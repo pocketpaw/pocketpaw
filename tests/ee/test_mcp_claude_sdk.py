@@ -1,18 +1,5 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
-Updated: 2026-09-14 (fix/attachment-not-on-disk) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_files`` (list_uploads / read_upload, registered
-  always-on via the ``files`` mcp_servers entry point, NOT in
-  ``OPT_IN_MCP_SERVERS``). Ambient because uploads live in object storage and an
-  attachment reaches the prompt only for the turn it arrived on — an opt-in
-  would leave the default chat agent unable to reach a document from the next
-  turn, which is the bug this server exists to fix. Six external-config
-  assertions counted it as external config and CI went red.
-
-  SEVENTEENTH entry, and the 2026-07-27 note still stands: registering a server
-  fails HERE first, in a file whose name gives no hint that registration is what
-  broke it. I ran tests/ee/agent/ and not tests/ee/, and so did not see it.
-
 Updated: 2026-09-11 (feat/site-media-tools) — ``_strip_builtin_servers`` now also
   drops ``pocketpaw_site_media`` (generate_site_image / generate_site_video,
   registered always-on via the ``site_media`` mcp_servers entry point, NOT in
@@ -172,7 +159,6 @@ from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SE
 from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
-from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.timeline import SERVER_NAME as _TIMELINE_MCP_SERVER_NAME
@@ -230,14 +216,6 @@ def _strip_builtin_servers(result: dict) -> dict:
     # call search_stock_images for site imagery without an explicit opt-in.
     # Pure read (free Pexels + Unsplash photo search), no identity.
     out.pop(_STOCK_MCP_SERVER_NAME, None)
-    # ``pocketpaw_files`` is always-on too — list_uploads / read_upload are how
-    # ANY chat agent reaches a file the user uploaded. Uploads live in object
-    # storage and an attachment is inlined into the prompt only for the turn it
-    # arrived on, so gating these behind an opt-in would leave the default agent
-    # unable to answer "what did that document say?" from the next turn onward.
-    # Workspace-scoped from the ContextVar, and ``hide_from_ai`` is honoured on
-    # both doors, so registration is not the boundary here either.
-    out.pop(_FILES_MCP_SERVER_NAME, None)
     # ``pocketpaw_other_hand`` is always-on in the same sense as the servers
     # above: it is REGISTERED for every agent so there is one road for every
     # in-process server, and the Otherhand surface profile is the door that
