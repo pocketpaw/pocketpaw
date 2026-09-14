@@ -7,6 +7,15 @@ to JSON responses.
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
 
+Changed 2026-09-14 (feat/uploads-multipart-endpoints): added `PayloadTooLarge`
+(413). The multipart upload contract refuses an over-ceiling file at init with
+413 `multipart.too_large`, and this hierarchy had no 413 at all — the nearest
+fits were `ValidationError` (422) and `BadRequest` (400), and neither is what a
+client retry logic keys on for "this file is too big". 413 is also what
+`security/body_limit.py` already answers for the same class of refusal one layer
+out, so a client sees one status for "too many bytes" whether the ceiling was
+hit at the ASGI boundary or at the upload session.
+
 Changed 2026-09-01 (feat/byok-guest-backend): added ``GuestLimitError`` (402,
 ``guest_limit_reached``, carries ``kind`` = sessions|turns as a TOP-LEVEL wire
 key beside the standard envelope), ``GuestUploadForbidden`` (403,
@@ -113,6 +122,25 @@ class PreconditionFailed(CloudError):
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(412, code, message)
+
+
+class PayloadTooLarge(CloudError):
+    """The request names more bytes than this endpoint will accept (413).
+
+    Added 2026-09-14 for the multipart upload contract, where a file over
+    ``max_large_file_bytes`` is refused at INIT — before a single part moves —
+    and again at complete against the size storage actually reports, because
+    the size named at init is client-supplied.
+
+    Distinct from ``StorageLimitError`` (402, the workspace's priced storage
+    plan) and ``DailyUploadLimitError`` (429, the daily abuse ceiling): both of
+    those are about the account, clear by upgrading or by waiting, and say
+    nothing about this file. This one is about THIS file, and the only cure is
+    a smaller one.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(413, code, message)
 
 
 class ValidationError(CloudError):

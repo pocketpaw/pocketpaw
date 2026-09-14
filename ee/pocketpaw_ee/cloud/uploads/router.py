@@ -1,5 +1,25 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-09-14 (feat/uploads-multipart-endpoints): the five resumable-upload routes
+from ``docs/design/drafts/2026-09-14-multipart-upload-contract.md`` — init, the
+relay part PUT, complete, status/resume, and abort. They live on THIS router,
+under the same ``/uploads`` prefix, because they carry the same four gates as
+``POST ""`` — guest refusal, ``uploads.write``, pocket ABAC, folder-chain
+auto-create — and putting them anywhere else would mean maintaining a second
+copy of those gates that drifts from this one.
+
+Every one of them raises ``CloudError`` subclasses, never ``HTTPException``,
+per the ee/cloud error convention; their neighbours here predate the rule and
+``make_book_agent`` is the precedent. The tenant boundary is the same shape too:
+an upload session is read with a workspace filter on every path, and a session
+belonging to another workspace is a 404 — never a 403, which would confirm the
+id exists.
+
+They are registered BEFORE the ``/{file_id}`` routes below. Path shapes do not
+currently collide (``/multipart/...`` always carries a literal second segment),
+but FastAPI resolves first-match-wins and a future single-segment file route
+would silently swallow ``POST /uploads/multipart``.
+
 Updated 2026-09-01 (feat/byok-guest-backend): POST "" (the upload route)
 refuses guest accounts with 403 {"code": "guest_upload_forbidden"} before any
 other processing — uploads are the signup hook for BYOK guests.
@@ -85,6 +105,7 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -103,6 +124,7 @@ from pocketpaw_ee.cloud.shared.deps import (
 from pocketpaw_ee.cloud.shared.time import iso_utc
 from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+from pocketpaw_ee.cloud.uploads.multipart_service import EEMultipartService
 from pocketpaw_ee.cloud.uploads.paths import normalize_path, parent_of
 from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
@@ -151,6 +173,12 @@ _SVC = EEUploadService(
     is_chat_member=_is_chat_member,
     is_workspace_admin=_is_workspace_admin,
 )
+
+# Resumable uploads. Built from the same adapter / store / config triple as
+# ``_SVC`` so a deployment cannot end up with simple and multipart uploads
+# pointed at different buckets, and so a test substituting storage substitutes
+# it for both at once.
+_MPU = EEMultipartService(adapter=_ADAPTER, meta=_META, cfg=_CFG)
 
 router = APIRouter(
     prefix="/uploads",
@@ -314,6 +342,212 @@ async def delete_folder(
 
 
 # ---------------------------------------------------------------------------
+# Multipart / resumable upload routes
+#
+# Registered before the ``/{file_id}`` routes — see the module docstring.
+# ---------------------------------------------------------------------------
+
+
+async def _refuse_guest(user_id: str) -> None:
+    """Guests cannot upload, by any route.
+
+    Lifted out of ``POST ""`` verbatim rather than reimplemented: the refusal
+    is a frozen frontend contract (a top-level ``{"code":
+    "guest_upload_forbidden"}``) and the whole point is that it fires BEFORE
+    any other processing, so every upload entry point has to make the same call
+    at the same moment. One helper, five call sites, one behaviour.
+    """
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    if await guest_budget.load_guest(user_id) is not None:
+        from pocketpaw_ee.cloud._core.errors import GuestUploadForbidden
+
+        raise GuestUploadForbidden()
+
+
+async def _assert_pocket_edit(pocket_id: str | None, user_id: str) -> None:
+    """Pocket ABAC, same gate and same code as ``POST ""``.
+
+    Checked at complete as well as at init, not only at init: a session lives
+    for seven days, and someone removed from a pocket in the meantime must not
+    be able to land a file in it with a request they prepared while they still
+    had access.
+    """
+    if not pocket_id:
+        return
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        allowed = await pockets_service.has_edit_access(pocket_id=pocket_id, user_id=user_id)
+    except Exception:
+        allowed = False
+    if not allowed:
+        raise Forbidden("files.pocket_forbidden")
+
+
+@router.post(
+    "/multipart",
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_init(
+    body: dict = Body(...),
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Open a resumable upload session.
+
+    Returns the mode the configured storage adapter can actually do — the
+    client does not choose — the part geometry, and the first batch of signed
+    part URLs when there are any. Everything that can refuse this upload
+    refuses it here, before a byte of it exists on our side.
+    """
+    from pocketpaw_ee.cloud._core.errors import BadRequest
+
+    await _refuse_guest(user_id)
+
+    try:
+        folder_path = normalize_path(body.get("path"))
+    except ValueError as e:
+        raise BadRequest("multipart.invalid", str(e)) from e
+
+    pocket_id = body.get("pocket_id")
+    await _assert_pocket_edit(pocket_id, user_id)
+
+    if folder_path != "/":
+        try:
+            await _FOLDERS.ensure_chain(workspace=workspace, owner=user_id, path=folder_path)
+        except ValueError as e:
+            raise BadRequest("multipart.invalid", str(e)) from e
+
+    return await _MPU.init(
+        workspace=workspace,
+        owner_id=user_id,
+        filename=body.get("filename"),
+        size=body.get("size"),
+        mime=body.get("mime"),
+        chat_id=body.get("chat_id"),
+        pocket_id=pocket_id,
+        folder_path=folder_path,
+    )
+
+
+@router.put(
+    "/multipart/{upload_id}/parts/{part_number}",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_put_part(
+    upload_id: str,
+    part_number: int,
+    request: Request,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Relay one part through the API. Raw binary body, one part.
+
+    Only used when the storage adapter cannot presign (local disk); a session
+    in ``presigned`` mode refuses here and points the client at its URLs.
+
+    The declared length is checked against this session's part size BEFORE the
+    body is read. ``BodySizeLimitMiddleware`` already bounds this route at one
+    part plus slack, but that ceiling is derived from the largest part size the
+    configuration can produce, not from THIS session's — so it stops the absurd
+    while this stops the merely wrong.
+    """
+    await _refuse_guest(user_id)
+    return await _MPU.put_part(
+        upload_id=upload_id,
+        workspace=workspace,
+        part_number=part_number,
+        declared_length=_declared_length(request),
+        read_body=request.body,
+    )
+
+
+def _declared_length(request: Request) -> int | None:
+    """``Content-Length``, or ``None`` when absent or unparseable.
+
+    Same reading as ``security/body_limit.py``: an unparseable value is treated
+    as absent rather than as a rejection, because the measured length is
+    checked after the read regardless and the server rejects malformed framing
+    on its own terms.
+    """
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+@router.post(
+    "/multipart/{upload_id}/complete",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_complete(
+    upload_id: str,
+    body: dict = Body(...),
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Assemble the parts and land the file.
+
+    The only place a multipart upload becomes a ``FileUpload`` row and fires
+    ``FileReady``. Returns exactly the shape ``POST /uploads`` puts in
+    ``uploaded[]`` so the frontend normalisers work on both unchanged.
+    """
+    await _refuse_guest(user_id)
+
+    async def _pocket_guard(pocket_id: str | None) -> None:
+        await _assert_pocket_edit(pocket_id, user_id)
+
+    return await _MPU.complete(
+        upload_id=upload_id,
+        workspace=workspace,
+        parts=body.get("parts"),
+        pocket_guard=_pocket_guard,
+    )
+
+
+@router.get("/multipart/{upload_id}")
+async def multipart_status(
+    upload_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """What a client that reloaded mid-upload needs to carry on.
+
+    Reports which parts storage already holds and re-mints URLs for the ones it
+    does not, so a resume costs the missing parts rather than the whole file.
+    """
+    await _refuse_guest(user_id)
+    return await _MPU.status(upload_id=upload_id, workspace=workspace)
+
+
+@router.delete(
+    "/multipart/{upload_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_abort(
+    upload_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Cancel the upload, drop its parts, and give back the daily-budget claim.
+
+    Idempotent: aborting an already-aborted session succeeds. A COMPLETED
+    session is a 404 — those bytes are a real file now, and
+    ``DELETE /uploads/{file_id}`` is how that one is removed.
+    """
+    await _refuse_guest(user_id)
+    await _MPU.abort(upload_id=upload_id, workspace=workspace)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
 # File routes
 # ---------------------------------------------------------------------------
 
@@ -331,16 +565,12 @@ async def upload(
     user_id: str = Depends(current_user_id),
 ) -> dict:
     # Guests cannot upload (BYOK-first onboarding, 2026-09-01): the upload
-    # affordance is the signup hook. Raised BEFORE any validation/side effect;
-    # ``GuestUploadForbidden`` is a 403 whose body carries the frozen
-    # top-level {"code": "guest_upload_forbidden"} contract. No-op (one
-    # indexed user read) for everyone else.
-    from pocketpaw_ee.cloud.auth import guest_budget
-
-    if await guest_budget.load_guest(user_id) is not None:
-        from pocketpaw_ee.cloud._core.errors import GuestUploadForbidden
-
-        raise GuestUploadForbidden()
+    # affordance is the signup hook. Raised BEFORE any validation/side effect.
+    # The check moved into ``_refuse_guest`` on 2026-09-14 when multipart added
+    # four more upload entry points — six copies of a security gate is six
+    # chances for one of them to drift, and the copy that drifts is an upload
+    # route with no account behind it.
+    await _refuse_guest(user_id)
     try:
         folder_path = normalize_path(path)
     except ValueError as e:

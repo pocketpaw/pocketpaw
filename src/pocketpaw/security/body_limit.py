@@ -2,6 +2,26 @@
 # Created: 2026-09-04 (fix/pool-and-body-ceilings, backend-perf H5) — a hard
 # ceiling on request bodies, enforced BEFORE the body is read.
 #
+# Updated: 2026-09-14 (feat/uploads-multipart-endpoints) — the multipart RELAY
+# part route gets its own derived ceiling. It is deliberately NOT the per-path
+# allowlist point 2 below argues against, and the difference is the direction of
+# the failure. That argument is about a table naming routes to PROTECT: a route
+# missing from it is silently unbounded, which is how the two rotted lists cited
+# below rotted. This is one route matched by SHAPE, and a miss falls back to the
+# global ceiling — the route is bounded either way, and a near-miss (a renamed
+# path) refuses legitimate parts loudly rather than admitting a 5 GB body
+# quietly. Fail-closed, so it has nothing to forget either.
+#
+# It is sized at one part plus framing slack, derived from the same upload
+# settings the global ceiling derives from, because that is exactly what this
+# route carries: one raw part body, no multipart envelope, no batch. Under the
+# default configuration that makes it ~9 MiB against a global ~1.27 GB — a
+# TIGHTENING, not a hole. The exemption matters because it does not depend on
+# the global number happening to stay large: the relay route is correct under a
+# narrowed POCKETPAW_UPLOAD_MAX_BYTES, and `max_file_bytes` must never be raised
+# to 5 GiB to make large uploads work (that would lift the global ceiling to
+# ~250 GB, which is the bug this file exists to prevent).
+#
 # The gap this closes: `max_file_bytes` (25 MiB) and `max_files_per_batch` (50)
 # are real limits, but they live in `uploads/service.py::_upload_one`, which
 # runs AFTER Starlette has already parsed the whole multipart body into a
@@ -23,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
@@ -38,6 +59,17 @@ Send = Callable[[Message], Awaitable[None]]
 #: than any real client adds and costs nothing when the ceiling is only ever
 #: consulted to reject the absurd.
 _MULTIPART_OVERHEAD_BYTES = 16 * 1024 * 1024
+
+#: ``PUT /api/v1/uploads/multipart/{upload_id}/parts/{part_number}`` — the relay
+#: part route, and the only request in the application whose legitimate body is
+#: one bare storage part. Matched on SHAPE rather than listed by name: there is
+#: exactly one such route, and the id segments are opaque.
+_RELAY_PART_PATH_RE = re.compile(r"^/api/v1/uploads/multipart/[^/]+/parts/[^/]+$")
+
+#: Framing slack on a relay part. The body is raw bytes with no envelope, so
+#: unlike ``_MULTIPART_OVERHEAD_BYTES`` there is nothing real to cover — 1 MiB
+#: is here so a client that pads or chunk-frames is not refused for it.
+_RELAY_PART_SLACK_BYTES = 1024 * 1024
 
 
 def _configured_ceiling() -> int:
@@ -86,6 +118,37 @@ def _configured_ceiling() -> int:
     return settings.max_file_bytes * settings.max_files_per_batch + _MULTIPART_OVERHEAD_BYTES
 
 
+def _relay_part_ceiling() -> int:
+    """The maximum body the multipart relay part route will accept, in bytes.
+
+    DERIVED, like :func:`_configured_ceiling`, and from the same settings —
+    one part at the largest size the sizing math can produce for a file at
+    ``max_large_file_bytes``, plus slack. ``part_size_for`` only grows the part
+    when the baseline would blow S3's 10000-part ceiling, so raising
+    ``POCKETPAW_MAX_LARGE_FILE_BYTES`` moves this number correctly and moves
+    nothing else.
+
+    Deliberately NOT read from ``POCKETPAW_MAX_REQUEST_BYTES``: that override
+    exists to bound the general request surface, and a deployment that narrows
+    it is not asking for its own resumable uploads to stop working. The per-
+    session ceiling is enforced again in the route against that session's real
+    ``part_size``, which is the number that decides whether a given part is
+    legitimate; this one only has to keep an absurd body off the disk.
+    """
+    from pocketpaw.uploads.config import UploadSettings, part_size_for
+
+    settings = UploadSettings()
+    part = part_size_for(settings.max_large_file_bytes, base=settings.multipart_part_bytes)
+    return part + _RELAY_PART_SLACK_BYTES
+
+
+def _is_relay_part(scope: Scope) -> bool:
+    """True for the one route whose body is a bare multipart part."""
+    if scope.get("method") != "PUT":
+        return False
+    return bool(_RELAY_PART_PATH_RE.match(scope.get("path", "") or ""))
+
+
 class BodySizeLimitMiddleware:
     """Pure-ASGI ceiling on request body size.
 
@@ -97,9 +160,12 @@ class BodySizeLimitMiddleware:
     parsed is the bug it exists to fix.
     """
 
-    def __init__(self, app, max_bytes: int | None = None) -> None:
+    def __init__(
+        self, app, max_bytes: int | None = None, relay_part_bytes: int | None = None
+    ) -> None:
         self.app = app
         self._max_bytes = max_bytes
+        self._relay_part_bytes = relay_part_bytes
 
     @property
     def max_bytes(self) -> int:
@@ -110,13 +176,29 @@ class BodySizeLimitMiddleware:
             self._max_bytes = _configured_ceiling()
         return self._max_bytes
 
+    @property
+    def relay_part_bytes(self) -> int:
+        """Ceiling for the multipart relay part route. Same lazy resolution."""
+        if self._relay_part_bytes is None:
+            self._relay_part_bytes = _relay_part_ceiling()
+        return self._relay_part_bytes
+
+    def _limit_for(self, scope: Scope) -> int:
+        """The ceiling this request is measured against.
+
+        One branch, one route shape. A path that does not match gets the global
+        ceiling, so a rename or a prefix change refuses legitimate parts rather
+        than admitting an unbounded body — see the module header.
+        """
+        return self.relay_part_bytes if _is_relay_part(scope) else self.max_bytes
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             # WebSocket and lifespan have no request body to bound.
             await self.app(scope, receive, send)
             return
 
-        limit = self.max_bytes
+        limit = self._limit_for(scope)
 
         declared = _declared_length(scope)
         if declared is not None and declared > limit:

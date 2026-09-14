@@ -39,6 +39,24 @@
 #
 # Structure copied from ``uploads/comprehension_budget.py``, including the
 # increment-then-compare ordering and the rollback of an over-cap claim.
+#
+# 2026-09-14 (feat/uploads-multipart-endpoints): added ``release`` and
+# ``today()``. A multipart upload claims its budget at INIT — before any bytes
+# move, which is the point of the feature — and the claim has to be given back
+# when the session is aborted or expires without completing, or an abandoned
+# 5 GB upload permanently consumes a workspace's day.
+#
+# ``release`` takes the DAY explicitly and this is the whole reason it is not
+# just ``try_spend`` with negative arguments. The counter is keyed
+# ``{workspace}:{utc_day}``, and a multipart session lives for 7 days: a
+# session opened on the 14th and aborted on the 20th, refunded against "today",
+# would decrement a row the claim was never made against and hand the workspace
+# free quota on a day it had not spent. Callers persist the day they claimed on
+# and pass it back. Decrementing a past day's row is harmless — that day is
+# over and nothing reads it.
+#
+# It clamps at zero rather than letting a row go negative, so a double refund
+# (two aborts racing, an abort after an expiry sweep) cannot mint quota either.
 
 from __future__ import annotations
 
@@ -92,6 +110,66 @@ def daily_byte_cap() -> int:
 
 def _today() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def today() -> str:
+    """The UTC day a claim made right now is charged to.
+
+    Public because a caller that holds a claim across requests (multipart
+    sessions) must persist which day it spent on in order to refund it there.
+    Same value ``try_spend`` uses, from one place, so the two cannot drift.
+    """
+    return _today()
+
+
+async def release(workspace_id: str | None, day: str, files: int, size_bytes: int) -> None:
+    """Give back a claim made by ``try_spend`` on ``day``.
+
+    Best-effort and silent on failure: the claim expires at the next UTC
+    midnight regardless, so a failed refund costs at most the rest of that day,
+    and raising here would turn a successful abort into a 500 the user cannot
+    act on.
+
+    Clamped at zero with a ``$max``-style follow-up read rather than a bare
+    ``$inc``: a negative counter would grant free quota, which is worse than
+    failing to refund. See the module header for why the day travels with the
+    claim instead of being read as "now".
+    """
+    if not workspace_id or not day:
+        return
+    if files <= 0 and size_bytes <= 0:
+        return
+
+    key = f"{workspace_id}:{day}"
+    try:
+        coll = WorkspaceUploadUsage.get_pymongo_collection()
+        doc = await coll.find_one_and_update(
+            {"key": key},
+            {
+                "$inc": {"used": -int(files), "bytes_used": -int(size_bytes)},
+                "$set": {"updatedAt": datetime.now(UTC)},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if doc is None:
+            # Nothing to refund — the row was reaped, or the claim never
+            # landed (``try_spend`` fails open, so a claim can be "held"
+            # without a row behind it). Either way there is no counter to fix.
+            return
+        floor: dict[str, int] = {}
+        if int(doc.get("used", 0)) < 0:
+            floor["used"] = 0
+        if int(doc.get("bytes_used", 0)) < 0:
+            floor["bytes_used"] = 0
+        if floor:
+            await coll.update_one({"key": key}, {"$set": floor})
+    except Exception:
+        logger.warning(
+            "could not release an upload budget claim for workspace=%s day=%s",
+            workspace_id,
+            day,
+            exc_info=True,
+        )
 
 
 async def try_spend(workspace_id: str | None, files: int, size_bytes: int) -> tuple[bool, str]:
@@ -177,4 +255,4 @@ async def try_spend(workspace_id: str | None, files: int, size_bytes: int) -> tu
     return False, over
 
 
-__all__ = ["daily_byte_cap", "daily_file_cap", "try_spend"]
+__all__ = ["daily_byte_cap", "daily_file_cap", "release", "today", "try_spend"]

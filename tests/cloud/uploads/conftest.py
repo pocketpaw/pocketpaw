@@ -1,4 +1,12 @@
 # conftest.py — shared fixtures for the cloud/uploads test package.
+# 2026-09-14 (feat/uploads-multipart-endpoints): ``beanie_upload_db`` also
+#   registers ``MultipartUpload`` — the in-flight upload session document — and
+#   resets its Beanie binding on teardown alongside the other three. Without the
+#   registration every multipart route answers 500 on its first session read;
+#   without the teardown reset one test's sessions leak into the next, which
+#   matters more here than for the other documents because a leaked OPEN session
+#   is something the service acts on (it aborts it, refunds its budget) rather
+#   than merely lists.
 # 2026-08-29 (T2): added the autouse ``no_real_transcription`` fixture. It pins
 #   both halves of the fal seam, for two different reasons.
 #   ``transcription._api_key`` resolves through ``studio.fal_edit.fal_api_key``,
@@ -116,9 +124,13 @@ async def beanie_upload_db():
 
     # Import after db creation to avoid circular imports
     from pocketpaw_ee.cloud.uploads.models import FileFolder, FileUpload
+    from pocketpaw_ee.cloud.uploads.multipart_models import MultipartUpload
     from pocketpaw_ee.cloud.uploads.share_models import ShareLink
 
-    await init_beanie(database=db, document_models=[FileUpload, FileFolder, ShareLink])
+    await init_beanie(
+        database=db,
+        document_models=[FileUpload, FileFolder, ShareLink, MultipartUpload],
+    )
     try:
         yield db
     finally:
@@ -127,7 +139,7 @@ async def beanie_upload_db():
         # seeded rows into a later test that reads Beanie state (FL-6 listener
         # loads the FileUpload row). Beanie stores the collection on a private
         # settings object per Document; drop it so the next init rebinds clean.
-        for model in (FileUpload, FileFolder, ShareLink):
+        for model in (FileUpload, FileFolder, ShareLink, MultipartUpload):
             for attr in ("_document_settings", "_settings"):
                 if hasattr(model, attr):
                     try:
