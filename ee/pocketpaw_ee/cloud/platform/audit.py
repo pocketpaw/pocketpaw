@@ -124,6 +124,47 @@ async def settle(
     return event
 
 
+async def record_read(
+    *,
+    operator: User,
+    action: str,
+    query: str,
+    target_type: str = "",
+    target_workspace: str | None = None,
+    target_user: str | None = None,
+    request: Request | None = None,
+) -> PlatformAuditEvent:
+    """Record a cross-tenant READ.
+
+    Reads need a trail for the same reason writes do, and arguably more: the
+    common abuse of an operator account is not moving money, it is looking at
+    things. A support operator can enumerate every tenant and pull every
+    member's email address, and ``request_logs`` records only the ROUTE
+    TEMPLATE — so the query string, which is the part that says whose data was
+    read, is otherwise written down nowhere.
+
+    ``reason`` on a read row is MACHINE-GENERATED and describes the query,
+    because a read has no operator-supplied justification to capture. That is a
+    real difference from a write row, where the reason is a human's and is
+    required. Both land in the same collection; ``action`` tells them apart, and
+    the read actions all end in ``.read``.
+
+    Volume: this writes one row per cross-tenant read, on a collection with no
+    TTL. That is deliberate for now — an operator log that forgets is not a
+    log — but it is the main reason the retention decision this PRD defers
+    should not stay deferred forever.
+    """
+    return await record(
+        operator=operator,
+        action=action,
+        reason=f"read: {query}" if query else "read",
+        target_type=target_type,
+        target_workspace=target_workspace,
+        target_user=target_user,
+        request=request,
+    )
+
+
 async def record(
     *,
     operator: User,
@@ -156,4 +197,4 @@ async def record(
     return await settle(event, ok=True, after=after)
 
 
-__all__ = ["begin", "record", "settle"]
+__all__ = ["begin", "record", "record_read", "settle"]

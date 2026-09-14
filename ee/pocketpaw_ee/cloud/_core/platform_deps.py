@@ -64,13 +64,27 @@ def _require_interactive_principal(request: Request, action: str, user: User) ->
         API keys are minted per workspace and (as of this writing) their CRUD is
         guarded by bare membership, so any workspace member can mint one. A key
         minted by an operator must never inherit that operator's platform rung.
-        These principals are refused outright.
-      - ``Authorization: Bearer`` — the back-compat JWT transport, used by
-        native clients and scripts. It is the credential an agent is most likely
-        to be handed, and it is copyable in a way a cookie is not. The platform
-        axis accepts the session COOKIE only. The operator console forwards that
-        cookie server-side, so this costs the console nothing; it costs a script
-        the ability to act as an operator, which is the point.
+        These principals are refused outright, and this half is a real boundary:
+        an API key is a DIFFERENT credential, not a differently-packaged copy of
+        the session, so there is nothing to re-send.
+
+      - ``Authorization: Bearer`` — refused, requiring the session cookie
+        instead. **This half is a speed bump, not a boundary, and the difference
+        matters.** ``auth/core.py`` builds the cookie and bearer backends from
+        the SAME ``get_jwt_strategy()`` with the same secret and audience, so the
+        two tokens are interchangeable: a caller refused for sending
+        ``Authorization: Bearer <jwt>`` can send ``Cookie: paw_auth=<the same
+        jwt>`` and pass. It costs an attacker one line. What it does buy is that
+        an agent using an ordinary HTTP client or SDK sends an Authorization
+        header by default, so the refusal catches the accidental and careless
+        cases rather than the deliberate one.
+
+        CLOSING IT PROPERLY means making the credential carry its transport —
+        e.g. a claim minted only by the cookie backend (``write_token`` is
+        already overridden for ``jti``, so the ground exists) and asserted here.
+        That touches every login, so it is deliberately NOT bundled into this
+        chunk. Until it lands, do not describe this as preventing an agent with
+        the operator's token from reaching the platform axis. It does not.
 
     WHAT THIS DOES NOT COVER, and must be stated plainly: an agent that calls
     service functions IN-PROCESS never passes through a route, so no dependency

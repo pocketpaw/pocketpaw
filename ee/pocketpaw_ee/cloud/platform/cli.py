@@ -62,14 +62,42 @@ async def _connect() -> None:
 async def _find_user(email: str):
     from pocketpaw_ee.cloud.models.user import User
 
-    # Case-insensitive: operators type their own address from memory, and a
-    # silent "no such user" because of a capital letter is a bad first
-    # experience with a tool you reach for during an incident.
-    user = await User.find_one({"email": {"$regex": f"^{_escape(email)}$", "$options": "i"}})
-    if user is None:
+    # Case-insensitive MATCH, but never an ambiguous one.
+    #
+    # The users collection sets ``email_collation = None``, which disables the
+    # case-insensitive collation fastapi-users-db-beanie would otherwise install
+    # — so the unique index is case-SENSITIVE and "Ops@corp.com" and
+    # "ops@corp.com" can both exist as separate accounts. A find_one() here
+    # would return whichever Mongo handed back first, which means an attacker
+    # who registers a case-variant of an address they expect to be promoted
+    # could receive the operator grant instead of the intended account, with the
+    # printed confirmation showing the address the operator typed.
+    #
+    # So: match case-insensitively (an operator typing from memory should still
+    # find the account), but if more than one row matches, refuse and make the
+    # human disambiguate rather than guessing.
+    pattern = {"email": {"$regex": f"^{_escape(email)}$", "$options": "i"}}
+    matches = await User.find(pattern).to_list()
+
+    if not matches:
         print(f"error: no user with email {email!r}", file=sys.stderr)
         raise SystemExit(1)
-    return user
+
+    if len(matches) > 1:
+        print(
+            f"error: {len(matches)} accounts match {email!r} case-insensitively. "
+            "Re-run with the exact address:",
+            file=sys.stderr,
+        )
+        for candidate in matches:
+            print(f"  {candidate.email}", file=sys.stderr)
+        raise SystemExit(1)
+
+    found = matches[0]
+    if found.email != email:
+        # Tell the operator which account they actually hit.
+        print(f"note: matched {found.email!r} for input {email!r}", file=sys.stderr)
+    return found
 
 
 def _escape(value: str) -> str:
@@ -78,10 +106,10 @@ def _escape(value: str) -> str:
     return re.escape(value)
 
 
-async def _audit(user, action: str, reason: str, before: str | None, after: str | None) -> None:
+async def _audit_begin(user, action: str, reason: str, before: str | None, after: str | None):
     from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 
-    await PlatformAuditEvent(
+    event = PlatformAuditEvent(
         actor_id="cli",
         actor_email="",
         actor_platform_role="",
@@ -92,8 +120,15 @@ async def _audit(user, action: str, reason: str, before: str | None, after: str 
         reason=reason,
         before={"platform_role": before},
         after={"platform_role": after},
-        status="applied",
-    ).insert()
+        status="attempted",
+    )
+    await event.insert()
+    return event
+
+
+async def _audit_settle(event) -> None:
+    event.status = "applied"
+    await event.save()
 
 
 async def cmd_list() -> int:
@@ -127,9 +162,15 @@ async def cmd_grant(email: str, role: str, reason: str) -> int:
         print(f"{user.email} already holds {resolved.value}; nothing to do.")
         return 0
 
+    # Record BEFORE acting, settle after — the ordering this project's own
+    # audit model mandates, and which the first version of this file got
+    # backwards. A grant is the one path that mints cross-tenant access; if the
+    # process dies between the write and the record, the safe residue is a row
+    # saying "attempted", not silence.
+    event = await _audit_begin(user, "platform.role.grant", reason, before, resolved.value)
     user.platform_role = resolved.value
     await user.save()
-    await _audit(user, "platform.role.grant", reason, before, resolved.value)
+    await _audit_settle(event)
 
     was = before or "none"
     print(f"{user.email}: {was} -> {resolved.value}")
@@ -145,12 +186,26 @@ async def cmd_revoke(email: str, reason: str) -> int:
         print(f"{user.email} holds no platform role; nothing to do.")
         return 0
 
+    event = await _audit_begin(user, "platform.role.revoke", reason, before, None)
     user.platform_role = None
     await user.save()
-    await _audit(user, "platform.role.revoke", reason, before, None)
+    await _audit_settle(event)
 
     print(f"{user.email}: {before} -> none")
     return 0
+
+
+def _nonempty(value: str) -> str:
+    """argparse type: reject a blank reason.
+
+    ``required=True`` is satisfied by ``--reason ""``, which writes a row that
+    looks complete and explains nothing — the exact outcome the required field
+    exists to prevent.
+    """
+    stripped = value.strip()
+    if not stripped:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return stripped
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,11 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
     grant = sub.add_parser("grant", help="Grant a platform role")
     grant.add_argument("email")
     grant.add_argument("role", choices=[r.value for r in PlatformRole])
-    grant.add_argument("--reason", required=True, help="Why, for the audit trail")
+    grant.add_argument("--reason", required=True, type=_nonempty, help="Why, for the audit trail")
 
     revoke = sub.add_parser("revoke", help="Remove a user's platform role")
     revoke.add_argument("email")
-    revoke.add_argument("--reason", required=True, help="Why, for the audit trail")
+    revoke.add_argument("--reason", required=True, type=_nonempty, help="Why, for the audit trail")
 
     return parser
 
