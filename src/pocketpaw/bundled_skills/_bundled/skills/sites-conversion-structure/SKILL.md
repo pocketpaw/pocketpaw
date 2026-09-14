@@ -5,9 +5,9 @@ description: |
   what single action it drives. Invoke it BEFORE writing any section markup on a
   marketing / landing site: "build a dentist landing page", "a page for my SaaS",
   "why is this page not converting", "what sections should this have". It decides
-  the one offer / one audience / one action, runs the intake, picks a page
-  archetype (A-D), orders the argument, writes headline + CTA + benefit copy to
-  formula, handles objections, and sets the index / noindex + FAQ-schema call.
+  the one offer / one audience / one action, runs the intake, SELECTS the
+  sections this particular page needs, orders the argument, writes headline +
+  CTA + benefit copy, handles objections, sets index / noindex + schema.
   It does NOT choose colors, type, or layout composition — `pocketpaw-design-taste`
   owns all of that and governs every visual decision. This skill owns the ARGUMENT;
   design-taste owns the LOOK. Use them together: structure first, then taste.
@@ -32,7 +32,7 @@ the look to `pocketpaw-design-taste`, which governs every visual value.
 
 | Decision | Owner |
 | --- | --- |
-| Which sections exist, and in what order | **this skill** |
+| Which sections this page needs, and in what order | **this skill** |
 | What the headline claims, what the CTA promises | **this skill** |
 | Which objections get a section | **this skill** |
 | index / noindex, title, meta, FAQ schema | **this skill** |
@@ -79,44 +79,64 @@ differentiators beat any invented intake answer, and they are what stops the pag
 reading as generic. Never fabricate a specific verifiable fact (an address, a
 price, a named testimonial) - use an obvious placeholder and flag it.
 
-## 2. Page archetype
+## 2. Page shape
 
-Pick ONE and say why in the Design Read. This choice, not the section list, is
-what makes two sites argue differently.
+The shape follows the offer. Settle it before the section list — this choice,
+not the section count, is what makes two sites argue differently. It is a
+working decision you hold in your head, never a label you read out to the user.
 
-| Archetype | Use when |
+| Shape | Use when |
 | --- | --- |
-| **A. Classic hero + sections** | The product is understandable from one hero visual. The common case. |
-| **B. Long-form story** | You must educate and dismantle real skepticism before the ask. |
-| **C. Minimal conversion page** | High-intent traffic (email to known users), or one narrow offer: waitlist, download, a single booking. |
-| **D. Comparison page** | Search intent already includes alternatives ("X vs Y", "best X for Y"). |
+| **Hero-led** | The product is understandable from one hero visual. |
+| **Long-form story** | You must educate and dismantle real skepticism before the ask. |
+| **Minimal conversion page** | High-intent traffic (email to known users), or one narrow offer: waitlist, download, a single booking. |
+| **Comparison page** | Search intent already includes alternatives ("X vs Y", "best X for Y"). |
 
-Archetype C is routinely correct and routinely skipped. A waitlist page does not
-need a benefits grid, a how-it-works and a twelve-question FAQ. It needs the offer,
-one proof signal, and the field.
+**None of these is the default.** Hero-led is the one that gets picked by
+reflex, so it is the one to justify hardest. A narrow offer wants the minimal
+page, and a hero-led page over the top of it is padding: a waitlist page does
+not need a benefits grid, a how-it-works and a twelve-question FAQ. It needs the
+offer, one proof signal, and the field.
 
-## 3. The argument, in order
+## 3. The argument
 
-**Above the fold (required)**
+**Above the fold** - the part that is genuinely always there:
 1. Headline - the outcome, plus who it is for.
-2. Subheadline - how, with one specific.
-3. Primary CTA - a verb plus what they get.
+2. Primary CTA - a verb plus what they get.
+3. A subheadline where the headline needs a qualifier, not as a reflex.
 4. One proof signal, only where the brief supplied one - a logo strip, one number, or one short quote. Omit the line rather than inventing proof (`pocketpaw-design-taste` MODULE 0).
-5. Hero visual - real product, real place, real person.
+5. A hero visual where you have a real one: real product, real place, real person.
 
-**The middle (the argument itself)**
-6. Problem -> solution, as one section, in the visitor's words.
-7. Benefits: three to five, outcome-led, not feature-led.
-8. How it works: three steps, no more.
-9. Social proof: testimonials or one case study, placed **next to the claim it
-   supports**, not gathered into a wall at the bottom.
+**Everything below the fold is SELECTED, not filled in.** What follows is the
+menu you select FROM, in the order these arguments generally land. It is not a
+checklist, not a section count, and not a page template. Take what this offer
+needs and leave the rest out. A section included because it appeared on a list
+is the single most reliable way to produce a page that reads like every other
+page.
 
-**The bottom (objections)**
-10. FAQ: six to twelve real questions. Move it EARLIER for a high-friction offer.
-11. Risk reversal: trial, free plan, no card, cancel anytime, guarantee. At least one.
-12. Final CTA: the same promise and the same label as the top.
+- Problem -> solution, in the visitor's words.
+- Benefits, outcome-led rather than feature-led.
+- How it works, where the mechanism is genuinely unobvious.
+- Social proof, placed **next to the claim it supports** rather than gathered
+  into a wall - and only where the brief supplied real proof.
+- Objections, as a section, where there are real ones worth answering.
+- Risk reversal: trial, free plan, no card, cancel anytime, guarantee - where one
+  of those is actually true of this business.
+- Final CTA: the same promise and the same label as the top.
 
-This is the ARGUMENT order, not a section-shape order. `pocketpaw-design-taste`
+**The selection rule.** A section earns its place when it answers a question
+this visitor would actually ask about THIS offer, or when it carries content the
+brief handed you. If you can name neither, cut it. Three sections that each do a
+job beat seven that fill a shape.
+
+**Nothing on that menu is a fixture.** An FAQ ships when intake surfaced real
+questions worth answering, at whatever number that turns out to be - not to
+round the page out, and not at a target count. The same holds for a pricing
+table, a testimonial band, a stats row, a logo strip and a newsletter box: each
+ships where the brief asks for it or hands you the content that fills it, and
+otherwise does not exist (design-taste MODULE 0).
+
+This is the ARGUMENT, not a section-shape order. `pocketpaw-design-taste`
 MODULE 3.A / 3.B still governs how each is composed, and its section-repetition ban
 still applies: no two sections share a layout, no three-equal-card feature row,
 no eyebrow on every section. On a page of five or more sections that works out
@@ -163,7 +183,7 @@ zero em-dashes, organic metrics, no filler verbs, no "John Doe", no "Acme".
 
 ## 6. Build order
 
-Author section by section: hero, benefits, how it works, proof, FAQ, final CTA.
+Author section by section, in the order your selected argument runs.
 **Never rebuild the whole page on each iteration.** Section by section keeps the
 diff reviewable and keeps a bad section from taking a good one down with it.
 
@@ -172,27 +192,47 @@ diff reviewable and keeps a bad section from taking a good one down with it.
 - **Do not index** ad-only campaign pages and time-boxed offers. Set `noindex`.
 - **Do index** evergreen offers where search intent matches the promise.
 - Indexed pages need a real `<title>`, a meta description, Open Graph and Twitter
-  card tags, a canonical URL, and the FAQ in plain question-and-answer markup.
+  card tags, a canonical URL, and any FAQ in plain question-and-answer markup.
 - Add `FAQPage` structured data when a genuine FAQ exists. For a product or app,
   `SoftwareApplication` is appropriate. **Encode only true facts.** Never fabricate
   a rating, a review count or a price into structured data.
 - A local business page carries `LocalBusiness` with the real name, address and
   hours, or it carries none. Half-invented structured data is worse than none.
 
-## 8. The output, before any code
+## 8. Settle this before any code
 
-When building a page from scratch, return these in order **before writing markup**:
+Work these out before you write markup. This is a WORKING NOTE you keep to
+yourself, not a script to read out - see "What you say to the user" below.
 
-1. Page archetype (A / B / C / D) and one line on why.
-2. The one offer, the one audience, the one action.
-3. Hero copy: headline, subheadline, CTA, proof line.
-4. Benefits: three to five, outcome-led.
-5. How it works: three steps.
-6. FAQ: six to twelve real questions.
-7. index or noindex, plus title and meta if indexed.
-8. Stated assumptions, one line each, for anything intake could not answer.
+1. The one offer, the one audience, the one action.
+2. The page shape (section 2), and one line on why this offer needs it.
+3. The selected sections (section 3): what is IN, and what you deliberately
+   left OUT. Name the cut, so you can tell that you made one.
+4. Hero copy: headline, CTA, and a subheadline only if the headline needs one.
+5. The copy for each section you selected.
+6. index or noindex, plus title and meta if indexed.
+7. Stated assumptions, one line each, for anything intake could not answer.
 
-Then build section by section per step 6, under `pocketpaw-design-taste`.
+Then build section by section per section 6, under `pocketpaw-design-taste`.
+
+### What you say to the user
+
+**Never narrate the framework.** The shapes in section 2, the numbered argument
+in section 3, the "Design Read", the "Vision Ledger" and the aesthetic direction
+families in `pocketpaw-design-taste` are internal vocabulary. They are how you
+think, not what you report.
+
+A user who asked for a website did not ask to be told their page is
+"Archetype A (classic hero + sections)". That line is worse than noise: it is
+the SAME line on nearly every site, so the one thing it successfully
+communicates is that the page came off a template. The same goes for announcing
+a direction family ("a clean-tech identity"), reading the section list back as
+an inventory, or quoting a module number.
+
+Say one plain sentence about THEIR business and what the page does for it, then
+build. *"A one-page site for the studio that leads with the work and pushes to
+the enquiry form"* is the whole announcement. No labels, no letters, no
+taxonomy.
 
 ## Pitfalls that kill conversion
 
@@ -214,4 +254,4 @@ Then build section by section per step 6, under `pocketpaw-design-taste`.
 | FAQ that avoids the real objection | Put the top-three objections from intake into it, near-verbatim |
 | Structured data with invented numbers | Remove the field, or ship the page without schema |
 | A campaign page left indexable | Set `noindex` |
-| Twelve sections on a waitlist page | Switch to archetype C and cut to four |
+| Twelve sections on a waitlist page | Cut to the offer, one proof signal and the field |

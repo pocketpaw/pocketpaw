@@ -384,6 +384,37 @@
 # renaming that heading IS a silent degrade to the whole file, which is why it has
 # its own mutation. Full reasoning and what is still gated:
 # docs/design/drafts/2026-09-08-sites-system-prompt-diet.md (paw-workspace), SD-2.
+# Updated: 2026-09-14 (fix/sites-stop-the-slop) - the create/refine/chat
+# orientations each described the page as a fixed conversion funnel and named its
+# sections. That list was a template: it arrived before the brief did, so every
+# site came back with the same shape whatever was asked for, and refine/chat told
+# the agent a published page had sections it may never have had. The orientation
+# now says what a Paw Site IS and stops; what the page contains is settled from
+# the brief by `sites-conversion-structure`.
+#
+# The form contract no longer mandates a confirmation page on every site. The
+# capture endpoint defaults `paw_redirect` to `/` when the field is absent
+# (cloud/leads/router.py), so the thank-you page was never a requirement of
+# capture - it was a habit the prompt enforced. It is now scoped to the form that
+# needs it: the contract renders only where a form is being written, and says the
+# page exists because the form does.
+#
+# The example markup is stripped to the contract (action, hidden inputs, field
+# names) because the labelled four-field column it used to show was being copied
+# verbatim as a layout. The NAMES are what the lead pipeline maps; the rest is a
+# design decision like any other.
+#
+# `_create_preamble` gains SUPPLIED SOURCES WIN, above the decide-it-yourself
+# block. A user who hands over a design doc or brand guide was getting it
+# acknowledged and then designed past, because everything downstream of that point
+# told the agent to infer the identity itself. Supplied material now outranks the
+# embedded DESIGN SYSTEM wherever the two disagree.
+#
+# Phase 1 and the brief step stop narrating the framework. The preamble asked the
+# agent to state the Design Read and to report the direction family back; the
+# vocabulary is how the agent thinks, and reading it out produced the same
+# sentence on every site, which is the one thing the user can tell is a template.
+#
 
 from __future__ import annotations
 
@@ -738,7 +769,7 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "sites-conversion-structure",
         "create",
         "BEFORE Phase 2 on any marketing / landing brief. Fixes the ONE offer and "
-        "ONE action, the page archetype, the order the page argues in, the "
+        "ONE action, the order the page argues in, the "
         "headline + CTA copy, and index/noindex. The DESIGN SYSTEM below owns how "
         "the page LOOKS; this owns what it SAYS.",
     ),
@@ -1032,7 +1063,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         build_step = (
             "BUILD via the `pocketpaw-create-svelte-site` skill — invoke it by "
             "intent (no slash command). YOU write premium hand-written SvelteKit "
-            "components (Hero, Pricing, Faq, …) at the design quality bar, "
+            "components at the design quality bar, "
             "authoring them per the embedded `pocketpaw-design-taste` design "
             "system for premium, non-generic styling on top of the design "
             "system's tokens, "
@@ -1055,7 +1086,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         build_step = (
             "BUILD via the `pocketpaw-create-react-site` skill — invoke it by "
             "intent (no slash command). YOU write premium hand-written React "
-            "components (Hero, Pricing, Faq, …) at the design quality bar, "
+            "components at the design quality bar, "
             "authoring them per the embedded `pocketpaw-design-taste` design "
             "system for premium, non-generic styling on top of the design "
             "system's tokens, THEME them with those tokens + your asset URLs, and "
@@ -1203,9 +1234,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "<sites-orientation>\n"
         "The user is on the SITES surface, building a publishable WEBSITE that "
         "deploys as a standalone static page on the edge — not an in-app pocket "
-        "dashboard. It renders as a real marketing landing page read top to "
-        "bottom as a conversion funnel: nav, hero, services, social proof, "
-        "pricing, a call-to-action, a lead-capture form, footer. Talk about it "
+        "dashboard. It renders as a real marketing landing page. Talk about it "
         "as a 'site' or 'page' — never a 'pocket'. The pocket is only the "
         "source spec; you create the site as a reviewable DRAFT the user "
         "previews in-app, then publish to a live URL only when they ask — do "
@@ -1214,6 +1243,20 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "premium, on-brand site — you do not ask the user what theme to use.\n"
         "</sites-orientation>\n"
         "<sites-procedure>\n"
+        "SUPPLIED SOURCES WIN. If the user handed you material for this site (a "
+        "design doc or brief, a brand or style guide, a reference image or "
+        "screenshot, a link to a site they like, a palette, fonts, copy, a "
+        "sitemap), that material IS the spec. READ IT IN FULL before you design "
+        "anything and build to what it says: the sections it names, the tokens it "
+        "sets, the copy it supplies, the voice it sets. It outranks every default "
+        "and every inference in this message, including the embedded DESIGN "
+        "SYSTEM, wherever the two disagree. Anything it supplies ships VERBATIM: "
+        "do not rewrite a supplied headline or swap a stated brand color because "
+        "the palette would be tidier. Where it is silent, you decide. "
+        "Acknowledging a document and then designing past it is the worst failure "
+        "on this surface, because the user handed you the answer and got a "
+        "generic page back.\n"
+        "\n"
         "DECIDE THE DESIGN YOURSELF; ASK ONLY FOR REAL FACTS. Choosing the visual "
         "style, palette, layout, and typography is YOUR expertise — infer it from "
         "the business and NEVER ask the user 'what style / theme / colors do you "
@@ -1227,7 +1270,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "\n"
         "PHASE 0 — THE ARGUMENT (settle this before any design decision).\n"
         "Invoke the `sites-conversion-structure` skill and follow it: the ONE "
-        "offer, the ONE action, the page archetype, and the order the page argues "
+        "offer, the ONE action, WHICH sections this page needs, and the order it argues "
         "in. Do this FIRST. A page that looks right and argues nothing does not "
         "convert, and the section list is the most expensive thing to change once "
         "the markup exists.\n"
@@ -1239,12 +1282,12 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "the CRAFT SYSTEM that follows it. That "
         "is not a general instruction to avoid skills: the ones named in "
         "<design-skills> are NOT in your context and you DO invoke those): "
-        "declare the Vision Ledger "
+        "work out, for yourself, the Vision Ledger "
         "and a one-line Visual DNA Token (the Design Read), then commit to ONE "
         "aesthetic direction family from 2.E (clean-tech, soft-premium, "
         "editorial-luxury, warm-minimalist, brutalist, dark-tech) and express it "
-        "in tokens top to bottom. State the "
-        "read in one sentence, then go — do NOT ask the user to pick the look. If "
+        "in tokens top to bottom. "
+        "Then go — do NOT ask the user to pick the look. If "
         "the user already named a style or brand, honor it. Rotate the identity "
         "and palette so two similar briefs never look identical.\n"
         "\n"
@@ -1305,10 +1348,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "medium, it is yours to use. Render it in its native element. The only asset "
         "rule is that a URL has to be one you were actually given rather than one you "
         "made up.\n"
-        "4. BRIEF. State a one-line brief back so the user sees the plan — e.g. "
-        "'Building a [direction family + identity] site for [business] with "
-        "sections "
-        "[…], palette [primary].' Then build.\n"
+        "4. BRIEF. State a one-line plan back in the user's own terms — e.g. "
+        "'A one-page site for the studio that leads with the work and "
+        "pushes to the enquiry form.' Then build.\n"
         f"5. {build_step}\n"
         "5b. SELF-CHECK BEFORE YOU SHOW IT. Invoke `sites-ship-fixes` and run its "
         "list against what you just built. These are the defects that come back as "
@@ -1415,10 +1457,12 @@ def native_form_contract() -> str:
         '  `<input type="hidden" name="paw_redirect" value="/thank-you">`\n'
         "The three `__TOKENS__` are placeholders — write them EXACTLY as shown and "
         "never invent a value for them; publish substitutes the real site id, "
-        "capture URL and signed key. `paw_redirect` MUST be a relative path on this "
-        "site (an absolute URL is rejected with a 400), so author the page it names — "
-        "a small `/thank-you` route or `thank-you.html` confirming the message was "
-        "sent. Name the visible inputs " + fields + " — those are the names the lead "
+        "capture URL and signed key. Because this form exists, the visitor "
+        "needs somewhere to land after they send it: `paw_redirect` is a "
+        "relative path on this site (an absolute URL is rejected with a 400), "
+        "so author the confirmation page it names. A site with no contact form "
+        "has nothing to confirm and gets no such page. "
+        "Name the visible inputs " + fields + " — those are the names the lead "
         "pipeline maps, and a field named anything else is stored empty. Mark the "
         "name and email inputs `required`. No JavaScript: this is a plain native "
         "browser POST, so never attach an onSubmit handler or a fetch call.\n"
@@ -1788,9 +1832,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "as a static page on the edge. They are on its per-site chat, asking for "
         "a CHANGE to that page. Do NOT rebuild the site from scratch, do NOT "
         "create a new site or a new pocket, and do NOT treat it as an in-app "
-        "dashboard pocket. It is a real marketing landing page that reads top to "
-        "bottom as a conversion funnel: nav, hero, services, social proof, "
-        "pricing, a call-to-action, a flat lead-capture form, footer. Talk about "
+        "dashboard pocket. It is a real marketing landing page. Talk about "
         f"it as a 'site' or 'page' — never a 'pocket'.{render_truth}\n"
         "</sites-orientation>\n"
         "<sites-procedure>\n"
@@ -1868,9 +1910,8 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
     sitemap_block = (
         "\n".join(section_lines)
         if section_lines
-        else "(the brief carries no explicit sitemap — build a standard "
-        "conversion funnel: nav → hero → services → proof → pricing → cta → "
-        "flat lead form → footer)"
+        else "(the brief carries no explicit sitemap — derive the sections "
+        "from what the source page actually contains, and build those)"
     )
 
     # --- Real media from the asset manifest (ANY kind; never invent a URL). ---
@@ -2046,10 +2087,8 @@ def _chat_preamble(meta: SurfaceMeta) -> str:
         f"`{pocket_id}`) — a live standalone marketing website already deployed as "
         "a static page on the edge. They are on its per-site chat with the "
         "Build/Chat toggle set to CHAT, so they are asking a QUESTION about the "
-        "site, not requesting a change to it. It is a real marketing landing page "
-        "that reads top to bottom as a conversion funnel: nav, hero, services, "
-        "social proof, pricing, a call-to-action, a flat lead-capture form, "
-        "footer. Talk about it as a 'site' or 'page' — never a 'pocket'.\n"
+        "site, not requesting a change to it. It is a real marketing landing page. "
+        "Talk about it as a 'site' or 'page' — never a 'pocket'.\n"
         "</sites-orientation>\n"
         "<sites-procedure>\n"
         "Treat the user's message as a QUESTION to ANSWER about the existing site "

@@ -94,7 +94,7 @@ Call ``mcp__pocketpaw_sites_manager__publish`` with the pocket id:
 ```json
 {
   "pocket_id": "<the current or just-created pocket id>",
-  "name": "Bright Smile Dental"
+  "name": "<the business name>"
 }
 ```
 
@@ -113,7 +113,7 @@ On success the tool returns:
   "site": {
     "id": "...",
     "pocket_id": "...",
-    "name": "Bright Smile Dental",
+    "name": "<the business name>",
     "url": "https://...",
     "deployed": true
   }
