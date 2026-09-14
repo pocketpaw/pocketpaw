@@ -197,6 +197,7 @@ from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
@@ -372,6 +373,7 @@ __all__ = [
     "AgentConfig",
     "Attachment",
     "AuditEvent",
+    "PlatformAuditEvent",
     "AuditWebhook",
     "AuthSession",
     "BeltWorkspaceConfig",
@@ -612,6 +614,7 @@ def get_all_documents():
         VapidKeypair,
         WorkspaceSensePreference,
         AuditEvent,
+        PlatformAuditEvent,
         AuditWebhook,
         AuthSession,
         APIKey,

@@ -332,6 +332,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.agent_activity.router import router as agent_activity_router
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
+    from pocketpaw_ee.cloud.platform.router import router as platform_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
     from pocketpaw_ee.cloud.automations_status.router import (
@@ -380,6 +381,13 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(workspace_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
+
+    # The cross-tenant operator surface. Mounted on its own, like the Dodo
+    # webhook router, because it is not part of any tenant's API: every route
+    # under it takes its target workspace as an explicit parameter and is gated
+    # by require_platform, never by workspace membership. The prefix IS the
+    # audit boundary — see ee/pocketpaw_ee/cloud/platform/router.py.
+    app.include_router(platform_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
     # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
     # tenancy/auth oracle every later Web Cursor slice authorizes against.
