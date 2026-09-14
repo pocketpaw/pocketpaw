@@ -23,12 +23,12 @@ import logging
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 
-from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.platform import audit
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 
 logger = logging.getLogger(__name__)
@@ -76,18 +76,6 @@ class WorkspaceDetailOut(BaseModel):
     owner_count: int
 
 
-class UserMembershipOut(BaseModel):
-    workspace_id: str
-    role: str
-
-
-class UserRowOut(BaseModel):
-    user_id: str
-    email: str
-    name: str
-    memberships: list[UserMembershipOut]
-
-
 def _row(workspace) -> WorkspaceRowOut:
     return WorkspaceRowOut(
         id=workspace.id,
@@ -104,8 +92,15 @@ def _row(workspace) -> WorkspaceRowOut:
 
 @router.get("", response_model=WorkspacePageOut)
 async def search_workspaces(
-    _operator: Annotated[User, Depends(require_platform("platform.workspace.read"))],
-    q: Annotated[str | None, Query(description="Match slug, name, or the owner's email")] = None,
+    request: Request,
+    operator: Annotated[User, Depends(require_platform("platform.workspace.read"))],
+    q: Annotated[
+        str | None,
+        Query(
+            min_length=2,
+            description="Match slug, name, or the owner's email",
+        ),
+    ] = None,
     plan: Annotated[str | None, Query(description="Exact plan filter")] = None,
     include_deleted: Annotated[bool, Query(description="Include soft-deleted tenants")] = False,
     cursor: Annotated[str | None, Query(description="Opaque cursor from a previous page")] = None,
@@ -116,20 +111,30 @@ async def search_workspaces(
     ``q`` matches the three things a support request actually arrives with: a
     slug, a display name, or the owner's email address.
     """
-    try:
-        workspaces, next_cursor = await workspace_service.platform_search_workspaces(
-            q=q,
-            plan=plan,
-            include_deleted=include_deleted,
-            limit=limit,
-            cursor=cursor,
-        )
-    except Exception as exc:  # noqa: BLE001 - narrowed immediately below
-        # A malformed cursor is the caller's fault, not a server fault. Without
-        # this it surfaces as a 500 and looks like an outage.
-        if "cursor" in str(exc).lower():
-            raise HTTPException(status_code=400, detail="platform.malformed_cursor") from exc
-        raise
+    # No try/except here on purpose. A malformed cursor raises ValidationError,
+    # which the central `cloud_error_handler` maps to the standard envelope —
+    # the convention every router in this codebase follows ("never
+    # HTTPException"). The earlier version caught Exception and matched on the
+    # word "cursor" in the message, which was both fragile and wrong: it turned
+    # a bad cursor into a 500.
+    workspaces, next_cursor = await workspace_service.platform_search_workspaces(
+        q=q,
+        plan=plan,
+        include_deleted=include_deleted,
+        limit=limit,
+        cursor=cursor,
+    )
+
+    # Audited. Enumerating tenants is the read an abused operator account makes
+    # first, and request_logs stores the route template rather than the query
+    # string — so without this row, WHAT was searched for is recorded nowhere.
+    await audit.record_read(
+        operator=operator,
+        action="platform.workspace.read",
+        query=f"q={q!r} plan={plan!r} include_deleted={include_deleted}",
+        target_type="workspace_search",
+        request=request,
+    )
 
     return WorkspacePageOut(
         items=[_row(w) for w in workspaces],
@@ -140,7 +145,8 @@ async def search_workspaces(
 @router.get("/{workspace_id}", response_model=WorkspaceDetailOut)
 async def get_workspace(
     workspace_id: str,
-    _operator: Annotated[User, Depends(require_platform("platform.workspace.read"))],
+    request: Request,
+    operator: Annotated[User, Depends(require_platform("platform.workspace.read"))],
 ) -> WorkspaceDetailOut:
     """One tenant, with its members.
 
@@ -148,12 +154,19 @@ async def get_workspace(
     usually asking why an account is gone, and answering that from the console
     is the point of the whole PRD.
     """
-    try:
-        workspace = await workspace_service.platform_get_workspace(workspace_id)
-    except NotFound as exc:
-        raise HTTPException(status_code=404, detail="workspace.not_found") from exc
+    # NotFound propagates to the central handler, same as everywhere else.
+    workspace = await workspace_service.platform_get_workspace(workspace_id)
 
     members = await workspace_service.platform_list_members(workspace_id)
+
+    await audit.record_read(
+        operator=operator,
+        action="platform.workspace.read",
+        query=f"workspace={workspace_id}",
+        target_type="workspace",
+        target_workspace=workspace_id,
+        request=request,
+    )
 
     return WorkspaceDetailOut(
         workspace=_row(workspace),
@@ -174,7 +187,8 @@ async def get_workspace(
 @router.get("/{workspace_id}/members", response_model=list[MemberOut])
 async def list_members(
     workspace_id: str,
-    _operator: Annotated[User, Depends(require_platform("platform.member.read"))],
+    request: Request,
+    operator: Annotated[User, Depends(require_platform("platform.member.read"))],
 ) -> list[MemberOut]:
     """Members of one tenant.
 
@@ -183,6 +197,16 @@ async def list_members(
     member list quietly riding a broader grant.
     """
     members = await workspace_service.platform_list_members(workspace_id)
+
+    await audit.record_read(
+        operator=operator,
+        action="platform.member.read",
+        query=f"workspace={workspace_id}",
+        target_type="workspace_members",
+        target_workspace=workspace_id,
+        request=request,
+    )
+
     return [
         MemberOut(
             user_id=m.user_id,

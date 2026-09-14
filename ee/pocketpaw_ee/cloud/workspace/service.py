@@ -2364,10 +2364,35 @@ def _escape_regex(value: str) -> str:
     return re.escape(value)
 
 
+# Hard ceiling on the owner-email fan-out. Without one, `?q=a` loads every user
+# whose address contains "a" into process memory and then builds an `$in` out of
+# their ids — either exhausting the shared cloud process or blowing past Mongo's
+# 16MB query-document limit. Reachable at the SUPPORT rung, which is the lowest
+# one and the likeliest to be phished, so it is an availability hole rather than
+# a theoretical one.
+_PLATFORM_OWNER_MATCH_CAP = 500
+
+# A member list is bounded by one tenant's size, which is not the same as small.
+# The console paginates nothing here yet, so the cap is what stops a single
+# enterprise row from being a memory event.
+_PLATFORM_MEMBER_LIST_CAP = 1000
+
+
 async def _platform_user_ids_matching_email(fragment: str) -> list[str]:
-    """User ids whose email contains ``fragment``, for owner-email search."""
+    """User ids whose email contains ``fragment``, for owner-email search.
+
+    Capped. A fragment matching more owners than the cap returns only the first
+    page of them, so the owner-email LIMB of a search is best-effort on a very
+    broad query — slug and name matching are unaffected. That is the right
+    trade: a broad query is a typo or a probe, and a precise one (a full address,
+    which is what a support request carries) never approaches the cap.
+    """
     pattern = _escape_regex(fragment)
-    users = await _UserDoc.find({"email": {"$regex": pattern, "$options": "i"}}).to_list()
+    users = (
+        await _UserDoc.find({"email": {"$regex": pattern, "$options": "i"}})
+        .limit(_PLATFORM_OWNER_MATCH_CAP)
+        .to_list()
+    )
     return [str(u.id) for u in users]
 
 
@@ -2452,7 +2477,12 @@ async def platform_search_workspaces(
         try:
             query["_id"] = {"$lt": PydanticObjectId(cursor)}
         except Exception as exc:
-            raise ValidationError("Malformed cursor.") from exc
+            # (code, message) — CloudError subclasses take both, and the
+            # central handler renders the code onto the wire.
+            raise ValidationError(
+                "platform.malformed_cursor",
+                "Cursor is not a valid workspace id.",
+            ) from exc
 
     # One extra row tells us whether another page exists without a count().
     docs = await _WorkspaceDoc.find(query).sort("-_id").limit(limit + 1).to_list()
@@ -2494,7 +2524,11 @@ async def platform_list_members(workspace_id: str) -> list[WorkspaceMember]:
     off a tenancy check is the kind of parameter that eventually gets passed
     ``True`` from somewhere it should not be.
     """
-    members = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
+    members = (
+        await _UserDoc.find({"workspaces.workspace": workspace_id})
+        .limit(_PLATFORM_MEMBER_LIST_CAP)
+        .to_list()
+    )
     out: list[WorkspaceMember] = []
     for member in members:
         membership = next((m for m in member.workspaces if m.workspace == workspace_id), None)

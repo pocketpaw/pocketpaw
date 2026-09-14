@@ -150,6 +150,37 @@ async def test_principal_is_checked_before_the_rung() -> None:
     assert exc.value.detail == "platform.non_interactive_principal"
 
 
+@pytest.mark.asyncio
+async def test_the_same_token_resent_as_a_cookie_is_accepted_KNOWN_GAP() -> None:
+    """DOCUMENTS A KNOWN GAP. This test passing is not good news.
+
+    `auth/core.py` builds the cookie and bearer backends from the same
+    `get_jwt_strategy()`, so the two tokens are interchangeable. A caller
+    refused for `Authorization: Bearer <jwt>` can re-send the identical token as
+    `Cookie: paw_auth=<jwt>` and pass — the header refusal costs one line to
+    step around.
+
+    This test exists so the gap is written down in the suite rather than only in
+    a docstring, and so that whoever binds the token to its transport has a test
+    to INVERT. When that lands, this should become an assertion that the
+    re-sent token is refused, and the name should lose its suffix.
+
+    The fixture here fakes the authenticated user, so it cannot prove the token
+    is genuinely interchangeable — that claim rests on reading auth/core.py. It
+    proves the narrower thing the guard controls: the guard looks at the header
+    name, not at which backend authenticated the caller.
+    """
+    guard = require_platform("platform.audit.read")
+    user = _FakeUser("operator")
+
+    # Refused when the credential is presented as a bearer header.
+    with pytest.raises(HTTPException):
+        await _run(guard, _request(cookie=False, bearer=True), user)
+
+    # Accepted when the very same credential arrives as a cookie.
+    assert await _run(guard, _request(cookie=True, bearer=False), user) is user
+
+
 # ---------------------------------------------------------------------------
 # 2. Rung, once the principal is accepted
 # ---------------------------------------------------------------------------

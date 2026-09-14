@@ -162,6 +162,41 @@ async def test_last_page_reports_no_cursor(mongo_db) -> None:
     assert cursor is None
 
 
+async def test_malformed_cursor_is_a_client_error_not_a_500(mongo_db) -> None:
+    """Regression: a bad cursor used to produce a 500.
+
+    ``ValidationError`` takes ``(code, message)`` and was being constructed with
+    one argument, so it raised TypeError instead. The route then caught
+    Exception and looked for the word "cursor" in the message — which the
+    TypeError did not contain — and re-raised, surfacing an outage-shaped 500
+    for what is a caller mistake.
+
+    There was no test for this path at all, which is how it survived. Asserting
+    the CloudError subclass AND its status keeps both halves honest.
+    """
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    await _workspace("Acme", "acme", "u1")
+
+    with pytest.raises(ValidationError) as exc_info:
+        await workspace_service.platform_search_workspaces(cursor="not-an-object-id")
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "platform.malformed_cursor"
+
+
+async def test_a_valid_cursor_is_not_mistaken_for_a_malformed_one(mongo_db) -> None:
+    """Guards the fix from over-correcting into rejecting real cursors."""
+    for i in range(3):
+        await _workspace(f"WS{i}", f"ws{i}", "u1")
+
+    first, cursor = await workspace_service.platform_search_workspaces(limit=1)
+    assert cursor is not None
+
+    second, _ = await workspace_service.platform_search_workspaces(limit=1, cursor=cursor)
+    assert second and second[0].slug != first[0].slug
+
+
 # ---------------------------------------------------------------------------
 # Detail
 # ---------------------------------------------------------------------------
@@ -209,6 +244,47 @@ async def test_list_members_needs_no_membership(mongo_db) -> None:
 
     assert {m.email for m in members} == {"a@acme.test", "b@acme.test"}
     assert {m.role for m in members} == {"owner", "member"}
+
+
+async def test_owner_email_fanout_is_capped(mongo_db) -> None:
+    """A broad search must not load the whole user table into memory.
+
+    Without the cap, `?q=a` pulls every user whose address contains "a" and
+    builds an $in out of their ids — an OOM or a 16MB BSON blowup, reachable at
+    the SUPPORT rung. The cap is exercised here by lowering it rather than by
+    inserting thousands of rows.
+    """
+    from pocketpaw_ee.cloud.workspace import service as svc
+
+    for i in range(12):
+        await _user(f"owner{i}@acme.test")
+
+    original = svc._PLATFORM_OWNER_MATCH_CAP
+    try:
+        svc._PLATFORM_OWNER_MATCH_CAP = 5
+        ids = await svc._platform_user_ids_matching_email("acme")
+    finally:
+        svc._PLATFORM_OWNER_MATCH_CAP = original
+
+    assert len(ids) == 5, f"expected the cap to bound the fan-out, got {len(ids)}"
+
+
+async def test_member_list_is_capped(mongo_db) -> None:
+    """One tenant's member list is bounded by that tenant's size, not by small."""
+    from pocketpaw_ee.cloud.workspace import service as svc
+
+    ws = await _workspace("Big", "big", "u1")
+    for i in range(8):
+        await _user(f"m{i}@big.test", [(str(ws.id), "member")])
+
+    original = svc._PLATFORM_MEMBER_LIST_CAP
+    try:
+        svc._PLATFORM_MEMBER_LIST_CAP = 3
+        members = await svc.platform_list_members(str(ws.id))
+    finally:
+        svc._PLATFORM_MEMBER_LIST_CAP = original
+
+    assert len(members) == 3
 
 
 # ---------------------------------------------------------------------------

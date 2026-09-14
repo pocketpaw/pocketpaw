@@ -16,11 +16,12 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.platform import audit
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,8 @@ class UserRowOut(BaseModel):
 
 @router.get("", response_model=list[UserRowOut])
 async def find_users(
-    _operator: Annotated[User, Depends(require_platform("platform.user.read"))],
+    request: Request,
+    operator: Annotated[User, Depends(require_platform("platform.user.read"))],
     email: Annotated[str, Query(min_length=3, description="Full or partial email address")],
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> list[UserRowOut]:
@@ -59,6 +61,18 @@ async def find_users(
     looking at a specific workspace, where the action is audited.
     """
     rows = await workspace_service.platform_find_users(email=email, limit=limit)
+
+    # The email fragment IS the sensitive part of this request — searching for
+    # "ceo@competitor" is the action worth being able to review later, and it
+    # appears in no other log.
+    await audit.record_read(
+        operator=operator,
+        action="platform.user.read",
+        query=f"email={email!r}",
+        target_type="user_search",
+        request=request,
+    )
+
     return [
         UserRowOut(
             user_id=user_id,
