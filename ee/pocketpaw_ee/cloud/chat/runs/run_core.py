@@ -1,6 +1,17 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-14 (fix/partial-reply-survives-failed-run) — the cancel check at the
+  top of the event loop no longer THROWS AWAY the event it is holding. It runs
+  before the event is handled, so breaking on it discarded a chunk the model had
+  already produced; when the flag was already set as the loop opened, that was
+  every chunk, and ``mark_terminal(status="cancelled", partial_text=full_text)``
+  persisted an empty string. The stop button therefore erased the very text the
+  user had just read and deliberately stopped because of. The chunk is now folded
+  into ``full_text`` before the break — but deliberately NOT appended to the
+  transport: the client asked for the stream to end and it still ends at exactly
+  the event it did before. Only the durable record changes, which is what
+  ``load_history_for_scope`` replays.
 - 2026-09-11 (feat/byok-custom-gateway, review B2) — ``_iter_agent_events``
   catches ``byok_service.GatewayEgressRejected`` from
   ``resolve_turn_credentials`` and yields a terminal
@@ -1195,6 +1206,17 @@ def _is_concierge_run(spec: RunSpec) -> bool:
     path can supersede this outright suppression.
     """
     return (spec.session_key or "").startswith(_CONCIERGE_SESSION_PREFIX)
+
+
+def _chunk_text(event_data: dict[str, Any]) -> str:
+    """The assistant text one ``chunk`` event carries, or "".
+
+    Two call sites accumulate it now — the normal path and the cancel break —
+    and they must agree on what counts as text, because a disagreement is
+    invisible: it shows up as a reply that is subtly short, never as an error.
+    """
+    content = event_data.get("content", "")
+    return content if isinstance(content, str) else ""
 
 
 async def _persist_and_complete(
@@ -2828,12 +2850,22 @@ async def execute_run(spec: RunSpec) -> None:
         try:
             async for event_name, event_data in _iter_agent_events(spec, ctx):
                 if await transport.is_cancelled(spec.run_id):
+                    # Keep the text this event carries before leaving. The check
+                    # runs BEFORE the event is handled, so a bare break discards
+                    # a chunk the model already produced and already charged for
+                    # — and with the flag set before the loop opened, it discards
+                    # all of them, which is how a cancelled run reached
+                    # ``mark_terminal`` with an empty ``partial_text``.
+                    #
+                    # Not appended to the transport on purpose: the client asked
+                    # the stream to stop, and it stops at the same event it
+                    # always did. Only the durable record gains the text.
+                    if event_name == "chunk":
+                        full_text += _chunk_text(event_data)
                     cancelled = True
                     break
                 if event_name == "chunk":
-                    content = event_data.get("content", "")
-                    if isinstance(content, str):
-                        full_text += content
+                    full_text += _chunk_text(event_data)
                 elif event_name == "token_usage":
                     if isinstance(event_data, dict) and event_data:
                         # LATEST-WINS, FLOORED. Every backend reports a

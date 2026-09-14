@@ -4,6 +4,16 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 ``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
 
 Changes:
+- 2026-09-14 (fix/partial-reply-survives-failed-run) — added
+  ``STRANDED_REPLY_STATUSES`` + ``find_stranded_replies``. ``execute_run`` writes
+  an assistant ``Message`` from exactly one place, and the failed / cancelled /
+  interrupted branches return before it, leaving the text the model had already
+  produced on ``partial_text`` and nowhere else. ``load_history_for_scope`` reads
+  the ``Message`` collection alone, so that reply was durable and unreachable at
+  the same time: the next turn was answered cold and the user paid twice for the
+  same tokens. This read is how the history reader gets at it WITHOUT importing
+  ``ChatRunDoc`` (EE Rule 2) — it returns ``StrandedReply`` value objects, the
+  same Beanie-free shape ``find_*_for_workspace`` returns ``RunActivityRow`` in.
 - 2026-06-10 (sov/w3a-igw — per-run token metering) — ``mark_completed`` and
   ``mark_terminal`` now accept an optional ``usage: dict[str, Any] | None`` and
   persist it onto ``ChatRunDoc.usage`` when provided. ``run_core`` passes the
@@ -39,7 +49,7 @@ from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NotFound
-from pocketpaw_ee.cloud.chat.runs.domain import RunActivityRow, RunSpec
+from pocketpaw_ee.cloud.chat.runs.domain import RunActivityRow, RunSpec, StrandedReply
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
 logger = logging.getLogger(__name__)
@@ -49,6 +59,15 @@ logger = logging.getLogger(__name__)
 # agent-activity board all read the same pair, so "is this agent working right
 # now" can never disagree with "is this scope busy".
 ACTIVE_RUN_STATUSES = ("queued", "running")
+
+# A run whose reply is STRANDED: it reached a terminal state carrying text the
+# model had already produced, and no assistant ``Message`` was ever written for
+# it — ``execute_run`` writes one only from ``_persist_and_complete``, which all
+# three of these return before reaching. ``completed`` is absent on purpose (its
+# text IS a Message row, so replaying it from here would duplicate every answer
+# the agent ever gave) and so is the ACTIVE pair (that text is still streaming
+# into the turn in flight; it is not history yet).
+STRANDED_REPLY_STATUSES = ("failed", "cancelled", "interrupted")
 
 
 def _utcnow() -> datetime:
@@ -345,3 +364,47 @@ async def find_recent_runs_for_workspace(
         .to_list()
     )
     return [_to_activity_row(d) for d in docs]
+
+
+async def find_stranded_replies(
+    *,
+    workspace_id: str,
+    context_type: str,
+    scope_id: str,
+    agent_id: str,
+    limit: int,
+) -> list[StrandedReply]:
+    """This scope's newest ``limit`` replies that live on a run and nowhere else.
+
+    The four identity predicates are deliberately the ones
+    ``agent_service.session_key_for`` derives its ``Message.session_key`` from —
+    kind, scope, agent — plus an explicit ``workspace``. Matching on the stored
+    ``session_key`` string instead would look tighter and be wrong: the run
+    document's copy comes from ``RunSpec.session_key``, which every production
+    caller fills from ``session_key_for`` but which is simply a field any caller
+    may set. The tenant key is a predicate here, never an inference.
+
+    Ordered newest-first and capped, because the caller wants the END of the
+    conversation; ``(workspace, context_type, scope_id, createdAt)`` is a real
+    index, so that is a walk rather than a scan of a collection that has no TTL.
+
+    Empty ``partial_text`` is filtered in the query: a run that died before the
+    model emitted a token has nothing to contribute, and excluding it here keeps
+    it from spending one of the caller's window slots.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == context_type,
+            ChatRunDoc.scope_id == scope_id,
+            ChatRunDoc.agent_id == agent_id,
+            {"status": {"$in": list(STRANDED_REPLY_STATUSES)}},
+            {"partial_text": {"$ne": ""}},
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [
+        StrandedReply(status=d.status, text=d.partial_text, created_at=d.createdAt) for d in docs
+    ]
