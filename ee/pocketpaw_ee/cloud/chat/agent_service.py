@@ -9,6 +9,14 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images`` grew the
+provider's per-image ceiling (5MB) and a per-turn byte budget, which it had
+neither of while the surface-snapshot channel in ``run_core`` has had both since
+2026-09-11. A cap alone would have made the common case worse, so ``_fit_for_model``
+SHRINKS an oversized picture instead of dropping it: a 4K PNG screenshot is what
+people actually attach, and a transcoded HEIC or AVIF balloons because PNG is
+lossless. An image that already fits is returned byte-identical.
+
 Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images``
 resolves a turn's uploads to bytes (transcoding HEIC/HEIF/TIFF/BMP to PNG, since
 HEIC is what an iPhone shoots and is not on the API's media-type list), and
@@ -2884,6 +2892,87 @@ def _to_png(raw: bytes, *, mime: str) -> bytes:
     return buf.getvalue()
 
 
+# Anthropic's documented per-image ceiling, and the safe floor across providers
+# (OpenAI and Gemini allow more). The surface-snapshot channel already answers to
+# it as ``run_core._MAX_IMAGE_BYTES``; both channels feed the same request, so
+# the number is not conditional on which one a picture arrived through.
+_MODEL_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+# What ONE turn may put on the wire across all of its attachments. Sits above the
+# per-image ceiling for the same reason ``run_core`` keeps both: the budget caps
+# the turn, the ceiling caps a single file, and either alone lets the other
+# through.
+_MODEL_IMAGE_TURN_BUDGET = 6 * 1024 * 1024
+# The long edge worth sending. The API rejects an edge over 8000px outright and
+# downscales anything past roughly this before the model sees it — while billing
+# the tokens for the size we sent. So shrinking here is not a degradation, it is
+# the same picture for fewer tokens.
+_MODEL_IMAGE_MAX_EDGE = 1568
+# A source we will not even read into memory. Well above the per-image ceiling on
+# purpose: a big PNG that shrinks to fit is the case this whole function exists
+# for, and only an absurd file is refused outright.
+_MODEL_IMAGE_MAX_SOURCE_BYTES = 40 * 1024 * 1024
+
+
+def _fit_for_model(raw: bytes, *, mime: str) -> tuple[bytes, str] | None:
+    """Shrink ``raw`` until a model will accept it, or return ``None``.
+
+    Returns the bytes UNCHANGED when they already fit, which is the common case
+    and keeps an ordinary attachment byte-identical to what was uploaded.
+
+    Why shrink instead of skip: a screenshot is the single most common thing a
+    user attaches, and a 4K PNG one routinely clears 5MB — as does any HEIC or
+    AVIF we transcode, because PNG is lossless and a 2MB photo can come out
+    several times larger. Dropping those would mean the feature works for small
+    pictures and silently fails for the ones people actually paste, which is the
+    shape of the bug this change set exists to remove.
+
+    Animated GIFs are never resized: Pillow would flatten the animation to one
+    frame, and a still frame of an animation is not what was attached. An
+    oversized one is refused instead.
+
+    Runs in a worker thread at the call site — decode and re-encode are
+    CPU-bound and would otherwise stall the event loop for the whole turn.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    if len(raw) <= _MODEL_IMAGE_MAX_BYTES:
+        try:
+            with Image.open(_io.BytesIO(raw)) as probe:
+                if max(probe.size) <= _MODEL_IMAGE_MAX_EDGE:
+                    return raw, mime
+        except Exception:
+            # Unreadable here means unreadable to the provider too.
+            return None
+
+    with Image.open(_io.BytesIO(raw)) as img:
+        if getattr(img, "is_animated", False):
+            return None if len(raw) > _MODEL_IMAGE_MAX_BYTES else (raw, mime)
+
+        # JPEG stays JPEG (re-encoding a photo as PNG inflates it); everything
+        # else becomes PNG, which is lossless and keeps screenshot text crisp.
+        keep_jpeg = mime == "image/jpeg"
+        out_mime = "image/jpeg" if keep_jpeg else "image/png"
+        img = img.convert("RGB" if keep_jpeg else "RGBA" if img.mode == "RGBA" else "RGB")
+
+        edge = _MODEL_IMAGE_MAX_EDGE
+        for _ in range(6):
+            frame = img.copy()
+            if max(frame.size) > edge:
+                frame.thumbnail((edge, edge), Image.LANCZOS)
+            buf = _io.BytesIO()
+            if keep_jpeg:
+                frame.save(buf, format="JPEG", quality=85, optimize=True)
+            else:
+                frame.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+            if len(data) <= _MODEL_IMAGE_MAX_BYTES:
+                return data, out_mime
+            edge //= 2
+    return None
+
+
 async def resolve_turn_images(
     ctx: ScopeContext,
     attachments: list[dict[str, Any]] | None,
@@ -2916,6 +3005,7 @@ async def resolve_turn_images(
         return ()
 
     out: list[ImageAttachment] = []
+    budget = _MODEL_IMAGE_TURN_BUDGET
     for att in attachments:
         if len(out) >= _ATTACHMENT_MAX_FILES:
             break
@@ -2932,10 +3022,41 @@ async def resolve_turn_images(
                 mime = getattr(rec, "mime", "") or ""
                 if mime not in _MODEL_IMAGE_MIMES and mime not in _TRANSCODE_TO_PNG_MIMES:
                     continue
+                # Checked before the read, so an absurd file costs a stat and
+                # not its own size in memory.
+                declared = getattr(rec, "size", 0) or 0
+                if declared > _MODEL_IMAGE_MAX_SOURCE_BYTES:
+                    logger.warning(
+                        "attachment %s is %d bytes, past the %d-byte source limit; "
+                        "not sending it as an image",
+                        url,
+                        declared,
+                        _MODEL_IMAGE_MAX_SOURCE_BYTES,
+                    )
+                    continue
                 raw = await asyncio.to_thread(Path(path).read_bytes)
+                if not raw:
+                    continue
                 if mime in _TRANSCODE_TO_PNG_MIMES:
                     raw = await asyncio.to_thread(_to_png, raw, mime=mime)
                     mime = "image/png"
+                fitted = await asyncio.to_thread(_fit_for_model, raw, mime=mime)
+                if fitted is None:
+                    logger.warning(
+                        "attachment %s could not be fitted under the %d-byte "
+                        "per-image limit; not sending it as an image",
+                        url,
+                        _MODEL_IMAGE_MAX_BYTES,
+                    )
+                    continue
+                raw, mime = fitted
+                if len(raw) > budget:
+                    logger.warning(
+                        "attachment %s does not fit the remaining turn budget; skipping it",
+                        url,
+                    )
+                    continue
+                budget -= len(raw)
                 out.append(
                     ImageAttachment(
                         data=raw,
