@@ -30,6 +30,12 @@
 #   - 2026-07-04: Added StockImageTool — search free Pexels/Unsplash stock photos
 #     for Paw Sites imagery (shared search_stock_images() helper; EE MCP surface
 #     for the SDK backend).
+#   - 2026-09-15: Added ReferoStylesTool + ReferoScreensTool — design research
+#     against real shipped design systems (shared pocketpaw.tools.builtin.refero
+#     helpers; EE `pocketpaw_refero` MCP surface for the SDK backend). Same
+#     two-surface split as StockImageTool, and for the same reason: the site
+#     skills run on claude_agent_sdk, which cannot see a BaseTool. Both return
+#     empty when no Refero token is set.
 #   - 2026-08-04: Added WidgetSpecTool + InlineWidgetHelpTool. Both tools already
 #     existed on the `pocketpaw_widgets` in-process MCP server, which only
 #     `agents/claude_sdk.py` builds — so every other backend ran without them
@@ -53,6 +59,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "UrlExtractTool": (".url_extract", "UrlExtractTool"),
     "ImageGenerateTool": (".image_gen", "ImageGenerateTool"),
     "StockImageTool": (".stock_images", "StockImageTool"),
+    "ReferoStylesTool": (".refero", "ReferoStylesTool"),
+    "ReferoScreensTool": (".refero", "ReferoScreensTool"),
     "CreateSkillTool": (".skill_gen", "CreateSkillTool"),
     "GmailSearchTool": (".gmail", "GmailSearchTool"),
     "GmailReadTool": (".gmail", "GmailReadTool"),

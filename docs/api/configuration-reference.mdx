@@ -201,6 +201,13 @@ Independent of the flag, the `<current-pocket>` widget summary is bounded to 2,0
 | `google_api_key` | `POCKETPAW_GOOGLE_API_KEY` | string | — | Google AI API key |
 | `image_model` | `POCKETPAW_IMAGE_MODEL` | string | `gemini-2.0-flash` | Model |
 
+## Design Research (Refero)
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `refero_api_token` | `POCKETPAW_REFERO_API_TOKEN` | string | — | Refero API token. Enables the design-research tools that ground generated UI in real shipped design systems: `refero_design_styles` / `refero_design_screens` (BaseTools, for the pydantic_ai and other non-SDK backends) and the `pocketpaw_refero` in-process MCP server exposing `search_styles` / `get_style` / `search_screens` (for the claude_agent_sdk backend, which cannot see a BaseTool). Requires a paid Refero plan. **Unset degrades to empty results everywhere** — a site build proceeds without design research rather than failing, exactly like an unconfigured stock-photo provider. Granted to `/sites` on every mode; other restrictive surfaces see it only if they name the ids. **Licensing:** a per-seat Refero plan is licensed to one user and forbids sharing access, so a token serving a multi-tenant deploy needs Refero's usage-based integration agreement, not a Pro seat. |
+| `refero_endpoint` | `POCKETPAW_REFERO_ENDPOINT` | string | `""` | Override the Refero MCP endpoint. Empty uses the documented default (`https://api.refero.design/mcp`). For pointing at a proxy or staging host without a code change; no reason to set it otherwise. |
+
 ## Voice & STT
 
 | Setting | Env Variable | Type | Default | Description |
