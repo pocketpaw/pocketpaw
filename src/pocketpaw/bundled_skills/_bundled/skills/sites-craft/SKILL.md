@@ -95,6 +95,43 @@ non-variable fallback renders.
 
 ---
 
+**Derive the vertical rhythm from the leading.** `line-height x 0.5` gives the
+smallest vertical step the page should use — body text at `16px/1.5` gives `24px`
+leading and therefore a `12 / 24 / 48 / 72` ladder. Spacing chosen off a
+different grid from the type is why a page can have a correct scale and still
+feel unsettled.
+
+**Count what you shipped, then cut.** A finished page should hold no more than
+six to eight distinct font sizes, four text colours and four weights. Squint at
+it: if you cannot tell two sizes apart, they are one size and one of them is
+noise.
+
+**Fluid type belongs in `clamp()`, not in breakpoints.**
+`clamp(2.5rem, 5vw, 4.5rem)` for a display line removes a whole class of
+in-between-width defects. Going from phone to desktop, body moves barely at all
+(`16px` to `16-18px`) while a display line moves a lot (`32-36px` to `48-64px`) —
+heading leading gets *tighter* as size grows, and letter-spacing does not change.
+
+**Tighten tracking only when all four are true**: the text is `32px` or larger,
+it is a headline rather than body, its weight is not light, and you have looked
+at the awkward pairs — `AV`, `WA`, `To`. Negative tracking on body text at any
+size is the fastest way to make a page tiring to read.
+
+**Text that can overflow needs to be told how.** A long word in a narrow column
+takes `overflow-wrap: break-word`; a summary line capped at two takes
+`-webkit-line-clamp`. **And a flex child will not truncate at all until it has
+`min-width: 0`** — the default `min-width: auto` refuses to shrink below the
+content, so the text escapes the container instead of ellipsing. That one is
+worth knowing by heart; it looks like a broken layout, never like a text rule.
+
+**Use the real punctuation.** A true ellipsis `…` rather than three periods,
+curly quotes and apostrophes in prose, and a non-breaking space between a number
+and its unit (`10 MB`, `20 min`) so the pair never splits across a line break.
+Every loading or in-progress string ends in `…`. This is small, and it is one of
+the differences between a page that was typeset and one that was typed.
+
+---
+
 ## 2. Colour — build a ramp, not a set of colours
 
 **A system is ramps, not colours.** One neutral ramp, one accent ramp, and only
@@ -148,6 +185,51 @@ get by not asking.
 
 ---
 
+**Tell the browser which scheme the page is in.** This is the most-skipped line
+in dark design and the failure is never in your CSS — it is in the parts of the
+page the browser paints for you.
+
+```html
+<meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+```
+
+```css
+:root { color-scheme: light; }
+[data-theme="dark"] { color-scheme: dark; }
+```
+
+Without `color-scheme`, a dark page keeps light-grey scrollbars, native form
+controls render with light defaults, and autofill and system dialogs look broken
+on an otherwise finished page. `theme-color` is what tints the mobile address bar
+so the browser chrome stops ending the design two pixels above the header. On
+Windows a native `<select>` additionally needs its own background and colour set
+in dark, because it does not fully inherit.
+
+**Roughly 60-30-10 by area.** Neutrals carry most of the page, text hierarchy
+takes the next slice, and accent is the smallest — 5-10%, not a third. When a
+page looks loud and no single element is wrong, this ratio is what broke.
+
+**At most two colours in any one component.** A card with a brand border, a tinted
+background, a coloured heading and a coloured badge has no hierarchy left to
+spend.
+
+**A semantic colour is a set, not a value.** Success, warning and error each need
+a foreground, a background, a border and an on-colour for text that sits on the
+fill — `--success`, `--success-bg`, `--success-border`, `--on-success`. Shipping
+only the first is why status messages end up as unreadable text on a tinted
+block.
+
+**Keep semantic colours clear of the brand.** A blue primary means blue cannot
+also mean success; a green primary means success needs to move to teal, and
+yellow-green stops reading as a warning. Decide it once, in the ramp, rather than
+per component.
+
+**A gradient is never the only thing making something visible.** Remove it: if
+the element disappears, the element was never designed — it was decorated.
+
+---
+
 ## 3. Space — grouping is the layout
 
 **Group with space, not lines.** Space first, a background shape second,
@@ -182,7 +264,13 @@ being able to name it.
 
 **Optical over geometric alignment.** A play triangle, an asymmetric glyph, an
 icon beside a label — centre them by eye, not by box. Geometric centring looks
-off for anything whose visual mass is not centred.
+off for anything whose visual mass is not centred. A play triangle wants
+`0.5-1px` to the right; a chevron or arrow wants a nudge toward its point. **The
+test:** drop the icon into a circle. If it does not look centred, it is not.
+
+**Visual mass is not stroke width.** At the same stroke, a circle reads lighter
+than a square and a diagonal reads thinner than a horizontal. Match what the eye
+weighs, not what the box measures.
 
 **Shadows for elevation, borders for structure.** Where a border exists only to
 fake depth, use a layered transparent `box-shadow` instead. Keep borders that
@@ -200,6 +288,12 @@ above `0.98` is invisible.
 `2px` beside semibold (600). One stroke weight per icon set, one icon library per
 page. A hairline icon next to bold text is a visible mismatch.
 
+**Size the icon off the text it sits beside**, then check it by eye: `14-16px`
+text takes a `16px` icon, `16-18px` text takes `18-20px`, a heading takes
+`20-24px`. Icons need `align-items: center` plus, often, a final `0.5-1px`
+nudge. An icon sized off nothing in particular is the most common reason a row
+of links looks subtly uneven.
+
 **Transition only what changes.** Name the properties (`transition-property:
 opacity, transform`). Never `transition: all` — it animates things you did not
 mean, including layout, and costs frames.
@@ -208,13 +302,164 @@ mean, including layout, and costs frames.
 states from CSS colour and opacity. Outline is the default variant; fill marks
 active.
 
+**Load the hero eagerly, everything else lazily.** The largest image above the
+fold carries `fetchpriority="high"` and NO `loading="lazy"` — lazy-loading the
+LCP image is the most common self-inflicted performance defect on a landing
+page. Everything below the fold takes `loading="lazy"` and `decoding="async"`.
+Every `<img>` carries explicit `width` and `height` (or an `aspect-ratio`) so
+the page does not reflow as images arrive.
+
+---
+
+## Motion — timing, easing and origin
+
+`pocketpaw-design-taste` 3.D decides WHICH motion a page earns and holds the
+Tier-0 rule that it stays CSS-only and static-safe. This decides how whatever it
+chose is timed. Everything here is plain CSS: the page is prerendered and has to
+look finished before any JavaScript runs, so motion is a transition or a
+keyframe on markup that already renders in its resting state, never a class a
+script toggles on arrival.
+
+**Name the curves once and reuse them.** Hand-rolled `cubic-bezier` values per
+component are why a page feels like several pages.
+
+```css
+:root {
+  --ease-out:              cubic-bezier(0, 0, 0.2, 1);
+  --ease-in:               cubic-bezier(0.4, 0, 1, 1);
+  --ease-in-out:           cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-emphasized:       cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
+}
+```
+
+`--ease-out` is the default for this surface, in **both** directions — an exit on
+`ease-in` accelerates away from the cursor and reads as the element being yanked.
+Reach for `--ease-emphasized` only on the one deliberate hero moment a page is
+allowed.
+
+**Duration follows distance and frequency**, not taste. A token triple covers
+almost everything: `120ms` fast, `200ms` default, `320ms` slow.
+
+| Band | Duration | Where |
+| --- | --- | --- |
+| Instant | 90-150ms | hover, press, focus, toggle |
+| State change | 160-240ms | accordion, tabs, a small panel |
+| Large | 240-360ms | a drawer, a full-width reveal |
+
+Shorter for smaller distances and for anything a visitor triggers repeatedly.
+Past `500ms` a page feels slow rather than considered.
+
+**Set `transform-origin` deliberately on anything that scales.** The default
+`center` makes a dropdown appear to inflate from its own middle rather than grow
+out of the control that opened it: a dropdown takes `top left` or `top right` to
+match its trigger, a tooltip takes the edge nearest what it describes, a modal
+keeps `center`.
+
+**Rotating or scaling part of an inline SVG needs `transform-box`.** A transform
+on a `path` resolves against the SVG's user-space origin, not the shape, so it
+swings instead of spinning. Wrap the shape and set the box:
+
+```css
+svg .spin { transform-box: fill-box; transform-origin: center; }
+```
+
+**Honour `prefers-reduced-motion` by redefining the tokens, not by hunting
+rules.** Reducing motion means removing travel, not removing feedback — a fade
+stays, a slide, a scale and any parallax go.
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  :root { --duration-fast: 0ms; --duration-default: 0ms; --duration-slow: 0ms; }
+  .reveal { transform: none; }
+}
+```
+
+---
+
+## The page shell — set once, at the top
+
+These are written once when the page is created and never touched again, which
+is exactly why they get forgotten. None of them is visible until it is missing.
+
+**The viewport meta allows zoom.** `width=device-width, initial-scale=1` and
+nothing else. Never `user-scalable=no` and never `maximum-scale=1` — that tag is
+what makes the 200% zoom floor impossible to meet, and it is usually pasted in
+from a template nobody read.
+
+**Anchor targets clear the fixed header.** `[id] { scroll-margin-top: 6rem; }`,
+sized to the nav. Without it every in-page link lands with the heading it was
+pointing at hidden behind the bar.
+
+**`touch-action: manipulation`** on buttons and links. It removes the ~300ms
+delay a phone otherwise waits out before firing a tap, which is the difference
+between a page that feels native and one that feels like a website.
+
+**`<link rel="preconnect">` every origin you pull from** — the font CDN, the
+stock-photo host. The connection gets set up while the HTML is still parsing
+rather than when the first byte is wanted.
+
+---
+
+## Forms and input — when the page collects something
+
+A lead form is the conversion point of most pages here, and it is where craft
+failures cost a real submission rather than a compliment.
+
+**Name the field so the browser can fill it.** Every input carries a real
+`autocomplete` value — this is the single highest-leverage thing on a form,
+because a filled form gets finished and an empty one gets abandoned.
+
+| Field | `autocomplete` |
+| --- | --- |
+| Email | `email` |
+| Full name | `name` |
+| Phone | `tel` |
+| Company | `organization` |
+| Street | `street-address` |
+| Postcode | `postal-code` |
+| New password | `new-password` |
+| Existing password | `current-password` |
+
+Set `autocomplete="off"` on anything that is NOT an account field — a search box
+or a quantity — so a password manager stops offering to fill it.
+
+**`type` and `inputmode` pick the mobile keyboard.** `type="email"`,
+`type="tel"`, `inputmode="numeric"` for codes. A numeric field that opens a QWERTY
+keyboard reads as broken on a phone.
+
+**`spellcheck="false"`** on emails, usernames, URLs and verification codes. Red
+squiggles under a correctly typed email address look like an error.
+
+**Never block paste.** Intercepting paste on an email or code field is an
+accessibility failure and it defeats every password manager.
+
+**The label and its control are ONE hit target.** Wrap the checkbox and its text
+in a single `<label>` with `display: flex; gap: 8px; cursor: pointer` — a
+checkbox whose text is not clickable is a 16px target where a 200px one was
+available.
+
+**Wire errors so they are announced, not just drawn.** The failing input takes
+`aria-invalid="true"` and `aria-describedby` pointing at the message; the message
+carries `role="alert"`. On submit, move focus to the first failing field —
+otherwise a keyboard or screen-reader user is told something failed and left with
+no way to find it.
+
+**Say what happened and what to do**, next to the field that broke. Error copy is
+governed by `sites-conversion-structure` section 6; the three rungs there apply to
+every message a form can produce.
+
 ---
 
 ## 5. The floor — non-negotiable on a public page
 
 - **Hit areas at least 44x44px**, even where the visual control is smaller.
-- **A visible focus ring** on everything focusable. Never removed without a
-  replacement; at least 2px on a dark ground.
+- **A visible focus ring** on everything focusable, via **`:focus-visible`, not
+  `:focus`** — `:focus` also fires on a mouse click, which is why rings get
+  removed in the first place. Never removed without a replacement; at least 2px
+  on a dark ground. Where an outline collides with a rounded control, the
+  two-ring `box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent)` reads
+  cleanly on any ground.
 - **Never rely on colour alone** to carry meaning — pair it with a label, an
   icon, or a shape.
 - **Honour `prefers-reduced-motion`** with a complete fallback, not a broken one.
