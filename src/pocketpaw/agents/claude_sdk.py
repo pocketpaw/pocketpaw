@@ -576,21 +576,52 @@ def _mcp_server_of(tool_id: str) -> str:
 # filename have byte-identical content, so there is nothing one could learn from
 # the other. An agent/session directory would multiply the surface the pruner has
 # to walk without changing what any process can read (same OS user, same home).
-_WINDOWS_PROMPT_SPILL_CHARS = 24_000
+# Windows caps the WHOLE command line at ~32,767 chars (CreateProcess).
+_WINDOWS_PROMPT_SPILL_BYTES = 24_000
+
+# POSIX caps a SINGLE argv entry at MAX_ARG_STRLEN = PAGE_SIZE * 32 = 131,072
+# bytes (linux/binfmts.h). This is NOT the familiar ARG_MAX (~2 MB, the whole
+# vector): the per-argument ceiling is 16x smaller and much less known, which is
+# how a prompt comfortably under ARG_MAX still fails to exec. Over it, execve
+# returns E2BIG and the SDK surfaces it as
+#
+#   Failed to start Claude Code: [Errno 7] Argument list too long: .../claude
+#
+# 96,000 leaves ~35 KiB for the rest of the command line — the flag itself, the
+# tool allow-list, the MCP server config. A threshold set AT the kernel limit
+# would still fail to exec.
+_POSIX_PROMPT_SPILL_BYTES = 96_000
 
 
-def _prompt_must_spill(prompt: str) -> bool:
+def _prompt_spill_threshold(os_name: str = os.name) -> int:
+    """Max BYTES this platform will carry as an inline ``--system-prompt``."""
+    return _WINDOWS_PROMPT_SPILL_BYTES if os_name == "nt" else _POSIX_PROMPT_SPILL_BYTES
+
+
+def _prompt_must_spill(prompt: str, os_name: str = os.name) -> bool:
     """Is this prompt too long to pass inline on this platform?
 
-    A function rather than an inline ``os.name == "nt" and len(...)`` so a test
-    can force the Windows branch on Linux by patching THIS, and not ``os.name``.
-    Patching ``os.name`` looks equivalent and is not: ``pathlib`` decides at
-    IMPORT time whether ``WindowsPath.__new__`` is the real one or a stub that
-    raises, so a POSIX process with ``os.name`` forced to ``"nt"`` dispatches
-    every ``Path(...)`` to the raising stub. The spill test did exactly that and
-    only CI could see it — on Windows both spellings pass.
+    EVERY platform has a ceiling, which this got wrong until 2026-09-15: the
+    check read ``os.name == "nt" and ...``, so on POSIX it answered False for a
+    prompt of any size and the spill was never armed where the product actually
+    runs. A cloud turn carrying a large upload (``_ATTACHMENT_TOTAL_CHARS`` is
+    100,000) cleared the per-argument limit and the CLI failed to exec at all.
+
+    MEASURED IN BYTES, because the kernel counts bytes and ``len()`` counts code
+    points. These prompts are full of em dashes and box drawing — 3 bytes each
+    in UTF-8 — so a prompt that reads as "40,000 chars, half the limit" can be
+    120,000 bytes and refuse to exec. ``errors="replace"`` keeps a lone
+    surrogate from raising here: this is a size check, and the same replacement
+    is what the spill write and the SDK would do with it anyway.
+
+    ``os_name`` is a parameter rather than a read of the global so a test can
+    exercise the OTHER platform's branch without patching ``os.name``. Patching
+    it looks equivalent and is not: ``pathlib`` decides at IMPORT time whether
+    ``WindowsPath.__new__`` is real or a stub that raises, so a POSIX process
+    with ``os.name`` forced to ``"nt"`` sends every ``Path(...)`` to the raising
+    stub. The old spill test did exactly that and only CI could see it.
     """
-    return os.name == "nt" and len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS
+    return len(prompt.encode("utf-8", "replace")) > _prompt_spill_threshold(os_name)
 
 
 # How many spilled prompts survive a prune. They are 24k+ chars each and they
