@@ -3,6 +3,12 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-09-15 (feat/chat-image-wiring) — adds
+``_accepts_image_attachments_kwarg``, the fourth signature guard in this file and
+the third to be written because withholding-when-empty was not enough on its own.
+It gates ``image_attachments`` (a user's attached files) the way
+``_accepts_images_kwarg`` gates ``images`` (a surface's snapshot).
+
 Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the two signature
 guards that decide who RECEIVES ``system_prompt_digest`` moved here from
 ``AgentPool``, plus a ``forward_prompt_digest`` helper for callers holding a
@@ -160,6 +166,30 @@ def _accepts_images_kwarg(func: Any) -> bool:
     """
     try:
         return "images" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def _accepts_image_attachments_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``image_attachments`` in its signature?
+
+    The same question ``_accepts_images_kwarg`` asks, for the files the USER
+    attached to a turn (2026-09-12, fix/chat-image-attachments). Two kwargs
+    carry pictures for two different reasons — ``images`` is a snapshot the
+    surface chose to show, ``image_attachments`` is what the user deliberately
+    attached — and only the two SDK backends translate the latter into a shape
+    a model can see.
+
+    Asked rather than assumed, for the reason the three guards above it were
+    each written the hard way: seven of the backends take a narrower signature
+    with no ``**kwargs``. An attachment is rarer than an Otherhand snapshot, but
+    rarity is not a guard — the first user to attach a photo on an install
+    running one of those backends would end their turn in ``TypeError: run() got
+    an unexpected keyword argument 'image_attachments'``. Withholding narrows
+    WHEN the kwarg is forwarded; only the signature narrows WHERE.
+    """
+    try:
+        return "image_attachments" in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
 

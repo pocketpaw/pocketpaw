@@ -47,5 +47,50 @@
     "find": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)",
     "replace": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in [])",
     "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-8: the signature gate goes away and only truthiness is left, so the first user to attach a photo on any of the seven narrow backends ends their turn in TypeError: run() got an unexpected keyword argument 'image_attachments'",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if image_attachments and _accepts_image_attachments_kwarg(run_backend.run):\n                run_kwargs[\"image_attachments\"] = tuple(image_attachments)",
+    "replace": "            if image_attachments:\n                run_kwargs[\"image_attachments\"] = tuple(image_attachments)",
+    "tests": [
+      "tests/test_agent_pool_image_attachments.py"
+    ]
+  },
+  {
+    "label": "IMG-9: AVIF leaves the transcode set, so a Chrome 'Copy image' upload falls through to the extraction path and the model describes the container's ispe box instead of the picture (the 2026-09-15 live report)",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    {\"image/avif\", \"image/heic\", \"image/heif\", \"image/tiff\", \"image/bmp\"}",
+    "replace": "    {\"image/heic\", \"image/heif\", \"image/tiff\", \"image/bmp\"}",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_transcode.py"
+    ]
+  },
+  {
+    "label": "IMG-10: the fitter returns an oversized image unchanged instead of shrinking it, so a 4K PNG screenshot goes to the provider past its 5MB per-image limit and the turn fails with nothing useful to show the user",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        edge = _MODEL_IMAGE_MAX_EDGE\n        for _ in range(6):",
+    "replace": "        return raw, mime\n        edge = _MODEL_IMAGE_MAX_EDGE\n        for _ in range(6):",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_size_limits.py"
+    ]
+  },
+  {
+    "label": "IMG-11: the early-exit forgets the dimension check, so an image that is small in bytes but enormous in pixels is sent at full size and billed at full size",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "                if max(probe.size) <= _MODEL_IMAGE_MAX_EDGE:\n                    return raw, mime",
+    "replace": "                if probe is not None:\n                    return raw, mime",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_size_limits.py"
+    ]
+  },
+  {
+    "label": "IMG-12: a shrunk JPEG comes back declared as PNG, so the bytes and the media_type disagree and the provider decodes a JPEG as a PNG",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        out_mime = \"image/jpeg\" if keep_jpeg else \"image/png\"",
+    "replace": "        out_mime = \"image/png\"",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_size_limits.py"
+    ]
   }
 ]

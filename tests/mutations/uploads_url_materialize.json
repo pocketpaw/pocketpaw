@@ -1,0 +1,38 @@
+[
+  {
+    "label": "only the first chunk of a remote blob is written, so every URL-attached file past 64 bytes reaches the extractor truncated and a PDF yields nothing",
+    "file": "ee/pocketpaw_ee/cloud/uploads/resolver.py",
+    "find": "            async for chunk in adapter.open(storage_key):\n                tmp.write(chunk)",
+    "replace": "            async for chunk in adapter.open(storage_key):\n                tmp.write(chunk)\n                break",
+    "tests": [
+      "tests/cloud/uploads/test_materialize_remote_upload.py"
+    ]
+  },
+  {
+    "label": "the temp file loses the original extension, so the suffix-routed extraction chain picks the wrong extractor and a URL-attached document reads as empty",
+    "file": "ee/pocketpaw_ee/cloud/uploads/resolver.py",
+    "find": "    suffix = _extension_for(filename, mime)",
+    "replace": "    suffix = \"\"",
+    "tests": [
+      "tests/cloud/uploads/test_materialize_remote_upload.py"
+    ]
+  },
+  {
+    "label": "a mid-stream storage failure raises into the turn instead of yielding None, so one unreadable attachment costs the user the whole turn",
+    "file": "ee/pocketpaw_ee/cloud/uploads/resolver.py",
+    "find": "        except Exception:\n            logger.exception(\"stream-to-temp failed for storage_key=%r\", storage_key)\n            yield None\n            return",
+    "replace": "        except Exception:\n            raise",
+    "tests": [
+      "tests/cloud/uploads/test_materialize_remote_upload.py"
+    ]
+  },
+  {
+    "label": "the workspace scope drops off the metadata lookup, so a URL from another tenant resolves and its bytes are streamed into this turn",
+    "file": "ee/pocketpaw_ee/cloud/uploads/resolver.py",
+    "find": "        rec = await self._meta.get_scoped(file_id, workspace=workspace)\n        if rec is None:\n            yield None\n            return",
+    "replace": "        rec = await self._meta.get_scoped(file_id, workspace=workspace) or await self._meta.get_scoped(file_id, workspace=\"ws-1\")\n        if rec is None:\n            yield None\n            return",
+    "tests": [
+      "tests/cloud/uploads/test_materialize_remote_upload.py"
+    ]
+  }
+]

@@ -9,6 +9,22 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images`` grew the
+provider's per-image ceiling (5MB) and a per-turn byte budget, which it had
+neither of while the surface-snapshot channel in ``run_core`` has had both since
+2026-09-11. A cap alone would have made the common case worse, so ``_fit_for_model``
+SHRINKS an oversized picture instead of dropping it: a 4K PNG screenshot is what
+people actually attach, and a transcoded HEIC or AVIF balloons because PNG is
+lossless. An image that already fits is returned byte-identical.
+
+Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images``
+resolves a turn's uploads to bytes (transcoding HEIC/HEIF/TIFF/BMP to PNG, since
+HEIC is what an iPhone shoots and is not on the API's media-type list), and
+``_build_attachments_block`` stops OCRing anything the model is being SHOWN,
+emitting a one-line note naming the file instead. Failures are per-file and
+quiet: an unreadable image is simply absent from the tuple while the text block
+still names it, so the turn says a file arrived rather than pretending none did.
+
 Changes: 2026-09-14 (fix/partial-reply-survives-failed-run) —
 ``load_history_for_scope`` is no longer a read of the ``Message`` collection
 alone. ``execute_run`` writes an assistant ``Message`` from exactly one place
@@ -293,6 +309,7 @@ if TYPE_CHECKING:
     # render an about-block.
     from pocketpaw_ee.cloud.people.domain import Person
 
+from pocketpaw.agents.backend import ImageAttachment
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
     INLINE_RIPPLE_SYSTEM_PROMPT,
@@ -2809,6 +2826,250 @@ async def _publish_media_attachment(
     )
 
 
+# Image mimes a model can be shown directly. This is the intersection of what the
+# Claude Messages API accepts as an image block and what pydantic-ai will hand a
+# provider — png, jpeg, gif, webp. Anything outside it either has to be converted
+# first (below) or is not an image at all.
+_MODEL_IMAGE_MIMES: frozenset[str] = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+# Image mimes worth converting rather than refusing. HEIC is the one that
+# matters: it is what an iPhone shoots by default, so "images work now" would be
+# false for a large share of the photos people actually attach. Sending one
+# through unconverted is not an option — it is not on the API's list, and the
+# failure is a rejected request rather than a degraded answer.
+#
+# AVIF is here for the same reason and was found the same way: it is what
+# Chrome's "Copy image" and a growing number of sites hand you, the uploads
+# config already records it as ``image/avif`` (``uploads/config.py``), and it is
+# NOT on the API's list. Left out of both sets it fell through to the extraction
+# path, where an image-only AVIF has no text to give — so the model was handed
+# the container's own boxes and answered by describing them: "I can see the file
+# container metadata (AVIF, single still frame, roughly 246x56 based on the ispe
+# box), but the actual pixel content is AV1-compressed and I can't decode it."
+# That is a correct report of what it was given, which is what makes it the
+# clearest possible statement of the bug.
+_TRANSCODE_TO_PNG_MIMES: frozenset[str] = frozenset(
+    {"image/avif", "image/heic", "image/heif", "image/tiff", "image/bmp"}
+)
+
+
+def _to_png(raw: bytes, *, mime: str) -> bytes:
+    """Decode ``raw`` and re-encode it as PNG. Raises if it cannot be read.
+
+    Runs in a worker thread at the call site: Pillow's decode is CPU-bound and
+    would otherwise stall the event loop for the whole turn on a large photo.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    if mime == "image/avif":
+        # Pillow decodes AVIF natively from 11.3 on (``features.check("avif")``
+        # is True on the locked 12.2), so there is no opener to register here.
+        # The declared floor is still ``pillow>=10.0.0``, which predates that
+        # support: a from-source install resolving an older Pillow raises
+        # UnidentifiedImageError and the caller drops this one file quietly, the
+        # same shape as every other unreadable attachment. Raising the floor is
+        # a lockfile change and is left to its own PR rather than smuggled in
+        # here.
+        pass
+    elif mime in {"image/heic", "image/heif"}:
+        # Pillow has no native HEIF decoder (PIL.features.check("heif") is False
+        # on Pillow 12.2); without the opener this raises UnidentifiedImageError.
+        # Same registration ``extraction/local.py`` does, for the same reason.
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+
+    buf = _io.BytesIO()
+    with Image.open(_io.BytesIO(raw)) as img:
+        # PNG carries no CMYK and no 16-bit palette; RGB(A) survives every source
+        # format here, and dropping an alpha channel a photo never had costs
+        # nothing.
+        img.convert("RGBA" if "A" in img.getbands() else "RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# Anthropic's documented per-image ceiling, and the safe floor across providers
+# (OpenAI and Gemini allow more). The surface-snapshot channel already answers to
+# it as ``run_core._MAX_IMAGE_BYTES``; both channels feed the same request, so
+# the number is not conditional on which one a picture arrived through.
+_MODEL_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+# What ONE turn may put on the wire across all of its attachments. Sits above the
+# per-image ceiling for the same reason ``run_core`` keeps both: the budget caps
+# the turn, the ceiling caps a single file, and either alone lets the other
+# through.
+_MODEL_IMAGE_TURN_BUDGET = 6 * 1024 * 1024
+# The long edge worth sending. The API rejects an edge over 8000px outright and
+# downscales anything past roughly this before the model sees it — while billing
+# the tokens for the size we sent. So shrinking here is not a degradation, it is
+# the same picture for fewer tokens.
+_MODEL_IMAGE_MAX_EDGE = 1568
+# A source we will not even read into memory. Well above the per-image ceiling on
+# purpose: a big PNG that shrinks to fit is the case this whole function exists
+# for, and only an absurd file is refused outright.
+_MODEL_IMAGE_MAX_SOURCE_BYTES = 40 * 1024 * 1024
+
+
+def _fit_for_model(raw: bytes, *, mime: str) -> tuple[bytes, str] | None:
+    """Shrink ``raw`` until a model will accept it, or return ``None``.
+
+    Returns the bytes UNCHANGED when they already fit, which is the common case
+    and keeps an ordinary attachment byte-identical to what was uploaded.
+
+    Why shrink instead of skip: a screenshot is the single most common thing a
+    user attaches, and a 4K PNG one routinely clears 5MB — as does any HEIC or
+    AVIF we transcode, because PNG is lossless and a 2MB photo can come out
+    several times larger. Dropping those would mean the feature works for small
+    pictures and silently fails for the ones people actually paste, which is the
+    shape of the bug this change set exists to remove.
+
+    Animated GIFs are never resized: Pillow would flatten the animation to one
+    frame, and a still frame of an animation is not what was attached. An
+    oversized one is refused instead.
+
+    Runs in a worker thread at the call site — decode and re-encode are
+    CPU-bound and would otherwise stall the event loop for the whole turn.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    if len(raw) <= _MODEL_IMAGE_MAX_BYTES:
+        try:
+            with Image.open(_io.BytesIO(raw)) as probe:
+                if max(probe.size) <= _MODEL_IMAGE_MAX_EDGE:
+                    return raw, mime
+        except Exception:
+            # Unreadable here means unreadable to the provider too.
+            return None
+
+    with Image.open(_io.BytesIO(raw)) as img:
+        if getattr(img, "is_animated", False):
+            return None if len(raw) > _MODEL_IMAGE_MAX_BYTES else (raw, mime)
+
+        # JPEG stays JPEG (re-encoding a photo as PNG inflates it); everything
+        # else becomes PNG, which is lossless and keeps screenshot text crisp.
+        keep_jpeg = mime == "image/jpeg"
+        out_mime = "image/jpeg" if keep_jpeg else "image/png"
+        img = img.convert("RGB" if keep_jpeg else "RGBA" if img.mode == "RGBA" else "RGB")
+
+        edge = _MODEL_IMAGE_MAX_EDGE
+        for _ in range(6):
+            frame = img.copy()
+            if max(frame.size) > edge:
+                frame.thumbnail((edge, edge), Image.LANCZOS)
+            buf = _io.BytesIO()
+            if keep_jpeg:
+                frame.save(buf, format="JPEG", quality=85, optimize=True)
+            else:
+                frame.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+            if len(data) <= _MODEL_IMAGE_MAX_BYTES:
+                return data, out_mime
+            edge //= 2
+    return None
+
+
+async def resolve_turn_images(
+    ctx: ScopeContext,
+    attachments: list[dict[str, Any]] | None,
+) -> tuple[ImageAttachment, ...]:
+    """Resolve the turn's image attachments into bytes the model can be shown.
+
+    THIS IS THE FIX FOR "the agent cannot see my image". Every attachment used to
+    become TEXT — the block was built from ``chain.run``, the default extraction
+    chain is ``["local"]``, and ``LocalExtractor`` answers an image by running
+    OCR. A photo of a person or a place OCRs to nothing, so the model was handed
+    "(no text extracted)" and reported the file was empty. Both SDKs beneath us
+    take images natively; nothing was translating for them.
+
+    Failures are per-file and quiet: an image that cannot be resolved, read or
+    converted is simply not in the returned tuple, and
+    ``_build_attachments_block`` still names it to the model so the turn says a
+    file arrived rather than pretending none did.
+
+    Never raises — a broken upload must not cost the user their turn.
+    """
+    if not attachments or not ctx.workspace_id:
+        return ()
+
+    try:
+        from pocketpaw_ee.cloud.uploads.resolver import default_resolver
+
+        resolver = default_resolver()
+    except Exception:
+        logger.debug("resolver unavailable; no images this turn", exc_info=True)
+        return ()
+
+    out: list[ImageAttachment] = []
+    budget = _MODEL_IMAGE_TURN_BUDGET
+    for att in attachments:
+        if len(out) >= _ATTACHMENT_MAX_FILES:
+            break
+        if not isinstance(att, dict):
+            continue
+        url = att.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        try:
+            async with resolver.open_local_for_url(url, workspace=ctx.workspace_id) as resolved:
+                if resolved is None:
+                    continue
+                rec, path = resolved
+                mime = getattr(rec, "mime", "") or ""
+                if mime not in _MODEL_IMAGE_MIMES and mime not in _TRANSCODE_TO_PNG_MIMES:
+                    continue
+                # Checked before the read, so an absurd file costs a stat and
+                # not its own size in memory.
+                declared = getattr(rec, "size", 0) or 0
+                if declared > _MODEL_IMAGE_MAX_SOURCE_BYTES:
+                    logger.warning(
+                        "attachment %s is %d bytes, past the %d-byte source limit; "
+                        "not sending it as an image",
+                        url,
+                        declared,
+                        _MODEL_IMAGE_MAX_SOURCE_BYTES,
+                    )
+                    continue
+                raw = await asyncio.to_thread(Path(path).read_bytes)
+                if not raw:
+                    continue
+                if mime in _TRANSCODE_TO_PNG_MIMES:
+                    raw = await asyncio.to_thread(_to_png, raw, mime=mime)
+                    mime = "image/png"
+                fitted = await asyncio.to_thread(_fit_for_model, raw, mime=mime)
+                if fitted is None:
+                    logger.warning(
+                        "attachment %s could not be fitted under the %d-byte "
+                        "per-image limit; not sending it as an image",
+                        url,
+                        _MODEL_IMAGE_MAX_BYTES,
+                    )
+                    continue
+                raw, mime = fitted
+                if len(raw) > budget:
+                    logger.warning(
+                        "attachment %s does not fit the remaining turn budget; skipping it",
+                        url,
+                    )
+                    continue
+                budget -= len(raw)
+                out.append(
+                    ImageAttachment(
+                        data=raw,
+                        media_type=mime,
+                        filename=getattr(rec, "filename", "") or "attachment",
+                    )
+                )
+        except Exception:
+            logger.warning("could not prepare attachment %s as an image", url, exc_info=True)
+            continue
+    return tuple(out)
+
+
 async def _build_attachments_block(
     ctx: ScopeContext,
     attachments: list[dict[str, Any]] | None,
@@ -2881,6 +3142,21 @@ async def _build_attachments_block(
                 published = await _publish_media_attachment(ctx, rec, path, surface=surface)
                 if published:
                     entries.append(published)
+                    processed += 1
+                    continue
+
+                # An image the model is being SHOWN does not also get OCR'd.
+                # Running tesseract over a photo to paste its (empty) output
+                # beside the real thing is the behaviour this change exists to
+                # remove; the entry below just names the file so the model can
+                # refer to it the way the user does.
+                _mime = getattr(rec, "mime", "") or ""
+                if _mime in _MODEL_IMAGE_MIMES or _mime in _TRANSCODE_TO_PNG_MIMES:
+                    entries.append(
+                        f"### {rec.filename} ({_mime}, {rec.size} bytes)\n"
+                        "(attached to this turn as an image — it is in your input, "
+                        "look at it rather than guessing from the filename)"
+                    )
                     processed += 1
                     continue
 

@@ -3,6 +3,15 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
+  ``image_attachments``: the files a user attached to THIS turn, carried as bytes
+  the model is shown rather than text scraped off them. It is a SECOND picture
+  channel beside ``images`` (the snapshot a surface chose to show) and is
+  forwarded from the same place and under the same signature guard — see
+  ``_accepts_image_attachments_kwarg``. Withhold-when-empty narrows WHEN a kwarg
+  rides; only the signature narrows WHERE, and seven of the backends take a
+  narrower signature with no ``**kwargs``.
+
 Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``get_agent_pool`` now builds the
   singleton with ``max_instances`` from settings (``POCKETPAW_AGENT_POOL_MAX_INSTANCES``,
   default 20 — the value that was already in force). The constructor default is
@@ -167,7 +176,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -178,6 +187,8 @@ from typing import TYPE_CHECKING, Any
 # below and the existing ``from pocketpaw.agents.pool import ...`` importers
 # resolve to the ONE definition.
 from pocketpaw.agents.backend import (
+    ImageAttachment,
+    _accepts_image_attachments_kwarg,
     _accepts_images_kwarg,
     _accepts_prompt_digest,
     _accepts_prompt_digest_kwarg,
@@ -684,6 +695,7 @@ class AgentPool:
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
         tools_enabled: bool = True,
+        image_attachments: Sequence[ImageAttachment] = (),
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
         byok_api_key: str | None = None,
@@ -922,6 +934,14 @@ class AgentPool:
             # of those turns in ``TypeError: run() got an unexpected keyword
             # argument 'images'``. That is the /sites failure this file already
             # records, one line above, with a different kwarg.
+            #
+            # ``image_attachments`` (the files the user attached, as
+            # ``ImageAttachment``) is forwarded from the SAME place and for the
+            # same reason. It is rarer than ``images`` — only a turn carrying an
+            # attachment sends one — but rarity is not a guard: the moment a user
+            # attaches a photo on an install running any of those seven backends,
+            # an unguarded forward is a TypeError on their turn. Withholding
+            # narrows WHEN, never WHERE; only the signature does that.
             # BYOK: swap the SHARED backend for a private one, built for this
             # run alone. Anything that fails here (an unregistered backend, a
             # bad settings key) falls back to the shared instance rather than
@@ -958,6 +978,8 @@ class AgentPool:
             # cached one because a BYOK run is served by a different object.
             if images and _accepts_images_kwarg(run_backend.run):
                 run_kwargs["images"] = images
+            if image_attachments and _accepts_image_attachments_kwarg(run_backend.run):
+                run_kwargs["image_attachments"] = tuple(image_attachments)
 
             # Per-send tool switch (2026-09-11). TWO gates, and the first one
             # alone was a bug in production.

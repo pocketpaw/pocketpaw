@@ -1,5 +1,12 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
+  ``image_attachments`` and a turn carrying one is sent through
+  ``build_streaming_user_message``, which is the only shape the SDK takes an
+  image in. The images ride the PERSISTENT-client sends only: single-message mode
+  explicitly does not support image attachments, so a stateless fresh-launch turn
+  would drop them silently — that path keeps sending a plain string.
+
 Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — a ``tool_use`` event now
   reaches consumers carrying the tool's REAL arguments. The stream loop announced
   a tool twice over: once from the partial ``content_block_start`` (name known,
@@ -2877,6 +2884,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         resume_active: bool,
         warm_client: LeasedClient | None,
         on_client_built: Callable[[Any, str, Callable], None] | None,
+        image_attachments: tuple[ImageAttachment, ...] = (),
     ) -> tuple[Any, LeasedClient | None]:
         """feat/warm-reuse WH-1 — route a turn against a caller-LEASED warm client.
 
@@ -2933,7 +2941,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "WH-1: reusing leased warm client (key match) — "
                     "no connect, no resume, no history injection"
                 )
-                await warm_client.client.query(message)
+                await warm_client.client.query(
+                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    if image_attachments
+                    else message
+                )
                 return self._resilient_receive(warm_client.client), warm_client
             except Exception as exc:  # noqa: BLE001
                 # The leased client failed mid-send. Release its busy flag (we no
@@ -2983,7 +2995,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "WH-1: supervised fresh client built + bound (resume=%s) — driving query",
                     bool(getattr(options, "resume", None)),
                 )
-                await fresh.query(message)
+                await fresh.query(
+                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    if image_attachments
+                    else message
+                )
                 # The supervisor now OWNS the client; the backend does not tear it
                 # down here even if the stream later aborts.
                 return self._resilient_receive(fresh), None
@@ -3017,6 +3033,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
         tools_enabled: bool = True,
+        # Images the user attached to this turn. They ride the PERSISTENT-client
+        # paths only: the SDK's single-message mode explicitly does not support
+        # image attachments, so a stateless fresh-launch turn carrying images
+        # would drop them silently. See where this is consumed below.
+        image_attachments: tuple[ImageAttachment, ...] = (),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -3253,6 +3274,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     resume_active=_resume_active,
                     warm_client=warm_client,
                     on_client_built=on_client_built,
+                    image_attachments=image_attachments,
                 )
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in

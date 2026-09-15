@@ -1,6 +1,11 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-15 (feat/chat-image-wiring) — a turn's attached images are resolved
+  to bytes here and forwarded to the pool as ``image_attachments``, alongside the
+  existing ``images`` (the surface's own snapshot). Two channels, two reasons:
+  the snapshot is replaced every turn, the attachment is a file the user chose.
+  Withhold-when-empty, so a turn with no attachment is byte-identical to before.
 - 2026-09-14 (fix/partial-reply-survives-failed-run) — the cancel check at the
   top of the event loop no longer THROWS AWAY the event it is holding. It runs
   before the event is handled, so breaking on it discarded a chunk the model had
@@ -421,6 +426,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     mark_cloud_chat_run,
     push_sse_event,
     register_stream_sink,
+    resolve_turn_images,
     resolve_user_content,
     session_key_for,
     unbind_pawbar_run,
@@ -1941,9 +1947,22 @@ async def _drive_agent_loop(
         # read them here, where the tenant's jail is known, and hand the pool
         # bytes. Withhold-when-empty, so every surface that declares none takes
         # the identical string path it always has.
-        turn_images = _read_turn_images(ctx)
-        if turn_images:
-            run_kwargs["images"] = turn_images
+        preamble_images = _read_turn_images(ctx)
+        if preamble_images:
+            run_kwargs["images"] = preamble_images
+        # --- Images the USER attached to this turn -----------------------------
+        # A separate channel from ``images`` above, and separate on purpose: the
+        # pictures above are a snapshot the SURFACE chose to show, replaced every
+        # turn; these are files the user deliberately attached, carried as bytes
+        # the model is SHOWN rather than text scraped off them. Resolved here
+        # (not inside build_knowledge_context) because the knowledge context is a
+        # string and an image is not — the two travel to the backend by different
+        # channels and only meet in the request. Same withhold-when-empty idiom:
+        # a turn with no attachments sends nothing extra and is byte-identical to
+        # before.
+        attached_images = await resolve_turn_images(ctx, attachments_in)
+        if attached_images:
+            run_kwargs["image_attachments"] = attached_images
         # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
         # Resolve whose credential pays for THIS turn — the call the byok
         # service's own header always said the turn path makes, wired at last.
