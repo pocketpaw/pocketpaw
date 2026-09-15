@@ -47,5 +47,14 @@
     "find": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)",
     "replace": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in [])",
     "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-8: the signature gate goes away and only truthiness is left, so the first user to attach a photo on any of the seven narrow backends ends their turn in TypeError: run() got an unexpected keyword argument 'image_attachments'",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if image_attachments and _accepts_image_attachments_kwarg(run_backend.run):\n                run_kwargs[\"image_attachments\"] = tuple(image_attachments)",
+    "replace": "            if image_attachments:\n                run_kwargs[\"image_attachments\"] = tuple(image_attachments)",
+    "tests": [
+      "tests/test_agent_pool_image_attachments.py"
+    ]
   }
 ]
