@@ -2,6 +2,13 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-15 (feat/otherhand-page-store) — added the "Otherhand — Pages"
+section: the server-side page store (GET/PUT `/other-hand/pages/{page_id}`, the
+list), written around the three things the frontend cannot infer from the field
+names — `page_id` is CLIENT-minted and the same id the snapshot endpoint uses,
+`base_rev` is a compare-and-set token and a mismatch is a 409 that carries the
+current page, and an oversize page is refused whole rather than truncated.
+
 Updated: 2026-09-11 (feat/otherhand-tools-toggle) — added the "Agent chat — the
 `tools` switch" section for the new per-send request field. Written around the
 two things a client cannot infer from a `bool | None`: the field is subtractive
@@ -4411,3 +4418,107 @@ not compiled.
   "scope": "workspace:w1"
 }
 ```
+
+## Otherhand — Pages
+
+The server-side notebook page. Until 2026-09-15 a page's ink lived only in the
+browser (`persistence.ts`, a versioned localStorage blob), so closing the tab on
+another device lost it. These three routes are what make "open it anywhere and it
+is there" true. All under `/api/v1/other-hand`, licence-gated, workspace-scoped:
+any member of the workspace may read or write any of its pages, exactly as they may
+already snapshot them.
+
+**One document per page, keyed `(workspace, page_id)`.** `page_id` is MINTED BY
+THE CLIENT — the same id the snapshot endpoint already overwrites by — so a page has
+one id everywhere and an existing localStorage page maps 1:1 on migration. It is
+one safe path segment (`[A-Za-z0-9_.-]`, max 128); anything else is a 400
+`other_hand.invalid_page_id`. `session_id` is a nullable grouping field, never
+the key: a session owns more than one page, and the draft sheet at a bare
+`/other-hand` has no session at all.
+
+**`strokes` and `book` are opaque.** Stored and returned verbatim, nested keys
+included. The frontend's `Stroke` shape grows (`text`, `img`, `icon`, `kind`,
+`color`) and the server does not re-model it. `book` is the `PersistedBookRef`
+(`fileId`, `name`, `pageNumber`, `mime?`) — which upload was open beside the paper —
+and is NOT validated against the files collection.
+
+**Last-write-wins, guarded by a compare-and-set.** No CRDT, no merge. Every write
+names the `rev` it is based on; a mismatch is refused, never merged. This is the
+whole multi-tab story: two tabs on one page is the common case, and a plain
+overwrite there silently erases the other tab's ink.
+
+### `GET /other-hand/pages/{page_id}`
+
+The whole page. 404 `other_hand.page.not_found` when the workspace has no such
+page — the client starts blank on a miss.
+
+```json
+{
+  "page_id": "3f9a1c07-…",
+  "session_id": "sess-1",
+  "strokes": [ { "id": "s1", "owner": "user", "points": [ … ], "width": 2.2 } ],
+  "book": { "fileId": "file-abc", "name": "paper.pdf", "pageNumber": 3, "mime": "application/pdf" },
+  "rev": 4,
+  "updated_at": "2026-09-15T10:22:01.120000Z",
+  "created_at": "2026-09-15T09:01:44.003000Z"
+}
+```
+
+### `PUT /other-hand/pages/{page_id}`
+
+Create or replace the page. Send `rev` from the last read (or last save) back as
+`base_rev`; `0` (the default) means "I have never seen a server copy" — a first
+save, or the one-time push of a page that until now lived only in localStorage.
+Clearing a page is `strokes: []`; there is no DELETE.
+
+```json
+{
+  "strokes": [ … ],
+  "book": { "fileId": "file-abc", "name": "paper.pdf", "pageNumber": 3 },
+  "session_id": "sess-1",
+  "base_rev": 4
+}
+```
+
+200 returns META ONLY — never an echo of the ink just sent, because the client
+debounces a save every ~2s of drawing:
+
+```json
+{ "page_id": "3f9a1c07-…", "rev": 5, "updated_at": "2026-09-15T10:22:01.120000Z" }
+```
+
+**Idempotent for identical content.** A re-save of the same strokes, book and
+session is a no-op: `rev` does not advance and nothing is emitted.
+
+**409 `other_hand.page_conflict`** when `base_rev` does not match the stored
+`rev` (including `base_rev: 0` against a page that already exists — a migration
+push must not clobber a server copy), and when two tabs race to CREATE the same
+page (the unique index refuses the second insert; the loser gets this, not a 500).
+The body carries the server's current page beside the standard envelope, so the
+client reloads from the refusal — `page` is `null` only when the client named a
+`base_rev` for a page the server does not have:
+
+```json
+{
+  "error": { "code": "other_hand.page_conflict", "message": "This page changed somewhere else. Reload it before saving again." },
+  "page": { "page_id": "…", "strokes": [ … ], "rev": 5, "…": "…" }
+}
+```
+
+**413 `other_hand.page_too_large`** when the serialized `strokes` + `book` exceed
+8 MiB. The WHOLE write is refused and the stored page is left byte-identical —
+never truncated. A page that came back missing its last half-hour would read as
+corruption; a loud refusal is recoverable because the ink is still in the browser.
+
+### `GET /other-hand/pages?limit=100`
+
+The workspace's pages, newest first, WITHOUT their ink. `limit` 1–500.
+
+```json
+{ "pages": [ { "page_id": "…", "session_id": "sess-1", "stroke_count": 212, "has_book": true, "rev": 5, "updated_at": "…", "created_at": "…" } ] }
+```
+
+Every content-changing write emits `other_hand.page.saved` on the realtime bus
+with `{workspace_id, page_id, session_id, user_id, rev, updated_at}` — ids and
+the rev only, never the strokes.
+

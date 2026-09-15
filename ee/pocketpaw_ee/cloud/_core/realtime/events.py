@@ -1190,3 +1190,16 @@ class ShipDeployStatusChanged(Event):
 @dataclass
 class ShipDestroyProposed(Event):
     EVENT_TYPE: ClassVar[str] = "ship.destroy.proposed"
+
+
+# Otherhand (feat/otherhand-page-store, 2026-09-15). ``other_hand.page.saved``
+# fires when a notebook page's ink actually CHANGED on the server — an
+# idempotent re-save of identical strokes emits nothing, because the debounced
+# client sends one every ~2s while a hand rests on the page.
+#
+# ``data`` carries ids and the new ``rev`` only, never the strokes: the payload
+# rides the realtime bus to every listener, and a few hundred KB of ink per
+# pen-stroke-burst is not a broadcast. A listener that wants the page reads it.
+@dataclass
+class OtherhandPageSaved(Event):
+    EVENT_TYPE: ClassVar[str] = "other_hand.page.saved"

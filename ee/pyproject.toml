@@ -601,6 +601,22 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
 
 [[tool.importlinter.contracts]]
+name = "OtherHand — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # feat/otherhand-page-store (2026-09-15): only ``other_hand.service`` owns
+    # the OtherhandPage Beanie write. Router, dto and domain go through it.
+    # ``models.other_hand_usage`` is deliberately NOT forbidden here —
+    # ``other_hand.illustration_budget`` imports it directly today (pre-existing
+    # rule-2 drift, tracked as a follow-up, not widened by this contract).
+    "pocketpaw_ee.cloud.other_hand.router",
+    "pocketpaw_ee.cloud.other_hand.dto",
+    "pocketpaw_ee.cloud.other_hand.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.other_hand_page"]
+
+[[tool.importlinter.contracts]]
 name = "FabricIngest — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
