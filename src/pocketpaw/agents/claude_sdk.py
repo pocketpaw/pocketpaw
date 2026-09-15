@@ -1,5 +1,12 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
+  ``image_attachments`` and a turn carrying one is sent through
+  ``build_streaming_user_message``, which is the only shape the SDK takes an
+  image in. The images ride the PERSISTENT-client sends only: single-message mode
+  explicitly does not support image attachments, so a stateless fresh-launch turn
+  would drop them silently — that path keeps sending a plain string.
+
 Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — a ``tool_use`` event now
   reaches consumers carrying the tool's REAL arguments. The stream loop announced
   a tool twice over: once from the partial ``content_block_start`` (name known,

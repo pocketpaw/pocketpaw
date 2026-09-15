@@ -1,6 +1,11 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-15 (feat/chat-image-wiring) — a turn's attached images are resolved
+  to bytes here and forwarded to the pool as ``image_attachments``, alongside the
+  existing ``images`` (the surface's own snapshot). Two channels, two reasons:
+  the snapshot is replaced every turn, the attachment is a file the user chose.
+  Withhold-when-empty, so a turn with no attachment is byte-identical to before.
 - 2026-09-14 (fix/partial-reply-survives-failed-run) — the cancel check at the
   top of the event loop no longer THROWS AWAY the event it is holding. It runs
   before the event is handled, so breaking on it discarded a chunk the model had

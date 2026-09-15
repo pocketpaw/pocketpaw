@@ -3,6 +3,12 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-09-15 (feat/chat-image-wiring) — adds
+``_accepts_image_attachments_kwarg``, the fourth signature guard in this file and
+the third to be written because withholding-when-empty was not enough on its own.
+It gates ``image_attachments`` (a user's attached files) the way
+``_accepts_images_kwarg`` gates ``images`` (a surface's snapshot).
+
 Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the two signature
 guards that decide who RECEIVES ``system_prompt_digest`` moved here from
 ``AgentPool``, plus a ``forward_prompt_digest`` helper for callers holding a

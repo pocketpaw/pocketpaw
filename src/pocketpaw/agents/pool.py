@@ -3,6 +3,15 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
+  ``image_attachments``: the files a user attached to THIS turn, carried as bytes
+  the model is shown rather than text scraped off them. It is a SECOND picture
+  channel beside ``images`` (the snapshot a surface chose to show) and is
+  forwarded from the same place and under the same signature guard — see
+  ``_accepts_image_attachments_kwarg``. Withhold-when-empty narrows WHEN a kwarg
+  rides; only the signature narrows WHERE, and seven of the backends take a
+  narrower signature with no ``**kwargs``.
+
 Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``get_agent_pool`` now builds the
   singleton with ``max_instances`` from settings (``POCKETPAW_AGENT_POOL_MAX_INSTANCES``,
   default 20 — the value that was already in force). The constructor default is

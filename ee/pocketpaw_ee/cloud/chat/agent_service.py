@@ -9,6 +9,14 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images``
+resolves a turn's uploads to bytes (transcoding HEIC/HEIF/TIFF/BMP to PNG, since
+HEIC is what an iPhone shoots and is not on the API's media-type list), and
+``_build_attachments_block`` stops OCRing anything the model is being SHOWN,
+emitting a one-line note naming the file instead. Failures are per-file and
+quiet: an unreadable image is simply absent from the tuple while the text block
+still names it, so the turn says a file arrived rather than pretending none did.
+
 Changes: 2026-09-14 (fix/partial-reply-survives-failed-run) —
 ``load_history_for_scope`` is no longer a read of the ``Message`` collection
 alone. ``execute_run`` writes an assistant ``Message`` from exactly one place

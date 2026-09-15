@@ -7,6 +7,14 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-15 (feat/chat-image-wiring): ``run`` grows
+``image_attachments`` and the turn's prompt is now built from BOTH picture
+channels — ``images`` (the surface's snapshot, already ``(bytes, media_type)``)
+and ``image_attachments`` (the user's attached files). They are flattened to the
+one shape ``_user_prompt`` takes rather than built by two helpers, so its
+empty-bytes drop covers a user's upload too; a zero-byte part comes back from
+some providers as an opaque 400 that reads as the model being broken.
+
 Changed 2026-09-11 (feat/byok-custom-gateway, review B2/N1): the shared HTTP
 client in ``_get_http_client`` pins ``follow_redirects=False``. It is httpx's
 default, so nothing changes today — but the OpenAI SDK's own client sets it
