@@ -56,6 +56,10 @@ the imports and ``get_all_documents()`` so the ``growth_message_logs``
 collection is wired into ``init_beanie``. Kept out of ``__all__`` like
 ``Prospect`` / ``Draft`` — only ``ee.cloud.growth.service`` imports the doc
 class directly (import-linter "Growth" contract).
+Updated: 2026-09-15 (feat/otherhand-page-store) — added ``OtherhandPage`` (the
+server-side notebook page: strokes + book ref, keyed per workspace by the
+client-minted page id) to the imports and ``get_all_documents()``. Kept out of
+``__all__``; only ``ee.cloud.other_hand.service`` imports it.
 Updated: 2026-07-27 (feat/growth-g3) — added ``Draft`` (the /growth per-channel
 outreach draft: workspace-scoped, attached to a prospect, status lifecycle
 enforced in the service) to the imports and ``get_all_documents()`` so the
@@ -254,6 +258,7 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.other_hand_page import OtherhandPage
 from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -551,6 +556,10 @@ def get_all_documents():
         # ``ee.cloud.llm_provisioning.service`` writes this.
         ByokProviderKey,
         IllustrationUsage,
+        # Otherhand page store (feat/otherhand-page-store) — one document per
+        # notebook page, keyed (workspace, page_id). Only ``other_hand.service``
+        # imports the doc class (import-linter "OtherHand" contract).
+        OtherhandPage,
         LiteLLMTenantKey,
         # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
         # Only ``ee.cloud.ship.store`` reads/writes these.

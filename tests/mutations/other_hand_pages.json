@@ -1,0 +1,113 @@
+[
+  {
+    "label": "drop the tenant filter on the page read",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "    doc = await OtherhandPage.find_one(\n        OtherhandPage.workspace == workspace_id,\n        OtherhandPage.page_id == safe_id,\n    )\n    if doc is None:\n        raise NotFound",
+    "replace": "    doc = await OtherhandPage.find_one(\n        OtherhandPage.page_id == safe_id,\n    )\n    if doc is None:\n        raise NotFound",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_tenant_isolation_same_page_id_two_workspaces"
+    ]
+  },
+  {
+    "label": "drop the tenant filter on the page list",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "await OtherhandPage.find(OtherhandPage.workspace == workspace_id)",
+    "replace": "await OtherhandPage.find()",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_tenant_isolation_same_page_id_two_workspaces"
+    ]
+  },
+  {
+    "label": "remove the compare-and-set — stale writes win",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "    if body.base_rev != stored_rev:\n        raise OtherhandPageConflict",
+    "replace": "    if False:\n        raise OtherhandPageConflict",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_stale_base_rev_is_refused_and_carries_server_copy",
+      "tests/cloud/other_hand/test_page_store.py::test_base_rev_zero_against_existing_page_is_a_conflict",
+      "tests/cloud/other_hand/test_page_store.py::test_wire_contract"
+    ]
+  },
+  {
+    "label": "conflict body loses the server copy",
+    "file": "ee/pocketpaw_ee/cloud/_core/errors.py",
+    "find": "        base[\"page\"] = self.page\n        return base",
+    "replace": "        return base",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_wire_contract"
+    ]
+  },
+  {
+    "label": "size cap no longer refuses",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "    if size > MAX_PAGE_BYTES:",
+    "replace": "    if size > MAX_PAGE_BYTES * 10**9:",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_oversize_page_is_refused_whole_and_stored_page_untouched"
+    ]
+  },
+  {
+    "label": "size cap fires AFTER a write already landed (half-saved page)",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "    if size > MAX_PAGE_BYTES:\n        # Refused BEFORE any write — a rejected save must leave the stored page\n        # byte-identical, never half-applied.\n        raise PayloadTooLarge(",
+    "replace": "    if size > MAX_PAGE_BYTES:\n        _d = await OtherhandPage.find_one(\n            OtherhandPage.workspace == workspace_id, OtherhandPage.page_id == safe_id\n        )\n        if _d is not None:\n            _d.strokes = body.strokes\n            _d.rev += 1\n            await _d.save()\n        raise PayloadTooLarge(",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_oversize_page_is_refused_whole_and_stored_page_untouched"
+    ]
+  },
+  {
+    "label": "book ref dropped from the stored page",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "            strokes=body.strokes,\n            book=body.book,\n            rev=1,",
+    "replace": "            strokes=body.strokes,\n            book=None,\n            rev=1,",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_round_trips_strokes_and_book_verbatim"
+    ]
+  },
+  {
+    "label": "rev never advances on a content change",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "        doc.rev = stored_rev + 1",
+    "replace": "        doc.rev = stored_rev",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_identical_resave_is_a_noop_that_does_not_bump_rev_or_emit"
+    ]
+  },
+  {
+    "label": "identical re-save emits anyway",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "        if unchanged:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_identical_resave_is_a_noop_that_does_not_bump_rev_or_emit"
+    ]
+  },
+  {
+    "label": "write emits nothing",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "    await emit(\n        OtherhandPageSaved(",
+    "replace": "    _evt = (\n        OtherhandPageSaved(",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_identical_resave_is_a_noop_that_does_not_bump_rev_or_emit"
+    ]
+  },
+  {
+    "label": "unsafe page id accepted",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "    try:\n        return _safe_page_id(page_id)\n    except SnapshotError as exc:",
+    "replace": "    try:\n        return page_id\n    except SnapshotError as exc:",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_page_id_must_be_one_safe_segment",
+      "tests/cloud/other_hand/test_page_store.py::test_wire_contract"
+    ]
+  },
+  {
+    "label": "racing create is a 500 (DuplicateKeyError uncaught)",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/service.py",
+    "find": "        except DuplicateKeyError:\n",
+    "replace": "        except ZeroDivisionError:\n",
+    "tests": [
+      "tests/cloud/other_hand/test_page_store.py::test_racing_creates_lose_as_409_not_500"
+    ]
+  }
+]

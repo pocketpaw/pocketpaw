@@ -7,6 +7,11 @@ to JSON responses.
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
 
+Changed 2026-09-15 (feat/otherhand-page-store): added `OtherhandPageConflict`
+(409, `other_hand.page_conflict`) — the compare-and-set refusal for the new
+Otherhand page store. Carries the server's current page as a top-level `page`
+key beside the standard envelope so the losing tab reloads from the refusal.
+
 Changed 2026-09-14 (feat/uploads-multipart-endpoints): added `PayloadTooLarge`
 (413). The multipart upload contract refuses an over-ceiling file at init with
 413 `multipart.too_large`, and this hierarchy had no 413 at all — the nearest
@@ -107,6 +112,42 @@ class ConflictError(CloudError):
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(409, code, message)
+
+
+class OtherhandPageConflict(CloudError):
+    """A page write lost a compare-and-set race (409, ``other_hand.page_conflict``).
+
+    Added 2026-09-15 (feat/otherhand-page-store). Otherhand pages are
+    last-write-wins by design — no CRDT, no merge — but plain LWW silently eats
+    work in the COMMON case: two tabs on the same page, one draws and saves, the
+    other's 2s debounce fires with a stale stroke list and overwrites it.
+    Detecting that afterwards from a timestamp does not help; the ink is already
+    gone. So every write names the ``rev`` it is based on, and a mismatch lands
+    here instead of in the database.
+
+    The wire body carries the server's CURRENT page beside the standard
+    ``{"error": {...}}`` envelope, so the client reloads from the refusal rather
+    than spending a second round-trip to find out what it lost.
+
+    409 and not 412: the caller is not using HTTP ``If-Match`` (that is
+    ``PreconditionFailed``, which the file-version spine owns) — ``base_rev`` is
+    a body field, and this is a resource conflict in the ordinary sense.
+    """
+
+    def __init__(self, page: dict | None) -> None:
+        #: The server's current page, or ``None`` when the conflict is that the
+        #: client named a ``base_rev`` for a page the server does not have.
+        self.page = page
+        super().__init__(
+            409,
+            "other_hand.page_conflict",
+            "This page changed somewhere else. Reload it before saving again.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["page"] = self.page
+        return base
 
 
 class PreconditionFailed(CloudError):

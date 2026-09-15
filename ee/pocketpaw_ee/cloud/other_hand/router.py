@@ -28,78 +28,40 @@
 # Echoing it keeps the client's snapshot-then-send sequence to one round-trip's
 # worth of state.
 #
+# Updated 2026-09-15 (feat/otherhand-page-store): the page STORE landed beside
+# the snapshot endpoint — GET/PUT ``/other-hand/pages`` persist the ink model
+# itself, so a page survives a reload and follows the user to another browser.
+# The request/response models moved out of this file into ``dto.py`` at the same
+# time (CLAUDE.md's touch-time rule; the entity had no 4-file shape before) and
+# are re-exported here so existing importers are unaffected.
+#
 # Errors propagate as ``CloudError`` so the central cloud error handler maps them
 # to the JSON envelope; the router never raises ``HTTPException`` (entity rule 10).
 
-"""FastAPI router for Otherhand page snapshots."""
+"""FastAPI router for Otherhand pages, snapshots and illustrations."""
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
-from fastapi import APIRouter, Depends, Path
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Path, Query
 
 from pocketpaw_ee.cloud._core.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.other_hand import service as other_hand_service
+from pocketpaw_ee.cloud.other_hand.dto import (
+    PAGE_ID_MAX,
+    IllustrateRequest,
+    SnapshotRequest,
+    UpsertPageRequest,
+)
 
 router = APIRouter(
     prefix="/other-hand",
     tags=["Otherhand"],
     dependencies=[Depends(require_license)],
 )
-
-
-class SnapshotRequest(BaseModel):
-    """Body for ``POST /other-hand/pages/{page_id}/snapshot``.
-
-    * ``png_base64`` — the full page rendered to a PNG, base64-encoded. A
-      ``data:image/png;base64,`` prefix is tolerated. Validated (size, base64,
-      PNG magic) by the service before anything touches the disk.
-    * ``free_y`` — the y coordinate, in the page's 1240x1754 logical space, below
-      which the page is empty. Echoed back; the backend stores nothing. Bounded
-      to the page so a nonsense value is rejected at the wire rather than
-      reaching the agent as a coordinate it would dutifully draw at.
-    """
-
-    png_base64: str = Field(min_length=1)
-    #: Upper bound lifted 2026-08-26: the paper GROWS downward (whole
-    #: half-sheets as ink approaches the bottom), so free_y can exceed one
-    #: A4 sheet. 30 sheets is far past any real page and still rejects a
-    #: nonsense coordinate at the wire.
-    free_y: int = Field(ge=0, le=52620)
-    #: Which image this is. ``page`` (the default, and the only v1 value) is
-    #: the notebook the agent draws on. ``book`` is the read-only source page
-    #: shown beside it in book mode — the agent reads it and never draws on it.
-    #: Defaulted so an older client that knows nothing about book mode keeps
-    #: working unchanged.
-    kind: Literal["page", "book", "mark"] = "page"
-
-
-class IllustrateRequest(BaseModel):
-    """Body for ``POST /other-hand/illustrate``.
-
-    The endpoint IS the opt-in. It exists only because a person pressed a
-    button, so reaching it is the authorisation — there is no path by which an
-    ordinary turn arrives here. That matters because each call costs real money
-    (a Recraft v4 pro generation) and, unlike LLM tokens, a user's own BYOK key
-    does NOT cover it.
-
-    ``x/y/w/h`` is where the drawing lands, in the page's 1240-wide logical
-    space. The caller picks it because only the client knows where the page is
-    empty; the box is bounded here so a nonsense rectangle is refused at the
-    wire rather than becoming coordinates nobody can see.
-    """
-
-    prompt: str = Field(min_length=2, max_length=500)
-    x: float = Field(ge=0, le=1240)
-    #: The paper grows downward, so y follows the same 30-sheet bound the
-    #: snapshot's free_y uses.
-    y: float = Field(ge=0, le=52620)
-    w: float = Field(gt=0, le=1240)
-    h: float = Field(gt=0, le=1754)
 
 
 def _to_cloud_error(exc: other_hand_service.SnapshotError) -> CloudError:
@@ -127,9 +89,6 @@ async def put_page_snapshot(
     except other_hand_service.SnapshotError as exc:
         raise _to_cloud_error(exc) from exc
     return {"path": path, "free_y": body.free_y}
-
-
-__all__ = ["router"]
 
 
 @router.post("/illustrate")
@@ -220,3 +179,60 @@ def _looks_like_auth(exc: Exception) -> bool:
     """
     text = str(exc).lower()
     return "401" in text or "403" in text or "unauthorized" in text or "forbidden" in text
+
+
+# ── Page store ─────────────────────────────────────────────────────────────
+#
+# Three routes, one resource. The path segment is the CLIENT-MINTED page id —
+# the same value the snapshot endpoint above overwrites by, so a page has one id
+# everywhere and an existing localStorage page maps 1:1 when the frontend
+# switches over.
+#
+# No DELETE. "New page" in the UI mints a fresh id and leaves the old ink where
+# it is, and clearing a page is a PUT with ``strokes: []`` — so a DELETE would be
+# a fourth way to say something two routes already say. Add one when a real
+# "forget this page" affordance exists to call it.
+#
+# Auth matches the snapshot endpoint: ``require_license`` on the router plus
+# ``current_workspace_id`` (which depends on ``current_active_user``). Tenancy is
+# the workspace; any member may read or write their workspace's pages, exactly
+# as they may already snapshot them. No new RBAC action is invented.
+
+
+@router.get("/pages")
+async def list_pages(
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """The workspace's pages, newest first, without their ink."""
+    return await other_hand_service.list_pages(workspace_id, user_id, limit)
+
+
+@router.get("/pages/{page_id}")
+async def get_page(
+    page_id: str = Path(min_length=1, max_length=PAGE_ID_MAX),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """One page, ink included. 404 when the workspace has no such page."""
+    return await other_hand_service.get_page(workspace_id, user_id, page_id)
+
+
+@router.put("/pages/{page_id}")
+async def upsert_page(
+    body: UpsertPageRequest,
+    page_id: str = Path(min_length=1, max_length=PAGE_ID_MAX),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Save a page. Returns meta only — never an echo of the ink just sent.
+
+    409 ``other_hand.page_conflict`` when ``base_rev`` does not match the stored
+    ``rev``; the error body carries the server's current page so the client can
+    reload from the refusal.
+    """
+    return await other_hand_service.upsert_page(workspace_id, user_id, page_id, body)
+
+
+__all__ = ["IllustrateRequest", "SnapshotRequest", "router"]

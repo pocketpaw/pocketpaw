@@ -39,17 +39,52 @@
 # one overwritten file per page, which is why that is acceptable rather than
 # merely convenient.
 
+# Updated 2026-09-15 (feat/otherhand-page-store): this module gained a SECOND
+# concern — the server-side notebook PAGE store (``get_page`` / ``upsert_page``
+# / ``list_pages``, below the snapshot section). They share a file because the
+# cloud entity rules put every Beanie write for an entity behind exactly one
+# ``service.py``, and ``OtherhandPage`` is this entity's document. The two halves
+# share nothing but ``_safe_page_id``, which is the point: a page and its
+# snapshot are addressed by the SAME client-minted id, so one validator has to
+# govern both or the two stores drift into different notions of "this page".
+#
+# The page half is Mongo, not disk. That is deliberate and is also the reason the
+# snapshot half is a known bug: ``snapshot_dir`` writes to LOCAL DISK, which is
+# per-replica, and the deployment runs more than one. Out of scope here; tracked
+# as a follow-up.
+
 from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
 import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
+from pymongo.errors import DuplicateKeyError
+
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    NotFound,
+    OtherhandPageConflict,
+    PayloadTooLarge,
+)
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import OtherhandPageSaved
 from pocketpaw_ee.cloud.agent_jail import workspace_jail_root
+from pocketpaw_ee.cloud.models.other_hand_page import OtherhandPage
+from pocketpaw_ee.cloud.other_hand.domain import Page
+from pocketpaw_ee.cloud.other_hand.dto import (
+    PageListResponse,
+    PageResponse,
+    PageSavedResponse,
+    PageSummaryResponse,
+    UpsertPageRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,9 +269,226 @@ def write_snapshot(workspace_id: str, page_id: str, png_base64: str, kind: str =
     return str(resolved_target)
 
 
+# ── Page store (feat/otherhand-page-store, 2026-09-15) ──────────────────────
+#
+# Everything below is the server-side page: the thing that makes a notebook page
+# survive a reload and follow the user to another browser. It replaces nothing —
+# the snapshot half above is a rendered PNG for the AGENT to read, this half is
+# the ink model for the RENDERER to restore. Both keyed by the same page_id.
+
+
+# Max serialized size of one page's ``strokes`` + ``book``, in bytes.
+#
+# The ceiling exists because the frontend will not stop growing the payload: a
+# single drawn circle became ~242 points across 2 strokes when rough.js landed,
+# and an ``img`` stroke carries its picture as a data URL, so a page with a few
+# generated illustrations is megabytes on its own. 8MiB leaves 2x headroom under
+# Mongo's 16MB document cap after BSON framing, and sits far under the ASGI body
+# ceiling (``src/pocketpaw/security/body_limit.py``, ~1GB by default) so a page
+# that trips this gets OUR error and not a generic one from the layer outside.
+#
+# Over the ceiling we REFUSE THE WHOLE WRITE (413) and leave the stored page
+# exactly as it was. Truncating would be worse than losing the save: a page that
+# comes back missing its last half-hour reads as corruption, and the user has no
+# way to tell which half survived. A loud refusal is recoverable — the ink is
+# still in the browser.
+MAX_PAGE_BYTES = 8 * 1024 * 1024
+
+
+def _page_payload_bytes(strokes: list[dict[str, Any]], book: dict[str, Any] | None) -> int:
+    """Serialized size of what this write would store.
+
+    Measured on the JSON the client sent, not on point counts: the expensive
+    thing on a page is an ``img`` stroke's embedded data URL, which no count of
+    points sees at all.
+    """
+    return len(json.dumps({"strokes": strokes, "book": book}, separators=(",", ":")))
+
+
+def _page_key(page_id: str) -> str:
+    """``_safe_page_id`` for the page store: same guard, cloud error envelope.
+
+    The snapshot half raises ``SnapshotError`` and its router maps it; the page
+    endpoints are thin and rely on the central ``CloudError`` handler, so the
+    refusal is re-raised as one here rather than surfacing as a 500.
+    """
+    try:
+        return _safe_page_id(page_id)
+    except SnapshotError as exc:
+        raise CloudError(exc.status_code, exc.code, exc.message) from exc
+
+
+def _page_to_domain(doc: OtherhandPage) -> Page:
+    """Beanie document -> the value object every reader outside this module sees."""
+    return Page(
+        workspace_id=doc.workspace,
+        page_id=doc.page_id,
+        user_id=doc.user_id,
+        rev=doc.rev,
+        updated_at=doc.updatedAt,
+        created_at=doc.createdAt,
+        session_id=doc.session_id,
+        strokes=doc.strokes,
+        book=doc.book,
+    )
+
+
+def _page_wire(page: Page) -> dict[str, Any]:
+    """The full-page wire dict (``PageResponse``'s shape)."""
+    return PageResponse.model_validate(page, from_attributes=True).model_dump(mode="json")
+
+
+async def get_page(workspace_id: str, user_id: str, page_id: str) -> dict[str, Any]:
+    """Return one page, ink included. Raises ``NotFound`` when there is none.
+
+    404 rather than an empty page on purpose: the frontend starts blank on a
+    miss, and an empty 200 is indistinguishable from "a page that exists and was
+    cleared" — which matters because the latter must NOT be overwritten by a
+    tab restoring from localStorage.
+    """
+    safe_id = _page_key(page_id)
+    doc = await OtherhandPage.find_one(
+        OtherhandPage.workspace == workspace_id,
+        OtherhandPage.page_id == safe_id,
+    )
+    if doc is None:
+        raise NotFound("other_hand.page", safe_id)
+    return _page_wire(_page_to_domain(doc))
+
+
+async def list_pages(workspace_id: str, user_id: str, limit: int = 100) -> dict[str, Any]:
+    """The workspace's pages, newest first, WITHOUT their ink.
+
+    Strokes are deliberately not projected: a workspace's pages are hundreds of
+    KB each and nothing renders from a list. ``stroke_count`` is what a picker
+    needs to tell a blank sheet from a full one.
+    """
+    docs = (
+        await OtherhandPage.find(OtherhandPage.workspace == workspace_id)
+        .sort(-OtherhandPage.updatedAt)
+        .limit(max(1, min(limit, 500)))
+        .to_list()
+    )
+    rows = [
+        PageSummaryResponse(
+            page_id=doc.page_id,
+            session_id=doc.session_id,
+            stroke_count=len(doc.strokes),
+            has_book=doc.book is not None,
+            rev=doc.rev,
+            updated_at=doc.updatedAt,
+            created_at=doc.createdAt,
+        )
+        for doc in docs
+    ]
+    return PageListResponse(pages=rows).model_dump(mode="json")
+
+
+async def upsert_page(workspace_id: str, user_id: str, page_id: str, body: Any) -> dict[str, Any]:
+    """Create or replace a page's ink. Last-write-wins, guarded by a CAS.
+
+    ``body.base_rev`` is the ``rev`` the caller last saw; ``0`` means "no server
+    copy". It must equal what is stored (or the page must not exist) or the write
+    is refused with ``OtherhandPageConflict``, which carries the current page so
+    the loser reloads without a second round-trip. That is the entire multi-tab
+    story — two tabs on one page is the common case, not a rare multi-device
+    race, and a plain LWW overwrite there is silent data loss.
+
+    Idempotent for identical content: a re-save of the same strokes and book is
+    a no-op that returns the current ``rev`` without touching the document or
+    emitting. The client debounces at ~2s and also saves on blur and
+    visibilitychange, so the same bytes arrive repeatedly while a hand rests on
+    the page.
+    """
+    body = UpsertPageRequest.model_validate(body)
+    safe_id = _page_key(page_id)
+
+    size = _page_payload_bytes(body.strokes, body.book)
+    if size > MAX_PAGE_BYTES:
+        # Refused BEFORE any write — a rejected save must leave the stored page
+        # byte-identical, never half-applied.
+        raise PayloadTooLarge(
+            "other_hand.page_too_large",
+            f"This page is {size // (1024 * 1024)}MB, over the "
+            f"{MAX_PAGE_BYTES // (1024 * 1024)}MB limit. Nothing was saved.",
+        )
+
+    doc = await OtherhandPage.find_one(
+        OtherhandPage.workspace == workspace_id,
+        OtherhandPage.page_id == safe_id,
+    )
+
+    stored_rev = doc.rev if doc is not None else 0
+    if body.base_rev != stored_rev:
+        raise OtherhandPageConflict(_page_wire(_page_to_domain(doc)) if doc is not None else None)
+
+    if doc is None:
+        doc = OtherhandPage(
+            workspace=workspace_id,
+            page_id=safe_id,
+            user_id=user_id,
+            session_id=body.session_id,
+            strokes=body.strokes,
+            book=body.book,
+            rev=1,
+        )
+        try:
+            await doc.insert()
+        except DuplicateKeyError:
+            # Two tabs racing to CREATE the same page: both read "no doc", both
+            # insert, the unique index refuses the second. That is the same
+            # lost race as a stale base_rev and gets the same answer — a 409
+            # carrying whichever copy won — not a 500.
+            winner = await OtherhandPage.find_one(
+                OtherhandPage.workspace == workspace_id,
+                OtherhandPage.page_id == safe_id,
+            )
+            raise OtherhandPageConflict(
+                _page_wire(_page_to_domain(winner)) if winner is not None else None
+            ) from None
+    else:
+        unchanged = (
+            doc.strokes == body.strokes
+            and doc.book == body.book
+            and doc.session_id == body.session_id
+        )
+        if unchanged:
+            # no-event: nothing changed. Emitting here would put an event on the
+            # bus every ~2s for a page nobody is drawing on.
+            return PageSavedResponse(
+                page_id=doc.page_id, rev=doc.rev, updated_at=doc.updatedAt
+            ).model_dump(mode="json")
+        doc.strokes = body.strokes
+        doc.book = body.book
+        doc.session_id = body.session_id
+        doc.user_id = user_id
+        doc.rev = stored_rev + 1
+        await doc.save()
+
+    await emit(
+        OtherhandPageSaved(
+            data={
+                "workspace_id": workspace_id,
+                "page_id": doc.page_id,
+                "session_id": doc.session_id,
+                "user_id": user_id,
+                "rev": doc.rev,
+                "updated_at": doc.updatedAt.isoformat(),
+            }
+        )
+    )
+    return PageSavedResponse(page_id=doc.page_id, rev=doc.rev, updated_at=doc.updatedAt).model_dump(
+        mode="json"
+    )
+
+
 __all__ = [
+    "MAX_PAGE_BYTES",
     "MAX_SNAPSHOT_BYTES",
     "SnapshotError",
+    "get_page",
+    "list_pages",
     "snapshot_dir",
+    "upsert_page",
     "write_snapshot",
 ]
