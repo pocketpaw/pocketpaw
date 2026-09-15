@@ -7,6 +7,41 @@
 - **License:** MIT. Attribution retained here; the skill body is a rewrite rather
   than a copy.
 
+### Second source (section 6, added 2026-09-15)
+
+- **Source:** https://github.com/referodesign/refero_skill (MIT, Refero) —
+  `skills/refero-design/references/copywriting.md`
+- **Vendored:** 2026-09-15 from commit `a9b54a3e62a6` (upstream v1.0.2)
+- **License:** MIT. Attribution retained; section 6 is a rewrite, not a copy.
+
+Section 6 (`Copy craft`) is the first harvest from the Refero craft references.
+copywriting.md was taken first because it was measured as the highest-yield and
+lowest-risk of the seven: about 60% of it was net-new to us, it is the ONLY one
+of the seven with no capability assumptions this surface cannot meet (no npm, no
+local font files, no browser, no build step), and it carries none of the
+fourteen conflicting concrete values the other six do.
+
+**Ported:** the Clarity > Respect > Character ordering; the dead/living word
+table and the removal test; the six-part empty-copy check; info-style (facts over
+adjectives, verbs over nouns, higher stakes = calmer tone); scenes over claims
+with the who/where/what-happens/what-changes template; rhythm; the sticky-line
+test; descriptive-not-aspirational headings with the operator litmus; the
+three-rung error ladder; the four banned-word categories — the AI-opener category
+in particular had no equivalent here; and the cut-30% test.
+
+**Not ported:** the button verb+object rule and the marketing-hero question list,
+both already in section 5; "Proof beats hype", already covered by section 4's
+"Be specific" and design-taste MODULE 4's organic-metrics rule; and empty-state
+copy, which is product-UI guidance with little to do with a marketing page.
+
+**Deliberately NOT deduplicated:** design-taste MODULE 4 keeps its seven-word
+filler list even though section 6 now carries a ~60-term catalogue that contains
+it. MODULE 4 is EMBEDDED in the create preamble unconditionally; section 6 is an
+on-demand skill the agent has to choose to invoke. Deleting the short list would
+trade a guarantee for a probability, which is the exact failure
+`_design_taste_system()` exists to prevent. Section 6 names the relationship so a
+reader does not treat them as competing lists.
+
 ## What was ported
 
 **Part A only** — the strategy layer: the one-offer/one-audience/one-action frame,

@@ -181,13 +181,115 @@ carries the qualifier. Do not stack both jobs into one sentence.
 All of `pocketpaw-design-taste` MODULE 4 applies to every string written here:
 zero em-dashes, organic metrics, no filler verbs, no "John Doe", no "Acme".
 
-## 6. Build order
+## 6. Copy craft
+
+Section 5 gives the shapes. This is how the words inside them get written. All of
+it applies to every visible string, including alt text, form labels, error text
+and the footer.
+
+**The order is Clarity, then Respect, then Character — always that way round.**
+Without clarity copy fails; without respect it irritates; without character it is
+merely forgotten. Most bad brand voice starts at character and never gets back to
+clarity, which is why so many pages sound confident and say nothing.
+
+**Dead words vs living words.** Dead copy is abstract, safe and interchangeable —
+the signal is that it could sit on a thousand other sites unchanged.
+
+| Dead | Living |
+| --- | --- |
+| "Innovative platform" | "Create a landing page in 20 minutes. No code." |
+| "Next-generation solution" | "See where users drop off in checkout." |
+| "Seamless experience" | "Export to PDF and Google Docs in one click." |
+| "Powerful and flexible" | "Works with Gmail and Outlook. iCloud is next." |
+
+The test: **if a word can be removed without changing the meaning, it was dead.**
+
+**When a block feels empty, one of these six is missing** — context (where the
+reader is), the job they are trying to do, what you offer, what changes for them,
+the conditions or limits, and the next step. Check them in order before rewriting
+by feel.
+
+**Info-style.** Facts beat adjectives: "fast" becomes "in 10 seconds". Verbs beat
+nouns: "configuration" becomes "set up". One sentence carries one idea. And
+**the higher the stakes, the calmer the tone** — payments, deletion, security and
+anything irreversible get plainer language, not more reassurance.
+
+**Write scenes, not claims.** People remember images, not abstractions. "A better
+workflow for teams" is a claim. "At 10:03 the PM drops a task. At 10:07 the
+designer has real references and a draft" is a scene. The shape is *who + where +
+what happens + what changes*. Use it where a benefit is hard to make concrete —
+but never invent a customer, a name or a number to build one.
+
+**Rhythm.** Flat rhythm loses attention: vary sentence length every line or two,
+and let one paragraph land one punch.
+
+> Fewer clicks.
+> Clearer decisions.
+> Less arguing in Slack.
+
+**Give the page one quotable line.** Every page worth building has at least one
+line that survives being screenshotted out of context. If nothing on the page is
+quotable, nothing about it is memorable. Shapes that work: "Not another X.
+Finally Y.", "Less noise. More decisions." One per page — a page where every line
+strains to be the sticky one is exhausting.
+
+**Headings describe, they do not aspire.** This is the most common failure in
+section headings and in any dashboard or status UI a dynamic site renders.
+
+| Aspirational | Descriptive |
+| --- | --- |
+| "Unlock Your Growth Potential" | "Revenue this month" |
+| "Your Journey Starts Here" | "Onboarding progress" |
+| "Insights That Matter" | "Search metrics" |
+
+The test: **if someone scans only the headings, labels and numbers, do they
+understand the page?** If not, the headings are decoration. Marketing warmth has
+four legitimate homes — an empty state, onboarding, an upgrade prompt and a
+success moment — and even there it is one line, then back to function.
+
+**Errors say what happened, why if it helps, and what to do next.** Three rungs,
+and most pages ship the first:
+
+| | |
+| --- | --- |
+| Bad | "Something went wrong" |
+| Better | "Couldn't save. Check your connection and try again." |
+| Best | "You're offline. Reconnect to save changes." |
+
+**Words that are banned outright**, because each one is a claim with no content
+behind it. `pocketpaw-design-taste` MODULE 4 carries a short version of this list
+and is in your context unconditionally; that one is the floor and this is the
+full catalogue, so they extend each other rather than compete:
+
+-   **Hype** — revolutionary, seamless, cutting-edge, best-in-class,
+    next-generation, world-class, game-changing, disruptive, state-of-the-art,
+    groundbreaking, and *innovative* / *powerful* / *robust* whenever no specific
+    follows.
+-   **Filler** — very, really, just, actually, basically, literally, simply,
+    easily, highly, incredibly, extremely, absolutely, truly, totally.
+-   **Corporate zombie** — leverage, synergy, ecosystem, paradigm, holistic,
+    end-to-end, mission-critical, value proposition, stakeholder, thought leader,
+    empower, unlock (metaphorical), drive (as in "drive growth"), and
+    optimize / streamline without a number attached.
+-   **AI openers**, which are the loudest tell of all — "In today's fast-paced
+    world...", "In an era of...", "Look no further", "Say goodbye to...",
+    "Introducing the future of...", "Reimagine...", "Supercharge your...",
+    "Elevate your...", "Take your X to the next level", "Harness the power
+    of...".
+
+**Then cut.** Read the finished page and ask whether 30% could come out without
+losing meaning. If it could, it should — and if cutting 30% *improves* the page,
+keep cutting. A stranger should get the offer in about three seconds, find one
+concrete detail, see the limits stated honestly, and know the next step without
+looking for it.
+
+## 7. Build order
 
 Author section by section, in the order your selected argument runs.
 **Never rebuild the whole page on each iteration.** Section by section keeps the
 diff reviewable and keeps a bad section from taking a good one down with it.
 
-## 7. Search and answer engines
+## 8. Search and answer engines
 
 - **Do not index** ad-only campaign pages and time-boxed offers. Set `noindex`.
 - **Do index** evergreen offers where search intent matches the promise.
@@ -199,7 +301,7 @@ diff reviewable and keeps a bad section from taking a good one down with it.
 - A local business page carries `LocalBusiness` with the real name, address and
   hours, or it carries none. Half-invented structured data is worse than none.
 
-## 8. Settle this before any code
+## 9. Settle this before any code
 
 Work these out before you write markup. This is a WORKING NOTE you keep to
 yourself, not a script to read out - see "What you say to the user" below.
@@ -213,7 +315,7 @@ yourself, not a script to read out - see "What you say to the user" below.
 6. index or noindex, plus title and meta if indexed.
 7. Stated assumptions, one line each, for anything intake could not answer.
 
-Then build section by section per section 6, under `pocketpaw-design-taste`.
+Then build section by section per section 7, under `pocketpaw-design-taste`.
 
 ### What you say to the user
 
