@@ -133,6 +133,33 @@ Animatable: `x`, `y`, `scale`, `rotation`, `opacity`, `volume`. Font size,
 colour and the preset are not — say so rather than reaching for a keyframe
 that would silently do nothing.
 
+## Zooming in on something
+
+`zoom_clip` is the verb for "punch in on her face", "zoom into the chart
+around 4 seconds", "push in and pull back out". Use it instead of hand-keying
+`scale`: keeping a point centred while the frame grows needs an offset that
+depends on the scale, and a keyframed scale alone zooms on the middle of the
+frame no matter what was asked for.
+
+```json
+[{"op":"zoom_clip","clipId":"…a1","focusX":0.34,"focusY":0.28,"scale":1.6,
+  "atMs":4000,"inMs":500,"holdMs":1500,"outMs":500}]
+```
+
+`focusX` / `focusY` are fractions of the **frame**: `0.5, 0.5` is centre,
+`0, 0` the top-left corner, `1, 1` the bottom-right. Fractions rather than
+pixels, so the same numbers mean the same place in a 9:16 cut as in 16:9.
+
+`atMs` is where the push starts (absent = the clip's head) and the whole
+`inMs + holdMs + outMs` window has to fit inside the clip — a zoom that runs
+past the end is refused, not truncated. `outMs: 0` stays zoomed for the rest
+of the clip.
+
+The point is clamped to the picture's edge, so zooming into a corner pushes
+as far as it can without letting the background show. A `scale` at or below 1
+is refused: that is not a zoom out, it is a shrink, and `set_transform` owns
+it.
+
 ## When the timeline is empty
 
 Say so plainly and ask what they want to build from. Do not place anything

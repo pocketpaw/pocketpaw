@@ -4,6 +4,10 @@
 # whose TS half is paw-enterprise/src/lib/core/studio/editor/agent-ops.ts.
 # Design: docs/design/drafts/2026-09-08-agentic-studio-editor.md in paw-workspace.
 #
+# 2026-09-15 (feat/studio-zoom): `zoom_clip` — a push-in on a point in the
+# frame. The point is a FRACTION of the frame, not pixels, so it means the same
+# thing at any aspect ratio and the browser half owns the offset arithmetic.
+#
 # 2026-09-11 (feat/agent-lane-ops): `add_lane`, and `track` resolving by lane
 # NAME as well as id. The name path is load-bearing — track ids are minted when
 # the batch applies in the browser, so a lane this batch creates has no id to
@@ -48,6 +52,7 @@ OP_KINDS: frozenset[str] = frozenset(
         "trim_clip",
         "add_keyframe",
         "clear_keyframes",
+        "zoom_clip",
     }
 )
 
@@ -63,6 +68,7 @@ _CLIP_OPS: frozenset[str] = frozenset(
         "set_transform",
         "add_keyframe",
         "clear_keyframes",
+        "zoom_clip",
     }
 )
 
@@ -71,6 +77,9 @@ _ASSET_OPS: frozenset[str] = frozenset({"place_clip", "place_audio"})
 
 # Blast radius of one confused turn, not a performance limit.
 MAX_OPS_PER_BATCH = 50
+
+# Mirrors MAX_ZOOM_SCALE in zoom.ts.
+_MAX_ZOOM_SCALE = 5
 
 _TRANSITION_KINDS: frozenset[str] = frozenset(
     {"none", "crossfade", "dip", "slide", "push", "zoom", "blur"}
@@ -586,6 +595,39 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
             return f"ops[{i}].opacity must be between 0 and 1."
         if not any(raw.get(k) is not None for k in ("x", "y", "scale", "rotation", "opacity")):
             return f"ops[{i}] changes nothing — give x, y, scale, rotation or opacity."
+
+    elif kind == "zoom_clip":
+        # Fractions of the frame, so 0.5/0.5 is centre at any aspect ratio.
+        for key in ("focusX", "focusY"):
+            err = _check_number(raw, key, i)
+            if err:
+                return err
+            value = raw.get(key)
+            if value is not None and not 0 <= value <= 1:
+                return (
+                    f"ops[{i}].{key} must be between 0 and 1 — it is a fraction of the "
+                    "frame, not a pixel position."
+                )
+        for key in ("atMs", "inMs", "holdMs", "outMs"):
+            err = _check_number(raw, key, i)
+            if err:
+                return err
+        err = _check_number(raw, "scale", i, minimum=None)
+        if err:
+            return err
+        scale = raw.get("scale")
+        if scale is not None and not 1 < scale <= _MAX_ZOOM_SCALE:
+            return (
+                f"ops[{i}].scale must be greater than 1 and at most {_MAX_ZOOM_SCALE}. "
+                "Below 1 is not a zoom out — use set_transform for that."
+            )
+        ease = raw.get("ease")
+        if ease is not None and ease not in _EASINGS:
+            hint = _suggest(str(ease), set(_EASINGS))
+            return (
+                f"ops[{i}].ease {ease!r} is not an easing.{hint} "
+                f"Valid easings: {', '.join(sorted(_EASINGS))}."
+            )
 
     elif kind in ("add_keyframe", "clear_keyframes"):
         prop = raw.get("prop")

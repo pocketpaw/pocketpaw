@@ -410,7 +410,7 @@
     },
     {
       "gist": "",
-      "how": "mcp__pocketpaw_timeline__edit_timeline (ops: place_clip / move_clip / trim_clip / split_clip / remove_clip / set_transition / add_text / style_text / add_caption / style_captions / place_audio / set_volume / set_transform / add_keyframe / clear_keyframes / set_project)",
+      "how": "mcp__pocketpaw_timeline__edit_timeline (ops: place_clip / move_clip / trim_clip / split_clip / remove_clip / set_transition / add_text / style_text / add_caption / style_captions / place_audio / set_volume / set_transform / add_keyframe / clear_keyframes / zoom_clip / set_project)",
       "id": "capability:timeline.edit",
       "keywords": [
         "arrange clips",
