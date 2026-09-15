@@ -1210,6 +1210,32 @@ class Settings(BaseSettings):
             "to reveal itself."
         ),
     )
+    sites_mcp_servers: str = Field(
+        default="",
+        description=(
+            "Comma-separated names of EXTERNAL MCP servers (from "
+            "``~/.pocketpaw/mcp_servers.json``) that the /sites surface may "
+            "call — e.g. ``refero`` for live design research. Empty (the "
+            "default) grants none, so an install that has not opted in sees no "
+            "behaviour change. "
+            "Names must match ``MCPServerConfig.name``; a name matching no "
+            "configured server is inert rather than an error, because the "
+            "server list is per-deploy and a surface should not fail to resolve "
+            "because an optional integration is absent. "
+            "MECHANISM: /sites runs a hard allow-list of fully-qualified "
+            "``mcp__<server>__<tool>`` ids, but an external server's tool names "
+            "are unknown until the SDK connects, so ``_collect_mcp_tool_ids`` "
+            "allow-lists it wholesale with a BARE ``mcp__<server>`` token. "
+            "Naming a server here puts that same bare token in the /sites allow "
+            "set, where it matches by exact string — scoping the grant to this "
+            "surface alone, unlike ``ALWAYS_ALLOWED_MCP_SERVERS`` which hands a "
+            "server to every surface at once. "
+            "A comma-separated STRING rather than ``list[str]`` on purpose: "
+            "pydantic-settings JSON-decodes complex types before any validator "
+            "runs, so ``POCKETPAW_SITES_MCP_SERVERS=refero`` would crash boot "
+            "on a list field."
+        ),
+    )
     sdk_load_bundled_skills: bool = Field(
         default=True,
         description=(
