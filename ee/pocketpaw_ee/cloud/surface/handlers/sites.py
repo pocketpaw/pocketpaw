@@ -986,6 +986,18 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "bleed-through, dead gutters, the mobile floor.",
     ),
     (
+        "sites-design-research",
+        "both",
+        "BEFORE locking a palette or type on a brief that leaves the LOOK open — "
+        "a new landing page, a redesign, or a 'make it premium / editorial / "
+        "technical' ask. Searches REAL shipped design systems and locks one "
+        "direction with a decision ledger, which is what the DESIGN SYSTEM below "
+        "then builds from. Skip it for a copy edit, a single value change, or "
+        "when the user supplied a design to match. Returns nothing when Refero "
+        "is unconfigured — that is normal, design on your own judgement and "
+        "never cite a reference you did not receive.",
+    ),
+    (
         "sites-design-sources",
         "both",
         "When you are about to hand-write a BACKGROUND, texture, canvas shader, "
