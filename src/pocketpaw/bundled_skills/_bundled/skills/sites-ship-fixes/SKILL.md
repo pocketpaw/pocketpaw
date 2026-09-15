@@ -161,6 +161,40 @@ Verified at 320, 375, 414 and 768px. These are hard, not aspirational:
   `:active`, disabled, and where relevant loading, empty and error.
 - Fonts load with `font-display: swap` or are preloaded. No layout shift.
 
+## 8B. Six removals that tell you what the page is worth
+
+Sections 1-8 find defects. These find the opposite problem — a page with no
+defects that is also not about anything. Each one is a removal: take something
+away and see whether the page notices.
+
+- **The card test.** Strip the border, shadow, background and radius off a card.
+  If nothing about the interaction or the meaning got worse, it was never a card
+  — it was a rectangle drawn around text. Remove the box, keep the content.
+- **The image test.** Hide the hero image. If the first viewport still works
+  fine, the image is doing nothing and is costing the page its largest download.
+  Make it carry the section or take it out; a decorative hero is the worst of
+  both.
+- **The brand test.** Hide the nav. If the brand has disappeared from the page,
+  the identity lives entirely in a logo in a corner. It should survive in the
+  type, the colour or one distinctive detail.
+- **The copy test.** Delete 30% of the words. If the page got BETTER, keep
+  deleting — the draft was over-written, which is the default failure rather than
+  the exception.
+- **The identity test.** Look at the first viewport and ask whether it could
+  belong to a different company in the same industry. If yes, nothing on it is
+  specific to this one yet.
+- **The editorial test.** Swap the logo for a coffee shop, a boutique hotel and a
+  literary magazine. If the hero stays plausible for all three, the page has
+  landed in calm-editorial house style — cream ground, oversized high-contrast
+  serif, one italic word, very airy spacing — which reads as taste and is
+  actually the absence of a decision. `sites-theme-system` carries the three-axis
+  difference test for getting out of it.
+
+A "yes" on any of these is not a defect to patch. It means a decision was never
+made, so make it before showing the draft.
+
+---
+
 ## 9. Look at it before calling it done
 
 Most of the defects above are only caught by looking. Where a preview is available,

@@ -53,6 +53,47 @@ and `<link rel="preload">` for a local WOFF2, which cannot exist here —
 `sites-design-sources` states flatly that a font file cannot be brought into the
 project.
 
+**Third pass, same day - motion, icons, colour and typography.** The remaining
+four references were harvested into the create-only region by the same test, all
+of them ABOVE `## 5. The floor`, so the refine slice is untouched (measured +0%).
+
+- **`## Motion` (new section):** the five named easing curves with values,
+  duration bands plus the 120/200/320 token triple, `transform-origin` per
+  component, the inline-SVG `transform-box: fill-box` gotcha, and reduced-motion
+  as a token override rather than a hunt through rules. Framed as plain CSS on
+  prerendered markup, because upstream's examples assume a JS framework toggling
+  classes and this surface guarantees no such thing. NOT ported: springs, Framer
+  Motion, GSAP, Rive and Lottie (npm, and the last two additionally need a file
+  ingested); and upstream's enter=ease-out / exit=ease-in split, which
+  contradicts `sites-interface-review`'s "exits are softer than enters, ease-out
+  both ways".
+- **Into `## 4. Surface`:** the optical-correction numbers (play triangle
+  `0.5-1px` right, chevrons toward the point, the circle test), visual mass vs
+  stroke width, and the icon-to-text size pairing. These sharpen two bullets that
+  were already there.
+- **Into `## 2. Colour`:** `color-scheme` + `theme-color` and the native
+  `<select>` dark fix, the most valuable block in upstream's colour file and
+  entirely absent here; plus the 60-30-10 area split, two colours per component,
+  semantic colours as four-token sets, and keeping semantic clear of the brand
+  hue. NOT ported: upstream's `rgba(0,0,0,0.45)` tertiary text, a rung
+  `sites-restraint` documents as failing 4.5:1 and requiring a lift to ~56%; and
+  its light-mode-by-default rule, which would make three of our six aesthetic
+  families unreachable.
+- **Into `## 1. Type`:** the `line-height x 0.5` rhythm ladder, the count caps
+  and squint audit, `clamp()` fluid type with the mobile-to-desktop change table,
+  the four preconditions for tightening tracking, the overflow recipes including
+  the flex-child `min-width: 0` truncation trap, and the real punctuation set.
+  NOT ported: upstream's Inter / Geist / Plus Jakarta recommendations, which
+  `pocketpaw-design-taste` 2.F bans BY NAME as the loudest AI tell; its 1.2
+  default ratio, below our 1.25-1.333 marketing band; and its 1.7 body leading,
+  11px minimum size and `0.06-0.10em` caps tracking, all outside our ranges.
+
+**Cost.** This file is embedded WHOLE on create, so the create preamble grew 46%
+(4,080 -> 5,956 approx tokens). The refine floor did not move. Whether create is
+worth that is a budget call rather than a craft one; the conditional part is
+`## Forms and input`, which a brochure page with no form still pays for and which
+could move to a named skill if the number matters more than the guarantee.
+
 **Conflicts resolved in OUR favour**, because our values were measured against
 this surface: upstream's `scale(0.98)` on press (we specify `0.96` and say above
 `0.98` is invisible); upstream's 32x32px desktop icon hit area (ours is 44x44
