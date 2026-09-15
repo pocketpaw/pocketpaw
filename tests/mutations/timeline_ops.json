@@ -240,5 +240,32 @@
     "tests": [
       "tests/ee/agent/test_timeline_ops.py::test_a_cue_lane_must_be_a_text_lane"
     ]
+  },
+  {
+    "label": "zoom focus accepts pixels, so 960 reads as 960 frames right of centre",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "            if value is not None and not 0 <= value <= 1:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_zoom_focus_outside_the_frame_is_rejected"
+    ]
+  },
+  {
+    "label": "zoom accepts a scale of 1 or below, which applies cleanly and moves no pixel",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if scale is not None and not 1 < scale <= _MAX_ZOOM_SCALE:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_zoom_scale_must_be_a_zoom_in"
+    ]
+  },
+  {
+    "label": "zoom_clip drops out of the clip-id set, so it can name a clip that is gone",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        \"clear_keyframes\",\n        \"zoom_clip\",\n    }\n)\n\n# Ops that bring an asset onto the timeline.",
+    "replace": "        \"clear_keyframes\",\n    }\n)\n\n# Ops that bring an asset onto the timeline.",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_zoom_clip_id_must_resolve"
+    ]
   }
 ]
