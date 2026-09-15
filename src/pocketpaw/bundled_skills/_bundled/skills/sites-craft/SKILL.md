@@ -208,13 +208,98 @@ mean, including layout, and costs frames.
 states from CSS colour and opacity. Outline is the default variant; fill marks
 active.
 
+**Load the hero eagerly, everything else lazily.** The largest image above the
+fold carries `fetchpriority="high"` and NO `loading="lazy"` — lazy-loading the
+LCP image is the most common self-inflicted performance defect on a landing
+page. Everything below the fold takes `loading="lazy"` and `decoding="async"`.
+Every `<img>` carries explicit `width` and `height` (or an `aspect-ratio`) so
+the page does not reflow as images arrive.
+
+---
+
+## The page shell — set once, at the top
+
+These are written once when the page is created and never touched again, which
+is exactly why they get forgotten. None of them is visible until it is missing.
+
+**The viewport meta allows zoom.** `width=device-width, initial-scale=1` and
+nothing else. Never `user-scalable=no` and never `maximum-scale=1` — that tag is
+what makes the 200% zoom floor impossible to meet, and it is usually pasted in
+from a template nobody read.
+
+**Anchor targets clear the fixed header.** `[id] { scroll-margin-top: 6rem; }`,
+sized to the nav. Without it every in-page link lands with the heading it was
+pointing at hidden behind the bar.
+
+**`touch-action: manipulation`** on buttons and links. It removes the ~300ms
+delay a phone otherwise waits out before firing a tap, which is the difference
+between a page that feels native and one that feels like a website.
+
+**`<link rel="preconnect">` every origin you pull from** — the font CDN, the
+stock-photo host. The connection gets set up while the HTML is still parsing
+rather than when the first byte is wanted.
+
+---
+
+## Forms and input — when the page collects something
+
+A lead form is the conversion point of most pages here, and it is where craft
+failures cost a real submission rather than a compliment.
+
+**Name the field so the browser can fill it.** Every input carries a real
+`autocomplete` value — this is the single highest-leverage thing on a form,
+because a filled form gets finished and an empty one gets abandoned.
+
+| Field | `autocomplete` |
+| --- | --- |
+| Email | `email` |
+| Full name | `name` |
+| Phone | `tel` |
+| Company | `organization` |
+| Street | `street-address` |
+| Postcode | `postal-code` |
+| New password | `new-password` |
+| Existing password | `current-password` |
+
+Set `autocomplete="off"` on anything that is NOT an account field — a search box
+or a quantity — so a password manager stops offering to fill it.
+
+**`type` and `inputmode` pick the mobile keyboard.** `type="email"`,
+`type="tel"`, `inputmode="numeric"` for codes. A numeric field that opens a QWERTY
+keyboard reads as broken on a phone.
+
+**`spellcheck="false"`** on emails, usernames, URLs and verification codes. Red
+squiggles under a correctly typed email address look like an error.
+
+**Never block paste.** Intercepting paste on an email or code field is an
+accessibility failure and it defeats every password manager.
+
+**The label and its control are ONE hit target.** Wrap the checkbox and its text
+in a single `<label>` with `display: flex; gap: 8px; cursor: pointer` — a
+checkbox whose text is not clickable is a 16px target where a 200px one was
+available.
+
+**Wire errors so they are announced, not just drawn.** The failing input takes
+`aria-invalid="true"` and `aria-describedby` pointing at the message; the message
+carries `role="alert"`. On submit, move focus to the first failing field —
+otherwise a keyboard or screen-reader user is told something failed and left with
+no way to find it.
+
+**Say what happened and what to do**, next to the field that broke. Error copy is
+governed by `sites-conversion-structure` section 6; the three rungs there apply to
+every message a form can produce.
+
 ---
 
 ## 5. The floor — non-negotiable on a public page
 
 - **Hit areas at least 44x44px**, even where the visual control is smaller.
-- **A visible focus ring** on everything focusable. Never removed without a
-  replacement; at least 2px on a dark ground.
+- **A visible focus ring** on everything focusable, via **`:focus-visible`, not
+  `:focus`** — `:focus` also fires on a mouse click, which is why rings get
+  removed in the first place. Never removed without a replacement; at least 2px
+  on a dark ground. Where an outline collides with a rounded control, the
+  two-ring `box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent)` reads
+  cleanly on any ground.
 - **Never rely on colour alone** to carry meaning — pair it with a label, an
   icon, or a shape.
 - **Honour `prefers-reduced-motion`** with a complete fallback, not a broken one.

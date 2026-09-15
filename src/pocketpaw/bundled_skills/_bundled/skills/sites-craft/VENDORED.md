@@ -7,6 +7,59 @@
 - **Vendored:** 2026-09-08 from commit `267330e1adfc`
 - **License:** MIT. Attribution retained; the body is a rewrite, not a copy.
 
+## Second source (2026-09-15): Refero craft-details
+
+- **Source:** https://github.com/referodesign/refero_skill (MIT, Refero) —
+  `skills/refero-design/references/craft-details.md`
+- **Vendored:** 2026-09-15 from commit `a9b54a3e62a6` (upstream v1.0.2)
+- **License:** MIT. Attribution retained; the body is a rewrite, not a copy.
+
+Second harvest from the Refero craft references, after `copywriting.md` landed in
+`sites-conversion-structure` section 6. craft-details measured as the highest
+net-new ratio of the seven (~55%), though roughly a third of that half is
+React/JSX-shaped (`virtua`, `nuqs`, `ResizeObserver` + `useLayoutEffect`,
+`next/image`) and does not port to a surface with no package manager.
+
+**Where each piece landed, and why the placement is the whole decision.**
+`_craft_system("floor")` slices this file from the `## 5. The floor` HEADING to
+EOF, so anything added at or below that heading rides EVERY refine turn — and the
+2026-09-08 diet exists because refine was paying 2,868 tokens to shorten a
+headline. So the harvest was split by the floor's own test: *does a copy edit
+break this?*
+
+- **Into the floor (rides every refine turn, +12%):** `:focus-visible` rather than
+  `:focus`, with the reason (`:focus` fires on mouse click too, which is why rings
+  get removed) and the two-ring `box-shadow` replacement. This one sharpens a
+  bullet that was already there rather than adding a concern, and any refine that
+  adds a control can break it.
+- **Into `## The page shell` (create-only, NEW section placed BEFORE the floor):**
+  the viewport-meta zoom rule, `[id] { scroll-margin-top }`, `touch-action:
+  manipulation`, `<link rel="preconnect">`. All four are written once at create
+  and never touched again — a copy edit cannot break them, so charging every
+  refine turn for them would have been the diet running backwards. They were in
+  the floor in a first pass and measured at +31%; moving them cut it to +12%.
+- **Into `## Forms and input` (create-only, NEW):** the `autocomplete` table,
+  `type`/`inputmode`, `spellcheck="false"`, never-block-paste, the label-plus-
+  control single hit target, and the `aria-invalid` / `aria-describedby` /
+  `role="alert"` wiring with focus moved to the first failing field. Forms are
+  conditional on the brief, so they are create-only by the same test.
+- **Into `## 4. Surface`:** `fetchpriority="high"` on the LCP image with no
+  `loading="lazy"`, lazy + `decoding="async"` below the fold, explicit dimensions.
+
+**Not ported.** Everything npm- or framework-shaped (`virtua`, `nuqs`,
+`next/image` `priority`, uncontrolled-input patterns); `content-visibility` list
+virtualization and `Intl.*` formatting, both marginal on a static marketing page;
+and `<link rel="preload">` for a local WOFF2, which cannot exist here —
+`sites-design-sources` states flatly that a font file cannot be brought into the
+project.
+
+**Conflicts resolved in OUR favour**, because our values were measured against
+this surface: upstream's `scale(0.98)` on press (we specify `0.96` and say above
+`0.98` is invisible); upstream's 32x32px desktop icon hit area (ours is 44x44
+everywhere); and upstream's "Title Case for buttons", which contradicts
+`sites-interface-review`'s verb-first `Save changes` and our one-capitalization-
+policy rule. None of the three was carried.
+
 ## Why this exists as well as `sites-interface-review`
 
 They are the same knowledge pointed at two different moments, and shipping only
