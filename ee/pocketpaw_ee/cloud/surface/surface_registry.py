@@ -574,6 +574,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.refero import REFERO_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
@@ -615,8 +616,14 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # follow-up turn ("use the brief I sent") has no way back to it —
             # this list is a hard whitelist, so ambient is not enough here.
             | frozenset(FILES_TOOL_IDS)
-            # Opt-in EXTERNAL servers (``POCKETPAW_SITES_MCP_SERVERS``), e.g.
-            # ``refero`` for live design research. Empty by default.
+            # refero: design research. /sites is the surface that chooses a
+            # VISUAL DIRECTION, and this list is a hard whitelist, so the
+            # ambient server is not enough — an id absent here is unreachable.
+            # The tools return empty when no Refero token is configured, so
+            # naming them costs an unconfigured deploy nothing.
+            | frozenset(REFERO_TOOL_IDS)
+            # Opt-in EXTERNAL servers (``POCKETPAW_SITES_MCP_SERVERS``), for a
+            # server the operator configured themselves. Empty by default.
             | _external_sites_mcp_grants()
         )
 

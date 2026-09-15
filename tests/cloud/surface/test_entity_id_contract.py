@@ -245,6 +245,14 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         "prospect",
         "run",
         "scenario",
+        # ``style`` — ``pocketpaw_refero.get_style`` takes a required
+        # ``style_id`` (2026-09-15). It is an OPAQUE UPSTREAM uuid minted by
+        # Refero, not a PocketPaw entity: nothing in our data model has that id,
+        # nothing persists it, and no prompt block can list one because the set
+        # is Refero's catalogue. The agent only ever gets one from
+        # ``search_styles`` output in the same turn — the same shape as
+        # ``app`` / ``box`` above.
+        "style",
         "task",
         "to",
         "user",

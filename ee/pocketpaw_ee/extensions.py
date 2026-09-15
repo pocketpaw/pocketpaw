@@ -1138,6 +1138,46 @@ class CloudInspoMcpProvider:
         return list(INSPO_TOOL_IDS)
 
 
+class CloudReferoMcpProvider:
+    """`pocketpaw.mcp_servers` — the Refero design-research in-process server
+    (``pocketpaw_refero``). Hosts ``search_styles`` / ``get_style`` /
+    ``search_screens``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled site-authoring skills
+    can ground a generated page in a real shipped design system without an
+    explicit opt-in — the same regime the stock-images + icons + palette servers
+    use. The cloud chat agent runs on the claude_agent_sdk backend, which only
+    sees in-process MCP servers (a plain BaseTool is invisible to it), so design
+    research MUST be surfaced here as well as through the BaseTools in
+    ``pocketpaw.tools.builtin.refero``.
+
+    Ambient does NOT mean reachable everywhere: a surface with a restrictive
+    allow-list sees these ids only if it names them, and ``/sites`` is the one
+    that does.
+
+    Registering the server costs nothing when Refero is unconfigured — the tools
+    exist but return empty results, exactly like stock images with no provider
+    key. That is deliberate: the alternative, hiding the server when no token is
+    set, makes the tool surface differ between deploys and turns a missing
+    setting into "the model hallucinated a tool".
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.refero import build_refero_server
+
+            return build_refero_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the refero server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.refero import REFERO_TOOL_IDS
+
+        return list(REFERO_TOOL_IDS)
+
+
 class CloudIconsMcpProvider:
     """`pocketpaw.mcp_servers` — the icon-search in-process server
     (``pocketpaw_icons``). Hosts ``search_icons`` only.
