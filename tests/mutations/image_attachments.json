@@ -56,5 +56,14 @@
     "tests": [
       "tests/test_agent_pool_image_attachments.py"
     ]
+  },
+  {
+    "label": "IMG-9: AVIF leaves the transcode set, so a Chrome 'Copy image' upload falls through to the extraction path and the model describes the container's ispe box instead of the picture (the 2026-09-15 live report)",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    {\"image/avif\", \"image/heic\", \"image/heif\", \"image/tiff\", \"image/bmp\"}",
+    "replace": "    {\"image/heic\", \"image/heif\", \"image/tiff\", \"image/bmp\"}",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_transcode.py"
+    ]
   }
 ]

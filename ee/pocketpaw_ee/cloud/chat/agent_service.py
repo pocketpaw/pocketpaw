@@ -2831,8 +2831,19 @@ _MODEL_IMAGE_MIMES: frozenset[str] = frozenset(
 # false for a large share of the photos people actually attach. Sending one
 # through unconverted is not an option — it is not on the API's list, and the
 # failure is a rejected request rather than a degraded answer.
+#
+# AVIF is here for the same reason and was found the same way: it is what
+# Chrome's "Copy image" and a growing number of sites hand you, the uploads
+# config already records it as ``image/avif`` (``uploads/config.py``), and it is
+# NOT on the API's list. Left out of both sets it fell through to the extraction
+# path, where an image-only AVIF has no text to give — so the model was handed
+# the container's own boxes and answered by describing them: "I can see the file
+# container metadata (AVIF, single still frame, roughly 246x56 based on the ispe
+# box), but the actual pixel content is AV1-compressed and I can't decode it."
+# That is a correct report of what it was given, which is what makes it the
+# clearest possible statement of the bug.
 _TRANSCODE_TO_PNG_MIMES: frozenset[str] = frozenset(
-    {"image/heic", "image/heif", "image/tiff", "image/bmp"}
+    {"image/avif", "image/heic", "image/heif", "image/tiff", "image/bmp"}
 )
 
 
@@ -2846,7 +2857,17 @@ def _to_png(raw: bytes, *, mime: str) -> bytes:
 
     from PIL import Image
 
-    if mime in {"image/heic", "image/heif"}:
+    if mime == "image/avif":
+        # Pillow decodes AVIF natively from 11.3 on (``features.check("avif")``
+        # is True on the locked 12.2), so there is no opener to register here.
+        # The declared floor is still ``pillow>=10.0.0``, which predates that
+        # support: a from-source install resolving an older Pillow raises
+        # UnidentifiedImageError and the caller drops this one file quietly, the
+        # same shape as every other unreadable attachment. Raising the floor is
+        # a lockfile change and is left to its own PR rather than smuggled in
+        # here.
+        pass
+    elif mime in {"image/heic", "image/heif"}:
         # Pillow has no native HEIF decoder (PIL.features.check("heif") is False
         # on Pillow 12.2); without the opener this raises UnidentifiedImageError.
         # Same registration ``extraction/local.py`` does, for the same reason.
