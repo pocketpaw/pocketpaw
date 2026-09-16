@@ -202,7 +202,7 @@ def _resolve_override_value(catalog_value: int | None, override: int | str | Non
 
 
 def _apply_overrides(
-    entitlements: Entitlements, overrides: "WorkspaceOverrides | None"
+    entitlements: Entitlements, overrides: WorkspaceOverrides | None
 ) -> Entitlements:
     """Overlay a workspace's overrides onto its catalog-resolved entitlements.
 
@@ -235,17 +235,23 @@ def _apply_overrides(
 
     return dataclasses.replace(
         entitlements,
-        monthly_ceiling=_resolve_override_value(entitlements.monthly_ceiling, overrides.monthly_ceiling),
+        monthly_ceiling=_resolve_override_value(
+            entitlements.monthly_ceiling, overrides.monthly_ceiling
+        ),
         max_seats=_resolve_override_value(entitlements.max_seats, overrides.max_seats),
         max_pockets=_resolve_override_value(entitlements.max_pockets, overrides.max_pockets),
-        max_connectors=_resolve_override_value(entitlements.max_connectors, overrides.max_connectors),
+        max_connectors=_resolve_override_value(
+            entitlements.max_connectors, overrides.max_connectors
+        ),
         max_call_seconds_per_day=_resolve_override_value(
             entitlements.max_call_seconds_per_day, overrides.max_call_seconds_per_day
         ),
         max_storage_bytes=_resolve_override_value(
             entitlements.max_storage_bytes, overrides.max_storage_bytes
         ),
-        included_sites=_resolve_override_value(entitlements.included_sites, overrides.included_sites),
+        included_sites=_resolve_override_value(
+            entitlements.included_sites, overrides.included_sites
+        ),
     )
 
 

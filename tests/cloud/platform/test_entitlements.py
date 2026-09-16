@@ -68,7 +68,9 @@ async def test_read_reports_catalog_resolved_and_no_override(mongo_db) -> None:
     operator = await _operator("support")
     ws = await _workspace(plan="free")
 
-    out = await routes.get_entitlements(workspace_id=str(ws.id), request=_request(), operator=operator)
+    out = await routes.get_entitlements(
+        workspace_id=str(ws.id), request=_request(), operator=operator
+    )
 
     assert out.workspace_id == str(ws.id)
     assert out.plan == "free"
@@ -164,7 +166,9 @@ async def test_write_records_an_attempted_then_applied_audit_row(mongo_db) -> No
     ws = await _workspace()
 
     body = routes.OverridesWriteIn(max_pockets=500, reason="Bulk import for a pilot")
-    await routes.set_overrides(workspace_id=str(ws.id), body=body, request=_request(), operator=operator)
+    await routes.set_overrides(
+        workspace_id=str(ws.id), body=body, request=_request(), operator=operator
+    )
 
     rows = await PlatformAuditEvent.find_all().to_list()
     assert len(rows) == 1
@@ -285,7 +289,9 @@ async def test_expired_override_reads_back_as_absent(mongo_db) -> None:
         operator=operator,
     )
 
-    out = await routes.get_entitlements(workspace_id=str(ws.id), request=_request(), operator=operator)
+    out = await routes.get_entitlements(
+        workspace_id=str(ws.id), request=_request(), operator=operator
+    )
     assert out.overrides is None
     assert out.resolved.max_seats == 0
 

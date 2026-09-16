@@ -191,8 +191,7 @@ from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
 from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
-from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides
-from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
+from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides, WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
