@@ -7,6 +7,14 @@
 # the workspace tag is impossible to forget — constructing a ``Person``
 # without one is a TypeError, not a silent leak.
 #
+# Changes: 2026-08-05 (feat/coupling-person-freshness, T-2) — added
+# ``SOURCE_MEMBERSHIP``, the provenance marker for a Person materialized
+# from live membership data rather than an invite's admin context: the
+# workspace owner at create, a pre-existing member lazily backfilled on a
+# ``get_person`` miss, or a role-change refresh for a member who never had
+# a Person. Distinguishes "seeded by an inviting admin" from "derived from
+# the membership record itself".
+#
 # STANDALONE by design: this models *identity* (who the member is), a
 # different axis from the per-pocket agent-policy surface profile
 # (``PocketSurfaceProfile`` / entity-pocket-profile work). No import of,
@@ -32,6 +40,13 @@ PERSON_TYPE_NAME = "Person"
 # the property bag (``source``) so a reader that only has the projected
 # object — not the journal event — can still tell where the row came from.
 SOURCE_ADMIN_CONTEXT = "admin_context"
+
+# Provenance marker for a Person materialized from live membership data
+# (no invite involved): the workspace owner at workspace-create, a lazy
+# backfill on a ``get_person`` miss, or a role-change refresh for a member
+# who never had a Person. ``invited_by`` is empty for these rows — nobody
+# invited them; the membership record itself is the source.
+SOURCE_MEMBERSHIP = "membership"
 
 
 @dataclass(frozen=True)
@@ -109,5 +124,6 @@ __all__ = [
     "PERSON_TYPE_ID",
     "PERSON_TYPE_NAME",
     "SOURCE_ADMIN_CONTEXT",
+    "SOURCE_MEMBERSHIP",
     "Person",
 ]
