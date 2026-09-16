@@ -124,8 +124,25 @@
 # ``test_every_registered_edit_tool_is_named_by_its_refine_branch`` fails when a
 # REGISTERED tool goes unnamed, where the existing gate only failed when a NAMED
 # tool was unregistered.
+# Updated: 2026-09-16 (feat/sites-inspo-design-research) — five tests at the
+# BOTTOM pin `PHASE 1b`, the create-preamble step that grounds the design
+# direction in an archive of real shipped pages. They run the gate in BOTH
+# directions, which is the point: absent by default (the control — an external
+# MCP server is opt-in per deploy, so an unconditional block would command a tool
+# most installs do not have), present once `POCKETPAW_SITES_MCP_SERVERS` grants
+# it, and absent again when the setting names a DIFFERENT server. The other two
+# pin what keeps a reference archive from flattening every site: the embedded
+# design system still outranks it on any visual value, and the rotation ban
+# survives it. `_INSPO_TOOLS` records that server's real tool names so the step
+# cannot drift into naming one that does not exist — the external-server
+# analogue of `test_every_tool_a_refine_branch_names_is_a_registered_tool`,
+# which cannot help here because an external server's tools are unknown until
+# the client connects.
 
 from __future__ import annotations
+
+import contextlib
+import re
 
 import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
@@ -2044,3 +2061,167 @@ async def test_html_create_routes_follow_up_changes_to_the_edit_tool() -> None:
     assert "SAME pocket_id" in preamble
     # Create is still the FIRST thing named — this is a create preamble.
     assert preamble.index("create_html_site") < preamble.index("edit_html_file")
+
+
+# ── PHASE 1b: live design research (feat/sites-inspo-design-research) ───────
+#
+# Added 2026-09-16. `_create_preamble` can tell the agent to ground its direction
+# in an archive of real shipped pages, via the EXTERNAL `inspo` MCP server. The
+# step is opt-in per deploy and these pin the two halves that must not drift:
+# the prompt appears ONLY when the grant that makes the tools reachable is
+# present, and it names ONLY tools that server actually exposes.
+
+
+# The live tool surface of https://inspomcp.dev/api/mcp, read off a `tools/list`
+# on 2026-09-16 (server build `hosted-85acb10`). Recorded rather than fetched
+# because a unit test must not depend on someone else's uptime — and because a
+# name DISAPPEARING upstream should be found by a human reading a failure here,
+# not papered over by a live call that returns the new truth.
+_INSPO_TOOLS: frozenset[str] = frozenset(
+    {
+        "recommend",
+        "search_screens",
+        "get_screen",
+        "get_design_system",
+        "find_similar",
+        "compare",
+        "find_by_color",
+        "find_examples_for_macrostructure",
+        "list_collections",
+        "get_collection",
+        "get_filters",
+        "get_site_pages",
+        "find_components",
+        "find_reference_components",
+        "get_reference_jsx",
+    }
+)
+
+
+@contextlib.contextmanager
+def _sites_mcp_servers(monkeypatch, value: str):
+    """Run the body with ``POCKETPAW_SITES_MCP_SERVERS`` set to ``value``.
+
+    The settings object is memoized, so the env var ALONE changes nothing — and
+    ``get_settings.cache_clear()`` is the only form that works here, not
+    ``get_settings(force_reload=True)``: ``force_reload`` is part of the
+    ``lru_cache`` KEY, so the reload branch runs once and every later call with
+    the same argument is a cache hit on the stale object.
+
+    The registry's tool-id table is dropped too. ``_design_research_step`` does
+    not read it, but ``_external_sites_mcp_grants`` lives in that module and a
+    future memoization there would make these tests pass for the wrong reason.
+    """
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+
+    from pocketpaw import config as pp_config
+
+    monkeypatch.setenv("POCKETPAW_SITES_MCP_SERVERS", value)
+    reg._MCP_TOOL_IDS_CACHE = None
+    pp_config.get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        monkeypatch.delenv("POCKETPAW_SITES_MCP_SERVERS", raising=False)
+        pp_config.get_settings.cache_clear()
+        reg._MCP_TOOL_IDS_CACHE = None
+
+
+async def test_design_research_is_absent_until_the_deploy_grants_the_server() -> None:
+    """The CONTROL, and the reason this step is a function rather than prose.
+
+    An external MCP server is opt-in per deploy and empty by default. A preamble
+    that named `mcp__inspo__recommend` unconditionally would command a tool the
+    agent does not have on every install that never configured one — this
+    module's oldest rule, and the failure mode where the model improvises
+    silently instead of erroring.
+
+    THE MUTATION THAT BREAKS THIS: make `_design_research_step` return its text
+    unconditionally. Run: every engine's create preamble names a tool that
+    resolves to nothing.
+    """
+    for engine in (None, "ripple", "svelte", "react"):
+        preamble = await _preamble_for(engine)
+        assert "PHASE 1b" not in preamble
+        assert "inspo" not in preamble
+
+
+async def test_design_research_appears_when_the_server_is_granted(monkeypatch) -> None:
+    """The other half: with the grant in place the step IS there, in Phase 1.
+
+    Phase 1 is where the direction is chosen, so it is the last point a real
+    reference can still change the answer. By Phase 2 the tokens are being
+    written.
+    """
+    with _sites_mcp_servers(monkeypatch, "inspo"):
+        preamble = await _preamble_for(None)
+
+    assert "PHASE 1b" in preamble
+    assert "mcp__inspo__recommend" in preamble
+    # Before the tokens get locked, not after.
+    assert preamble.index("PHASE 1b") < preamble.index("LOCK THE TOKENS")
+
+
+async def test_design_research_only_names_tools_the_server_exposes(monkeypatch) -> None:
+    """Every `mcp__inspo__<tool>` in the step is a tool that server really has.
+
+    The sibling of `test_every_tool_a_refine_branch_names_is_a_registered_tool`,
+    for a server whose tools are NOT registered in-process and so cannot be
+    enumerated at runtime — an external server's names are known only after the
+    client connects. `_INSPO_TOOLS` is that list, recorded.
+
+    THE MUTATION THAT BREAKS THIS: name a plausible-but-absent tool in the step
+    (`mcp__inspo__search_sites`, say). Run: the agent is told to call something
+    that does not exist and reports the capability as missing.
+    """
+    with _sites_mcp_servers(monkeypatch, "inspo"):
+        step = sites_handler._design_research_step()
+
+    named = set(re.findall(r"mcp__inspo__(\w+)", step))
+    assert named, "the step named no tools at all — it cannot be doing its job"
+    unknown = named - _INSPO_TOOLS
+    assert not unknown, (
+        f"the research step names {sorted(unknown)}, which the inspo server does "
+        "not expose — the agent will be told to call a tool that is not there"
+    )
+
+
+async def test_granting_another_server_does_not_emit_the_inspo_step(monkeypatch) -> None:
+    """The grant is per-SERVER, so the step keys on the server it names.
+
+    A deploy that grants `refero` for design research has not granted `inspo`,
+    and the preamble must not describe one server's tools because a different
+    one is configured.
+    """
+    with _sites_mcp_servers(monkeypatch, "refero"):
+        preamble = await _preamble_for(None)
+
+    assert "inspo" not in preamble
+    assert "PHASE 1b" not in preamble
+
+
+async def test_design_research_keeps_the_design_system_and_the_rotation_ban(
+    monkeypatch,
+) -> None:
+    """The two rails that stop a reference archive from flattening every site.
+
+    An archive returns the SAME exemplars for the same brief, so an unqualified
+    "build what they built" points straight at the repetition Phase 1 exists to
+    prevent — a reference that outranks the embedded system makes the
+    homogenization worse than having no reference at all.
+
+    THE MUTATION THAT BREAKS THIS: delete the precedence clause. Run: nothing
+    fails, every dentist brief converges on the same returned exemplar, and the
+    regression is invisible until a human looks at two sites side by side.
+    """
+    with _sites_mcp_servers(monkeypatch, "inspo"):
+        step = sites_handler._design_research_step()
+
+    lower = step.lower()
+    # The embedded system still wins on any visual value.
+    assert "does not outrank the embedded design system" in lower
+    assert "wholesale" in lower  # never lift a palette/font stack off a reference
+    # And the rotation ban survives it.
+    assert "rotation ban" in lower
+    # Bounded: this is a network call on someone else's service.
+    assert "one round" in lower

@@ -10,6 +10,15 @@ which maps a standard ``.mcp.json`` server spec (``{command, args, env,
 type, url, ...}``) to an ``MCPServerConfig``. Mirrors ``preset_to_config``'s
 field mapping so the plugin installer and the preset catalog stay in sync
 on transport-name normalisation.
+Updated: 2026-09-16 (feat/sites-inspo-design-research) — added the ``inspo``
+design preset, an unauthenticated remote archive of real shipped pages that the
+/sites authoring agent can consult before it locks a site's tokens. Its ``id``
+is coupled to ``POCKETPAW_SITES_MCP_SERVERS`` and to the /sites preamble's
+``_DESIGN_RESEARCH_SERVER``: ``preset_to_config`` writes the id as the server
+NAME, and that name is what the surface grant matches. Renaming it breaks the
+feature silently, because an unmatched grant is inert by design —
+``test_inspo_preset_installs_under_the_name_the_sites_grant_expects`` is what
+turns that silence into a failure.
 """
 
 from __future__ import annotations
@@ -681,6 +690,33 @@ _PRESETS: list[MCPPreset] = [
         command="npx",
         args=["-y", "@canva/cli@latest", "mcp"],
         docs_url="https://www.canva.dev/docs/apps/mcp-server/",
+    ),
+    # Design research for the /sites authoring agent. ``id`` is load-bearing:
+    # ``preset_to_config`` writes it as ``MCPServerConfig.name``, and that name
+    # is what ``POCKETPAW_SITES_MCP_SERVERS=inspo`` grants to the /sites surface
+    # (``surface_registry._external_sites_mcp_grants``). Renaming the id without
+    # the setting silently un-grants it.
+    #
+    # No ``env_keys`` and no ``oauth`` because the server genuinely takes
+    # neither — it is free, hosted and unauthenticated, MIT-licensed, and every
+    # tool on it is read-only. Installing it therefore needs no secret from the
+    # operator, which is the whole reason it can be a one-click preset.
+    #
+    # Installing it here only REGISTERS the server. The /sites step that uses it
+    # stays dark until the grant names it, and the two are deliberately separate:
+    # an external server registered on a deploy is visible to any surface that
+    # does not pin an allow-list, so "register" and "let /sites act on it" are
+    # different decisions and should be two switches.
+    MCPPreset(
+        id="inspo",
+        name="Inspo",
+        description="Real shipped websites as design reference — palettes, type, page structure",
+        icon="layout-template",
+        category="design",
+        package="",
+        transport="http",
+        url="https://inspomcp.dev/api/mcp",
+        docs_url="https://github.com/Nutlope/inspo",
     ),
     # ── Communication ────────────────────────────────────────────────────
     MCPPreset(

@@ -415,6 +415,26 @@
 # vocabulary is how the agent thinks, and reading it out produced the same
 # sentence on every site, which is the one thing the user can tell is a template.
 #
+# Changes: 2026-09-16 (feat/sites-inspo-design-research) — `_create_preamble`
+# gains PHASE 1b, a grounding step that lets the agent consult a live archive of
+# real shipped pages before it locks tokens. `pocketpaw-design-taste` and the
+# embedded CRAFT SYSTEM are a METHOD and a set of prohibitions; what this surface
+# had no source for was EVIDENCE — what pages in this category actually do — and
+# an archive is that source.
+#
+# The step is CONDITIONAL, via `_design_research_step`, on the same
+# `POCKETPAW_SITES_MCP_SERVERS` grant that makes the tools reachable
+# (fix/surface-external-mcp-grant). Both halves read one setting, so a deploy
+# that has not opted in gets a preamble byte-identical to today's rather than one
+# commanding `mcp__inspo__recommend` into the void — this module's oldest rule,
+# and the defect the refine-engine fork above was written to undo.
+#
+# What it does NOT do is let the reference win. On any visual VALUE the embedded
+# DESIGN SYSTEM still outranks it, and the rotation ban still binds — an archive
+# answers the same brief the same way every time, so "build what they built" is a
+# homogenizer pointed at the exact failure Phase 1 exists to prevent. The step
+# takes composition and leaves identity alone.
+#
 
 from __future__ import annotations
 
@@ -900,6 +920,105 @@ def _design_skills_note(mode: str) -> str:
     )
 
 
+# The EXTERNAL MCP server that carries live design research, named the way it is
+# named in ``~/.pocketpaw/mcp_servers.json`` on a deploy that configured it.
+# ``inspo`` (https://inspomcp.dev/api/mcp, MIT, unauthenticated) indexes ~2,300
+# captured pages across ~830 shipped sites, each with a DESIGN.md extracted from
+# the live DOM: role-tagged palette, type ramp, spacing scale, macrostructure.
+_DESIGN_RESEARCH_SERVER = "inspo"
+
+
+def _design_research_step() -> str:
+    """The PHASE 1 grounding step — EMPTY unless this deploy granted the server.
+
+    Gated on the SAME setting that makes the tools reachable
+    (``POCKETPAW_SITES_MCP_SERVERS``, read through
+    ``surface_registry._external_sites_mcp_grants``), because the alternative is
+    the defect this module already has a rule against: per the module header and
+    pocketpaw/CLAUDE.md, "The prompt may not command a tool the agent doesn't
+    have". An external server is opt-in per deploy and empty by default, so an
+    UNCONDITIONAL block here would command ``mcp__inspo__recommend`` on every
+    install that never configured it — the agent then improvises silently, which
+    is worse than not having the step at all. One setting drives both halves, so
+    they cannot drift apart.
+
+    The import is LOCAL because ``surface_registry`` imports this module
+    (``create_design_skill_names``); at module scope this would be a cycle.
+
+    Not a new cache key. The setting is process-global and read once per process
+    downstream, so create stays a pure function of ``meta`` and keeps answering
+    ``meta_key`` (see ``build_preamble``'s keying rules).
+
+    WHY IT SITS IN PHASE 1 AND NOT PHASE 2: it is evidence for the direction,
+    not a substitute for choosing one. Phase 1 commits to an aesthetic family and
+    is where a real reference can still change the answer; by Phase 2 the tokens
+    are being written and a late reference only muddies them.
+
+    WHAT IT DELIBERATELY DOES NOT SAY: "match the reference." The two rules this
+    surface would otherwise lose to it are the ROTATION ban (two similar briefs
+    must not resolve to the same page — and an archive queried with the same
+    brief returns the same exemplars, so a naive "do what they did" makes the
+    homogenization worse, not better) and DESIGN SYSTEM PRECEDENCE (the embedded
+    system outranks every other source on a visual VALUE — the same precedence
+    ``_design_skills_note`` states for skills). So the step takes COMPOSITION —
+    which sections, in what order, at what fold — and leaves the palette,
+    typography and tokens to the system that is already in context. The server's
+    own instructions concede exactly this: "If the project's own conventions and
+    Inspo disagree, the project wins."
+
+    TEXT, NOT PICTURES: the archive's screenshots do not reach most of our model
+    backends, and the tools named here are the ones whose value is a STRING the
+    agent can act on. ``get_design_system`` returns a DESIGN.md; ``recommend``
+    returns a macrostructure name plus exemplar slugs. Naming an image tool would
+    promise the agent an eye it does not have on this path.
+    """
+    try:
+        from pocketpaw_ee.cloud.surface.surface_registry import _external_sites_mcp_grants
+
+        granted = f"mcp__{_DESIGN_RESEARCH_SERVER}" in _external_sites_mcp_grants()
+    except Exception:  # noqa: BLE001 — a research step must never break the preamble
+        return ""
+    if not granted:
+        return ""
+
+    server = _DESIGN_RESEARCH_SERVER
+    return (
+        "\n"
+        "PHASE 1b — GROUND THE DIRECTION IN REAL SITES (one call, then move on).\n"
+        f"You have `mcp__{server}__recommend` — an archive of real shipped pages, "
+        "not a generator. Call it ONCE with the brief in plain words after you "
+        "have committed to a direction in Phase 1, and read what comes back as "
+        "EVIDENCE for how pages like this one are actually built: which "
+        "macrostructure they use, which sections they run and in what order, what "
+        "carries the fold. Take THAT. "
+        f"`mcp__{server}__get_design_system` on a returned slug is worth one "
+        "follow-up call when you want to see how a real page relates its type "
+        "sizes and where its accent is actually spent — read the relationships, "
+        "not the hex values. "
+        f"`mcp__{server}__get_filters` lists the accepted filter values if you "
+        "need to narrow a search.\n"
+        "THE LIMITS ON IT, which are the whole reason it helps rather than "
+        "flattens:\n"
+        "- It does NOT outrank the embedded DESIGN SYSTEM. On any visual VALUE — "
+        "palette, typographic pairing, ground, radius, motion — the DESIGN SYSTEM "
+        "wins and the reference loses. Never lift a palette or a font stack "
+        "wholesale off a returned site.\n"
+        "- It does NOT relax the ROTATION ban. The same brief returns the same "
+        "exemplars every time, so copying what comes back is how two similar "
+        "briefs end up identical — the exact failure Phase 1 just told you to "
+        "avoid. The reference informs the STRUCTURE; you still rotate the "
+        "identity.\n"
+        "- These are real shipped pages and plenty of them break rules a linter "
+        "would flag. Take their composition, not their compliance: the accessible "
+        "contrast floors, the em-dash ban and the craft rules in this message all "
+        "still bind.\n"
+        "- ONE round. It is a network call on someone else's service, and it is "
+        "not free latency for the user. Two calls maximum, then design. If it "
+        "errors or returns nothing, say nothing about it and proceed on your own "
+        "inference — the ROBUSTNESS rule below covers this tool too.\n"
+    )
+
+
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the /sites surface preamble.
 
@@ -1300,6 +1419,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "Then go — do NOT ask the user to pick the look. If "
         "the user already named a style or brand, honor it. Rotate the identity "
         "and palette so two similar briefs never look identical.\n"
+        # EMPTY on any deploy that has not granted the design-research server, so
+        # this interpolates blind and Phase 1 runs straight into Phase 2 exactly
+        # as it did before. See `_design_research_step`.
+        f"{_design_research_step()}"
         "\n"
         "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM and CRAFT "
         "SYSTEM throughout).\n"
