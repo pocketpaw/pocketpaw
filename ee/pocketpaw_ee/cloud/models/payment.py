@@ -28,6 +28,12 @@
 #   clawback total and the deliveries already applied to it) and a
 #   ``(gateway, gateway_ref)`` index, because the reversal join runs through
 #   ``payment_id`` and was otherwise a collection scan.
+# Updated 2026-09-16 (feat/platform-stats-revenue, chunk 9) — added a
+#   ``createdAt`` index. The revenue screen's ``summary``/``series`` reads
+#   are platform-wide time ranges with no workspace term (errata C1 in
+#   2026-09-15-paw-admin-prd-corrections.md caught the master PRD asking for
+#   the wrong index — a workspace-prefixed one on Subscription — and missed
+#   this doc entirely).
 
 from __future__ import annotations
 
@@ -102,4 +108,12 @@ class Payment(TimestampedDocument):
                 [("gateway", 1), ("gateway_ref", 1)],
                 name="ix_gateway_ref",
             ),
+            # Platform revenue reads (chunk 9, Paw Admin PRD) are time-ranged
+            # and carry no workspace term — ``summary``/``series`` both
+            # ``$match`` on ``createdAt`` alone. Without this index that is a
+            # full collection scan; see the corrections doc (errata C1), which
+            # found this missing entirely (the PRD only asked for a
+            # workspace-prefixed index on Subscription, which this document
+            # does not even have).
+            IndexModel([("createdAt", 1)], name="ix_created_at"),
         ]

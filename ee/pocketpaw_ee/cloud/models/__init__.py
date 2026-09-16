@@ -258,6 +258,7 @@ from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
+from pocketpaw_ee.cloud.models.platform_rollup import PlatformDailyRollup
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
@@ -628,6 +629,10 @@ def get_all_documents():
         WorkspaceSensePreference,
         AuditEvent,
         PlatformAuditEvent,
+        # Platform-wide per-tenant daily spend rollup (chunk 8, Paw Admin
+        # PRD). Read by ee.cloud.platform.stats; nothing writes it in this
+        # PR (the nightly backfill job is a follow-up — see stats.py).
+        PlatformDailyRollup,
         AuditWebhook,
         AuthSession,
         APIKey,
