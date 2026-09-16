@@ -33,6 +33,18 @@
 # guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
 # kind — resolving the design's open question (keep the enum + assert).
 #
+# Changes: 2026-09-15 (fix/surface-external-mcp-grant) — /sites can be granted
+# an EXTERNAL MCP server, scoped to that surface alone, via
+# ``POCKETPAW_SITES_MCP_SERVERS`` (comma-separated, empty by default). The grant
+# is a BARE ``mcp__<server>`` token because an external server's tool names are
+# not known until the client connects, so ``_collect_mcp_tool_ids`` allow-lists
+# such a server wholesale with that token and the allow set is compared to it by
+# exact string. The alternative — ``claude_sdk.ALWAYS_ALLOWED_MCP_SERVERS`` —
+# would hand the server to EVERY surface, which is not what "let /sites do design
+# research" should mean. ``_external_sites_mcp_grants`` deliberately does not
+# validate names against ``load_mcp_config()``: an unmatched grant is already
+# inert, and validating would let an optional integration break profile
+# resolution.
 # Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — registered the SHIP
 # surface (/ship — the managed-deploy control plane). Its handler
 # (``ship.build_preamble``) joins the handler-import list + the ``SURFACES`` row,
@@ -509,6 +521,38 @@ class _McpToolIds(NamedTuple):
 _MCP_TOOL_IDS_CACHE: _McpToolIds | None = None
 
 
+def _external_sites_mcp_grants() -> frozenset[str]:
+    """Bare ``mcp__<server>`` grants for the servers /sites is allowed to call.
+
+    Reads ``POCKETPAW_SITES_MCP_SERVERS`` (comma-separated). Empty by default,
+    so this is a no-op unless a deploy opts in.
+
+    The BARE token is the point. An external server's tool names are unknown
+    until the client connects, so ``claude_sdk._collect_mcp_tool_ids``
+    allow-lists such a server wholesale as ``mcp__<server>`` with no tool
+    segment — and the /sites allow-list is compared against ``allowed_tools`` by
+    exact string, so emitting the same token here is what lets it through, and
+    lets it through on THIS surface only. The alternative,
+    ``ALWAYS_ALLOWED_MCP_SERVERS``, would grant the server to every surface.
+
+    A name that matches no configured server is deliberately NOT validated
+    against ``load_mcp_config()``: an unmatched grant is already inert (the
+    token never appears in ``allowed_tools``, so nothing passes), and
+    validating here would couple surface resolution to the MCP config file and
+    give an optional integration a way to break profile resolution.
+
+    Read once per process — the caller memoizes into ``_MCP_TOOL_IDS_CACHE`` —
+    so changing the setting needs a restart, like the rest of this table.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        raw = getattr(get_settings(), "sites_mcp_servers", "") or ""
+    except Exception:  # noqa: BLE001 — never let config break profile resolution
+        return frozenset()
+    return frozenset(f"mcp__{name.strip()}" for name in raw.split(",") if name.strip())
+
+
 def _load_mcp_tool_ids() -> _McpToolIds:
     """Load (or memoize) the per-mode MCP allow-lists from the EE agent layer.
 
@@ -562,6 +606,9 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # follow-up turn ("use the brief I sent") has no way back to it —
             # this list is a hard whitelist, so ambient is not enough here.
             | frozenset(FILES_TOOL_IDS)
+            # Opt-in EXTERNAL servers (``POCKETPAW_SITES_MCP_SERVERS``), e.g.
+            # ``refero`` for live design research. Empty by default.
+            | _external_sites_mcp_grants()
         )
 
         return _McpToolIds(

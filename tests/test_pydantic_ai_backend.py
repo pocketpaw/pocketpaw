@@ -3570,3 +3570,108 @@ async def test_the_words_of_an_image_turn_survive_into_the_next_one():
     await _collect(backend, "and now?", session_key="ws1:page2")
 
     assert "is this triangle right?" in seen["messages"]
+
+
+# ── server-level MCP grants (fix/surface-external-mcp-grant, 2026-09-15) ────
+#
+# An EXTERNAL MCP server's tool names are not known until the client connects,
+# so ``claude_sdk._collect_mcp_tool_ids`` allow-lists one wholesale with a BARE
+# ``mcp__<server>`` id carrying no tool segment. This backend used to expand
+# that id through ``_normalize_tool_id`` into plain ``refero`` — matching no
+# tool the server exposes — so the SDK backend admitted every tool of a granted
+# server while this one silently dropped all of them.
+#
+# That asymmetry landed in the worst possible place: per ``_gate_mcp_toolsets``'
+# own docstring, THIS backend's MCP toolsets are "the user's EXTERNAL configured
+# servers". The grant was a no-op exactly where external servers live.
+
+
+class _FakeToolDef:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeToolset:
+    """Stands in for a ``PrefixedToolset(MCPToolset(client), cfg.name)``.
+
+    External servers are wrapped in ``PrefixedToolset`` with the server name, so
+    a tool arrives named ``<server>_<tool>`` — the same shape
+    ``_normalize_tool_id`` produces for a fully-qualified id. These names are
+    spelled that way on purpose; a flat ``search_styles`` would not exercise the
+    prefix match at all.
+    """
+
+    _NAMES = (
+        "refero_search_styles",
+        "refero_get_style",
+        "reference_search",  # shares a PREFIX STRING with "refero" but is not it
+        "fabric_query",
+        "sites_manager_publish",
+    )
+
+    def __init__(self) -> None:
+        # Starts as "everything kept". ``_gate_mcp_toolsets`` returns the
+        # toolsets UNTOUCHED when there is nothing to apply, so ``filtered`` is
+        # never called on that path — an empty start would read that no-op as
+        # "dropped everything".
+        self.kept: list[str] = list(self._NAMES)
+
+    def filtered(self, predicate):
+        self.kept = [n for n in self._NAMES if predicate(None, _FakeToolDef(n))]
+        return self
+
+
+def _gate(allow, *, deny=frozenset(), exclusive=False) -> list[str]:
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    ts = _FakeToolset()
+    PydanticAIBackend._gate_mcp_toolsets([ts], deny, allow, exclusive)
+    return ts.kept
+
+
+def test_a_bare_server_grant_admits_that_servers_tools():
+    """``mcp__refero`` means "all of refero's tools" — the SDK convention."""
+    assert _gate(frozenset({"mcp__refero"})) == ["refero_search_styles", "refero_get_style"]
+
+
+def test_a_bare_server_grant_admits_only_the_server_it_names():
+    """The control that makes the test above worth having.
+
+    ``reference_search`` is in the list because ``"reference_search".startswith
+    ("refero")`` is True — a naive prefix check without the separator would
+    admit another server's tools. ``fabric_query`` proves an unrelated server
+    stays out.
+    """
+    kept = _gate(frozenset({"mcp__refero"}))
+    assert "reference_search" not in kept
+    assert "fabric_query" not in kept
+
+
+def test_without_the_grant_an_external_servers_tools_are_dropped():
+    """The pre-fix behaviour, pinned so the grant cannot quietly become a no-op.
+
+    A restrictive allow set that does NOT name the server must still drop it —
+    otherwise the fix would have widened the gate rather than taught it a new
+    spelling.
+    """
+    assert _gate(frozenset({"mcp__pocketpaw_sites_manager__publish"})) == []
+
+
+def test_a_fully_qualified_id_still_matches_on_its_own():
+    """The existing spelling is untouched by the server-level branch."""
+    assert _gate(frozenset({"mcp__refero__search_styles"})) == ["refero_search_styles"]
+
+
+def test_no_allow_set_still_keeps_everything():
+    assert _gate(None) == list(_FakeToolset._NAMES)
+
+
+def test_deny_still_beats_a_server_grant():
+    """Deny is the hard boundary — a server grant must not resurrect a denied id."""
+    kept = _gate(frozenset({"mcp__refero"}), deny=frozenset({"refero_get_style"}))
+    assert kept == ["refero_search_styles"]
+
+
+def test_an_exclusive_turn_with_no_grant_drops_the_server():
+    """An exclusive turn caps to what it declared; declaring nothing keeps nothing."""
+    assert _gate(None, exclusive=True) == []
