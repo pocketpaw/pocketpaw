@@ -200,6 +200,40 @@
 # lives here rather than in the reader because the read cannot be fixed — an
 # absent field and a genuinely empty wallet are the same document — so refusing to
 # serve is the only answer that does not guess about money.
+# Changed 2026-09-16 (feat/platform-credits, chunk 6 of the Paw Admin PRD): four
+# additive changes for the new platform wallet/adjustment routes, all verified
+# against every existing call site before landing —
+#   * ``grant`` gained an ``amount_micro`` kwarg, mirroring ``debit``'s existing
+#     exactly-one-of-amount/amount_micro convention. Without it, a platform
+#     operator correcting a sub-credit discrepancy had no way to grant an exact
+#     micro amount — routing it through the whole-credit ``amount`` path
+#     truncates toward zero, so a 375_000-micro correction would silently grant
+#     0. Every existing caller (~90 call sites, production and test) passes
+#     ``amount`` explicitly, so this is fully backward compatible.
+#   * ``history`` gained an optional ``cause`` exact-match filter, for an
+#     operator scoping a wallet's ledger to just its platform adjustments.
+#     Default ``None`` preserves the existing query unchanged.
+#   * ``reconcile`` now returns a ``ReconcileResult(balance, redriven, voided)``
+#     instead of a bare balance int, so the platform reconcile route can report
+#     what the repair actually did rather than only its end state. Verified
+#     ZERO production callers before making this change; the 8 test call sites
+#     (tests/cloud/credits/test_ledger.py, test_micro_credit_migration.py) were
+#     updated in the same PR.
+#   * ``_entry_to_domain`` now carries ``applied``/``conditional`` onto the
+#     ``LedgerEntry`` domain object (verified as the sole construction site), so
+#     a platform wallet-history read can show an operator which entries are
+#     phantoms.
+#   * Added ``wallet_exists`` and ``unapplied_count`` — read-only helpers so the
+#     platform wallet-detail route can report "no wallet yet" and "N entries
+#     need reconcile" without any write.
+#   * Added ``find_by_key`` — a read-only lookup by ``(workspace,
+#     idempotency_key)``, so the platform adjust route can echo
+#     ``ledger_entry_id`` without importing ``models.credit`` itself.
+# ``debit``'s public signature was deliberately left untouched — see
+# ``ee/pocketpaw_ee/cloud/platform/credits.py`` for why (a replay signal is
+# derived from the pre-existing ``is_recorded`` instead), since changing it
+# would have touched revenue-critical call sites in billing/service.py,
+# llm_provisioning/service.py and metering/service.py outside this chunk's scope.
 
 from __future__ import annotations
 
@@ -223,6 +257,7 @@ from pocketpaw_ee.cloud.credits.domain import (
     GrantResult,
     LedgerEntry,
     ModelSpendRow,
+    ReconcileResult,
     credits_to_micro,
     micro_to_credits,
 )
@@ -252,6 +287,8 @@ def _entry_to_domain(doc: CreditLedgerEntry) -> LedgerEntry:
         ref=dict(doc.ref or {}),
         idempotency_key=doc.idempotency_key,
         created_at=getattr(doc, "createdAt", None),
+        applied=doc.applied,
+        conditional=doc.conditional,
     )
 
 
@@ -296,15 +333,23 @@ async def _emit_movement(entry: CreditLedgerEntry) -> None:
 
 async def grant(
     workspace: str,
-    amount: int,
-    cause: str,
-    idempotency_key: str,
+    amount: int | None = None,
+    cause: str = "",
+    idempotency_key: str = "",
     *,
+    amount_micro: int | None = None,
     member_id: str | None = None,
     ref: dict | None = None,
     kind: str = "grant",
 ) -> GrantResult:
-    """Add ``amount`` credits to the workspace wallet. Idempotent.
+    """Add credits to the workspace wallet. Idempotent.
+
+    Takes EITHER ``amount`` (whole credits, the original signature) or
+    ``amount_micro`` (micro-credits, 1_000_000 == 1 credit) — exactly one, same
+    convention as ``debit``. ``amount_micro`` exists for callers that must move
+    an exact sub-credit amount (chunk 6: a platform operator adjustment) — a
+    grant routed through the whole-credit ``amount`` path truncates toward zero,
+    so a 375_000-micro correction would silently become a no-op grant of 0.
 
     Returns a ``GrantResult`` of ``(balance, created)``. ``created`` is True when
     this call NEWLY applied the grant; a retried call with the same
@@ -316,17 +361,24 @@ async def grant(
     ``kind`` defaults to ``"grant"``; pass ``"genesis"`` to seed a fresh
     wallet's first credits (the ledger origin row).
 
-    ``amount`` is WHOLE credits and the returned balance is whole credits, both
-    unchanged. Grants are top-ups and plan allowances, which are priced in whole
-    credits by definition — nobody buys a millionth of one. The storage unit
-    underneath is micro-credits; the conversion happens here so no caller of this
-    function had to change.
+    The returned balance stays WHOLE credits so existing callers are unaffected.
+    Use ``balance_micro`` when you need the exact figure.
     """
-    # Rule 6 — validate at entry. Money-handling: an amount must be a positive
-    # integer (1 credit == $0.01) and the idempotency key must be present.
-    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
-        raise ValidationError("credits.invalid_amount", "Grant amount must be a positive integer")
-    amount_micro = credits_to_micro(amount)
+    # Rule 6 — validate at entry, exactly-one-of, mirroring ``debit``.
+    if (amount is None) == (amount_micro is None):
+        raise ValidationError(
+            "credits.invalid_amount", "Pass exactly one of amount or amount_micro"
+        )
+    if amount is not None:
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ValidationError(
+                "credits.invalid_amount", "Grant amount must be a positive integer"
+            )
+        amount_micro = credits_to_micro(amount)
+    if not isinstance(amount_micro, int) or isinstance(amount_micro, bool) or amount_micro <= 0:
+        raise ValidationError(
+            "credits.invalid_amount", "Grant amount_micro must be a positive integer"
+        )
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
     if not idempotency_key:
@@ -725,6 +777,55 @@ async def is_recorded(workspace: str, idempotency_key: str) -> bool:
     return existing is not None
 
 
+async def find_by_key(workspace: str, idempotency_key: str) -> LedgerEntry | None:
+    """The single ledger entry for this ``(workspace, idempotency_key)``, if any.
+
+    Read-only. Added for the platform adjust route (chunk 6): ``grant``/``debit``
+    report a balance but not the id of the row they wrote (or, on a replay, the
+    id of the row that already existed), and the route must echo
+    ``ledger_entry_id`` to the operator without importing ``models.credit``
+    directly — only this module may do that.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    if not idempotency_key:
+        return None
+    doc = await CreditLedgerEntry.find_one(
+        CreditLedgerEntry.workspace == workspace,
+        CreditLedgerEntry.idempotency_key == idempotency_key,
+    )
+    return _entry_to_domain(doc) if doc is not None else None
+
+
+async def wallet_exists(workspace: str) -> bool:
+    """Whether a ``CreditBalance`` row exists for this workspace.
+
+    Read-only. Added for the platform wallet-detail route (chunk 6): an
+    operator viewing a tenant that has never had a wallet provisioned needs to
+    see "no wallet yet" rather than a balance of 0 that reads as identical to
+    "an empty wallet".
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    doc = await CreditBalance.find_one(CreditBalance.workspace == workspace)
+    return doc is not None
+
+
+async def unapplied_count(workspace: str) -> int:
+    """How many ledger entries are stuck at ``applied is False`` right now.
+
+    Read-only signal for the platform wallet-detail route (chunk 6): an
+    operator deciding whether a workspace's wallet needs ``reconcile`` should
+    not have to run the (write, quiescent-only) repair just to find out.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    return await CreditLedgerEntry.find(
+        CreditLedgerEntry.workspace == workspace,
+        CreditLedgerEntry.applied == False,  # noqa: E712 — Beanie field equality, not `is`
+    ).count()
+
+
 async def sum_debits_by_cause(
     workspace: str,
     cause: str,
@@ -1018,6 +1119,7 @@ async def history(
     *,
     limit: int = 50,
     cursor: str | None = None,
+    cause: str | None = None,
 ) -> tuple[list[LedgerEntry], str | None]:
     """Page the workspace's ledger, newest first.
 
@@ -1026,12 +1128,18 @@ async def history(
     page. ``cursor`` is the last id from the previous page — only entries
     OLDER than it are returned (id is a monotonic ObjectId, so ``_id < cursor``
     is a stable "older than" predicate).
+
+    ``cause`` is an optional exact-match filter (e.g. a platform operator
+    scoping the wallet history to ``"platform.adjust"`` entries only). Additive:
+    the default ``None`` preserves every existing caller's behavior unchanged.
     """
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
     limit = max(1, min(int(limit), 200))
 
     query: dict[str, Any] = {"workspace": workspace}
+    if cause:
+        query["cause"] = cause
     if cursor:
         try:
             query["_id"] = {"$lt": PydanticObjectId(cursor)}
@@ -1046,7 +1154,7 @@ async def history(
     return [_entry_to_domain(d) for d in page], next_cursor
 
 
-async def reconcile(workspace: str) -> int:
+async def reconcile(workspace: str) -> ReconcileResult:
     """Re-drive unapplied ledger entries, then repair the CreditBalance doc.
 
     WARNING — MANUAL RECOVERY TOOL, RUN QUIESCENT ONLY (B4). This is an operator
@@ -1084,12 +1192,15 @@ async def reconcile(workspace: str) -> int:
        >= 0 — a legitimately negative balance (from ``allow_negative`` metered
        overage) is preserved as-is.
 
-    Returns the reconciled balance. Idempotent: a wallet with no phantoms and a
-    balance already in agreement is left untouched.
+    Returns a ``ReconcileResult`` of ``(balance, redriven, voided)``. Idempotent:
+    a wallet with no phantoms and a balance already in agreement returns
+    ``redriven=0, voided=0`` and is left untouched.
     """
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
 
+    redriven = 0
+    voided = 0
     coll = CreditBalance.get_pymongo_collection()
 
     # Phase 1 — re-drive every unapplied (phantom) entry, oldest first so the
@@ -1126,6 +1237,7 @@ async def reconcile(workspace: str) -> int:
                     int(entry.amount_delta_micro),
                 )
                 await entry.delete()
+                voided += 1
                 continue
         else:
             # Grant or allow_negative debit: unconditional $inc (upsert so a lost
@@ -1145,6 +1257,7 @@ async def reconcile(workspace: str) -> int:
         entry.balance_after_micro = int(updated["balance_micro"])
         entry.applied = True
         await entry.save()
+        redriven += 1
         logger.warning(
             "credits.reconcile: workspace=%s re-drove unapplied entry (key=%s, delta=%d) "
             "→ balance_after_micro=%d",
@@ -1175,7 +1288,7 @@ async def reconcile(workspace: str) -> int:
     if bal_doc is None:
         if computed == 0:
             # No wallet and no applied movements — nothing to repair.
-            return 0
+            return ReconcileResult(balance=0, redriven=redriven, voided=voided)
         # Applied entries exist but the balance row was lost — recreate it.
         await coll.update_one(
             {"workspace": workspace},
@@ -1192,7 +1305,9 @@ async def reconcile(workspace: str) -> int:
             workspace,
             computed,
         )
-        return micro_to_credits(computed)
+        return ReconcileResult(
+            balance=micro_to_credits(computed), redriven=redriven, voided=voided
+        )
 
     if int(bal_doc.balance_micro) != computed:
         logger.warning(
@@ -1208,7 +1323,7 @@ async def reconcile(workspace: str) -> int:
         )
     # The repair above works in micro end to end — that is what keeps the ledger
     # invariant exact. Only the reported figure is coarsened, for the caller.
-    return micro_to_credits(computed)
+    return ReconcileResult(balance=micro_to_credits(computed), redriven=redriven, voided=voided)
 
 
 # ---------------------------------------------------------------------------
@@ -1272,11 +1387,13 @@ async def verify_wallet_migrated() -> None:
 __all__ = [
     "GrantResult",
     "ModelSpendRow",
+    "ReconcileResult",
     "balance",
     "balance_micro",
     "check_balance",
     "check_quota",
     "debit",
+    "find_by_key",
     "grant",
     "history",
     "is_recorded",
@@ -1285,5 +1402,7 @@ __all__ = [
     "record_no_movement",
     "spend_by_model",
     "sum_debits_by_cause",
+    "unapplied_count",
     "verify_wallet_migrated",
+    "wallet_exists",
 ]
