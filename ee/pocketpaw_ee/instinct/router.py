@@ -2174,6 +2174,17 @@ async def bulk_approve_actions(
                 )
             continue
 
+        # TERRARIUM — a bulk-approved ``_world_spawn`` mints the child citizen,
+        # exactly like the single-approve hook (see its note: no chain emit).
+        try:
+            from pocketpaw_ee.terrarium import executor as terrarium_executor
+
+            if terrarium_executor.world_spawn_blob(action) is not None:
+                await terrarium_executor.execute_approved_spawn(action)
+                continue
+        except Exception:
+            logger.exception("bulk-approve terrarium world_spawn failed (non-fatal)")
+
         # BP-3 — a bulk-approved ``_artifact_change`` Action MERGES its candidate
         # (publish + deploy), exactly like the single-approve hook. Disposition
         # is always ``accepted`` (bulk-approve has no edit surface). The executor
@@ -3127,6 +3138,21 @@ async def approve_action(
             await mandate_executor.execute_approved_plan(approved, human_event_id=human_event_id)
         except Exception:
             logger.exception("belt_plan execution after approval failed (non-fatal)")
+
+    # TERRARIUM — an approved ``_world_spawn`` Action mints the child citizen.
+    # Reproduction is human-gated in season one: the citizen's ``spawn`` verb
+    # only filed this Action and left a zero-cost ``gate`` Event; the child is
+    # created HERE, on approval, and the executor re-validates the parent's
+    # balance and state at that moment. No Decision-Graph emit: terrarium does
+    # not open a chain on propose, so it must not close one on approve. Same
+    # best-effort, lazy-import, never-break-the-approve-response shape.
+    try:
+        from pocketpaw_ee.terrarium import executor as terrarium_executor
+
+        if terrarium_executor.world_spawn_blob(approved) is not None:
+            await terrarium_executor.execute_approved_spawn(approved)
+    except Exception:
+        logger.exception("terrarium world_spawn after approval failed (non-fatal)")
 
     # BP-3 — when the approved Action carries an ``_artifact_change`` blob, MERGE
     # the branch: promote the candidate version to published + (for pocket/site
