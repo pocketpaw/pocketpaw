@@ -15,6 +15,11 @@ never from the caller"). Two obligations follow, and both are asserted by
 Chunk 1 ships the two routes it owns: the operator's own identity, and the
 operator audit trail. Tenant, credits, entitlement, stats, revenue, model and
 settings routes arrive in their own chunks, each as a sub-router mounted here.
+
+Changed 2026-09-16 (feat/platform-credits, chunk 6): mounted ``credits_router``
+— the wallet read, ledger-history read, adjust and reconcile routes at
+``/workspaces/{workspace_id}/credits*``. Sorted alphabetically by module name
+alongside its siblings (credits < users < workspaces).
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from pydantic import BaseModel
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.platform.credits import router as credits_router
 from pocketpaw_ee.cloud.platform.users import router as users_router
 from pocketpaw_ee.cloud.platform.workspaces import router as workspaces_router
 
@@ -40,8 +46,9 @@ router = APIRouter(prefix="/platform", tags=["platform"])
 # so the guard-coverage test in tests/cloud/platform/test_platform_guard.py
 # reaches their routes too — a sub-router that forgot require_platform fails
 # there rather than shipping.
-router.include_router(workspaces_router)
+router.include_router(credits_router)
 router.include_router(users_router)
+router.include_router(workspaces_router)
 
 
 class PlatformIdentityOut(BaseModel):
