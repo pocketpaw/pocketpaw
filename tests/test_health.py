@@ -8,6 +8,7 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -584,6 +585,85 @@ class TestCheckLlmReachable:
         r = await _check_alt_provider_reachable(settings, "some_unsupported_provider")
         assert r.status == "warning"
         assert "not implemented" in r.message
+
+
+class TestCheckLitellmReachableUsesTheRealField:
+    """Regression for L1 (2026-09-15 paw-admin PRD corrections).
+
+    ``_check_litellm_reachable`` used to read ``settings.litellm_base_url``, a
+    field that has never existed on ``Settings`` (the real field is
+    ``litellm_api_base``). A ``getattr(..., default="")`` swallowed the
+    AttributeError, so the probe silently fell back to
+    ``http://localhost:4000`` on every deployment regardless of the operator's
+    actual LiteLLM configuration — a wrong-target health check with no error
+    anywhere. ``SimpleNamespace`` (unlike ``MagicMock``) has no such attribute
+    at all, so this test fails loudly against the old ``getattr`` line instead
+    of quietly probing a Mock.
+    """
+
+    @pytest.mark.asyncio
+    async def test_probes_litellm_api_base_not_localhost(self):
+        from pocketpaw.health.checks.connectivity import _check_litellm_reachable
+
+        settings = SimpleNamespace(
+            litellm_api_base="https://proxy.internal.example:4000",
+            litellm_api_key="sk-test-master-key",
+        )
+        captured: dict = {}
+
+        class _FakeResponse:
+            status_code = 200
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, headers=None):
+                captured["url"] = url
+                captured["headers"] = headers
+                return _FakeResponse()
+
+        with patch(
+            "httpx.AsyncClient",
+            return_value=_FakeClient(),
+        ):
+            result = await _check_litellm_reachable(settings)
+
+        assert captured["url"] == "https://proxy.internal.example:4000/health"
+        assert captured["headers"] == {"Authorization": "Bearer sk-test-master-key"}
+        assert result.status == "ok"
+
+    @pytest.mark.asyncio
+    async def test_no_key_sends_no_authorization_header(self):
+        from pocketpaw.health.checks.connectivity import _check_litellm_reachable
+
+        settings = SimpleNamespace(litellm_api_base="http://localhost:4000", litellm_api_key=None)
+        captured: dict = {}
+
+        class _FakeResponse:
+            status_code = 200
+
+        class _FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, headers=None):
+                captured["headers"] = headers
+                return _FakeResponse()
+
+        with patch(
+            "httpx.AsyncClient",
+            return_value=_FakeClient(),
+        ):
+            await _check_litellm_reachable(settings)
+
+        assert captured["headers"] == {}
 
 
 # =============================================================================
