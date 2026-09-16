@@ -2186,6 +2186,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /sites-design-research in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-design-research",
+      "keywords": [
+        "sites-design-research"
+      ],
+      "kind": "skill",
+      "name": "sites-design-research",
+      "narrative": "Ground a page in REAL shipped design systems before designing it, using the Refero research tools. Invoke when you are about to choose a visual direction and the brief gives you room to choose — a new landing page, a redesign, a \"make it look premium / editorial / technical\" ask, or a second site that must not resemble the first. It is the RESEARCH step that feeds `pocketpaw-design-taste`: this skill finds and locks a direction with evidence, that one builds the page from it. Also the honest answer to \"what should this look like?\" when the brief does not say. Do NOT invoke it for a copy edit, a single value change, or when the user supplied a design to match — there is nothing to research. Returns nothing when Refero is unconfigured, which is a normal outcome, not a failure.",
+      "requires": [],
+      "summary": "Ground a page in REAL shipped design systems before designing it, using the Refero research tools.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /sites-design-sources in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:sites-design-sources",
       "keywords": [
