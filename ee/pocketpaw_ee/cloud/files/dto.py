@@ -1,5 +1,13 @@
 """Public schemas for the files module.
 
+2026-09-16 (graph rebuild): ``FilesGraphResponse`` grew ``ghost_edges`` — the
+file that named each unresolved wikilink. ``ghosts`` was a bare name list, so
+the one fact that could attach a ghost to the graph was computed and thrown
+away, and the client had no way to draw it anywhere but floating. ``target`` is
+a ghost NAME, not a file id; it is kept parallel to ``edges`` rather than
+folded in so a client reading ``edges`` cannot mistake a name for an id.
+Defaults empty, so a client that predates it sees no change.
+
 2026-09-05 (files vault, feat/files-links): response models for the two link
 reads. ``FileLinksResponse`` (GET /files/{id}/links) carries the file's outgoing
 wikilink targets, resolved to a file where one exists, plus the files that
@@ -226,4 +234,5 @@ class FilesGraphResponse(BaseModel):
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
     ghosts: list[str] = Field(default_factory=list)
+    ghost_edges: list[GraphEdge] = Field(default_factory=list)
     truncated: bool = False

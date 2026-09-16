@@ -155,6 +155,28 @@ async def test_graph_nodes_edges_ghosts(monkeypatch, links_db):
     assert body["truncated"] is False
 
 
+async def test_graph_ghost_edges_name_the_file_that_linked(monkeypatch, links_db):
+    """A ghost is only drawable if the client knows who pointed at it."""
+    a = await _note("w1", "A.md", "[[Ghost]] [[ghost]]")
+    b = await _note("w1", "B.md", "[[Ghost]] [[Other]]")
+
+    body = _client(monkeypatch).get("/api/v1/files/graph").json()
+    assert body["ghosts"] == ["ghost", "other"]
+    # Deduped per (file, name) the way ``edges`` is — A named it twice.
+    assert sorted((e["source"], e["target"]) for e in body["ghost_edges"]) == sorted(
+        [(a, "ghost"), (b, "ghost"), (b, "other")]
+    )
+
+
+async def test_graph_ghost_edges_empty_when_everything_resolves(monkeypatch, links_db):
+    await _note("w1", "A.md", "[[B]]")
+    await _note("w1", "B.md")
+
+    body = _client(monkeypatch).get("/api/v1/files/graph").json()
+    assert body["ghosts"] == []
+    assert body["ghost_edges"] == []
+
+
 async def test_graph_truncates_at_cap(monkeypatch, links_db):
     for i in range(3):
         await _note("w1", f"N{i}.md", age_minutes=i)
