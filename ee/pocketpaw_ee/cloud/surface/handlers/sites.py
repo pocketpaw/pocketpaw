@@ -429,6 +429,25 @@
 # commanding `mcp__inspo__recommend` into the void — this module's oldest rule,
 # and the defect the refine-engine fork above was written to undo.
 #
+# Changes: 2026-09-16 (feat/sites-bundled-design-research) — PHASE 1b is now
+# UNCONDITIONAL, because the archive moved from an external MCP server to a
+# BUNDLED in-process one (`ee/agent/mcp_servers/inspo.py`, reaching this surface
+# via `INSPO_TOOL_IDS` in the /sites allow-list).
+#
+# The conditional above was correct for what it guarded and still wrong in
+# practice. An external server needs TWO switches — install it, then grant it —
+# both defaulting off and neither implying the other, so the first deploy of this
+# feature researched nothing, errored nowhere, and was indistinguishable from an
+# install that had never heard of it. Worse, the two could disagree: granted but
+# not installed put the instruction in the preamble with no tools behind it,
+# which is precisely the rule the conditional was written to honour. A bundled
+# server has no switches. The tools are there, so the preamble says so, the same
+# way it does for stock, palette and icons.
+#
+# Reachability is still not automatic: `sites_allow` is a hard whitelist and an
+# id absent from it is silently unreachable, so the preamble and the allow-list
+# are coupled by `test_the_research_step_names_only_tools_sites_can_reach`.
+#
 # What it does NOT do is let the reference win. On any visual VALUE the embedded
 # DESIGN SYSTEM still outranks it, and the rotation ban still binds — an archive
 # answers the same brief the same way every time, so "build what they built" is a
@@ -920,34 +939,35 @@ def _design_skills_note(mode: str) -> str:
     )
 
 
-# The EXTERNAL MCP server that carries live design research, named the way it is
-# named in ``~/.pocketpaw/mcp_servers.json`` on a deploy that configured it.
-# ``inspo`` (https://inspomcp.dev/api/mcp, MIT, unauthenticated) indexes ~2,300
-# captured pages across ~830 shipped sites, each with a DESIGN.md extracted from
-# the live DOM: role-tagged palette, type ramp, spacing scale, macrostructure.
-_DESIGN_RESEARCH_SERVER = "inspo"
+# The BUNDLED design-research server (``ee/agent/mcp_servers/inspo.py``), which
+# wraps an archive of ~2,300 captured pages across ~830 real shipped sites, each
+# with a DESIGN.md extracted from the live DOM: role-tagged palette, type ramp,
+# spacing scale, macrostructure. It is an ordinary in-process server like stock /
+# palette / icons — present on every deploy, carried onto this surface by
+# ``INSPO_TOOL_IDS`` in the /sites allow-list. Nothing to install, nothing to
+# grant, nothing to configure.
+_RESEARCH_TOOL = "mcp__pocketpaw_inspo__research_page_design"
+_REFERENCE_SYSTEM_TOOL = "mcp__pocketpaw_inspo__get_reference_design_system"
 
 
 def _design_research_step() -> str:
-    """The PHASE 1 grounding step — EMPTY unless this deploy granted the server.
+    """The PHASE 1 grounding step. Always on.
 
-    Gated on the SAME setting that makes the tools reachable
-    (``POCKETPAW_SITES_MCP_SERVERS``, read through
-    ``surface_registry._external_sites_mcp_grants``), because the alternative is
-    the defect this module already has a rule against: per the module header and
-    pocketpaw/CLAUDE.md, "The prompt may not command a tool the agent doesn't
-    have". An external server is opt-in per deploy and empty by default, so an
-    UNCONDITIONAL block here would command ``mcp__inspo__recommend`` on every
-    install that never configured it — the agent then improvises silently, which
-    is worse than not having the step at all. One setting drives both halves, so
-    they cannot drift apart.
+    UNCONDITIONAL, and that is the whole point of the rewrite. This first shipped
+    (#2204) gated on ``POCKETPAW_SITES_MCP_SERVERS`` because the archive was an
+    EXTERNAL MCP server, and an external server is opt-in per deploy — naming its
+    tools unconditionally would have commanded tools the agent might not have.
+    But that meant TWO switches, install and grant, both defaulting off and
+    neither implying the other. The first deploy therefore researched nothing,
+    reported nothing, and looked identical to a deploy that had never heard of
+    the feature. Bundling the server removes the question entirely: the tools
+    ship in-process like stock, palette and icons, so the preamble can name them
+    the way it names those.
 
-    The import is LOCAL because ``surface_registry`` imports this module
-    (``create_design_skill_names``); at module scope this would be a cycle.
-
-    Not a new cache key. The setting is process-global and read once per process
-    downstream, so create stays a pure function of ``meta`` and keeps answering
-    ``meta_key`` (see ``build_preamble``'s keying rules).
+    Reachability is still not automatic — ``INSPO_TOOL_IDS`` has to be in the
+    /sites allow-list in ``surface_registry``, because that list is a hard
+    whitelist and an id absent from it is silently unreachable. That coupling is
+    held by ``test_the_research_step_names_only_tools_sites_can_reach``.
 
     WHY IT SITS IN PHASE 1 AND NOT PHASE 2: it is evidence for the direction,
     not a substitute for choosing one. Phase 1 commits to an aesthetic family and
@@ -966,37 +986,24 @@ def _design_research_step() -> str:
     own instructions concede exactly this: "If the project's own conventions and
     Inspo disagree, the project wins."
 
-    TEXT, NOT PICTURES: the archive's screenshots do not reach most of our model
-    backends, and the tools named here are the ones whose value is a STRING the
-    agent can act on. ``get_design_system`` returns a DESIGN.md; ``recommend``
-    returns a macrostructure name plus exemplar slugs. Naming an image tool would
-    promise the agent an eye it does not have on this path.
+    TEXT, NOT PICTURES: the archive holds screenshots, and they do not reach most
+    of our model backends. Both tools named here return a STRING the agent can
+    act on — a macrostructure with exemplar slugs, and a DESIGN.md. Naming an
+    image tool would promise the agent an eye it does not have on this path.
     """
-    try:
-        from pocketpaw_ee.cloud.surface.surface_registry import _external_sites_mcp_grants
-
-        granted = f"mcp__{_DESIGN_RESEARCH_SERVER}" in _external_sites_mcp_grants()
-    except Exception:  # noqa: BLE001 — a research step must never break the preamble
-        return ""
-    if not granted:
-        return ""
-
-    server = _DESIGN_RESEARCH_SERVER
     return (
         "\n"
         "PHASE 1b — GROUND THE DIRECTION IN REAL SITES (one call, then move on).\n"
-        f"You have `mcp__{server}__recommend` — an archive of real shipped pages, "
+        f"You have `{_RESEARCH_TOOL}` — an archive of real shipped pages, "
         "not a generator. Call it ONCE with the brief in plain words after you "
         "have committed to a direction in Phase 1, and read what comes back as "
         "EVIDENCE for how pages like this one are actually built: which "
         "macrostructure they use, which sections they run and in what order, what "
         "carries the fold. Take THAT. "
-        f"`mcp__{server}__get_design_system` on a returned slug is worth one "
+        f"`{_REFERENCE_SYSTEM_TOOL}` on a returned exemplar slug is worth one "
         "follow-up call when you want to see how a real page relates its type "
         "sizes and where its accent is actually spent — read the relationships, "
-        "not the hex values. "
-        f"`mcp__{server}__get_filters` lists the accepted filter values if you "
-        "need to narrow a search.\n"
+        "not the hex values.\n"
         "THE LIMITS ON IT, which are the whole reason it helps rather than "
         "flattens:\n"
         "- It does NOT outrank the embedded DESIGN SYSTEM. On any visual VALUE — "
@@ -1015,7 +1022,7 @@ def _design_research_step() -> str:
         "- ONE round. It is a network call on someone else's service, and it is "
         "not free latency for the user. Two calls maximum, then design. If it "
         "errors or returns nothing, say nothing about it and proceed on your own "
-        "inference — the ROBUSTNESS rule below covers this tool too.\n"
+        "inference — the ROBUSTNESS rule below covers these tools too.\n"
     )
 
 
@@ -1419,9 +1426,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "Then go — do NOT ask the user to pick the look. If "
         "the user already named a style or brand, honor it. Rotate the identity "
         "and palette so two similar briefs never look identical.\n"
-        # EMPTY on any deploy that has not granted the design-research server, so
-        # this interpolates blind and Phase 1 runs straight into Phase 2 exactly
-        # as it did before. See `_design_research_step`.
+        # Always present now that the research server is bundled rather than an
+        # opt-in external one. See `_design_research_step` for why it is Phase 1b
+        # and not Phase 2, and for the two rails that keep a reference archive
+        # from flattening every site it touches.
         f"{_design_research_step()}"
         "\n"
         "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM and CRAFT "

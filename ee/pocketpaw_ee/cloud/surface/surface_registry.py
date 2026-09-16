@@ -568,6 +568,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
@@ -595,6 +596,11 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         sites_allow = (
             frozenset(SITES_TOOL_IDS)
             | frozenset(STOCK_TOOL_IDS)
+            # Design research over real shipped pages. Named here because the
+            # create preamble's PHASE 1b commands these tools unconditionally —
+            # this list is a hard whitelist, so an id absent from it is silently
+            # unreachable and the instruction would command nothing.
+            | frozenset(INSPO_TOOL_IDS)
             | frozenset(SITE_MEDIA_TOOL_IDS)
             | frozenset(ICON_TOOL_IDS)
             | frozenset(PALETTE_TOOL_IDS)

@@ -248,31 +248,35 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | `mcp_client_metadata_url` | `POCKETPAW_MCP_CLIENT_METADATA_URL` | string | — | CIMD URL for MCP OAuth (for servers without dynamic client registration) |
 | `sites_mcp_servers` | `POCKETPAW_SITES_MCP_SERVERS` | string | `""` | Comma-separated names of EXTERNAL MCP servers (from `~/.pocketpaw/mcp_servers.json`) that the **/sites** surface may call — e.g. `refero` for live design research. Empty grants none, so an install that has not opted in is unaffected. `/sites` runs a hard allow-list of fully-qualified `mcp__<server>__<tool>` ids, but an external server's tool names are unknown until the client connects, so it is allow-listed wholesale with a bare `mcp__<server>` token; naming a server here puts that token in the /sites allow set. This scopes the grant to **that surface alone** — unlike `ALWAYS_ALLOWED_MCP_SERVERS`, which hands a server to every surface. A name matching no configured server is inert, not an error. Read once at startup. |
 
+| `inspo_mcp_url` | `POCKETPAW_INSPO_MCP_URL` | string | `""` | Override the endpoint the bundled design-research server (`pocketpaw_inspo`) calls. Empty uses the hosted archive at `https://inspomcp.dev/api/mcp`. Exists because the hosted service rate-limits **per IP** and a multi-tenant deploy presents one egress IP for all its tenants, so a busy install can exhaust the limit for everyone at once; the upstream is MIT with a documented self-host path. Read per call, so it takes effect without a restart. |
+
 ### Design research on /sites
 
-The one grant this is written for today is `inspo` — a free, unauthenticated
-archive of ~2,300 captured pages across ~830 real shipped sites, each carrying a
-DESIGN.md extracted from the live DOM (role-tagged palette, type ramp, spacing
-scale, macrostructure). Turning it on is two steps, deliberately:
+**Nothing to configure.** `pocketpaw_inspo` is a bundled in-process MCP server,
+like `pocketpaw_stock` and `pocketpaw_icons` — it ships with the deploy and the
+/sites create preamble names its tools unconditionally.
 
-1. **Register the server.** Dashboard → MCP → install the **Inspo** preset. It
-   asks for no credentials, because the server takes none.
-2. **Grant it to /sites.** Set `POCKETPAW_SITES_MCP_SERVERS=inspo` and restart.
-   The setting is read once per process.
+It wraps an archive of ~2,300 captured pages across ~830 real shipped sites,
+each carrying a DESIGN.md extracted from the live DOM (role-tagged palette, type
+ramp, spacing scale, macrostructure), and exposes two tools:
+`research_page_design` (a brief in, a macrostructure and real exemplars out) and
+`get_reference_design_system` (one exemplar's DESIGN.md).
 
-Step 1 alone registers the server without letting the site agent act on it;
-step 2 alone is inert, because the name matches nothing. Both are needed, and
-they are separate because they are separate decisions: an external MCP server,
-once registered, is reachable from any surface that does not pin its own
-allow-list, while the grant is what scopes it to `/sites`.
+The /sites **create** preamble uses them in `PHASE 1b`, after the agent commits
+to a direction and before it locks tokens — once, for composition: which
+sections, in what order, what carries the fold. It does not relax the embedded
+design system, which still outranks any reference on a visual value, and it does
+not relax the rotation rule that stops two similar briefs resolving to the same
+page.
 
-With both in place the /sites **create** preamble grows a `PHASE 1b` step that
-tells the agent to ground its direction in real pages — once, for composition
-(which sections, in what order, what carries the fold) — before it locks tokens.
-It does not relax the embedded design system, which still outranks any reference
-on a visual value, and it does not relax the rotation rule that stops two
-similar briefs resolving to the same page. With either step missing the preamble
-is byte-identical to an install that never heard of the feature.
+<Note>
+This was briefly shipped as an **external** server behind
+`POCKETPAW_SITES_MCP_SERVERS` (pocketpaw#2204). That took two switches — install
+the server, then grant it — both defaulting off and neither implying the other,
+so a deploy of the code alone changed nothing and said nothing about why. The
+server is bundled now and that setting is no longer involved in design research.
+It remains available for granting *other* external servers to `/sites`.
+</Note>
 
 ## Memory (Mem0)
 

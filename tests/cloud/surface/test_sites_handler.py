@@ -141,7 +141,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import re
 
 import pytest
@@ -2063,165 +2062,103 @@ async def test_html_create_routes_follow_up_changes_to_the_edit_tool() -> None:
     assert preamble.index("create_html_site") < preamble.index("edit_html_file")
 
 
-# ── PHASE 1b: live design research (feat/sites-inspo-design-research) ───────
+# ── PHASE 1b: design research (feat/sites-bundled-design-research) ──────────
 #
-# Added 2026-09-16. `_create_preamble` can tell the agent to ground its direction
-# in an archive of real shipped pages, via the EXTERNAL `inspo` MCP server. The
-# step is opt-in per deploy and these pin the two halves that must not drift:
-# the prompt appears ONLY when the grant that makes the tools reachable is
-# present, and it names ONLY tools that server actually exposes.
+# Rewritten 2026-09-16. This first shipped (#2204) with the archive as an
+# EXTERNAL MCP server behind `POCKETPAW_SITES_MCP_SERVERS`, so the step was
+# conditional and most of these tests pinned the gate. That design needed TWO
+# switches — install the server, then grant it — both defaulting off and neither
+# implying the other, and the first deploy duly researched nothing and said
+# nothing about it. The server is bundled in-process now, so the step is
+# unconditional and what needs pinning is different: that the tools it names are
+# ones this surface can actually reach.
 
 
-# The live tool surface of https://inspomcp.dev/api/mcp, read off a `tools/list`
-# on 2026-09-16 (server build `hosted-85acb10`). Recorded rather than fetched
-# because a unit test must not depend on someone else's uptime — and because a
-# name DISAPPEARING upstream should be found by a human reading a failure here,
-# not papered over by a live call that returns the new truth.
-_INSPO_TOOLS: frozenset[str] = frozenset(
-    {
-        "recommend",
-        "search_screens",
-        "get_screen",
-        "get_design_system",
-        "find_similar",
-        "compare",
-        "find_by_color",
-        "find_examples_for_macrostructure",
-        "list_collections",
-        "get_collection",
-        "get_filters",
-        "get_site_pages",
-        "find_components",
-        "find_reference_components",
-        "get_reference_jsx",
-    }
-)
+async def test_the_research_step_is_always_on() -> None:
+    """No setting, no install, no grant: every create preamble carries it.
 
+    The point of bundling. `pocketpaw_inspo` is an ordinary in-process server
+    like stock and icons, so the preamble names its tools the way it names
+    theirs — unconditionally, because they are unconditionally there.
 
-@contextlib.contextmanager
-def _sites_mcp_servers(monkeypatch, value: str):
-    """Run the body with ``POCKETPAW_SITES_MCP_SERVERS`` set to ``value``.
-
-    The settings object is memoized, so the env var ALONE changes nothing — and
-    ``get_settings.cache_clear()`` is the only form that works here, not
-    ``get_settings(force_reload=True)``: ``force_reload`` is part of the
-    ``lru_cache`` KEY, so the reload branch runs once and every later call with
-    the same argument is a cache hit on the stale object.
-
-    The registry's tool-id table is dropped too. ``_design_research_step`` does
-    not read it, but ``_external_sites_mcp_grants`` lives in that module and a
-    future memoization there would make these tests pass for the wrong reason.
-    """
-    from pocketpaw_ee.cloud.surface import surface_registry as reg
-
-    from pocketpaw import config as pp_config
-
-    monkeypatch.setenv("POCKETPAW_SITES_MCP_SERVERS", value)
-    reg._MCP_TOOL_IDS_CACHE = None
-    pp_config.get_settings.cache_clear()
-    try:
-        yield
-    finally:
-        monkeypatch.delenv("POCKETPAW_SITES_MCP_SERVERS", raising=False)
-        pp_config.get_settings.cache_clear()
-        reg._MCP_TOOL_IDS_CACHE = None
-
-
-async def test_design_research_is_absent_until_the_deploy_grants_the_server() -> None:
-    """The CONTROL, and the reason this step is a function rather than prose.
-
-    An external MCP server is opt-in per deploy and empty by default. A preamble
-    that named `mcp__inspo__recommend` unconditionally would command a tool the
-    agent does not have on every install that never configured one — this
-    module's oldest rule, and the failure mode where the model improvises
-    silently instead of erroring.
-
-    THE MUTATION THAT BREAKS THIS: make `_design_research_step` return its text
-    unconditionally. Run: every engine's create preamble names a tool that
-    resolves to nothing.
+    THE MUTATION THAT BREAKS THIS: make `_design_research_step` return "" again.
+    Run: sites build with no research and nothing anywhere says why.
     """
     for engine in (None, "ripple", "svelte", "react"):
         preamble = await _preamble_for(engine)
-        assert "PHASE 1b" not in preamble
-        assert "inspo" not in preamble
+        assert "PHASE 1b" in preamble, f"{engine} create lost the research step"
+        assert "mcp__pocketpaw_inspo__research_page_design" in preamble
 
 
-async def test_design_research_appears_when_the_server_is_granted(monkeypatch) -> None:
-    """The other half: with the grant in place the step IS there, in Phase 1.
+async def test_the_research_step_names_only_tools_sites_can_reach() -> None:
+    """The coupling that decides whether any of this works at all.
 
-    Phase 1 is where the direction is chosen, so it is the last point a real
-    reference can still change the answer. By Phase 2 the tokens are being
-    written.
+    /sites runs a HARD whitelist: an id absent from `sites_allow` is stripped
+    from `allowed_tools` before the subprocess launches, and the agent is simply
+    told the capability does not exist. So a preamble naming a bundled tool is
+    not enough — the id has to be in the allow-list too, and the two live in
+    different files edited by different changes.
+
+    This is the sibling of
+    `test_every_tool_a_refine_branch_names_is_a_registered_tool`, run against
+    the resolved profile rather than the server registry.
+
+    THE MUTATION THAT BREAKS THIS: drop `INSPO_TOOL_IDS` from the `sites_allow`
+    union in `surface_registry`. Run: the preamble still commands the tools, the
+    agent never sees them, and every generated site skips research silently —
+    which is exactly how the first deploy of this feature failed.
     """
-    with _sites_mcp_servers(monkeypatch, "inspo"):
-        preamble = await _preamble_for(None)
+    from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
 
-    assert "PHASE 1b" in preamble
-    assert "mcp__inspo__recommend" in preamble
-    # Before the tokens get locked, not after.
-    assert preamble.index("PHASE 1b") < preamble.index("LOCK THE TOKENS")
+    step = sites_handler._design_research_step()
+    named = set(re.findall(r"mcp__pocketpaw_inspo__\w+", step))
+    assert named, "the step named no research tools at all"
 
+    # Every named tool is one the server really builds...
+    unknown = named - set(INSPO_TOOL_IDS)
+    assert not unknown, f"the step names {sorted(unknown)}, which the server does not expose"
 
-async def test_design_research_only_names_tools_the_server_exposes(monkeypatch) -> None:
-    """Every `mcp__inspo__<tool>` in the step is a tool that server really has.
-
-    The sibling of `test_every_tool_a_refine_branch_names_is_a_registered_tool`,
-    for a server whose tools are NOT registered in-process and so cannot be
-    enumerated at runtime — an external server's names are known only after the
-    client connects. `_INSPO_TOOLS` is that list, recorded.
-
-    THE MUTATION THAT BREAKS THIS: name a plausible-but-absent tool in the step
-    (`mcp__inspo__search_sites`, say). Run: the agent is told to call something
-    that does not exist and reports the capability as missing.
-    """
-    with _sites_mcp_servers(monkeypatch, "inspo"):
-        step = sites_handler._design_research_step()
-
-    named = set(re.findall(r"mcp__inspo__(\w+)", step))
-    assert named, "the step named no tools at all — it cannot be doing its job"
-    unknown = named - _INSPO_TOOLS
-    assert not unknown, (
-        f"the research step names {sorted(unknown)}, which the inspo server does "
-        "not expose — the agent will be told to call a tool that is not there"
+    # ...and one /sites is allowed to call.
+    allow = resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids
+    assert allow is not None, "the /sites profile stopped pinning an MCP allow-list"
+    unreachable = named - set(allow)
+    assert not unreachable, (
+        f"{sorted(unreachable)} is named by the preamble but missing from the "
+        "/sites allow-list — it is silently unreachable and the instruction "
+        "commands nothing"
     )
 
 
-async def test_granting_another_server_does_not_emit_the_inspo_step(monkeypatch) -> None:
-    """The grant is per-SERVER, so the step keys on the server it names.
-
-    A deploy that grants `refero` for design research has not granted `inspo`,
-    and the preamble must not describe one server's tools because a different
-    one is configured.
-    """
-    with _sites_mcp_servers(monkeypatch, "refero"):
-        preamble = await _preamble_for(None)
-
-    assert "inspo" not in preamble
-    assert "PHASE 1b" not in preamble
-
-
-async def test_design_research_keeps_the_design_system_and_the_rotation_ban(
-    monkeypatch,
-) -> None:
+async def test_the_research_step_keeps_the_design_system_and_the_rotation_ban() -> None:
     """The two rails that stop a reference archive from flattening every site.
 
     An archive returns the SAME exemplars for the same brief, so an unqualified
     "build what they built" points straight at the repetition Phase 1 exists to
     prevent — a reference that outranks the embedded system makes the
-    homogenization worse than having no reference at all.
+    homogenisation worse than having no reference at all.
 
     THE MUTATION THAT BREAKS THIS: delete the precedence clause. Run: nothing
     fails, every dentist brief converges on the same returned exemplar, and the
     regression is invisible until a human looks at two sites side by side.
     """
-    with _sites_mcp_servers(monkeypatch, "inspo"):
-        step = sites_handler._design_research_step()
+    lower = sites_handler._design_research_step().lower()
 
-    lower = step.lower()
-    # The embedded system still wins on any visual value.
     assert "does not outrank the embedded design system" in lower
     assert "wholesale" in lower  # never lift a palette/font stack off a reference
-    # And the rotation ban survives it.
     assert "rotation ban" in lower
-    # Bounded: this is a network call on someone else's service.
-    assert "one round" in lower
+    assert "one round" in lower  # bounded: someone else's service, user is waiting
+
+
+async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
+    """Phase 1b, not Phase 2.
+
+    It is evidence for the direction, not a substitute for choosing one. Phase 1
+    is the last point a real reference can still change the answer; by the time
+    Phase 2 is writing tokens a late reference only muddies them.
+    """
+    preamble = await _preamble_for(None)
+
+    assert preamble.index("PHASE 1b") < preamble.index("LOCK THE TOKENS")
+    assert preamble.index("PHASE 1 — CREATIVE DIRECTION") < preamble.index("PHASE 1b")

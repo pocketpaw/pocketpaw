@@ -1105,6 +1105,37 @@ class CloudStockImagesMcpProvider:
         return list(STOCK_TOOL_IDS)
 
 
+class CloudInspoMcpProvider:
+    """`pocketpaw.mcp_servers` — the design-research in-process server
+    (``pocketpaw_inspo``). Hosts ``research_page_design`` and
+    ``get_reference_design_system``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) for the same reason stock is: the
+    /sites authoring agent runs on the claude_agent_sdk backend, which sees only
+    in-process MCP servers, and the create preamble names these tools
+    unconditionally. An opt-in here would put the preamble back in the state
+    where it commands a tool the agent may not have.
+
+    Registration is not reachability. ``surface_registry`` unions
+    ``INSPO_TOOL_IDS`` into the /sites allow-list, and every surface that pins
+    its own list without naming them cannot call them.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.inspo import build_inspo_server
+
+            return build_inspo_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+
+        return list(INSPO_TOOL_IDS)
+
+
 class CloudIconsMcpProvider:
     """`pocketpaw.mcp_servers` — the icon-search in-process server
     (``pocketpaw_icons``). Hosts ``search_icons`` only.
