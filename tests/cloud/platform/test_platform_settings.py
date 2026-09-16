@@ -24,16 +24,17 @@ from __future__ import annotations
 import json
 
 import pytest
-from pocketpaw import config as pocketpaw_config
-from pocketpaw import credentials as pocketpaw_credentials
-from pocketpaw.credentials import CredentialStore
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, ValidationError
+from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 from pocketpaw_ee.cloud.models.user import User as UserDoc
 from pocketpaw_ee.cloud.platform import settings as platform_settings
-from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from starlette.datastructures import Headers
 from starlette.requests import Request
+
+from pocketpaw import config as pocketpaw_config
+from pocketpaw import credentials as pocketpaw_credentials
+from pocketpaw.credentials import CredentialStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -212,9 +213,7 @@ async def test_billing_llm_proxy_and_payments_groups_are_built(
 # ---------------------------------------------------------------------------
 
 
-async def test_config_json_missing_reports_missing_status(
-    mongo_db, isolated_settings_env
-) -> None:
+async def test_config_json_missing_reports_missing_status(mongo_db, isolated_settings_env) -> None:
     operator = await _user("operator")
     page = await platform_settings.get_platform_settings(request=_request(), operator=operator)
     assert page.config_json.status == "missing"
@@ -274,9 +273,7 @@ async def test_write_refuses_no_changes(mongo_db, isolated_settings_env) -> None
 
 async def test_write_refuses_unknown_field(mongo_db, isolated_settings_env) -> None:
     operator = await _user("operator")
-    body = platform_settings.SettingsWriteIn(
-        changes={"totally_bogus_field": 1}, reason="testing"
-    )
+    body = platform_settings.SettingsWriteIn(changes={"totally_bogus_field": 1}, reason="testing")
     with pytest.raises(ValidationError):
         await platform_settings.update_platform_settings(
             body=body, request=_request(), operator=operator
@@ -308,9 +305,7 @@ async def test_write_refuses_env_shadowed_field(
 ) -> None:
     monkeypatch.setenv("POCKETPAW_LITELLM_MAX_TOKENS", "999")
     operator = await _user("operator")
-    body = platform_settings.SettingsWriteIn(
-        changes={"litellm_max_tokens": 111}, reason="testing"
-    )
+    body = platform_settings.SettingsWriteIn(changes={"litellm_max_tokens": 111}, reason="testing")
     with pytest.raises(ConflictError):
         await platform_settings.update_platform_settings(
             body=body, request=_request(), operator=operator
@@ -328,16 +323,12 @@ async def test_write_refuses_invalid_type(mongo_db, isolated_settings_env) -> No
         )
 
 
-async def test_config_unparseable_refuses_the_whole_write(
-    mongo_db, isolated_settings_env
-) -> None:
+async def test_config_unparseable_refuses_the_whole_write(mongo_db, isolated_settings_env) -> None:
     tmp_path, _store = isolated_settings_env
     (tmp_path / "config.json").write_text("{not valid json")
 
     operator = await _user("operator")
-    body = platform_settings.SettingsWriteIn(
-        changes={"litellm_max_tokens": 111}, reason="testing"
-    )
+    body = platform_settings.SettingsWriteIn(changes={"litellm_max_tokens": 111}, reason="testing")
     with pytest.raises(ConflictError):
         await platform_settings.update_platform_settings(
             body=body, request=_request(), operator=operator

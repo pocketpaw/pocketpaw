@@ -134,9 +134,7 @@ async def test_no_platform_role_is_refused_the_health_read() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_probe_1_hits_health_readiness_not_health(
-    mongo_db, monkeypatch
-) -> None:
+async def test_probe_1_hits_health_readiness_not_health(mongo_db, monkeypatch) -> None:
     """Deliberately not /health — see the module docstring for why."""
     monkeypatch.setattr(
         platform_health,
@@ -226,7 +224,9 @@ async def test_probe_2_reports_rejected_on_auth_failure(mongo_db, monkeypatch) -
     monkeypatch.setattr(
         platform_health,
         "get_settings",
-        lambda: SimpleNamespace(litellm_api_base="http://localhost:4000", litellm_api_key="bad-key"),
+        lambda: SimpleNamespace(
+            litellm_api_base="http://localhost:4000", litellm_api_key="bad-key"
+        ),
     )
     with _patched_client(
         {"/health/readiness": _FakeResponse(200), "/model/info": _FakeResponse(401)}
@@ -246,7 +246,9 @@ async def test_probe_2_authenticates_and_the_key_never_appears_in_the_response(
     monkeypatch.setattr(
         platform_health,
         "get_settings",
-        lambda: SimpleNamespace(litellm_api_base="http://localhost:4000", litellm_api_key=secret_key),
+        lambda: SimpleNamespace(
+            litellm_api_base="http://localhost:4000", litellm_api_key=secret_key
+        ),
     )
     with _patched_client(
         {

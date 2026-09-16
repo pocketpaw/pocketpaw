@@ -51,9 +51,8 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
-from pydantic import TypeAdapter
 from pydantic_core import PydanticUndefined
 
 # `_IMMUTABLE_FIELDS` is imported rather than redefined: it is the one place in
@@ -63,7 +62,6 @@ from pydantic_core import PydanticUndefined
 from pocketpaw.api.v1.settings import _IMMUTABLE_FIELDS
 from pocketpaw.config import Settings, _chmod_safe, get_config_path, get_settings
 from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
-
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, Internal, ValidationError
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.user import User
@@ -636,9 +634,7 @@ async def update_platform_settings(
         get_settings.cache_clear()
     except Exception as exc:
         await audit.settle(event, ok=False)
-        raise Internal(
-            "platform.settings.write_failed", "Failed to write settings"
-        ) from exc
+        raise Internal("platform.settings.write_failed", "Failed to write settings") from exc
 
     live_after = get_settings()
     after = {name: _mask_for_audit(name, getattr(live_after, name)) for name in validated}

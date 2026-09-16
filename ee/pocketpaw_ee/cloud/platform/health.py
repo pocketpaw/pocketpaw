@@ -47,7 +47,6 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from pocketpaw.config import get_settings
-
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.platform import audit
@@ -139,7 +138,9 @@ async def _probe_master_key_authenticates(
     catalog actually works, not just that the network path is open.
     """
     if not proxy_reached:
-        return ProbeOut(status="neutral", word="Not run", detail="Not run: the proxy did not answer probe 1.")
+        return ProbeOut(
+            status="neutral", word="Not run", detail="Not run: the proxy did not answer probe 1."
+        )
 
     if not api_key:
         return ProbeOut(
