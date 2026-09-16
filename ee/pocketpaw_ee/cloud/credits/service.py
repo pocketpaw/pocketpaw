@@ -1305,9 +1305,7 @@ async def reconcile(workspace: str) -> ReconcileResult:
             workspace,
             computed,
         )
-        return ReconcileResult(
-            balance=micro_to_credits(computed), redriven=redriven, voided=voided
-        )
+        return ReconcileResult(balance=micro_to_credits(computed), redriven=redriven, voided=voided)
 
     if int(bal_doc.balance_micro) != computed:
         logger.warning(
