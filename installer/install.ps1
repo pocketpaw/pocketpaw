@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     PocketPaw Installer for Windows.
@@ -92,6 +92,19 @@ function Get-PythonFullVersion {
     }
 }
 
+function Add-PathPermanent {
+    param([string]$PathToAdd)
+    try {
+        $path = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($path -notlike "*$PathToAdd*") {
+            [Environment]::SetEnvironmentVariable("Path", "$path;$PathToAdd", "User")
+            Write-Ok "Added $PathToAdd to permanent User PATH"
+        }
+    } catch {
+        Write-Warn "Could not update permanent PATH. You may need to add $PathToAdd manually."
+    }
+}
+
 # ── Find Python 3.11+ ──────────────────────────────────────────────────
 $Python = $null
 
@@ -136,6 +149,10 @@ if (-not $Python) {
 
             # Refresh PATH — include standard uv install locations
             $env:PATH = "$env:LOCALAPPDATA\uv\bin;$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.uv\bin;$env:PATH"
+            
+            Add-PathPermanent "$env:LOCALAPPDATA\uv\bin"
+            Add-PathPermanent "$env:USERPROFILE\.local\bin"
+
             if (Get-Command uv -ErrorAction SilentlyContinue) {
                 $uvAvailable = $true
                 Write-Ok "uv installed"
@@ -209,6 +226,10 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
         if (Get-Command uv -ErrorAction SilentlyContinue) {
             $uvAvailable = $true
             Write-Ok "uv installed"
+            
+            # Permanently add uv to PATH if not already there
+            Add-PathPermanent "$env:LOCALAPPDATA\uv\bin"
+            Add-PathPermanent "$env:USERPROFILE\.local\bin"
         }
     } catch {
         Write-Warn "Could not install uv."
