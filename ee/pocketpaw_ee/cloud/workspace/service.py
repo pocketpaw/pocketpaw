@@ -125,6 +125,24 @@ plan — can no longer invite anyone new; existing members are never removed.
 filters ``deleted_at == None`` so a soft-deleted first workspace is skipped and
 the next-oldest LIVE workspace receives instance-scoped alerts, instead of
 routing them to a tombstone.
+2026-09-16 (Paw Admin chunk 7, Decision 7): added
+``get_workspace_plan_and_overrides(workspace_id)`` — plan + entitlement
+overrides in one fetch, the same by-id/soft-delete contract as
+``get_workspace_plan``, for the platform entitlements route only. Also added
+``get_workspace_overrides(workspace_id)`` — overrides alone, same contract —
+after the combined call turned out to break ``resolve_entitlements``: its
+own tests (and every other consumer's) monkeypatch ``get_workspace_plan``
+against workspace ids that are not real Mongo ids, and the combined fetch's
+doc lookup nulled out that mocked plan on those ids (44 failures across
+``tests/cloud`` before the split). ``resolve_entitlements`` now calls
+``get_workspace_plan`` and ``get_workspace_overrides`` separately; the
+combined function stays for the platform route, which always addresses a
+real doc by path parameter and has no such mock to protect. Also added
+``platform_set_workspace_overrides(workspace_id, overrides)`` — the
+platform-only writer that sets or clears (``overrides=None``) a workspace's
+overrides; no membership check, workspace_id is a caller-supplied path
+parameter, so it is listed in test_platform_boundary.py's
+``_CROSS_TENANT_HELPERS`` alongside the read-side platform_* helpers.
 """
 
 from __future__ import annotations
@@ -173,6 +191,7 @@ from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
 from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.people import service as people_service
@@ -1977,6 +1996,61 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     return doc.plan
 
 
+async def get_workspace_overrides(workspace_id: str) -> WorkspaceOverrides | None:
+    """Return a workspace's operator entitlement overrides, or None.
+
+    Sibling to ``get_workspace_plan`` with the identical by-id / soft-delete
+    contract — an invalid id or a soft-deleted workspace resolves to ``None``,
+    same as "no override set". Added (corrected 2026-09-16, Paw Admin chunk 7)
+    as the second half of ``entitlements.service.resolve_entitlements``'s
+    override overlay, kept deliberately separate from ``get_workspace_plan``
+    rather than combined into one fetch: every existing test that drives that
+    resolver monkeypatches ``get_workspace_plan`` alone against a workspace id
+    that is not a real Mongo id, and a combined fetch's own doc lookup would
+    fail on that id and null out the mocked plan along with the overrides. Two
+    independent calls cost one extra round trip but leave every such mock
+    intact — this one simply answers "no override" for the same ids.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return None
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return None
+    return doc.overrides
+
+
+async def get_workspace_plan_and_overrides(
+    workspace_id: str,
+) -> tuple[str | None, WorkspaceOverrides | None]:
+    """Return (plan, overrides) for a workspace in one fetch.
+
+    Sibling to ``get_workspace_plan`` with the identical by-id / soft-delete
+    contract — an invalid id or a soft-deleted workspace resolves to
+    ``(None, None)``. Added for the platform entitlements route
+    (``cloud/platform/entitlements.py``, Paw Admin chunk 7), which always
+    addresses a real workspace doc by path parameter and wants "does it exist"
+    and "what overrides does it carry" off one round trip.
+
+    NOT used by ``entitlements.service.resolve_entitlements`` — that resolver
+    calls ``get_workspace_plan`` and ``get_workspace_overrides`` separately
+    instead, because its callers monkeypatch ``get_workspace_plan`` alone
+    against workspace ids that are not real Mongo ids, and this combined
+    fetch's doc lookup would null out a plan the mock already answered. See
+    ``entitlements.service``'s module changelog for the failure that taught
+    this.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return None, None
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return None, None
+    return doc.plan, doc.overrides
+
+
 async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
     """Set a workspace's plan tier (BC-7 subscription lifecycle).
 
@@ -2514,6 +2588,33 @@ async def platform_get_workspace(workspace_id: str) -> Workspace:
 
     member_count = await _count_members(workspace_id)
     return _workspace_to_domain(doc, member_count=member_count)
+
+
+async def platform_set_workspace_overrides(
+    workspace_id: str, overrides: WorkspaceOverrides | None
+) -> _WorkspaceDoc:
+    """Set (or clear, with ``overrides=None``) a workspace's entitlement overrides.
+
+    Platform-only mutator (Paw Admin chunk 7) — no membership check, and
+    ``workspace_id`` arrives as a caller-supplied path parameter rather than
+    session context, same inversion as ``platform_get_workspace`` beside it.
+    Listed in ``_CROSS_TENANT_HELPERS`` (test_platform_boundary.py) so nothing
+    outside ``cloud/platform/`` can reach for it.
+
+    Returns the raw document (not the domain object) so the route can build
+    both the audit ``before``/``after`` dicts and the read-back response from
+    the one write it already made, with no extra fetch.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception as exc:
+        raise NotFound("workspace", workspace_id) from exc
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    doc.overrides = overrides
+    await doc.save()
+    return doc
 
 
 async def platform_list_members(workspace_id: str) -> list[WorkspaceMember]:

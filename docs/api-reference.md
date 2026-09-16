@@ -4411,3 +4411,78 @@ not compiled.
   "scope": "workspace:w1"
 }
 ```
+
+## Platform — Plan & Entitlement Overrides
+
+Cross-tenant operator routes under `/api/v1/platform/workspaces/{workspace_id}/entitlements*`
+(chunk 7 of the Paw Admin PRD, `ee/pocketpaw_ee/cloud/platform/entitlements.py`). These
+sit on the platform authority axis, not workspace RBAC: `workspace_id` is a caller-supplied
+path parameter (every route under `/platform` inverts the usual "workspace comes from the
+session" rule), reads require the `platform.entitlements.read` action (SUPPORT rung),
+writes require `platform.entitlements.write` (OPERATOR rung), and every call is recorded
+as a `PlatformAuditEvent`.
+
+Only seven fields can be overridden — `monthly_ceiling`, `max_seats`, `max_pockets`,
+`max_connectors`, `max_call_seconds_per_day`, `max_storage_bytes`, `included_sites`.
+These are exactly the fields `resolve_entitlements` enforces. Two catalog fields,
+`monthly_credit_allotment` and `extra_features`, are deliberately absent: both are read
+by their enforcement points straight off the plan catalog rather than through
+`resolve_entitlements`, so an override on either would be stored and displayed but would
+never change behavior. Each overridable field is a tri-state: omitted/`null` means "not
+overridden", `"uncapped"` means "override to no limit", and an integer overrides to
+exactly that value. An override set's `expires_at` is whole-set — once past, the entire
+set reads back as absent, not per-field.
+
+### `GET /api/v1/platform/workspaces/{workspace_id}/entitlements`
+
+Returns the tenant's plan key alongside three views of the seven fields: `catalog` (the
+plan alone, no override applied), `resolved` (what `resolve_entitlements` — and therefore
+every enforcement path in the codebase — currently returns), and `overrides` (the raw
+override document, or `null` if none is active). Keeping all three separate is deliberate:
+a merged number can't tell an operator "the plan gives this" from "an override changed it
+to that." Returns `404` if the workspace doesn't exist.
+
+```json
+{
+  "workspace_id": "<id>",
+  "plan": "free",
+  "catalog": { "monthly_ceiling": 1000, "max_seats": 0, "max_pockets": 1, "max_connectors": 1, "max_call_seconds_per_day": 0, "max_storage_bytes": 104857600, "included_sites": 0 },
+  "resolved": { "monthly_ceiling": 1000, "max_seats": 7, "max_pockets": 1, "max_connectors": 1, "max_call_seconds_per_day": 3600, "max_storage_bytes": 104857600, "included_sites": 0 },
+  "overrides": { "monthly_ceiling": null, "max_seats": 7, "max_pockets": null, "max_connectors": null, "max_call_seconds_per_day": 3600, "max_storage_bytes": null, "included_sites": null, "expires_at": null }
+}
+```
+
+### `PUT /api/v1/platform/workspaces/{workspace_id}/entitlements/overrides`
+
+Replaces the workspace's entire override set (PUT, not PATCH — a field left off the body
+is "not overridden," the same as sending it `null`). Requires a non-empty, free-text
+`reason` (no canned options — a dropdown produces a log that says nothing); a missing or
+whitespace-only reason returns `422` before anything is read or written. Accepts an
+optional `idempotency_key` for the console to send on retry, but nothing in
+`cloud/platform/` has dedup infrastructure to check it against yet, so it is not
+persisted or enforced — a plain no-op safety net rather than a promise, documented as a
+scoping decision in the module. Returns the same shape as the `GET`, recomputed after the
+write. Records an `attempted` audit row before mutating and settles it to `applied` or
+`failed`.
+
+Request body:
+
+```json
+{
+  "max_seats": 7,
+  "max_call_seconds_per_day": 3600,
+  "monthly_ceiling": "uncapped",
+  "expires_at": "2026-12-31T00:00:00Z",
+  "reason": "Comping a design-partner trial past the Free caps"
+}
+```
+
+### `DELETE /api/v1/platform/workspaces/{workspace_id}/entitlements/overrides`
+
+Clears the workspace's override set back to whatever the plan alone gives. Still a write:
+requires the same non-empty `reason`, and is audited the same way as the `PUT`, including
+when there was nothing to clear.
+
+```json
+{ "reason": "Trial ended" }
+```
