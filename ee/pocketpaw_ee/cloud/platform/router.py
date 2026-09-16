@@ -29,6 +29,8 @@ from pydantic import BaseModel
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.platform.health import router as health_router
+from pocketpaw_ee.cloud.platform.settings import router as settings_router
 from pocketpaw_ee.cloud.platform.users import router as users_router
 from pocketpaw_ee.cloud.platform.workspaces import router as workspaces_router
 
@@ -40,8 +42,10 @@ router = APIRouter(prefix="/platform", tags=["platform"])
 # so the guard-coverage test in tests/cloud/platform/test_platform_guard.py
 # reaches their routes too — a sub-router that forgot require_platform fails
 # there rather than shipping.
-router.include_router(workspaces_router)
+router.include_router(health_router)
+router.include_router(settings_router)
 router.include_router(users_router)
+router.include_router(workspaces_router)
 
 
 class PlatformIdentityOut(BaseModel):
