@@ -40,7 +40,9 @@ from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.platform.credits import router as credits_router
 from pocketpaw_ee.cloud.platform.entitlements import router as entitlements_router
 from pocketpaw_ee.cloud.platform.health import router as health_router
+from pocketpaw_ee.cloud.platform.revenue import router as revenue_router
 from pocketpaw_ee.cloud.platform.settings import router as settings_router
+from pocketpaw_ee.cloud.platform.stats import router as stats_router
 from pocketpaw_ee.cloud.platform.users import router as users_router
 from pocketpaw_ee.cloud.platform.workspaces import router as workspaces_router
 
@@ -55,7 +57,9 @@ router = APIRouter(prefix="/platform", tags=["platform"])
 router.include_router(credits_router)
 router.include_router(entitlements_router)
 router.include_router(health_router)
+router.include_router(revenue_router)
 router.include_router(settings_router)
+router.include_router(stats_router)
 router.include_router(users_router)
 router.include_router(workspaces_router)
 
