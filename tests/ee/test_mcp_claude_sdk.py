@@ -1,5 +1,15 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-09-16 (feat/sites-bundled-design-research) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_inspo`` (research_page_design /
+  get_reference_design_system, registered always-on via the ``inspo``
+  mcp_servers entry point). It has to be always-on because the /sites create
+  preamble names its tools UNCONDITIONALLY; the previous shape registered it
+  only when a deploy opted in, and a preamble commanding a tool that may be
+  absent is the failure this file's siblings keep catching. These six tests are
+  about EXTERNAL config, so an in-process built-in belongs in the strip list
+  rather than in their assertions.
+
 Updated: 2026-09-14 (fix/attachment-not-on-disk) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_files`` (list_uploads / read_upload, registered
   always-on via the ``files`` mcp_servers entry point, NOT in
@@ -157,6 +167,7 @@ from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVE
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.inspo import SERVER_NAME as _INSPO_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
@@ -251,6 +262,14 @@ def _strip_builtin_servers(result: dict) -> dict:
     out.pop(_ICONS_MCP_SERVER_NAME, None)
     out.pop(_PALETTE_MCP_SERVER_NAME, None)
     out.pop(_ASK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_inspo`` is always-on too — the /sites create preamble names
+    # research_page_design UNCONDITIONALLY, so the server has to be registered
+    # unconditionally or the prompt commands a tool that is not there. It shipped
+    # briefly as an opt-in EXTERNAL server and that is exactly what went wrong
+    # (#2204 → #2205). Pure read over a remote archive of shipped web pages, no
+    # identity, nothing persisted — same regime as stock. The /sites allow-list
+    # is the door that decides which surfaces may call it.
+    out.pop(_INSPO_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
     # (loom_model_path unset -> not registered) but stripped defensively: a
