@@ -637,6 +637,14 @@ _TENANT_SAFE_TOOLS = frozenset(
         "delegate_to_a2a_agent",
         "image_generate",
         "ocr",
+        # design research — a text query out, public design references back.
+        # Same class as ``search_stock_images`` and ``web_search``: an external
+        # API called with OUR key, no tenant data on the wire, nothing
+        # persisted, no host state. The only shared resource is the Refero call
+        # quota, which is a COST question rather than a tenancy one and is
+        # bounded upstream by the plan.
+        "refero_design_screens",
+        "refero_design_styles",
         "research",
         "search_stock_images",
         "speech_to_text",
