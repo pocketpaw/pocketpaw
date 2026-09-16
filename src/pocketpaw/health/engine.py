@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from pocketpaw.config import Settings
 from pocketpaw.health.checks import (
     CONNECTIVITY_CHECKS,
     STARTUP_CHECKS,
@@ -123,12 +124,29 @@ class HealthEngine:
             ]
             if api_key_issues:
                 message = "System running, but AI features disabled. Please add API key."
+        # return {
+        #     "status": status,
+        #     "message": message,
+        #     "check_count": len(self._results),
+        #     "issues": issues,
+        #     "last_check": self._last_check,
+        # }
+        try:
+            settings = Settings.load()
+            active_backend = getattr(settings, "agent_backend", None)
+            fallback_backends = getattr(settings, "fallback_backends", [])
+        except Exception:
+            active_backend = None
+            fallback_backends = []
+
         return {
             "status": status,
             "message": message,
             "check_count": len(self._results),
             "issues": issues,
             "last_check": self._last_check,
+            "active_backend": active_backend,
+            "fallback_backends": fallback_backends,
         }
 
     # =========================================================================
