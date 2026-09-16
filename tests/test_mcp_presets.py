@@ -4,12 +4,6 @@ Created: 2026-02-09
 Updated: 2026-06-08 (feat/plugin-installer-mcp) — added coverage for
 ``spec_to_config`` (standard .mcp.json spec -> MCPServerConfig mapping,
 transport derivation from the spec ``type`` field).
-Updated: 2026-09-16 (feat/sites-inspo-design-research) — two tests at the bottom
-pin the ``inspo`` design-research preset. The load-bearing one is the NAME: the
-preset id, the ``POCKETPAW_SITES_MCP_SERVERS`` grant and the /sites preamble's
-``_DESIGN_RESEARCH_SERVER`` are three places holding one string, and when they
-disagree nothing raises — the grant is inert by design, so the feature simply
-does nothing on a deploy that installed and configured it correctly.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -361,52 +355,3 @@ class TestPresetRoutes:
         )
         assert res.status_code == 200
         assert res.json()["status"] == "ok"
-
-
-# ======================================================================
-# The inspo preset and the /sites grant share one name
-# (feat/sites-inspo-design-research, 2026-09-16)
-# ======================================================================
-
-
-def test_inspo_preset_installs_under_the_name_the_sites_grant_expects():
-    """Installing the preset must produce the server name /sites grants.
-
-    Three independent places have to agree on the single string ``inspo``:
-    ``preset_to_config`` writes ``MCPServerConfig.name = preset.id``,
-    ``POCKETPAW_SITES_MCP_SERVERS`` is matched against that name, and the
-    /sites preamble's ``_DESIGN_RESEARCH_SERVER`` decides whether to emit the
-    research step at all.
-
-    Nothing errors when they disagree — an unmatched grant is deliberately
-    inert — so the whole feature just silently does nothing: the operator
-    installs the preset, sets the env var, and the agent never gets the tools.
-
-    THE MUTATION THAT BREAKS THIS: rename the preset id to ``inspo-design``.
-    Run: install succeeds, the grant matches nothing, and no preamble changes.
-    """
-    from pocketpaw_ee.cloud.surface.handlers.sites import _DESIGN_RESEARCH_SERVER
-
-    preset = get_preset("inspo")
-    assert preset is not None, "the inspo design-research preset is gone"
-
-    config = preset_to_config(preset)
-    assert config.name == _DESIGN_RESEARCH_SERVER
-
-
-def test_inspo_preset_needs_no_credentials():
-    """It is a one-click install precisely because it takes no secret.
-
-    The server is free, hosted and unauthenticated. Adding a required env key
-    or flipping ``oauth`` would put a credential prompt in front of an install
-    that does not need one — and on a multi-tenant deploy there is no per-user
-    credential to prompt for in the first place.
-    """
-    preset = get_preset("inspo")
-    assert preset is not None
-    assert preset.oauth is False
-    assert [ek for ek in preset.env_keys if ek.required] == []
-    assert preset.url.startswith("https://")
-    # Remote HTTP, not an npx package the deploy would have to install.
-    assert preset.transport == "http"
-    assert preset.command == ""

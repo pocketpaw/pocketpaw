@@ -1210,6 +1210,20 @@ class Settings(BaseSettings):
             "to reveal itself."
         ),
     )
+    inspo_mcp_url: str = Field(
+        default="",
+        description=(
+            "Override the endpoint the BUNDLED design-research server "
+            "(``pocketpaw_inspo``) calls. Empty (the default) uses the hosted "
+            "archive at https://inspomcp.dev/api/mcp. "
+            "The reason this exists: the hosted service rate-limits PER IP, and a "
+            "multi-tenant deploy presents a single egress IP for every tenant it "
+            "serves, so a busy install can exhaust the limit for all of its users "
+            "at once. The upstream is MIT-licensed with a documented self-host "
+            "path; point this at your own instance and nothing else changes. "
+            "Read per tool call, not cached, so it takes effect without a restart."
+        ),
+    )
     sites_mcp_servers: str = Field(
         default="",
         description=(
