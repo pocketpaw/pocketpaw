@@ -76,6 +76,22 @@ def fallback_title(first_message: str) -> str | None:
     return one_line
 
 
+def _is_auth_failure(exc: Exception) -> bool:
+    """True when ``exc`` is the API refusing the credential rather than a real fault.
+
+    Matched on the SDK's exception classes when they import, and on the status code
+    otherwise, so a titling call never depends on the anthropic package being present.
+    """
+    try:
+        from anthropic import AuthenticationError, PermissionDeniedError
+
+        if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+            return True
+    except ImportError:
+        pass
+    return getattr(exc, "status_code", None) in (401, 403)
+
+
 async def generate_title(
     first_message: str, *, model: str, api_key: str | None = None
 ) -> str | None:
@@ -114,8 +130,21 @@ async def generate_title(
             max_tokens=_MAX_TOKENS,
             messages=[{"role": "user", "content": _PROMPT.format(message=text)}],
         )
-    except Exception:
-        logger.warning("Haiku title generation call failed; using fallback", exc_info=True)
+    except Exception as exc:
+        # An auth/permission refusal is an EXPECTED outcome here, not a crash: the key
+        # may be absent, expired, or meant for a gateway rather than api.anthropic.com
+        # (ANTHROPIC_BASE_URL, which the Anthropic SDK reads on its own). Titling is
+        # best-effort and already falls back, so a refusal is one line. A full traceback
+        # reads as a failed run and has sent people debugging the agent, which was fine.
+        # Anything else is genuinely unexpected and keeps its traceback.
+        if _is_auth_failure(exc):
+            logger.info(
+                "chat titling skipped: the Anthropic API rejected the configured key "
+                "(%s); using the first-message fallback",
+                type(exc).__name__,
+            )
+        else:
+            logger.warning("Haiku title generation call failed; using fallback", exc_info=True)
         return fallback_title(first_message)
 
     try:
