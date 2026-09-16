@@ -37,6 +37,14 @@
 # ``credits_micro`` carries the stored figure through untouched; ``credits`` stays
 # for display, the same split ``LedgerEntry`` already makes with
 # ``amount_delta_micro``.
+# Changed 2026-09-16 (feat/platform-credits, chunk 6 of the Paw Admin PRD):
+# ``LedgerEntry`` gained ``applied``/``conditional`` trailing-default fields,
+# mirroring ``models.credit.CreditLedgerEntry`` — the platform ledger-history
+# route needs to tell an operator apart a settled movement from a crash-window
+# phantom, which the domain object could not previously express at all. Added
+# ``ReconcileResult`` — ``reconcile`` now reports how many phantom entries it
+# re-drove or voided, not just the final balance, so the platform reconcile
+# route can show an operator what the repair actually did.
 
 from __future__ import annotations
 
@@ -119,6 +127,32 @@ class LedgerEntry:
     ref: dict = field(default_factory=dict)
     idempotency_key: str = ""
     created_at: datetime | None = None
+    # Mirrors ``models.credit.CreditLedgerEntry`` — see that model for the full
+    # crash-window explanation. ``applied=False`` means the balance ``$inc`` for
+    # this entry has not (yet, or ever) landed — a phantom row that ``reconcile``
+    # will re-drive or void. ``conditional=True`` marks a STRICT debit (voided by
+    # reconcile if funds are insufficient); grants and metered/allow_negative
+    # debits are unconditional and always re-driven.
+    applied: bool = False
+    conditional: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """The outcome of a ``credits.reconcile`` call.
+
+    ``balance`` is the repaired wallet balance (whole credits, for display —
+    see ``micro_to_credits``). ``redriven`` counts phantom entries that were
+    re-applied (an unconditional grant/metered-debit, or a conditional debit
+    for which funds turned out sufficient); ``voided`` counts phantom
+    conditional debits that reconcile determined could not be funded and
+    therefore deleted rather than applied. Both are 0 on a wallet with nothing
+    to repair.
+    """
+
+    balance: int
+    redriven: int
+    voided: int
 
 
 # ---------------------------------------------------------------------------
