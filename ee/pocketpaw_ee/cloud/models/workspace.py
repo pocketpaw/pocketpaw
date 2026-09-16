@@ -45,11 +45,23 @@ tab title, accent color, favicon, paw-mark toggle). Branding is a per-tenant
 IDENTITY field — kept separate from ``WorkspaceSettings`` (operational config)
 on purpose. Every sub-field is optional; an unset field falls back to the Paw
 default at render time (a frontend concern, not stored here).
+
+2026-09-16 (Paw Admin chunk 7, Decision 7): added the ``WorkspaceOverrides``
+sub-model and a top-level ``Workspace.overrides`` field — a platform
+operator's per-tenant entitlement overrides, set/cleared only through
+``cloud/platform/entitlements.py`` and applied by
+``entitlements.service.resolve_entitlements``. Deliberately does NOT cover
+every ``Entitlements`` field: see ``WorkspaceOverrides``'s own docstring for
+which two fields were left out and why (PRD errata C2 — both are read by
+their enforcement points straight off the plan catalog, never through the
+resolver, so an override on either would be stored and displayed while
+granting nothing).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field, field_validator
@@ -107,6 +119,66 @@ class Branding(BaseModel):
     show_paw_mark: bool = True  # keep/hide our paw icon
 
 
+class WorkspaceOverrides(BaseModel):
+    """Platform-operator entitlement overrides (Paw Admin chunk 7, Decision 7).
+
+    Each field is independently tri-state: ``None`` means "not overridden — use
+    the plan catalog's value", the literal string ``"uncapped"`` means
+    "override to no limit", and an int means "override to exactly this limit".
+    Three states because a plain ``int | None`` cannot tell "leave the catalog
+    alone" apart from "override to unlimited" — both would collapse onto the
+    same wire value (``null``) otherwise, and an operator lifting Free's
+    ``max_seats=0`` to uncapped needs to say that, not merely "no opinion".
+
+    Every field here is read by ``resolve_entitlements``, which is the single
+    choke point every enforcement path in the codebase calls through — an
+    override set here reaches all of them with no extra plumbing. That
+    includes ``max_call_seconds_per_day``, which Decision 7's original field
+    list omitted despite it already being resolver-enforced (PRD errata C2).
+
+    Deliberately does NOT model ``monthly_credit_allotment`` or
+    ``extra_features``. Verified against every consumer in the tree, not just
+    ``Entitlements``: the credit-renewal grant reads
+    ``plan_catalog.get_plan(event.plan_key).monthly_credit_allotment`` directly
+    (``billing/service.py``), and both ``require_plan_feature`` implementations
+    (``cloud/_core/deps.py``, ``guards/deps.py``) test
+    ``feature in PLAN_FEATURES.get(plan, set())`` directly — neither goes
+    through the resolver. An override on either field would be stored, shown
+    on the console, and change nothing, which the PRD errata calls worse than
+    the field not existing: the ticket would read as fixed when it is not.
+    Add either field here only once its underlying gate reads the resolver.
+
+    ``expires_at`` — ``None`` never expires. Once past, the resolver treats
+    every field on this document as absent, not just the ones past their own
+    clock — a partial expiry would leave an operator unable to reason about
+    what is still in effect.
+    """
+
+    monthly_ceiling: int | Literal["uncapped"] | None = None
+    max_seats: int | Literal["uncapped"] | None = None
+    max_pockets: int | Literal["uncapped"] | None = None
+    max_connectors: int | Literal["uncapped"] | None = None
+    max_call_seconds_per_day: int | Literal["uncapped"] | None = None
+    max_storage_bytes: int | Literal["uncapped"] | None = None
+    included_sites: int | Literal["uncapped"] | None = None
+    expires_at: datetime | None = None
+
+    @field_validator(
+        "monthly_ceiling",
+        "max_seats",
+        "max_pockets",
+        "max_connectors",
+        "max_call_seconds_per_day",
+        "max_storage_bytes",
+        "included_sites",
+    )
+    @classmethod
+    def _validate_non_negative(cls, v: int | str | None) -> int | str | None:
+        if isinstance(v, int) and v < 0:
+            raise ValueError("override value must be zero or positive, or the string 'uncapped'")
+        return v
+
+
 class SsoConfig(BaseModel):
     """Embedded OIDC SSO config — one per workspace, optional."""
 
@@ -148,6 +220,13 @@ class Workspace(TimestampedDocument):
     # nested under settings (which holds operational config). None = no
     # custom branding; the frontend renders the Paw defaults.
     branding: Branding | None = None
+    # Platform-operator entitlement overrides (Paw Admin chunk 7). None = no
+    # override in effect; set/cleared only by the platform write route in
+    # ``cloud/platform/entitlements.py`` (via its cross-tenant helper in
+    # ``workspace/service.py``), never by the tenant's own admin. See
+    # ``WorkspaceOverrides`` for the field list and why two ``Entitlements``
+    # fields are deliberately absent from it.
+    overrides: WorkspaceOverrides | None = None
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None
