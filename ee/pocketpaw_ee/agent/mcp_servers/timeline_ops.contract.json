@@ -24,9 +24,16 @@
     "id. Lanes existed but nothing could ask for one, so layering was reachable",
     "only as a side effect of the store's collision stacking. Names are what make",
     "a lane usable in the batch that creates it — track ids are minted at apply",
-    "time, the same reason `after` cannot anchor to a clip the batch is adding."
+    "time, the same reason `after` cannot anchor to a clip the batch is adding.",
+    "",
+    "v4 (2026-09-15): zoom_clip. A push-in on a point is reachable as four",
+    "add_keyframe ops and nobody gets it right — keeping a point centred while",
+    "the frame scales is an offset that depends on the scale, and getting it",
+    "wrong zooms somewhere else while looking like the feature worked. The verb",
+    "carries the point as a fraction of the frame and the applier does the",
+    "arithmetic, in the one place it is unit-tested."
   ],
-  "version": 3,
+  "version": 4,
   "maxOpsPerBatch": 50,
   "ops": [
     "add_caption",
@@ -45,6 +52,7 @@
     "split_clip",
     "style_captions",
     "style_text",
-    "trim_clip"
+    "trim_clip",
+    "zoom_clip"
   ]
 }

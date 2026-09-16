@@ -26,6 +26,11 @@
 #   because suspension is OURS (it revokes the entitlements we grant) while the
 #   subscription is still alive at Dodo and can still recover, so it must stay
 #   billable or a re-subscribe opens a second one alongside it.
+# Updated 2026-09-16 (feat/platform-stats-revenue, chunk 9) — added a
+#   ``(status, plan_key)`` index. The master PRD asked for ``(workspace,
+#   status)``, which cannot serve the revenue screen's platform-wide reads
+#   (they carry no workspace term); errata C1 in
+#   2026-09-15-paw-admin-prd-corrections.md names the correct shape.
 
 from __future__ import annotations
 
@@ -88,4 +93,12 @@ class Subscription(TimestampedDocument):
                 unique=True,
                 name="uq_gateway_subscription_id",
             ),
+            # Platform revenue reads (chunk 9, Paw Admin PRD) are platform-wide
+            # and carry no workspace term. The master PRD named a
+            # ``(workspace, status)`` index here, which cannot serve them — see
+            # the corrections doc (errata C1). The actual queries are the
+            # subscription-snapshot status/plan breakdown and MRR's walk over
+            # paid-up subscriptions grouped by plan, both of which filter on
+            # ``status`` and then read ``plan_key``.
+            IndexModel([("status", 1), ("plan_key", 1)], name="ix_status_plan_key"),
         ]

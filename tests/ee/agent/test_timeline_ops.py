@@ -125,6 +125,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "add_keyframe": {"clipId": "clip_aaa", "prop": "opacity", "atMs": 500, "value": 0.5},
         "clear_keyframes": {"clipId": "clip_aaa", "prop": "opacity"},
         "add_lane": {"kind": "audio", "name": "Score"},
+        "zoom_clip": {"clipId": "clip_aaa", "focusX": 0.3, "focusY": 0.4, "scale": 1.5},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -408,6 +409,42 @@ def test_an_empty_transform_is_rejected(summary: TimelineSummary) -> None:
     _, error = validate_ops([{"op": "set_transform", "clipId": "clip_aaa"}], summary)
     assert error is not None
     assert "changes nothing" in error
+
+
+def test_zoom_focus_outside_the_frame_is_rejected(summary: TimelineSummary) -> None:
+    """focusX/focusY are FRACTIONS of the frame. Pixels are the obvious thing to
+    pass — set_transform's x/y right above take pixels — and 960 would read as a
+    point 960 frames to the right rather than the middle of a 1920-wide one.
+
+    Mutation: drop the 0..1 bounds check from the zoom_clip branch."""
+    for key in ("focusX", "focusY"):
+        _, error = validate_ops([{"op": "zoom_clip", "clipId": "clip_aaa", key: 960}], summary)
+        assert error is not None
+        assert "fraction of the frame" in error
+
+
+def test_zoom_scale_must_be_a_zoom_in(summary: TimelineSummary) -> None:
+    """Below 1 is a shrink, which set_transform owns, and exactly 1 is nothing at
+    all — both would apply cleanly and change no pixel."""
+    for scale in (0.5, 1, 99):
+        _, error = validate_ops(
+            [{"op": "zoom_clip", "clipId": "clip_aaa", "scale": scale}], summary
+        )
+        assert error is not None, scale
+
+
+def test_zoom_defaults_are_left_to_the_applier(summary: TimelineSummary) -> None:
+    """A bare zoom_clip with just a clip id is valid: the browser half fills in
+    a centred 1.4x push. Requiring every field here would make the common
+    "zoom in a bit" turn into seven numbers the agent has to invent."""
+    clean, error = validate_ops([{"op": "zoom_clip", "clipId": "clip_aaa"}], summary)
+    assert error is None, error
+    assert clean is not None
+
+
+def test_zoom_clip_id_must_resolve(summary: TimelineSummary) -> None:
+    _, error = validate_ops([{"op": "zoom_clip", "clipId": "clip_nope"}], summary)
+    assert error is not None
 
 
 def test_style_text_needs_no_span(summary: TimelineSummary) -> None:

@@ -8,6 +8,12 @@ pockets have a connected Drive account. Once that lands we can fan a
 Drive listing in here without changing the response shape the FE already
 consumes. See ``docs/plans/cluster-E-reality.md`` for the handshake.
 
+2026-09-16 (graph rebuild): ``files_graph`` now also reports ``ghost_edges`` —
+which file named each unresolved wikilink. It already knew (the ghost is
+discovered while scanning one row's ``link_names``) and dropped the fact on
+the floor, which left every client drawing ghosts as free-floating nodes with
+nothing to attach them to.
+
 2026-09-05 (files vault, feat/files-links): ``file_links`` and ``files_graph``
 resolve the ``[[wikilinks]]`` the FileReady listener stored in
 ``FileUpload.link_names``. Resolution is by ``normalize_link_name(filename)``
@@ -301,11 +307,13 @@ class UnifiedFilesService:
         by_stem = _stem_map(rows)
         edges: dict[tuple[str, str], None] = {}
         ghosts: dict[str, None] = {}
+        ghost_edges: dict[tuple[str, str], None] = {}
         for r in rows:
             for name in r["link_names"]:
                 hit = by_stem.get(name)
                 if hit is None:
                     ghosts[name] = None
+                    ghost_edges[(r["file_id"], name)] = None
                 else:
                     edges[(r["file_id"], hit["file_id"])] = None
         return FilesGraphResponse(
@@ -321,6 +329,7 @@ class UnifiedFilesService:
             ],
             edges=[GraphEdge(source=s, target=t) for s, t in edges],
             ghosts=list(ghosts),
+            ghost_edges=[GraphEdge(source=s, target=t) for s, t in ghost_edges],
             truncated=truncated,
         )
 

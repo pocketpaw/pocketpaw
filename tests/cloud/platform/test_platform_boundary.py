@@ -14,6 +14,10 @@ _CROSS_TENANT_HELPERS = (
     "platform_get_workspace",
     "platform_list_members",
     "platform_find_users",
+    # Added 2026-09-16 (Paw Admin chunk 7): the entitlement-override writer —
+    # no membership check, workspace_id is a caller-supplied path parameter,
+    # same shape as the four above.
+    "platform_set_workspace_overrides",
 )
 
 

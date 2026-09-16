@@ -83,34 +83,56 @@
 #   function exists for the seams that hold two strings and no resolved object; the
 #   field exists for the one reader that already has the object. Neither re-derives
 #   the rule, which is the only property that matters.
+# Updated 2026-09-16 (Paw Admin chunk 7, Decision 7): ``resolve_entitlements``
+#   now also overlays a workspace's ``WorkspaceOverrides`` (set by a platform
+#   operator via ``cloud/platform/entitlements.py``) onto the catalog-resolved
+#   values, skipping an expired override set entirely. The tier→``Entitlements``
+#   construction was extracted to the new ``entitlements_from_plan`` (pure, no
+#   DB) so the platform route can show an operator the CATALOG value beside the
+#   RESOLVED one without a second copy of the tier-lookup/fallback logic. Only
+#   the seven fields ``resolve_entitlements`` itself enforces are overlaid —
+#   ``monthly_credit_allotment`` and ``features`` are deliberately excluded; see
+#   ``WorkspaceOverrides`` for why (PRD errata C2).
+#   CORRECTION, same day: the first cut of this fetched the plan and the
+#   overrides off one combined call (``get_workspace_plan_and_overrides``),
+#   which broke every test across this codebase (44 failures in
+#   ``tests/cloud``) that drives this resolver by monkeypatching
+#   ``get_workspace_plan`` — the combined call's own doc lookup failed on
+#   those tests' non-Mongo-id workspace ids and nulled out the plan the mock
+#   had already answered. Fixed by going back to calling ``get_workspace_plan``
+#   directly (so every existing mock keeps working) and adding a second,
+#   independent ``get_workspace_overrides`` call for the override half. Costs
+#   one extra DB round trip over the original design; correctness for every
+#   existing caller outweighs it. ``get_workspace_plan_and_overrides`` is kept
+#   for the platform route, which always addresses a real workspace doc by
+#   path parameter and has no such mock to preserve.
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
 from pocketpaw_ee.cloud.entitlements.domain import Entitlements, SiteEntitlements
 
+if TYPE_CHECKING:
+    from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides
 
-async def resolve_entitlements(workspace_id: str) -> Entitlements:
-    """Resolve a workspace to its entitlements (plan + features + allotment).
 
-    Reads the workspace's CURRENT ``Workspace.plan`` and looks the tier up in the
-    billing plan catalog. A workspace with no/unknown plan (or one that doesn't
-    exist) resolves to the ``free`` base tier — never a crash, never a paid-tier
-    leak.
+def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitlements:
+    """Build ``Entitlements`` from a plan key — pure, no DB access.
+
+    Extracted out of ``resolve_entitlements`` so the platform entitlements
+    route (Paw Admin chunk 7) can show an operator the plan CATALOG'S values
+    beside the OVERRIDE-RESOLVED ones without re-deriving the tier lookup and
+    its fallback. ``resolve_entitlements`` is this function plus a DB fetch
+    plus the override overlay — nothing about the fallback logic lives twice.
+
+    A workspace with no/unknown plan (``plan_key`` is ``None`` or not in the
+    catalog) resolves to the ``free`` base tier — never a crash, never a
+    paid-tier leak.
     """
-    # Rule 6 — validate at entry.
-    if not workspace_id:
-        raise ValidationError("entitlements.invalid_workspace", "workspace_id is required")
-
-    # Lazy import keeps this module free of the heavy workspace.service import at
-    # module load (it pulls Beanie), mirroring how the plan-feature gate dep
-    # imports the workspace service inside the guard.
-    from pocketpaw_ee.cloud.workspace import service as workspace_service
-
-    plan_key = await workspace_service.get_workspace_plan(workspace_id)
-
     # None (missing/deleted/malformed id) OR a plan string not in the catalog
     # (a stale/typo'd tier) both fall back to the base floor. ``get_plan``
     # returns None for an unknown key, so this one branch covers both.
@@ -158,6 +180,121 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         included_sites=tier.included_sites,
         features=tier.features,
     )
+
+
+def _resolve_override_value(catalog_value: int | None, override: int | str | None) -> int | None:
+    """Overlay one field: ``None`` keeps the catalog value, ``"uncapped"``
+    clears it, an int replaces it.
+
+    ``isinstance`` rather than ``override == "uncapped"``: the field's type is
+    ``int | Literal["uncapped"] | None``, and a type checker cannot narrow
+    ``int | str`` down to ``int`` from an equality comparison — the trailing
+    ``return override`` would still read as ``int | str`` against a
+    ``-> int | None`` signature. ``isinstance(override, str)`` narrows the
+    ``else`` branch to ``int`` correctly, and is equivalent here because the
+    only string value the type allows is ``"uncapped"``.
+    """
+    if override is None:
+        return catalog_value
+    if isinstance(override, str):
+        return None
+    return override
+
+
+def _apply_overrides(
+    entitlements: Entitlements, overrides: WorkspaceOverrides | None
+) -> Entitlements:
+    """Overlay a workspace's overrides onto its catalog-resolved entitlements.
+
+    An expired override set (``expires_at`` in the past) is treated as
+    entirely absent — not partially applied — so an operator is never left
+    reasoning about which fields of one grant outlived the others.
+
+    Only the seven fields ``WorkspaceOverrides`` models are overlaid.
+    ``monthly_credit_allotment`` and ``features`` never reach this function at
+    all — see ``WorkspaceOverrides`` for why an override on either would be
+    inert (PRD errata C2).
+    """
+    if overrides is None:
+        return entitlements
+
+    if overrides.expires_at is not None:
+        from datetime import UTC, datetime
+
+        # Mongo (and mongomock) round-trips a naive datetime, so a value read
+        # straight back off the document has no tzinfo even though it was
+        # written as UTC-aware. Treat naive as UTC rather than let the
+        # comparison raise.
+        expires_at = overrides.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at <= datetime.now(UTC):
+            return entitlements
+
+    import dataclasses
+
+    return dataclasses.replace(
+        entitlements,
+        monthly_ceiling=_resolve_override_value(
+            entitlements.monthly_ceiling, overrides.monthly_ceiling
+        ),
+        max_seats=_resolve_override_value(entitlements.max_seats, overrides.max_seats),
+        max_pockets=_resolve_override_value(entitlements.max_pockets, overrides.max_pockets),
+        max_connectors=_resolve_override_value(
+            entitlements.max_connectors, overrides.max_connectors
+        ),
+        max_call_seconds_per_day=_resolve_override_value(
+            entitlements.max_call_seconds_per_day, overrides.max_call_seconds_per_day
+        ),
+        max_storage_bytes=_resolve_override_value(
+            entitlements.max_storage_bytes, overrides.max_storage_bytes
+        ),
+        included_sites=_resolve_override_value(
+            entitlements.included_sites, overrides.included_sites
+        ),
+    )
+
+
+async def resolve_entitlements(workspace_id: str) -> Entitlements:
+    """Resolve a workspace to its entitlements (plan + features + allotment).
+
+    Reads the workspace's CURRENT ``Workspace.plan`` and looks the tier up in the
+    billing plan catalog, then overlays any non-expired ``WorkspaceOverrides`` a
+    platform operator has set (Paw Admin chunk 7). A workspace with no/unknown
+    plan (or one that doesn't exist) resolves to the ``free`` base tier — never
+    a crash, never a paid-tier leak.
+
+    This is the SINGLE choke point every enforcement path in the codebase calls
+    through, which is what makes an override here reach all of them (seat caps,
+    the LiveKit call-time gate, storage, connectors, pockets, the monthly
+    ceiling, included sites) with no other code changed.
+    """
+    # Rule 6 — validate at entry.
+    if not workspace_id:
+        raise ValidationError("entitlements.invalid_workspace", "workspace_id is required")
+
+    # Lazy import keeps this module free of the heavy workspace.service import at
+    # module load (it pulls Beanie), mirroring how the plan-feature gate dep
+    # imports the workspace service inside the guard.
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    # Two separate calls, not the combined ``get_workspace_plan_and_overrides``
+    # (that one is for the platform route, which always has a real workspace
+    # doc behind a path parameter). Every existing consumer of this resolver —
+    # tests across billing, credits, connectors, pockets, storage, livekit,
+    # chat — drives it by monkeypatching ``get_workspace_plan`` with a plan
+    # string against a workspace id that is not a real Mongo id. A combined
+    # fetch that resolves both fields off one document lookup would silently
+    # discard that patch (the doc lookup fails on the fake id and nulls out a
+    # plan the mock already answered), which is exactly the regression this
+    # split avoids: ``get_workspace_plan`` stays the one function every mock
+    # targets, and only the override lookup touches the DB, failing closed to
+    # "no override" for the same fake ids those tests use.
+    plan_key = await workspace_service.get_workspace_plan(workspace_id)
+    overrides = await workspace_service.get_workspace_overrides(workspace_id)
+
+    base = entitlements_from_plan(workspace_id, plan_key)
+    return _apply_overrides(base, overrides)
 
 
 # The per-site subscription states that count as PAYING. Everything else —

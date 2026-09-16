@@ -7,6 +7,31 @@
 - **License:** MIT. Attribution retained here; the skill body is a rewrite rather
   than a copy.
 
+## Second source (2026-09-15): Refero anti-ai-slop
+
+- **Source:** https://github.com/referodesign/refero_skill (MIT, Refero) -
+  `skills/refero-design/references/anti-ai-slop.md`
+- **Vendored:** 2026-09-15 from commit `a9b54a3e62a6` (upstream v1.0.2)
+- **License:** MIT. Attribution retained; the body is a rewrite, not a copy.
+
+Only the six litmus tests were taken, as `## 8B`. They landed here rather than in
+`pocketpaw-design-taste` MODULE 5 for two reasons: this skill's trigger already IS
+"after authoring the sections and before showing the draft", which is exactly when
+a removal test gets run; and design-taste is embedded on every create turn, so
+fifteen lines there are paid unconditionally while here they are paid when a draft
+is actually being checked.
+
+They are a different instrument from MODULE 5's ~40-item AI-tells catalogue and
+replace none of it. That catalogue names specific things not to draw. These ask
+whether the page is about anything - each is a REMOVAL (take away the card
+chrome, the hero image, the nav, 30% of the copy, the logo) and a question about
+what the page lost. A "yes" is not a defect to patch; it means a decision was
+never made.
+
+The rest of upstream's file was not ported: its nine tells are either already in
+MODULE 5 at greater specificity, or - for reference averaging and token-role
+drift - already carried by `sites-design-research`.
+
 ## What was ported
 
 Upstream's **"Ship-it checklist — recurring first-draft fixes"**, which is the part
