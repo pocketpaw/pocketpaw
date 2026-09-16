@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-16 (PS-1, refactor/sites-extract-plan-close): the decision to end
+# a paid plan at the close of the period it bought is now
+# ``_close_site_plan_at_period_end`` instead of an inline block in
+# ``publish_pocket``. Pure move — both branches, both log lines and every field
+# written are unchanged. It takes the site DOCUMENT and no request, because a
+# second verb (pause) has to schedule the same close and could not reach the logic
+# while it sat among publish's locals. ``log_prefix`` defaults to
+# ``sites.publish`` so the publish path's log lines are byte-identical.
+#
 # Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the
 # DELETE lifecycle — ``start_site_delete`` / ``site_delete_status`` (the two
 # owner-only seams the REST routes call) plus the writes the delete job drives the
@@ -6087,6 +6096,70 @@ async def record_site_invoice(
     return _client_response(site)
 
 
+async def _close_site_plan_at_period_end(
+    site: _SiteDoc,
+    *,
+    log_prefix: str = "sites.publish",
+) -> bool:
+    """End ``site``'s paid plan, honouring the period it has already paid for.
+
+    Returns ``True`` when the close was SCHEDULED for the period end, ``False``
+    when there was no period to honour and it had to happen on the spot.
+
+    The end is SCHEDULED, NOT IMMEDIATE, while the site is still inside a month it
+    has paid for. Closing on the spot is the mirror image of the whole change
+    removed: the model is "the PERIOD is bought, and a tier change re-prices it
+    rather than restarting it" — which is why a downgrade costs nothing and going
+    back up inside the period is free — and ending the plan the moment someone
+    clicks away contradicts that for the one move where it costs the customer
+    money. Paying $19 on the 1st and cancelling on the 2nd would forfeit 28 days
+    AND make re-buying cost a second full month, because ``period_paid_usd`` would
+    already be back to zero.
+
+    So everything the customer bought is left standing — tier, active status,
+    renewal date, paid mark — and the renewal sweep closes it when the period it
+    paid for actually runs out. Entitlements read ``subscription_status``, so the
+    custom domain, analytics and badge removal survive to the same date rather
+    than disappearing under a live site mid-month.
+
+    It takes the DOCUMENT and nothing else that matters. Ending a plan is not the
+    publish path's decision — publish is only the first verb that needed it — so
+    nothing here may reach for a publish request, its tier lookup or its locals.
+    ``log_prefix`` exists for that reason alone: a second verb logs under its own
+    name without the line otherwise changing.
+    """
+    _period_end = getattr(site, "renewal_date", None)
+    if _period_end is not None:
+        site.plan_cancels_at_period_end = True
+        await site.save()
+        logger.info(
+            "%s: site %s set to close at the end of the period it "
+            "has paid for (%s) — tier %s and its capabilities stay until then",
+            log_prefix,
+            str(site.id),
+            _period_end,
+            site.plan_tier,
+        )
+        return True
+
+    # No period end to run to. An active paid site with no renewal date is not a
+    # shape this path writes; it is a legacy or half-healed row, and there is
+    # nothing to honour, so close it now rather than leave a paid tier standing
+    # with nothing scheduled to ever end it.
+    site.subscription_status = "none"
+    site.renewal_date = None
+    site.period_paid_usd = 0
+    site.plan_cancels_at_period_end = False
+    await site.save()
+    logger.info(
+        "%s: site %s moved to the free floor — subscription "
+        "closed immediately (no renewal date to run to)",
+        log_prefix,
+        str(site.id),
+    )
+    return False
+
+
 async def publish_pocket(
     *,
     workspace_id: str,
@@ -6552,47 +6625,10 @@ async def publish_pocket(
         # treating it as a downgrade is how a paying customer silently loses every
         # capability they are still being billed for.
         #
-        # The end is SCHEDULED, NOT IMMEDIATE, while the site is still inside a
-        # month it has paid for. Closing on the spot is the mirror image of the
-        # whole change removed: the model is "the PERIOD is bought, and a tier
-        # change re-prices it rather than restarting it" — which is why a downgrade
-        # costs nothing and going back up inside the period is free — and ending
-        # the plan the moment someone clicks away contradicts that for the one move
-        # where it costs the customer money. Paying $19 on the 1st and cancelling
-        # on the 2nd would forfeit 28 days AND make re-buying cost a second full
-        # month, because ``period_paid_usd`` would already be back to zero.
-        #
-        # So everything the customer bought is left standing — tier, active status,
-        # renewal date, paid mark — and the renewal sweep closes it when the period
-        # it paid for actually runs out. Entitlements read ``subscription_status``,
-        # so the custom domain, analytics and badge removal survive to the same
-        # date rather than disappearing under a live site mid-month.
-        _period_end = getattr(existing_doc, "renewal_date", None)
-        if _period_end is not None:
-            existing_doc.plan_cancels_at_period_end = True
-            await existing_doc.save()
-            logger.info(
-                "sites.publish: site %s set to close at the end of the period it "
-                "has paid for (%s) — tier %s and its capabilities stay until then",
-                str(existing_doc.id),
-                _period_end,
-                existing_doc.plan_tier,
-            )
-        else:
-            # No period end to run to. An active paid site with no renewal date is
-            # not a shape this path writes; it is a legacy or half-healed row, and
-            # there is nothing to honour, so close it now rather than leave a paid
-            # tier standing with nothing scheduled to ever end it.
-            existing_doc.subscription_status = "none"
-            existing_doc.renewal_date = None
-            existing_doc.period_paid_usd = 0
-            existing_doc.plan_cancels_at_period_end = False
-            await existing_doc.save()
-            logger.info(
-                "sites.publish: site %s moved to the free floor — subscription "
-                "closed immediately (no renewal date to run to)",
-                str(existing_doc.id),
-            )
+        # The end is SCHEDULED rather than immediate while the site is inside a
+        # month it has paid for. ``_close_site_plan_at_period_end`` owns that
+        # decision and the reasoning behind it.
+        await _close_site_plan_at_period_end(existing_doc)
 
     # RESUMING a plan that is scheduled to close. The gesture is "apply the plan
     # this site already has" — which is what the Billing tab's plan selector shows
