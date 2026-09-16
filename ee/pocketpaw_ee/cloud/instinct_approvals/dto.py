@@ -3,6 +3,12 @@
 # DTOs for the RFC 03 v2 template-level approval queue. Distinct
 # request and response classes per EE cloud rule 4 — never reuse one
 # model for input and output.
+# Updated: 2026-08-06 (feat/coupling-template-approvals, T-5) —
+# ``ApprovalResponse`` now carries ``correlation_id``, the Decision-Graph
+# chain id minted on the row at create time. It rides the wire (and
+# therefore the realtime event payload) so the approvals UI can deep-link a
+# decided approval to its /decisions chain without a second lookup, and so
+# the notification bridge can read it straight off the bus payload.
 
 """Wire-format DTOs for the ``instinct_approvals`` entity."""
 
@@ -90,6 +96,7 @@ class ApprovalResponse(BaseModel):
     decided_at: str | None
     decided_by: str | None
     created_at: str | None
+    correlation_id: str = ""
 
 
 def approval_to_dto(a: InstinctApproval) -> ApprovalResponse:
@@ -116,6 +123,7 @@ def approval_to_dto(a: InstinctApproval) -> ApprovalResponse:
         decided_at=iso_utc(a.decided_at) if a.decided_at else None,
         decided_by=a.decided_by,
         created_at=iso_utc(a.created_at) if a.created_at else None,
+        correlation_id=a.correlation_id,
     )
 
 
