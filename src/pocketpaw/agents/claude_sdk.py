@@ -1,5 +1,18 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-09-15 (fix/chat-image-persistent-client) — the images now ride the
+  LEGACY ``self._client`` persistent send too, not only the two leased sends in
+  ``_leased_dispatch``. Those two run only when a SessionSupervisor is driving,
+  and ``POCKETPAW_SESSION_SUPERVISOR`` defaults OFF — so in a default deployment
+  every turn took the legacy path and the attached image was dropped, while the
+  attachments block still named the file. The reported symptom was a model saying
+  it could see the filename and size but not the pixels. Not a capability limit:
+  ``_get_or_create_client`` returns a persistent ``ClaudeSDKClient`` and the SDK
+  docs list image uploads as a streaming-input capability. The stateless
+  ``query()`` fallback genuinely cannot carry one (the same docs say
+  single-message input does not support direct image attachments), so that one
+  now logs a warning naming which of the three routes forced it.
+
 Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
   ``image_attachments`` and a turn carrying one is sent through
   ``build_streaming_user_message``, which is the only shape the SDK takes an
@@ -3295,8 +3308,37 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         plugin_digest=plugin_digest,
                         system_prompt_digest=system_prompt_digest,
                     )
-                    logger.info("Persistent client: sending query (%d chars)", len(message))
-                    await _persistent_client.query(message)
+                    logger.info(
+                        "Persistent client: sending query (%d chars, %d image(s))",
+                        len(message),
+                        len(image_attachments),
+                    )
+                    # The images ride HERE too, not only on the two leased sends
+                    # in ``_leased_dispatch``. This is the "unchanged legacy
+                    # ``self._client``" route the module docstring names, and it
+                    # is what runs whenever no SessionSupervisor is driving the
+                    # turn — which is most turns. #2171 wired the payload into
+                    # the leased sends only, so on this path an attached image
+                    # was dropped and the model got the attachments NOTE with no
+                    # pixels: "I can see screenshot-compare.jpg is attached, but
+                    # the image itself isn't coming through to me on this turn."
+                    #
+                    # It is not a capability limit. ``_get_or_create_client``
+                    # returns a persistent ``ClaudeSDKClient``, and the SDK docs
+                    # list "Image uploads: attach images directly to messages"
+                    # as a streaming-input capability. Only the stateless
+                    # ``query()`` fallback below genuinely cannot carry one —
+                    # the same docs say single-message input does NOT support
+                    # direct image attachments.
+                    #
+                    # Withhold-when-empty, as on both leased sends: a turn with
+                    # no attachment keeps sending the bare string every existing
+                    # run sends, rather than a one-element parts list.
+                    await _persistent_client.query(
+                        stream_one_message(build_streaming_user_message(message, image_attachments))
+                        if image_attachments
+                        else message
+                    )
                     # Use _resilient_receive instead of receive_response() +
                     # _safe_iter.  This handles MessageParseError by
                     # re-creating the iterator from the same anyio channel,
@@ -3337,6 +3379,36 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             if event_stream is None:
                 logger.info("Starting stateless query (reason: _client_in_use was True)")
+                if image_attachments:
+                    # The one place an attached image genuinely CANNOT ride. The
+                    # SDK docs are explicit that single-message input "does NOT
+                    # support: Direct image attachments in messages", so there is
+                    # no payload shape that would work here — unlike the
+                    # persistent send above, which was a wiring gap and is fixed.
+                    #
+                    # Logged rather than silent because the user-visible result is
+                    # a model that says it can see the filename and not the
+                    # pixels, and every other cause of that looks identical from
+                    # the outside. The turn still runs: the attachments block
+                    # names the file, so the model knows one arrived.
+                    #
+                    # Reachable on three routes, all of which force this path: a
+                    # native-resume turn, a sibling run holding the client lease,
+                    # and a turn carrying per-entity skills. A resume turn could
+                    # in principle keep its images by driving a FRESH persistent
+                    # client with ``resume`` in its options (what the supervised
+                    # build does) instead of a stateless query — that is a
+                    # dispatch change, not a payload one, and is left to its own
+                    # PR.
+                    logger.warning(
+                        "stateless query cannot carry image attachments; "
+                        "%d image(s) dropped for this turn "
+                        "(resume_active=%s, client_in_use=%s, skills=%s)",
+                        len(image_attachments),
+                        _resume_active,
+                        self._client_in_use,
+                        bool(skill_names),
+                    )
                 # ``_build_options`` already baked Mongo history into the system
                 # prompt inside ``options``, so the stateless path uses the same
                 # options as the persistent path — no separate prompt swap needed.
