@@ -246,6 +246,7 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `mcp_client_metadata_url` | `POCKETPAW_MCP_CLIENT_METADATA_URL` | string | — | CIMD URL for MCP OAuth (for servers without dynamic client registration) |
+| `sites_mcp_servers` | `POCKETPAW_SITES_MCP_SERVERS` | string | `""` | Comma-separated names of EXTERNAL MCP servers (from `~/.pocketpaw/mcp_servers.json`) that the **/sites** surface may call — e.g. `refero` for live design research. Empty grants none, so an install that has not opted in is unaffected. `/sites` runs a hard allow-list of fully-qualified `mcp__<server>__<tool>` ids, but an external server's tool names are unknown until the client connects, so it is allow-listed wholesale with a bare `mcp__<server>` token; naming a server here puts that token in the /sites allow set. This scopes the grant to **that surface alone** — unlike `ALWAYS_ALLOWED_MCP_SERVERS`, which hands a server to every surface. A name matching no configured server is inert, not an error. Read once at startup. |
 
 ## Memory (Mem0)
 
