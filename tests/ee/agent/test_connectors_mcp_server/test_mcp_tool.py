@@ -19,6 +19,14 @@
 #   trust) actions PROPOSE without ever calling execute inline, connectors not
 #   bound to the pocket are rejected, and a missing pocket / workspace
 #   ContextVar (called off-stream) yields a clear error.
+# Updated: 2026-07-16 (SR-1 catalog-wide discovery) — the server now carries a
+#   FIFTH tool, ``sense_search``. Bumped the tool-count assertion (4 -> 5) and
+#   added ``SENSE_SEARCH_TOOL_ID`` to the registration test. New ``TestSenseSearch``
+#   drives ``_sense_search_handler`` end to end: it mocks ONLY the EE store read
+#   (``list_bound_connector_names``) and runs the REAL catalog over the full
+#   connector set, proving github surfaces catalog-wide + UNBOUND when only gmail
+#   is bound, a local-execution-mode connector (firebase) is marked UNAVAILABLE,
+#   and the no-workspace / missing-query / no-match envelopes.
 """MCP server registration + handler tests for connector execution."""
 
 from __future__ import annotations
@@ -46,6 +54,7 @@ class TestConnectorsMcpServerRegistration:
             CONNECTOR_EXECUTE_TOOL_ID,
             CONNECTOR_TOOL_IDS,
             LIST_CONNECTOR_ACTIONS_TOOL_ID,
+            SENSE_SEARCH_TOOL_ID,
             SERVER_NAME,
         )
 
@@ -53,10 +62,12 @@ class TestConnectorsMcpServerRegistration:
         # Allowlist entries must use the exact ``mcp__<server>__<tool>`` form.
         assert LIST_CONNECTOR_ACTIONS_TOOL_ID == "mcp__pocketpaw_connectors__list_connector_actions"
         assert CONNECTOR_EXECUTE_TOOL_ID == "mcp__pocketpaw_connectors__connector_execute"
+        assert SENSE_SEARCH_TOOL_ID == "mcp__pocketpaw_connectors__sense_search"
         assert LIST_CONNECTOR_ACTIONS_TOOL_ID in CONNECTOR_TOOL_IDS
         assert CONNECTOR_EXECUTE_TOOL_ID in CONNECTOR_TOOL_IDS
-        # The server now also carries the two Sense-tier tools (chunk 4).
-        assert len(CONNECTOR_TOOL_IDS) == 4
+        assert SENSE_SEARCH_TOOL_ID in CONNECTOR_TOOL_IDS
+        # Connector surface + two Sense-tier tools (chunk 4) + sense_search (SR-1).
+        assert len(CONNECTOR_TOOL_IDS) == 5
 
     def test_extension_provider_advertises_tool_ids(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
@@ -808,3 +819,108 @@ class TestSenseTools:
 
         assert out.get("is_error") is True
         assert "unknown sense" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Handler — sense_search (catalog-wide discovery)
+# ---------------------------------------------------------------------------
+
+
+class TestSenseSearch:
+    @pytest.mark.asyncio
+    async def test_returns_catalog_wide_results_with_bound_overlay(self) -> None:
+        """sense_search runs the REAL catalog over the full connector set with a
+        mocked tenant read: github surfaces even though only gmail is bound, and
+        is marked UNBOUND + available, with trust level populated."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.list_bound_connector_names",
+                new=AsyncMock(return_value={"gmail"}),
+            ) as mock_bound,
+        ):
+            out = await connectors_mcp._sense_search_handler({"query": "create a github issue"})
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["query"] == "create a github issue"
+        assert body["results"], "expected catalog-wide results"
+        gh = next(r for r in body["results"] if r["connector"] == "github")
+        assert gh["action"] == "create_issue"
+        assert gh["bound"] is False  # only gmail is bound — github is catalog-wide
+        assert gh["available"] is True
+        assert gh["trust_level"] == "confirm"
+        assert gh["cost_estimate"] is None
+        # The bound set was read ONCE via the EE store (pocket "" fall-through safe).
+        mock_bound.assert_awaited_once_with("ws_1", "pk_1")
+
+    @pytest.mark.asyncio
+    async def test_marks_local_execution_mode_unavailable(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.list_bound_connector_names",
+                new=AsyncMock(return_value=set()),
+            ),
+        ):
+            out = await connectors_mcp._sense_search_handler(
+                {"query": "firebase firestore collections"}
+            )
+
+        body = _decode_payload(out)
+        fb = next(r for r in body["results"] if r["connector"] == "firebase")
+        assert fb["available"] is False
+        assert fb["unavailable_reason"] == "local_runtime_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_no_workspace_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity(None, None, None)
+        with ws_patch, user_patch, pocket_patch:
+            out = await connectors_mcp._sense_search_handler({"query": "anything"})
+
+        assert out.get("is_error") is True
+        assert "no active workspace" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_missing_query_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with ws_patch, user_patch, pocket_patch:
+            out = await connectors_mcp._sense_search_handler({})
+
+        assert out.get("is_error") is True
+        assert "query is required" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_no_match_returns_clear_message(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.list_bound_connector_names",
+                new=AsyncMock(return_value=set()),
+            ),
+        ):
+            out = await connectors_mcp._sense_search_handler({"query": "zzzqqx wubbleflonk"})
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["results"] == []
+        assert "No catalog actions matched" in body["message"]
