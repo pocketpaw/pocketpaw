@@ -378,27 +378,19 @@ async def subscriptions(
         [
             {"$match": {"status": "active"}},
             {"$group": {"_id": "$plan_key", "count": {"$sum": 1}}},
-        ]
+        ],
     )
     active_by_plan = {r["_id"]: int(r.get("count") or 0) for r in active_plan_rows}
 
     suspended_count = await Subscription.find({"suspended_at": {"$ne": None}}).count()
-    in_grace_count = await Subscription.find(
-        {"grace_until": {"$ne": None, "$gt": now}}
-    ).count()
+    in_grace_count = await Subscription.find({"grace_until": {"$ne": None, "$gt": now}}).count()
 
     billable_workspaces = {
         s.workspace
-        for s in await Subscription.find(
-            {"status": {"$in": list(_BILLABLE_STATUSES)}}
-        ).to_list()
+        for s in await Subscription.find({"status": {"$in": list(_BILLABLE_STATUSES)}}).to_list()
     }
-    paid_workspaces = await Workspace.find(
-        {"plan": {"$ne": "free"}, "deleted_at": None}
-    ).to_list()
-    untracked_active_plans = sum(
-        1 for w in paid_workspaces if str(w.id) not in billable_workspaces
-    )
+    paid_workspaces = await Workspace.find({"plan": {"$ne": "free"}, "deleted_at": None}).to_list()
+    untracked_active_plans = sum(1 for w in paid_workspaces if str(w.id) not in billable_workspaces)
 
     result = SubscriptionsSnapshotOut(
         by_status=by_status,

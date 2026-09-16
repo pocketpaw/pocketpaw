@@ -53,7 +53,9 @@ def _request() -> Request:
 
 
 async def _operator() -> UserDoc:
-    doc = UserDoc(email="ops@paw.test", hashed_password="x", full_name="Ops", platform_role="support")
+    doc = UserDoc(
+        email="ops@paw.test", hashed_password="x", full_name="Ops", platform_role="support"
+    )
     await doc.insert()
     return doc
 
@@ -115,7 +117,9 @@ async def _subscription(
 async def test_summary_on_empty_deployment_returns_zeros(mongo_db) -> None:
     operator = await _operator()
 
-    result = await revenue_routes.summary(request=_request(), operator=operator, from_=None, to=None)
+    result = await revenue_routes.summary(
+        request=_request(), operator=operator, from_=None, to=None
+    )
 
     assert result.gross_credits == 0
     assert result.granted_credits == 0
@@ -134,7 +138,9 @@ async def test_summary_reports_whole_credits_not_micro(mongo_db) -> None:
     now = datetime.now(UTC)
     await _payment(when=now, amount_credits=1_000, credits_granted=1_000, event_id="evt-1")
 
-    result = await revenue_routes.summary(request=_request(), operator=operator, from_=None, to=None)
+    result = await revenue_routes.summary(
+        request=_request(), operator=operator, from_=None, to=None
+    )
 
     assert result.gross_credits == 1_000
     assert result.granted_credits == 1_000
@@ -148,7 +154,9 @@ async def test_summary_null_credits_granted_reads_as_fully_granted(mongo_db) -> 
     now = datetime.now(UTC)
     await _payment(when=now, amount_credits=500, credits_granted=None, event_id="evt-legacy")
 
-    result = await revenue_routes.summary(request=_request(), operator=operator, from_=None, to=None)
+    result = await revenue_routes.summary(
+        request=_request(), operator=operator, from_=None, to=None
+    )
 
     assert result.granted_credits == 500
     assert result.refused_count == 0
@@ -162,7 +170,9 @@ async def test_summary_refused_and_non_usd_counts(mongo_db) -> None:
         when=now, amount_credits=100, credits_granted=100, currency="EUR", event_id="evt-eur"
     )
 
-    result = await revenue_routes.summary(request=_request(), operator=operator, from_=None, to=None)
+    result = await revenue_routes.summary(
+        request=_request(), operator=operator, from_=None, to=None
+    )
 
     assert result.refused_count == 1
     assert result.non_usd_count == 1
@@ -290,10 +300,18 @@ async def test_subscriptions_snapshot_on_empty_deployment(mongo_db) -> None:
 
 async def test_subscriptions_snapshot_counts_by_status_and_plan(mongo_db) -> None:
     operator = await _operator()
-    await _subscription(workspace="ws1", plan_key="pro", status="active", gateway_subscription_id="s1")
-    await _subscription(workspace="ws2", plan_key="go", status="active", gateway_subscription_id="s2")
-    await _subscription(workspace="ws3", plan_key="pro", status="on_hold", gateway_subscription_id="s3")
-    await _subscription(workspace="ws4", plan_key="go", status="cancelled", gateway_subscription_id="s4")
+    await _subscription(
+        workspace="ws1", plan_key="pro", status="active", gateway_subscription_id="s1"
+    )
+    await _subscription(
+        workspace="ws2", plan_key="go", status="active", gateway_subscription_id="s2"
+    )
+    await _subscription(
+        workspace="ws3", plan_key="pro", status="on_hold", gateway_subscription_id="s3"
+    )
+    await _subscription(
+        workspace="ws4", plan_key="go", status="cancelled", gateway_subscription_id="s4"
+    )
 
     result = await revenue_routes.subscriptions(request=_request(), operator=operator)
 
@@ -342,14 +360,17 @@ async def test_subscriptions_untracked_active_plans(mongo_db) -> None:
     is a real gap this snapshot must surface."""
     operator = await _operator()
     tracked_ws = await WorkspaceDoc(name="Tracked", slug="tracked", owner="u1", plan="pro").insert()
-    untracked_ws = await WorkspaceDoc(name="Untracked", slug="untracked", owner="u2", plan="pro").insert()
+    await WorkspaceDoc(name="Untracked", slug="untracked", owner="u2", plan="pro").insert()
     await WorkspaceDoc(name="FreeCo", slug="freeco", owner="u3", plan="free").insert()
     await WorkspaceDoc(
         name="DeletedPaid", slug="deletedpaid", owner="u4", plan="pro", deleted_at=datetime.now(UTC)
     ).insert()
 
     await _subscription(
-        workspace=str(tracked_ws.id), plan_key="pro", status="active", gateway_subscription_id="s-tracked"
+        workspace=str(tracked_ws.id),
+        plan_key="pro",
+        status="active",
+        gateway_subscription_id="s-tracked",
     )
     # untracked_ws and the deleted paid workspace get no Subscription row.
 
@@ -388,8 +409,12 @@ async def test_mrr_on_empty_deployment_is_zero(mongo_db) -> None:
 async def test_mrr_sums_priced_plans_in_usd_cents(mongo_db) -> None:
     operator = await _operator()
     # go = $9/mo, pro = $19/mo.
-    await _subscription(workspace="ws1", plan_key="go", status="active", gateway_subscription_id="s1")
-    await _subscription(workspace="ws2", plan_key="pro", status="active", gateway_subscription_id="s2")
+    await _subscription(
+        workspace="ws1", plan_key="go", status="active", gateway_subscription_id="s1"
+    )
+    await _subscription(
+        workspace="ws2", plan_key="pro", status="active", gateway_subscription_id="s2"
+    )
 
     result = await revenue_routes.mrr(request=_request(), operator=operator)
 
@@ -402,7 +427,9 @@ async def test_mrr_sums_priced_plans_in_usd_cents(mongo_db) -> None:
 async def test_mrr_excludes_on_hold_from_paid_up_population(mongo_db) -> None:
     """MRR means currently collecting — on_hold is billable but not paid up."""
     operator = await _operator()
-    await _subscription(workspace="ws1", plan_key="pro", status="on_hold", gateway_subscription_id="s1")
+    await _subscription(
+        workspace="ws1", plan_key="pro", status="on_hold", gateway_subscription_id="s1"
+    )
 
     result = await revenue_routes.mrr(request=_request(), operator=operator)
 

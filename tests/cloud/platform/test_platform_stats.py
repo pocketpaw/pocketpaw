@@ -54,7 +54,9 @@ def _request() -> Request:
 
 
 async def _operator() -> UserDoc:
-    doc = UserDoc(email="ops@paw.test", hashed_password="x", full_name="Ops", platform_role="support")
+    doc = UserDoc(
+        email="ops@paw.test", hashed_password="x", full_name="Ops", platform_role="support"
+    )
     await doc.insert()
     return doc
 
@@ -85,7 +87,9 @@ async def _rollup(
     return row
 
 
-async def _seed_ledger(*, workspace: str, when: datetime, spend_micro: int, cause: str = "compute_spend") -> None:
+async def _seed_ledger(
+    *, workspace: str, when: datetime, spend_micro: int, cause: str = "compute_spend"
+) -> None:
     """Insert an applied spend entry back-dated to ``when`` (createdAt is
     stamped to now() on insert, so it is corrected via the raw collection —
     same idiom as tests/cloud/credits/test_spend_by_model.py)."""
@@ -229,7 +233,9 @@ async def test_today_block_ignores_older_entries_and_requested_range(mongo_db) -
     yesterday = today_start - timedelta(hours=2)
 
     await _seed_ledger(workspace="ws1", when=yesterday, spend_micro=9_000_000)
-    await _seed_ledger(workspace="ws1", when=today_start + timedelta(minutes=5), spend_micro=1_500_000)
+    await _seed_ledger(
+        workspace="ws1", when=today_start + timedelta(minutes=5), spend_micro=1_500_000
+    )
 
     # Even a very old / very wide requested range must not affect "today".
     result = await stats_routes.dashboard(
@@ -274,7 +280,9 @@ async def test_today_block_excludes_non_spend_causes_and_unapplied(mongo_db) -> 
         {"_id": phantom.id}, {"$set": {"createdAt": today_start + timedelta(minutes=2)}}
     )
 
-    result = await stats_routes.dashboard(request=_request(), operator=operator, start=None, end=None)
+    result = await stats_routes.dashboard(
+        request=_request(), operator=operator, start=None, end=None
+    )
 
     assert result.today is not None
     assert result.today.spend_micro == 0

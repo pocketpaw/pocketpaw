@@ -47,7 +47,6 @@ from pydantic import BaseModel
 
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.billing.plans import _TIER_ORDER, BASE_PLAN_KEY
-from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT
 from pocketpaw_ee.cloud.credits.service import _SPEND_CAUSES
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 from pocketpaw_ee.cloud.models.platform_rollup import PlatformDailyRollup
@@ -241,7 +240,7 @@ async def dashboard(
     """
     end_day = end or _day_str(datetime.now(UTC).date())
     start_day = start or _day_str(
-        (datetime.strptime(end_day, "%Y-%m-%d").date() - timedelta(days=_DEFAULT_WINDOW_DAYS - 1))
+        datetime.strptime(end_day, "%Y-%m-%d").date() - timedelta(days=_DEFAULT_WINDOW_DAYS - 1)
     )
     requested_days = _date_range(start_day, end_day)
     # Re-derive start/end in case a caller passed them reversed — _date_range
@@ -346,7 +345,9 @@ async def dashboard(
                 deleted=(
                     latest_rollup.deleted
                     if latest_rollup
-                    else bool(ws_doc.deleted_at) if ws_doc else False
+                    else bool(ws_doc.deleted_at)
+                    if ws_doc
+                    else False
                 ),
                 spend_micro=spend,
                 runs=sum(r.runs for r in rows if r.workspace == wid),
