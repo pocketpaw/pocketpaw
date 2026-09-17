@@ -277,3 +277,50 @@ async def delete_flow_project(
     """Delete one flow project, or 404 if it doesn't exist in this workspace."""
     if not service.delete_flow_project(project_id, workspace_id):
         raise HTTPException(404, f"Flow project '{project_id}' not found")
+
+
+# ── Editor timelines (cross-device sync for the /studio editor) ─────────────
+# The editor keeps its authoritative copy locally (IndexedDB + OPFS media); this
+# is the sync target that lets a second device rebuild the same edit. The doc is
+# opaque — the backend stores and returns it without inspecting it.
+
+
+@router.get("/timelines", response_model=schemas.TimelineProjectsResponse)
+async def list_timelines(
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.TimelineProjectsResponse:
+    """Return the workspace's timelines, most-recently-updated first."""
+    return schemas.TimelineProjectsResponse(
+        projects=service.list_timeline_projects(workspace_id),
+    )
+
+
+@router.put("/timelines/{project_id}", response_model=schemas.TimelineProject)
+async def save_timeline(
+    project_id: str,
+    req: schemas.TimelineProjectSave,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.TimelineProject:
+    """Create-or-update a timeline (UPSERT). A save carrying an older edit clock
+    than the stored one is refused with 409 so a stale device cannot overwrite
+    newer work."""
+    try:
+        return service.save_timeline_project(
+            project_id,
+            workspace_id,
+            name=req.name,
+            doc=req.doc,
+            updated_at=req.updatedAt,
+        )
+    except service.TimelineConflict as exc:
+        raise HTTPException(409, f"Timeline '{project_id}' has newer changes") from exc
+
+
+@router.delete("/timelines/{project_id}", status_code=204)
+async def delete_timeline(
+    project_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """Delete one timeline, or 404 if it doesn't exist in this workspace."""
+    if not service.delete_timeline_project(project_id, workspace_id):
+        raise HTTPException(404, f"Timeline '{project_id}' not found")

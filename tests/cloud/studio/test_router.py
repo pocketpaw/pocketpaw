@@ -497,3 +497,50 @@ def test_flow_projects_crud_roundtrip(client, flow_env):
     assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 204
     assert client.get("/api/v1/studio/flow-projects").json()["projects"] == []
     assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 404
+
+
+# ── Editor timelines ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def timeline_env(tmp_path, monkeypatch):
+    path = tmp_path / "studio" / "timelines.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(studio_service, "_timelines_path", lambda: path)
+    return path
+
+
+def test_timelines_crud_roundtrip(client, timeline_env):
+    """GET list → PUT (upsert) → GET → DELETE, through the real service. The doc
+    is opaque: whatever the client sent comes back byte-for-byte."""
+    assert client.get("/api/v1/studio/timelines").json() == {"projects": []}
+
+    doc = {"version": 1, "id": "tl_1", "name": "Reel", "tracks": [], "updatedAt": 100}
+    resp = client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 100, "doc": doc},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["doc"] == doc
+    assert resp.json()["updatedAt"] == 100
+
+    listed = client.get("/api/v1/studio/timelines").json()["projects"]
+    assert [p["id"] for p in listed] == ["tl_1"]
+
+    assert client.delete("/api/v1/studio/timelines/tl_1").status_code == 204
+    assert client.delete("/api/v1/studio/timelines/tl_1").status_code == 404
+
+
+def test_timeline_stale_write_is_409(client, timeline_env):
+    """The staleness guard reaches the wire: an older edit clock is refused, and
+    the stored doc is the newer one."""
+    client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 500, "doc": {"name": "new"}},
+    )
+    resp = client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 400, "doc": {"name": "stale"}},
+    )
+    assert resp.status_code == 409
+    assert client.get("/api/v1/studio/timelines").json()["projects"][0]["doc"]["name"] == "new"
