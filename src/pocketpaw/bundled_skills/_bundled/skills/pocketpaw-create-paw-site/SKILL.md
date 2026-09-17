@@ -33,6 +33,14 @@ description: |
   and its `/_fx/...` paths are root-absolute so they must be copied as given.
   The Related tools entry for the fx server already existed; this is the
   working loop behind it. Nothing on the copy-only path changed.
+
+  Updated: 2026-09-17 (docs/sites-multipage-skills): the raw-HTML track is now
+  also the answer for a site that needs more than one page — `create_landing_site`
+  composes one anchored document and cannot express a second URL. Adds the
+  directory-index page shape (`about/index.html` → `/about/`), the root-absolute
+  link rule, a heuristic for when a brief actually warrants a second page, and
+  the author-before-you-link rule: no layer checks that a nav href resolves, so a
+  dangling one ships as a live 404 with every layer reporting success.
 -->
 
 You're building a **Paw Site**: a real, standalone marketing website that
@@ -47,13 +55,19 @@ the page structure (every marketing widget, the section order, the SSR
 rules) from your copy. The structure is fixed and cannot be downgraded —
 the copy is your only input.
 
-## Opt-in: the raw-HTML track (only when explicitly asked)
+## Opt-in: the raw-HTML track
 
 The copy-only path above is the **default** and what you should use for a
-normal "build me a landing site" request. There is one exception. When the
-user **explicitly** asks for a plain / raw / single-file **HTML** site — "just
-give me an `index.html`", "no framework", "hand-written HTML/CSS", "no
-Svelte" — author the markup yourself and call **`create_html_site`** instead:
+normal "build me a landing site" request. Two things send you here instead —
+author the markup yourself and call **`create_html_site`**:
+
+1. The user **explicitly** asks for a plain / raw / single-file **HTML** site
+   — "just give me an `index.html`", "no framework", "hand-written HTML/CSS",
+   "no Svelte".
+2. **The site needs more than one page** (see below). `create_landing_site`
+   composes ONE document with an anchor nav — `#services`, `#reviews`,
+   `#pricing`, `#book` — and has no way to express a second URL. A brief that
+   names real pages has to come here.
 
 ```
 mcp__pocketpaw_sites_manager__create_html_site(
@@ -70,6 +84,37 @@ the page must be complete on its own (inline or linked CSS/JS, real copy —
 never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket }`; hand
 `pocket_id` to `publish` exactly like the copy path (STEP 3). If `ok` is
 false, relay the error.
+
+### When a site needs more than one page
+
+One page is still right for a landing page: one story, one nav of `#anchors`,
+one CTA. Author a SECOND page when the brief names something a visitor would go
+looking for on its own — a service line with real copy behind it, a menu or
+price list, a catalogue, a portfolio, a genuine About / Team / Contact story, or
+anything the user asked for by name ("and a page for our team"). A section that
+runs three sentences is a section; don't split a thin page into four thin ones.
+
+Each extra page is a **directory with its own `index.html`**, which is what
+gives it a clean URL:
+
+```
+index.html            →  /
+about/index.html      →  /about/
+menu/index.html       →  /menu/
+styles.css               shared by all of them
+```
+
+Link them **root-absolute with the trailing slash** — `href="/about/"`,
+`href="/styles.css"`. A relative `about/` means something different depending on
+which page wrote it: on `/menu/` it points at `/menu/about/`, which does not
+exist. Every page is a whole document — its own `<head>`, its own stylesheet
+link, the same nav and footer markup as the rest.
+
+**Author the page before you link it.** Nothing checks that a nav `href`
+resolves — not the create tool, not the build, not the deploy. A nav linking
+`/about/` with no `about/index.html` in the `source` map ships as a live 404 on
+the visitor's first click while every layer reports success. Put every page in
+the same `source` map as the nav that points at it.
 
 ### Sections from paw-fx
 
@@ -185,7 +230,8 @@ change is in the draft they can preview under /sites and offer to publish it;
 only call `publish` when they ask.
 
 **Do not reach for this by default.** Unless the user explicitly wants raw
-HTML, use the copy-only `create_landing_site` path below.
+HTML, or the site genuinely needs more than one page, use the copy-only
+`create_landing_site` path below.
 
 ## Why copy-only (and why this is the reliable path)
 
