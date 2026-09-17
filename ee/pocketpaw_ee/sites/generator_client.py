@@ -286,6 +286,17 @@
 #     ripple-ui-svelte-0.2.0.tgz". PROD TODO: publish @ripple-ui/svelte, pin a
 #     real registry version, and drop the tarball shim. The install is part of
 #     the publish/build flow — never a manual step.
+#
+# Updated 2026-09-18 (chore/ripple-split-sites-dep — survive ripple's monorepo
+# split): ripple-iui #119 moved the engine into its own ``@ripple-ui/core``
+# package, and the packed ``@ripple-ui/svelte`` tarball declares it as
+# ``file:../core``, which bun resolves against its own cache rather than the
+# tarball — so a generated site installs with no core and dies at build.
+# ``_rewrite_ripple_dep`` now also emits ``resolutions["@ripple-ui/core"]``
+# pointing at a second baked tarball, read from PAW_SITES_RIPPLE_CORE_DEP.
+# ``resolutions`` rather than a direct dep because bun 1.4 rejects the direct
+# form. Unset env var = unchanged output and an unchanged ``generator_version``,
+# so images built before the split keep working.
 
 from __future__ import annotations
 
@@ -1013,10 +1024,15 @@ def generator_version() -> str:
     strings, so shipping a generator change and forgetting the manual bump served
     stale renders indefinitely. ``_ARTIFACT_FORMAT_EPOCH`` stays for what it is
     actually good at: invalidating when the EXTRACTION shape changes on the Python
-    side, which no amount of watching the generator file can detect."""
+    side, which no amount of watching the generator file can detect.
+
+    The core-dep term is APPENDED ONLY when set, so an image that bakes no core
+    tarball keeps the exact key it had — adding the core tarball is a dep change
+    like any other and has to invalidate, but not adding one must not."""
+    core = _ripple_core_dep_source()
     return (
         f"{_ARTIFACT_FORMAT_EPOCH}|{_generator_build_id()}"
-        f"|{_ripple_dep_source()}|{_ripple_motion_dep()}"
+        f"|{_ripple_dep_source()}|{_ripple_motion_dep()}" + (f"|{core}" if core else "")
     )
 
 
@@ -1040,19 +1056,45 @@ def _ripple_motion_dep() -> str:
     return os.environ.get("PAW_SITES_MOTION_DEP", "^12.40.0")
 
 
+def _ripple_core_dep_source() -> str:
+    """The source spec for @ripple-ui/core, or "" when the image bakes none.
+
+    ripple's monorepo split (ripple-iui #119) moved the engine into its own
+    package, and the packed @ripple-ui/svelte tarball declares
+    ``"@ripple-ui/core": "file:../core"`` VERBATIM — a relative path bun resolves
+    against its own install cache, never against the tarball that declared it. So
+    the consumer gets no core: bun 1.3 installs clean and dies at `bun run build`
+    with ERR_MODULE_NOT_FOUND, bun 1.4 refuses at install. The image bakes a
+    SECOND tarball for core and points PAW_SITES_RIPPLE_CORE_DEP at it.
+
+    Empty default on purpose: an image built before the split has one tarball and
+    nothing to redirect to, and must keep generating exactly what it did."""
+    return os.environ.get("PAW_SITES_RIPPLE_CORE_DEP", "")
+
+
 def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
     """Make the generated package.json install: point @ripple-ui/svelte at a
     resolvable source AND ensure motion.dev is declared. The template pins the
     (unpublished) ripple version "0.2.0" and omits motion; we overwrite that one
     key and add motion if absent, leaving every other dep intact. Without motion
     the generator's `bun run build` smoke fails to resolve ripple's runtime
-    ``import('motion')`` (the same break that hit paw-enterprise)."""
+    ``import('motion')`` (the same break that hit paw-enterprise).
+
+    Post-split, it also redirects the @ripple-ui/core spec nested INSIDE the
+    ripple tarball (see :func:`_ripple_core_dep_source`) to a second, baked core
+    tarball. That has to be a ``resolutions`` entry, not a direct dependency:
+    tested on both, a direct dep resolves on bun 1.3 but is rejected outright by
+    bun 1.4, while ``resolutions`` works on both. Skipped entirely when the env
+    var is unset, so an older image emits the package.json it always did."""
     pkg_path = Path(project_dir, "package.json")
     pkg = json.loads(pkg_path.read_text())
     deps = pkg.setdefault("dependencies", {})
     if "@ripple-ui/svelte" in deps:
         deps["@ripple-ui/svelte"] = source
         deps.setdefault("motion", _ripple_motion_dep())
+        core = _ripple_core_dep_source()
+        if core:
+            pkg.setdefault("resolutions", {})["@ripple-ui/core"] = core
         pkg_path.write_text(json.dumps(pkg, indent=2))
 
 
