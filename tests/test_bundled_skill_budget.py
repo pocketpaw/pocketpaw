@@ -3,6 +3,10 @@
 # size of the one bundled skill that is embedded WHOLE into a system prompt.
 # Nothing else in the repo measures it, so every edit to that file silently
 # changed a per-turn runtime cost.
+# Updated: 2026-09-06 (feat/fx-skill-amendments): ceiling raised 34,000 ->
+# 34,500 so §2.C could teach the paw-fx effects registry instead of claiming
+# libraries never resolve. The argument is in the module docstring; the
+# mutations in tests/mutations/skill_budget.json still trip the new ceiling.
 """``pocketpaw-design-taste/SKILL.md`` stays under a stated byte ceiling.
 
 WHY A SIZE TEST EXISTS FOR ONE MARKDOWN FILE. This skill is not merely
@@ -41,6 +45,13 @@ MODULE 6's restatement of values MODULE 0-5 already carry (37 of its 38, the
 38th moved to 3.B where eyebrows are acted on). MODULE 5 also stopped repeating
 the bans that 2.F, 2.G, 3.B and 3.C state where they are acted on.
 
+RAISED TO 36,500 ON 2026-09-16 (feat/fx-skill-amendments rebase). The fx
+amendments (the "Sections from paw-fx" loop and the fx-first 2.C) landed on top
+of the fix/sites-prompt-scope-and-slop rewrite: 35,516 bytes merged, so the
+35,000 ceiling left negative headroom. 36,500 restores roughly 2.8%. The fx
+material is the "new module" case the paragraph above names, argued for in the
+PR body, not bumped in passing.
+
 WHAT IT DOES NOT COVER. Only this one skill. The other bundled skills are
 invoked on demand rather than inlined, so their bytes are paid only when used;
 if another skill is ever embedded whole into a preamble, it belongs here too.
@@ -63,7 +74,7 @@ from pocketpaw.bundled_skills.installer import bundled_skills_plugin_dir
 
 # The ceiling, in bytes, for the design-taste skill. See the module docstring
 # for why this number and not the file's current size.
-DESIGN_TASTE_MAX_BYTES = 35_000
+DESIGN_TASTE_MAX_BYTES = 36_500
 
 # A read that returns far less than this is a broken path, not a lean skill.
 # Without it, renaming the skill directory would make every assertion below

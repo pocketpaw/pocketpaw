@@ -1,4 +1,7 @@
 ---
+# Updated 2026-09-06 (feat/fx-skill-amendments): 2.C searches paw-fx before
+# hand-writing a canvas, plus the per-engine rule. Note kept out of the body:
+# sites.py inlines the body into the /sites preamble, so bytes cost tokens.
 name: pocketpaw-design-taste
 description: |
   The SINGLE engine-agnostic Creative Director system for authoring marketing
@@ -99,9 +102,11 @@ That is the whole requirement. A treatment on top of the ground is optional and 
 ### 2.C Canvas backgrounds
 A published Paw Site KEEPS its client bundle by default, so a hand-written WebGL canvas runs. Reach for one where the read genuinely wants it - immersive, technical, or a premium brand with something to show - rather than on every page, and never as filler behind copy that would read better on a quiet ground.
 
-No npm: `package.json` is generator-owned and your source map supplies FILES ONLY, so `three`, `ogl`, `threlte` and `gsap` never resolve. Raw `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), driven by `u_time` / `u_resolution`, buffer capped at 2x DPR, loop stopped off-screen. That buys fluid colour mixing, noise fields, gradient flow and aurora warping; scene graphs and particle swarms are what the library bought you. The `webgl-components` skill carries the mechanics (DPR, aliasing, context loss, many-instances-per-page).
+**Search paw-fx first.** `mcp__pocketpaw_fx__search_effects("<what you want>")` then `get_effect(name)` returns `files` to write verbatim under `_fx/` plus a `snippet` to place: shader backgrounds, 3D heroes, particle fields, scroll, kinetic-text and cursor effects are already built. Hand-written GLSL is the fallback for when nothing fits, not the opening move. Per engine: on **html** every effect is available, vendored dependency and all — the source map serves as assets with no build step, so nothing prunes the script. On **svelte** and **react** `package.json` is generator-owned and your source map supplies FILES ONLY, so `three`, `ogl`, `threlte` and `gsap` never resolve and only dependency-free effects (empty `needs`) are served; pass `needs_js=false` to `search_effects` there.
 
-*THE CANVAS GUARDRAIL:* the page is PRERENDERED, so the `<canvas>` MUST sit over a polished CSS fallback and look premium before the context ever initializes. Two cases prune the bundle and run no JS at all: a site that declared `keepsClientBundle: false`, and every ripple site. There, ship the CSS background alone.
+The hand-written fallback: raw `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), driven by `u_time` / `u_resolution`, buffer capped at 2x DPR, loop stopped off-screen. That buys fluid colour mixing, noise fields, gradient flow and aurora warping; scene graphs and particle swarms are what the library bought you — take those from paw-fx where the engine serves them, skip them elsewhere. The `webgl-components` skill carries the mechanics (DPR, aliasing, context loss, many-instances-per-page).
+
+*THE CANVAS GUARDRAIL:* the page is PRERENDERED, so the `<canvas>` MUST sit over a polished CSS fallback and look premium before the context ever initializes. paw-fx effects satisfy this by construction (each ships a CSS-only resting state); a hand-written canvas still owes the fallback. Two cases prune the bundle and run no JS at all: a site that declared `keepsClientBundle: false`, and every ripple site. There, ship the CSS background alone.
 
 ### 2.D Typography Pairings 2.0
 Never isolate a single family. Rotate display-to-body pairings: `Cabinet Grotesk` + `General Sans` + `Fira Code` for numbers; `Clash Display` + `Satoshi` + `Geist Mono`; `PP Editorial New` + `Switzer` + `Space Mono`; `Instrument Sans` + `Manrope` + `SF Mono`.
