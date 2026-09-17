@@ -1,0 +1,38 @@
+[
+  {
+    "label": "the site_id resolution is gone, so a send from the loading builder is dispatched as a CREATE and mints a duplicate site",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    if not meta.pocket_id and meta.site_id:\r\n        resolved = await _site_pocket_id(workspace_id, meta.site_id)\r\n        if resolved is None:\r\n            text = _unidentified_site_preamble(meta)\r\n            return SurfacePreamble(text=text, cache_key=content_key(\"sites\", text))\r\n        # Rebound onto the meta so every sub-builder below reads one pocket id\r\n        # rather than each learning about the resolution separately.\r\n        meta = replace(meta, pocket_id=resolved)\r\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "an unresolvable site_id falls back to the create preamble — the original bug with an extra step",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        if resolved is None:\r\n            text = _unidentified_site_preamble(meta)\r\n            return SurfacePreamble(text=text, cache_key=content_key(\"sites\", text))\r\n",
+    "replace": "        if resolved is None:\r\n            text = _create_preamble(meta)\r\n            return SurfacePreamble(text=text, cache_key=content_key(\"sites\", text))\r\n",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "the svelte create branch loses its anti-recreate clause, so a follow-up change in the same conversation mints a second site",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            + \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'make the hero \"",
+    "replace": "            + \"\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "the ripple create branch loses its anti-recreate clause, so a follow-up change in the same conversation mints a second site",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"track — the page is a widget spec, not hand-authored markup.\\n\"\r\n            \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'change the phone \"",
+    "replace": "            \"track — the page is a widget spec, not hand-authored markup.\\n\"\r\n            \"\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  }
+]

@@ -1,5 +1,14 @@
 # sites.py — /sites surface preamble.
 #
+# TWO INVARIANTS a reader must not break, both of which have been broken before
+# (see the 2026-09-17 entry below for how):
+#   1. ``build_preamble`` resolves the pocket BEFORE it forks. A meta with a
+#      ``site_id`` and no ``pocket_id`` is a REFINE, never a create, and an
+#      unresolvable ``site_id`` fails closed into ``_unidentified_site_preamble``
+#      rather than falling back to ``_create_preamble``.
+#   2. Every engine branch of ``_create_preamble`` names its own edit tool and
+#      forbids calling create a second time.
+#
 # Created: 2026-06-02 — Orients the chat agent when the user is on the /sites
 # surface (the Paw Sites gallery + describe-to-create rail). Without it the
 # surface fell back to GENERIC and the agent built + talked "pocket" instead of
@@ -138,6 +147,32 @@
 # site correctly leaves it still. The sub-builders keep returning ``str``; only
 # the entry point answers the key. (The refine half of that claim no longer
 # holds — see the next entry.)
+#
+# Changes: 2026-09-17 (fix/sites-edit-mints-duplicate) — the SAME class of bug the
+# 2026-08-18 entry below fixed for html, closed twice more and then closed at the
+# root. That entry added the "changes go through the edit tool" clause to
+# ``_create_preamble``'s html branch and stopped there; react had it from RX-3, and
+# svelte and ripple were simply left without it, so a follow-up change in a create
+# conversation on either of those tracks had one available move — call create again
+# — which mints a second site and leaves the one on screen untouched. Both branches
+# now carry it, and ``test_every_create_branch_forbids_the_re_create`` iterates the
+# engines so the next one joins the gate by existing rather than by being
+# remembered.
+#
+# The root cause was upstream of all four branches: ``build_preamble`` forked on
+# ``meta.pocket_id`` alone and never read ``meta.site_id``. Only the client supplied
+# ``pocket_id``, and it sources it from a whole-workspace list fetch, while the
+# builder's chat rail is a SIBLING of the page content and therefore live during
+# loading, load-failure and not-found. Every send in that window reached the CREATE
+# branch for a site that already existed, and nothing downstream could refuse it —
+# refine mode leaves the create tools reachable and none of their schemas accepts a
+# pocket id. ``_site_pocket_id`` now resolves the source pocket server-side from the
+# route's own ``site_id`` (``sites.service._load``: primary key, workspace-scoped,
+# InvalidId-safe) before the fork, and an unresolvable id renders
+# ``_unidentified_site_preamble`` — refine-shaped, naming no create tool — because
+# falling back to ``_create_preamble`` there is the original bug with an extra step.
+# A stamped ``pocket_id`` still wins and skips the read. Mutations:
+# ``tests/mutations/sites_edit_duplicate.json``.
 #
 # Changes: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — the html
 # branches stopped denying a tool that exists. ``edit_html_file`` shipped in
@@ -459,6 +494,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from dataclasses import replace
 from typing import Any
 
 from pocketpaw.prompt.entity import unaddressed_line
@@ -562,6 +598,113 @@ def _preamble_engine(raw: str | None, *, default: str) -> str:
     """
     engine = (raw or default).lower()
     return engine if engine in _SITE_ENGINES else default
+
+
+async def _site_pocket_id(workspace_id: str, site_id: str) -> str | None:
+    """Resolve the SOURCE POCKET of the site the route names. ``None`` if unreadable.
+
+    WHY THIS EXISTS: ``pocket_id`` was supplied only by the client, and the client
+    cannot always supply it. ``metaFromRouteParams`` in paw-enterprise stamps
+    ``site_id`` off the route param, so it is atomic with navigation; the builder
+    page adds ``pocket_id`` from a SurfaceMetaProvider reading
+    ``sitesStore.sites.find(...)``, which is a whole-workspace list fetch. The chat
+    rail is a SIBLING of that page's main content, so the composer is live through
+    the entire loading / load-failed / not-found window — and a send inside it used
+    to arrive with a site id, no pocket id, and get the CREATE preamble. Nothing
+    downstream could refuse it: refine mode leaves every create tool reachable, and
+    no create tool's schema accepts a pocket id, so the agent's only available move
+    minted a fresh pocket and a SECOND Site row for a site that already existed.
+
+    Resolving it here removes the whole race class rather than narrowing one window:
+    the server reads the id the URL guarantees instead of waiting on a list the
+    client may never finish fetching.
+
+    THE READ: ``sites.service._load`` — one ``find_one`` on
+    ``{_id: ObjectId(site_id), workspace: workspace_id}``. Primary key, so it is
+    cheap; tenant-scoped, so a site id from another workspace resolves to nothing
+    here rather than handing this chat another tenant's pocket; and already
+    ``InvalidId``-safe, so a malformed id is a ``NotFound`` and not a 500.
+
+    Never raises, for the same reason ``_refine_engine`` never raises: a preamble is
+    not worth breaking a chat turn over. But unlike that one, ``None`` here is NOT a
+    degrade to the other branch — the caller must fail CLOSED (see
+    ``_unidentified_site_preamble``), because the branch it would otherwise fall
+    into is the create branch, and that is the bug.
+    """
+    try:
+        from pocketpaw_ee.sites.service import _load
+
+        doc = await _load(workspace_id, site_id)
+    except Exception:  # noqa: BLE001 — see the docstring: never break a turn
+        logger.warning(
+            "sites_handler: could not resolve site %s in workspace %s",
+            site_id,
+            workspace_id,
+            exc_info=True,
+        )
+        return None
+    pocket_id = (getattr(doc, "pocket_id", "") or "").strip()
+    if not pocket_id:
+        # A Site row with no pocket is not a site anyone can edit. Treat it as
+        # unidentified rather than threading an empty id into the refine preamble,
+        # which would name pocket `` in every tool call it prints.
+        logger.warning("sites_handler: site %s carries no pocket_id", site_id)
+        return None
+    return pocket_id
+
+
+def _unidentified_site_preamble(meta: SurfaceMeta) -> str:
+    """The FAIL-CLOSED branch: the route names a site we could not resolve.
+
+    Reached when ``meta.site_id`` is present, ``meta.pocket_id`` is not, and
+    ``_site_pocket_id`` came back empty — a deleted site, an id from another
+    workspace, a malformed id, or a dropped connection.
+
+    IT MUST NOT FALL BACK TO ``_create_preamble``. That fallback is the original
+    defect with an extra step: the user is sitting on a site's own page, and the
+    create preamble would tell the agent to build a new one — which is exactly the
+    duplicate this handler now exists to prevent. The safe degrade on a surface
+    whose entire purpose is "change THIS site" is to change nothing and say so.
+
+    It is refine-SHAPED on purpose: the orientation ("an existing site", never a
+    pocket, do not rebuild) is the part we are still certain of, so it stays. What
+    it deliberately does NOT do is name a resolution tool. /sites has no
+    site_id -> pocket lookup the agent can call — every tool on this surface that
+    takes a pocket (``read_site_source``, the three edit tools, the specialist)
+    needs the id we just failed to produce — so pointing at one would command a
+    move that cannot succeed. Asking the user is the only honest next step.
+    """
+    route = meta.route_path or "/sites"
+    site_id = meta.site_id or ""
+    return (
+        f'<surface kind="sites" route="{route}" site="{site_id}" '
+        'engine="unknown" mode="refine-unidentified" />\n'
+        "<sites-orientation>\n"
+        "The user is on the page of an EXISTING Paw Site — a live standalone "
+        "marketing website they already own — and is asking for a change to it. "
+        f"THIS SITE COULD NOT BE IDENTIFIED on the server (site id `{site_id}`): "
+        "it may still be loading, it may have been deleted, or the id may belong "
+        "to another workspace.\n"
+        "</sites-orientation>\n"
+        "<sites-procedure>\n"
+        "DO NOT CREATE A SITE. Not a new site, not a new pocket, not a "
+        "'replacement' — no site create tool at all, and no pocket specialist "
+        "create. The user has a site; building another one hands them a SECOND "
+        "site at a SECOND url and leaves the one they are looking at untouched, "
+        "which is worse than doing nothing and far harder to undo.\n"
+        "DO NOT EDIT BLIND either. Every edit path on this surface needs the "
+        "site's source pocket id, and that is precisely what could not be "
+        "resolved — so there is no tool call to attempt yet.\n"
+        "SAY SO AND ASK. Tell the user plainly that you could not load that site "
+        "right now, and ask them to reopen it from the Sites gallery (or say which "
+        "site they mean) so the page can hand you its details. If they retry and it "
+        "loads, the next message will carry what is missing and you can pick the "
+        "change straight up.\n"
+        "You can still answer QUESTIONS about Paw Sites in general — what the "
+        "tracks are, how publishing works — as long as you change nothing.\n"
+        "Talk about it as a 'site' or 'page', never a 'pocket'.\n"
+        "</sites-procedure>\n"
+    )
 
 
 async def _refine_engine(pocket_id: str, user_id: str, workspace_id: str) -> str | None:
@@ -1060,7 +1203,43 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
       preamble genuinely says something different.
 
     The sub-builders keep returning ``str``; only the entry point answers the key.
+
+    THE POCKET IS RESOLVED BEFORE THE FORK. The fork below used to read
+    ``meta.pocket_id`` and nothing else, while ``site_id`` — the one hint the route
+    guarantees — was carried into the cache key and never consulted for routing.
+    Since only the client supplied ``pocket_id``, and the client sources it from a
+    whole-workspace list fetch that the live composer does not wait for, an ordinary
+    "make the headline shorter" sent during the builder's loading window arrived as
+    a CREATE and minted a duplicate site. So a meta that names a site now gets its
+    pocket looked up server-side, from the primary key, and the resolved id is what
+    the fork reads.
+
+    Precedence: a STAMPED ``meta.pocket_id`` still wins, and the lookup does not run
+    at all when one is present. Two reasons. It is the id the page is actually
+    rendering, so on the happy path the two agree and a second read would buy
+    nothing but latency on every refine turn. And where they could disagree, the
+    stamp is the more specific fact: a Site row is keyed on (workspace, pocket_id),
+    so one pocket has one row, while a client that has a pocket in hand has it
+    because the page resolved it. The lookup is a FLOOR under the client, not a
+    correction of it.
+
+    ``site_id`` also wins over ``brief_id`` if both ever arrive. They cannot today —
+    ``brief_id`` is stamped on the /sites gallery, which has no ``siteId`` route
+    param — and if that changes, refining the site the user is looking at is the
+    safe direction and minting one from a stale brief is not.
+
+    Failure fails CLOSED: an unresolvable site id renders
+    ``_unidentified_site_preamble``, never ``_create_preamble``. Falling back to
+    create is the bug, not a degrade.
     """
+    if not meta.pocket_id and meta.site_id:
+        resolved = await _site_pocket_id(workspace_id, meta.site_id)
+        if resolved is None:
+            text = _unidentified_site_preamble(meta)
+            return SurfacePreamble(text=text, cache_key=content_key("sites", text))
+        # Rebound onto the meta so every sub-builder below reads one pocket id
+        # rather than each learning about the resolution separately.
+        meta = replace(meta, pocket_id=resolved)
     if meta.pocket_id:
         if meta.mode == "chat":
             text = _chat_preamble(meta)
@@ -1212,6 +1391,21 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "yourself and call `mcp__pocketpaw_sites_manager__create_svelte_site` "
             "(then STOP at the draft — publish only on explicit request).\n"
             + native_form_contract()
+            + "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
+            "change the user asks for in this conversation — 'make the hero "
+            "headline bolder', 'change the pricing copy', 'add an about page' — is "
+            "`mcp__pocketpaw_sites_manager__edit_svelte_component` with the SAME "
+            "pocket_id, NOT a second `create_svelte_site` call. Calling create "
+            "again mints a SECOND site and leaves the one the user is looking at "
+            "unchanged. Send a targeted `edits` diff for a small change; to add a "
+            "section, call it with `create=true` for the new "
+            "`src/lib/components/<Name>.svelte` and then again with `edits` on "
+            "`src/routes/+page.svelte` to render it. A PAGE is two files on this "
+            "track — `src/routes/<slug>/+page.svelte` and a `+page.ts` carrying "
+            "`export const prerender = true;`, which the root page's flag does not "
+            "cascade to — then a third call to link it. The edit saves to the "
+            "DRAFT — it does not publish, so keep offering the Preview rather than "
+            "announcing a live change."
         )
     elif engine == "react":
         engine_note = (
@@ -1279,7 +1473,20 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "conversion-ordered ripple landing spec, then STOP at the draft — "
             "publish only on explicit request per the DRAFT-FIRST step). This is "
             "the ripple/widget "
-            "track — the page is a widget spec, not hand-authored markup."
+            "track — the page is a widget spec, not hand-authored markup.\n"
+            "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
+            "change the user asks for in this conversation — 'change the phone "
+            "number in the footer', 'shorten the hero headline', 'add a "
+            "testimonials section' — is `mcp__pocketpaw_pocket_specialist__edit` "
+            "on the SAME pocket_id, which merges into the existing landing spec in "
+            "place. It is NOT a second `create_landing_site` and NOT a second "
+            "`mcp__pocketpaw_pocket_specialist__create`: calling create again mints "
+            "a SECOND site and leaves the one the user is looking at unchanged. "
+            "A refine is a targeted edit on top of the current spec — never a "
+            "rebuild of the page from scratch, which throws away copy and theming "
+            "the user never asked you to touch. The edit saves to the DRAFT — it "
+            "does not publish, so keep offering the Preview rather than announcing "
+            "a live change."
         )
     else:  # html (default)
         engine_note = (
