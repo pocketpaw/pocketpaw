@@ -1087,6 +1087,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from dateutil.relativedelta import relativedelta
 from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
@@ -1864,6 +1865,49 @@ def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
     return ObjectId(digest[:12])
 
 
+def _foreign_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
+    """A STABLE per-(workspace, pocket) ObjectId for the FOREIGN concierge row.
+
+    The THIRD id namespace in this module, beside ``_preview_id`` (a preview
+    build's directory) and ``_live_object_id`` (a published site's Worker). It
+    exists so that ONE pocket cannot end up with two foreign concierges and two
+    $19 charges: ``_id`` is the one index MongoDB enforces natively, on every
+    deployment, across every process, with nothing to declare and nothing a test
+    double can fail to represent. A duplicate bind loses at the insert, which in
+    ``mint_foreign_site`` happens BEFORE the debit — so the loser never reaches
+    the charge at all, rather than being refunded afterwards.
+
+    THE SALT IS THE WHOLE POINT. ``_live_object_id`` is
+    ``sha1("<ws>:<pocket>")[:12]``; this is ``sha1("foreign:<ws>:<pocket>")[:12]``,
+    a different preimage and therefore a different 12 bytes. That preserves what
+    the mint was careful about from the start: a foreign row must never collide
+    with, or overwrite, the published Worker doc for the same pocket. The two
+    rows coexist deliberately, at two ids, and this derivation must never be
+    given ``_live_object_id``'s preimage to "simplify" it.
+
+    IT MAKES THE DEBIT KEY DETERMINISTIC, WHICH IS A DECISION AND NOT AN
+    ACCIDENT. ``billing.site_plan_debit_key`` is
+    ``site_plan:<site_id>:<tier>:<date>``, so with a derived id the key for a
+    given (workspace, pocket) is now fixed for a given day and tier. The
+    consequence: deleting a foreign concierge and binding it again the SAME day
+    charges nothing. That is the correct reading rather than a leak — the
+    customer bought that pocket's concierge for that month and a second debit
+    inside it would be a double charge — and it is the same reading
+    ``site_plan_debit_key`` already takes for a same-day tier flip-flop. A rebind
+    on a LATER day lands on a new key and charges normally.
+
+    Unlike ``_live_object_id`` this needs no ``_resolve_live_site_oid`` twin. That
+    lookup exists because a TRANSFERRED site keeps the id it was minted with, and
+    a foreign concierge cannot be transferred: ``transfer._check_not_paying``
+    refuses any site with an active subscription, which a bought concierge always
+    has.
+    """
+    import hashlib
+
+    digest = hashlib.sha1(f"foreign:{workspace_id}:{pocket_id}".encode()).digest()
+    return ObjectId(digest[:12])
+
+
 # DS-2: the Worker binding name a dynamic site reads its D1 through. Must match
 # the generator's wrangler.toml binding (``binding = "DB"``) so the compiled
 # remote functions (which reference ``env.DB``) resolve.
@@ -2556,18 +2600,20 @@ async def mint_foreign_site(
     feature that acts on the proof. This asks only the boolean today, and must not
     grow anything that assumes a proof stays good.
 
-    IT MINTS UNCONDITIONALLY, AND CALLERS MUST NOT USE IT DIRECTLY. Every call
-    inserts a fresh doc (fresh ObjectId, fresh key) and buys a month, so a second
-    call is a second site and a SECOND CHARGE. That is the right shape for a
-    primitive and the wrong one for anything a user can click twice:
+    IT ALWAYS TRIES TO MINT, AND CALLERS MUST NOT USE IT DIRECTLY. It has no
+    resolve step: it buys a month every time it runs to completion.
     ``bind_foreign_concierge`` is the resolve-or-buy layer over this, it is the
     entry point, and it is also where the concierge agent gets provisioned.
 
-    The fresh ObjectId is deliberate — reusing ``_live_object_id`` would derive
-    the stable per-(workspace, pocket) id of a PUBLISHED site, and a foreign
-    concierge must never collide with a real Worker doc. Dedupe therefore lives in
-    a ``foreign_origin``-filtered lookup rather than in the id; see the binding
-    section below.
+    A SECOND CALL FOR THE SAME POCKET NOW FAILS RATHER THAN CHARGING. The id is
+    derived (``_foreign_object_id``), so the insert below hits the primary key and
+    raises ``DuplicateKeyError`` — before the debit, so no money moves. That is
+    the cross-process guard, and it is deliberately the PRIMARY key rather than a
+    declared index: ``_id`` is enforced by every MongoDB, on every deployment,
+    with nothing to migrate. The salt keeps it clear of ``_live_object_id``, so a
+    foreign row still cannot collide with the published Worker doc for the same
+    pocket. Callers handle the conflict by adopting the winner; see
+    ``bind_foreign_concierge``.
 
     Args:
         workspace_id: Owning tenant, and the tenant whose wallet is debited.
@@ -2647,6 +2693,10 @@ async def mint_foreign_site(
         )
 
     site = _SiteDoc(
+        # DERIVED, not minted. The primary key is the cross-process guard against
+        # one pocket buying two concierges: a duplicate bind fails HERE, at the
+        # insert below, which is before the debit — so a loser never charges.
+        id=_foreign_object_id(workspace_id, pocket_id),
         workspace=workspace_id,
         pocket_id=pocket_id,
         owner=owner,
@@ -2740,15 +2790,39 @@ async def mint_foreign_site(
 # collide with or overwrite a real Worker doc. Dedupe therefore has to come from
 # a LOOKUP rather than from the id, which is what everything above is.
 #
-# THE CONCURRENCY GUARD IS IN-PROCESS. ``_foreign_bind_lock`` serialises binds
-# per (workspace, pocket) inside one interpreter, which is what makes two
-# awaited-together binds produce one row. It does NOT span processes: two API
-# workers binding the same pocket in the same instant can still mint twice, and
-# the only real fix is a unique index — partial on ``foreign_origin`` so it never
-# constrains published rows. That index is not declared yet because mongomock
-# (what every test here runs on) ignores ``partialFilterExpression`` and would
-# enforce uniqueness on EVERY site row, turning the dedupe suites red for a
-# reason that has nothing to do with sites. Treat the window as open.
+# TWO GUARDS, AND THEY PREVENT DIFFERENT THINGS. Read them as a pair or one of
+# them looks redundant and gets deleted.
+#
+#   * THE PRIMARY KEY stops the DOUBLE CHARGE, across processes. The foreign row
+#     is inserted at a DERIVED id (``_foreign_object_id``), so a second bind for
+#     the same pocket loses at the insert — which in ``mint_foreign_site`` is
+#     before the debit, so the loser never charges. This is the real dedupe, and
+#     it holds between API workers, pods and machines. It is the primary key
+#     rather than a declared partial index because mongomock ignores
+#     ``partialFilterExpression`` and would enforce uniqueness on EVERY site row,
+#     while ``_id`` is enforced natively by both the real driver and the double.
+#
+#   * ``_foreign_bind_lock`` stops a loser ADOPTING A ROW THE WINNER IS ABOUT TO
+#     DELETE. The winner inserts, then charges; a charge that fails deletes the
+#     row (``_discard_unpaid_foreign_site``). In between, an unserialised loser
+#     catches the primary-key conflict, re-reads, and adopts a row that is one
+#     step from being removed — so it returns a PHANTOM concierge: a Site its
+#     caller was handed, that is not in the collection, that nobody was charged
+#     for, carrying an embed key the resolver will never find. Measured with the
+#     lock removed: outcomes ``['InsufficientCredits', 'Site']`` and that Site
+#     absent from the collection. With the lock both callers fail honestly.
+#
+#     It serialises per (workspace, pocket) inside ONE interpreter and does not
+#     span processes, so the phantom is still reachable across workers. It is not
+#     a money error in either case (no charge happens on that path), which is why
+#     the primary key above carries the billing guarantee and this carries the
+#     consistency one.
+#
+# ONE CONSEQUENCE OF KEEPING BOTH, SAID OUT LOUD: with the lock in place the
+# ``except DuplicateKeyError`` recovery below is unreachable IN-PROCESS, so the
+# concurrency tests cannot exercise it. It is covered instead by two tests that
+# drive the conflict directly through the mint seam. A branch that only a second
+# process can reach still needs a test; it just cannot be a race test.
 # ---------------------------------------------------------------------------
 
 # One lock per (workspace, pocket). Never evicted: a deployment holds one entry
@@ -2760,6 +2834,14 @@ _FOREIGN_BIND_LOCKS: dict[str, asyncio.Lock] = {}
 
 def _foreign_bind_lock(workspace_id: str, pocket_id: str) -> asyncio.Lock:
     """The bind mutex for one (workspace, pocket).
+
+    NOT the dedupe mechanism — the derived ``_id`` is (see the section header).
+    What this prevents is a PHANTOM: the winner inserts, its charge fails, and it
+    deletes the row; an unserialised loser catches the primary-key conflict in
+    that window, re-reads, and adopts a row that is about to vanish. Its caller
+    is handed a concierge that is not in the collection and was never paid for.
+    Holding the mutex across the whole mint means the loser either sees a
+    finished purchase or sees nothing and mints for itself.
 
     Keyed on both halves so two tenants binding pockets that happen to share an
     id never serialise against each other. Created on first use; there is no
@@ -2860,14 +2942,48 @@ async def bind_foreign_concierge(
             await _provision_foreign_concierge(existing, workspace_id)
             return existing
 
-        site = await mint_foreign_site(
-            workspace_id=workspace_id,
-            pocket_id=pocket_id,
-            owner=owner,
-            allowed_origins=allowed_origins,
-            name=name,
-            scopes=scopes,
-        )
+        try:
+            site = await mint_foreign_site(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                owner=owner,
+                allowed_origins=allowed_origins,
+                name=name,
+                scopes=scopes,
+            )
+        except DuplicateKeyError:
+            # Lost the insert race to another PROCESS (in-process the lock above
+            # makes this unreachable). No debit happened — the mint inserts before
+            # it charges — so adopting the winner is simply correct.
+            adopted = await foreign_site_for_pocket(workspace_id, pocket_id)
+            if adopted is None:
+                # The winner rolled back: its own charge failed and it deleted the
+                # row (``_discard_unpaid_foreign_site``), freeing the id between
+                # our conflict and our re-read. Nobody has a concierge and nobody
+                # has been charged, so the buy is still owed. Once — a second
+                # conflict here means a third party is minting in a loop, and a
+                # retry loop on a path that spends money is worse than a 409.
+                logger.info(
+                    "sites.bind_foreign: lost the insert race for pocket %s then found "
+                    "no winner (it rolled back); minting once more",
+                    pocket_id,
+                )
+                site = await mint_foreign_site(
+                    workspace_id=workspace_id,
+                    pocket_id=pocket_id,
+                    owner=owner,
+                    allowed_origins=allowed_origins,
+                    name=name,
+                    scopes=scopes,
+                )
+            else:
+                site = adopted
+                logger.info(
+                    "sites.bind_foreign: lost the insert race for pocket %s; adopted "
+                    "site %s without charging",
+                    pocket_id,
+                    str(site.id),
+                )
 
     # Outside the lock: the row is committed, so every later bind resolves it and
     # holding the mutex through a network-bound agent mint would only serialise
