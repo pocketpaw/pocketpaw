@@ -1,111 +1,47 @@
 # ee/pocketpaw_ee/cloud/entitlements/service.py — the entitlements RESOLVER
-# (BC-6, the Entitlement primitive).
+# (BC-6, the Entitlement primitive). Module-level ``async def`` API, not a class,
+# per EE cloud rule and mirroring ``credits.service`` / ``billing.service``.
 #
-# Module-level ``async def`` API (NOT a class, per EE cloud rule, mirroring
-# ``credits.service`` / ``billing.service``). Public API:
-#   * ``resolve_entitlements(workspace_id)`` — read the workspace's CURRENT plan
-#     (``workspace.service.get_workspace_plan``), look it up in the billing plan
-#     catalog (``billing.plans``), and return an ``Entitlements`` (plan +
-#     features + monthly credit allotment + monthly credit ceiling).
+# WORKSPACE scope:
+#   * ``entitlements_from_plan(workspace_id, plan_key)`` — PURE, no DB. The plan
+#     catalog's answer for a tier key. The platform console reads it to show an
+#     operator the CATALOG value beside the RESOLVED one without a second copy of
+#     the tier lookup and its fallback.
+#   * ``resolve_entitlements(workspace_id)`` — the above, plus the workspace's
+#     current plan, plus any non-expired ``WorkspaceOverrides`` a platform
+#     operator has set. THE single choke point every enforcement path in the
+#     codebase calls through, which is what makes one override reach all of them.
 #
-# READ-ONLY: no writes, no emit (EE cloud rule 9 only fires on mutation; this
-# entity mutates nothing). Tenancy: ``get_workspace_plan`` resolves the plan from
-# the ONE ``Workspace`` document with that id and returns None for a missing /
-# soft-deleted / malformed id, so there is no cross-tenant read here — a caller
-# only ever sees the plan of the workspace it asked for.
+# PER-SITE scope (a different source and cadence — see ``SiteEntitlements``):
+#   * ``site_domain_allowance`` / ``site_analytics_entitled`` — pure predicates,
+#     shared by the seams that hold two strings rather than a resolved object.
+#   * ``resolve_site_entitlements`` — the per-site object, whose fields CALL those
+#     predicates rather than re-deriving them.
 #
-# FALLBACK: a workspace with no plan, an unknown plan string, or a missing
-# workspace resolves to the ``free`` base tier (``plans.BASE_PLAN_KEY``) — never
-# a crash, never a silent upgrade to a paid tier. The Free tier carries the
-# explicit 1000 credit ceiling, so the fallback also fails closed on the quota cap
-# (never None/uncapped). (Subscription EVENTS that CHANGE the plan are BC-7's job;
-# here entitlements derive from the existing ``Workspace.plan`` field as it stands.)
-#
-# Created 2026-06-24 (integration/billing-credits, BC-6): new entity.
-# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1): ``Entitlements``
-#   now also carries ``monthly_ceiling`` — populated from the resolved tier's
-#   ``monthly_ceiling`` exactly as ``monthly_credit_allotment`` is. The defensive
-#   base-floor branch sets the Free trial ceiling (1000), so every path fails
-#   closed and no path leaves the cap uncapped.
-# Updated 2026-07-08 (feat/billing-smb-caps): ``Entitlements`` now also carries the
-#   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``), populated
-#   from the resolved tier exactly as ``monthly_ceiling`` is. The defensive
-#   base-floor branch sets the Free values (5 / 200 / 50) so every path fails closed.
-# Updated 2026-08-08 (feat/billing-rbac-member-caps): the Free base-floor
-#   ``max_seats`` is now 0 — a workspace with no/unknown plan resolves to the Free
-#   tier, which cannot invite ANY members (Paw Go = 5, Paw Pro = 25; Pro Max and
-#   Enterprise = None). Fails closed to the most restrictive tier. Also added
-#   ``max_call_seconds_per_day`` — the daily LiveKit call budget (Free = 0 → no
-#   calls) surfaced to the LiveKit room-create gate; fail-closed to 0.
-# Updated 2026-08-08 (feat/billing-storage-caps): also added
-#   ``max_storage_bytes`` — the workspace S3 storage cap (Free = 5 GB) surfaced
-#   to the uploads gate and the /storage/usage read; fail-closed to 5 GB.
-# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): ``resolve_site_entitlements``
-#   no longer has ONE branch. It has two, and the split is the point of the change:
-#   PAID grants (badge removal, concierge, an UNCAPPED domain allowance) still need
-#   an active subscription, while the FLOOR grant (``max_domained_sites``) resolves
-#   off the base tier whether or not anyone is paying — because free now includes a
-#   custom domain, and a catalog edit alone could never have delivered one. Under
-#   the old single branch every $0 tier fell through to the all-False defaults, so a
-#   floor capability was structurally unexpressible. Also extracted the
-#   active-subscription test to ``_subscription_is_active`` now that two branches
-#   ask it.
-# Updated 2026-08-20 (feat/site-plan-catalog-inclusions): ``concierge_entitled``
-#   now reads ``tier.sells_concierge`` off the catalog row instead of re-deriving
-#   "above the free floor" here — the plan-catalog DTO needs the same answer for
-#   the buyer-facing plan cards, and two copies of one rule drift. The AND with an
-#   active subscription stays here; that is this resolver's job, not the catalog's.
-# Updated 2026-08-22 (feat/site-pricing-ladder): both per-site reads
-#   (``site_domain_allowance`` and ``resolve_site_entitlements``) now go through
-#   ``site_plans.site_scoped_tier`` instead of ``get_site_plan``. The catalog gained
-#   ORG-scoped flats (studio/agency) in the pricing rekey, and their keys are not
-#   legal ``Site.plan_tier`` values — a plain lookup would resolve one off a single
-#   site's field and grant that site an allowance the org buys once for many.
-#   ``site_scoped_tier`` returns None for them, so an org key on a site fails closed
-#   to the free floor exactly as an unknown key does. The same call also resolves
-#   the LEGACY basic/pro/business keys, which is what stops the rekey demoting every
-#   already-published site the day it deploys.
-# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): added
-#   ``site_analytics_entitled`` — "may this site's visitors be counted", the gate
-#   the publish path reads before it deploys a pageview counter and the read
-#   endpoint will read before it serves the numbers. A module-level PURE function
-#   beside ``site_domain_allowance`` rather than a field on ``SiteEntitlements``,
-#   for the reason that function's own docstring gives: more than one seam asks it,
-#   and one of them (the deploy) holds two strings rather than a resolved
-#   entitlements object. Keeping it a function is what makes both seams able to
-#   share the single predicate instead of each re-deriving it.
-# Updated 2026-09-02 (feat/sites-analytics-entitlement-field, SA-5):
-#   ``resolve_site_entitlements`` now also reports that answer as
-#   ``SiteEntitlements.analytics``, so the dashboard can disable the analytics panel
-#   and say why rather than calling the endpoint to be refused. This does NOT
-#   supersede the entry above: the function stays THE predicate and the field CALLS
-#   it, exactly as ``max_domained_sites`` calls ``site_domain_allowance``. The
-#   function exists for the seams that hold two strings and no resolved object; the
-#   field exists for the one reader that already has the object. Neither re-derives
-#   the rule, which is the only property that matters.
-# Updated 2026-09-16 (Paw Admin chunk 7, Decision 7): ``resolve_entitlements``
-#   now also overlays a workspace's ``WorkspaceOverrides`` (set by a platform
-#   operator via ``cloud/platform/entitlements.py``) onto the catalog-resolved
-#   values, skipping an expired override set entirely. The tier→``Entitlements``
-#   construction was extracted to the new ``entitlements_from_plan`` (pure, no
-#   DB) so the platform route can show an operator the CATALOG value beside the
-#   RESOLVED one without a second copy of the tier-lookup/fallback logic. Only
-#   the seven fields ``resolve_entitlements`` itself enforces are overlaid —
-#   ``monthly_credit_allotment`` and ``features`` are deliberately excluded; see
-#   ``WorkspaceOverrides`` for why (PRD errata C2).
-#   CORRECTION, same day: the first cut of this fetched the plan and the
-#   overrides off one combined call (``get_workspace_plan_and_overrides``),
-#   which broke every test across this codebase (44 failures in
-#   ``tests/cloud``) that drives this resolver by monkeypatching
-#   ``get_workspace_plan`` — the combined call's own doc lookup failed on
-#   those tests' non-Mongo-id workspace ids and nulled out the plan the mock
-#   had already answered. Fixed by going back to calling ``get_workspace_plan``
-#   directly (so every existing mock keeps working) and adding a second,
-#   independent ``get_workspace_overrides`` call for the override half. Costs
-#   one extra DB round trip over the original design; correctness for every
-#   existing caller outweighs it. ``get_workspace_plan_and_overrides`` is kept
-#   for the platform route, which always addresses a real workspace doc by
-#   path parameter and has no such mock to preserve.
+# INVARIANTS a reader must not break:
+#   * READ-ONLY. No writes, no ``emit`` (EE cloud rule 9 fires on mutation only).
+#   * FAIL CLOSED, everywhere. No plan, an unknown plan, a missing workspace: the
+#     ``free`` base tier, never a crash and never a paid-tier leak. Even the
+#     defensive branch for "the catalog has lost its base tier" spells out the
+#     Free values rather than leaving a ceiling ``None``/uncapped.
+#   * PAID GRANTS NEED AN ACTIVE SUBSCRIPTION. Per-site, ``plan_tier`` alone is
+#     not evidence of payment — a cancelled subscription leaves the paid key in
+#     place, and a paid publish with no Dodo product configured records the tier
+#     with ``subscription_status="none"``. Only ``max_domained_sites`` is a FLOOR
+#     grant, resolving off the base tier with nobody paying.
+#   * TWO SEPARATE DB CALLS, on purpose. ``resolve_entitlements`` calls
+#     ``get_workspace_plan`` and ``get_workspace_overrides`` independently, not
+#     the combined ``get_workspace_plan_and_overrides``. Tests across the tree
+#     drive this resolver by monkeypatching ``get_workspace_plan`` against an id
+#     that is not a real Mongo id, and a combined fetch nulls out the mocked plan
+#     (44 failures when it was tried). One extra round trip buys every mock.
+#   * An EXPIRED override set is wholly absent, not partly applied — an operator
+#     must never reason about which fields of one grant outlived the others.
+#   * Overrides reach only the fields this resolver enforces.
+#     ``monthly_credit_allotment`` and ``features`` are excluded: their
+#     enforcement points read the catalog directly and never come through here,
+#     so an override on either would store, display, and do nothing (PRD errata
+#     C2). See ``WorkspaceOverrides``.
 
 from __future__ import annotations
 
@@ -118,6 +54,23 @@ from pocketpaw_ee.cloud.entitlements.domain import Entitlements, SiteEntitlement
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides
+
+
+# Which workspace plans may read the SOURCE CODE of the sites they own. Every
+# paid rung does; ``free`` is absent, so a free workspace resolves ``False`` by
+# not being named here rather than by being listed as denied.
+#
+# AN EXPLICIT ALLOW-SET, NOT ``key != BASE_PLAN_KEY``. Deriving a capability by
+# negating the floor is how ``SitePlanTier.sells_concierge`` came to claim it
+# survived the site-plan rekey when it did not — the middle rung is also "not
+# free" and must not sell what the top rung sells. Here the same shortcut would
+# grant source to any tier added to the catalog later, silently, on the day it
+# was added. A key this set does not name resolves ``False``: a retired one
+# (``studio``, ``agency`` — both retired SITE-plan keys that still sit in stored
+# documents and resolve to no tier), a typo'd one, or a rung invented next
+# quarter. For a capability that exposes code, "unknown means no" is the only
+# direction a mistake may fail in.
+_SOURCE_VISIBLE_PLANS = frozenset({"go", "pro", "pro_max", "enterprise"})
 
 
 def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitlements:
@@ -164,6 +117,9 @@ def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitleme
                 # whether a site is billed AT ALL, so a generous default is free
                 # hosting that nothing later reclaims.
                 included_sites=0,
+                # And no site source. The catalog having lost its base tier is
+                # no reason to hand out code.
+                site_source_visible=False,
                 features=frozenset(),
             )
 
@@ -178,6 +134,12 @@ def entitlements_from_plan(workspace_id: str, plan_key: str | None) -> Entitleme
         max_call_seconds_per_day=tier.max_call_seconds_per_day,
         max_storage_bytes=tier.max_storage_bytes,
         included_sites=tier.included_sites,
+        # Read off the RESOLVED tier's key, never the raw ``plan_key`` argument.
+        # An unknown or retired key has already been replaced by the base tier
+        # above, so ``free`` is what reaches this line and ``False`` is what it
+        # answers. Testing ``plan_key`` here instead would hand a stale document
+        # a paid grant.
+        site_source_visible=tier.key in _SOURCE_VISIBLE_PLANS,
         features=tier.features,
     )
 
@@ -201,6 +163,28 @@ def _resolve_override_value(catalog_value: int | None, override: int | str | Non
     return override
 
 
+def _resolve_override_flag(catalog_value: bool, override: bool | None) -> bool:
+    """Overlay one BOOLEAN capability: ``None`` keeps the catalog answer,
+    ``True`` or ``False`` replaces it.
+
+    A separate helper from ``_resolve_override_value``, not a widened one, and
+    the reason is ``bool`` being a subclass of ``int``. A flag routed through
+    that function would reach its ``isinstance(override, str)`` narrowing as an
+    ``int``, so ``False`` would fall to the final ``return override`` and work
+    only by accident of the branch order — and the ``"uncapped"`` state it exists
+    to express is meaningless for a flag, which already has three states of its
+    own (on, off, no opinion).
+
+    Note what ``False`` means here: an operator REVOKING a capability the plan
+    grants, which is a real lever (an abuse response) and distinct from ``None``.
+    So this cannot be written as ``catalog_value or override`` — that reads a
+    revocation as no opinion and leaves the capability on.
+    """
+    if override is None:
+        return catalog_value
+    return override
+
+
 def _apply_overrides(
     entitlements: Entitlements, overrides: WorkspaceOverrides | None
 ) -> Entitlements:
@@ -210,10 +194,10 @@ def _apply_overrides(
     entirely absent — not partially applied — so an operator is never left
     reasoning about which fields of one grant outlived the others.
 
-    Only the seven fields ``WorkspaceOverrides`` models are overlaid.
-    ``monthly_credit_allotment`` and ``features`` never reach this function at
-    all — see ``WorkspaceOverrides`` for why an override on either would be
-    inert (PRD errata C2).
+    Only the fields ``WorkspaceOverrides`` models are overlaid — seven ceilings
+    and one capability flag. ``monthly_credit_allotment`` and ``features`` never
+    reach this function at all — see ``WorkspaceOverrides`` for why an override
+    on either would be inert (PRD errata C2).
     """
     if overrides is None:
         return entitlements
@@ -252,6 +236,9 @@ def _apply_overrides(
         included_sites=_resolve_override_value(
             entitlements.included_sites, overrides.included_sites
         ),
+        site_source_visible=_resolve_override_flag(
+            entitlements.site_source_visible, overrides.site_source_visible
+        ),
     )
 
 
@@ -267,7 +254,7 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
     This is the SINGLE choke point every enforcement path in the codebase calls
     through, which is what makes an override here reach all of them (seat caps,
     the LiveKit call-time gate, storage, connectors, pockets, the monthly
-    ceiling, included sites) with no other code changed.
+    ceiling, included sites, site-source visibility) with no other code changed.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
