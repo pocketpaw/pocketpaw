@@ -29,7 +29,8 @@
 #   * Per-fetch timeout; the size cap is enforced ON THE STREAM, so an oversized
 #     body is aborted mid-read and never fully buffered. No cookies (jar cleared
 #     after every response), no auth, no env proxies (trust_env=False — an
-#     HTTP_PROXY would route around the pin), an honest User-Agent.
+#     HTTP_PROXY would route around the pin), and an honest User-Agent that each
+#     caller supplies for ITSELF (``user_agent=``, defaulting to the importer's).
 #
 # The error codes read `sites.import_*` because the import endpoint's 422
 # contract depends on those exact strings. A caller outside the import path
@@ -54,7 +55,13 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 
 logger = logging.getLogger(__name__)
 
-# Honest UA — robots groups for "pawsitesimporter" or "*" apply to us.
+# Honest UA — robots groups for "pawsitesimporter" or "*" apply to us. It is the
+# DEFAULT, not a constant every caller must wear: the string goes to a third
+# party's server and their robots groups match on it, so a caller that is not the
+# import crawler passes its own identity via ``user_agent=``. Announcing a
+# one-file ownership probe as a site-import crawler is a lie to the operator, and
+# a customer whose robots.txt blocks that name would watch it fail with no
+# guessable cause.
 USER_AGENT = "PawSitesImporter/1.0 (+https://pocketpaw.dev; site-import crawler)"
 
 MAX_URL_LENGTH = 2048
@@ -206,8 +213,10 @@ class SafeFetcher:
     check-then-fetch TOCTOU is closed because the socket never re-resolves.
     Redirects are followed manually (max ``MAX_REDIRECTS``) with the full check
     re-run per hop. Responses stream against a per-fetch cap and a shared total
-    byte budget. ``transport`` / ``resolver`` are test seams (MockTransport +
-    a fake resolver — tests never touch the network)."""
+    byte budget. ``user_agent`` is what this fetcher announces itself as — pass
+    the caller's own honest identity rather than wearing the importer's default.
+    ``transport`` / ``resolver`` are test seams (MockTransport + a fake resolver —
+    tests never touch the network)."""
 
     def __init__(
         self,
@@ -215,6 +224,7 @@ class SafeFetcher:
         total_byte_cap: int,
         per_fetch_cap: int = MAX_FETCH_BYTES,
         timeout_sec: float = PER_FETCH_TIMEOUT_SEC,
+        user_agent: str = USER_AGENT,
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Callable[[str], Awaitable[list[str]]] | None = None,
     ) -> None:
@@ -227,7 +237,7 @@ class SafeFetcher:
             timeout=httpx.Timeout(timeout_sec),
             follow_redirects=False,  # hops are validated manually
             trust_env=False,  # no env proxies — the pin must not be bypassed
-            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+            headers={"User-Agent": user_agent, "Accept": "*/*"},
         )
 
     async def aclose(self) -> None:
@@ -355,6 +365,7 @@ async def fetch_single_url(
     max_bytes: int = MAX_FETCH_BYTES,
     timeout_sec: float = PER_FETCH_TIMEOUT_SEC,
     allowed_host: str | None = None,
+    user_agent: str = USER_AGENT,
     transport: httpx.AsyncBaseTransport | None = None,
     resolver: Callable[[str], Awaitable[list[str]]] | None = None,
 ) -> FetchResult:
@@ -386,6 +397,11 @@ async def fetch_single_url(
       timeout, TLS). Deliberately NOT wrapped: the caller's retry policy wants
       to see it.
 
+    ``user_agent`` is what the probe announces itself as. It DEFAULTS to the
+    import crawler's string for callers that are the import crawler; anything
+    else should pass its own, because this header reaches a third party's server
+    and their robots groups and access rules match on it.
+
     ``allowed_host`` is the optional off-host redirect guard. Leave it None to
     follow a redirect anywhere that passes the SSRF checks (every hop is still
     fully revalidated), or pass a lowercased netloc to pin the whole hop chain
@@ -397,6 +413,7 @@ async def fetch_single_url(
         total_byte_cap=max_bytes,
         per_fetch_cap=max_bytes,
         timeout_sec=timeout_sec,
+        user_agent=user_agent,
         transport=transport,
         resolver=resolver,
     )

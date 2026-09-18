@@ -273,6 +273,7 @@ from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_export import SiteExport
+from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
@@ -455,6 +456,7 @@ __all__ = [
     "SiteDesignBrief",
     "SiteExport",
     "SiteDomain",
+    "SiteOriginClaim",
     "SiteRateCounter",
     "SpendReconciliation",
     "StudioGeneration",
@@ -606,6 +608,9 @@ def get_all_documents():
         Site,
         SiteDesignBrief,
         SiteExport,
+        # SF-8 — the proof that a workspace controls an origin. The later
+        # concierge crawl reads it before fetching anyone's pages.
+        SiteOriginClaim,
         SiteRateCounter,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only

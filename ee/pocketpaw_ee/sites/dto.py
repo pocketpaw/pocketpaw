@@ -2,6 +2,11 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# ONE SHAPE HERE CARRIES A SECRET: ``OriginClaimResponse.token`` is the
+# domain-ownership proof the claiming workspace publishes on its own site. It
+# belongs only in the response to the workspace that asked for it — never in a
+# list, a card, or anything another tenant can read.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
 # ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
 # ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a
@@ -1409,3 +1414,63 @@ class SiteTransferListResponse(BaseModel):
     """Everything offered TO the calling workspace."""
 
     transfers: list[SiteTransferResponse] = []
+
+
+# --- SF-8: proving a workspace controls an origin --------------------------
+#
+# Request and response stay separate per the DTO rule. The request carries the one
+# field the client supplies; everything else — the token, the deadline, the proven
+# status — is minted server-side, because a client that can name them can forge a
+# proof.
+
+
+class OriginClaimRequest(BaseModel):
+    """The domain a workspace claims to control. Body of BOTH origin endpoints.
+
+    Claim and verify take the same single field, so they share a shape rather
+    than carrying two identical models. If either ever grows a field the other
+    does not want, split them then — not before.
+
+    A BARE HOST, never a URL. The service normalizes and refuses (lowercase, no
+    scheme/port/path/credentials, no single-label name, no literal IP); this cap
+    only stops an absurd value from reaching it.
+    """
+
+    host: str = Field(min_length=1, max_length=253)
+
+
+class OriginClaimResponse(BaseModel):
+    """A pending claim, with everything the owner needs to publish the proof.
+
+    ``token`` IS A SECRET and this is the only shape that carries it. It is
+    readable by the workspace that asked for it and nobody else — do not add this
+    model to a list endpoint, a gallery card, or any response a different tenant
+    can reach.
+    """
+
+    host: str
+    token: str
+    status: str
+    expires_at: datetime
+    # The two places the owner may publish it, rendered rather than described, so
+    # the panel can offer a copy button instead of an instruction to interpret.
+    well_known_url: str
+    meta_tag: str
+    verified_at: datetime | None = None
+    method: str = ""
+
+
+class OriginVerificationResponse(BaseModel):
+    """The outcome of a verification attempt that SUCCEEDED.
+
+    It carries no token: by the time this is returned the secret has done its job,
+    and echoing it back widens the number of places it can leak from. A failed
+    attempt is an error response (``sites.origin_token_missing`` /
+    ``_token_mismatch`` / ``_claim_expired`` / ``_probe_failed``), not a status on
+    this model — a client must not be able to read a refusal as a mild success.
+    """
+
+    host: str
+    status: str
+    method: str
+    verified_at: datetime | None = None
