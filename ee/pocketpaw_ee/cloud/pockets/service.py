@@ -418,23 +418,52 @@ async def _resolve_user_ids(user_ids: list[str]) -> dict[str, dict]:
     }
 
 
-async def _source_visible_for_doc(doc: _PocketDoc) -> bool:
+async def _workspace_source_entitled(workspace_id: str) -> bool:
+    """Does this workspace hold ``Entitlements.site_source_visible``? (SF-2)
+
+    Split out of ``_source_visible_for_doc`` when ``list_pockets`` needed to ask it
+    once for a whole page rather than once per row, so the two callers cannot drift
+    on WHICH resolver answers it. Fails closed on a malformed workspace id rather
+    than calling a resolver that would reject it — for a capability that exposes
+    code, "unknown means no" is the only direction a mistake may fail in.
+    """
+    if not workspace_id:
+        return False
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    return ent.site_source_visible
+
+
+async def _source_visible_for_doc(
+    doc: _PocketDoc, *, workspace_entitled: bool | None = None
+) -> bool:
     """May this pocket's authored ``source`` go out over the wire? (SF-2)
 
-    Three conditions ANDed, cheapest first:
+    Two conditions ANDed, cheapest first:
 
-    1. **The pocket carries a source at all.** There is nothing to withhold
-       otherwise, and short-circuiting here is what keeps the gallery free of N
-       extra round trips: ``list_pockets`` projects ``source`` out of its query,
-       so every row of it stops on this line without touching the resolver.
-    2. **The pocket was born gated AND the gate is still on.** ``doc.source_gated``
+    1. **The pocket was born gated AND the gate is still on.** ``doc.source_gated``
        is stamped at create time from ``sites_source_gate_enabled`` and the setting
        is re-read here, so BOTH must hold. That is what makes the rollout
        reversible in both directions — flipping the setting on never re-classifies
        a pocket that already exists (D3), and flipping it back off restores source
        to every pocket that was stamped, with no migration and no second flag.
-    3. **The workspace is entitled.** ``Entitlements.site_source_visible``: every
+       Neither check touches the database, so a pocket outside the cohort — which
+       is every pocket until somebody turns the gate on — costs nothing.
+    2. **The workspace is entitled.** ``Entitlements.site_source_visible``: every
        paid rung grants it, ``free`` does not.
+
+    IT DOES NOT SHORT-CIRCUIT ON ``doc.source`` BEING ABSENT, and that is not an
+    oversight to optimize away. The answer is PUBLISHED as ``sourceVisible`` on the
+    wire dict, so it has to mean "may this caller see this pocket's source" rather
+    than "did anything get redacted just now". ``list_pockets`` projects ``source``
+    out of its Mongo query for weight reasons, so a presence check would report
+    every gallery row visible — including the gated ones a single-pocket read
+    reports withheld. The frontend would show a Code tab from the gallery and lose
+    it on open. ``workspace_entitled`` is how the gallery stays cheap instead:
+    ``list_pockets`` resolves its one workspace ONCE and passes the answer down,
+    rather than every row resolving the same workspace for itself.
 
     THE WORKSPACE RESOLVER, NOT ``resolve_site_entitlements``. Source is a field on
     the POCKET and pockets are workspace-scoped, so a Site row does not own the
@@ -450,8 +479,6 @@ async def _source_visible_for_doc(doc: _PocketDoc) -> bool:
     would reject it. For a capability that exposes code, "unknown means no" is the
     only direction a mistake may fail in.
     """
-    if getattr(doc, "source", None) is None:
-        return True
     if not getattr(doc, "source_gated", False):
         return True
 
@@ -460,23 +487,29 @@ async def _source_visible_for_doc(doc: _PocketDoc) -> bool:
     if not get_settings().sites_source_gate_enabled:
         return True
 
-    workspace_id = getattr(doc, "workspace", "") or ""
-    if not workspace_id:
-        return False
-
-    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
-
-    ent = await entitlements_service.resolve_entitlements(workspace_id)
-    return ent.site_source_visible
+    if workspace_entitled is not None:
+        return workspace_entitled
+    return await _workspace_source_entitled(getattr(doc, "workspace", "") or "")
 
 
-async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
+async def _resolved_wire_dict(
+    doc: _PocketDoc, viewer_user_id: str, *, workspace_entitled: bool | None = None
+) -> dict:
     """The wire dict as it goes OVER THE WIRE — ``source`` withheld when the
     workspace may not read it (SF-2). The default entry point, and the one every
     user-facing read funnels through; use ``_unredacted_wire_dict`` only where the
     caller is the build / edit pipeline and needs the real file map.
+
+    ``workspace_entitled`` lets a caller that is already serializing N pockets of
+    ONE workspace resolve the entitlement once and hand the answer down. Only
+    ``list_pockets`` needs it; everything else resolves per pocket, which is one
+    workspace lookup on a single-pocket read.
     """
-    return await _wire_dict(doc, viewer_user_id, source_visible=await _source_visible_for_doc(doc))
+    return await _wire_dict(
+        doc,
+        viewer_user_id,
+        source_visible=await _source_visible_for_doc(doc, workspace_entitled=workspace_entitled),
+    )
 
 
 async def _unredacted_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
@@ -1843,7 +1876,20 @@ async def list_pockets(
     # every pocket's round trips end to end, one after another — N sequential
     # awaits for a list that renders all at once. gather keeps the ordering
     # (results come back positionally) while overlapping the waits.
-    return list(await asyncio.gather(*(_resolved_wire_dict(d, user_id) for d in docs)))
+    # SF-2 — resolve the source entitlement ONCE for the whole page. Every doc here
+    # belongs to ``workspace_id`` (the query is anchored on it), so the answer is
+    # the same for all of them, and letting each row resolve it would put two
+    # workspace lookups behind every card in the gallery. Skipped entirely unless
+    # some row is actually in the gated cohort — which is every row of every
+    # gallery until somebody turns the gate on.
+    workspace_entitled: bool | None = None
+    if any(getattr(d, "source_gated", False) for d in docs):
+        workspace_entitled = await _workspace_source_entitled(workspace_id)
+    return list(
+        await asyncio.gather(
+            *(_resolved_wire_dict(d, user_id, workspace_entitled=workspace_entitled) for d in docs)
+        )
+    )
 
 
 async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:

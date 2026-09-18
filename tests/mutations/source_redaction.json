@@ -78,5 +78,44 @@
       "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
       "tests/cloud/pockets/test_source_redaction_gate.py::test_d_the_two_readers_split_only_on_source"
     ]
+  },
+  {
+    "label": "the flag lies — sourceVisible is hardcoded true beside a withheld source, so the client shows a Code tab over nothing",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "        \"sourceVisible\": source_visible,",
+    "replace": "        \"sourceVisible\": True,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_tracks_the_payload_in_both_directions",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_cannot_be_computed_apart_from_the_payload",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_share_link_reports_the_flag_false"
+    ]
+  },
+  {
+    "label": "the flag is computed from the payload instead of the decision, so a ripple pocket with no source reports withheld",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "        \"sourceVisible\": source_visible,",
+    "replace": "        \"sourceVisible\": getattr(p, \"source\", None) is not None,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_is_honest_in_the_gallery_list",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_tracks_the_payload_in_both_directions"
+    ]
+  },
+  {
+    "label": "restore the source-presence short-circuit, so a projected gallery row reports visible while the single-pocket read reports withheld",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not getattr(doc, \"source_gated\", False):\n        return True\n\n    from pocketpaw.config import get_settings",
+    "replace": "    if getattr(doc, \"source\", None) is None:\n        return True\n    if not getattr(doc, \"source_gated\", False):\n        return True\n\n    from pocketpaw.config import get_settings",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_is_honest_in_the_gallery_list"
+    ]
+  },
+  {
+    "label": "the gallery resolves the entitlement per row instead of once per page, putting two workspace lookups behind every card",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            *(_resolved_wire_dict(d, user_id, workspace_entitled=workspace_entitled) for d in docs)",
+    "replace": "            *(_resolved_wire_dict(d, user_id) for d in docs)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_list_resolves_the_entitlement_once_for_the_page"
+    ]
   }
 ]

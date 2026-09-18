@@ -13,6 +13,13 @@ INVARIANTS a reader must not break:
   no default so a call site that forgets it is a TypeError rather than a leak.
   The only default that would not break the build pipeline is a fail-open one.
   Its own docstring has the full reasoning.
+* IT ALSO TRAVELS AS ``sourceVisible``, AND THE TWO MUST COME OFF THE SAME
+  ARGUMENT. The flag is what lets a client tell "withheld from you" from "no
+  source here" without re-deriving a rule it cannot see half of. Computing it
+  from anything other than the parameter that redacts ``source`` — the pocket's
+  engine, the payload being non-empty, a second entitlement read — reintroduces
+  the drift it exists to prevent, and a ``true`` beside a withheld payload shows
+  a Code tab over nothing.
 * MULTI-WORD WIRE KEYS ARE camelCase (``templateSlug``, ``shareLinkToken``,
   ``keepsClientBundle``), SINGLE-WORD ONES ARE NOT (``pattern``, ``engine``,
   ``source``). Every new field picks a side by that rule, not by taste.
@@ -674,8 +681,11 @@ def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:
 
     ``source_visible`` (SF-2) answers ONE question: may the caller this dict is
     being built for see the site's authored source? ``False`` emits ``None`` in
-    its place. Only ``source`` is affected — ``rippleSpec`` is untouched, because
-    ripple is a separate authoring track and outside this gate entirely.
+    its place AND is published as ``sourceVisible``, so a client can distinguish
+    "withheld from you" from "this site has no source" without re-deriving the
+    rule. The two come off the same argument by construction. Only ``source`` is
+    affected — ``rippleSpec`` is untouched, because ripple is a separate authoring
+    track and outside this gate entirely.
 
     IT IS REQUIRED AND HAS NO DEFAULT, DELIBERATELY. This function is pure and
     synchronous over a frozen domain object, so it cannot resolve an entitlement
@@ -730,6 +740,18 @@ def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:
         # and the WebSocket broadcast (a socket bypasses the dependency layer, so
         # no route-level gate would ever have reached it).
         "source": getattr(p, "source", None) if source_visible else None,
+        # SF-2 — the EFFECTIVE answer the line above just acted on, published so a
+        # client can tell "you may not see this" from "this site has no source".
+        # Both read the SAME parameter and cannot disagree: a ``sourceVisible:
+        # true`` beside a withheld ``source`` would put a Code tab over nothing.
+        #
+        # It exists because the client cannot re-derive it. The gate is the
+        # workspace capability AND the pocket's ``source_gated`` cohort stamp, and
+        # only the first of those is on any wire (``GET /entitlements``) — so a
+        # client gating on the capability alone would hide the Code tab on
+        # GRANDFATHERED pockets whose source this dict is still sending. Emitting
+        # the resolved answer keeps the rule in one place instead of two that drift.
+        "sourceVisible": source_visible,
         # MT-1 — this site keeps its client bundle. camelCased like every other
         # multi-word wire key, which also matches the generator's
         # ``siteConfig.keepsClientBundle``. TRI-STATE: emitted as ``None`` when
