@@ -1,65 +1,37 @@
-# ee/pocketpaw_ee/sites/url_crawler.py — Paw Sites same-site URL crawler (SI-5).
+# ee/pocketpaw_ee/sites/url_crawler.py — the same-site crawler behind
+# POST /sites/import/from-url. It walks a customer's live site into a FileMap
+# that the shared import pipeline then treats exactly like an uploaded zip.
 #
-# Created 2026-07-23 (feat/sites-import-crawler, stacked on SI-4): the fetch half of
-# POST /sites/import/from-url. Fills the ``crawl_site_from_url`` seam SI-4 left open.
-# SECURITY-CRITICAL — this module is the SSRF surface of the import path. The
-# guards themselves now live in safe_fetch.py (see the 2026-09-18 note below);
-# they are listed here because this is where they were written and reviewed:
-#   * Seed/hop URL validation: http(s) only, no credentials in the URL, ports limited
-#     to 80/443/default, length-capped (``validate_seed_url`` — the endpoint calls it
-#     too, so a hostile seed 422s before anything is minted or fetched).
-#   * DNS is resolved HERE and the connection is PINNED to the validated IP (the
-#     request rides ``scheme://ip/...`` with the original Host header + SNI hostname
-#     for https), so a re-resolution between check and fetch (TOCTOU / DNS rebinding)
-#     cannot swap in a private address. ALL resolved addresses must pass — a mixed
-#     public+private answer is rejected outright.
-#   * Forbidden targets (both families): loopback, RFC1918/private, link-local (incl.
-#     169.254.169.254 metadata), CGNAT 100.64/10, unspecified/reserved/multicast,
-#     IPv6 ULA fc00::/7, fe80::/10, and v4 addresses EMBEDDED in v6 forms
-#     (IPv4-mapped, 6to4, Teredo, NAT64 64:ff9b::/96) are re-checked as v4.
-#   * Redirects are followed MANUALLY (max 5) and EVERY hop re-runs the full URL +
-#     DNS + IP validation; non-http(s) redirect targets are rejected.
-#   * Per-fetch timeout, per-response size cap, total crawl byte budget (streamed —
-#     the response is aborted the moment a cap is crossed, never buffered past it),
-#     no cookies (jar cleared after every response), no auth, no env proxies
-#     (trust_env=False), an honest User-Agent.
-# Crawl scope: BFS from the seed, EXACT host match only. The seed MAY redirect
-# off-host (apex->www is the common case) — the crawl then re-seeds to the final
-# host so the whole site imports; every OTHER fetch is scope-locked, so a
-# same-site page/asset cannot 30x us into fetching foreign content. Depth <= 3,
-# pages <= 50, assets <= 200,
-# robots.txt honored (simple RobotFileParser matching for our UA + '*'; a failed
-# robots fetch degrades to a polite warning), small politeness delay between fetches.
-# Harvest: pages/assets map to safe relative paths (sanitized through import_service's
-# ``_safe_entry_path`` — the SAME rule zip entries pass), absolute same-origin URLs in
-# HTML/CSS are rewritten root-relative, CSS url()/@import refs are chased same-origin.
-# Cross-origin refs are left as-is and counted for the import report.
-# Edited 2026-07-23 (SSRF review): redirect scope guard (off-host 30x rejected
-# for non-seed fetches) + seed apex->www re-seed; opposite-scheme origin rewrite.
-# Edited 2026-09-04 (page/dir collision): the asset loop gained the page loop's
-# content-type guard, the other way round. A <link href> that answers text/html
-# (rel="canonical" above all) now claims the PAGE path, so /about stops landing at
-# the file "about" beside the directory "about/" the same page claims through
-# <a href="/about/">. That FileMap cannot exist on a filesystem: the generator
-# mkdirs over the file, EEXIST, and the whole URL import reports "failed". On one
-# real site 48 of 112 harvested files collided this way. Such a page counts
-# against MAX_CRAWL_PAGES, and against the asset loop's fetch ceiling (which is
-# now counted in slots, not stored files, so re-routing a fetch out of
-# assets_fetched cannot widen it). _LinkScan also stops queueing navigational
-# <link rel> values outright (canonical, prefetch, alternate & co) — the
-# content-type guard stays as the backstop for the ones it can't know about.
-# Scope, SSRF, robots and byte-budget behaviour are unchanged.
-# Edited 2026-09-18 (SF-7, feat/sites-single-url-fetch): the SSRF fetch machinery
-# — URL-shape validation, the forbidden-IP check, the DNS resolve, the IP-pinned
-# streaming GET and the manual redirect loop — MOVED VERBATIM to
-# ee/pocketpaw_ee/sites/safe_fetch.py and is imported back. A coming slice has to
-# fetch ONE customer-controlled URL (a domain-ownership token at
-# /.well-known/paw-verify), and the rule is that this codebase has exactly one
-# SSRF surface; burying it inside a BFS crawler left that caller with no honest
-# way to reuse it short of a depth-1 crawl. What stayed here is the CRAWL: BFS,
-# scope, robots, the byte budget, the HTML/CSS harvest. Behaviour is unchanged
-# and the error classes are the same objects under their old names, so
-# `except CrawlError` and every existing test keep working.
+# Fetching is NOT done here. Every request goes through safe_fetch, the one SSRF
+# surface in this codebase; this module supplies only the crawl policy around it.
+# Do not add an httpx call to this file — extend safe_fetch instead.
+#
+# SCOPE IS EXACT-HOST, AND THAT IS A SECURITY BOUNDARY. A same-site page or asset
+# must not be able to 30x the crawler into fetching (and then deploying) foreign
+# content, so every non-seed fetch passes allowed_host. The SEED is the one
+# exception: it may redirect off-host, because apex->www is the common case, and
+# the crawl re-seeds `scope` to the final host so the whole site imports instead
+# of one page plus a wall of warnings. Cross-origin refs are left as-is, counted.
+#
+# CAPS, all load-bearing against a hostile site: depth <= MAX_CRAWL_DEPTH,
+# MAX_CRAWL_PAGES pages, MAX_CRAWL_ASSETS fetch SLOTS (slots, not stored files,
+# so re-routing a fetch cannot widen the ceiling), MAX_TRACKED_URLS on the
+# discovery sets so link soup cannot balloon memory, and a total byte budget that
+# aborts the whole import when crossed.
+#
+# CONTENT TYPE DECIDES THE PATH, not the tag that pointed at it — both loops
+# check it. A <link href> answering text/html must claim the PAGE path, or /about
+# lands as a file beside the directory /about/ that the same page claims through
+# <a href="/about/">, and that FileMap cannot exist on a filesystem: the
+# generator mkdirs over the file and the import reports "failed". _LinkScan's
+# navigational-rel list (canonical, prefetch, alternate) is a DENYLIST, so an
+# unfamiliar rel is still fetched and the content-type check is the backstop.
+#
+# Harvested paths run through import_service._safe_entry_path, the SAME sanitizer
+# zip entries pass. Absolute same-origin URLs in HTML/CSS are rewritten
+# root-relative; CSS url()/@import refs are chased same-origin. robots.txt is
+# honored for our UA and '*'; a FAILED robots fetch degrades to a report warning
+# rather than blocking the import.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 

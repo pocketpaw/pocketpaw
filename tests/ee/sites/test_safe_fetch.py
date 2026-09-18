@@ -1,23 +1,28 @@
-# tests/ee/sites/test_safe_fetch.py — SF-7: the single-URL SSRF-hardened fetch.
+# tests/ee/sites/test_safe_fetch.py — the guard suite for safe_fetch, the one
+# SSRF-hardened fetch. It is the gate a change to that module has to pass, so
+# every test here asserts a MECHANISM rather than just "it raised":
 #
-# Created 2026-09-18 (feat/sites-single-url-fetch). Covers ``fetch_single_url``,
-# the primitive extracted out of url_crawler so a caller that needs exactly ONE
-# fetch of a customer-controlled URL reuses the hardened path instead of
-# hand-rolling a second, weaker one. All network is mocked (httpx.MockTransport
-# + a dict-backed resolver): nothing here opens a socket.
+#   * a target that resolves private is refused with ZERO requests issued —
+#     refusing after the connection is too late, and `seen == []` is what tells
+#     the two apart;
+#   * a MIXED public+private DNS answer is refused OUTRIGHT, because an
+#     implementation that filtered down to the public record would fetch happily
+#     here, and record ORDER must not matter either;
+#   * a redirect whose target resolves private dies AT THE HOP, with the one
+#     public hop the only request made, so the first hop cannot launder the
+#     second;
+#   * an oversized response aborts MID-STREAM — the assertion is on chunks
+#     pulled from the transport, because "raises eventually" is also what a
+#     fully-buffering implementation does;
+#   * the pin itself: the request carries the resolved IP while the Host header
+#     and sni_hostname carry the real name.
 #
-# The guards these tests exist to pin, each of which a naive reimplementation
-# gets wrong:
-#   * a target that RESOLVES private is rejected with ZERO requests issued (not
-#     rejected after the connection, which is too late);
-#   * a MIXED public+private DNS answer is rejected OUTRIGHT, never filtered down
-#     to the public record — filtering hands a DNS-controlling attacker a public
-#     record to use as a passkey;
-#   * a redirect whose target resolves private dies AT THE HOP, so the first
-#     public hop cannot be used as a launder;
-#   * an oversized response aborts MID-STREAM — the assertion is on how many
-#     chunks the transport was asked for, because "raises eventually" is also
-#     what a fully-buffering implementation does.
+# All network is mocked (httpx.MockTransport + a dict-backed resolver): nothing
+# here opens a socket. Public fixture IPs must be genuinely public — this
+# Python classifies the RFC 5737 documentation ranges (203.0.113.0/24 and
+# friends) as private, so a fixture drawn from them fails for the wrong reason.
+# tests/mutations/single_fetch_guard.json is the other half of this gate: it
+# breaks each guard on purpose and expects these tests to catch it.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator

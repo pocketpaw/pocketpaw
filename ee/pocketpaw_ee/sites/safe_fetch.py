@@ -1,46 +1,39 @@
-# ee/pocketpaw_ee/sites/safe_fetch.py — the ONE SSRF-hardened outbound fetch (SF-7).
+# ee/pocketpaw_ee/sites/safe_fetch.py — the ONE SSRF-hardened outbound fetch in
+# the sites codebase. Every fetch of a customer-controlled URL goes through here:
+# the import crawler's per-page fetches, and any caller that needs a single
+# request (a domain-ownership probe, a manifest read). A second fetch path is the
+# failure mode this module exists to prevent, because it re-opens whichever guard
+# it forgets. Add a caller, not a parallel implementation.
 #
-# Created 2026-09-18 (feat/sites-single-url-fetch): extracted VERBATIM out of
-# ee/pocketpaw_ee/sites/url_crawler.py, which had grown the only hardened egress
-# path in the sites codebase and then buried it inside a BFS crawler. Nothing
-# here is new behaviour — the guards, the error codes and the messages are the
-# crawler's, moved so a caller that needs exactly ONE fetch can have it without
-# abusing a depth-1 crawl or hand-rolling a second, weaker fetch. url_crawler
-# now imports these names and re-exports its historical aliases
-# (validate_fetch_url, FetchError, FetchBudgetExceeded), so its callers and its
-# test suite are untouched.
+# `fetch_single_url` is the entry point for one fetch; it owns the client
+# lifecycle. `SafeFetcher` is the multi-fetch form, for a caller that wants one
+# connection pool across many requests. Both run the same pipeline:
 #
-# WHY IT MATTERS THAT THERE IS ONLY ONE. Each guard below closes a specific SSRF
-# technique, and a second fetch path re-opens whichever one it forgets:
-#   * URL shape (``validate_fetch_url``): http(s) only, a real hostname, NO
-#     credentials in the URL, NO ports beyond 80/443/default, length-capped. A
-#     LITERAL-IP host is run through the forbidden-IP check right here, so
-#     ``http://169.254.169.254/`` dies before any socket is opened.
-#   * DNS is resolved HERE and the connection is PINNED to the validated IP (the
-#     request rides ``scheme://ip/...`` with the original Host header + the SNI
-#     hostname for https), so a re-resolution between check and fetch
-#     (TOCTOU / DNS rebinding) cannot swap in a private address.
-#   * ALL resolved addresses must pass — a mixed public+private answer is
-#     rejected outright, NOT filtered down to the public record. Filtering would
-#     hand an attacker who controls DNS a public record to use as a passkey.
-#   * Forbidden targets in both families: loopback, RFC1918/private, link-local
-#     (incl. the 169.254.169.254 metadata address), CGNAT 100.64/10,
-#     unspecified/reserved/multicast, IPv6 ULA fc00::/7, fe80::/10, and v4
-#     addresses EMBEDDED in v6 forms (IPv4-mapped, 6to4, Teredo, NAT64
-#     64:ff9b::/96) re-checked as the embedded v4.
-#   * Redirects are followed MANUALLY (max ``MAX_REDIRECTS``) and EVERY hop
-#     re-runs the full URL + DNS + IP validation; non-http(s) hops are rejected.
-#   * Per-fetch timeout and a per-response size cap enforced ON THE STREAM — the
-#     response is aborted the moment a cap is crossed, never buffered past it.
-#   * No cookies (jar cleared after every response), no auth, no env proxies
-#     (``trust_env=False`` — an HTTP_PROXY in the environment would route around
-#     the pin), an honest User-Agent.
+#   * URL SHAPE (`validate_fetch_url`): http(s) only, a real hostname, NO
+#     credentials, NO port beyond 80/443/default, length-capped. A literal-IP
+#     host is checked here, so http://169.254.169.254/ dies before any socket.
+#   * DNS IS RESOLVED HERE AND THE CONNECTION IS PINNED TO THE VALIDATED IP — the
+#     request rides scheme://ip/... with the original Host header and, for https,
+#     the SNI hostname. httpx is never handed a hostname, so a re-resolution
+#     between check and fetch (TOCTOU / DNS rebinding) cannot swap in a private
+#     address. This is the invariant; nothing may hand a host back to httpx.
+#   * ALL RESOLVED ADDRESSES MUST PASS. A mixed public+private answer is rejected
+#     whole, never filtered to the public record — filtering hands an attacker who
+#     controls DNS one public record to use as a passkey.
+#   * FORBIDDEN TARGETS, both families: loopback, RFC1918, link-local (incl. the
+#     169.254.169.254 metadata address), CGNAT 100.64/10, unspecified, reserved,
+#     multicast, ULA fc00::/7, fe80::/10, and v4 addresses EMBEDDED in v6 forms
+#     (IPv4-mapped, 6to4, Teredo, NAT64 64:ff9b::/96) re-checked as the v4.
+#   * REDIRECTS ARE MANUAL, max MAX_REDIRECTS, and EVERY hop re-runs the whole URL
+#     + DNS + IP check. `allowed_host` additionally pins the chain to one host.
+#   * Per-fetch timeout; the size cap is enforced ON THE STREAM, so an oversized
+#     body is aborted mid-read and never fully buffered. No cookies (jar cleared
+#     after every response), no auth, no env proxies (trust_env=False — an
+#     HTTP_PROXY would route around the pin), an honest User-Agent.
 #
-# The error CODES still read "sites.import_*". They are the crawler's, kept
-# verbatim so this extraction changes no response body; a caller outside the
-# import path should catch them and re-raise in its own vocabulary rather than
-# re-word them here, because the import endpoint's 422 contract depends on these
-# exact strings.
+# The error codes read `sites.import_*` because the import endpoint's 422
+# contract depends on those exact strings. A caller outside the import path
+# should catch them and re-raise in its own vocabulary, not re-word them here.
 
 """The single SSRF-hardened outbound fetch primitive for Paw Sites."""
 
