@@ -17,6 +17,14 @@ either field, and ``max_call_seconds_per_day`` — resolver-enforced but missing
 from Decision 7's original list — is added in their place. See
 ``cloud.models.workspace.WorkspaceOverrides`` for the full accounting.
 
+**One of the overridable fields is not a ceiling.** ``site_source_visible``
+is a capability flag — may this tenant read the source code of the sites it
+owns — so its override is ``bool | None``, not the ``int | "uncapped" | None``
+every ceiling here uses. ``None`` defers to the plan, ``True`` grants, and
+``False`` REVOKES a grant the plan makes, which is the case that earns the
+tri-state: taking source away from a paying tenant is an abuse response and
+must not require moving them off their plan.
+
 **Read-back, not just merge.** The read route returns the plan CATALOG's
 values, the OVERRIDE-RESOLVED values, and the raw override document side by
 side, so an operator can tell "the plan gives this" from "an override changed
@@ -58,10 +66,12 @@ _OverrideValue = int | Literal["uncapped"] | None
 
 
 class EntitlementCeilingsOut(BaseModel):
-    """The seven fields an override can actually reach.
+    """The fields an override can actually reach — seven ceilings and one flag.
 
     Deliberately excludes ``monthly_credit_allotment`` and ``features`` — see
-    the module docstring for why an override on either is inert.
+    the module docstring for why an override on either is inert. The class name
+    predates ``site_source_visible``; it is the override-reachable SET, not the
+    ceilings alone.
     """
 
     monthly_ceiling: int | None
@@ -71,6 +81,7 @@ class EntitlementCeilingsOut(BaseModel):
     max_call_seconds_per_day: int | None
     max_storage_bytes: int | None
     included_sites: int | None
+    site_source_visible: bool
 
 
 class OverridesOut(BaseModel):
@@ -83,6 +94,7 @@ class OverridesOut(BaseModel):
     max_call_seconds_per_day: _OverrideValue
     max_storage_bytes: _OverrideValue
     included_sites: _OverrideValue
+    site_source_visible: bool | None = None
     expires_at: str | None = None
 
 
@@ -118,6 +130,8 @@ class OverridesWriteIn(BaseModel):
     max_call_seconds_per_day: _OverrideValue = None
     max_storage_bytes: _OverrideValue = None
     included_sites: _OverrideValue = None
+    # Not a ceiling — see the module docstring. False is a revocation.
+    site_source_visible: bool | None = None
     expires_at: datetime | None = None
     # Required, non-empty (checked in the handler body, not a field_validator,
     # so a test can still construct an invalid body and drive it through the
@@ -144,6 +158,7 @@ def _ceilings(ent: Entitlements) -> EntitlementCeilingsOut:
         max_call_seconds_per_day=ent.max_call_seconds_per_day,
         max_storage_bytes=ent.max_storage_bytes,
         included_sites=ent.included_sites,
+        site_source_visible=ent.site_source_visible,
     )
 
 
@@ -173,6 +188,7 @@ def _overrides_out(overrides: WorkspaceOverrides | None) -> OverridesOut | None:
         max_call_seconds_per_day=overrides.max_call_seconds_per_day,
         max_storage_bytes=overrides.max_storage_bytes,
         included_sites=overrides.included_sites,
+        site_source_visible=overrides.site_source_visible,
         expires_at=overrides.expires_at.isoformat() if overrides.expires_at else None,
     )
 
@@ -252,6 +268,7 @@ async def set_overrides(
         max_call_seconds_per_day=body.max_call_seconds_per_day,
         max_storage_bytes=body.max_storage_bytes,
         included_sites=body.included_sites,
+        site_source_visible=body.site_source_visible,
         expires_at=body.expires_at,
     )
 

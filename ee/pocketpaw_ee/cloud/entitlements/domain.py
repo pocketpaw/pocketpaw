@@ -1,60 +1,32 @@
-# ee/pocketpaw_ee/cloud/entitlements/domain.py — the frozen, framework-free
-# value object the entitlements resolver returns (BC-6, the Entitlement
-# primitive).
+# ee/pocketpaw_ee/cloud/entitlements/domain.py — the frozen, framework-free value
+# objects the entitlements resolvers return (BC-6, the Entitlement primitive).
 #
-# ``Entitlements`` is the normalized "what is this workspace entitled to" shape:
-# its resolved plan key, the plan's feature set, its monthly credit allotment, and
-# its monthly credit ceiling (the quota cap). It carries no framework type (no
-# Beanie, no FastAPI) so the service can build it and the DTO layer can map it
-# without either reaching into the other. It is derived from the EXISTING
-# ``Workspace.plan`` field + the billing plan catalog — there is no event
-# projection here.
+# Two scopes live here and they are deliberately separate classes, not one class
+# with optional halves:
 #
-# Created 2026-06-24 (integration/billing-credits, BC-6): new entity.
-# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1): added
-#   ``monthly_ceiling: int | None`` next to ``monthly_credit_allotment`` — the
-#   per-plan monthly credit CAP (None = uncapped) the resolver populates from the
-#   plan catalog and later quota chunks enforce against.
-# Updated 2026-07-08 (feat/billing-smb-caps): added ``max_seats`` / ``max_pockets``
-#   / ``max_connectors`` (all ``int | None``, None = uncapped) beside
-#   ``monthly_ceiling`` — the SMB resource ceilings the resolver populates from the
-#   plan catalog and the seat / pocket-create / connector-enable gates enforce
-#   against at create time. Fail-closed to the Free value on the fallback path.
-# Updated 2026-08-08 (feat/billing-rbac-member-caps): added
-#   ``max_call_seconds_per_day`` (``int | None``, None = uncapped) — the daily
-#   LiveKit CALL-TIME budget in seconds the LiveKit room-create gate enforces
-#   at call-start time. Fail-closed to the Free value (0 = no calls) on the
-#   fallback path.
-# Updated 2026-08-08 (feat/billing-storage-caps): added ``max_storage_bytes``
-#   (``int | None``, None = uncapped) — the workspace S3 STORAGE cap in bytes the
-#   uploads pipeline enforces at upload time. Fail-closed to the Free value
-#   (5 GB) on the fallback path.
-# Updated 2026-08-15 (feat/sites-concierge-entitlement): added
-#   ``SiteEntitlements.concierge_entitled`` + the ``concierge_available`` property.
-#   ``concierge_enabled`` was a PASS-THROUGH of the owner's toggle that consulted no
-#   plan at all, so a free site served a concierge indefinitely. The two questions
-#   stay separate fields on purpose — see the class docstring.
-# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): added
-#   ``SiteEntitlements.max_domained_sites`` (``int | None``, None = uncapped) — how
-#   many SITES in the workspace may carry a custom domain, counted in SITES rather
-#   than hostnames so apex + ``www`` on one site spend one. Unlike every other
-#   field here it is a FLOOR GRANT: the base tier's 1 resolves with no subscription
-#   at all, because free now includes a custom domain. ``custom_domain`` stays, now
-#   derived as ``max_domained_sites != 0`` — it answers "may this site have one at
-#   all", which is a different question from "has the workspace room for another".
-# Updated 2026-08-13 (feat/sites-site-entitlements): added ``SiteEntitlements`` —
-#   the PER-SITE shape, a second scope beside the workspace one. Sites are the
-#   only thing billed per-object (``Site.plan_tier`` + ``subscription_status``),
-#   so "what may this SITE do" cannot be answered by the workspace resolver.
-#   Deliberately a separate frozen class rather than fields bolted onto
-#   ``Entitlements``: they resolve from different sources, on different cadences,
-#   and a caller that wants one almost never wants the other.
-# Updated 2026-09-02 (feat/sites-analytics-entitlement-field, SA-5): added
-#   ``SiteEntitlements.analytics`` (bool) — may this site's visitors be counted.
-#   A PAID grant, resolved by ``site_analytics_entitled`` rather than re-derived,
-#   because the publish seam and the read endpoint already share that predicate and
-#   a third copy is how the two drift. Exposing it lets the dashboard disable the
-#   panel and name the reason instead of rendering a refusal.
+#   * ``Entitlements`` — what a WORKSPACE may do, derived from ``Workspace.plan``
+#     plus the billing plan catalog, then overlaid with any platform-operator
+#     override. Credit allotment, the monthly credit ceiling, the SMB resource
+#     ceilings, the included-sites allowance, and the site-source capability.
+#   * ``SiteEntitlements`` — what ONE site may do, derived from that site's own
+#     ``plan_tier`` + ``subscription_status``. Sites are the only thing billed
+#     per-object, so the workspace plan cannot answer it.
+#
+# They resolve from different sources on different cadences, and a caller that
+# wants one almost never wants the other.
+#
+# INVARIANTS a reader must not break:
+#   * No framework type may appear here — no Beanie, no FastAPI, no pydantic. The
+#     service builds these and the DTO layer maps them without either reaching
+#     into the other.
+#   * Every ceiling FAILS CLOSED. A workspace with no/unknown plan resolves to the
+#     Free values, never ``None``/uncapped; ``None`` means uncapped and is only
+#     ever reached from a tier that genuinely is.
+#   * A capability must never be granted by forgetting it. The one field carrying
+#     a default (``Entitlements.site_source_visible``) defaults to WITHHELD;
+#     everything else has no default, so an omission fails loudly.
+#   * A field that would answer the same thing forever does not belong here — it
+#     reads as implemented. See ``SiteEntitlements``'s note on the three it omits.
 
 from __future__ import annotations
 
@@ -100,6 +72,25 @@ class Entitlements:
     ``billing.enforcement.concierge_conversation_quota_exceeded``. Three carried
     sites are three private blocks of 200, not one shared pool, so there is no
     workspace-level number to resolve.
+
+    ``site_source_visible`` is "may this account read the SOURCE CODE of the sites
+    it owns" — the generated markup, styles and scripts behind a published Paw
+    Site. It is the only boolean on this class, and the only field here with a
+    default, so both facts are worth stating:
+
+    It is a WORKSPACE capability rather than a per-site one, and that is not a
+    convenience. Source is a field on the POCKET, and pockets are workspace-scoped
+    — a site does not own the thing being read. Worse, ``create_draft_site`` sets
+    neither ``plan_tier`` nor ``subscription_status``, so every pocket's Site row
+    sits on the free floor from pocket-create until its first publish; a per-site
+    gate would therefore withhold source on every DRAFT, from paying customers,
+    for exactly as long as they were authoring it.
+
+    It defaults to ``False`` because ``features`` above it already carries a
+    default, so dataclass ordering leaves no choice — and ``False`` is the only
+    safe default to have been forced into. A construction that forgets this field
+    WITHHOLDS source; it cannot leak code by omission. Do not "fix" the default to
+    ``True`` to spare a caller an argument.
     """
 
     workspace_id: str
@@ -113,6 +104,8 @@ class Entitlements:
     max_storage_bytes: int | None
     included_sites: int | None
     features: frozenset[str] = field(default_factory=frozenset)
+    # Fail closed: an omitted field withholds source rather than granting it.
+    site_source_visible: bool = False
 
 
 @dataclass(frozen=True)
