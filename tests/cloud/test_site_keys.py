@@ -197,12 +197,47 @@ async def test_key_check_is_constant_time(mongo_db, monkeypatch):
 _OWNED_POCKET = {"name": "Shop", "rippleSpec": {}}
 
 
+async def _buyable(workspace_id: str, host: str) -> None:
+    """Make ``mint_foreign_site`` able to complete for (workspace, host).
+
+    The mint became a PURCHASE gated on a proved origin (feat/foreign-site-mint):
+    it debits a month of the ``staff`` rung from the workspace wallet and refuses
+    a host the workspace has not verified. This suite is about the KEY the mint
+    hands back, not about the money or the proof, so it seeds both preconditions
+    directly — the ones that own them are tests/cloud/sites/test_foreign_site_mint.py
+    and tests/ee/sites/test_domain_ownership.py.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
+
+    await credits_service.grant(
+        workspace=workspace_id,
+        amount=5000,
+        cause="top_up",
+        idempotency_key=f"seed-{workspace_id}",
+    )
+    now = datetime.now(UTC)
+    await SiteOriginClaim(
+        workspace=workspace_id,
+        host=host,
+        token="pawverify-seeded-for-the-key-suite",
+        status="verified",
+        issued_at=now,
+        expires_at=now + timedelta(days=7),
+        verified_at=now,
+        method="well-known",
+    ).insert()
+
+
 @pytest.mark.asyncio
 async def test_mint_foreign_site_then_resolve(mongo_db):
     """A foreign site (script_name="") minted by the service resolves by its
     signed_key — proving the lookup does NOT depend on script_name."""
     from unittest.mock import AsyncMock, patch
 
+    await _buyable("ws-2", "shop.example.com")
     with patch(
         "pocketpaw_ee.cloud.pockets.service.get",
         new=AsyncMock(return_value=_OWNED_POCKET),
@@ -234,6 +269,7 @@ async def test_mint_foreign_site_then_resolve(mongo_db):
 async def test_mint_foreign_site_scope_override(mongo_db):
     from unittest.mock import AsyncMock, patch
 
+    await _buyable("ws-3", "shop.example.com")
     with patch(
         "pocketpaw_ee.cloud.pockets.service.get",
         new=AsyncMock(return_value=_OWNED_POCKET),

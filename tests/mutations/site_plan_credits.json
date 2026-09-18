@@ -101,8 +101,8 @@
   {
     "label": "the deploy runs before the subscription reads active (a paid site is branded free)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.subscription_status = \"active\"\n    await doc.save()\n\n    deployed = await _deploy_site_doc(",
-    "replace": "    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "find": "    await _mark_subscription_active(doc)\n\n    deployed = await _deploy_site_doc(",
+    "replace": "    deployed = await _deploy_site_doc(",
     "tests": [
       "tests/cloud/sites/test_credits_publish.py::test_the_subscription_reads_active_before_the_deploy_runs"
     ]
@@ -184,7 +184,7 @@
   {
     "label": "the renewal charges a site that never deployed (a monthly bill for a 404)",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "        if not getattr(doc, \"deployed\", False):",
+    "find": "        if not getattr(doc, \"deployed\", False) and not getattr(doc, \"foreign_origin\", False):",
     "replace": "        if False:",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_site_that_never_deployed_is_not_charged"
