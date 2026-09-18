@@ -491,6 +491,23 @@ class Site(TimestampedDocument):
     # the invoice it is already on, and no migration is needed to keep billing
     # correct.
     billing_rail: str = ""
+    # A SITE POCKETPAW DOES NOT HOST. True only for a row minted by
+    # ``sites.service.mint_foreign_site`` — a Paw Bar concierge embedded on a page
+    # the customer already owns (a Squarespace site, a hand-rolled marketing page).
+    # There is no Worker, so ``script_name`` stays "" and ``deployed`` stays False
+    # FOREVER, and that is the finished, working state rather than a failure.
+    #
+    # IT IS A STAMP AND NOT A DERIVATION, because what reads it decides whether to
+    # MOVE MONEY. The renewal sweep refuses to charge an undeployed site — a paid
+    # site that never deployed needs an operator, not another month's debit — and a
+    # foreign site has to be the one exception. ``script_name == ""`` would also
+    # describe every draft and every half-written row, so deriving the exception
+    # from it would let an unrelated empty string open the door to a debit. An
+    # explicit flag only the mint sets means every other row reads False and keeps
+    # the old refusal.
+    #
+    # Defaults False, so every pre-existing document reads "hosted" — no migration.
+    foreign_origin: bool = False
     # THE MOST EXPENSIVE TIER THIS SITE HAS ALREADY PAID FOR IN THE CURRENT PERIOD,
     # in whole USD. It exists so a mid-period tier change charges the DIFFERENCE
     # rather than a fresh month, and so a change that is not an upgrade charges

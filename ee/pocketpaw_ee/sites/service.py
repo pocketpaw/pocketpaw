@@ -511,20 +511,22 @@
 # the edit-bridge to public pages. The ``_store`` seam keeps "where the render comes
 # from" injectable so a later client-side-REPL compile wave can swap it cheaply.
 #
-# Updated 2026-07-14 (Paw Bar concierge seam, T1): added ``mint_foreign_site`` — a
-# minimal Site writer for a FOREIGN origin (a site we did NOT generate). It creates
-# a ``script_name=""`` / ``deployed=False`` Site that carries only the concierge
-# credential (a freshly minted ``signed_key`` + normalized ``allowed_origins`` +
-# ``scopes``); it is resolved by ``signed_key`` (via ``auth.site_keys.resolve_site_key``),
-# not by ``script_name``, so the empty script name is fine. Kept HERE, not in the
-# auth module, because this service is the sole owner of Site writes. Helper
+# ``mint_foreign_site`` is the Site writer for a FOREIGN origin — a site we did NOT
+# generate, where a Paw Bar concierge embeds on a page the customer already hosts.
+# It writes a ``script_name=""`` / ``deployed=False`` / ``foreign_origin=True`` row
+# resolved by its ``signed_key`` (``auth.site_keys.resolve_site_key``) rather than by
+# ``script_name``, so the empty script name is fine. It is A PURCHASE, not a bare
+# credential writer: the concierge is sold on the ``staff`` rung and
+# ``concierge_entitled`` needs that rung AND an active subscription, so the mint
+# stamps the tier, debits the month from the workspace credit wallet on the CREDITS
+# rail, and activates only after the money moves — a failed charge leaves no row.
+# It gates on a VERIFIED origin (``sites.ownership``) and on the pockets-service
+# ownership check (``pockets_service.get``), both before any write, so a caller can
+# bind a concierge neither to another workspace's pocket (which would leak that
+# pocket's KB to the resolved context) nor to a domain it does not control.
 # ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
 # ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
 # foreign concierge must not collide with a published site's stable per-pocket id).
-# Review follow-up (HIGH): ``mint_foreign_site`` now runs the pockets-service
-# ownership check (``pockets_service.get(pocket_id, owner)``) BEFORE inserting, the
-# same gate ``publish_pocket`` uses, so a caller cannot bind a concierge to another
-# workspace's pocket (which would leak that pocket's KB to the resolved context).
 #
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
@@ -1237,6 +1239,16 @@ _PLAN_RAIL = "plan"
 # live in another (this rung), rather than being spelled out a second time here.
 # Change the rung the plans include and this is the line to change.
 _PLAN_CARRIED_TIER_KEY = "staff"
+# The rung a FOREIGN concierge is sold on — a Paw Bar embedded on a site the
+# customer hosts themselves (``mint_foreign_site``). It is the same rung a
+# plan-carried site gets and for the same reason: ``staff`` is the rung that
+# SELLS THE CONCIERGE, and a concierge is the entire product here. Named
+# separately from ``_PLAN_CARRIED_TIER_KEY`` despite holding the same string,
+# because the two answer different questions — "what does the workspace plan
+# include" and "what does a foreign concierge cost" — and a future ladder that
+# splits them must not have to guess which call sites meant which. The PRICE is
+# never written here; it is read off the catalog at mint time.
+_FOREIGN_CONCIERGE_TIER_KEY = "staff"
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -2460,6 +2472,32 @@ def _normalize_origin_hosts(origins: list[str]) -> list[str]:
     return hosts
 
 
+async def _discard_unpaid_foreign_site(site: _SiteDoc) -> None:
+    """Remove a just-inserted foreign Site whose charge did not go through.
+
+    A plain delete and deliberately NOT ``delete_cascade``: this row is seconds
+    old and nothing has been built from it — no Worker, no hostname, no lead, no
+    emitted event, no ledger entry (the debit is what failed). The cascade exists
+    to unwind a LIVE site and would be the wrong tool and the slower one.
+
+    Swallows its own failure, and only its own. The caller re-raises the charge
+    error, which is the one the buyer needs to see; a delete that also failed would
+    otherwise replace a clear "your wallet is short" with a Mongo error. What is
+    left behind in that case is an unpaid row with ``subscription_status="none"``,
+    which holds no paid capability — so the log line is for an operator, not an
+    incident.
+    """
+    try:
+        await site.delete()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "sites.mint_foreign: could not delete site %s after its charge failed — "
+            "it is left UNPAID (subscription_status=none) and holds no paid "
+            "capability, but it should be removed by hand",
+            str(site.id),
+        )
+
+
 async def mint_foreign_site(
     *,
     workspace_id: str,
@@ -2469,51 +2507,89 @@ async def mint_foreign_site(
     name: str = "",
     scopes: list[str] | None = None,
 ) -> _SiteDoc:
-    """Mint a Site for a FOREIGN origin — one PocketPaw did not generate (T1).
+    """BUY a Paw Bar concierge for a FOREIGN origin — a site PocketPaw does not host.
 
-    A normal Site is created by ``publish`` for a pocket we render into a Worker;
-    its ``script_name`` is the deployed Worker id and it is looked up by that id.
-    A Paw Bar concierge instead embeds on a site the customer already owns (a
-    Squarespace page, a hand-rolled marketing site, …). There is no Worker to
-    deploy, so this mints a Site with ``script_name=""`` and ``deployed=False``
-    whose ONLY job is to carry the concierge credential: the world-visible
-    ``signed_key`` (minted here, same ``site_key_...`` format ``publish`` seeds),
-    the ``allowed_origins`` the embed is valid from, and the ``scopes`` a resolved
-    request may exercise. It is resolved not by ``script_name`` (empty) but by that
-    ``signed_key`` — ``auth.site_keys.resolve_site_key`` does the key→Site lookup —
-    so an empty ``script_name`` is not a problem.
+    A normal Site is created by ``publish`` for a pocket we render into a Worker.
+    A foreign concierge instead embeds on a page the customer already owns (a
+    Squarespace site, a hand-rolled marketing page). There is no Worker to deploy,
+    so this mints a Site with ``script_name=""``, ``deployed=False`` and
+    ``foreign_origin=True``, carrying the world-visible ``signed_key``, the
+    ``allowed_origins`` the embed is valid from and the ``scopes`` a resolved
+    request may exercise. It is resolved by that key, never by ``script_name``
+    (``auth.site_keys.resolve_site_key``), so the empty script name is fine.
 
-    Site writes are owned by this service (the sole Site writer), which is why the
-    mint lives here rather than in the auth module that reads the key back.
+    IT IS A PURCHASE, AND THAT IS THE WHOLE POINT. The concierge is sold on the
+    ``staff`` rung and nothing else grants it: ``concierge_entitled`` is
+    ``tier.sells_concierge`` AND an active subscription. A row minted without both
+    halves resolves to the free floor, and every visitor's first message is
+    answered with a 403 by the key resolver — which is exactly what this primitive
+    did for as long as it had no caller. So the mint stamps the tier, debits a
+    month from the workspace credit wallet, and only then activates.
 
-    v1 mints a FRESH doc per call (fresh ObjectId, fresh key). It deliberately does
+    ORDER, and each step's failure mode:
+
+      1. Refuse a pocket the caller cannot access, then refuse an origin this
+         workspace has not PROVED it controls. Both before any write: minting on
+         someone else's domain is how a concierge becomes a crawler-for-hire.
+      2. Insert the row UNPAID — tier stamped, subscription ``none``. It confers
+         nothing; it exists so the debit has a stable ``site_id`` to key on.
+      3. CHARGE. A refusal (a short wallet raises ``InsufficientCredits``, 402)
+         DELETES the row and re-raises. Nothing may leave a paid tier with no money
+         behind it, which is the state removing the gateway set out to end.
+      4. Only then stamp the renewal + the period's price and flip the
+         subscription ACTIVE, through the same ``_mark_subscription_active`` the
+         hosted path uses.
+
+    ON THE CREDITS RAIL, WITH NO PLAN SLOT. ``billing_rail`` is set explicitly so
+    the monthly sweep finds it and the Dodo add-on cart does not; it is NOT the
+    plan rail, so ``plan_site_slots`` does not count it and
+    ``reconcile_plan_carried_sites`` never releases it. The sweep re-charges it
+    without deploying anything — see ``foreign_origin`` on the model for how it
+    tells this undeployed row apart from a broken one.
+
+    A VERIFIED ORIGIN IS A FACT WITH A DATE, not a permanent license. Ownership
+    records ``verified_at`` and expires nothing; a freshness policy belongs to the
+    feature that acts on the proof. This asks only the boolean today, and must not
+    grow anything that assumes a proof stays good.
+
+    v1 mints a FRESH doc per call (fresh ObjectId, fresh key) and deliberately does
     NOT reuse ``_live_object_id`` — that derives a stable per-(workspace, pocket)
-    id for a PUBLISHED site, and a foreign concierge for the same pocket must not
-    collide with (or overwrite) a real published Worker doc. Idempotent binding
-    management (one canonical concierge per pocket, rotate/rebind) is a follow-up
-    (the pilot-bind slice); this primitive just creates the credential row.
+    id for a PUBLISHED site, and a foreign concierge must not collide with a real
+    published Worker doc. Idempotent binding management (one canonical concierge
+    per pocket, rotate/rebind) is a follow-up (the pilot-bind slice). Until it
+    lands, a second call is a second site and a second charge.
 
     Args:
-        workspace_id: Owning tenant (the Site's ``workspace``).
+        workspace_id: Owning tenant, and the tenant whose wallet is debited.
         pocket_id: The pocket the concierge is grounded in (drives the KB scope
             ``pocket:<pocket_id>`` downstream).
-        owner: The acting user. Recorded as the Site's ``owner`` AND used as the
-            identity for the pocket ownership check below — so it must be a user
-            who can access ``pocket_id``, not an arbitrary label.
+        owner: The acting user. Recorded as the Site's ``owner``, used as the
+            identity for the pocket ownership check, and attributed on the ledger
+            row — so it must be a user who can access ``pocket_id``.
         allowed_origins: Origins the embed is valid from; normalized to bare hosts.
+            EVERY one must already be verified for this workspace.
         name: Optional display name.
         scopes: Optional override of what the key may do; defaults to the Site
             model's concierge baseline when omitted.
 
     Returns:
-        The inserted ``Site`` doc, carrying its freshly-minted ``signed_key`` so the
-        caller can hand the embed snippet back to the owner.
+        The inserted, PAID, active ``Site`` doc carrying its freshly-minted
+        ``signed_key`` so the caller can hand the embed snippet back to the owner.
 
     Raises:
         Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
-            ``pocket_id`` (via the pockets service ownership check).
+            ``pocket_id``; ``sites.origin_unverified`` when the workspace has not
+            proved it controls one of ``allowed_origins``.
         NotFound: when ``pocket_id`` does not exist.
+        ValidationError: ``sites.origin_required`` when no usable origin is given.
+        InsufficientCredits: (402) when the wallet cannot cover the month. No Site
+            survives it.
     """
+    from pocketpaw_ee.cloud.billing import service as billing_service
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import ownership
+
     # Ownership gate — the SAME check every other pocket-touching path in this
     # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
     # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
@@ -2522,9 +2598,43 @@ async def mint_foreign_site(
     # a denied caller leaves no orphan Site behind. ``get`` raises
     # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
     # pocket is missing; we only need it for the side-effect of that check.
-    from pocketpaw_ee.cloud.pockets import service as pockets_service
-
     await pockets_service.get(pocket_id, owner)
+
+    hosts = _normalize_origin_hosts(allowed_origins)
+    if not hosts:
+        # ``origin_allowed`` fails closed on an empty list, so a site minted with no
+        # usable origin could never serve its concierge anywhere — and it would
+        # still have been charged for. Refuse before the money moves.
+        raise ValidationError(
+            "sites.origin_required",
+            "A foreign concierge needs at least one origin to embed on.",
+        )
+
+    # PROOF OF CONTROL, PER ORIGIN, BEFORE ANY ROW EXISTS. Every host on the
+    # allowlist is a host this concierge will answer on and — once the crawl slice
+    # lands — a host whose pages we fetch. An unverified one is someone naming a
+    # third party's domain, so ALL of them must be proved rather than any of them:
+    # a single unproved entry on an otherwise legitimate list is still a live embed
+    # on a domain that is not the buyer's.
+    for host in hosts:
+        if not await ownership.verified_origin(workspace_id, host):
+            raise Forbidden(
+                "sites.origin_unverified",
+                f"This workspace has not proved that it controls '{host}'. "
+                "Verify the domain first, then mint the concierge.",
+            )
+
+    # The rung, and its price, read from the catalog rather than written here — the
+    # ladder is allowed to re-price without this file changing. The guard is not
+    # ceremony: if the rung ever stops selling the concierge or loses its price,
+    # minting would charge nothing, or charge for a capability the resolver then
+    # refuses, and a loud 422 beats either.
+    tier = site_plans.site_scoped_tier(_FOREIGN_CONCIERGE_TIER_KEY)
+    if tier is None or not tier.sells_concierge or tier.monthly_price_usd <= 0:
+        raise ValidationError(
+            "sites.foreign_concierge_unsellable",
+            f"Site tier '{_FOREIGN_CONCIERGE_TIER_KEY}' does not sell a priced concierge.",
+        )
 
     site = _SiteDoc(
         workspace=workspace_id,
@@ -2534,7 +2644,15 @@ async def mint_foreign_site(
         script_name="",
         deployed=False,
         url="",
-        allowed_origins=_normalize_origin_hosts(allowed_origins),
+        # The row is what makes this site chargeable-but-not-yet-paid: the tier and
+        # the rail are stamped now (the debit's idempotency key is built from the
+        # id this insert mints), while ``subscription_status`` stays at its "none"
+        # default until the money has actually moved. ``concierge_entitled`` is the
+        # AND of the two, so between here and the charge the row confers nothing.
+        plan_tier=tier.key,
+        billing_rail=_CREDITS_RAIL,
+        foreign_origin=True,
+        allowed_origins=hosts,
         signed_key=f"site_key_{secrets.token_urlsafe(24)}",
     )
     # Only override the model's default scope set when the caller asked to narrow
@@ -2542,6 +2660,45 @@ async def mint_foreign_site(
     if scopes is not None:
         site.scopes = scopes
     await site.insert()
+
+    period_start = datetime.now(UTC)
+    try:
+        await billing_service.charge_site_plan_credits(
+            workspace_id=workspace_id,
+            site_id=str(site.id),
+            tier_key=tier.key,
+            amount_usd=tier.monthly_price_usd,
+            period_start=period_start,
+            member_id=owner,
+        )
+    except Exception:
+        # FAIL CLOSED. Anything that stops the debit — a short wallet, a ledger
+        # error — must leave NO Site behind, because a row on a paid tier that
+        # nobody paid for is precisely the state this rail exists to make
+        # impossible, and here it would be indistinguishable from a real purchase.
+        await _discard_unpaid_foreign_site(site)
+        raise
+
+    # The month is bought, so the row may now say so. All three fields ride the one
+    # save inside ``_mark_subscription_active``: the renewal date the monthly sweep
+    # selects on, the price this period has been paid (what a later tier change
+    # prices against, so an upgrade does not charge a second full month), and the
+    # status flip itself, which is the half of ``concierge_entitled`` nothing else
+    # sets. ``period_start`` rather than a second ``now()`` — the date the wallet
+    # was charged for is the date the next month is due from.
+    _stamp_next_renewal(site, at=period_start)
+    site.period_paid_usd = int(tier.monthly_price_usd)
+    await _mark_subscription_active(site)
+
+    logger.info(
+        "sites.mint_foreign: site %s minted for workspace %s on %s ($%s/month from "
+        "the credit wallet), origins=%s",
+        str(site.id),
+        workspace_id,
+        tier.key,
+        tier.monthly_price_usd,
+        hosts,
+    )
     return site
 
 
@@ -7370,6 +7527,48 @@ async def _publish_pending_site(
     return doc
 
 
+async def _mark_subscription_active(doc: _SiteDoc) -> None:
+    """Flip a paid site's subscription to ACTIVE and persist it immediately.
+
+    THE SAVE IS THE POINT, not the assignment. Every paid capability is resolved
+    from ``subscription_status`` by code that RE-READS the document:
+    ``_embed_concierge_bar`` and ``_stamp_free_badge`` each ``find_one`` it fresh
+    in the middle of a deploy, and ``auth.site_keys.concierge_available`` reads
+    whatever the collection holds when a visitor arrives. An in-memory flip that
+    has not landed yet is invisible to all of them, so a customer who has just paid
+    gets the free-tier answer — the attribution badge stamped on, the concierge
+    absent, and nothing that re-runs either stamper afterwards.
+
+    Shared by the two paths that turn a charge into capabilities — ``activate_site``
+    (hosted, immediately before its deploy) and ``mint_foreign_site`` (foreign,
+    where there is no deploy at all) — so the ordering the capabilities depend on
+    cannot drift between them. Anything a caller wants written in the SAME round
+    trip must be set on ``doc`` before calling this.
+    """
+    doc.subscription_status = "active"
+    await doc.save()
+
+
+def _stamp_next_renewal(doc: _SiteDoc, *, at: datetime | None = None) -> None:
+    """Set the date the renewal sweep will next charge this site — IN MEMORY.
+
+    A month on from ``at`` (default: now) for every rail that actually moved
+    money, and None on the plan rail. That branch is load-bearing: the sweep
+    selects on ``renewal_date <= now``, so a date on a plan-carried site would
+    hand it a row to debit for a site nobody bought.
+
+    ``relativedelta`` rather than ``timedelta(days=30)`` — fixed 30-day steps walk
+    a customer's billing day backwards through the calendar, five days a year.
+
+    Deliberately does not save: both callers have other fields to write in the
+    same round trip, and a second write here would be a second chance to lose one.
+    """
+    if getattr(doc, "billing_rail", "") == _PLAN_RAIL:
+        doc.renewal_date = None
+    else:
+        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)
+
+
 async def activate_site(
     *,
     workspace_id: str,
@@ -7439,23 +7638,12 @@ async def activate_site(
     pocket_id = doc.pocket_id
     # Deploy live using the inputs captured at publish time (NOT a fresh pocket read
     # — the webhook has no pocket scope, and the pocket's draft may have advanced).
-    # Mark the subscription ACTIVE BEFORE the deploy, not after.
-    #
-    # This call only happens on the ``subscription.active`` webhook — the payment is
-    # already confirmed — so "active" is true the moment we get here, and the old
-    # ordering made it true only after the artifact had been built. That mattered
-    # because the deploy stamps the site's PAID capabilities off this very field:
-    # ``_embed_concierge_bar`` and ``_stamp_free_badge`` both re-read the doc mid-
-    # deploy and resolve entitlements from it. With the flip afterwards, both read
-    # "pending", so a customer who had just paid got a page with the FREE
-    # attribution badge stamped on it and no concierge loader — and nothing
-    # re-runs either stamper, so the page stayed that way until some unrelated
-    # publish. A republish makes it recur: ``_publish_pending_site`` resets the
-    # status to "pending" every time.
-    #
-    # Saved separately from the post-deploy save below so the value is on the doc
-    # the deploy re-reads (both stampers ``find_one`` it fresh rather than taking
-    # the in-memory object).
+    # Mark the subscription ACTIVE BEFORE the deploy, not after — and SAVE it
+    # first, which is why this goes through ``_mark_subscription_active`` rather
+    # than two lines here. That helper carries the reasoning and is shared with the
+    # foreign mint, so the one ordering the paid capabilities depend on is written
+    # down once. This call only happens once payment is confirmed, so "active" is
+    # already true by the time we reach it.
     #
     # Safe on the failure path: if the deploy raises, this row is "active" with
     # ``deployed=False`` for the duration of the retry. The webhook is at-least-once
@@ -7464,8 +7652,7 @@ async def activate_site(
     # exposure the pre-existing ``no captured inputs`` branch reasons about, in the
     # opposite direction, and it is the lesser of the two: a paid site that retries
     # its deploy beats a paid site permanently branded as free.
-    doc.subscription_status = "active"
-    await doc.save()
+    await _mark_subscription_active(doc)
 
     deployed = await _deploy_site_doc(
         workspace_id=workspace_id,
@@ -7512,10 +7699,7 @@ async def activate_site(
     # ``renewal_date <= now`` and would find this one a month later — so the rail
     # check is what keeps a free site free.
     deployed.subscription_status = "active"
-    if getattr(deployed, "billing_rail", "") != _PLAN_RAIL:
-        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)
-    else:
-        deployed.renewal_date = None
+    _stamp_next_renewal(deployed)
     await deployed.save()
 
     # Promote the pocket's draft to published — the durable "this was published"

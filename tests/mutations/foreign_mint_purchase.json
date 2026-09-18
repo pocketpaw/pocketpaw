@@ -1,0 +1,127 @@
+[
+  {
+    "label": "the status flip is deleted - the mint charges for a concierge that resolves to the free floor",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _stamp_next_renewal(site, at=period_start)\n    site.period_paid_usd = int(tier.monthly_price_usd)\n    await _mark_subscription_active(site)",
+    "replace": "    _stamp_next_renewal(site, at=period_start)\n    site.period_paid_usd = int(tier.monthly_price_usd)\n    await site.save()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_minted_concierge_is_entitled_and_charged_once",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_renewal_sweep_recharges_a_foreign_site_without_deploying"
+    ]
+  },
+  {
+    "label": "a failed charge no longer rolls back - a paid tier survives with no money behind it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await _discard_unpaid_foreign_site(site)\n        raise",
+    "replace": "        raise",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_failed_charge_leaves_no_site",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_charge_that_errors_for_any_other_reason_also_leaves_no_site"
+    ]
+  },
+  {
+    "label": "the rollback only handles the 402 - a ledger outage still leaves the row",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    except Exception:\n        # FAIL CLOSED.",
+    "replace": "    except InsufficientCredits:\n        # FAIL CLOSED.",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_charge_that_errors_for_any_other_reason_also_leaves_no_site"
+    ]
+  },
+  {
+    "label": "the charge is skipped entirely - the concierge is free and nothing can refuse it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    period_start = datetime.now(UTC)\n    try:\n        await billing_service.charge_site_plan_credits(\n            workspace_id=workspace_id,\n            site_id=str(site.id),\n            tier_key=tier.key,\n            amount_usd=tier.monthly_price_usd,\n            period_start=period_start,\n            member_id=owner,\n        )\n    except Exception:\n        # FAIL CLOSED. Anything that stops the debit — a short wallet, a ledger\n        # error — must leave NO Site behind, because a row on a paid tier that\n        # nobody paid for is precisely the state this rail exists to make\n        # impossible, and here it would be indistinguishable from a real purchase.\n        await _discard_unpaid_foreign_site(site)\n        raise\n",
+    "replace": "    period_start = datetime.now(UTC)\n",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_minted_concierge_is_entitled_and_charged_once",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_failed_charge_leaves_no_site"
+    ]
+  },
+  {
+    "label": "the rail is left empty - the Dodo add-on cart invoices a month the wallet bought",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        billing_rail=_CREDITS_RAIL,",
+    "replace": "        billing_rail=\"\",",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_rail_is_credits_and_takes_no_plan_slot",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_renewal_sweep_recharges_a_foreign_site_without_deploying"
+    ]
+  },
+  {
+    "label": "the rail becomes the plan rail - a bought site eats an included slot and never renews",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        billing_rail=_CREDITS_RAIL,",
+    "replace": "        billing_rail=_PLAN_RAIL,",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_rail_is_credits_and_takes_no_plan_slot",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_plan_reconciler_leaves_a_foreign_site_alone"
+    ]
+  },
+  {
+    "label": "no renewal date - the month is bought once and the capability never expires",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _stamp_next_renewal(site, at=period_start)\n    site.period_paid_usd",
+    "replace": "    site.period_paid_usd",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_rail_is_credits_and_takes_no_plan_slot",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_renewal_sweep_recharges_a_foreign_site_without_deploying"
+    ]
+  },
+  {
+    "label": "the ownership proof is not consulted - anyone mints a concierge on anyone's domain",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if not await ownership.verified_origin(workspace_id, host):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_an_unverified_origin_refuses_before_anything_is_written",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_proof_from_another_workspace_does_not_count",
+      "tests/cloud/sites/test_foreign_site_mint.py::test_every_origin_must_be_proved_not_just_one"
+    ]
+  },
+  {
+    "label": "one proved origin is enough - an unproved host rides in on a legitimate allowlist",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    for host in hosts:\n        if not await ownership.verified_origin(workspace_id, host):",
+    "replace": "    for host in hosts[:1]:\n        if not await ownership.verified_origin(workspace_id, host):",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_every_origin_must_be_proved_not_just_one"
+    ]
+  },
+  {
+    "label": "the proof is read by host alone - one customer's verified domain opens it to every workspace",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "        return None\n    claim = await SiteOriginClaim.find_one(\n        SiteOriginClaim.workspace == workspace_id, SiteOriginClaim.host == normalized\n    )",
+    "replace": "        return None\n    claim = await SiteOriginClaim.find_one(SiteOriginClaim.host == normalized)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_proof_from_another_workspace_does_not_count"
+    ]
+  },
+  {
+    "label": "an empty allowlist is accepted - a charged concierge that can never answer anywhere",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    hosts = _normalize_origin_hosts(allowed_origins)\n    if not hosts:",
+    "replace": "    hosts = _normalize_origin_hosts(allowed_origins)\n    if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_an_empty_origin_list_is_refused"
+    ]
+  },
+  {
+    "label": "the sweep's foreign exception is deleted - a paid foreign concierge is never charged again",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        if not getattr(doc, \"deployed\", False) and not getattr(doc, \"foreign_origin\", False):",
+    "replace": "        if not getattr(doc, \"deployed\", False):",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_renewal_sweep_recharges_a_foreign_site_without_deploying"
+    ]
+  },
+  {
+    "label": "the sweep's not-live guard is dropped entirely - a hosted site that never deployed is billed monthly",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        if not getattr(doc, \"deployed\", False) and not getattr(doc, \"foreign_origin\", False):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_hosted_site_that_never_deployed_is_still_not_charged"
+    ]
+  }
+]

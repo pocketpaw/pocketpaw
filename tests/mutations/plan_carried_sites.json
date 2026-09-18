@@ -29,8 +29,8 @@
   {
     "label": "activate_site stamps a renewal date on the plan rail, putting the sweep on a free site",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if getattr(deployed, \"billing_rail\", \"\") != _PLAN_RAIL:\n        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
-    "replace": "    if True:\n        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
+    "find": "    if getattr(doc, \"billing_rail\", \"\") == _PLAN_RAIL:\n        doc.renewal_date = None\n    else:",
+    "replace": "    if False:\n        doc.renewal_date = None\n    else:",
     "tests": [
       "tests/cloud/sites/test_plan_carried_sites.py::test_a_carried_site_is_invisible_to_the_renewal_sweep"
     ]
