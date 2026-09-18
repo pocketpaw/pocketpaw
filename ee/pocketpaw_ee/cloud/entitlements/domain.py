@@ -22,9 +22,11 @@
 #   * Every ceiling FAILS CLOSED. A workspace with no/unknown plan resolves to the
 #     Free values, never ``None``/uncapped; ``None`` means uncapped and is only
 #     ever reached from a tier that genuinely is.
-#   * A capability must never be granted by forgetting it. The one field carrying
-#     a default (``Entitlements.site_source_visible``) defaults to WITHHELD;
-#     everything else has no default, so an omission fails loudly.
+#   * A capability must never be granted by forgetting it. The two fields carrying
+#     a default (``Entitlements.site_source_visible`` and
+#     ``SiteEntitlements.project_download``) both default to WITHHELD; everything
+#     else has no default, so an omission fails loudly. A new default is only
+#     allowed in that direction.
 #   * A field that would answer the same thing forever does not belong here — it
 #     reads as implemented. See ``SiteEntitlements``'s note on the three it omits.
 
@@ -157,6 +159,19 @@ class SiteEntitlements:
     every construction must state the answer, so a capability cannot be granted by
     forgetting it.
 
+    ``project_download`` is "may this site's project be downloaded" — the built
+    site handed to its owner as an archive rather than only served from our edge.
+    A PAID grant on both per-site rungs, so a floor site resolves ``False``, and
+    gated on an active subscription like every other paid grant here.
+
+    It is the only field on this class with a default, and the default is
+    ``False``. Nothing is being spared an argument: ``SiteEntitlements`` is
+    constructed by name in the resolver and in one test double, and giving a new
+    capability no default would break that double rather than teach it anything.
+    What the default guarantees is the direction of the mistake — a construction
+    that forgets this field WITHHOLDS the download; it cannot hand out a
+    customer's project by omission. Do not "fix" it to ``True``.
+
     ``concierge_enabled`` and ``concierge_entitled`` are two different questions
     and are deliberately NOT folded into one boolean. The first is the owner's own
     kill switch, echoed unchanged; the second is whether the site's plan sells the
@@ -177,6 +192,8 @@ class SiteEntitlements:
     analytics: bool
     concierge_enabled: bool
     concierge_entitled: bool
+    # Fail closed: an omitted field withholds the download rather than granting it.
+    project_download: bool = False
 
     @property
     def concierge_available(self) -> bool:
