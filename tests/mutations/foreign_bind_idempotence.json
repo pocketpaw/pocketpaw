@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the resolve-or-create check is deleted - every bind mints again and charges again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        existing = await foreign_site_for_pocket(workspace_id, pocket_id)\n        if existing is not None:",
+    "replace": "        existing = await foreign_site_for_pocket(workspace_id, pocket_id)\n        if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_sequential_binds_buy_one_concierge",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_concurrent_binds_buy_one_concierge",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_repeat_bind_does_not_widen_the_origin_allowlist"
+    ]
+  },
+  {
+    "label": "the bind mutex is dropped - two binds in flight both mint, and the wallet is debited twice",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    async with _foreign_bind_lock(workspace_id, pocket_id):\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "replace": "    if True:\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_concurrent_binds_buy_one_concierge"
+    ]
+  },
+  {
+    "label": "the foreign filter is dropped - a bind adopts the pocket's PUBLISHED site and charges nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            {\"workspace\": workspace_id, \"pocket_id\": pocket_id, \"foreign_origin\": True}",
+    "replace": "            {\"workspace\": workspace_id, \"pocket_id\": pocket_id}",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_bind_never_touches_a_published_site_for_the_same_pocket"
+    ]
+  },
+  {
+    "label": "the rotated key is never persisted - the leaked key keeps resolving forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site.rotate_signed_key()\n    await site.save()",
+    "replace": "    site.rotate_signed_key()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_rotating_retires_the_old_key_at_the_resolver"
+    ]
+  },
+  {
+    "label": "a rotate on a pocket with no concierge returns nothing instead of raising",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site = await foreign_site_for_pocket(workspace_id, pocket_id)\n    if site is None:\n        raise NotFound(\"site\", f\"foreign concierge for pocket {pocket_id}\")\n    site.rotate_signed_key()",
+    "replace": "    site = await foreign_site_for_pocket(workspace_id, pocket_id)\n    if site is None:\n        return site  # type: ignore[return-value]\n    site.rotate_signed_key()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_rotating_a_pocket_with_no_concierge_is_a_404"
+    ]
+  },
+  {
+    "label": "the rebind tenancy gate is deleted - a bar is bound to another workspace's agent",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "        await agents_service.get_for_viewer(agent_id, workspace_id, None)\n        updated = await _store().update_fields(",
+    "replace": "        updated = await _store().update_fields(",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_to_another_tenants_agent_is_refused"
+    ]
+  },
+  {
+    "label": "the rebind gate is workspace-blind - a cross-tenant agent id passes the check",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "        await agents_service.get_for_viewer(agent_id, workspace_id, None)",
+    "replace": "        await agents_service.get(agent_id)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_to_another_tenants_agent_is_refused"
+    ]
+  },
+  {
+    "label": "a re-provision no longer clears the old bind - the bar can never be reset to its own concierge",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    cleared = await _store().update_fields(widget.id, {\"agent_id\": \"\"}, workspace_id=workspace_id)\n    return await ensure_site_agent(site, cleared or widget)",
+    "replace": "    return await ensure_site_agent(site, widget)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_reprovision_resets_a_bar_bound_to_a_LIVE_but_wrong_agent"
+    ]
+  },
+  {
+    "label": "the foreign bind stops funnelling into ensure_site_agent - a paid concierge with no agent",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    widget = await ensure_site_widget(site, workspace_id)\n    if widget is None:\n        return None\n    return str(getattr(widget, \"agent_id\", \"\") or \"\") or None",
+    "replace": "    return None",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_first_bind_buys_a_concierge_and_provisions_its_agent",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_points_the_bar_at_a_new_agent_without_stranding_the_row"
+    ]
+  }
+]

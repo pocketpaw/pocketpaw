@@ -527,6 +527,10 @@
 # ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
 # ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
 # foreign concierge must not collide with a published site's stable per-pocket id).
+# It mints UNCONDITIONALLY, so it is not the entry point: ``bind_foreign_concierge``
+# is the resolve-or-buy layer over it (one row and one charge per pocket, plus the
+# concierge funnel), with ``rotate_foreign_concierge_key`` and
+# ``rebind_foreign_concierge`` beside it.
 #
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
@@ -2552,12 +2556,18 @@ async def mint_foreign_site(
     feature that acts on the proof. This asks only the boolean today, and must not
     grow anything that assumes a proof stays good.
 
-    v1 mints a FRESH doc per call (fresh ObjectId, fresh key) and deliberately does
-    NOT reuse ``_live_object_id`` — that derives a stable per-(workspace, pocket)
-    id for a PUBLISHED site, and a foreign concierge must not collide with a real
-    published Worker doc. Idempotent binding management (one canonical concierge
-    per pocket, rotate/rebind) is a follow-up (the pilot-bind slice). Until it
-    lands, a second call is a second site and a second charge.
+    IT MINTS UNCONDITIONALLY, AND CALLERS MUST NOT USE IT DIRECTLY. Every call
+    inserts a fresh doc (fresh ObjectId, fresh key) and buys a month, so a second
+    call is a second site and a SECOND CHARGE. That is the right shape for a
+    primitive and the wrong one for anything a user can click twice:
+    ``bind_foreign_concierge`` is the resolve-or-buy layer over this, it is the
+    entry point, and it is also where the concierge agent gets provisioned.
+
+    The fresh ObjectId is deliberate — reusing ``_live_object_id`` would derive
+    the stable per-(workspace, pocket) id of a PUBLISHED site, and a foreign
+    concierge must never collide with a real Worker doc. Dedupe therefore lives in
+    a ``foreign_origin``-filtered lookup rather than in the id; see the binding
+    section below.
 
     Args:
         workspace_id: Owning tenant, and the tenant whose wallet is debited.
@@ -2700,6 +2710,274 @@ async def mint_foreign_site(
         hosts,
     )
     return site
+
+
+# ---------------------------------------------------------------------------
+# Foreign concierge BINDING — one canonical concierge per pocket.
+#
+# ``mint_foreign_site`` is the always-mints primitive: every call inserts a fresh
+# row and BUYS a month. That is correct for a primitive and wrong for a caller,
+# because a repeat bind of the same pocket would then be a second concierge and a
+# SECOND month. ``bind_foreign_concierge`` is the resolve-or-buy layer over it,
+# and it is the function a router or a tool should reach for.
+#
+# ONE ROW IS WHAT MAKES ONE CHARGE. The wallet debit is keyed
+# ``site_plan:<site_id>:<tier>:<date>`` (``billing.site_plan_debit_key``), so
+# deduping the ROW is what dedupes the MONEY — there is no second idempotency
+# mechanism to keep in step with this one. A bind that resolves an existing row
+# does not re-charge at all; it must not, because that key carries the DATE and a
+# re-charge on a later calendar day would go through.
+#
+# THE FOREIGN ROW IS FOUND BY ``foreign_origin``, NEVER BY THE CANONICAL
+# RESOLVER. ``canonical_site_for_pocket`` answers "which published site is this
+# pocket's live one" and would hand back the Worker doc when a pocket has both.
+# Binding would then read that row's key, and a rotate would invalidate the embed
+# of a site somebody is actually serving. The two rows coexist on purpose, and
+# this lookup is the boundary between them.
+#
+# IDS STAY RANDOM. ``mint_foreign_site`` deliberately does not derive its id from
+# (workspace, pocket) the way a published site does, so a foreign row can never
+# collide with or overwrite a real Worker doc. Dedupe therefore has to come from
+# a LOOKUP rather than from the id, which is what everything above is.
+#
+# THE CONCURRENCY GUARD IS IN-PROCESS. ``_foreign_bind_lock`` serialises binds
+# per (workspace, pocket) inside one interpreter, which is what makes two
+# awaited-together binds produce one row. It does NOT span processes: two API
+# workers binding the same pocket in the same instant can still mint twice, and
+# the only real fix is a unique index — partial on ``foreign_origin`` so it never
+# constrains published rows. That index is not declared yet because mongomock
+# (what every test here runs on) ignores ``partialFilterExpression`` and would
+# enforce uniqueness on EVERY site row, turning the dedupe suites red for a
+# reason that has nothing to do with sites. Treat the window as open.
+# ---------------------------------------------------------------------------
+
+# One lock per (workspace, pocket). Never evicted: a deployment holds one entry
+# per pocket ever bound, which is bounded by the tenant's pocket count and far
+# below anything worth an eviction policy (the same shape as the admin-proposal
+# executor's per-action locks).
+_FOREIGN_BIND_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _foreign_bind_lock(workspace_id: str, pocket_id: str) -> asyncio.Lock:
+    """The bind mutex for one (workspace, pocket).
+
+    Keyed on both halves so two tenants binding pockets that happen to share an
+    id never serialise against each other. Created on first use; there is no
+    await between the lookup and the insert, so this is race-free without a lock
+    of its own.
+    """
+    key = f"{workspace_id}:{pocket_id}"
+    lock = _FOREIGN_BIND_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _FOREIGN_BIND_LOCKS[key] = lock
+    return lock
+
+
+async def foreign_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The one FOREIGN concierge row for (workspace, pocket), or ``None``.
+
+    Filtered on ``foreign_origin`` so a PUBLISHED site for the same pocket is
+    never returned — see the section header for why conflating the two would let
+    a rotate invalidate a live site's embed key.
+
+    Oldest ``_id`` wins when several exist. Rows minted before this slice landed
+    (when every call was a fresh mint) can leave a pocket with more than one, and
+    an arbitrary pick would make the SAME pocket resolve to different keys on
+    different reads. Oldest-first also means the row the customer was first given
+    a snippet for is the one that keeps working.
+    """
+    if not workspace_id or not pocket_id:
+        return None
+    docs = (
+        await _SiteDoc.find(
+            {"workspace": workspace_id, "pocket_id": pocket_id, "foreign_origin": True}
+        )
+        .sort("_id")
+        .to_list()
+    )
+    return docs[0] if docs else None
+
+
+async def bind_foreign_concierge(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    owner: str,
+    allowed_origins: list[str],
+    name: str = "",
+    scopes: list[str] | None = None,
+) -> _SiteDoc:
+    """Resolve-or-buy the ONE foreign concierge for (workspace, pocket).
+
+    The first call mints and charges through ``mint_foreign_site``; every call
+    after it returns that same row and charges NOTHING. This is the entry point
+    callers want — the mint is a primitive that buys a month unconditionally, so
+    a UI that called it on every "connect" click would bill per click.
+
+    Both paths then run the concierge funnel
+    (``paw_bar.agent_provisioning.provision_foreign_concierge``), so a row minted
+    before it had a funnel, or one whose agent was deleted, gets its agent on the
+    next bind instead of staying a paid bar that cannot answer.
+
+    The gates are INHERITED, not re-implemented: a pocket the caller cannot
+    access and an origin the workspace has not proved it controls are both
+    refused inside the mint, before any row or debit exists. A refused bind
+    leaves nothing behind, exactly as a refused mint does.
+
+    ``allowed_origins`` / ``name`` / ``scopes`` apply to the MINT only. An
+    existing row is returned untouched: silently widening a live concierge's
+    origin allowlist from a call that reads as "make sure this exists" is how a
+    verified-origin gate gets walked around one bind at a time. Changing them is
+    a deliberate edit, not a side effect of binding.
+
+    Args:
+        workspace_id: Owning tenant, and the wallet debited on a first bind.
+        pocket_id: The pocket the concierge is grounded in.
+        owner: The acting user; must be able to access ``pocket_id``.
+        allowed_origins: Origins the embed is valid from (first bind only).
+        name: Optional display name (first bind only).
+        scopes: Optional scope override (first bind only).
+
+    Returns:
+        The single foreign ``Site`` doc for this pocket, paid and active.
+
+    Raises:
+        Whatever ``mint_foreign_site`` raises on a FIRST bind — Forbidden
+        (``pocket.access_denied`` / ``sites.origin_unverified``), NotFound,
+        ValidationError (``sites.origin_required``), InsufficientCredits.
+    """
+    async with _foreign_bind_lock(workspace_id, pocket_id):
+        existing = await foreign_site_for_pocket(workspace_id, pocket_id)
+        if existing is not None:
+            logger.info(
+                "sites.bind_foreign: pocket %s in workspace %s already has concierge "
+                "site %s - resolved, not re-bought",
+                pocket_id,
+                workspace_id,
+                str(existing.id),
+            )
+            await _provision_foreign_concierge(existing, workspace_id)
+            return existing
+
+        site = await mint_foreign_site(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            owner=owner,
+            allowed_origins=allowed_origins,
+            name=name,
+            scopes=scopes,
+        )
+
+    # Outside the lock: the row is committed, so every later bind resolves it and
+    # holding the mutex through a network-bound agent mint would only serialise
+    # unrelated callers behind it. The funnel is idempotent, so a bind that races
+    # in here converges on the same agent.
+    await _provision_foreign_concierge(site, workspace_id)
+    return site
+
+
+async def _provision_foreign_concierge(site: _SiteDoc, workspace_id: str) -> None:
+    """Run the concierge funnel for a foreign site, swallowing everything.
+
+    Lazily imported for the same reason every other paw_bar reach-in here is: the
+    sites service must load in a deployment that does not carry the bar.
+
+    Never raises. The month is ALREADY PAID by the time this runs, so a failure
+    to mint the agent must not unwind the purchase — the customer keeps their row
+    and their key, the next bind retries the funnel, and the failure is logged
+    rather than turned into a refund problem.
+    """
+    try:
+        from pocketpaw_ee.paw_bar.agent_provisioning import provision_foreign_concierge
+
+        agent_id = await provision_foreign_concierge(site, workspace_id)
+        if not agent_id:
+            logger.warning(
+                "sites.bind_foreign: site %s is paid but has no concierge agent bound",
+                str(site.id),
+            )
+    except Exception:  # noqa: BLE001 - a paid row must survive a provisioning failure
+        logger.warning(
+            "sites.bind_foreign: concierge provisioning failed for site %s",
+            str(site.id),
+            exc_info=True,
+        )
+
+
+async def rotate_foreign_concierge_key(*, workspace_id: str, pocket_id: str) -> _SiteDoc:
+    """Retire this concierge's embed key and issue a new one.
+
+    The ``signed_key`` is world-visible by design — it ships inside the snippet on
+    a public page — so it leaks the way public things leak, and rotation is the
+    only remedy. Afterwards the OLD key resolves to nothing
+    (``auth.site_keys.resolve_site_key`` looks a key up directly), and the owner
+    has to update the snippet on their page.
+
+    Mints through ``Site.rotate_signed_key()`` rather than formatting a token
+    here, so exactly one place knows what an embed key looks like.
+
+    The row is otherwise untouched: same id, same tier, same subscription, same
+    allowlist. A rotation is not a repurchase and must never read as one.
+
+    Raises:
+        NotFound: ``site`` — this pocket has no foreign concierge to rotate.
+    """
+    site = await foreign_site_for_pocket(workspace_id, pocket_id)
+    if site is None:
+        raise NotFound("site", f"foreign concierge for pocket {pocket_id}")
+    site.rotate_signed_key()
+    await site.save()
+    logger.info(
+        "sites.bind_foreign: rotated the embed key for site %s (workspace %s)",
+        str(site.id),
+        workspace_id,
+    )
+    return site
+
+
+async def rebind_foreign_concierge(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    agent_id: str = "",
+    widget_id: str = "",
+) -> str | None:
+    """Point this concierge's bar at a different agent, leaving the row alone.
+
+    ``agent_id`` names the replacement, and is tenancy-checked inside the funnel
+    module before anything is written. Omitted, the bar is RE-PROVISIONED: the
+    stale bind is cleared and the funnel resolve-or-mints the canonical agent
+    again, which is the repair for a bar whose agent was deleted.
+
+    ``widget_id`` picks the bar explicitly when a pocket carries more than one;
+    omitted, the pocket resolves it.
+
+    THE CREDENTIAL ROW IS NOT TOUCHED. Nothing here rewrites, deletes or re-mints
+    the Site: the customer's embedded ``signed_key`` keeps resolving, the tier
+    they bought stays bought, and the renewal date stays where it was. A rebind
+    that stranded the row would silently turn a paid concierge into a 403 on the
+    buyer's own live page.
+
+    Returns the newly bound agent id, or ``None`` when there was no bar to bind.
+
+    Raises:
+        NotFound: ``site`` when the pocket has no foreign concierge; ``agent``
+            when ``agent_id`` is not readable in this workspace.
+    """
+    site = await foreign_site_for_pocket(workspace_id, pocket_id)
+    if site is None:
+        raise NotFound("site", f"foreign concierge for pocket {pocket_id}")
+
+    from pocketpaw_ee.paw_bar.agent_provisioning import rebind_site_agent
+
+    bound = await rebind_site_agent(site, workspace_id, agent_id=agent_id, widget_id=widget_id)
+    logger.info(
+        "sites.bind_foreign: rebound site %s to agent %s",
+        str(site.id),
+        bound or "<none>",
+    )
+    return bound
 
 
 async def publish(
