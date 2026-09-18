@@ -405,7 +405,7 @@ class TestCreateReactSiteEndToEnd:
 
         doc = await _PocketDoc.get(ObjectId(pocket_id))
         assert doc is not None
-        wire = pocket_to_wire_dict(_pocket_to_domain(doc))
+        wire = pocket_to_wire_dict(_pocket_to_domain(doc), source_visible=True)
         assert wire.get("engine") == "react"
         assert wire.get("keepsClientBundle") is True
 

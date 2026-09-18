@@ -1,78 +1,38 @@
-"""Pocket and Widget documents.
+"""Pocket and Widget documents — the Beanie models behind the ``pockets``
+collection.
 
-Updated: 2026-05-21 — documented the ``type="home"`` pocket type (the
-per-user pocket that backs the home page) and the ``type="native"``
-widget type (rendered by the frontend as a built-in Svelte component
-keyed on ``name``). Both reuse the free-form ``type`` field — no schema
-change, just recognized values.
-Updated: 2026-05-22 — added the optional ``Widget.spec`` field: a Ripple
-rippleSpec subtree for a single tile (e.g. a ``chart`` node with a real
-``data`` series). The home grid renders a ``widgets[]`` entry from its
-``spec``; the home agent's ``add_widget`` MCP tool populates it. Native
-widgets leave it ``None``.
-Updated: 2026-05-28 (feat/wave-3e-template-slug) — added the optional
-``Pocket.template_slug`` field: the kebab-case slug of the RFC 03 v2
-:class:`PocketTemplate` this pocket was instantiated from. Optional so
-legacy pockets (no template) read back as ``None`` without a Mongo
-migration. ``pockets.service.resolve_pocket_template`` reads this field
-and feeds the resolved template to the bulk dispatcher + temporal
-scheduler.
-Updated: 2026-06-03 (feat/sites-landing-brain) — added the optional
-``Pocket.pattern`` field: the create-pocket layout pattern this pocket
-was built as (``dashboard`` | ``app`` | ``viewer`` | ... | ``landing``).
-Records site/landing intent as first-class metadata so a published Paw
-Site renders as a marketing landing page rather than a dashboard.
-Optional (default ``None``) so legacy pockets read back as ``None`` with
-no Mongo migration.
-Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
-"Svelte track" fields: ``Pocket.engine`` (``"ripple"`` default |
-``"svelte"``) selects the site-generation track, and ``Pocket.source``
-(``{relative_path: file_contents}`` | ``None``) holds the hand-written
-SvelteKit source map a svelte-engine site materializes from (the svelte
-analog of ``rippleSpec``). ``engine`` defaults to ``"ripple"`` and
-``source`` to ``None`` so every existing pocket reads back as a ripple
-pocket with no source map — additive, no Mongo migration.
-Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
-chunk ②) — added the optional ``Pocket.surface_profile`` field: a per-entity
-override that MIRRORS the surface-domain ``SurfaceProfile`` (``ripple_mode`` /
-``allowed_sdk_tools`` / ``deny_mcp_tool_ids`` / ``skill_names`` /
-``system_message_override``) with JSON-friendly types (lists, not frozensets)
-for Mongo. ALL sub-fields optional; the whole field defaults to ``None`` →
-zero behaviour change for existing pockets, no Mongo migration. Consumed by
-the entity-aware ``resolve_profile`` (chunk ①), which hydrates a
-``SurfaceProfile`` from it.
-Updated: 2026-06-07 (feat/entity-pocket-profile-field) — the
-``PocketSurfaceProfile`` sub-model now lives in ``surface/domain.py`` (the
-leaf domain module) and is imported here. This lets ``pockets.dto`` import the
-same class from ``surface.domain`` instead of from ``models.pocket``, which
-the OSS-EE boundary contract forbids. No schema change — the embedded BSON
-shape is identical, so no Mongo migration.
-Updated: 2026-08-08 (feat/sites-js-by-default) — ``Pocket.keeps_client_bundle``
-became TRI-STATE (``bool | None``, default ``None``). ``None`` means the author
-declared nothing, and publish resolves it from the new
-``sites_keep_client_bundle_default`` setting (``True``: sites ship their client
-JS unless told otherwise); ``True``/``False`` stay explicit authorial choices
-that override the setting in BOTH directions. The old two-state ``bool`` could
-not express "undeclared", so a default could only ever have been one-way. Still
-additive with no Mongo migration — the key is simply absent on legacy docs,
-which now reads back as the undeclared state rather than as a decision.
-Updated: 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript) —
-added ``Pocket.keeps_client_bundle`` beside ``engine``. It declares that the
-site's hand-written client JS is load-bearing, so the generator emits
-``csr = true`` instead of the static default and the ripple prune step leaves
-the hydration bundle in place. It sits on the pocket for the same reason
-``engine`` does — it describes the authored artifact, not the deploy.
-Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened
-``Pocket.source`` from ``dict[str, str] | None`` to ``dict[str, Any] | None``
-so a DYNAMIC svelte site's ``source`` envelope can carry its live-data bindings
-(``objects`` = a list of D1 table defs, ``sources`` / ``actions`` = lists,
-``auth`` = a bool) as SIBLING keys alongside the ``{relative_path:
-file_contents}`` SvelteKit file entries on the SAME dict. Keeping the bindings
-inside ``source`` means they ride the versioned content (``version_content =
-source`` for svelte → draft/publish/revert capture the full dynamic spec), and
-the DSV-2b read resolves ``objects`` off this same envelope. A STATIC svelte
-pocket's ``source`` stays a ``str -> str`` file map — the looser ``Any`` is a
-superset, so no behaviour change and no Mongo migration.
+A Pocket is the workspace canvas: widgets, team, and ONE authored artifact
+whose shape depends on ``engine``. ``engine="ripple"`` (the default, and what
+every legacy document reads back as) authors a ``rippleSpec``;
+``engine="svelte"``/``react``/``html`` author a ``source`` file map instead.
+``type="home"`` marks the per-user pocket behind the home page, and
+``Widget.type="native"`` a widget the frontend renders as a built-in Svelte
+component keyed on its ``name`` rather than from a spec.
+
+INVARIANTS a reader must not break:
+
+* EVERY FIELD ADDED HERE IS OPTIONAL WITH A DEFAULT, and the default must be
+  what a document written before the field existed should mean. That is what
+  lets this collection grow without a Mongo migration, and it is why
+  ``keeps_client_bundle`` is tri-state (``None`` = the author declared nothing,
+  which publish resolves from ``sites_keep_client_bundle_default``; ``True`` and
+  ``False`` are authorial choices that win in BOTH directions). A two-state
+  ``bool`` could not express "undeclared", so a default could only ever have
+  been one-way.
+* ``source`` IS ``dict[str, Any]``, NOT ``dict[str, str]``. A static source-track
+  site carries only ``{relative_path: file_contents}``, but a DYNAMIC svelte site
+  carries its live-data bindings (``objects``, ``sources``, ``actions``, ``auth``)
+  as SIBLING keys on the SAME dict, so the values are lists and bools as well as
+  strings. They live inside ``source`` so they ride the versioned content —
+  draft/publish/revert capture the full dynamic spec in one snapshot.
+* ``source_gated`` IS A COHORT STAMP, NOT A GATE. It records that the pocket was
+  born after the site-source gate was switched on; the decision to withhold
+  ``source`` from the wire is made in ``pockets.service``, which ANDs it with the
+  live setting and the workspace entitlement. It defaults ``False``, so every
+  pocket predating the field is permanently outside the cohort.
+* ``PocketSurfaceProfile`` IS IMPORTED FROM ``surface.domain``, not defined here.
+  ``pockets.dto`` needs the same class, and importing it from this module would
+  break the OSS-EE boundary contract. The embedded BSON shape is identical.
 """
 
 from __future__ import annotations
@@ -180,6 +140,21 @@ class Pocket(TimestampedDocument):
     # pockets; a STATIC svelte pocket carries only the str->str file map (a
     # subset of the looser type — no behaviour change).
     source: dict[str, Any] | None = None
+    # SF-2 — this pocket was created while the site-source gate was switched on,
+    # so its ``source`` may be withheld from the wire when the workspace is not
+    # entitled to read it. A COHORT STAMP, not the gate itself: it records which
+    # side of the flip the pocket was born on, and the gate ANDs it with the
+    # live ``sites_source_gate_enabled`` setting and the workspace entitlement.
+    #
+    # A STORED FLAG RATHER THAN ``created_at < <ship date>``. A date comparison
+    # needs a magic constant nothing owns, silently re-classifies every row if
+    # anyone edits the timestamp, and leaves an owner's future opt-in nowhere to
+    # live. This field is that somewhere.
+    #
+    # Defaults ``False``, which is what every pocket written before this field
+    # existed reads back as — so the entire existing population is permanently
+    # outside the cohort with no Mongo migration, which is the whole of D3.
+    source_gated: bool = False
     # MT-1 — this site's own client JavaScript is load-bearing (an onMount, a
     # ``use:`` action, an IntersectionObserver scroll-reveal, a WebGL canvas). A
     # site generated with ``csr = false`` has its emitted hydration bundle pruned

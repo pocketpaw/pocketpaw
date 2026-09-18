@@ -314,8 +314,8 @@ def test_wire_serialization_is_equivalent_for_dict_and_typed() -> None:
     # Force the dict path for the comparison baseline.
     legacy_dict = dataclasses.replace(legacy, ripple_spec=dict(_SEEDED_FLAT))
 
-    wire_typed = pocket_to_wire_dict(legacy)
-    wire_dict = pocket_to_wire_dict(legacy_dict)
+    wire_typed = pocket_to_wire_dict(legacy, source_visible=True)
+    wire_dict = pocket_to_wire_dict(legacy_dict, source_visible=True)
 
     assert _strip_ids(wire_typed["rippleSpec"]["ui"]) == _strip_ids(wire_dict["rippleSpec"]["ui"])
     assert wire_typed["rippleSpec"]["state"] == wire_dict["rippleSpec"]["state"]

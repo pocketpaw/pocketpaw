@@ -1,148 +1,34 @@
-"""Pockets domain — request/response schemas.
+"""Pockets domain — request/response schemas and the wire serializers.
 
-Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``RunActionResponse``
-gained ``job_id``, set ONLY on a ``kind:"job"`` action dispatch
-(``code:"job_enqueued"``). It carries the WorkspaceJobDoc id the client polls
-via ``GET /workspaces/{ws}/jobs/{job_id}``; None on every other action path.
+Holds the Pydantic models for every pockets route plus ``pocket_to_wire_dict`` /
+``_widget_to_wire``, which convert a frozen domain object into the LEGACY wire
+dict the frontend has always received. That dict is not the Beanie model dumped:
+it is byte-equivalent to the older ``_pocket_response`` helper, and staying that
+way is the point of it living in one function.
 
-Changes: Added agents, rippleSpec (aliased), and widgets fields to CreatePocketRequest
-so the frontend can pass the full pocket spec on creation instead of requiring
-separate follow-up calls.
+INVARIANTS a reader must not break:
 
-Updated: 2026-05-16 — added optional ``project_id`` (aliased as
-``projectId`` on the wire) to CreatePocketRequest / UpdatePocketRequest /
-PocketResponse so pockets can be grouped under a Mission Control Project.
-
-Updated: 2026-05-21 — documented the ``type="native"`` widget contract on
-``AddWidgetRequest`` (home-as-pocket foundation). A native widget is an
-ordinary widget entry whose ``type`` is ``"native"`` and whose ``name`` is
-the key the frontend uses to look up a built-in Svelte component — it
-carries no ``rippleSpec`` to render or validate.
-
-Updated: 2026-05-21 — added ``HomePocketResponse`` so ``GET /pockets/home``
-has a real OpenAPI schema instead of an empty ``dict``.
-
-Updated: 2026-05-22 (#1174) — ``AddWidgetRequest`` and ``_widget_to_wire``
-carry the optional ``spec`` field: a per-tile rippleSpec subtree the home
-grid renders. Populated by the home agent's ``add_widget`` MCP tool.
-
-Updated: 2026-05-21 (RFC 04 alpha) — added PocketBackendConfigRequest /
-PocketBackendConfigResponse / RunSourcesRequest for the per-pocket backend
-binding + read-only source-run endpoints.
-Updated: 2026-05-21 (PR #1177 security pass) — PocketBackendConfigRequest
-.base_url now requires min_length=1; RunSourcesRequest.source coerces an
-empty string to None; documented that `auth_token` for `basic` is the
-`user:pass` credential (base64-encoded server-side).
-Updated: 2026-05-22 (RFC 05 M2a) — added RunActionRequest /
-RunActionResponse for the write-action run endpoint, plus AllowedWriteDTO
-and SetWritePolicyRequest for the per-pocket write-allowlist endpoint.
-Updated: 2026-05-22 (RFC 05 M2b.1) — RunActionResponse gained
-``proposed_action_id`` (set when a ``requires_instinct`` write is parked
-into an Instinct Action instead of fired). Added ApprovalRouteDTO and
-SetApprovalRouteRequest plus an optional ``approval_route`` field on
-PocketBackendConfigResponse — the per-pocket approver routing for gated
-writes.
-Updated: 2026-05-22 (security-review fix for PR #1183, SHOULD-FIX 2) —
-RunActionResponse is now ``extra="forbid"`` so an executor-internal key
-(``_park``, ``outcome``) that the router fails to strip raises on
-construction instead of leaking the resolved write path/params onto the
-wire.
-Updated: 2026-05-24 (#1206 part a) — added RunToolRequest /
-RunToolResponse for the new ``POST /pockets/{id}/tools/run`` wire (the
-click-driven sibling of ``sources/run`` and ``actions/run``). The
-endpoint runs a named server-side tool with the resolved args from the
-``invoke_tool`` ripple action verb; the allowlist is intentionally empty
-in part (a) so the wire is locked down before any tool can fire (parts b
-and c add the home-grid plumbing + prompt guidance).
-Updated: 2026-05-28 (feat/wave-3b-action-pipeline) — added
-DispatchBulkRequest / BulkDispatchResponse / BulkExecutionResultDTO /
-BulkBlockedRowDTO for the new
-``POST /pockets/{id}/actions/{action}/dispatch-bulk`` endpoint. The
-request carries ``rows`` (per-row dicts); the response surfaces the
-RFC 03 v2 bucketing — ``executions`` / ``blocked`` /
-``batch_approval_id`` — plus the consolidated ``approval_row_ids``.
-Updated: 2026-05-28 (feat/wave-3e-template-slug) — added the optional
-``template_slug`` (aliased ``templateSlug``) field on
-``CreatePocketRequest`` / ``UpdatePocketRequest`` / ``PocketResponse``.
-When supplied on create, the service loads the named bundled template,
-compiles it, and merges the runtime-shaped dict into the pocket's
-``rippleSpec`` (compile-on-install). Legacy callers that omit it see
-the same shape they always have.
-Updated: 2026-06-03 (feat/sites-landing-brain) — added the optional
-``pattern`` field on ``CreatePocketRequest`` / ``PocketResponse`` (and
-threaded onto the wire dict). Records the create-pocket layout pattern
-(``"landing"`` for marketing sites). Single-word key, so the wire form
-is the same snake_case ``"pattern"`` on both DTOs and the legacy wire
-dict. Legacy callers that omit it read back ``None``.
-Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
-"Svelte track" fields ``engine`` (``"ripple"`` default | ``"svelte"``)
-and ``source`` (the SvelteKit source map, or ``None``) on
-``CreatePocketRequest`` / ``PocketResponse`` and threaded onto the wire
-dict. Both are single-word snake_case keys (no camelCase split), matching
-the read-back form. Defaults keep legacy callers reading ``engine="ripple"``,
-``source=None``.
-Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
-chunk ②) — added the optional ``surface_profile`` field (aliased
-``surfaceProfile`` on the wire) on ``CreatePocketRequest`` /
-``PocketResponse`` and threaded it onto the wire dict. Reuses the
-``PocketSurfaceProfile`` sub-model (all sub-fields optional, JSON-friendly
-lists) so the create/read DTOs share one shape with the persisted model.
-Defaults to ``None`` → legacy callers read back ``None`` with no migration.
-Updated: 2026-06-06 (feat/entity-pocket-profile-field) — added the
-``surface_profile`` field (aliased ``surfaceProfile``) to
-``UpdatePocketRequest`` so an existing pocket's override can be SET / CHANGED
-/ CLEARED (the auto-authoring write path). Three-way partial semantics live
-in ``pockets_service.update`` and key off ``model_fields_set``: present +
-non-null sets/replaces, explicit ``null`` clears, absent leaves it unchanged.
-Updated: 2026-06-07 (feat/entity-pocket-profile-field) — import
-``PocketSurfaceProfile`` from ``surface.domain`` (its new home) instead of
-``models.pocket``. The OSS-EE boundary contract forbids ``pockets.dto`` from
-importing ``models.*``; the class is a plain value object, not a Beanie doc,
-so sharing it via the leaf domain module keeps one shape without crossing the
-boundary.
-Updated: 2026-06-12 (feat/connector-as-pocket-backend) — a pocket backend
-can be an existing CONNECTOR, not only an http base_url.
-PocketBackendConfigRequest gained ``backend_type`` ("http" default |
-"connector") + ``connector_name`` and made ``base_url`` optional (a
-connector backend needs none; the service still requires a valid URL for an
-http backend). PocketBackendConfigResponse echoes ``backend_type`` /
-``connector_name`` back (never the token).
-Updated: 2026-06-13 (fix/ripple-normalizer-path-drop, native gated actions
-step 1) — ``RunActionRequest.path`` is now OPTIONAL (``str | None``, default
-``None``). The read-time ripple normalizer rewrites an inline write ``api``
-handler into a PATHLESS ``call_binding`` handler (it has no request context to
-carry a path), so the client fires ``/actions/run`` with only ``{action,
-params}``. The path is author-time data the server already persists on the
-``rippleSpec.actions`` binding (it must, to read the HTTP method), so the route
-resolves it from there when the client omits it. A required ``path`` 422'd
-every relative-URL api button (caught live on the Nerve demo's "Score next 20").
-Client-sent ``path`` (a row-scoped binding whose stored path holds an unresolved
-``{item.id}`` template, resolved client-side) still wins — the binding path is
-only the fallback. The server still reads the verb from the binding, so a
-compromised client cannot pick method OR a path the allowlist would reject.
-Updated: 2026-06-15 (feat/invoke-tool-v1) — added ``ToolGrantDTO`` and
-``SetToolPolicyRequest`` for the new owner-only ``PUT
-/pockets/{id}/backend/tool-policy`` endpoint (the tool-allowlist analog of
-the write-policy route), and an ``allowed_tools`` field on
-``PocketBackendConfigResponse``. A grant's ``tool`` is a built-in tool name
-or a connector action ``connector:<name>:<action>``. Empty list = fail-closed
-(no ``invoke_tool`` fires until a human allow-lists one). ``RunToolResponse``
-is unchanged — it already carries ``{ok, tool, status, response, error, code,
-on_success, on_error}``.
-Updated: 2026-06-19 (feat/typed-ripplespec-phase1, #1503) — ``UpdatePocketRequest``
-gains ``reset_state: bool = False``. It is the escape hatch for the clobber-fix:
-by default a partial ``ripple_spec`` body that omits instance-owned regions
-(``state`` / ``selections``) now PRESERVES them (the service does a layer-safe
-merge), so a frontend canvas-only PATCH no longer wipes instance data. A caller
-that genuinely wants to clear instance state sends ``reset_state: true`` to
-restore the old wholesale write. Wire-level ``ripple_spec`` stays ``dict | None``.
-Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened the
-``source`` value type from ``dict[str, str]`` to ``dict[str, Any]`` on
-``CreatePocketRequest`` and ``PocketResponse`` so a dynamic svelte site's
-``source`` envelope can carry its live-data bindings
-(``objects``/``sources``/``actions``/``auth``) as sibling keys alongside the
-str->str SvelteKit file entries. Static svelte pockets keep a str->str map (a
-subset); ripple pockets keep ``source=None``.
+* ``pocket_to_wire_dict``'s ``source_visible`` IS REQUIRED AND MUST STAY THAT
+  WAY. It decides whether a site's authored source reaches the wire, and it has
+  no default so a call site that forgets it is a TypeError rather than a leak.
+  The only default that would not break the build pipeline is a fail-open one.
+  Its own docstring has the full reasoning.
+* MULTI-WORD WIRE KEYS ARE camelCase (``templateSlug``, ``shareLinkToken``,
+  ``keepsClientBundle``), SINGLE-WORD ONES ARE NOT (``pattern``, ``engine``,
+  ``source``). Every new field picks a side by that rule, not by taste.
+* ``keepsClientBundle`` IS TRI-STATE ON THE WIRE. It is emitted as ``None`` when
+  the author declared nothing — including for every legacy pocket — so publish
+  can tell "undeclared" from an explicit ``False`` and apply
+  ``sites_keep_client_bundle_default`` to only the former. Coercing it to a bool
+  here erases that distinction before publish ever sees it.
+* ``RunActionResponse`` IS ``extra="forbid"``. An executor-internal key
+  (``_park``, ``outcome``) that a router fails to strip must raise on
+  construction rather than leak the resolved write path and params onto the wire.
+* READ-TIME rippleSpec NORMALIZATION IS IDEMPOTENT. Pockets persisted before the
+  agent-alias safety net (``root`` / ``tree`` lifted into ``ui``) are repaired in
+  flight, with no DB rewrite; a spec already canonical passes through unchanged.
+* ``PocketSurfaceProfile`` IS IMPORTED FROM ``surface.domain``. Importing it from
+  ``models.pocket`` instead would break the OSS-EE boundary contract.
 """
 
 from __future__ import annotations
@@ -775,7 +661,7 @@ class BulkDispatchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def pocket_to_wire_dict(p) -> dict:
+def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:
     """Convert a domain ``Pocket`` (from ``ee.cloud.pockets.domain``) to
     the legacy wire-format dict. Byte-equivalent to the
     ``_pocket_response`` helper in ``service.py``.
@@ -785,6 +671,25 @@ def pocket_to_wire_dict(p) -> dict:
     etc. lifted into ``ui``) get fixed in flight without a DB rewrite.
     The normalizer is idempotent — specs already in the canonical
     ``{ui, state}`` shape pass through unchanged.
+
+    ``source_visible`` (SF-2) answers ONE question: may the caller this dict is
+    being built for see the site's authored source? ``False`` emits ``None`` in
+    its place. Only ``source`` is affected — ``rippleSpec`` is untouched, because
+    ripple is a separate authoring track and outside this gate entirely.
+
+    IT IS REQUIRED AND HAS NO DEFAULT, DELIBERATELY. This function is pure and
+    synchronous over a frozen domain object, so it cannot resolve an entitlement
+    itself; the answer has to come from the caller. A default would decide for
+    every caller that forgot to, and the only default that does not break the
+    build pipeline is ``True`` — which is to say, a fail-OPEN one. Requiring the
+    argument turns a missed call site into a TypeError at import rather than a
+    silent leak, which is the entire bug class this gate exists to close. Do not
+    add a default to make a call site or a test shorter.
+
+    ``None`` rather than dropping the key, because that is already the shape a
+    consumer sees for a pocket with no source at all and for every row of the
+    gallery list (which projects ``source`` out of the query). A dropped key
+    would be a second, novel absence for callers to handle.
     """
     from pocketpaw_ee.cloud._core.time import iso_utc
     from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
@@ -818,7 +723,13 @@ def pocket_to_wire_dict(p) -> dict:
         # no camelCase split. ``engine`` defaults to ``"ripple"`` and
         # ``source`` to ``None`` for legacy / ripple pockets.
         "engine": getattr(p, "engine", "ripple"),
-        "source": getattr(p, "source", None),
+        # SF-2 — withheld as ``None`` when the caller may not see it. THE single
+        # place source reaches the wire; ``_resolved_wire_dict`` in service.py
+        # funnels ~26 of the ~30 call sites through here, which is why gating one
+        # expression also covers the REST reads, the create/update return values
+        # and the WebSocket broadcast (a socket bypasses the dependency layer, so
+        # no route-level gate would ever have reached it).
+        "source": getattr(p, "source", None) if source_visible else None,
         # MT-1 — this site keeps its client bundle. camelCased like every other
         # multi-word wire key, which also matches the generator's
         # ``siteConfig.keepsClientBundle``. TRI-STATE: emitted as ``None`` when
