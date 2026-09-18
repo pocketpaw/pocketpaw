@@ -2577,8 +2577,9 @@ async def mint_foreign_site(
     ORDER, and each step's failure mode:
 
       1. Refuse a pocket the caller cannot access, then refuse an origin this
-         workspace has not PROVED it controls. Both before any write: minting on
-         someone else's domain is how a concierge becomes a crawler-for-hire.
+         workspace has not PROVED it controls — or proved more than 30 days ago.
+         All before any write: minting on someone else's domain is how a concierge
+         becomes a crawler-for-hire.
       2. Insert the row UNPAID — tier stamped, subscription ``none``. It confers
          nothing; it exists so the debit has a stable ``site_id`` to key on.
       3. CHARGE. A refusal (a short wallet raises ``InsufficientCredits``, 402)
@@ -2596,9 +2597,11 @@ async def mint_foreign_site(
     tells this undeployed row apart from a broken one.
 
     A VERIFIED ORIGIN IS A FACT WITH A DATE, not a permanent license. Ownership
-    records ``verified_at`` and expires nothing; a freshness policy belongs to the
-    feature that acts on the proof. This asks only the boolean today, and must not
-    grow anything that assumes a proof stays good.
+    records ``verified_at`` and expires nothing, because how long a proof stays
+    good belongs to the feature acting on it. This feature's answer is the CRAWL's
+    (``foreign_grounding.VERIFICATION_MAX_AGE``, 30 days), asked here rather than
+    restated, so a month is never sold against a proof the first grounding run
+    would refuse.
 
     IT ALWAYS TRIES TO MINT, AND CALLERS MUST NOT USE IT DIRECTLY. It has no
     resolve step: it buys a month every time it runs to completion.
@@ -2635,7 +2638,8 @@ async def mint_foreign_site(
     Raises:
         Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
             ``pocket_id``; ``sites.origin_unverified`` when the workspace has not
-            proved it controls one of ``allowed_origins``.
+            proved it controls one of ``allowed_origins``;
+            ``sites.origin_verification_stale`` when it did, over 30 days ago.
         NotFound: when ``pocket_id`` does not exist.
         ValidationError: ``sites.origin_required`` when no usable origin is given.
         InsufficientCredits: (402) when the wallet cannot cover the month. No Site
@@ -2644,7 +2648,7 @@ async def mint_foreign_site(
     from pocketpaw_ee.cloud.billing import service as billing_service
     from pocketpaw_ee.cloud.billing import site_plans
     from pocketpaw_ee.cloud.pockets import service as pockets_service
-    from pocketpaw_ee.sites import ownership
+    from pocketpaw_ee.sites import foreign_grounding, ownership
 
     # Ownership gate — the SAME check every other pocket-touching path in this
     # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
@@ -2667,17 +2671,38 @@ async def mint_foreign_site(
         )
 
     # PROOF OF CONTROL, PER ORIGIN, BEFORE ANY ROW EXISTS. Every host on the
-    # allowlist is a host this concierge will answer on and — once the crawl slice
-    # lands — a host whose pages we fetch. An unverified one is someone naming a
-    # third party's domain, so ALL of them must be proved rather than any of them:
-    # a single unproved entry on an otherwise legitimate list is still a live embed
-    # on a domain that is not the buyer's.
+    # allowlist is a host this concierge will answer on and a host whose pages the
+    # grounding crawl fetches. An unverified one is someone naming a third party's
+    # domain, so ALL of them must be proved rather than any of them: a single
+    # unproved entry on an otherwise legitimate list is still a live embed on a
+    # domain that is not the buyer's.
+    #
+    # AND THE PROOF MUST STILL BE FRESH, asked of the rule the CRAWL already owns
+    # (``foreign_grounding.VERIFICATION_MAX_AGE`` — 30 days, argued there) rather
+    # than a second number invented here. Without this the bind sells a concierge
+    # on a proof its first grounding run then refuses: the buyer pays for a bar
+    # that can never learn anything about the site it sits on, and nothing in the
+    # purchase says why.
+    #
+    # TWO ARMS, TWO CODES, AND THEY MASK EACH OTHER. "Never proved" and "proved
+    # too long ago" are different instructions to the owner, so they are different
+    # codes. Delete the first arm and the second refuses in its place —
+    # ``verification_is_fresh(None)`` is False — which means a test asserting only
+    # the status is green against a deleted gate. Assert the code.
     for host in hosts:
-        if not await ownership.verified_origin(workspace_id, host):
+        record = await ownership.verified_origin_record(workspace_id, host)
+        if record is None:
             raise Forbidden(
                 "sites.origin_unverified",
                 f"This workspace has not proved that it controls '{host}'. "
                 "Verify the domain first, then mint the concierge.",
+            )
+        if not foreign_grounding.verification_is_fresh(record):
+            raise Forbidden(
+                "sites.origin_verification_stale",
+                f"The proof that this workspace controls '{host}' is more than "
+                f"{foreign_grounding.VERIFICATION_MAX_AGE.days} days old. Verify "
+                "the domain again, then mint the concierge.",
             )
 
     # The rung, and its price, read from the catalog rather than written here — the
@@ -2926,7 +2951,8 @@ async def bind_foreign_concierge(
 
     Raises:
         Whatever ``mint_foreign_site`` raises on a FIRST bind — Forbidden
-        (``pocket.access_denied`` / ``sites.origin_unverified``), NotFound,
+        (``pocket.access_denied`` / ``sites.origin_unverified`` /
+        ``sites.origin_verification_stale``), NotFound,
         ValidationError (``sites.origin_required``), InsufficientCredits.
     """
     async with _foreign_bind_lock(workspace_id, pocket_id):

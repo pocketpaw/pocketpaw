@@ -71,8 +71,8 @@
   {
     "label": "the ownership proof is not consulted - anyone mints a concierge on anyone's domain",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        if not await ownership.verified_origin(workspace_id, host):",
-    "replace": "        if False:",
+    "find": "    for host in hosts:\n        record = await ownership.verified_origin_record(workspace_id, host)",
+    "replace": "    for host in []:\n        record = await ownership.verified_origin_record(workspace_id, host)",
     "tests": [
       "tests/cloud/sites/test_foreign_site_mint.py::test_an_unverified_origin_refuses_before_anything_is_written",
       "tests/cloud/sites/test_foreign_site_mint.py::test_a_proof_from_another_workspace_does_not_count",
@@ -82,8 +82,8 @@
   {
     "label": "one proved origin is enough - an unproved host rides in on a legitimate allowlist",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    for host in hosts:\n        if not await ownership.verified_origin(workspace_id, host):",
-    "replace": "    for host in hosts[:1]:\n        if not await ownership.verified_origin(workspace_id, host):",
+    "find": "    for host in hosts:\n        record = await ownership.verified_origin_record(workspace_id, host)",
+    "replace": "    for host in hosts[:1]:\n        record = await ownership.verified_origin_record(workspace_id, host)",
     "tests": [
       "tests/cloud/sites/test_foreign_site_mint.py::test_every_origin_must_be_proved_not_just_one"
     ]

@@ -21,7 +21,11 @@
 # visitor's turn: a concierge run reads ``pocket:<pocket_id>`` out of the KB and
 # performs no outbound fetch, so a visitor cannot make us request a
 # customer-controlled hostname — nor time one to probe the network we sit in.
-# ``kb_ingest.sync_site_knowledge`` is this module's only caller; keep it so.
+# ``kb_ingest.sync_site_knowledge`` is the only caller of ``harvest_foreign_site``;
+# keep it so. The pure freshness predicates below are deliberately shared:
+# ``sites.service.mint_foreign_site`` asks them at BIND, so a purchase is refused
+# on exactly the proofs a crawl would refuse and there is ONE 30-day number
+# instead of two drifting ones. Sharing a predicate is not sharing the crawl.
 #
 # THE GATES, ALL FAIL-CLOSED:
 #   * A host must carry a VERIFIED ownership claim for THIS workspace
@@ -52,7 +56,10 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 
 logger = logging.getLogger(__name__)
 
-# HOW LONG A PROOF OF CONTROL STAYS GOOD FOR CRAWLING.
+# HOW LONG A PROOF OF CONTROL STAYS GOOD — FOR CRAWLING, AND FOR BUYING.
+#
+# ``sites.service.mint_foreign_site`` reads this too, so a bind is refused on the
+# same proofs a crawl is. Changing the number changes both, which is the point.
 #
 # 30 days, and the number is argued rather than picked:
 #   * A domain that lapses is not available to a stranger for at least ~35 days
