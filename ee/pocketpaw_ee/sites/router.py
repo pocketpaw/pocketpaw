@@ -3,6 +3,12 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# ORIGIN OWNERSHIP (end of file): POST ``/sites/origins/claims`` issues a token
+# bound to (workspace, host) and POST ``/sites/origins/verify`` reads it back off
+# the claimed domain. They are the gate a later concierge slice asks before it
+# crawls anyone's pages, so read ``sites/ownership.py``'s header before touching
+# either. Neither mints a Site and neither crawls.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): four endpoints for
 # moving a site to another workspace, appended at end-of-file.
 # POST/DELETE ``/sites/{site_id}/transfer`` are the SOURCE half (offer, withdraw);
@@ -274,7 +280,7 @@ from fastapi.responses import StreamingResponse
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
-from pocketpaw_ee.sites import import_service
+from pocketpaw_ee.sites import import_service, ownership
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
@@ -290,6 +296,9 @@ from pocketpaw_ee.sites.dto import (
     LeafEditVerdict,
     MakeEditableRequest,
     NativeArtifactResponse,
+    OriginClaimRequest,
+    OriginClaimResponse,
+    OriginVerificationResponse,
     PublishRequest,
     RequestPublishResponse,
     SiteAnalyticsResponse,
@@ -1527,4 +1536,74 @@ def _transfer_response(wire: dict) -> SiteTransferResponse:
         offered_by=wire.get("offeredBy", "") or "",
         offered_at=wire.get("offeredAt"),
         status=wire.get("status", "none"),
+    )
+
+
+# --- SF-8: proving the workspace controls an origin -------------------------
+#
+# These two exist so a later slice can crawl a customer's OWN pages without
+# becoming a crawler-for-hire. Both are workspace-scoped writes (``fabric.write``)
+# under the router's sites plan gate, like every sibling mutation: a claim mints a
+# secret and a verification flips a durable permission, so neither is a read.
+#
+# NOTHING IS MINTED AND NOTHING IS CRAWLED HERE. A claim writes one
+# ``SiteOriginClaim`` row; a verification updates it or raises. No Site document,
+# no import, no crawl is reachable from either — the crawl is a separate slice
+# that asks ``ownership.verified_origin`` first.
+
+
+@router.post("/sites/origins/claims", response_model=OriginClaimResponse, status_code=201)
+async def claim_site_origin(
+    body: OriginClaimRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OriginClaimResponse:
+    """Issue this workspace's verification token for a domain it says it owns.
+
+    The token is bound to (workspace, host) and is the ONLY response shape that
+    carries it. Re-claiming a pending domain re-mints the token; re-claiming one
+    that is already verified returns the verified row untouched, because
+    re-issuing there would unprove a live binding.
+
+    A malformed or non-public host (URL syntax, a single label, any literal IP —
+    loopback and link-local included) is a 422 raised during normalization, before
+    any row is written and before any DNS lookup.
+    """
+    claim = await ownership.claim_origin(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, host=body.host
+    )
+    return OriginClaimResponse(
+        host=claim.host,
+        token=claim.token,
+        status=claim.status,
+        expires_at=claim.expires_at,
+        well_known_url=f"https://{claim.host}{ownership.WELL_KNOWN_PATH}",
+        meta_tag=f'<meta name="{ownership.META_NAME}" content="{claim.token}">',
+        verified_at=claim.verified_at,
+        method=claim.method,
+    )
+
+
+@router.post("/sites/origins/verify", response_model=OriginVerificationResponse)
+async def verify_site_origin(
+    body: OriginClaimRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OriginVerificationResponse:
+    """Read the token back off the claimed domain and record the origin verified.
+
+    The host travels in the BODY rather than the path deliberately: a hostname in
+    a path segment invites percent-encoding bugs on exactly the input whose
+    normalization is a security boundary here.
+
+    The service fetches through the one SSRF-hardened fetch, pinned to the claimed
+    host. A failure — nothing published, the wrong token, an expired claim, an
+    unreachable domain — is an error response and writes nothing at all.
+    """
+    claim = await ownership.verify_origin(workspace_id=ctx.workspace_id, host=body.host)
+    return OriginVerificationResponse(
+        host=claim.host,
+        status=claim.status,
+        method=claim.method,
+        verified_at=claim.verified_at,
     )
