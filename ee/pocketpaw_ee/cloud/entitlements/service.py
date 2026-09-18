@@ -302,6 +302,34 @@ def _subscription_is_active(subscription_status: str | None) -> bool:
     return (subscription_status or "none") in _ACTIVE_SITE_SUBSCRIPTION_STATUSES
 
 
+# Which per-site tiers may have the site's PROJECT DOWNLOADED — the built site
+# handed back to its owner as an archive rather than only served from our edge.
+# The two paid rungs do; ``free`` is absent, so a floor site resolves ``False`` by
+# not being named here rather than by being listed as denied.
+#
+# AN EXPLICIT ALLOW-SET, NOT ``key != BASE_SITE_PLAN_KEY``. Deriving a per-site
+# capability by negating the floor is a mistake this catalog has already made
+# once: ``sells_concierge`` was written that way, which was only ever correct
+# while nothing sold the concierge — the moment ``staff`` did, "not free" handed
+# the $7 rung the $19 rung's feature. The same shortcut here would grant the
+# download to whatever rung the ladder gains next, silently, on the day it is
+# added. A key this set does not name resolves ``False``: a retired one
+# (``studio``, ``agency``, both retired on 2026-09-06 and still sitting in stored
+# documents), a typo, or a tier invented next quarter.
+#
+# It holds CANONICAL keys only, and the grant below reads the RESOLVED tier's key
+# against it. That is what keeps the legacy aliases working: a site whose document
+# still says ``pro`` resolves to ``site`` and is entitled to what it has always
+# paid for, without ``pro`` and ``business`` having to be listed here too.
+#
+# It lives here rather than on ``SitePlanTier`` because one caller needs it. The
+# catalog grew ``sells_concierge`` only when a SECOND caller did (the resolver and
+# the buyer-facing plan-card DTO), which is the bar for lifting a rule out of the
+# resolver; until a plan card sells the download, a catalog field would be a
+# second home for a rule with one reader.
+_PROJECT_DOWNLOAD_PLANS = frozenset({"site", "staff"})
+
+
 def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | None) -> int | None:
     """How many SITES may carry a custom domain, from THIS site's own plan.
 
@@ -456,6 +484,7 @@ def resolve_site_entitlements(
     # short-circuit evaluation.
     badge_removal = False
     concierge_entitled = False
+    project_download = False
     if tier is not None and subscription_active:
         badge_removal = tier.badge_removal
         # Any tier ABOVE the free floor sells the concierge. The rule itself now
@@ -464,6 +493,12 @@ def resolve_site_entitlements(
         # read it, do not re-express it. What stays HERE is the AND with an active
         # subscription, which is this resolver's whole job.
         concierge_entitled = tier.sells_concierge
+        # ``tier.key`` and not the ``plan_tier`` argument. The resolved key is the
+        # CURRENT name for a site whose document still holds a pre-rekey one, so a
+        # ``pro`` site is entitled to the download exactly as the ``site`` it
+        # resolves to. Matching the raw string instead would quietly demote every
+        # site that has not been migrated.
+        project_download = tier.key in _PROJECT_DOWNLOAD_PLANS
 
     return SiteEntitlements(
         site_id=site_id,
@@ -484,4 +519,5 @@ def resolve_site_entitlements(
         # AND of the two is ``concierge_available``, which is what seams ask.
         concierge_enabled=bool(concierge_enabled),
         concierge_entitled=concierge_entitled,
+        project_download=project_download,
     )
