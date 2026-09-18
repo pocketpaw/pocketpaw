@@ -2,6 +2,18 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-19 (SF-13) — added "Sites — the foreign-origin concierge": the
+four endpoints that finally reach the bind. Written around the three things a
+client cannot infer from the field names. The bind SPENDS MONEY and is
+idempotent, so it needs `sites.buy_plan` on top of `fabric.write` and a repeat is
+a 200 rather than a second $19 — and it carries no `created` flag, because the
+route cannot honestly say which of two concurrent first binds charged. The two
+verification refusals are different codes (never proved vs proved over 30 days
+ago) and must stay that way, since they are different instructions to the owner.
+And the grounding read is NOT here: `/paw-bar/admin/site/{site_id}/knowledge`
+already serves it for any Site in the workspace, so this response carries the
+`site_id` to call it with instead of a second copy of those fields.
+
 Updated: 2026-09-11 (feat/otherhand-tools-toggle) — added the "Agent chat — the
 `tools` switch" section for the new per-send request field. Written around the
 two things a client cannot infer from a `bool | None`: the field is subtractive
@@ -2327,6 +2339,166 @@ that stopped rather than repeating the ones that finished.
 `WorkspaceSettings.site_transfers_allowed` (default `true`). A site leaving takes its
 leads with it, so an admin can forbid the outbound half outright. Only the source
 side is gated — the receiving side is governed by consent, not by a setting.
+
+## Sites — the foreign-origin concierge
+
+A concierge on a site **PocketPaw does not host** — a Squarespace page, a
+hand-rolled marketing site. There is no Worker to deploy, so instead of a publish
+the owner buys a credential: a `Site` row with `foreign_origin: true`, a
+world-visible `signed_key`, and the origins the embed is valid from. The snippet
+goes on the page they already own. Source: `ee/pocketpaw_ee/sites/router.py`,
+`ee/pocketpaw_ee/sites/service.py`.
+
+| Method | Path | Action |
+|--------|------|--------|
+| `POST` | `/sites/by-pocket/{pocket_id}/foreign-concierge` | `fabric.write` **and** `sites.buy_plan` |
+| `GET` | `/sites/by-pocket/{pocket_id}/foreign-concierge` | `fabric.read` |
+| `POST` | `/sites/by-pocket/{pocket_id}/foreign-concierge/rotate-key` | `fabric.write` |
+| `POST` | `/sites/by-pocket/{pocket_id}/foreign-concierge/rebind` | `fabric.write` |
+
+**Prove the domain first.** `POST /sites/origins/claims` mints a token bound to
+(workspace, host); publish it at `/.well-known/paw-verify` or as a
+`<meta name="paw-verify">` in the origin's `<head>`; `POST /sites/origins/verify`
+reads it back off the live domain. The bind refuses an origin that has not been
+through this, and refuses one whose proof is over **30 days** old — the same
+window the grounding crawl applies, so a bind can never sell a concierge that the
+next crawl will refuse to feed.
+
+### `POST .../foreign-concierge` — buy or resolve
+
+```json
+{ "allowed_origins": ["https://brewco.example"], "name": "Brew Co" }
+```
+
+**It charges $19/month from the workspace credit wallet, and it is idempotent.**
+The first call mints and debits; every call after it returns the same concierge
+and debits nothing, so a double-clicked button is a 200 with the same `site_id`
+rather than a second purchase. The guarantee is a derived primary key — a
+duplicate insert fails before the debit — which is why the endpoint calls the
+resolve-or-buy layer and never the always-mints primitive underneath it.
+
+`allowed_origins` and `name` apply to the **first** bind only. An existing
+concierge comes back untouched: widening a live allowlist from a call that reads
+as "make sure this exists" would be a way around the verified-origin gate, one
+bind at a time. There is deliberately no `scopes` field — what a world-visible
+embed key may do is the model's baseline, not the caller's to widen.
+
+`sites.buy_plan` sits at ADMIN. A member gets 403 `sites.plan_purchase_forbidden`
+on the bind and still gets the `GET`, so "does one already exist" never needs an
+admin.
+
+Response (all four endpoints share it):
+
+```json
+{
+  "exists": true,
+  "site_id": "68c1f0...",
+  "pocket_id": "pk-brewco",
+  "name": "Brew Co",
+  "site_key": "site_key_kP3...",
+  "embed_snippet": "<!-- Paw Bar concierge (embedded at publish) -->\n<script src=\"https://api.pocketpaw.dev/api/v1/paw-bar/widget.js\" data-paw-bar-embed=\"1\" data-site-key=\"site_key_kP3...\" data-widget-id=\"w_9f2\" data-endpoint=\"https://api.pocketpaw.dev/api/v1\" async></script>",
+  "widget_id": "w_9f2",
+  "agent_id": "ag_71c",
+  "origins": [
+    {
+      "host": "brewco.example",
+      "verified": true,
+      "verified_at": "2026-09-01T10:22:04",
+      "verification_fresh": true
+    }
+  ],
+  "plan_tier": "staff",
+  "subscription_status": "active",
+  "renewal_date": "2026-10-19T00:00:00",
+  "concierge_available": true
+}
+```
+
+**The timestamps are UTC and carry no zone suffix.** Mongo stores UTC and hands
+back naive datetimes, so `verified_at` and `renewal_date` have no trailing `Z` —
+parse them as UTC, not as local time, or a proof looks like it expires a day
+early. `verification_fresh` is already computed against the 30-day rule the bind
+enforces, so a panel never has to do that arithmetic itself.
+
+`embed_snippet` is authoritative and `""` is meaningful — it is the answer from
+the one definition of the five gates a site must pass to earn a bar (plan,
+owner's kill switch, a key, a widget, a bound agent). `widget_id` / `agent_id`
+say **why** it is empty: an empty snippet beside a bound agent is the plan or the
+kill switch, an empty snippet beside an empty `agent_id` is provisioning that has
+not completed yet — retry the bind, which re-runs the funnel.
+
+`site_key` is not a secret. It ships inside the snippet on a public page and is
+origin-bound; `OriginClaimResponse.token` is the secret on this surface and
+nothing here carries it.
+
+**There is no `created` or `charged` flag.** Only the call that actually minted
+spent money, and the endpoint cannot honestly say whether it was the one — a read
+outside the service's lock reports "nothing here" to both of two concurrent first
+binds while one of them charges. Call the `GET` before binding; `exists` answers
+the same question without lying on a race.
+
+Refusals, all of them before a row exists and before money moves:
+
+| Status | Code | Means |
+|--------|------|-------|
+| 403 | `pocket.access_denied` | the pocket is not the caller's to ground a concierge in |
+| 403 | `sites.origin_unverified` | this workspace never proved it controls that host |
+| 403 | `sites.origin_verification_stale` | it did, over 30 days ago — verify again |
+| 403 | `sites.plan_purchase_forbidden` | the caller may write here but may not buy |
+| 404 | `pocket.not_found` | no such pocket |
+| 422 | `sites.origin_required` | no usable origin survived normalization |
+| 422 | `sites.foreign_concierge_unsellable` | the catalog rung stopped selling a priced concierge |
+| 402 | `credits.insufficient` | the wallet cannot cover the month |
+
+The two 403s on verification are **different codes on purpose**: "re-verify your
+domain" and "you never claimed this domain" are different instructions, and a
+panel that collapsed them would tell a customer to re-verify a domain they have
+never heard of. The 402 deletes the unpaid row it had just inserted, so nothing
+survives it either — a paid tier with no money behind it is the state this rail
+exists to make impossible.
+
+### `GET .../foreign-concierge` — the panel's read
+
+A pocket that has never been bound is `200` with `exists: false`, not a 404:
+that is the normal first state of the setup panel, and a 404 there would be
+indistinguishable from a wrong pocket id. The lookup filters on `foreign_origin`,
+so a pocket that ALSO has a published Worker site never has that site reported
+here — conflating them would put a rotate button in front of the embed key of a
+site somebody is actually serving.
+
+For what the concierge can **answer from** — the article count, the last sync
+stamp, the sync error, and an owner-triggered re-crawl — use
+`GET`/`POST /paw-bar/admin/site/{site_id}/knowledge` with the `site_id` from this
+response. That surface already covers every Site in the workspace, a foreign row
+included, and is not duplicated here.
+
+### `POST .../foreign-concierge/rotate-key`
+
+Retires the embed key and issues a new one; the old key stops resolving
+immediately (401 at the key resolver), so the owner's page is serving a dead
+credential until they paste the new snippet in. The response carries it. Same
+row, same tier, same renewal date — a rotation is not a repurchase, which is why
+it is `fabric.write` and not the bind's admin gate: the member who can see a
+leaked key should be able to act on it. `404 site.not_found` when the pocket has
+no foreign concierge.
+
+### `POST .../foreign-concierge/rebind`
+
+```json
+{ "agent_id": "ag_new", "widget_id": "" }
+```
+
+Points the bar at a different agent. Both fields are optional and an empty
+`agent_id` is **not** a no-op: it means re-provision — clear the stale bind and
+let the funnel resolve-or-mint the canonical agent again, which is the repair for
+a bar whose agent was deleted. `widget_id` picks the bar when a pocket carries
+more than one.
+
+Nothing about the purchase moves: the embedded `signed_key` keeps resolving, the
+tier stays bought, the renewal date stays where it was. An `agent_id` in another
+tenant is a 404 from inside the funnel, deliberately indistinguishable from an
+agent that does not exist.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and

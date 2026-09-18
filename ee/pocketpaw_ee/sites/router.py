@@ -3,11 +3,18 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
-# ORIGIN OWNERSHIP (end of file): POST ``/sites/origins/claims`` issues a token
-# bound to (workspace, host) and POST ``/sites/origins/verify`` reads it back off
-# the claimed domain. They are the gate a later concierge slice asks before it
-# crawls anyone's pages, so read ``sites/ownership.py``'s header before touching
-# either. Neither mints a Site and neither crawls.
+# ORIGIN OWNERSHIP: POST ``/sites/origins/claims`` issues a token bound to
+# (workspace, host) and POST ``/sites/origins/verify`` reads it back off the
+# claimed domain. They are the gate the foreign-concierge routes ask before
+# anything is bought or crawled, so read ``sites/ownership.py``'s header before
+# touching either. Neither mints a Site and neither crawls.
+#
+# THE FOREIGN CONCIERGE (end of file): bind / read / rotate-key / rebind under
+# ``/sites/by-pocket/{pocket_id}/foreign-concierge``. The bind is the ONE route
+# on this router that spends money unconditionally — $19/month from the credit
+# wallet — so it carries ``sites.buy_plan`` on top of ``fabric.write``, and it
+# must keep calling the service's resolve-or-buy layer rather than the mint
+# beneath it. Its section comment at the end of the file is the full contract.
 #
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): four endpoints for
 # moving a site to another workspace, appended at end-of-file.
@@ -265,6 +272,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -287,6 +296,10 @@ from pocketpaw_ee.sites.dto import (
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    ForeignConciergeBindRequest,
+    ForeignConciergeOrigin,
+    ForeignConciergeRebindRequest,
+    ForeignConciergeResponse,
     HtmlArmedSourceResponse,
     ImportBriefStatusResponse,
     ImportFromUrlRequest,
@@ -1607,3 +1620,245 @@ async def verify_site_origin(
         method=claim.method,
         verified_at=claim.verified_at,
     )
+
+
+# --- SF-13: the foreign concierge over HTTP --------------------------------
+#
+# Four slices built the foreign concierge — ownership proof, a charged mint, an
+# idempotent bind, knowledge grounding — and none of them reached the wire, so
+# the feature was complete as a library and unreachable as a product. These are
+# the routes the setup UI calls.
+#
+# THE BIND SPENDS MONEY, which is what makes its gate different from every other
+# mutation on this router. ``fabric.write`` says the caller may write in this
+# workspace; ``sites.buy_plan`` (ADMIN, refusal code
+# ``sites.plan_purchase_forbidden``) says they may commit it to a recurring
+# charge. Both are required, which is the pair ``publish_site`` already uses —
+# the difference is that a publish is usually free, so it ASKS the second
+# question and lets the service decide, while a first bind is always a $19/month
+# purchase and there is nothing to decide. A member who may not buy still gets
+# the GET, so "does one already exist" never needs an admin.
+#
+# IDEMPOTENCE IS THE SERVICE'S, AND THIS LAYER MUST NOT HELP. The guarantee is a
+# derived primary key (a duplicate insert fails BEFORE the debit) plus an
+# in-process lock. So nothing here mints an id, retries a ``DuplicateKeyError``,
+# or catches a conflict and re-calls: each of those would turn one purchase into
+# two. The route calls ``bind_foreign_concierge`` — the resolve-or-buy layer —
+# and never ``mint_foreign_site``, which buys a month unconditionally.
+#
+# THE ERROR VOCABULARY IS THE SERVICE'S TOO, and the mapping is the standard
+# envelope rather than anything written here: ``sites.origin_unverified`` and
+# ``sites.origin_verification_stale`` are both 403 but are DIFFERENT codes,
+# because "you never proved you own this domain" and "your proof is older than
+# 30 days" need different sentences from the owner, and a panel that collapsed
+# them would tell a customer to re-verify a domain they never claimed.
+#
+# WHAT IS NOT HERE, BECAUSE IT ALREADY EXISTS: the grounding result. GET/POST
+# ``/paw-bar/admin/site/{site_id}/knowledge`` already serve the article count,
+# the last sync stamp, the sync error and an owner-triggered re-sync for any Site
+# in the workspace, a foreign row included. This response carries ``site_id`` so
+# the panel can call them; a second read of the same fields would be a second
+# thing to keep in step.
+
+_FOREIGN_CONCIERGE_PATH = "/sites/by-pocket/{pocket_id}/foreign-concierge"
+
+
+async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
+    """Render one foreign Site as the panel's view of its concierge.
+
+    The snippet comes from ``embed.concierge_snippet`` rather than being formatted
+    here, so the five gates that decide whether a site has earned a bar keep
+    exactly one definition. Its ``concierge_entitled`` half is asked of
+    ``site_keys.concierge_available`` — the predicate the public seams use — so
+    this panel and the visitor's first message cannot disagree about the plan.
+
+    FAILURE-SOFT ON THE BAR, NOT ON THE ROW. paw_bar is imported lazily (the
+    sites service must load in a deployment that does not carry it) and anything
+    escaping the widget lookup leaves the snippet empty with a log line, because a
+    row that is paid for and readable matters more than the panel's copy button.
+    """
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available
+    from pocketpaw_ee.sites import foreign_grounding
+
+    workspace_id = str(getattr(site, "workspace", "") or "")
+    pocket_id = str(getattr(site, "pocket_id", "") or "")
+    site_key = str(getattr(site, "signed_key", "") or "")
+    available = bool(concierge_available(site))
+
+    snippet = ""
+    widget_id = ""
+    agent_id = ""
+    try:
+        from pocketpaw_ee.paw_bar import embed
+        from pocketpaw_ee.paw_bar.agent_provisioning import site_widget
+
+        widget = await site_widget(pocket_id, workspace_id)
+        widget_id = str(getattr(widget, "id", "") or "") if widget else ""
+        agent_id = str(getattr(widget, "agent_id", "") or "") if widget else ""
+        snippet = await embed.concierge_snippet(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            site_key=site_key,
+            api_base=sites_service._capture_base(),
+            concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
+            # The plan half, from the one predicate that owns the rule (it also
+            # honours the sites-billing flag, which a re-expression here would
+            # have to remember).
+            concierge_entitled=available,
+        )
+    except Exception:  # noqa: BLE001 — the row is real whether or not the bar is
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "sites.foreign_concierge: could not resolve the bar for site %s",
+            str(getattr(site, "id", "?")),
+            exc_info=True,
+        )
+
+    origins: list[ForeignConciergeOrigin] = []
+    for host in list(getattr(site, "allowed_origins", None) or []):
+        record = await ownership.verified_origin_record(workspace_id, host)
+        origins.append(
+            ForeignConciergeOrigin(
+                host=host,
+                verified=record is not None,
+                verified_at=getattr(record, "verified_at", None),
+                # The same 30-day rule the bind and the crawl apply, asked of the
+                # same function — so the panel cannot say "verified" about a proof
+                # the next grounding run will refuse.
+                verification_fresh=foreign_grounding.verification_is_fresh(record),
+            )
+        )
+
+    return ForeignConciergeResponse(
+        exists=True,
+        site_id=str(getattr(site, "id", "") or ""),
+        pocket_id=pocket_id,
+        name=str(getattr(site, "name", "") or ""),
+        site_key=site_key,
+        embed_snippet=snippet,
+        widget_id=widget_id,
+        agent_id=agent_id,
+        origins=origins,
+        plan_tier=str(getattr(site, "plan_tier", "") or ""),
+        subscription_status=str(getattr(site, "subscription_status", "") or "none"),
+        renewal_date=getattr(site, "renewal_date", None),
+        concierge_available=available,
+    )
+
+
+@router.post(
+    _FOREIGN_CONCIERGE_PATH,
+    response_model=ForeignConciergeResponse,
+    dependencies=[Depends(require_action_any_workspace("sites.buy_plan"))],
+)
+async def bind_pocket_foreign_concierge(
+    pocket_id: str,
+    body: ForeignConciergeBindRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ForeignConciergeResponse:
+    """Create or return the one foreign concierge for this pocket.
+
+    The first call debits $19/month from the workspace credit wallet; every call
+    after it returns the same concierge and charges nothing. A repeat is a 200
+    with the same ``site_id``, not a 409 — a double-clicked button is the case
+    this endpoint is shaped around.
+
+    Every refusal happens before a row exists and before money moves: a pocket
+    the caller cannot access (403 ``pocket.access_denied``), an origin the
+    workspace has not proved it controls (403 ``sites.origin_unverified``), a
+    proof older than 30 days (403 ``sites.origin_verification_stale``), no usable
+    origin (422 ``sites.origin_required``) and a wallet that cannot cover the
+    month (402 ``credits.insufficient``). The last one deletes the unpaid row it
+    had just inserted, so a 402 leaves nothing behind either.
+    """
+    site = await sites_service.bind_foreign_concierge(
+        workspace_id=ctx.workspace_id,
+        pocket_id=pocket_id,
+        owner=ctx.user_id,
+        allowed_origins=body.allowed_origins,
+        name=body.name,
+    )
+    return await _foreign_concierge_response(site)
+
+
+@router.get(_FOREIGN_CONCIERGE_PATH, response_model=ForeignConciergeResponse)
+async def get_pocket_foreign_concierge(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> ForeignConciergeResponse:
+    """What this pocket's foreign concierge currently is, if it has one.
+
+    ``fabric.read`` and not the bind's admin gate, deliberately: a member who may
+    not commit the workspace to a charge still needs to see that the concierge
+    exists, what its snippet is, and which of its origins have gone stale.
+
+    A pocket with no foreign concierge is ``exists: false``, not a 404. The
+    lookup is ``foreign_site_for_pocket``, which filters on ``foreign_origin``, so
+    a pocket that also has a PUBLISHED site never has that site reported here.
+    """
+    site = await sites_service.foreign_site_for_pocket(ctx.workspace_id, pocket_id)
+    if site is None:
+        return ForeignConciergeResponse(exists=False, pocket_id=pocket_id)
+    return await _foreign_concierge_response(site)
+
+
+@router.post(f"{_FOREIGN_CONCIERGE_PATH}/rotate-key", response_model=ForeignConciergeResponse)
+async def rotate_pocket_foreign_concierge_key(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ForeignConciergeResponse:
+    """Retire this concierge's embed key and issue a new one.
+
+    ``fabric.write`` rather than the bind's ``sites.buy_plan``: a rotation is not
+    a repurchase — same row, same tier, same renewal date — and gating a leak
+    response behind an admin would leave a member who can see the leak unable to
+    act on it.
+
+    The response carries the NEW snippet, which is the whole point: the old key
+    stops resolving the moment this returns, so the owner's page is serving a
+    dead credential until they paste this one in. 404 when the pocket has no
+    foreign concierge to rotate.
+    """
+    site = await sites_service.rotate_foreign_concierge_key(
+        workspace_id=ctx.workspace_id, pocket_id=pocket_id
+    )
+    return await _foreign_concierge_response(site)
+
+
+@router.post(f"{_FOREIGN_CONCIERGE_PATH}/rebind", response_model=ForeignConciergeResponse)
+async def rebind_pocket_foreign_concierge(
+    pocket_id: str,
+    body: ForeignConciergeRebindRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ForeignConciergeResponse:
+    """Point this concierge's bar at a different agent, leaving the row alone.
+
+    Nothing about the purchase moves: the embedded ``signed_key`` keeps
+    resolving, the tier stays bought and the renewal date stays where it was, so
+    swapping the answering agent never costs the buyer their credential or their
+    month. An ``agent_id`` in another tenant is a 404 from inside the funnel,
+    deliberately indistinguishable from an agent that does not exist.
+
+    The row is re-read for the response rather than returned by the rebind, which
+    hands back the bound agent id; ``exists: false`` here means the concierge was
+    deleted between the two, not that the rebind failed.
+    """
+    await sites_service.rebind_foreign_concierge(
+        workspace_id=ctx.workspace_id,
+        pocket_id=pocket_id,
+        agent_id=body.agent_id,
+        widget_id=body.widget_id,
+    )
+    # Named for what it is — a re-read after the write — rather than sharing the
+    # read endpoint's ``site``. The two blocks are otherwise identical text, and a
+    # mutation anchored on either one would then match both, which is how a plan
+    # ends up unable to say which arm it covers.
+    refreshed = await sites_service.foreign_site_for_pocket(ctx.workspace_id, pocket_id)
+    if refreshed is None:
+        return ForeignConciergeResponse(exists=False, pocket_id=pocket_id)
+    return await _foreign_concierge_response(refreshed)

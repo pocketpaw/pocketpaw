@@ -4,8 +4,15 @@
 # themselves and CRAWLS that site's pages to ground the agent. Without a proof of
 # control that feature is a crawler-for-hire: anyone could name a third party's
 # host and have its content fetched and compiled into their own workspace. This
-# module is the gate, and it gates the CRAWL, not merely an embed. Consumers ask
-# ``verified_origin(workspace_id, host)`` and fetch nothing when it answers False.
+# module is the gate, and it gates the CRAWL, not merely an embed.
+#
+# CONSUMERS ASK ``verified_origin_record``, NOT THE BOOLEAN. Both of them — the
+# bind (``sites.service.mint_foreign_site``) and the crawl
+# (``sites.foreign_grounding``) — apply a freshness policy off ``verified_at``,
+# which the boolean cannot express. ``verified_origin`` is still the fail-closed
+# one-line form of the same question and is still tested, but nothing in
+# production calls it today; delete it or grow a caller rather than leaving a
+# third way to ask.
 #
 # THE FLOW. ``claim_origin`` mints a secret bound to (workspace, host) and stores
 # it pending. The owner publishes it at ``/.well-known/paw-verify`` or as a
@@ -466,6 +473,13 @@ async def verified_origin(workspace_id: str, host: str) -> bool:
     (a literal IP, a single label, URL syntax) answers False rather than raising,
     because a caller using this to decide whether to fetch someone's pages must
     never be handed an exception it might treat as "not my problem".
+
+    NO PRODUCTION CALLER TODAY. The bind and the crawl both need ``verified_at``
+    to apply their 30-day freshness rule, so both ask
+    ``verified_origin_record``. This stays as the boolean form of the same
+    question and is exercised by tests/ee/sites/test_domain_ownership.py; a new
+    consumer that genuinely does not care how old a proof is may use it, but it
+    should say why in a comment, because "verified once" is rarely the question.
     """
     return (await verified_origin_record(workspace_id, host)) is not None
 
