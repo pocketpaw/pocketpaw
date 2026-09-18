@@ -8,24 +8,40 @@
 # about a return value, because a version that resolves the row but re-charges
 # anyway returns exactly the right Site.
 #
-# The ones that carry the most weight:
+# THERE ARE THREE GUARDS AND THEY MASK EACH OTHER, so each is tested at the level
+# where it is the only thing standing:
 #
-#   * ``test_two_concurrent_binds_buy_one_concierge`` — the shape a billing race
-#     actually takes. Sequential idempotence is the easy half; two binds awaited
-#     together both find nothing and both mint unless something serialises them.
+#   * THE DERIVED ``_id`` carries the cross-process billing guarantee. The bind's
+#     mutex serialises in-process, so no race test here can reach the primary key
+#     — swap the derivation for ``ObjectId()`` and every race test stays green
+#     (measured). It is therefore asked of the MINT:
+#     ``test_a_second_mint_for_the_same_pocket_loses_before_it_can_charge``.
+#   * THE SALT keeps that id clear of the published site's, so a concierge can
+#     never collide with a live Worker row:
+#     ``test_the_foreign_id_never_lands_on_the_published_id``.
+#   * THE MUTEX stops a loser adopting a row the winner is about to delete and
+#     handing back a phantom:
+#     ``test_a_concurrent_loser_is_never_handed_a_row_the_winner_deletes``.
+#
+# Also worth the most:
+#
+#   * ``test_two_concurrent_binds_buy_one_concierge`` — the billing race, and the
+#     reason it patches the pocket gate is written in its own docstring.
 #   * ``test_a_bind_never_touches_a_published_site_for_the_same_pocket`` — the
 #     foreign row and the published Worker row coexist for one pocket on purpose.
-#     A resolver that conflated them would let a rotate invalidate the embed key
-#     of a site somebody is serving.
 #   * ``test_rotating_retires_the_old_key_at_the_resolver`` — asked of
 #     ``resolve_site_key`` rather than of the field, since rotation exists to make
 #     a LEAKED key stop working and only the resolver can say whether it did.
 #   * ``test_a_rebind_to_another_tenants_agent_is_refused`` — a rebind is the
 #     obvious place to try to attach a victim tenant's agent to a bar you control.
 #
-# tests/mutations/foreign_bind_idempotence.json is the other half of this file: it
-# deletes the resolve-or-create check and the charge's one-time-ness on purpose
-# and expects these tests to notice.
+# TWO MONGOMOCK TRAPS ARE LOAD-BEARING HERE, both measured rather than assumed.
+# ``asyncio.gather`` interleaves nothing unless something genuinely suspends, and
+# the fake driver never does. And a doc instance read from the fake driver is
+# MUTATED IN PLACE when another holder saves it, so any assertion on a field can
+# heal itself mid-test; row EXISTENCE is a collection fact and cannot.
+#
+# tests/mutations/foreign_bind_idempotence.json is the other half of this file.
 
 from __future__ import annotations
 
@@ -37,13 +53,15 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
+from pocketpaw_ee.cloud._core.errors import Forbidden, InsufficientCredits, NotFound
+from pocketpaw_ee.cloud.billing import service as billing_service
 from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.models.agent import Agent
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.sites import service as sites_service
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.paw_bar.store import PawBarStore
 
@@ -130,6 +148,43 @@ async def _foreign_rows(workspace_id: str) -> list[Site]:
     return await Site.find(
         {"workspace": workspace_id, "pocket_id": _POCKET, "foreign_origin": True}
     ).to_list()
+
+
+def _entitlements(site: Site):
+    """What the resolver would actually answer for this row.
+
+    ``concierge_entitled`` is the AND of a rung that sells the concierge with an
+    active subscription, so it is the only honest way to ask "would a visitor get
+    a bar that talks?" — a row can look healthy field by field and still 403.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    return entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=site.concierge_enabled,
+    )
+
+
+def _conflict_then_real():
+    """A resolver that misses on the pre-mint check and hits on the recovery read.
+
+    That is exactly what a second process sees: the winner's insert is not visible
+    when the loser looks, and is visible once the loser's own insert has collided
+    with it.
+    """
+    real = sites_service.foreign_site_for_pocket
+    seen: list[int] = []
+
+    async def _resolve(ws: str, pocket_id: str):
+        seen.append(1)
+        if len(seen) == 1:
+            return None
+        return await real(ws, pocket_id)
+
+    return _resolve
 
 
 async def _concierge_agents(workspace_id: str) -> list[Agent]:
@@ -243,6 +298,235 @@ async def test_two_concurrent_binds_buy_one_concierge(store):  # noqa: ARG001
     )
 
 
+async def test_a_concurrent_loser_is_never_handed_a_row_the_winner_deletes(store):  # noqa: ARG001
+    """THE HARM THE MUTEX PREVENTS, which is NOT the double charge.
+
+    The derived ``_id`` is what stops two rows and two debits, and it does that
+    across processes where a lock cannot reach. This is what the lock is still
+    for, and it is a correctness harm rather than a cosmetic one.
+
+    The winner inserts, then charges. A charge that fails DELETES the row
+    (``_discard_unpaid_foreign_site``) — fail-closed, and right. In that window an
+    unserialised loser catches the primary-key conflict, re-reads, and adopts a
+    row that is one step from being removed. Its caller is then handed a PHANTOM
+    concierge: a Site object that is not in the collection, that nobody was
+    charged for, carrying an embed key ``resolve_site_key`` will never find. The
+    buyer gets a snippet for a concierge that does not exist.
+
+    With the lock, both callers fail honestly with the 402 they earned.
+
+    Measured with the lock removed, this exact setup:
+        outcomes ['InsufficientCredits', 'Site']
+        returned Site d2446366ec038fc58e4e96aa -> in collection: False
+
+    A NOTE ON WHY THE FIRST ATTEMPT AT THIS TEST WAS WRONG, since it is a trap
+    anyone re-testing the lock will fall into. The obvious harm to reach for is
+    the loser reading a row the winner has not activated yet. That harm is real in
+    production and CANNOT be observed here: mongomock hands back the stored dict
+    by reference, so the very doc instance the loser is holding flips from "none"
+    to "active" underneath it when the winner saves. Asserting on
+    ``subscription_status`` therefore passes with the lock deleted. Row EXISTENCE
+    is a collection fact and does not heal itself, which is why this asserts that.
+    """
+    ws = "ws-bind-phantom"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    async def _failing_charge(**_kwargs):
+        # Yields BEFORE raising. That yield is the window in which the loser
+        # re-reads a row the winner is about to delete.
+        await asyncio.sleep(0)
+        raise InsufficientCredits("credits.insufficient", "no funds")
+
+    async def _slow_pocket_gate(*_args, **_kwargs):
+        await asyncio.sleep(0)
+        return _OWNED_POCKET
+
+    def _bind_call():
+        return sites_service.bind_foreign_concierge(
+            workspace_id=ws,
+            pocket_id=_POCKET,
+            owner=_OWNER,
+            allowed_origins=[f"https://{_HOST}"],
+            name="Brew Co Concierge",
+        )
+
+    with patch("pocketpaw_ee.cloud.pockets.service.get", new=_slow_pocket_gate):
+        with patch.object(billing_service, "charge_site_plan_credits", new=_failing_charge):
+            outcomes = await asyncio.gather(_bind_call(), _bind_call(), return_exceptions=True)
+
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            assert isinstance(outcome, InsufficientCredits), (
+                f"the only honest failure here is the 402, got {outcome!r}"
+            )
+            continue
+        stored = await Site.get(str(outcome.id))
+        assert stored is not None, (
+            "a caller was handed site "
+            f"{outcome.id}, which is not in the collection - a phantom concierge"
+        )
+
+    assert await _foreign_rows(ws) == [], "a failed charge leaves no row behind"
+    assert await credits_service.balance(ws) == _FUNDED, "and takes nothing"
+
+
+# --------------------------------------------------------------------------- #
+# 1a. The primary key — the cross-process guard, tested where it is observable.
+#
+# ``bind_foreign_concierge``'s mutex serialises in-process, so NO race test in
+# this file can reach the primary key: the loser resolves the winner's row and
+# returns before it ever attempts an insert. The two guards mask each other that
+# way, and a mutation on the derived id is caught by nothing above (measured: swap
+# it for ``ObjectId()`` and all the race tests stay green).
+#
+# The guarantee belongs to the MINT, so it is asked of the mint. That is also the
+# honest level for it: what holds between processes is "a second insert for this
+# pocket loses, before the debit", and the mint is the thing that inserts.
+# --------------------------------------------------------------------------- #
+
+
+async def _mint_direct(workspace_id: str, **overrides: Any) -> Site:
+    """Call the primitive, bypassing the bind layer and therefore the mutex."""
+    kwargs: dict[str, Any] = dict(
+        workspace_id=workspace_id,
+        pocket_id=_POCKET,
+        owner=_OWNER,
+        allowed_origins=[f"https://{_HOST}"],
+        name="Brew Co Concierge",
+    )
+    kwargs.update(overrides)
+    with _owned_pocket():
+        return await sites_service.mint_foreign_site(**kwargs)
+
+
+async def test_a_second_mint_for_the_same_pocket_loses_before_it_can_charge(store):  # noqa: ARG001
+    """THE CROSS-PROCESS GUARD. A duplicate insert must fail, and fail unpaid.
+
+    The foreign row is inserted at a DERIVED id, so a second mint for the same
+    (workspace, pocket) collides on ``_id`` — which MongoDB enforces natively on
+    every deployment, unlike a partial index mongomock cannot represent. The mint
+    inserts BEFORE it debits, so the loser never reaches the charge: that ordering
+    is what turns the primary key into a billing guarantee rather than just a
+    uniqueness one.
+
+    Asserted on the WALLET as well as the row count, because a version that
+    charged first and inserted second would also raise here, having already taken
+    the money.
+    """
+    ws = "ws-mint-twice-pk"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    first = await _mint_direct(ws)
+    balance_after_first = await credits_service.balance(ws)
+    assert balance_after_first == _FUNDED - _PRICE_CREDITS
+
+    with pytest.raises(DuplicateKeyError):
+        await _mint_direct(ws)
+
+    rows = await _foreign_rows(ws)
+    assert len(rows) == 1, "the duplicate must not have become a second concierge"
+    assert str(rows[0].id) == str(first.id)
+    assert await credits_service.balance(ws) == balance_after_first, (
+        "the loser charged the wallet - the insert is not guarding the debit"
+    )
+
+
+def test_the_foreign_id_never_lands_on_the_published_id() -> None:
+    """The salt, which is the reason this derivation is allowed to exist at all.
+
+    A pocket can carry a published Worker site AND a foreign concierge. The
+    published row's id is ``sha1("<ws>:<pocket>")[:12]``; if the foreign
+    derivation used the same preimage, minting a concierge would collide with —
+    and on an upsert path could overwrite — a live site's row. The prefix is what
+    keeps the two id spaces apart, and it is asserted rather than assumed because
+    "simplify the hash input" is an inviting-looking edit.
+    """
+    for ws, pocket in (("ws-1", "pk-1"), ("acme", "shop"), ("", "")):
+        published = sites_service._live_object_id(ws, pocket)
+        foreign = sites_service._foreign_object_id(ws, pocket)
+        assert published != foreign, f"collision for ({ws!r}, {pocket!r})"
+
+    # And it is a pure function of the pair, or a retry would mint a second row.
+    assert sites_service._foreign_object_id("ws-1", "pk-1") == sites_service._foreign_object_id(
+        "ws-1", "pk-1"
+    )
+    assert sites_service._foreign_object_id("ws-1", "pk-1") != sites_service._foreign_object_id(
+        "ws-2", "pk-1"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 1b. The cross-process recovery branch.
+#
+# With the mutex in place the ``except DuplicateKeyError`` path is unreachable
+# in-process, so no race test can reach it. It is the path a SECOND PROCESS takes,
+# and it moves money by deciding whether to re-mint, so it is driven directly
+# through the mint seam here rather than left as the only untested branch.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_cross_process_loser_adopts_the_winner_without_charging(store):  # noqa: ARG001
+    """Another process won the insert. Adopt its row; do not charge.
+
+    The mint inserts before it debits, so a primary-key conflict means the loser
+    never reached a charge. Re-minting or raising would both be wrong: the pocket
+    HAS a concierge, and the caller asked for one to exist.
+    """
+    ws = "ws-bind-adopt"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    winner = await _bind(ws)  # stands in for the other process's row
+    balance_after_winner = await credits_service.balance(ws)
+
+    # Force the conflict the way a second process would see it: the pre-mint
+    # existence check misses (as it would, mid-flight), the insert loses, and the
+    # recovery re-read then finds the winner. Built OUTSIDE the patch so it closes
+    # over the real resolver rather than over itself.
+    resolver = _conflict_then_real()
+    boom = AsyncMock(side_effect=DuplicateKeyError("duplicate key"))
+    with patch.object(sites_service, "mint_foreign_site", new=boom):
+        with patch.object(sites_service, "foreign_site_for_pocket", new=resolver):
+            adopted = await _bind(ws)
+
+    assert boom.await_count == 1, "the loser must NOT re-mint when the winner's row stands"
+
+    assert str(adopted.id) == str(winner.id), "the loser must adopt the winner's row"
+    assert await credits_service.balance(ws) == balance_after_winner, "and must not charge"
+    assert len(await _foreign_rows(ws)) == 1
+
+
+async def test_a_cross_process_loser_mints_again_when_the_winner_rolled_back(store):  # noqa: ARG001
+    """The winner's charge failed and it deleted its row between our conflict and
+    our re-read. Nobody has a concierge and nobody paid, so the buy is still owed.
+
+    Returning ``None`` or re-raising here would leave the caller with no concierge
+    and no error they could act on, for a purchase they asked for and can afford.
+    """
+    ws = "ws-bind-rollback"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    real_mint = sites_service.mint_foreign_site
+    calls: list[int] = []
+
+    async def _conflict_once(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise DuplicateKeyError("duplicate key")
+        return await real_mint(**kwargs)
+
+    with patch.object(sites_service, "mint_foreign_site", new=_conflict_once):
+        site = await _bind(ws)
+
+    assert len(calls) == 2, "the rolled-back winner must be followed by exactly one re-mint"
+    assert site.subscription_status == "active"
+    assert len(await _foreign_rows(ws)) == 1
+    assert await credits_service.balance(ws) == _FUNDED - _PRICE_CREDITS, "charged once"
+
+
 async def test_a_repeat_bind_does_not_widen_the_origin_allowlist(store):  # noqa: ARG001
     """An existing row is returned UNTOUCHED.
 
@@ -315,8 +599,6 @@ async def test_a_failed_charge_leaves_nothing_to_resolve_on_the_next_bind(store)
     hand the customer a concierge nobody ever bought."""
     ws = "ws-bind-broke"
     await _verify_origin(ws)  # funded with nothing
-
-    from pocketpaw_ee.cloud._core.errors import InsufficientCredits
 
     with pytest.raises(InsufficientCredits):
         await _bind(ws)

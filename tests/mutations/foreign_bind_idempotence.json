@@ -1,5 +1,32 @@
 [
   {
+    "label": "the foreign row's id goes back to random - a second bind mints again and charges again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        id=_foreign_object_id(workspace_id, pocket_id),",
+    "replace": "        id=ObjectId(),",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_second_mint_for_the_same_pocket_loses_before_it_can_charge"
+    ]
+  },
+  {
+    "label": "the foreign id loses its salt - it collides with the pocket's PUBLISHED site row",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    digest = hashlib.sha1(f\"foreign:{workspace_id}:{pocket_id}\".encode()).digest()",
+    "replace": "    digest = hashlib.sha1(f\"{workspace_id}:{pocket_id}\".encode()).digest()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_the_foreign_id_never_lands_on_the_published_id"
+    ]
+  },
+  {
+    "label": "the bind mutex is dropped - a loser adopts a row the winner deletes and returns a phantom concierge",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    async with _foreign_bind_lock(workspace_id, pocket_id):\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "replace": "    if True:\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_concurrent_loser_is_never_handed_a_row_the_winner_deletes"
+    ]
+  },
+  {
     "label": "the resolve-or-create check is deleted - every bind mints again and charges again",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "        existing = await foreign_site_for_pocket(workspace_id, pocket_id)\n        if existing is not None:",
@@ -11,12 +38,22 @@
     ]
   },
   {
-    "label": "the bind mutex is dropped - two binds in flight both mint, and the wallet is debited twice",
+    "label": "a cross-process conflict is re-raised instead of adopting the winner - the caller gets a 500 for a concierge that exists",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    async with _foreign_bind_lock(workspace_id, pocket_id):\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
-    "replace": "    if True:\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "find": "        except DuplicateKeyError:\n            # Lost the insert race to another PROCESS",
+    "replace": "        except ValueError:\n            # Lost the insert race to another PROCESS",
     "tests": [
-      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_concurrent_binds_buy_one_concierge"
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_process_loser_adopts_the_winner_without_charging",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_process_loser_mints_again_when_the_winner_rolled_back"
+    ]
+  },
+  {
+    "label": "a conflict adopts blindly - a winner that rolled back leaves the loser holding nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            adopted = await foreign_site_for_pocket(workspace_id, pocket_id)\n            if adopted is None:",
+    "replace": "            adopted = await foreign_site_for_pocket(workspace_id, pocket_id)\n            if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_process_loser_mints_again_when_the_winner_rolled_back"
     ]
   },
   {
