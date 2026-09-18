@@ -260,6 +260,9 @@
         --lp-r-code: 12px;
         --lp-r-pill: 100px;
         --lp-ease: cubic-bezier(0.22, 1, 0.36, 1);
+        /* The announcement bar's height, read by the fixed nav and the body
+           padding. Set to 0 by the dismiss script, which moves both. */
+        --lp-ann-h: 40px;
       }
 
       /* ════════════════════════════════════════
@@ -377,9 +380,91 @@
       /* ════════════════════════════════════════
      NAV
      ════════════════════════════════════════ */
-      nav {
+      /* ════════════════════════════════════════
+     ANNOUNCEMENT BAR — one line, above the nav, dismissible
+     ════════════════════════════════════════ */
+      .ann {
         position: fixed;
         top: 0;
+        left: 0;
+        right: 0;
+        z-index: 101;
+        height: var(--lp-ann-h);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        padding: 0 44px 0 16px;
+        background: var(--lp-honey-light);
+        border-bottom: 1px solid rgba(212, 154, 92, 0.35);
+        font-size: 0.86rem;
+        line-height: 1.2;
+        color: var(--lp-text);
+      }
+      .ann-new {
+        flex: none;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8a5a24;
+        background: rgba(212, 154, 92, 0.25);
+        border-radius: var(--lp-r-pill);
+        padding: 3px 9px;
+      }
+      .ann-link {
+        text-decoration: none;
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ann-link:hover {
+        text-decoration: underline;
+      }
+      .ann-arrow {
+        transition: transform 0.25s var(--lp-ease);
+        display: inline-block;
+      }
+      .ann-link:hover .ann-arrow {
+        transform: translateX(3px);
+      }
+      .ann-x {
+        position: absolute;
+        right: 10px;
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--lp-text-2);
+        font-size: 15px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .ann-x:hover {
+        background: rgba(212, 154, 92, 0.22);
+        color: var(--lp-text);
+      }
+      .landing-custom {
+        padding-top: var(--lp-ann-h);
+      }
+      @media (max-width: 560px) {
+        .ann {
+          font-size: 0.76rem;
+          gap: 7px;
+          padding-left: 10px;
+        }
+        .ann-full {
+          display: none;
+        }
+      }
+
+      nav {
+        position: fixed;
+        top: var(--lp-ann-h);
         left: 0;
         right: 0;
         z-index: 100;
@@ -2254,6 +2339,43 @@
     <!-- GSAP + ScrollTrigger loaded dynamically to avoid Vite strict-mode wrapper -->
   </head>
   <body class="landing-custom" un-cloak>
+    <!-- ───────────── ANNOUNCEMENT ───────────── -->
+    <div class="ann" id="ann">
+      <span class="ann-new">New</span>
+      <a class="ann-link" href="https://pet.pocketpaw.xyz">
+        Paw, a desktop pet that reacts<span class="ann-full">
+          while your coding agent works</span
+        >
+        <span class="ann-arrow">&rarr;</span>
+      </a>
+      <button class="ann-x" id="annX" type="button" aria-label="Dismiss">
+        &times;
+      </button>
+    </div>
+    <script>
+      // Hide it for good once dismissed, and take its height out of the page
+      // so the nav sits back at the top. Private windows throw on storage,
+      // hence the try: a bar that cannot remember is better than a broken page.
+      (function () {
+        var root = document.documentElement;
+        var close = function (remember) {
+          document.getElementById("ann").style.display = "none";
+          root.style.setProperty("--lp-ann-h", "0px");
+          if (remember) {
+            try {
+              localStorage.setItem("pp-ann-paw", "1");
+            } catch (e) {}
+          }
+        };
+        try {
+          if (localStorage.getItem("pp-ann-paw")) close(false);
+        } catch (e) {}
+        document.getElementById("annX").addEventListener("click", function () {
+          close(true);
+        });
+      })();
+    </script>
+
     <!-- ───────────── NAV ───────────── -->
     <nav
       id="nav"
