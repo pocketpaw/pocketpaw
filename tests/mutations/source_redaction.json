@@ -1,0 +1,82 @@
+[
+  {
+    "label": "delete the redaction — serve source unconditionally",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "\"source\": getattr(p, \"source\", None) if source_visible else None,",
+    "replace": "\"source\": getattr(p, \"source\", None),",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_b_websocket_broadcast_payload_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_serializer_redacts_only_when_told_to"
+    ]
+  },
+  {
+    "label": "give source_visible a default — the gate fails open at every call site that forgets it",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:",
+    "replace": "def pocket_to_wire_dict(p, *, source_visible: bool = True) -> dict:",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_source_visible_is_required_and_has_no_default"
+    ]
+  },
+  {
+    "label": "D4 — let a share link serve source",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "return pocket_to_wire_dict(_pocket_to_domain(doc), source_visible=False)",
+    "replace": "return pocket_to_wire_dict(_pocket_to_domain(doc), source_visible=True)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_c_share_link_strips_source_on_every_tier",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_c_share_link_ignores_access_level"
+    ]
+  },
+  {
+    "label": "ignore the entitlement — gate everyone in the cohort, paid included",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    return ent.site_source_visible",
+    "replace": "    return bool(ent) and False",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_paid_workspace_is_unaffected",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_b_websocket_broadcast_is_unredacted_when_paid"
+    ]
+  },
+  {
+    "label": "D3 — drop the cohort check, so the flip retroactively gates existing pockets",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not getattr(doc, \"source_gated\", False):\n        return True",
+    "replace": "    if False:\n        return True",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_existing_free_pocket_keeps_its_source"
+    ]
+  },
+  {
+    "label": "never stamp the cohort at create — the gate can then never fire on the REST create path",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        source_gated=_source_gated_at_create(),\n        surface_profile=body.surface_profile,",
+    "replace": "        source_gated=False,\n        surface_profile=body.surface_profile,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_cohort_stamp_is_persisted_not_inferred"
+    ]
+  },
+  {
+    "label": "redact in get too — the pipeline reader goes dark and the gated cohort stops building",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _unredacted_wire_dict(doc, user_id)",
+    "replace": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _resolved_wire_dict(doc, user_id)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_edit_lane_still_reads_source",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_preview_pocket_still_serves_draft_content",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_draft_version_snapshot_survives_a_gated_edit"
+    ]
+  },
+  {
+    "label": "get_for_wire stops gating, so GET /pockets/{id} serves source to the whole cohort",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _resolved_wire_dict(doc, user_id)",
+    "replace": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _unredacted_wire_dict(doc, user_id)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_the_two_readers_split_only_on_source"
+    ]
+  }
+]

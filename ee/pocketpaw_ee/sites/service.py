@@ -8373,6 +8373,14 @@ async def read_site_source(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
+    # ``pockets_service.get`` is the pipeline reader and is NOT subject to SF-2's
+    # source gate, which is what this tool needs: it is the agent's only way to read
+    # a file before editing it, so gating it would not withhold code from a free
+    # workspace so much as end agent-driven editing there — "change the headline"
+    # begins with a read.
+    # KNOWN GAP, deliberately taken: a user who asks the agent to print the whole
+    # source map gets it on any tier. Closing that means a policy on what the agent
+    # may echo, not a narrower read here, and it is tracked separately.
     pocket = await pockets_service.get(pocket_id, user_id)
     source = pocket.get("source")
     engine = pocket.get("engine") or "ripple"
@@ -9573,6 +9581,13 @@ async def preview_pocket(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
+    # ``pockets_service.get`` is not subject to SF-2's source gate, and the Preview
+    # tab depends on that: it IS the editor, and the gate is about what a pocket read
+    # hands a browser, not about stopping an author seeing their own draft. Redacting
+    # here would blank the preview for every free-tier site while it was being built,
+    # which is worse than not gating at all. The DRAFT snapshot read below is a
+    # SECOND copy of the same source living in the versions spine and reached by a
+    # different path, so it is unaffected either way.
     pocket = await pockets_service.get(pocket_id, user_id)
     engine = pocket.get("engine") or "ripple"
 

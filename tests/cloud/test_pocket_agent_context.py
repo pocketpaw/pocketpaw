@@ -612,7 +612,7 @@ def test_pocket_wire_dict_normalizes_legacy_root_alias():
         shared_with=(),
     )
 
-    wire = pocket_to_wire_dict(pocket)
+    wire = pocket_to_wire_dict(pocket, source_visible=True)
     spec = wire["rippleSpec"]
     assert spec is not None
     assert "ui" in spec, "root should have been lifted to ui"
