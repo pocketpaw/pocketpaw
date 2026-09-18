@@ -1,0 +1,192 @@
+[
+  {
+    "label": "THE VERIFICATION GATE IS GONE — a host with no ownership claim is crawled, so the feature is a crawler-for-hire",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        record = await ownership.verified_origin_record(workspace_id, host)\n        if record is None:\n            continue",
+    "replace": "        record = await ownership.verified_origin_record(workspace_id, host)\n        if record is None:\n            return host, \"\"",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_an_unverified_origin_is_never_fetched",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_pending_claim_is_not_a_verified_origin",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_claim_verified_for_another_workspace_does_not_open_this_one"
+    ]
+  },
+  {
+    "label": "the gate is asked about the wrong tenant, so one workspace's proof opens the domain for every workspace",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        record = await ownership.verified_origin_record(workspace_id, host)",
+    "replace": "        record = await ownership.verified_origin_record(\"ws-beta\", host)",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_an_unverified_origin_is_never_fetched",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_verified_origin_is_crawled_into_the_html_lanes_source_map"
+    ]
+  },
+  {
+    "label": "THE FRESHNESS CHECK IS GONE — a proof from any date is acted on, so a domain that changed hands stays crawlable",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        saw_verified = True\n        if verification_is_fresh(record, now=now):\n            return host, \"\"",
+    "replace": "        saw_verified = True\n        if True:\n            return host, \"\"",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_stale_verification_is_never_fetched",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_verified_row_with_no_date_fails_closed",
+      "tests/ee/sites/test_foreign_grounding.py::test_the_first_fresh_origin_wins_when_an_earlier_one_is_stale"
+    ]
+  },
+  {
+    "label": "the freshness predicate always answers yes, so the window is decorative",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "    return age <= VERIFICATION_MAX_AGE",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_stale_verification_is_never_fetched",
+      "tests/ee/sites/test_foreign_grounding.py::test_the_first_fresh_origin_wins_when_an_earlier_one_is_stale"
+    ]
+  },
+  {
+    "label": "the window is widened to a century, which is the same as having none",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "VERIFICATION_MAX_AGE = timedelta(days=30)",
+    "replace": "VERIFICATION_MAX_AGE = timedelta(days=36500)",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_stale_verification_is_never_fetched",
+      "tests/ee/sites/test_foreign_grounding.py::test_the_first_fresh_origin_wins_when_an_earlier_one_is_stale"
+    ]
+  },
+  {
+    "label": "a verified row with no date FAILS OPEN, so a proof from an unknown time reads as fresh forever",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "    age = verification_age(record, now=now)\n    if age is None:\n        return False",
+    "replace": "    age = verification_age(record, now=now)\n    if age is None:\n        return True",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_verified_row_with_no_date_fails_closed"
+    ]
+  },
+  {
+    "label": "A FAILED CRAWL REPORTS SUCCESS — the harvest comes back clean and empty, so the owner is told nothing is wrong",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        logger.info(\"sites.grounding: crawl of %s failed (%s)\", host, exc.code)\n        return ForeignHarvest(host=host, error=_crawl_error_code(exc.code))",
+    "replace": "        logger.info(\"sites.grounding: crawl of %s failed (%s)\", host, exc.code)\n        return ForeignHarvest(host=host)",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_an_unreachable_origin_reports_crawl_failed",
+      "tests/ee/sites/test_foreign_grounding.py::test_an_origin_with_no_dns_reports_crawl_failed",
+      "tests/ee/sites/test_foreign_grounding.py::test_robots_disallowing_the_concierge_blocks_the_crawl_and_says_so",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_wildcard_robots_rule_still_applies",
+      "tests/ee/sites/test_foreign_grounding.py::test_the_byte_budget_reports_crawl_too_large"
+    ]
+  },
+  {
+    "label": "every crawl failure collapses to one code, so a robots block is indistinguishable from an unreachable host",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "    if code == \"sites.import_crawl_blocked_by_robots\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_robots_disallowing_the_concierge_blocks_the_crawl_and_says_so",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_wildcard_robots_rule_still_applies"
+    ]
+  },
+  {
+    "label": "an unclassified crawler exception escapes, so the failure surfaces as a generic sync error instead of a reported one",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "    except Exception:  # noqa: BLE001 — an UNREPORTED crawl failure is the bug here\n        logger.warning(\"sites.grounding: crawl of %s raised\", host, exc_info=True)\n        return ForeignHarvest(host=host, error=\"crawl_failed\")",
+    "replace": "    except AssertionError:  # narrowed on purpose\n        logger.warning(\"sites.grounding: crawl of %s raised\", host, exc_info=True)\n        return ForeignHarvest(host=host, error=\"crawl_failed\")",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_an_unexpected_crawler_failure_is_still_reported"
+    ]
+  },
+  {
+    "label": "a PARTIAL harvest reports itself complete, so a page that 502'd is read as a page that was deleted",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        return not self.error and self.pages_failed == 0",
+    "replace": "        return not self.error",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_page_that_fails_mid_crawl_marks_the_harvest_incomplete",
+      "tests/cloud/test_site_foreign_grounding.py::test_a_partial_crawl_ingests_what_arrived_but_prunes_nothing"
+    ]
+  },
+  {
+    "label": "the sync PRUNES after a partial crawl, deleting the articles of whichever pages happened to fail",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    if harvest.complete:\n        await _prune_stale(scope, previous, report)\n        await _record_sync(site, report, previous=previous)\n    else:\n        report.error = \"crawl_partial\"\n        await _record_sync(site, report, previous=previous, keep_previous=True)",
+    "replace": "    await _prune_stale(scope, previous, report)\n    await _record_sync(site, report, previous=previous)",
+    "tests": [
+      "tests/cloud/test_site_foreign_grounding.py::test_a_partial_crawl_ingests_what_arrived_but_prunes_nothing"
+    ]
+  },
+  {
+    "label": "a partial sync forgets the ids it did not re-produce, stranding those articles beyond any future prune",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    if report.ingested and keep_previous:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_site_foreign_grounding.py::test_a_partial_crawl_ingests_what_arrived_but_prunes_nothing"
+    ]
+  },
+  {
+    "label": "the sync ignores the harvest's error code and ingests whatever came back, so a refused origin reads as an empty site",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    harvest = await foreign_grounding.harvest_foreign_site(site)\n    if harvest.error:",
+    "replace": "    harvest = await foreign_grounding.harvest_foreign_site(site)\n    if harvest.error and False:",
+    "tests": [
+      "tests/cloud/test_site_foreign_grounding.py::test_an_unproved_origin_ingests_nothing_and_reports_why",
+      "tests/cloud/test_site_foreign_grounding.py::test_a_failed_crawl_reports_the_reason_and_ingests_nothing"
+    ]
+  },
+  {
+    "label": "a foreign site falls back to the pocket lanes, so it syncs zero documents again",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    if getattr(site, \"foreign_origin\", False):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_site_foreign_grounding.py::test_a_foreign_site_syncs_a_non_zero_document_count",
+      "tests/cloud/test_site_foreign_grounding.py::test_a_foreign_site_is_no_longer_reported_as_skipped",
+      "tests/cloud/test_site_foreign_grounding.py::test_a_concierge_read_returns_the_crawled_content"
+    ]
+  },
+  {
+    "label": "grounding fetches the assets it then discards, spending a customer's bandwidth on stylesheets nobody can quote",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "            fetch_assets=False,",
+    "replace": "            fetch_assets=True,",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_grounding_fetches_no_assets_and_that_is_most_of_the_traffic"
+    ]
+  },
+  {
+    "label": "the page budget is not clamped, so a caller can widen the crawl past the module's own ceiling",
+    "file": "ee/pocketpaw_ee/sites/url_crawler.py",
+    "find": "    page_budget = MAX_CRAWL_PAGES if max_pages is None else max(1, min(max_pages, MAX_CRAWL_PAGES))",
+    "replace": "    page_budget = MAX_CRAWL_PAGES if max_pages is None else max(1, max_pages)",
+    "tests": [
+      "tests/ee/sites/test_crawler_budget_knobs.py::test_max_pages_cannot_widen_past_the_module_cap"
+    ]
+  },
+  {
+    "label": "robots is read for a hardcoded agent, so we obey a rule about a name we do not send",
+    "file": "ee/pocketpaw_ee/sites/url_crawler.py",
+    "find": "        return robots.can_fetch(user_agent, url)",
+    "replace": "        return robots.can_fetch(USER_AGENT, url)",
+    "tests": [
+      "tests/ee/sites/test_crawler_budget_knobs.py::test_the_announced_user_agent_is_the_one_robots_is_read_for",
+      "tests/ee/sites/test_foreign_grounding.py::test_robots_disallowing_the_concierge_blocks_the_crawl_and_says_so",
+      "tests/ee/sites/test_foreign_grounding.py::test_robots_disallowing_only_the_importer_does_not_block_grounding"
+    ]
+  },
+  {
+    "label": "a page that failed to fetch is warned about but not counted, so no consumer can tell a harvest is incomplete",
+    "file": "ee/pocketpaw_ee/sites/url_crawler.py",
+    "find": "                result.stats.pages_failed += 1\n                result.warnings.append(f\"skipped {page_url} — fetch failed\")",
+    "replace": "                result.warnings.append(f\"skipped {page_url} — fetch failed\")",
+    "tests": [
+      "tests/ee/sites/test_crawler_budget_knobs.py::test_a_page_whose_fetch_RAISES_is_counted_too"
+    ]
+  },
+  {
+    "label": "a non-200 page is warned about but not counted, the other half of the same blind spot",
+    "file": "ee/pocketpaw_ee/sites/url_crawler.py",
+    "find": "                result.stats.pages_failed += 1\n                result.warnings.append(f\"skipped {page_url} — HTTP {fetched.status}\")",
+    "replace": "                result.warnings.append(f\"skipped {page_url} — HTTP {fetched.status}\")",
+    "tests": [
+      "tests/ee/sites/test_crawler_budget_knobs.py::test_a_page_that_answers_badly_is_counted_not_only_warned",
+      "tests/ee/sites/test_foreign_grounding.py::test_a_page_that_fails_mid_crawl_marks_the_harvest_incomplete"
+    ]
+  }
+]

@@ -27,6 +27,14 @@
 # navigational-rel list (canonical, prefetch, alternate) is a DENYLIST, so an
 # unfamiliar rel is still fetched and the content-type check is the backstop.
 #
+# TWO CONSUMERS, ONE POLICY. The import endpoint wants a deployable site, so it
+# takes the defaults (every cap above, assets included). Site-KB GROUNDING
+# (sites.foreign_grounding) wants prose only, and passes ``max_pages`` +
+# ``fetch_assets=False`` to say so: a stylesheet cannot be quoted to a visitor, so
+# fetching one is a request against a customer's origin that can only be thrown
+# away. Both knobs NARROW ONLY — ``max_pages`` is clamped to MAX_CRAWL_PAGES, so a
+# caller can spend less of the budget but never more.
+#
 # Harvested paths run through import_service._safe_entry_path, the SAME sanitizer
 # zip entries pass. Absolute same-origin URLs in HTML/CSS are rewritten
 # root-relative; CSS url()/@import refs are chased same-origin. robots.txt is
@@ -210,6 +218,10 @@ class CrawlStats:
     """Counters surfaced on the import report."""
 
     pages_fetched: int = 0
+    # Non-seed pages that were queued and did not arrive (fetch error, non-200).
+    # Each one is ALSO a warning; the counter exists because a consumer has to
+    # decide "is this harvest complete" without parsing warning prose.
+    pages_failed: int = 0
     assets_fetched: int = 0
     bytes_fetched: int = 0
     skipped_by_robots: int = 0
@@ -218,6 +230,7 @@ class CrawlStats:
     def as_dict(self) -> dict[str, int]:
         return {
             "pages_fetched": self.pages_fetched,
+            "pages_failed": self.pages_failed,
             "assets_fetched": self.assets_fetched,
             "bytes_fetched": self.bytes_fetched,
             "skipped_by_robots": self.skipped_by_robots,
@@ -261,11 +274,16 @@ async def _load_robots(
     return parser, None
 
 
-def _allowed_by_robots(robots: robotparser.RobotFileParser | None, url: str) -> bool:
+def _allowed_by_robots(
+    robots: robotparser.RobotFileParser | None, url: str, user_agent: str
+) -> bool:
+    """robots for the UA WE ANNOUNCE, not a hardcoded one. A caller that fetches
+    under its own identity must be checked under that identity, or the operator's
+    rule for the name in our request header is silently the wrong rule."""
     if robots is None:
         return True
     try:
-        return robots.can_fetch(USER_AGENT, url)
+        return robots.can_fetch(user_agent, url)
     except Exception:  # noqa: BLE001 — a pathological robots file never blocks the crawl
         return True
 
@@ -277,18 +295,36 @@ async def crawl_site(
     transport: httpx.AsyncBaseTransport | None = None,
     resolver: Callable[[str], Awaitable[list[str]]] | None = None,
     politeness_delay: float | None = None,
+    max_pages: int | None = None,
+    fetch_assets: bool = True,
+    user_agent: str = USER_AGENT,
 ) -> CrawlResult:
     """BFS-crawl ``url``'s site (same exact host only) into a FileMap.
 
     Raises on the FATAL failure modes — bad/forbidden seed, unreachable seed,
     seed blocked by robots, byte budget exceeded. Per-page/per-asset problems
     degrade to report warnings. ``transport``/``resolver`` are test seams;
-    ``politeness_delay`` overrides the module default (tests pass 0)."""
+    ``politeness_delay`` overrides the module default (tests pass 0).
+
+    ``max_pages`` and ``fetch_assets`` NARROW the budget for a caller that wants
+    less than a deployable copy of the site. ``max_pages`` is clamped into
+    [1, MAX_CRAWL_PAGES] so it can only spend less; ``fetch_assets=False`` skips
+    the asset pass entirely, which also means a page reachable ONLY through a
+    <link rel> is not discovered (that page arrives via the asset loop's
+    content-type guard). The grounding caller accepts that: it wants prose, and a
+    page nothing links to with <a href> is not part of the site's navigation.
+
+    ``user_agent`` is the identity announced to the customer's server AND the
+    identity robots.txt is evaluated for — the two must be the same string or an
+    operator's rule about the name in our header is not the rule we obeyed."""
     # Lazy import — import_service imports this module; the safe-path rule is
     # shared with the zip path deliberately (ONE sanitizer for both imports).
     from pocketpaw_ee.sites.import_service import _safe_entry_path
 
     delay = POLITENESS_DELAY_SEC if politeness_delay is None else politeness_delay
+    # Clamped, not trusted: MAX_CRAWL_PAGES stays the ceiling no matter what a
+    # caller asks for, so this knob cannot be used to widen the crawl.
+    page_budget = MAX_CRAWL_PAGES if max_pages is None else max(1, min(max_pages, MAX_CRAWL_PAGES))
     seed = validate_seed_url(url)
     # Crawl scope is MUTABLE: if the seed redirects to another host (apex->www,
     # the overwhelmingly common case), we re-seed to the final host after the
@@ -306,7 +342,12 @@ async def crawl_site(
     }
 
     result = CrawlResult()
-    fetcher = SafeFetcher(total_byte_cap=total_byte_cap, transport=transport, resolver=resolver)
+    fetcher = SafeFetcher(
+        total_byte_cap=total_byte_cap,
+        user_agent=user_agent,
+        transport=transport,
+        resolver=resolver,
+    )
     fetched_once = False
 
     async def _polite_fetch(target: str, *, allowed_host: str | None = None) -> FetchResult:
@@ -376,10 +417,10 @@ async def crawl_site(
                 seen_assets.add(normalized)
                 asset_queue.append(normalized)
 
-        while queue and result.stats.pages_fetched < MAX_CRAWL_PAGES:
+        while queue and result.stats.pages_fetched < page_budget:
             page_url, depth = queue.popleft()
             is_seed = page_url == seed_url
-            if not _allowed_by_robots(robots, page_url):
+            if not _allowed_by_robots(robots, page_url, user_agent):
                 result.stats.skipped_by_robots += 1
                 if is_seed:
                     raise CrawlError(
@@ -402,6 +443,7 @@ async def crawl_site(
                         "the seed URL could not be fetched",
                         code="sites.import_crawl_seed_unreachable",
                     ) from exc
+                result.stats.pages_failed += 1
                 result.warnings.append(f"skipped {page_url} — fetch failed")
                 continue
             if is_seed and urlparse(fetched.url).netloc.lower() != scope["netloc"]:
@@ -412,6 +454,7 @@ async def crawl_site(
                         f"the seed URL answered HTTP {fetched.status}",
                         code="sites.import_crawl_seed_unreachable",
                     )
+                result.stats.pages_failed += 1
                 result.warnings.append(f"skipped {page_url} — HTTP {fetched.status}")
                 continue
 
@@ -449,7 +492,7 @@ async def crawl_site(
                 normalized = _normalize(absolute)
                 if normalized in seen_pages or depth >= MAX_CRAWL_DEPTH:
                     continue
-                if len(seen_pages) >= MAX_CRAWL_PAGES:
+                if len(seen_pages) >= page_budget:
                     pages_truncated = True
                     continue
                 seen_pages.add(normalized)
@@ -480,9 +523,9 @@ async def crawl_site(
         # would let this loop drain the whole 2000-entry queue on a link-heavy
         # site — several hundred page fetches where 200 was the ceiling.
         asset_slots = 0
-        while asset_queue and asset_slots < MAX_CRAWL_ASSETS:
+        while fetch_assets and asset_queue and asset_slots < MAX_CRAWL_ASSETS:
             asset_url = asset_queue.popleft()
-            if not _allowed_by_robots(robots, asset_url):
+            if not _allowed_by_robots(robots, asset_url, user_agent):
                 result.stats.skipped_by_robots += 1
                 continue
             try:
@@ -520,7 +563,7 @@ async def crawl_site(
                 )
                 if rel is None:
                     continue
-                if result.stats.pages_fetched >= MAX_CRAWL_PAGES:
+                if result.stats.pages_fetched >= page_budget:
                     pages_truncated = True
                     continue
                 html_text = fetched.body.decode("utf-8", errors="replace")
@@ -551,13 +594,17 @@ async def crawl_site(
             result.stats.assets_fetched += 1
             asset_slots += 1
 
-        if asset_queue:
+        if asset_queue and not fetch_assets:
+            result.warnings.append(
+                f"{len(asset_queue)} asset(s) not fetched — this crawl harvests pages only"
+            )
+        elif asset_queue:
             result.warnings.append(
                 f"asset cap reached ({MAX_CRAWL_ASSETS}) — {len(asset_queue)} assets not fetched"
             )
         if queue or pages_truncated:
             result.warnings.append(
-                f"page cap reached ({MAX_CRAWL_PAGES}) — some linked pages were not crawled"
+                f"page cap reached ({page_budget}) — some linked pages were not crawled"
             )
         result.stats.cross_origin_refs = len(cross_origin)
         result.stats.bytes_fetched = fetcher.bytes_fetched

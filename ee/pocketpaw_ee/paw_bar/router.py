@@ -1833,6 +1833,10 @@ async def render_preview_tokens(
 # two endpoints are the owner's window into it — what the concierge currently
 # knows, and a way to re-run the sync without re-publishing.
 #
+# For a FOREIGN site the sync CRAWLS the customer's verified origin
+# (``sites.foreign_grounding``), so this POST is one of the only two places that
+# happens — the other is the bind. It never happens on a visitor's turn.
+#
 # Gates: the read uses ``paw_bar.read`` and the sync ``paw_bar.manage`` (both
 # ADMIN). The sync is a mutation that spends compute, so it does not ride the read.
 # ---------------------------------------------------------------------------
@@ -1845,9 +1849,20 @@ class ConciergeKnowledgeResponse(BaseModel):
     """What a site's concierge currently knows, and how the last sync went.
 
     ``status`` is "" for a clean sync; otherwise a stable machine code the dashboard
-    can turn into a sentence: ``never_synced`` (nothing has run yet), ``no_content``
-    (the pocket holds no ingestable pages — the case for a foreign site we do not
-    host), ``pocket_unavailable`` or ``sync_failed``.
+    can turn into a sentence. Every lane: ``never_synced`` (nothing has run yet),
+    ``no_content`` (nothing ingestable was found), ``ingest_failed``,
+    ``pocket_unavailable`` or ``sync_failed``.
+
+    A FOREIGN site — a concierge embedded on a page we do not host — is grounded by
+    crawling its own verified origin, so it adds the codes that crawl can end on,
+    and each names a cause the owner can act on instead of a generic failure:
+    ``origin_missing`` (the site carries no origin), ``origin_unverified`` (this
+    workspace has not proved it controls it), ``origin_verification_stale`` (it did,
+    longer ago than ``foreign_grounding.VERIFICATION_MAX_AGE`` — re-verify the
+    domain), ``origin_unfetchable``, ``crawl_blocked_by_robots`` (the customer's own
+    robots.txt disallows our crawler, which is otherwise unguessable from their
+    side), ``crawl_too_large``, ``crawl_failed``, and ``crawl_partial`` (pages were
+    ingested but some could not be read, so nothing was pruned).
     """
 
     site_id: str
