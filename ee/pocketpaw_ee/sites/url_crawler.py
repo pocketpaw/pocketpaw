@@ -2,7 +2,9 @@
 #
 # Created 2026-07-23 (feat/sites-import-crawler, stacked on SI-4): the fetch half of
 # POST /sites/import/from-url. Fills the ``crawl_site_from_url`` seam SI-4 left open.
-# SECURITY-CRITICAL — this module is the SSRF surface of the import path. Guards:
+# SECURITY-CRITICAL — this module is the SSRF surface of the import path. The
+# guards themselves now live in safe_fetch.py (see the 2026-09-18 note below);
+# they are listed here because this is where they were written and reviewed:
 #   * Seed/hop URL validation: http(s) only, no credentials in the URL, ports limited
 #     to 80/443/default, length-capped (``validate_seed_url`` — the endpoint calls it
 #     too, so a hostile seed 422s before anything is minted or fetched).
@@ -47,16 +49,25 @@
 # <link rel> values outright (canonical, prefetch, alternate & co) — the
 # content-type guard stays as the backstop for the ones it can't know about.
 # Scope, SSRF, robots and byte-budget behaviour are unchanged.
+# Edited 2026-09-18 (SF-7, feat/sites-single-url-fetch): the SSRF fetch machinery
+# — URL-shape validation, the forbidden-IP check, the DNS resolve, the IP-pinned
+# streaming GET and the manual redirect loop — MOVED VERBATIM to
+# ee/pocketpaw_ee/sites/safe_fetch.py and is imported back. A coming slice has to
+# fetch ONE customer-controlled URL (a domain-ownership token at
+# /.well-known/paw-verify), and the rule is that this codebase has exactly one
+# SSRF surface; burying it inside a BFS crawler left that caller with no honest
+# way to reuse it short of a depth-1 crawl. What stayed here is the CRAWL: BFS,
+# scope, robots, the byte budget, the HTML/CSS harvest. Behaviour is unchanged
+# and the error classes are the same objects under their old names, so
+# `except CrawlError` and every existing test keep working.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import re
-import socket
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -68,14 +79,37 @@ from urllib.parse import unquote, urljoin, urlparse, urlunparse
 import httpx
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites.safe_fetch import (
+    USER_AGENT,
+    FetchBudgetExceeded,
+    FetchError,
+    FetchResult,
+    SafeFetcher,
+    validate_fetch_url,
+)
 
 logger = logging.getLogger(__name__)
 
-# Honest UA — robots groups for "pawsitesimporter" or "*" apply to us.
-USER_AGENT = "PawSitesImporter/1.0 (+https://pocketpaw.dev; site-import crawler)"
+# Compat aliases — the SSRF fetch machinery moved to safe_fetch (SF-7) but this
+# module is its historical home, and import_service plus the crawler test suite
+# import these names from here. They are the SAME objects, so `except
+# CrawlError` and `isinstance` keep working across the move.
+CrawlError = FetchError
+CrawlBudgetExceeded = FetchBudgetExceeded
+validate_seed_url = validate_fetch_url
 
-MAX_URL_LENGTH = 2048
-MAX_REDIRECTS = 5
+__all__ = [
+    "CrawlBudgetExceeded",
+    "CrawlError",
+    "CrawlResult",
+    "CrawlStats",
+    "FetchResult",
+    "SafeFetcher",
+    "crawl_site",
+    "validate_seed_url",
+]
+
+
 MAX_CRAWL_DEPTH = 3
 MAX_CRAWL_PAGES = 50
 MAX_CRAWL_ASSETS = 200
@@ -83,293 +117,12 @@ MAX_CRAWL_ASSETS = 200
 # discovery sets (assets to fetch, cross-origin URLs to count) stop growing at
 # this bound so link soup can't balloon the crawler's memory.
 MAX_TRACKED_URLS = 2000
-# Per-response cap — one file may not eat the whole budget.
-MAX_FETCH_BYTES = 10 * 1024 * 1024
-PER_FETCH_TIMEOUT_SEC = 10.0
 # Politeness delay between consecutive fetches (tests pass 0).
 POLITENESS_DELAY_SEC = 0.15
 
-_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-_CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
-_NAT64_V6 = ipaddress.ip_network("64:ff9b::/96")
 
 _CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", re.IGNORECASE)
 _CSS_IMPORT_RE = re.compile(r"@import\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
-
-
-class CrawlError(RuntimeError):
-    """A crawl failure with a FIXED, safe message (it lands in the import report,
-    which viewers read — never raw upstream text, never a traceback)."""
-
-    def __init__(self, message: str, *, code: str = "sites.import_crawl_failed") -> None:
-        super().__init__(message)
-        self.code = code
-
-
-class CrawlBudgetExceeded(CrawlError):
-    """The total crawl byte budget was crossed — the whole import fails closed."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="sites.import_crawl_budget_exceeded")
-
-
-# --------------------------------------------------------------------------- #
-# URL + IP validation (the SSRF floors)
-# --------------------------------------------------------------------------- #
-
-
-def validate_seed_url(url: str) -> Any:
-    """Validate one crawl-target URL's SHAPE and return its ``urlparse`` result.
-
-    Enforced (each raises ``ValidationError`` → 422 at the endpoint, a failed
-    report in the background crawl): http/https only; a real hostname; NO
-    credentials in the URL; NO ports beyond 80/443/default; length cap. A
-    literal-IP host is additionally run through the forbidden-IP check here, so
-    ``http://169.254.169.254/`` dies at validation, before any socket."""
-    candidate = (url or "").strip()
-    if not candidate or len(candidate) > MAX_URL_LENGTH:
-        raise ValidationError("sites.import_url_invalid", "A non-empty http(s) URL is required.")
-    parsed = urlparse(candidate)
-    if parsed.scheme not in ("http", "https"):
-        raise ValidationError(
-            "sites.import_url_invalid", "Only http and https URLs can be imported."
-        )
-    if not parsed.hostname:
-        raise ValidationError("sites.import_url_invalid", "The import URL must carry a hostname.")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValidationError(
-            "sites.import_url_forbidden", "URLs with embedded credentials are not allowed."
-        )
-    try:
-        port = parsed.port  # raises ValueError on a malformed port
-    except ValueError as exc:
-        raise ValidationError(
-            "sites.import_url_invalid", "The import URL port is invalid."
-        ) from exc
-    if port not in (None, 80, 443):
-        raise ValidationError(
-            "sites.import_url_forbidden",
-            "Only the standard web ports (80/443) can be imported.",
-        )
-    try:
-        literal = ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        literal = None
-    if literal is not None:
-        reason = _forbidden_ip_reason(literal)
-        if reason:
-            raise ValidationError(
-                "sites.import_url_forbidden",
-                f"The import URL points at a non-public address ({reason}).",
-            )
-    return parsed
-
-
-def _forbidden_ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
-    """Why this address may NOT be fetched, or None when it is publicly routable.
-
-    v6 forms that EMBED a v4 address (IPv4-mapped, 6to4, Teredo, NAT64) are
-    re-checked as the embedded v4 — ``::ffff:127.0.0.1`` is still loopback."""
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            return _forbidden_ip_reason(ip.ipv4_mapped)
-        if ip.sixtofour is not None and _forbidden_ip_reason(ip.sixtofour):
-            return "6to4-embedded private address"
-        if ip.teredo is not None and any(_forbidden_ip_reason(a) for a in ip.teredo):
-            return "teredo-embedded private address"
-        if ip in _NAT64_V6:
-            embedded = ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
-            if _forbidden_ip_reason(embedded):
-                return "NAT64-embedded private address"
-    if ip.is_unspecified:
-        return "unspecified address"
-    if ip.is_loopback:
-        return "loopback address"
-    if ip.is_link_local:
-        return "link-local address"
-    if ip.is_multicast:
-        return "multicast address"
-    if ip.is_reserved:
-        return "reserved address"
-    if ip.is_private:
-        return "private address"
-    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_V4:
-        return "carrier-grade NAT address"
-    return None
-
-
-async def _default_resolve(host: str) -> list[str]:
-    """Resolve ``host`` to its addresses via the event loop's resolver."""
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    ips: list[str] = []
-    for info in infos:
-        addr = info[4][0]
-        if addr not in ips:
-            ips.append(addr)
-    return ips
-
-
-# --------------------------------------------------------------------------- #
-# The SSRF-pinned fetcher
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class FetchResult:
-    """One completed (post-redirect) fetch."""
-
-    url: str
-    status: int
-    content_type: str
-    body: bytes
-
-
-class SafeFetcher:
-    """httpx-based fetcher that resolves DNS itself and pins the connection.
-
-    Every ``fetch`` re-validates the URL shape, resolves the host, checks EVERY
-    resolved address against the forbidden ranges, then connects to the validated
-    IP with the original Host header (and SNI hostname for https) — the classic
-    check-then-fetch TOCTOU is closed because the socket never re-resolves.
-    Redirects are followed manually (max ``MAX_REDIRECTS``) with the full check
-    re-run per hop. Responses stream against a per-fetch cap and a shared total
-    byte budget. ``transport`` / ``resolver`` are test seams (MockTransport +
-    a fake resolver — tests never touch the network)."""
-
-    def __init__(
-        self,
-        *,
-        total_byte_cap: int,
-        per_fetch_cap: int = MAX_FETCH_BYTES,
-        timeout_sec: float = PER_FETCH_TIMEOUT_SEC,
-        transport: httpx.AsyncBaseTransport | None = None,
-        resolver: Callable[[str], Awaitable[list[str]]] | None = None,
-    ) -> None:
-        self._total_byte_cap = total_byte_cap
-        self._per_fetch_cap = per_fetch_cap
-        self._resolver = resolver or _default_resolve
-        self.bytes_fetched = 0
-        self._client = httpx.AsyncClient(
-            transport=transport,
-            timeout=httpx.Timeout(timeout_sec),
-            follow_redirects=False,  # hops are validated manually
-            trust_env=False,  # no env proxies — the pin must not be bypassed
-            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
-        )
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-    async def _checked_ip(self, host: str) -> str:
-        """Resolve ``host`` and return a validated connect address. ALL resolved
-        addresses must be public — one private record fails the whole host."""
-        try:
-            literal = ipaddress.ip_address(host)
-        except ValueError:
-            literal = None
-        if literal is not None:
-            reason = _forbidden_ip_reason(literal)
-            if reason:
-                raise ValidationError(
-                    "sites.import_url_forbidden",
-                    f"Crawl target resolves to a non-public address ({reason}).",
-                )
-            return str(literal)
-        try:
-            ips = await self._resolver(host)
-        except (OSError, socket.gaierror) as exc:
-            raise CrawlError(
-                "DNS resolution failed for the crawl target",
-                code="sites.import_crawl_dns_failed",
-            ) from exc
-        if not ips:
-            raise CrawlError(
-                "DNS resolution returned no addresses for the crawl target",
-                code="sites.import_crawl_dns_failed",
-            )
-        for raw in ips:
-            try:
-                addr = ipaddress.ip_address(raw)
-            except ValueError as exc:
-                raise CrawlError(
-                    "DNS resolution returned an unparseable address",
-                    code="sites.import_crawl_dns_failed",
-                ) from exc
-            reason = _forbidden_ip_reason(addr)
-            if reason:
-                raise ValidationError(
-                    "sites.import_url_forbidden",
-                    f"Crawl target resolves to a non-public address ({reason}).",
-                )
-        return ips[0]
-
-    async def fetch(self, url: str, *, allowed_host: str | None = None) -> FetchResult:
-        """GET ``url`` with the full SSRF pipeline, following redirects manually.
-
-        Every hop is SSRF-revalidated regardless. ``allowed_host`` adds an
-        orthogonal SCOPE guard: when set, a redirect that leaves that host
-        raises ``sites.import_crawl_offsite_redirect`` so a same-site asset/page
-        can't 30x us into fetching (and deploying) foreign content. The seed
-        fetch passes ``None`` — the caller re-seeds the crawl host from the
-        final URL instead (so an apex->www redirect imports the whole site)."""
-        current = url
-        for _hop in range(MAX_REDIRECTS + 1):
-            parsed = validate_seed_url(current)
-            ip = await self._checked_ip(parsed.hostname)
-            status, content_type, location, body = await self._pinned_get(parsed, ip)
-            if status in _REDIRECT_STATUSES:
-                if not location:
-                    raise CrawlError("redirect response carried no Location header")
-                current = urljoin(current, location)
-                if allowed_host is not None and urlparse(current).netloc.lower() != allowed_host:
-                    raise CrawlError(
-                        f"redirect left the site ({allowed_host} -> "
-                        f"{urlparse(current).netloc.lower()})",
-                        code="sites.import_crawl_offsite_redirect",
-                    )
-                continue
-            return FetchResult(url=current, status=status, content_type=content_type, body=body)
-        raise CrawlError(f"too many redirects (max {MAX_REDIRECTS})")
-
-    async def _pinned_get(self, parsed: Any, ip: str) -> tuple[int, str, str, bytes]:
-        """One GET pinned to ``ip``: URL host swapped for the validated address,
-        original Host header (and SNI hostname for https) supplied explicitly."""
-        port = parsed.port
-        default_port = port is None or (parsed.scheme, port) in (("http", 80), ("https", 443))
-        host_header = parsed.hostname if default_port else f"{parsed.hostname}:{port}"
-        ip_host = f"[{ip}]" if ":" in ip else ip
-        netloc = ip_host if default_port else f"{ip_host}:{port}"
-        pinned = urlunparse((parsed.scheme, netloc, parsed.path or "/", "", parsed.query, ""))
-        request = self._client.build_request("GET", pinned, headers={"Host": host_header})
-        if parsed.scheme == "https":
-            # TLS must negotiate + verify against the REAL name, not the IP.
-            request.extensions["sni_hostname"] = parsed.hostname
-        response = await self._client.send(request, stream=True)
-        try:
-            declared = response.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > self._per_fetch_cap:
-                raise CrawlError(
-                    "response exceeds the per-fetch size cap",
-                    code="sites.import_crawl_response_too_large",
-                )
-            buf = bytearray()
-            async for chunk in response.aiter_bytes():
-                buf += chunk
-                if len(buf) > self._per_fetch_cap:
-                    raise CrawlError(
-                        "response exceeds the per-fetch size cap",
-                        code="sites.import_crawl_response_too_large",
-                    )
-                if self.bytes_fetched + len(buf) > self._total_byte_cap:
-                    raise CrawlBudgetExceeded("crawl exceeded the total byte budget")
-        finally:
-            await response.aclose()
-            # No cookie persistence — the crawler is stateless by design.
-            self._client.cookies.clear()
-        self.bytes_fetched += len(buf)
-        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        return response.status_code, content_type, response.headers.get("location", ""), bytes(buf)
 
 
 # --------------------------------------------------------------------------- #
