@@ -507,13 +507,169 @@ async def test_reclaiming_a_pending_origin_remints_the_token_and_invalidates_the
 
 
 async def test_reclaiming_a_verified_origin_does_not_unprove_it(beanie_test_db):
+    """Fresh or stale, a re-claim returns the row untouched — and the SAME token.
+
+    The fresh half is the original assertion and still holds: re-minting there
+    would unprove a live binding for no reason.
+
+    The stale half is why the fresh half is safe now that ``verified_at`` is
+    load-bearing. A re-claim that re-minted a stale row's token would demand the
+    owner publish a NEW file before they could re-verify, and CLAIM_TTL (7 days)
+    is shorter than the freshness window (30), so that would be the price of
+    every renewal. Keeping the token is what makes ``verify_origin``'s re-probe a
+    single click: the file the owner published long ago is still the file we
+    compare.
+    """
     claim = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
-    await _verify(routes=_well_known(claim.token.encode()))
+    token = claim.token
+    await _verify(routes=_well_known(token.encode()))
 
     again = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
 
     assert again.status == "verified"
+    assert again.token == token
     assert await ownership.verified_origin(_WS_A, _HOST) is True
+
+    await _age_the_proof(days=31)
+    stale_again = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+
+    assert stale_again.status == "verified"
+    assert stale_again.token == token, (
+        "a stale row must keep its token, or re-verifying costs the owner a new file"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Re-verification — the way back from a proof a consumer has refused
+#
+# ``verified_at`` became load-bearing when the 30-day freshness window landed:
+# the mint, the grounding crawl and the concierge panel all refuse a proof older
+# than it, and all three tell the owner to verify the domain again. Before these
+# tests that click was a no-op — ``verify_origin`` returned early on a verified
+# row and ``_record_verified`` is the only writer of ``verified_at`` — so the
+# date froze at the first proof and a paid concierge could reach a state whose
+# knowledge can never refresh while the renewal sweep keeps charging for it.
+# --------------------------------------------------------------------------- #
+
+
+async def _age_the_proof(*, days: int) -> SiteOriginClaim:
+    """Backdate a verified row's proof AND its token TTL by ``days``.
+
+    Both, deliberately. CLAIM_TTL is 7 days and the freshness window is 30, so
+    any real 31-day-old proof sits on a row whose ``expires_at`` passed weeks
+    ago. A fixture that aged only ``verified_at`` would describe a state that
+    cannot occur, and would pass against code that still refuses an expired row.
+    """
+    claim = await SiteOriginClaim.find_one(SiteOriginClaim.workspace == _WS_A)
+    assert claim is not None
+    now = datetime.now(UTC)
+    claim.verified_at = now - timedelta(days=days)
+    claim.issued_at = now - timedelta(days=days)
+    claim.expires_at = now - timedelta(days=days - ownership.CLAIM_TTL.days)
+    await claim.save()
+    return claim
+
+
+async def test_a_stale_proof_is_re_proved_and_the_date_moves(beanie_test_db):
+    """The window crossing, end to end: verify, age past 30 days, re-verify.
+
+    The last assertion is the one a customer feels — it asks the SAME predicate
+    the crawl and the bind ask, so this proves the concierge can ground itself
+    again rather than merely that a field changed.
+    """
+    from pocketpaw_ee.sites import foreign_grounding
+
+    claim = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+    await _verify(routes=_well_known(claim.token.encode()))
+    stale = await _age_the_proof(days=31)
+    assert foreign_grounding.verification_is_fresh(stale) is False, (
+        "the fixture must actually be stale, or this test passes for the wrong reason"
+    )
+
+    again = await _verify(routes=_well_known(claim.token.encode()))
+
+    assert again.status == "verified"
+    assert again.verified_at is not None
+    assert again.verified_at > stale.verified_at
+    record = await ownership.verified_origin_record(_WS_A, _HOST)
+    assert foreign_grounding.verification_is_fresh(record) is True
+
+
+async def test_re_verifying_a_verified_row_actually_FETCHES(beanie_test_db):
+    """A re-stamp without a fetch is not a proof, and it is this fix's own
+    failure mode: the cheap way to make the window crossing above pass is to move
+    the date on a row nobody re-read. Asserted on the transport, which is the
+    only thing that can tell those two apart."""
+    claim = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+    await _verify(routes=_well_known(claim.token.encode()))
+    await _age_the_proof(days=31)
+
+    seen: list[httpx.Request] = []
+    await _verify(routes=_well_known(claim.token.encode()), seen=seen)
+
+    assert seen, "the re-verify issued no request, so it re-stamped a proof it never checked"
+    assert [r.url.path for r in seen] == [ownership.WELL_KNOWN_PATH]
+
+
+async def test_a_re_verify_that_finds_NOTHING_leaves_the_old_proof_standing(beanie_test_db):
+    """A domain that stopped serving its token is told so — and keeps its row.
+
+    Two properties in one test because they are one decision. The refusal is what
+    proves the fetch was real (a blind re-stamp would have returned success), and
+    the untouched row is what keeps a failed re-probe from cutting off a live,
+    paid binding: the owner gets a sentence about their server, not a dead
+    concierge.
+    """
+    claim = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+    await _verify(routes=_well_known(claim.token.encode()))
+    stale = await _age_the_proof(days=31)
+
+    with pytest.raises(ValidationError) as exc:
+        await _verify(routes={})
+
+    assert exc.value.code == "sites.origin_token_missing"
+    reloaded = await SiteOriginClaim.find_one(SiteOriginClaim.workspace == _WS_A)
+    assert reloaded is not None
+    assert reloaded.status == "verified"
+    assert reloaded.verified_at == stale.verified_at
+
+
+async def test_a_wrong_token_on_a_re_verify_does_not_re_stamp_the_date(beanie_test_db):
+    """The other failure a re-probe must survive: the domain changed hands and
+    the new owner publishes their own token. A mismatch refuses and writes
+    nothing, so a proof is never advanced by a file we did not issue."""
+    claim = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+    await _verify(routes=_well_known(claim.token.encode()))
+    stale = await _age_the_proof(days=31)
+
+    with pytest.raises(ValidationError) as exc:
+        await _verify(routes=_well_known(b"pawverify-somebody-elses-token"))
+
+    assert exc.value.code == "sites.origin_token_mismatch"
+    reloaded = await SiteOriginClaim.find_one(SiteOriginClaim.workspace == _WS_A)
+    assert reloaded is not None and reloaded.verified_at == stale.verified_at
+
+
+async def test_an_expired_TOKEN_does_not_block_re_verifying_a_proven_origin(beanie_test_db):
+    """CLAIM_TTL bounds an UNREDEEMED invitation, not a published proof.
+
+    The TTL is 7 days and the freshness window is 30, so every row due for
+    re-verification has an ``expires_at`` weeks in the past. Applying the TTL to
+    a verified row would make the re-verify unreachable — the exact dead end this
+    fix exists to remove — while a PENDING row that expired is still refused
+    (``test_an_expired_claim_refuses_without_fetching_anything``, above).
+    """
+    claim = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+    await _verify(routes=_well_known(claim.token.encode()))
+    aged = await _age_the_proof(days=31)
+    assert aged.expires_at.replace(tzinfo=UTC) < datetime.now(UTC), (
+        "the fixture's token must have expired, or this test proves nothing"
+    )
+
+    again = await _verify(routes=_well_known(claim.token.encode()))
+
+    assert again.status == "verified"
+    assert again.verified_at > aged.verified_at
 
 
 # --------------------------------------------------------------------------- #

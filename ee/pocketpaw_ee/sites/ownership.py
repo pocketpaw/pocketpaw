@@ -17,9 +17,8 @@
 # ``<meta name="paw-verify">`` in the origin's <head>. ``verify_origin`` fetches
 # the claimed host and compares. A failure writes NOTHING: the row is untouched,
 # no Site is minted, no crawl is scheduled. An ALREADY-VERIFIED row is RE-PROBED
-# rather than handed back, so ``verified_at`` can move — it is what the freshness
-# window above is measured against, and a re-verify is the click a refusal asks
-# the owner for.
+# rather than handed back, so ``verified_at`` moves — the freshness window above
+# is measured against it, and re-verifying is the click a refusal asks for.
 #
 # INVARIANTS A READER MUST NOT BREAK:
 #   * A CLAIM IS LOOKED UP BY (workspace, host), NEVER BY TOKEN. The comparison is
