@@ -1,0 +1,58 @@
+{
+  "id": "emit-fire-and-forget",
+  "asserts": "emit runs every listener in registration order, returns nothing, and is not awaited.",
+  "semantics": "\u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "ev",
+          "mode": "emit",
+          "id": "L1",
+          "action": "observe"
+        }
+      ]
+    },
+    "b": {
+      "listeners": [
+        {
+          "event": "ev",
+          "mode": "emit",
+          "id": "L2",
+          "action": "observe"
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "ev",
+      "mode": "emit"
+    },
+    {
+      "op": "settle"
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE",
+    "a:listener:L1:enter",
+    "a:listener:L1:exit",
+    "b:listener:L2:enter",
+    "b:listener:L2:exit"
+  ]
+}
