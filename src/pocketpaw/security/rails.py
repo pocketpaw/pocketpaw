@@ -23,6 +23,8 @@ import re
 DANGEROUS_PATTERNS: list[str] = [
     # -- Destructive file operations --
     r"rm\s+(-[rf]+\s+)*[/~]",  # rm -rf /, rm -r -f ~, etc.
+    r"rm\s+(-[rf]+)*(?=[/~])", # rm -rf/ (no space)
+    r"rm\s+.*(--recursive|--force).*[/~]", # rm --recursive /
     r"rm\s+[/~]\s+(-[rf]+\s*)+",  # rm / -rf, rm ~ -fr
     r"rm\s+(-[rf]+\s+)*\*",  # rm -rf *
     r"sudo\s+rm\b",  # Any sudo rm
