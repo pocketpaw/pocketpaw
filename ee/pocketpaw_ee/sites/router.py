@@ -1663,6 +1663,27 @@ async def verify_site_origin(
 _FOREIGN_CONCIERGE_PATH = "/sites/by-pocket/{pocket_id}/foreign-concierge"
 
 
+async def _assert_pocket_readable(pocket_id: str, user_id: str) -> None:
+    """Refuse a caller who cannot reach this pocket, before the Site is looked up.
+
+    ``foreign_site_for_pocket`` filters on workspace and ``foreign_origin`` and
+    nothing else, so it answers "is there a concierge here" rather than "may YOU
+    ask". Both of this surface's guards are MEMBER — ``fabric.read`` and
+    ``fabric.write`` say what a call INTENDS, not who is privileged to make it —
+    so without this a member who is refused a private pocket everywhere else in
+    the product could still read its concierge's ``site_key`` and embed snippet,
+    and could rotate that key out from under a live page.
+
+    Raises whatever the pockets service raises: Forbidden
+    ``pocket.access_denied`` for a pocket this user may not read, NotFound for one
+    that does not exist. Called for the side effect only — the doc it returns is
+    not this surface's business.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    await pockets_service.get(pocket_id, user_id)
+
+
 async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
     """Render one foreign Site as the panel's view of its concierge.
 
@@ -1800,7 +1821,16 @@ async def get_pocket_foreign_concierge(
     A pocket with no foreign concierge is ``exists: false``, not a 404. The
     lookup is ``foreign_site_for_pocket``, which filters on ``foreign_origin``, so
     a pocket that also has a PUBLISHED site never has that site reported here.
+
+    A pocket that does not EXIST is a 404 rather than ``exists: false``, because
+    the pocket gate below runs ahead of the site lookup. That is the honest answer
+    — "this pocket has no concierge" is a statement about a pocket — and the
+    alternative would have this route describe pockets the caller cannot see.
     """
+    # THE READ'S POCKET GATE. Reading a concierge hands back its ``site_key`` and
+    # the snippet that uses it; neither should reach a caller who cannot open the
+    # pocket the concierge speaks for.
+    await _assert_pocket_readable(pocket_id, ctx.user_id)
     site = await sites_service.foreign_site_for_pocket(ctx.workspace_id, pocket_id)
     if site is None:
         return ForeignConciergeResponse(exists=False, pocket_id=pocket_id)
@@ -1823,8 +1853,12 @@ async def rotate_pocket_foreign_concierge_key(
     The response carries the NEW snippet, which is the whole point: the old key
     stops resolving the moment this returns, so the owner's page is serving a
     dead credential until they paste this one in. 404 when the pocket has no
-    foreign concierge to rotate.
+    foreign concierge to rotate, and 403 when the caller cannot open the pocket.
     """
+    # THE ROTATION'S POCKET GATE, and the loudest of the three. A rotation kills
+    # the live key the instant it lands, so without this a member who is refused
+    # the pocket can still take a customer's published page offline.
+    await _assert_pocket_readable(pocket_id, ctx.user_id)
     site = await sites_service.rotate_foreign_concierge_key(
         workspace_id=ctx.workspace_id, pocket_id=pocket_id
     )
@@ -1850,6 +1884,9 @@ async def rebind_pocket_foreign_concierge(
     hands back the bound agent id; ``exists: false`` here means the concierge was
     deleted between the two, not that the rebind failed.
     """
+    # THE REBIND'S POCKET GATE. A rebind decides which agent answers the public,
+    # so it is at least as privileged as reading the pocket it answers for.
+    await _assert_pocket_readable(pocket_id, ctx.user_id)
     await sites_service.rebind_foreign_concierge(
         workspace_id=ctx.workspace_id,
         pocket_id=pocket_id,

@@ -2963,9 +2963,11 @@ async def bind_foreign_concierge(
     access, a pocket belonging to another workspace, and an origin the workspace
     has not proved it controls are all refused inside the mint, before any row or
     debit exists. A refused bind leaves nothing behind, exactly as a refused mint
-    does. The resolve half needs no gate of its own — ``foreign_site_for_pocket``
-    is already scoped to (workspace, pocket), so a foreign pocket id resolves to
-    nothing and falls through to the mint's refusal.
+    does. The resolve half inherits the TENANCY half for free —
+    ``foreign_site_for_pocket`` is scoped to (workspace, pocket), so another
+    tenant's pocket id resolves to nothing and falls through to the mint's
+    refusal — but it asks the ACCESS question itself, because returning an
+    existing row hands back a ``signed_key`` without ever reaching the mint.
 
     ``allowed_origins`` / ``name`` / ``scopes`` apply to the MINT only. An
     existing row is returned untouched: silently widening a live concierge's
@@ -2990,9 +2992,18 @@ async def bind_foreign_concierge(
         ``sites.origin_verification_stale``), NotFound,
         ValidationError (``sites.origin_required``), InsufficientCredits.
     """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
     async with _foreign_bind_lock(workspace_id, pocket_id):
         existing = await foreign_site_for_pocket(workspace_id, pocket_id)
         if existing is not None:
+            # THE RESOLVE ARM'S OWN POCKET GATE. The mint arm below inherits one;
+            # this arm returns a row without ever reaching it, and that row carries
+            # the ``signed_key``. ``foreign_site_for_pocket`` is scoped to
+            # (workspace, pocket) so the tenancy half is already closed here — what
+            # is missing is whether THIS caller may open the pocket, which for a
+            # private one is a different question from being in the workspace.
+            await pockets_service.get(pocket_id, owner)
             logger.info(
                 "sites.bind_foreign: pocket %s in workspace %s already has concierge "
                 "site %s - resolved, not re-bought",

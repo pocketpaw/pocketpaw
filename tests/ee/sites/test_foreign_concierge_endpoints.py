@@ -41,6 +41,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.models.site import Site
@@ -216,6 +217,30 @@ async def _bind(
         )
 
 
+async def _read(client: AsyncClient, workspace_id: str, pocket_id: str = _POCKET) -> Any:
+    """GET the concierge with the pocket gate satisfied.
+
+    Every route on this surface now asks ``pockets_service.get`` before it touches
+    a Site, so a test that called the route bare would be exercising the refusal
+    rather than the read. The refusals get their own tests, which patch this same
+    target to deny.
+    """
+    with _owned_pocket(workspace_id):
+        return await client.get(_url(pocket_id))
+
+
+async def _rotate(client: AsyncClient, workspace_id: str, pocket_id: str = _POCKET) -> Any:
+    with _owned_pocket(workspace_id):
+        return await client.post(_url(pocket_id, "/rotate-key"))
+
+
+async def _rebind(
+    client: AsyncClient, workspace_id: str, body: dict, pocket_id: str = _POCKET
+) -> Any:
+    with _owned_pocket(workspace_id):
+        return await client.post(_url(pocket_id, "/rebind"), json=body)
+
+
 async def _arm_the_trap(client: AsyncClient, workspace_id: str) -> int:
     """Bind a CONTROL pocket and prove the two assertions below can move.
 
@@ -383,7 +408,7 @@ async def test_the_read_reports_a_stale_origin_as_verified_but_not_fresh(store):
         claim.verified_at = datetime.now(UTC) - timedelta(days=31)
         await claim.save()
 
-        resp = await c.get(_url(_POCKET))
+        resp = await _read(c, ws)
 
     assert resp.status_code == 200, resp.text
     origin = resp.json()["origins"][0]
@@ -443,7 +468,7 @@ async def test_a_member_can_still_read_whether_a_concierge_exists(store):  # noq
 
     member = _build_app(ws, role="member", user_id="user-sam")
     async with _client(member) as c:
-        resp = await c.get(_url(_POCKET))
+        resp = await _read(c, ws)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["site_id"] == bound.json()["site_id"]
@@ -492,7 +517,7 @@ async def test_rotating_through_the_route_retires_the_old_key_at_the_resolver(st
         assert bound.status_code == 200, bound.text
         old_key = bound.json()["site_key"]
 
-        resp = await c.post(_url(_POCKET, "/rotate-key"))
+        resp = await _rotate(c, ws)
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -514,7 +539,7 @@ async def test_rotating_a_pocket_with_no_concierge_is_a_404(store):  # noqa: ARG
     ws = "ws-ep-rotate-404"
     app = _build_app(ws)
     async with _client(app) as c:
-        resp = await c.post(_url(_POCKET, "/rotate-key"))
+        resp = await _rotate(c, ws)
 
     assert resp.status_code == 404, resp.text
     assert resp.json()["error"]["code"] == "site.not_found"
@@ -544,10 +569,10 @@ async def test_rebinding_through_the_route_reprovisions_the_bar(store):
         assert widget_id
 
         await store.update_fields(widget_id, {"agent_id": ""}, workspace_id=ws)
-        cleared = await c.get(_url(_POCKET))
+        cleared = await _read(c, ws)
         assert cleared.json()["agent_id"] == "", "the trap is armed: the bar has no agent"
 
-        resp = await c.post(_url(_POCKET, "/rebind"), json={})
+        resp = await _rebind(c, ws, {})
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -560,7 +585,7 @@ async def test_the_read_reports_no_concierge_before_a_bind(store):  # noqa: ARG0
     ws = "ws-ep-empty"
     app = _build_app(ws)
     async with _client(app) as c:
-        resp = await c.get(_url(_POCKET))
+        resp = await _read(c, ws)
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -591,7 +616,7 @@ async def test_the_read_never_returns_the_pockets_published_site(store):  # noqa
 
     app = _build_app(ws)
     async with _client(app) as c:
-        resp = await c.get(_url(_POCKET))
+        resp = await _read(c, ws)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["exists"] is False, "the published row is not this pocket's concierge"
@@ -655,3 +680,140 @@ async def test_the_four_routes_are_registered_with_the_gates_they_need():
         # the tier bought. Requiring an admin for a leak response would leave the
         # member who can see the leak unable to act on it.
         assert "sites.buy_plan" not in actions, suffix
+
+
+# --------------------------------------------------------------------------- #
+# 6. The pocket gate on read, rotate and rebind
+#
+# All three resolve through ``foreign_site_for_pocket``, which filters on
+# workspace and ``foreign_origin`` and nothing else, and both surface guards are
+# MEMBER (``fabric.read`` / ``fabric.write`` describe what a call INTENDS, not who
+# may make it). So a member refused a PRIVATE pocket everywhere else in the
+# product could still read its concierge's credential and rotate it off a live
+# page.
+#
+# EACH TEST ASSERTS THE HARM, NOT THE STATUS. A 403 is also what a route with a
+# typo'd path returns to this client, and three routes carrying the same one-line
+# check is exactly the shape where a single test reads like coverage for all of
+# them. So every test here drives the ALLOWED call first — proving the thing it is
+# about to assert can move — and then asserts the refused call left the key, the
+# agent or the wallet where the allowed one left it.
+# --------------------------------------------------------------------------- #
+
+
+def _denied_pocket():
+    """``pockets_service.get`` as it behaves for a pocket this caller may not open.
+
+    The real refusal, not an invented one: ``Forbidden("pocket.access_denied")``
+    is what that service raises for a private pocket outside the caller's reach.
+    """
+    return patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(side_effect=Forbidden("pocket.access_denied", "no access")),
+    )
+
+
+async def test_the_read_refuses_a_pocket_the_caller_cannot_open(store):  # noqa: ARG001
+    """The credential is in the body, so the pocket gate has to be on the read."""
+    ws = "ws-ep-read-denied"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    app = _build_app(ws)
+    async with _client(app) as c:
+        bound = await _bind(c, ws)
+        assert bound.status_code == 200, bound.text
+        allowed = await _read(c, ws)
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["site_key"], (
+            "the allowed read must hand back a key, or the refusal below proves nothing"
+        )
+
+        with _denied_pocket():
+            resp = await c.get(_url(_POCKET))
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "pocket.access_denied"
+    assert "site_key" not in resp.text
+
+
+async def test_rotate_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_key_live(store):  # noqa: ARG001
+    """The loudest of the three: a rotation takes the customer's published page
+    offline the instant it lands, so the refusal is asserted at the RESOLVER —
+    the old key still opening a concierge session is the only proof nothing was
+    retired."""
+    from pocketpaw_ee.cloud.auth import site_keys
+
+    ws = "ws-ep-rotate-denied"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    app = _build_app(ws)
+    async with _client(app) as c:
+        bound = await _bind(c, ws)
+        assert bound.status_code == 200, bound.text
+        key = bound.json()["site_key"]
+
+        with _denied_pocket():
+            resp = await c.post(_url(_POCKET, "/rotate-key"))
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "pocket.access_denied"
+    ctx = await site_keys.resolve_site_key(key, f"https://{_HOST}", "cust-1")
+    assert ctx is not None, "the refused rotation must not have retired the live key"
+
+
+async def test_rebind_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_bar_bound(store):
+    """Asserted on the WIDGET rather than the response: a rebind that ran and
+    then 403'd would answer identically to one that never ran."""
+    ws = "ws-ep-rebind-denied"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    app = _build_app(ws)
+    async with _client(app) as c:
+        bound = await _bind(c, ws)
+        assert bound.status_code == 200, bound.text
+        widget_id = bound.json()["widget_id"]
+        assert widget_id
+        agent_before = bound.json()["agent_id"]
+        assert agent_before, "the bar must start bound, or the assertion below cannot move"
+
+        with _denied_pocket():
+            resp = await c.post(_url(_POCKET, "/rebind"), json={})
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "pocket.access_denied"
+    widget = await store.get_widget(widget_id, workspace_id=ws)
+    assert widget is not None and widget.agent_id == agent_before
+
+
+async def test_resolving_an_existing_concierge_refuses_a_pocket_the_caller_cannot_open(store):  # noqa: ARG001
+    """The bind's RESOLVE arm, which never reaches the mint's gate.
+
+    A second bind returns the existing row untouched — and that row carries the
+    ``signed_key``. The arm is admin-gated, but an admin is not automatically a
+    reader of every private pocket in the workspace, so the credential would be
+    one repeat call away.
+    """
+    ws = "ws-ep-resolve-denied"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    app = _build_app(ws)
+    async with _client(app) as c:
+        first = await _bind(c, ws)
+        assert first.status_code == 200, first.text
+        spent = await credits_service.balance(ws)
+
+        with _denied_pocket():
+            resp = await c.post(
+                _url(_POCKET),
+                json={"allowed_origins": [f"https://{_HOST}"], "name": "Brew Co"},
+            )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "pocket.access_denied"
+    assert "site_key" not in resp.text
+    assert await credits_service.balance(ws) == spent, "a refused resolve must not charge either"
+    assert len(await _foreign_rows(ws)) == 1
