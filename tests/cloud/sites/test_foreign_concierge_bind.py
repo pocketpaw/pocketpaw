@@ -68,6 +68,7 @@ from pocketpaw.paw_bar.store import PawBarStore
 pytestmark = pytest.mark.anyio
 
 _HOST = "brewco.example"
+_OTHER_HOST = "cafe.example"
 _OWNER = "user:maya"
 _POCKET = "pk-bind"
 
@@ -807,7 +808,7 @@ async def test_a_rebind_points_the_bar_at_a_new_agent_without_stranding_the_row(
 
     replacement = await _make_agent(ws, "hand-built-concierge")
     bound = await sites_service.rebind_foreign_concierge(
-        workspace_id=ws, pocket_id=_POCKET, agent_id=replacement
+        workspace_id=ws, pocket_id=_POCKET, agent_id=replacement, caller_is_admin=True
     )
 
     assert bound == replacement
@@ -841,7 +842,7 @@ async def test_a_rebind_to_another_tenants_agent_is_refused(store):
 
     with pytest.raises(NotFound):
         await sites_service.rebind_foreign_concierge(
-            workspace_id=ws, pocket_id=_POCKET, agent_id=victim_agent
+            workspace_id=ws, pocket_id=_POCKET, agent_id=victim_agent, caller_is_admin=True
         )
 
     after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
@@ -898,7 +899,9 @@ async def test_a_reprovision_resets_a_bar_bound_to_a_LIVE_but_wrong_agent(store)
     # Point the bar at a different, LIVE agent — the state an explicit rebind
     # leaves, and the one the funnel refuses to overwrite.
     other = await _make_agent(ws, "some-other-live-agent")
-    await sites_service.rebind_foreign_concierge(workspace_id=ws, pocket_id=_POCKET, agent_id=other)
+    await sites_service.rebind_foreign_concierge(
+        workspace_id=ws, pocket_id=_POCKET, agent_id=other, caller_is_admin=True
+    )
     mid = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
     assert mid[0].agent_id == other
 
@@ -917,3 +920,191 @@ async def test_a_rebind_on_a_pocket_with_no_concierge_is_a_404(store):  # noqa: 
         await sites_service.rebind_foreign_concierge(
             workspace_id="ws-bind-nothing-2", pocket_id=_POCKET
         )
+
+
+# --------------------------------------------------------------------------- #
+# The rebind's two remaining gates: whose BAR, and whose AGENT
+#
+# rebind takes two caller-supplied ids and neither used to be checked against
+# the site it is rebinding. ``widget_id`` is looked up workspace-scoped, so it
+# could name a colleague's bar; ``agent_id`` only had to be READABLE, and
+# workspace visibility makes every agent in the tenant readable by every member.
+# Both matter because a foreign concierge answers ANONYMOUS visitors on a public
+# page — it is a publishing surface, not a setting.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_rebind_cannot_repoint_another_pockets_bar(store):
+    """``widget_id`` must name THIS site's bar.
+
+    The damage is the re-provision arm, which takes no ``agent_id`` and was
+    therefore gated by nothing: it clears the named widget's agent and binds it
+    to this site's ``concierge-<site_id>``. So a rebind naming a colleague's bar
+    would silently repoint their published site at your concierge, grounded in
+    your pocket, with nothing in either page saying so.
+
+    Asserted on the victim's widget, not the response: the call returns an agent
+    id either way.
+    """
+    ws = "ws-bind-widget-mismatch"
+    await _fund(ws, _PRICE_CREDITS * 10)
+    await _verify_origin(ws)
+    await _verify_origin(ws, host=_OTHER_HOST)
+
+    mine = await _bind(ws)
+    assert mine is not None
+    theirs = await _bind(ws, pocket_id="pk-colleague", allowed_origins=[f"https://{_OTHER_HOST}"])
+    assert theirs is not None
+
+    their_bars = await store.list_widgets(pocket_id="pk-colleague", workspace_id=ws, limit=1)
+    assert their_bars, "the colleague's bar must exist, or this test proves nothing"
+    their_bar = their_bars[0]
+    their_agent_before = their_bar.agent_id
+    assert their_agent_before
+
+    with pytest.raises(Forbidden) as exc:
+        await sites_service.rebind_foreign_concierge(
+            workspace_id=ws, pocket_id=_POCKET, widget_id=their_bar.id
+        )
+
+    assert exc.value.code == "sites.widget_pocket_mismatch"
+    after = await store.get_widget(their_bar.id, workspace_id=ws)
+    assert after is not None
+    assert after.agent_id == their_agent_before, "the colleague's bar must be untouched"
+
+
+async def test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors(store):
+    """The rebind refuses an agent that does not already answer for a foreign
+    concierge here.
+
+    ``rebind_site_agent``'s own gate asks whether the caller may READ the agent,
+    and every ``workspace``-visibility agent in the tenant is readable by every
+    member. That is the wrong question: a concierge run resolves
+    ``agent:<agent_id>``, so whatever is named here answers anonymous visitors on
+    a public page — an internal HR or finance agent included.
+
+    The widget is asserted, not just the code: a refusal that had already written
+    would answer the same way.
+    """
+    ws = "ws-bind-agent-unpublished"
+    await _fund(ws)
+    await _verify_origin(ws)
+    await _bind(ws)
+
+    bars = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
+    before = bars[0].agent_id
+    internal = await _make_agent(ws, "internal-hr-assistant")
+
+    with pytest.raises(Forbidden) as exc:
+        await sites_service.rebind_foreign_concierge(
+            workspace_id=ws, pocket_id=_POCKET, agent_id=internal
+        )
+
+    assert exc.value.code == "sites.agent_not_published"
+    after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
+    assert after[0].agent_id == before, "a refused rebind must not have written"
+
+
+async def test_the_refusal_defaults_to_on_when_the_caller_is_not_described(store):  # noqa: ARG001
+    """``caller_is_admin`` defaults to False, so a caller that forgets to pass it
+    gets the stricter path. A permission flag that fails open is not a permission
+    flag."""
+    import inspect
+
+    sig = inspect.signature(sites_service.rebind_foreign_concierge)
+    assert sig.parameters["caller_is_admin"].default is False
+
+
+async def test_an_admin_may_point_a_concierge_at_any_agent_they_can_read(store):
+    """The escape hatch, and the legitimate case the refusal must not break: an
+    admin hand-builds a better concierge and points the bar at it."""
+    ws = "ws-bind-agent-admin"
+    await _fund(ws)
+    await _verify_origin(ws)
+    await _bind(ws)
+
+    hand_built = await _make_agent(ws, "hand-built-front-desk")
+
+    bound = await sites_service.rebind_foreign_concierge(
+        workspace_id=ws, pocket_id=_POCKET, agent_id=hand_built, caller_is_admin=True
+    )
+
+    assert bound == hand_built
+    after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
+    assert after[0].agent_id == hand_built
+
+
+async def test_a_member_may_point_one_concierge_at_another_concierges_agent(store):
+    """The test is the BINDING, not the slug.
+
+    An agent already fronting a foreign concierge in this workspace has been
+    published deliberately once, so re-pointing a second concierge at it changes
+    nothing about who can reach it — and refusing that would make the rule about
+    provisioning history rather than exposure.
+    """
+    ws = "ws-bind-agent-shared"
+    await _fund(ws, _PRICE_CREDITS * 10)
+    await _verify_origin(ws)
+    await _verify_origin(ws, host=_OTHER_HOST)
+
+    await _bind(ws)
+    await _bind(ws, pocket_id="pk-sibling", allowed_origins=[f"https://{_OTHER_HOST}"])
+
+    sibling_bars = await store.list_widgets(pocket_id="pk-sibling", workspace_id=ws, limit=1)
+    published_agent = sibling_bars[0].agent_id
+    assert published_agent
+
+    bound = await sites_service.rebind_foreign_concierge(
+        workspace_id=ws, pocket_id=_POCKET, agent_id=published_agent
+    )
+
+    assert bound == published_agent
+    after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
+    assert after[0].agent_id == published_agent
+
+
+async def test_an_agent_whose_bar_is_not_a_foreign_concierge_does_not_count_as_published(store):
+    """The rule asks for a FOREIGN CONCIERGE, not merely for a bar.
+
+    Every pocket with a paw-bar widget has an agent bound to it, and most of
+    those bars are not public concierges at all — a dashboard widget mints one.
+    So "this agent fronts a widget" is a far weaker statement than "this agent
+    has been published to anonymous visitors", and keying the rule on the widget
+    would let a member publish an agent that only ever answered inside the
+    product.
+
+    The state below is a concierge that was cancelled: the Site row is gone and
+    the bar and its agent survive. That is the honest way to reach "a widget
+    exists, its foreign site does not" without hand-building a widget this suite
+    otherwise never constructs.
+    """
+    ws = "ws-bind-agent-barless"
+    await _fund(ws, _PRICE_CREDITS * 10)
+    await _verify_origin(ws)
+    await _verify_origin(ws, host=_OTHER_HOST)
+
+    await _bind(ws)
+    cancelled = await _bind(
+        ws, pocket_id="pk-cancelled", allowed_origins=[f"https://{_OTHER_HOST}"]
+    )
+
+    orphan_bars = await store.list_widgets(pocket_id="pk-cancelled", workspace_id=ws, limit=1)
+    orphan_agent = orphan_bars[0].agent_id
+    assert orphan_agent
+
+    await cancelled.delete()
+    assert await sites_service.foreign_site_for_pocket(ws, "pk-cancelled") is None, (
+        "the fixture must leave a bar whose foreign site is gone, or this proves nothing"
+    )
+
+    bars = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
+    before = bars[0].agent_id
+
+    with pytest.raises(Forbidden) as exc:
+        await sites_service.rebind_foreign_concierge(
+            workspace_id=ws, pocket_id=_POCKET, agent_id=orphan_agent
+        )
+
+    assert exc.value.code == "sites.agent_not_published"
+    after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
+    assert after[0].agent_id == before

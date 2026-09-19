@@ -817,3 +817,47 @@ async def test_resolving_an_existing_concierge_refuses_a_pocket_the_caller_canno
     assert "site_key" not in resp.text
     assert await credits_service.balance(ws) == spent, "a refused resolve must not charge either"
     assert len(await _foreign_rows(ws)) == 1
+
+
+async def test_the_route_passes_the_CALLERS_role_to_the_rebind_rule(store):
+    """The wiring, which the service tests cannot see.
+
+    The publish rule lives in the service and is relaxed for an ADMIN. If this
+    route hard-coded that flag either way, every service test would still pass
+    while the product had no rule at all (True) or no escape hatch (False). So
+    the same rebind is driven twice over HTTP, as a member and as an admin, and
+    only the roles differ.
+
+    ``fabric.write`` is MEMBER, so both callers are past the surface guard — the
+    difference below is the rule, not the gate.
+    """
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+
+    ws = "ws-ep-rebind-role"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    admin_app = _build_app(ws, role="admin")
+    async with _client(admin_app) as c:
+        bound = await _bind(c, ws)
+        assert bound.status_code == 200, bound.text
+
+    agent = await agents_service.create(
+        agents_service.legacy_ctx(_OWNER, ws),
+        ws,
+        CreateAgentRequest(name="internal-hr", slug="internal-hr", visibility="workspace"),
+    )
+
+    member_app = _build_app(ws, role="member", user_id="user-sam")
+    async with _client(member_app) as c:
+        refused = await _rebind(c, ws, {"agent_id": agent.id})
+
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"]["code"] == "sites.agent_not_published"
+
+    async with _client(admin_app) as c:
+        allowed = await _rebind(c, ws, {"agent_id": agent.id})
+
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["agent_id"] == agent.id

@@ -1870,7 +1870,7 @@ async def rebind_pocket_foreign_concierge(
     pocket_id: str,
     body: ForeignConciergeRebindRequest,
     ctx: RequestContext = Depends(request_context),
-    _: object = Depends(require_action_any_workspace("fabric.write")),
+    caller: Any = Depends(require_action_any_workspace("fabric.write")),
 ) -> ForeignConciergeResponse:
     """Point this concierge's bar at a different agent, leaving the row alone.
 
@@ -1878,7 +1878,10 @@ async def rebind_pocket_foreign_concierge(
     resolving, the tier stays bought and the renewal date stays where it was, so
     swapping the answering agent never costs the buyer their credential or their
     month. An ``agent_id`` in another tenant is a 404 from inside the funnel,
-    deliberately indistinguishable from an agent that does not exist.
+    deliberately indistinguishable from an agent that does not exist. One in THIS
+    tenant that does not already answer for a foreign concierge is a 403
+    (``sites.agent_not_published``) unless the caller is an ADMIN — the service
+    owns that rule and its reasoning; the role is the only part this layer knows.
 
     The row is re-read for the response rather than returned by the rebind, which
     hands back the bound agent id; ``exists: false`` here means the concierge was
@@ -1887,11 +1890,19 @@ async def rebind_pocket_foreign_concierge(
     # THE REBIND'S POCKET GATE. A rebind decides which agent answers the public,
     # so it is at least as privileged as reading the pocket it answers for.
     await _assert_pocket_readable(pocket_id, ctx.user_id)
+    # The role, read off the membership the guard above already resolved rather
+    # than re-asked through ``check_workspace_action`` — that function AUDITS a
+    # denial, and a member doing an ordinary rebind has not been denied anything.
+    from pocketpaw_ee.guards.actions import WorkspaceRole
+    from pocketpaw_ee.guards.deps import resolve_workspace_role
+
+    role = resolve_workspace_role(caller, ctx.workspace_id)
     await sites_service.rebind_foreign_concierge(
         workspace_id=ctx.workspace_id,
         pocket_id=pocket_id,
         agent_id=body.agent_id,
         widget_id=body.widget_id,
+        caller_is_admin=role.level >= WorkspaceRole.ADMIN.level,
     )
     # Named for what it is — a re-read after the write — rather than sharing the
     # read endpoint's ``site``. The two blocks are otherwise identical text, and a

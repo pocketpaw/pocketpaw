@@ -3130,6 +3130,7 @@ async def rebind_foreign_concierge(
     pocket_id: str,
     agent_id: str = "",
     widget_id: str = "",
+    caller_is_admin: bool = False,
 ) -> str | None:
     """Point this concierge's bar at a different agent, leaving the row alone.
 
@@ -3139,7 +3140,15 @@ async def rebind_foreign_concierge(
     again, which is the repair for a bar whose agent was deleted.
 
     ``widget_id`` picks the bar explicitly when a pocket carries more than one;
-    omitted, the pocket resolves it.
+    omitted, the pocket resolves it. The bar must belong to this site's pocket —
+    enforced in the funnel module, since a widget lookup is workspace-scoped and
+    an explicit id could otherwise name a colleague's published bar.
+
+    ``caller_is_admin`` RELAXES ONE RULE AND NOTHING ELSE: a non-admin may only
+    name an ``agent_id`` that already answers for a foreign concierge in this
+    workspace. Defaults to False, so a caller that forgets to pass it gets the
+    stricter path. See the block below for why the rule exists and why it is
+    written as a refusal that can be loosened later.
 
     THE CREDENTIAL ROW IS NOT TOUCHED. Nothing here rewrites, deletes or re-mints
     the Site: the customer's embedded ``signed_key`` keeps resolving, the tier
@@ -3152,12 +3161,49 @@ async def rebind_foreign_concierge(
     Raises:
         NotFound: ``site`` when the pocket has no foreign concierge; ``agent``
             when ``agent_id`` is not readable in this workspace.
+        Forbidden: ``sites.agent_not_published`` when a non-admin names an agent
+            that does not already front a foreign concierge here;
+            ``sites.widget_pocket_mismatch`` when ``widget_id`` is another
+            pocket's bar.
     """
     site = await foreign_site_for_pocket(workspace_id, pocket_id)
     if site is None:
         raise NotFound("site", f"foreign concierge for pocket {pocket_id}")
 
-    from pocketpaw_ee.paw_bar.agent_provisioning import rebind_site_agent
+    from pocketpaw_ee.paw_bar.agent_provisioning import rebind_site_agent, widget_for_agent
+
+    if agent_id and not caller_is_admin:
+        # A PUBLIC CONCIERGE IS A PUBLISHING SURFACE. ``rebind_site_agent``'s own
+        # gate asks whether the caller may READ this agent, and ``workspace``
+        # visibility means every MEMBER may read every such agent in the tenant.
+        # That is the wrong question here: a concierge run resolves
+        # ``agent:<agent_id>``, so the agent named here answers ANONYMOUS visitors
+        # on a public page. Pointing one at an agent that was never provisioned
+        # for public answering publishes its knowledge, and "readable by members"
+        # was never consent to that.
+        #
+        # The test is the BINDING, not the slug: an agent already fronting a
+        # foreign concierge in this workspace has been published deliberately
+        # once, so re-pointing another concierge at it changes nothing about who
+        # can reach it.
+        #
+        # REVERSIBLE BY DESIGN. Loosening this later — a flag on the agent, an
+        # explicit "may answer the public" opt-in — is safe. Tightening it after
+        # customers have built on the loose behaviour is not, which is why the
+        # refusal ships first and the escape hatch is a role rather than a
+        # setting.
+        holder = await widget_for_agent(agent_id, workspace_id)
+        holder_site = (
+            await foreign_site_for_pocket(workspace_id, str(getattr(holder, "pocket_id", "") or ""))
+            if holder is not None
+            else None
+        )
+        if holder_site is None:
+            raise Forbidden(
+                "sites.agent_not_published",
+                "That agent does not answer for a foreign concierge yet. "
+                "An admin can point a concierge at it.",
+            )
 
     bound = await rebind_site_agent(site, workspace_id, agent_id=agent_id, widget_id=widget_id)
     logger.info(

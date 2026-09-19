@@ -519,7 +519,12 @@ async def rebind_site_agent(
     ``ensure_site_agent`` resolve-or-mint the canonical one again.
 
     ``widget_id`` picks the bar explicitly; omitted, the site's pocket resolves
-    it (``site_widget``). Nothing about the Site row is touched either way — the
+    it (``site_widget``). Either way the bar must belong to the SITE'S pocket —
+    the store scopes a widget lookup to the workspace and no further, so an
+    explicit id could otherwise name a colleague's bar and the re-provision arm
+    would repoint their published page at this site's concierge.
+
+    Nothing about the Site row is touched either way — the
     ``signed_key`` the customer has already embedded, the tier they paid for and
     the subscription all survive a rebind, which is the whole point: swapping the
     answering agent must never cost the buyer their credential or their month.
@@ -527,6 +532,7 @@ async def rebind_site_agent(
     Returns the newly bound agent id, or ``None`` when there is no widget to bind
     or the rebind could not complete.
     """
+    from pocketpaw_ee.cloud._core.errors import Forbidden
     from pocketpaw_ee.cloud.agents import service as agents_service
 
     if widget_id:
@@ -539,6 +545,30 @@ async def rebind_site_agent(
             getattr(site, "id", "?"),
         )
         return None
+
+    # THE BAR MUST BE THIS SITE'S BAR. ``get_widget`` is scoped to the workspace
+    # and no further, so a caller-supplied ``widget_id`` could name a COLLEAGUE'S
+    # bar — and the re-provision arm below would clear that bar's agent and bind
+    # it to this site's ``concierge-<site_id>``. The published page it belongs to
+    # would then be answered by a concierge grounded in somebody else's pocket,
+    # with nothing in the response saying so. The ``agent_id`` arm is tenancy-
+    # gated; this arm was not gated by anything.
+    if str(getattr(widget, "pocket_id", "") or "") != str(getattr(site, "pocket_id", "") or ""):
+        logger.warning(
+            "paw-bar concierge: refused a rebind of widget %s (pocket %s) to site %s (pocket %s)",
+            widget_id,
+            getattr(widget, "pocket_id", "?"),
+            getattr(site, "id", "?"),
+            getattr(site, "pocket_id", "?"),
+        )
+        # Forbidden rather than the module's usual NotFound-for-a-stranger. Both
+        # rows are inside ONE workspace and the caller can list the bars in it
+        # anyway, so hiding the widget buys no secrecy — while "that bar is not
+        # this site's" is a mistake a UI can correct and a 404 is not.
+        raise Forbidden(
+            "sites.widget_pocket_mismatch",
+            "That bar belongs to a different pocket and cannot be bound to this concierge.",
+        )
 
     if agent_id:
         # Tenancy gate. Raises NotFound for a cross-workspace or unreadable

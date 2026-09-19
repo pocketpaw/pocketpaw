@@ -112,5 +112,23 @@
     "tests": [
       "tests/ee/sites/test_foreign_concierge_endpoints.py::test_resolving_an_existing_concierge_refuses_a_pocket_the_caller_cannot_open"
     ]
+  },
+  {
+    "label": "THE ROUTE HARD-CODES ADMIN - every member rebind is treated as an admin's, so the publish rule exists in the service and not in the product",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "        caller_is_admin=role.level >= WorkspaceRole.ADMIN.level,",
+    "replace": "        caller_is_admin=True,",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_route_passes_the_CALLERS_role_to_the_rebind_rule"
+    ]
+  },
+  {
+    "label": "the route hard-codes NON-admin, so the escape hatch is unreachable and an admin cannot point a concierge at an agent they built",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "        caller_is_admin=role.level >= WorkspaceRole.ADMIN.level,",
+    "replace": "        caller_is_admin=False,",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_route_passes_the_CALLERS_role_to_the_rebind_rule"
+    ]
   }
 ]
