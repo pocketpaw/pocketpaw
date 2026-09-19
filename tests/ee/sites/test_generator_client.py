@@ -20,6 +20,12 @@
 # (deleting the POSIX os attrs so any reference explodes) and assert the killer
 # uses taskkill /T for the child tree instead, and that _communicate_bounded still
 # raises _BuildTimeout end-to-end. A linux-branch test guards the POSIX path.
+# Updated 2026-09-18 (chore/ripple-split-sites-dep): ripple's monorepo split moved
+# @ripple-ui/core into its own package and the packed @ripple-ui/svelte tarball
+# carries "@ripple-ui/core": "file:../core" verbatim, which a tarball consumer
+# cannot resolve. Two new tests pin _rewrite_ripple_dep's answer: a `resolutions`
+# entry for the core tarball when PAW_SITES_RIPPLE_CORE_DEP is set, and NO
+# resolutions key at all when it isn't — older images must keep working.
 from __future__ import annotations
 
 import json
@@ -179,6 +185,53 @@ def test_rewrite_keeps_an_explicit_motion_pin(tmp_path: Path):
     _rewrite_ripple_dep(str(tmp_path), "file:/tmp/ripple.tgz")
     out = json.loads(pkg.read_text())
     assert out["dependencies"]["motion"] == "^12.99.0"
+
+
+def _svelte_site_pkg(tmp_path: Path) -> Path:
+    pkg = tmp_path / "package.json"
+    pkg.write_text(
+        json.dumps({"name": "paw-site-x", "dependencies": {"@ripple-ui/svelte": "0.2.0"}})
+    )
+    return pkg
+
+
+def test_rewrite_pins_ripple_core_via_resolutions(tmp_path: Path, monkeypatch):
+    """ripple's monorepo split put @ripple-ui/core in its own package, and the
+    packed @ripple-ui/svelte tarball carries "@ripple-ui/core": "file:../core"
+    VERBATIM. bun resolves that relative path against its own install cache, not
+    against the tarball, so the site installs with no core and dies at build with
+    ERR_MODULE_NOT_FOUND. The image bakes a second, core tarball and points
+    PAW_SITES_RIPPLE_CORE_DEP at it; only a `resolutions` entry redirects the
+    nested spec (a direct dep installs on bun 1.3 but is rejected outright by 1.4)."""
+    pkg = _svelte_site_pkg(tmp_path)
+    monkeypatch.setenv("PAW_SITES_RIPPLE_CORE_DEP", "file:/opt/ripple-ui-core-0.5.0.tgz")
+
+    _rewrite_ripple_dep(str(tmp_path), "file:/opt/ripple-ui-svelte-0.7.0.tgz")
+
+    out = json.loads(pkg.read_text())
+    assert out["resolutions"]["@ripple-ui/core"] == "file:/opt/ripple-ui-core-0.5.0.tgz"
+    # The core spec belongs ONLY in resolutions — a direct dependency is the form
+    # bun 1.4 rejects, so it must not leak into dependencies.
+    assert "@ripple-ui/core" not in out["dependencies"]
+    assert out["dependencies"]["@ripple-ui/svelte"] == "file:/opt/ripple-ui-svelte-0.7.0.tgz"
+
+
+def test_rewrite_omits_resolutions_without_the_core_env(tmp_path: Path, monkeypatch):
+    """Every image built before the split bakes no core tarball. With the env var
+    unset the emitted package.json must be byte-identical to what it was — an
+    empty `resolutions` block is a change in behaviour for those images, and the
+    generated-artifact cache key must not move either."""
+    pkg = _svelte_site_pkg(tmp_path)
+    monkeypatch.delenv("PAW_SITES_RIPPLE_CORE_DEP", raising=False)
+
+    _rewrite_ripple_dep(str(tmp_path), "file:/opt/ripple-ui-svelte-0.5.0.tgz")
+
+    out = json.loads(pkg.read_text())
+    assert "resolutions" not in out
+    assert gc._ripple_core_dep_source() == ""
+    unset_version = gc.generator_version()
+    monkeypatch.setenv("PAW_SITES_RIPPLE_CORE_DEP", "file:/opt/ripple-ui-core-0.5.0.tgz")
+    assert gc.generator_version() != unset_version, "a core-dep change must invalidate the cache"
 
 
 def test_gen_cmd_and_ripple_dep_env_knobs(monkeypatch):
