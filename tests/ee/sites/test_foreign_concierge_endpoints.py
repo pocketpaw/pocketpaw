@@ -861,3 +861,20 @@ async def test_the_route_passes_the_CALLERS_role_to_the_rebind_rule(store):
 
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["agent_id"] == agent.id
+
+
+async def test_the_read_is_a_404_for_a_pocket_that_does_not_exist(store):  # noqa: ARG001
+    """``exists: false`` is about a pocket that HAS no concierge. A pocket that
+    does not exist is a different sentence, and the pocket gate now runs first,
+    so this route answers it the way every other pocket-scoped route does.
+
+    Driven with NO patch on the pockets service, which is what makes it the real
+    lookup: the pocket genuinely is not there.
+    """
+    ws = "ws-ep-no-pocket"
+    app = _build_app(ws)
+    async with _client(app) as c:
+        resp = await c.get(_url("pk-does-not-exist"))
+
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error"]["code"] == "pocket.not_found"

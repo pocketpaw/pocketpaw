@@ -1877,11 +1877,13 @@ async def rebind_pocket_foreign_concierge(
     Nothing about the purchase moves: the embedded ``signed_key`` keeps
     resolving, the tier stays bought and the renewal date stays where it was, so
     swapping the answering agent never costs the buyer their credential or their
-    month. An ``agent_id`` in another tenant is a 404 from inside the funnel,
-    deliberately indistinguishable from an agent that does not exist. One in THIS
-    tenant that does not already answer for a foreign concierge is a 403
-    (``sites.agent_not_published``) unless the caller is an ADMIN — the service
-    owns that rule and its reasoning; the role is the only part this layer knows.
+    month. A non-admin may only name an agent that ALREADY answers for a
+    foreign concierge in this workspace; anything else is 403
+    ``sites.agent_not_published``, an agent in another tenant included. The
+    service owns that rule and its reasoning; the role is the only part this
+    layer knows. For an ADMIN the rule is relaxed, and a cross-tenant
+    ``agent_id`` is then a 404 from inside the funnel, deliberately
+    indistinguishable from an agent that does not exist.
 
     The row is re-read for the response rather than returned by the rebind, which
     hands back the bound agent id; ``exists: false`` here means the concierge was
@@ -1896,7 +1898,7 @@ async def rebind_pocket_foreign_concierge(
     from pocketpaw_ee.guards.actions import WorkspaceRole
     from pocketpaw_ee.guards.deps import resolve_workspace_role
 
-    role = resolve_workspace_role(caller, ctx.workspace_id)
+    role = resolve_workspace_role(caller, ctx.workspace_id or "")
     await sites_service.rebind_foreign_concierge(
         workspace_id=ctx.workspace_id,
         pocket_id=pocket_id,
