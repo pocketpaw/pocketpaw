@@ -1210,6 +1210,30 @@ class Settings(BaseSettings):
             "to reveal itself."
         ),
     )
+    sites_source_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "Withhold a Paw Site's authored SOURCE from the wire unless the "
+            "workspace is entitled to read it (``Entitlements."
+            "site_source_visible``, which every paid rung grants and ``free`` "
+            "does not). OFF by default so turning the gate on is a separate, "
+            "revertible operational step rather than something that ships with "
+            "the code. "
+            "It is ANDed with a per-pocket cohort stamp (``Pocket."
+            "source_gated``), set at create time from this same setting, so "
+            "flipping it on never re-classifies a pocket that already exists — "
+            "only pockets created while it is on can ever be gated. Flipping it "
+            "back off restores source to every one of them immediately, which is "
+            "what makes the rollout reversible in both directions rather than "
+            "only forward. "
+            "It gates the POCKET WIRE DICT only — what a browser is handed by "
+            "``GET /pockets/{id}``, the gallery list, a write response and the "
+            "WebSocket broadcast. The build / publish / edit pipeline reads "
+            "source through ``pockets.service.get_with_source`` and is never "
+            "redacted, because withholding source from the generator would stop "
+            "the site being built at all."
+        ),
+    )
     inspo_mcp_url: str = Field(
         default="",
         description=(
