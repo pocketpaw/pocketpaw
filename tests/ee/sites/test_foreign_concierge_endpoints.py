@@ -185,15 +185,19 @@ async def _fund(workspace_id: str, credits: int = _FUNDED) -> None:
     )
 
 
-def _owned_pocket():
-    """Patch the pocket ownership gate to an owned pocket.
+def _owned_pocket(workspace_id: str):
+    """Patch the pocket ownership gate to a pocket this caller owns in
+    ``workspace_id``.
 
     The gate itself is covered in tests/cloud/sites/test_foreign_site_mint.py; this
-    file is about what the endpoint does once it passes.
+    file is about what the endpoint does once it passes. The ``workspace`` key is
+    why the parameter exists: ``pockets_service.get`` denies only a PRIVATE
+    pocket, so the mint compares that key against the minting tenant, and a doc
+    without it would make every request here the cross-tenant refusal.
     """
     return patch(
         "pocketpaw_ee.cloud.pockets.service.get",
-        new=AsyncMock(return_value=_OWNED_POCKET),
+        new=AsyncMock(return_value={**_OWNED_POCKET, "workspace": workspace_id}),
     )
 
 
@@ -203,8 +207,10 @@ async def _foreign_rows(workspace_id: str, pocket_id: str = _POCKET) -> list[Sit
     ).to_list()
 
 
-async def _bind(client: AsyncClient, pocket_id: str = _POCKET, host: str = _HOST) -> Any:
-    with _owned_pocket():
+async def _bind(
+    client: AsyncClient, workspace_id: str, pocket_id: str = _POCKET, host: str = _HOST
+) -> Any:
+    with _owned_pocket(workspace_id):
         return await client.post(
             _url(pocket_id), json={"allowed_origins": [f"https://{host}"], "name": "Brew Co"}
         )
@@ -217,7 +223,7 @@ async def _arm_the_trap(client: AsyncClient, workspace_id: str) -> int:
     written and no credits were spent" is the same sentence a test whose request
     404'd would produce.
     """
-    resp = await _bind(client, _CONTROL_POCKET)
+    resp = await _bind(client, workspace_id, _CONTROL_POCKET)
     assert resp.status_code == 200, resp.text
     assert len(await _foreign_rows(workspace_id, _CONTROL_POCKET)) == 1, (
         "the control bind must leave a row, or the row assertions below prove nothing"
@@ -247,7 +253,7 @@ async def test_a_bind_through_the_route_charges_once_and_returns_the_snippet(sto
 
     app = _build_app(ws)
     async with _client(app) as c:
-        resp = await _bind(c)
+        resp = await _bind(c, ws)
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -285,11 +291,11 @@ async def test_a_second_bind_through_the_route_charges_nothing_more(store):  # n
 
     app = _build_app(ws)
     async with _client(app) as c:
-        first = await _bind(c)
+        first = await _bind(c, ws)
         assert first.status_code == 200, first.text
         after_first = await credits_service.balance(ws)
 
-        second = await _bind(c)
+        second = await _bind(c, ws)
 
     assert second.status_code == 200, second.text
     assert second.json()["site_id"] == first.json()["site_id"], "the same concierge"
@@ -317,7 +323,7 @@ async def test_an_unverified_origin_is_refused_with_no_row_and_no_charge(store):
     app = _build_app(ws)
     async with _client(app) as c:
         armed_balance = await _arm_the_trap(c, ws)
-        resp = await _bind(c, _POCKET, _OTHER_HOST)
+        resp = await _bind(c, ws, _POCKET, _OTHER_HOST)
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["error"]["code"] == "sites.origin_unverified"
@@ -342,7 +348,7 @@ async def test_a_stale_verification_is_refused_distinctly_from_an_unverified_one
     app = _build_app(ws)
     async with _client(app) as c:
         armed_balance = await _arm_the_trap(c, ws)
-        resp = await _bind(c, _POCKET, _OTHER_HOST)
+        resp = await _bind(c, ws, _POCKET, _OTHER_HOST)
 
     assert resp.status_code == 403, resp.text
     code = resp.json()["error"]["code"]
@@ -366,7 +372,7 @@ async def test_the_read_reports_a_stale_origin_as_verified_but_not_fresh(store):
 
     app = _build_app(ws)
     async with _client(app) as c:
-        bound = await _bind(c)
+        bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
 
         # Age the proof AFTER the purchase, which is what a month passing does.
@@ -410,7 +416,7 @@ async def test_a_member_who_may_not_buy_a_plan_cannot_bind_a_concierge(store):  
 
     member = _build_app(ws, role="member", user_id="user-sam")
     async with _client(member) as c:
-        resp = await _bind(c)
+        resp = await _bind(c, ws)
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["error"]["code"] == "sites.plan_purchase_forbidden"
@@ -432,7 +438,7 @@ async def test_a_member_can_still_read_whether_a_concierge_exists(store):  # noq
 
     admin = _build_app(ws, role="admin")
     async with _client(admin) as c:
-        bound = await _bind(c)
+        bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
 
     member = _build_app(ws, role="member", user_id="user-sam")
@@ -455,7 +461,7 @@ async def test_a_wallet_that_cannot_cover_the_month_gets_the_established_402(sto
 
     app = _build_app(ws)
     async with _client(app) as c:
-        resp = await _bind(c)
+        resp = await _bind(c, ws)
 
     assert resp.status_code == 402, resp.text
     assert resp.json()["error"]["code"] == "credits.insufficient"
@@ -482,7 +488,7 @@ async def test_rotating_through_the_route_retires_the_old_key_at_the_resolver(st
 
     app = _build_app(ws)
     async with _client(app) as c:
-        bound = await _bind(c)
+        bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
         old_key = bound.json()["site_key"]
 
@@ -531,7 +537,7 @@ async def test_rebinding_through_the_route_reprovisions_the_bar(store):
 
     app = _build_app(ws)
     async with _client(app) as c:
-        bound = await _bind(c)
+        bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
         key_before = bound.json()["site_key"]
         widget_id = bound.json()["widget_id"]

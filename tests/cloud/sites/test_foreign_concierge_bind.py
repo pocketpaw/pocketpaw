@@ -70,7 +70,19 @@ pytestmark = pytest.mark.anyio
 _HOST = "brewco.example"
 _OWNER = "user:maya"
 _POCKET = "pk-bind"
-_OWNED_POCKET = {"name": "Shop", "rippleSpec": {}}
+
+
+def _owned_pocket_doc(workspace_id: str) -> dict:
+    """The wire dict ``pockets_service.get`` hands back for a pocket this caller
+    owns, IN ``workspace_id``.
+
+    The ``workspace`` key is load-bearing. ``pockets_service.get`` denies only a
+    PRIVATE pocket and the model defaults visibility to "workspace", so the mint
+    compares this key against the minting tenant itself. A fixture without it
+    would test the cross-tenant refusal on every call instead of the path.
+    """
+    return {"name": "Shop", "rippleSpec": {}, "workspace": workspace_id}
+
 
 # The price off the catalog, not written as a number here: a test that hard-codes
 # 19 stops testing the purchase and starts testing the sticker.
@@ -119,15 +131,18 @@ async def _fund(workspace_id: str, credits: int = _FUNDED) -> None:
     )
 
 
-def _owned_pocket():
-    """Patch the pocket ownership gate to an owned pocket.
+def _owned_pocket(workspace_id: str):
+    """Patch the pocket ownership gate to a pocket this caller owns in
+    ``workspace_id``.
 
     The gate itself is covered in tests/cloud/sites/test_foreign_site_mint.py; this
-    file is about what happens after it passes.
+    file is about what happens after it passes — which is why the doc must carry
+    the tenant it belongs to rather than a shape that merely passes the access
+    half.
     """
     return patch(
         "pocketpaw_ee.cloud.pockets.service.get",
-        new=AsyncMock(return_value=_OWNED_POCKET),
+        new=AsyncMock(return_value=_owned_pocket_doc(workspace_id)),
     )
 
 
@@ -140,7 +155,7 @@ async def _bind(workspace_id: str, **overrides: Any) -> Site:
         name="Brew Co Concierge",
     )
     kwargs.update(overrides)
-    with _owned_pocket():
+    with _owned_pocket(workspace_id):
         return await sites_service.bind_foreign_concierge(**kwargs)
 
 
@@ -270,7 +285,7 @@ async def test_two_concurrent_binds_buy_one_concierge(store):  # noqa: ARG001
         # check and reach this same point before either of us gets to the insert.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        return _OWNED_POCKET
+        return _owned_pocket_doc(ws)
 
     with patch("pocketpaw_ee.cloud.pockets.service.get", new=_slow_pocket_gate):
         first, second = await asyncio.gather(
@@ -340,7 +355,7 @@ async def test_a_concurrent_loser_is_never_handed_a_row_the_winner_deletes(store
 
     async def _slow_pocket_gate(*_args, **_kwargs):
         await asyncio.sleep(0)
-        return _OWNED_POCKET
+        return _owned_pocket_doc(ws)
 
     def _bind_call():
         return sites_service.bind_foreign_concierge(
@@ -396,7 +411,7 @@ async def _mint_direct(workspace_id: str, **overrides: Any) -> Site:
         name="Brew Co Concierge",
     )
     kwargs.update(overrides)
-    with _owned_pocket():
+    with _owned_pocket(workspace_id):
         return await sites_service.mint_foreign_site(**kwargs)
 
 
@@ -578,6 +593,40 @@ async def test_a_cross_tenant_pocket_is_still_refused_through_the_bind(store):  
 
     denied = AsyncMock(side_effect=Forbidden("pocket.access_denied", "no access"))
     with patch("pocketpaw_ee.cloud.pockets.service.get", new=denied):
+        with pytest.raises(Forbidden) as exc:
+            await sites_service.bind_foreign_concierge(
+                workspace_id=ws,
+                pocket_id="pk-victim",
+                owner=_OWNER,
+                allowed_origins=[f"https://{_HOST}"],
+            )
+
+    assert exc.value.code == "pocket.access_denied"
+    assert await Site.find_one(Site.workspace == ws) is None
+    assert await credits_service.balance(ws) == _FUNDED
+
+
+async def test_another_tenants_readable_pocket_is_refused_through_the_bind_too(store):  # noqa: ARG001
+    """The tenancy half, inherited the same way the access half is.
+
+    ``pockets_service.get`` denies only a PRIVATE pocket, so a default-visibility
+    pocket in another workspace comes back readable — the mock below is that
+    function behaving normally, not a weakened one. The bind must still refuse,
+    because binding a foreign concierge is what turns a pocket into a PUBLIC,
+    anonymous read surface.
+
+    Driven through the bind rather than the mint because the bind is what a route
+    calls: a gate that only the primitive enforces is a gate the product does not
+    have.
+    """
+    ws = "ws-bind-tenant-a"
+    await _fund(ws)
+    await _verify_origin(ws)
+
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=_owned_pocket_doc("ws-bind-tenant-b")),
+    ):
         with pytest.raises(Forbidden) as exc:
             await sites_service.bind_foreign_concierge(
                 workspace_id=ws,
