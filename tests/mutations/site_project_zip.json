@@ -1,0 +1,151 @@
+[
+  {
+    "label": "the binding-key peeler is bypassed — a dynamic svelte project ships a file literally named `objects`",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    files, _bindings = generator_client._split_svelte_source(source)",
+    "replace": "    files, _bindings = dict(source or {}), {}",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_a_dynamic_svelte_project_holds_no_file_named_for_a_binding_key"
+    ]
+  },
+  {
+    "label": "the no-op gate is removed from the assembler — ripple assembles an archive holding nothing but a README",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if not has_downloadable_project(engine):\n        return None\n    planned = plan_project_files(",
+    "replace": "    if False:\n        return None\n    planned = plan_project_files(",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_a_ripple_pocket_returns_the_no_op_rather_than_raising",
+      "tests/ee/sites/test_project_zip.py::test_an_empty_or_unknown_engine_returns_the_same_no_op"
+    ]
+  },
+  {
+    "label": "the no-op gate is removed from the pocket-id entry — a ripple pocket raises 'no source map' instead of answering None",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if not has_downloadable_project(engine):\n        return None\n\n    source = pocket.get(\"source\")",
+    "replace": "    if False:\n        return None\n\n    source = pocket.get(\"source\")",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_a_ripple_pocket_id_returns_the_no_op"
+    ]
+  },
+  {
+    "label": "the engine question stops routing through `engines` — every engine claims a downloadable project",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    return engines.is_source_engine(engine)",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_has_downloadable_project_answers_for_each_engine",
+      "tests/ee/sites/test_project_zip.py::test_a_ripple_pocket_returns_the_no_op_rather_than_raising"
+    ]
+  },
+  {
+    "label": "the file-count cap is removed — a map of a million keys writes a million archive entries",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if len(planned) > MAX_FILES:\n        raise ProjectZipTooLarge(f\"project has {len(planned)} files, over the {MAX_FILES} cap\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_the_file_cap_refuses_a_map_with_more_entries_than_it_allows"
+    ]
+  },
+  {
+    "label": "the total-byte cap is removed — the whole archive is held in memory with no ceiling",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if total > MAX_TOTAL_BYTES:\n        raise ProjectZipTooLarge(f\"project is {total} bytes, over the {MAX_TOTAL_BYTES} cap\")",
+    "replace": "    if False:\n        raise ProjectZipTooLarge(f\"project is {total} bytes, over the {MAX_TOTAL_BYTES} cap\")",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_the_byte_cap_refuses_a_map_over_the_total",
+      "tests/ee/sites/test_project_zip.py::test_the_byte_cap_counts_encoded_bytes_not_characters"
+    ]
+  },
+  {
+    "label": "the byte cap counts characters instead of encoded bytes — a CJK or accented page passes at twice to three times the cap",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    total = sum(len(contents.encode(\"utf-8\")) for contents in planned.values())",
+    "replace": "    total = sum(len(contents) for contents in planned.values())",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_the_byte_cap_counts_encoded_bytes_not_characters"
+    ]
+  },
+  {
+    "label": "the traversal guard is removed — a source-map key of `../../etc/passwd` becomes an archive entry that escapes on extract",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if \"..\" in segments:\n        raise UnsafeSourcePath(f\"source-map key escapes the project root: {raw!r}\")",
+    "replace": "    if False:\n        raise UnsafeSourcePath(f\"source-map key escapes the project root: {raw!r}\")",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_a_nested_traversal_inside_a_longer_path_is_refused",
+      "tests/ee/sites/test_project_zip.py::test_an_unsafe_source_path_is_refused"
+    ]
+  },
+  {
+    "label": "the absolute-path guard is removed — a leading slash or a drive letter rides into the archive",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if norm.startswith(\"/\") or _DRIVE_PREFIX.match(norm):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_an_unsafe_source_path_is_refused"
+    ]
+  },
+  {
+    "label": "the reserved shell stops winning a path collision — an authored package.json puts an unvetted dependency set in a project we hand out",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "        if path in planned:\n            logger.info(\"project zip: the vetted %s replaces the authored copy\", path)\n        planned[path] = contents",
+    "replace": "        planned.setdefault(path, contents)",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_an_authored_manifest_cannot_displace_the_vetted_shell"
+    ]
+  },
+  {
+    "label": "nothing counts as reserved — the vetted manifest becomes a mere default an authored one displaces",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    if engine == \"svelte\":\n        return svelte_paths.is_reserved_svelte_path(path)",
+    "replace": "    if engine == \"svelte\":\n        return False",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_an_authored_manifest_cannot_displace_the_vetted_shell",
+      "tests/ee/sites/test_project_zip.py::test_every_overriding_shell_path_is_one_the_generator_reserves"
+    ]
+  },
+  {
+    "label": "everything counts as reserved — the shell silently overwrites the author's own +layout.ts and app.html",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "        return svelte_paths.is_reserved_svelte_path(path)",
+    "replace": "        return True",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_an_authored_file_in_the_authorable_tree_beats_the_shell_default"
+    ]
+  },
+  {
+    "label": "a non-string source value is accepted as file contents — a malformed envelope becomes an archive entry or an AttributeError deep in the writer",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "        if not isinstance(contents, str):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_an_unknown_non_string_entry_is_refused"
+    ]
+  },
+  {
+    "label": "a shell pin drifts off the vetted version — the download installs a package paw-sites never vetted",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    \"react\": \"^19.0.0\",",
+    "replace": "    \"react\": \"^20.0.0\",",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_a_react_project_names_only_vetted_dependencies"
+    ]
+  },
+  {
+    "label": "the capture tokens are never substituted — the downloaded form posts to a literal `__CAPTURE_API_BASE__`",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    tokens_resolved = bool(site_id and capture_signed_key)\n    if tokens_resolved:",
+    "replace": "    tokens_resolved = bool(site_id and capture_signed_key)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_the_capture_placeholders_are_resolved_in_the_archive"
+    ]
+  },
+  {
+    "label": "the deflate runs inline — the event loop, and therefore every other request, freezes for the length of the zip",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    data = await asyncio.to_thread(_write_zip, planned)",
+    "replace": "    data = _write_zip(planned)",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_the_deflate_runs_off_the_event_loop"
+    ]
+  }
+]
