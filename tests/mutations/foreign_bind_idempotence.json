@@ -119,5 +119,79 @@
       "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_first_bind_buys_a_concierge_and_provisions_its_agent",
       "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_points_the_bar_at_a_new_agent_without_stranding_the_row"
     ]
+  },
+  {
+    "label": "THE WIDGET-POCKET CHECK IS GONE - a rebind naming a colleague's bar clears its agent and repoints their published page at your concierge",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    if str(getattr(widget, \"pocket_id\", \"\") or \"\") != str(getattr(site, \"pocket_id\", \"\") or \"\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_cannot_repoint_another_pockets_bar"
+    ]
+  },
+  {
+    "label": "the widget-pocket mismatch is LOGGED and not refused, so the warning is the only trace of a repointed page",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "        raise Forbidden(\n            \"sites.widget_pocket_mismatch\",\n            \"That bar belongs to a different pocket and cannot be bound to this concierge.\",\n        )",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_cannot_repoint_another_pockets_bar"
+    ]
+  },
+  {
+    "label": "THE PUBLISH RULE IS GONE - any workspace-visibility agent can be pointed at a public concierge, so a member publishes an internal agent's knowledge to anonymous visitors",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if agent_id and not caller_is_admin:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors"
+    ]
+  },
+  {
+    "label": "the ADMIN ESCAPE IS INVERTED - the rule lands on admins and lets every member through, which is the opposite of both halves",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if agent_id and not caller_is_admin:",
+    "replace": "    if agent_id and caller_is_admin:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_an_admin_may_point_a_concierge_at_any_agent_they_can_read"
+    ]
+  },
+  {
+    "label": "the rule accepts any agent the workspace can read - holder_site is never consulted, so the check is decorative",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if holder_site is None:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors"
+    ]
+  },
+  {
+    "label": "the rule is keyed on the WIDGET rather than on that widget's foreign site, so any agent fronting any bar counts as published",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if holder_site is None:",
+    "replace": "        if holder is None:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_an_agent_whose_bar_is_not_a_foreign_concierge_does_not_count_as_published"
+    ]
+  },
+  {
+    "label": "caller_is_admin DEFAULTS TO TRUE, so every caller that does not describe itself gets the admin path - a permission flag that fails open",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    caller_is_admin: bool = False,",
+    "replace": "    caller_is_admin: bool = True,",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_the_refusal_defaults_to_on_when_the_caller_is_not_described",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors"
+    ]
+  },
+  {
+    "label": "an agent already fronting a sibling concierge is refused too, which makes the rule about provisioning history rather than exposure",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if holder_site is None:",
+    "replace": "        if holder_site is not None or True:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_may_point_one_concierge_at_another_concierges_agent"
+    ]
   }
 ]

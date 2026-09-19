@@ -123,5 +123,34 @@
     "tests": [
       "tests/cloud/sites/test_foreign_site_mint.py::test_a_hosted_site_that_never_deployed_is_still_not_charged"
     ]
+  },
+  {
+    "label": "THE TENANCY COMPARISON IS GONE — pockets_service.get denies only a PRIVATE pocket, so a bind against another workspace's default-visibility pocket succeeds and its KB answers anonymous visitors",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    pocket = await pockets_service.get(pocket_id, owner)\n    if str(pocket.get(\"workspace\") or \"\") != str(workspace_id):",
+    "replace": "    pocket = await pockets_service.get(pocket_id, owner)\n    if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_pocket_the_access_gate_ALLOWS_is_still_refused_when_it_is_another_tenants",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_another_tenants_readable_pocket_is_refused_through_the_bind_too"
+    ]
+  },
+  {
+    "label": "the tenancy comparison FAILS OPEN on a pocket with no workspace key, so a legacy doc binds anywhere",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if str(pocket.get(\"workspace\") or \"\") != str(workspace_id):",
+    "replace": "    if str(pocket.get(\"workspace\") or workspace_id) != str(workspace_id):",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_a_pocket_that_does_not_say_whose_it_is_is_refused"
+    ]
+  },
+  {
+    "label": "the access gate is dropped and only the tenancy comparison is left, so a PRIVATE pocket in your own workspace binds",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    pocket = await pockets_service.get(pocket_id, owner)\n    if str(pocket.get(\"workspace\") or \"\") != str(workspace_id):",
+    "replace": "    pocket = {\"workspace\": workspace_id}\n    if str(pocket.get(\"workspace\") or \"\") != str(workspace_id):",
+    "tests": [
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_pocket_gate_still_runs_first",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_tenant_pocket_is_still_refused_through_the_bind"
+    ]
   }
 ]

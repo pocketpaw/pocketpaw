@@ -44,7 +44,7 @@
   {
     "label": "the expiry window is not enforced, so an abandoned token stays redeemable forever",
     "file": "ee/pocketpaw_ee/sites/ownership.py",
-    "find": "    if _expires_at(claim) <= datetime.now(UTC):",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
     "replace": "    if False:",
     "tests": [
       "tests/ee/sites/test_domain_ownership.py::test_an_expired_claim_refuses_without_fetching_anything"
@@ -93,6 +93,45 @@
     "replace": "            headers={\"User-Agent\": USER_AGENT, \"Accept\": \"*/*\"},",
     "tests": [
       "tests/ee/sites/test_domain_ownership.py::test_the_probe_sends_the_verifier_user_agent_not_the_importers"
+    ]
+  },
+  {
+    "label": "THE EARLY RETURN IS BACK — a verified row is handed straight back, so verified_at freezes at the first proof and every consumer that refuses a 31-day-old one refuses forever",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if claim.status == _STATUS_VERIFIED:\n        return claim\n    if _expires_at(claim) <= datetime.now(UTC):",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_stale_proof_is_re_proved_and_the_date_moves",
+      "tests/ee/sites/test_domain_ownership.py::test_re_verifying_a_verified_row_actually_FETCHES"
+    ]
+  },
+  {
+    "label": "THE FIX'S OWN FAILURE MODE — verified_at is re-stamped WITHOUT re-probing, so the window crossing passes while the proof is a touch rather than a proof",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if claim.status == _STATUS_VERIFIED:\n        return await _record_verified(claim, claim.method or METHOD_WELL_KNOWN)\n    if _expires_at(claim) <= datetime.now(UTC):",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_re_verifying_a_verified_row_actually_FETCHES",
+      "tests/ee/sites/test_domain_ownership.py::test_a_re_verify_that_finds_NOTHING_leaves_the_old_proof_standing",
+      "tests/ee/sites/test_domain_ownership.py::test_a_wrong_token_on_a_re_verify_does_not_re_stamp_the_date"
+    ]
+  },
+  {
+    "label": "the 7-day token TTL is applied to a VERIFIED row too, which makes re-verification unreachable — every row due for it expired weeks ago",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if _expires_at(claim) <= datetime.now(UTC):",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_an_expired_TOKEN_does_not_block_re_verifying_a_proven_origin"
+    ]
+  },
+  {
+    "label": "re-claiming a verified origin re-mints its token, so the owner must publish a NEW file before they can re-verify — a renewal priced at one deploy",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if existing is not None and existing.status == _STATUS_VERIFIED:\n        return existing",
+    "replace": "    if False:\n        return existing",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_reclaiming_a_verified_origin_does_not_unprove_it"
     ]
   }
 ]

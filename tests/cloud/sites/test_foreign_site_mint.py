@@ -47,7 +47,21 @@ pytestmark = pytest.mark.anyio
 
 _HOST = "brewco.example"
 _OWNER = "user:maya"
-_OWNED_POCKET = {"name": "Shop", "rippleSpec": {}}
+
+
+def _owned_pocket(workspace_id: str) -> dict:
+    """The wire dict ``pockets_service.get`` hands back for a pocket this caller
+    owns, IN ``workspace_id``.
+
+    The ``workspace`` key is load-bearing, not decoration. ``pockets_service.get``
+    denies only a PRIVATE pocket, and the model defaults visibility to
+    "workspace", so the mint compares this key against the minting tenant itself.
+    A fixture that omitted it — or a bare ``AsyncMock`` whose ``.get("workspace")``
+    answers with a ``Mock`` — would fail that comparison and test the refusal
+    instead of the path.
+    """
+    return {"name": "Shop", "rippleSpec": {}, "workspace": workspace_id}
+
 
 # What a foreign concierge costs, read off the catalog rather than written as 19
 # here: a test that hard-codes the price stops testing the purchase and starts
@@ -101,7 +115,7 @@ async def _mint(workspace_id: str, **overrides):
     kwargs.update(overrides)
     with patch(
         "pocketpaw_ee.cloud.pockets.service.get",
-        new=AsyncMock(return_value=_OWNED_POCKET),
+        new=AsyncMock(return_value=_owned_pocket(workspace_id)),
     ):
         return await sites_service.mint_foreign_site(**kwargs)
 
@@ -299,6 +313,74 @@ async def test_the_pocket_gate_still_runs_first(mongo_db):  # noqa: ARG001
             await sites_service.mint_foreign_site(
                 workspace_id=ws,
                 pocket_id="pk-victim",
+                owner=_OWNER,
+                allowed_origins=[f"https://{_HOST}"],
+            )
+
+    assert exc.value.code == "pocket.access_denied"
+    assert await Site.find_one(Site.workspace == ws) is None
+    assert await credits_service.balance(ws) == 5000
+
+
+async def test_a_pocket_the_access_gate_ALLOWS_is_still_refused_when_it_is_another_tenants(
+    mongo_db,  # noqa: ARG001
+):
+    """The half ``pockets_service.get`` does not cover, and the reason the mint
+    asks a second question.
+
+    That gate's refusal reads ``... and pocket.visibility == "private"``, so it
+    denies a PRIVATE pocket only — while the model defaults visibility to
+    "workspace", a value it never scopes to the SAME workspace. So the mock here
+    is not a weakened fixture: RETURNING a readable pocket that belongs to tenant
+    B is exactly what the real function does when tenant A names B's
+    default-visibility pocket id.
+
+    Refused on the READ direction, which is the worse one: a concierge run is
+    locked to ``pocket:<pocket_id>`` off this row, so a bind that succeeded would
+    answer ANONYMOUS visitors on A's public page out of B's knowledge, and every
+    grounding sync would write into B's scope.
+    """
+    ws = "ws-mint-tenant-a"
+    await _fund(ws, 5000)
+    await _verify_origin(ws)
+
+    other_tenants = AsyncMock(return_value=_owned_pocket("ws-mint-tenant-b"))
+    with patch("pocketpaw_ee.cloud.pockets.service.get", new=other_tenants):
+        with pytest.raises(Forbidden) as exc:
+            await sites_service.mint_foreign_site(
+                workspace_id=ws,
+                pocket_id="pk-victim",
+                owner=_OWNER,
+                allowed_origins=[f"https://{_HOST}"],
+            )
+
+    # THE SAME CODE AS THE ACCESS DENIAL, on purpose: a distinct one would confirm
+    # to whoever guessed the id that the pocket is real and lives somewhere else.
+    assert exc.value.code == "pocket.access_denied"
+    assert other_tenants.await_count == 1, (
+        "the access gate must still be asked — this check is a second question, not a replacement"
+    )
+    assert await Site.find_one(Site.workspace == ws) is None
+    assert await credits_service.balance(ws) == 5000
+
+
+@pytest.mark.parametrize("pocket_doc", [{}, {"workspace": ""}, {"workspace": None}])
+async def test_a_pocket_that_does_not_say_whose_it_is_is_refused(mongo_db, pocket_doc):  # noqa: ARG001
+    """Fail-closed on the tenancy key. "This pocket did not say whose it is" is
+    not a tenancy proof, and a legacy row written before the field existed is the
+    shape an attacker would look for."""
+    ws = "ws-mint-no-tenant"
+    await _fund(ws, 5000)
+    await _verify_origin(ws)
+
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value={"name": "Shop", "rippleSpec": {}, **pocket_doc}),
+    ):
+        with pytest.raises(Forbidden) as exc:
+            await sites_service.mint_foreign_site(
+                workspace_id=ws,
+                pocket_id="pk-legacy",
                 owner=_OWNER,
                 allowed_origins=[f"https://{_HOST}"],
             )

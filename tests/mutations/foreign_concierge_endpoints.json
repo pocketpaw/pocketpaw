@@ -65,5 +65,70 @@
     "tests": [
       "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_read_never_returns_the_pockets_published_site"
     ]
+  },
+  {
+    "label": "THE READ'S POCKET GATE IS GONE - a member refused a private pocket still reads its concierge's site_key and embed snippet",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "    # pocket the concierge speaks for.\n    await _assert_pocket_readable(pocket_id, ctx.user_id)\n",
+    "replace": "    # pocket the concierge speaks for.\n",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_read_refuses_a_pocket_the_caller_cannot_open"
+    ]
+  },
+  {
+    "label": "THE ROTATION'S POCKET GATE IS GONE - a member refused the pocket can retire the live key off a customer's published page",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "    # the pocket can still take a customer's published page offline.\n    await _assert_pocket_readable(pocket_id, ctx.user_id)\n",
+    "replace": "    # the pocket can still take a customer's published page offline.\n",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_rotate_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_key_live"
+    ]
+  },
+  {
+    "label": "THE REBIND'S POCKET GATE IS GONE - a member refused the pocket repoints which agent answers its public visitors",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "    # so it is at least as privileged as reading the pocket it answers for.\n    await _assert_pocket_readable(pocket_id, ctx.user_id)\n",
+    "replace": "    # so it is at least as privileged as reading the pocket it answers for.\n",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_rebind_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_bar_bound"
+    ]
+  },
+  {
+    "label": "the helper answers yes to everyone, so all three routes keep their line and none of them has a gate",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "    from pocketpaw_ee.cloud.pockets import service as pockets_service\n\n    await pockets_service.get(pocket_id, user_id)",
+    "replace": "    return None",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_read_refuses_a_pocket_the_caller_cannot_open",
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_rotate_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_key_live",
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_rebind_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_bar_bound"
+    ]
+  },
+  {
+    "label": "THE BIND'S RESOLVE ARM LOSES ITS POCKET GATE - a repeat bind hands back an existing concierge's signed_key without asking whether the caller may open the pocket",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            await pockets_service.get(pocket_id, owner)\n            logger.info(",
+    "replace": "            logger.info(",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_resolving_an_existing_concierge_refuses_a_pocket_the_caller_cannot_open"
+    ]
+  },
+  {
+    "label": "THE ROUTE HARD-CODES ADMIN - every member rebind is treated as an admin's, so the publish rule exists in the service and not in the product",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "        caller_is_admin=role.level >= WorkspaceRole.ADMIN.level,",
+    "replace": "        caller_is_admin=True,",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_route_passes_the_CALLERS_role_to_the_rebind_rule"
+    ]
+  },
+  {
+    "label": "the route hard-codes NON-admin, so the escape hatch is unreachable and an admin cannot point a concierge at an agent they built",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "        caller_is_admin=role.level >= WorkspaceRole.ADMIN.level,",
+    "replace": "        caller_is_admin=False,",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_route_passes_the_CALLERS_role_to_the_rebind_rule"
+    ]
   }
 ]

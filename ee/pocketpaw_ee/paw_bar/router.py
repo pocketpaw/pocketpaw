@@ -1861,8 +1861,10 @@ class ConciergeKnowledgeResponse(BaseModel):
     longer ago than ``foreign_grounding.VERIFICATION_MAX_AGE`` — re-verify the
     domain), ``origin_unfetchable``, ``crawl_blocked_by_robots`` (the customer's own
     robots.txt disallows our crawler, which is otherwise unguessable from their
-    side), ``crawl_too_large``, ``crawl_failed``, and ``crawl_partial`` (pages were
-    ingested but some could not be read, so nothing was pruned).
+    side), ``crawl_too_large``, ``crawl_timeout`` (their server accepted the
+    connection and never finished answering, so the crawl was abandoned on its
+    wall clock), ``crawl_failed``, and ``crawl_partial`` (pages were ingested but
+    some could not be read, so nothing was pruned).
     """
 
     site_id: str

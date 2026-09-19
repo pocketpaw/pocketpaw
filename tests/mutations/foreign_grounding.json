@@ -188,5 +188,32 @@
       "tests/ee/sites/test_crawler_budget_knobs.py::test_a_page_that_answers_badly_is_counted_not_only_warned",
       "tests/ee/sites/test_foreign_grounding.py::test_a_page_that_fails_mid_crawl_marks_the_harvest_incomplete"
     ]
+  },
+  {
+    "label": "THE WALL CLOCK IS GONE — the crawl has no deadline, so a target that never finishes answering holds a web request and a connection forever",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        async with asyncio.timeout(GROUNDING_MAX_WALL_CLOCK_SEC):",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_target_that_never_finishes_answering_is_abandoned_on_the_clock"
+    ]
+  },
+  {
+    "label": "the deadline is kept but set to None, which is the same as not having one — the shape a reader would skim as present",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "        async with asyncio.timeout(GROUNDING_MAX_WALL_CLOCK_SEC):\n            crawl = await url_crawler.crawl_site(",
+    "replace": "        async with asyncio.timeout(None):\n            crawl = await url_crawler.crawl_site(",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_target_that_never_finishes_answering_is_abandoned_on_the_clock"
+    ]
+  },
+  {
+    "label": "the timeout arm stops matching, so an abandoned crawl falls into the catch-all and reports crawl_failed — the owner is never told it was their server that stopped answering",
+    "file": "ee/pocketpaw_ee/sites/foreign_grounding.py",
+    "find": "    except TimeoutError:",
+    "replace": "    except ValueError:",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_a_target_that_never_finishes_answering_is_abandoned_on_the_clock"
+    ]
   }
 ]

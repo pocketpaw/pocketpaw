@@ -520,10 +520,12 @@
 # ``concierge_entitled`` needs that rung AND an active subscription, so the mint
 # stamps the tier, debits the month from the workspace credit wallet on the CREDITS
 # rail, and activates only after the money moves — a failed charge leaves no row.
-# It gates on a VERIFIED origin (``sites.ownership``) and on the pockets-service
-# ownership check (``pockets_service.get``), both before any write, so a caller can
-# bind a concierge neither to another workspace's pocket (which would leak that
-# pocket's KB to the resolved context) nor to a domain it does not control.
+# It gates on a VERIFIED origin (``sites.ownership``), on the pockets-service
+# ownership check (``pockets_service.get``) and — separately, because that check
+# denies only a PRIVATE pocket — on the pocket living in the MINTING workspace, all
+# before any write, so a caller can bind a concierge neither to another workspace's
+# pocket (which would leak that pocket's KB to an anonymous visitor's resolved
+# context) nor to a domain it does not control.
 # ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
 # ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
 # foreign concierge must not collide with a published site's stable per-pocket id).
@@ -2576,10 +2578,12 @@ async def mint_foreign_site(
 
     ORDER, and each step's failure mode:
 
-      1. Refuse a pocket the caller cannot access, then refuse an origin this
-         workspace has not PROVED it controls — or proved more than 30 days ago.
-         All before any write: minting on someone else's domain is how a concierge
-         becomes a crawler-for-hire.
+      1. Refuse a pocket the caller cannot access OR that belongs to another
+         workspace, then refuse an origin this workspace has not PROVED it
+         controls — or proved more than 30 days ago. All before any write: minting
+         on someone else's domain is how a concierge becomes a crawler-for-hire,
+         and minting on someone else's POCKET is how it becomes a reader of their
+         knowledge.
       2. Insert the row UNPAID — tier stamped, subscription ``none``. It confers
          nothing; it exists so the debit has a stable ``site_id`` to key on.
       3. CHARGE. A refusal (a short wallet raises ``InsufficientCredits``, 402)
@@ -2637,7 +2641,8 @@ async def mint_foreign_site(
 
     Raises:
         Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
-            ``pocket_id``; ``sites.origin_unverified`` when the workspace has not
+            ``pocket_id`` or when that pocket belongs to another workspace;
+            ``sites.origin_unverified`` when the workspace has not
             proved it controls one of ``allowed_origins``;
             ``sites.origin_verification_stale`` when it did, over 30 days ago.
         NotFound: when ``pocket_id`` does not exist.
@@ -2651,14 +2656,41 @@ async def mint_foreign_site(
     from pocketpaw_ee.sites import foreign_grounding, ownership
 
     # Ownership gate — the SAME check every other pocket-touching path in this
-    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
-    # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
-    # resolved CONCIERGE context would then read that victim pocket's KB
-    # (``pocket:<pocket_id>``). Run it BEFORE minting the key / inserting the doc so
-    # a denied caller leaves no orphan Site behind. ``get`` raises
-    # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
-    # pocket is missing; we only need it for the side-effect of that check.
-    await pockets_service.get(pocket_id, owner)
+    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Run it BEFORE
+    # minting the key / inserting the doc so a denied caller leaves no orphan Site
+    # behind. It raises NotFound when the pocket is missing and
+    # Forbidden("pocket.access_denied") when the caller cannot read it.
+    #
+    # IT IS NOT A TENANCY GATE, WHICH IS THE OTHER HALF. Its refusal reads
+    # ``... and pocket.visibility == "private"``, so it denies a PRIVATE pocket
+    # only — and the model's default is "workspace" (``cloud.models.pocket``), a
+    # value that check never scopes to the SAME workspace. Left at one call, a
+    # member of tenant A could mint a concierge against a default-visibility pocket
+    # in tenant B. The read direction is the worse one: a concierge run is locked to
+    # ``pocket:<pocket_id>`` taken off THIS row, so A's public bar would answer
+    # ANONYMOUS visitors out of B's knowledge, and grounding would write into B's
+    # scope on every sync.
+    #
+    # FIXED HERE RATHER THAN THERE. ``pockets_service.get``'s permissiveness is
+    # deliberate and shared by many callers; narrowing it is a far larger decision
+    # than this row. What is particular to a foreign mint is that it turns a pocket
+    # into a PUBLIC, ANONYMOUS read surface, so it wants the same strict
+    # (workspace, pocket) scope ``foreign_site_for_pocket`` already applies on the
+    # way back out.
+    #
+    # FAIL-CLOSED, off the ``workspace`` key the wire dict carries
+    # (``cloud.pockets.dto.pocket_to_wire_dict``). A missing or empty value refuses:
+    # "this pocket did not say whose it is" is not a tenancy proof.
+    #
+    # THE SAME CODE AS THE ACCESS DENIAL, on purpose. A distinct code would confirm
+    # to whoever guessed the id that the pocket is real and lives somewhere else,
+    # which is an existence oracle the private-pocket refusal does not give away.
+    pocket = await pockets_service.get(pocket_id, owner)
+    if str(pocket.get("workspace") or "") != str(workspace_id):
+        raise Forbidden(
+            "pocket.access_denied",
+            "You do not have access to this pocket",
+        )
 
     hosts = _normalize_origin_hosts(allowed_origins)
     if not hosts:
@@ -2928,9 +2960,14 @@ async def bind_foreign_concierge(
     next bind instead of staying a paid bar that cannot answer.
 
     The gates are INHERITED, not re-implemented: a pocket the caller cannot
-    access and an origin the workspace has not proved it controls are both
-    refused inside the mint, before any row or debit exists. A refused bind
-    leaves nothing behind, exactly as a refused mint does.
+    access, a pocket belonging to another workspace, and an origin the workspace
+    has not proved it controls are all refused inside the mint, before any row or
+    debit exists. A refused bind leaves nothing behind, exactly as a refused mint
+    does. The resolve half inherits the TENANCY half for free —
+    ``foreign_site_for_pocket`` is scoped to (workspace, pocket), so another
+    tenant's pocket id resolves to nothing and falls through to the mint's
+    refusal — but it asks the ACCESS question itself, because returning an
+    existing row hands back a ``signed_key`` without ever reaching the mint.
 
     ``allowed_origins`` / ``name`` / ``scopes`` apply to the MINT only. An
     existing row is returned untouched: silently widening a live concierge's
@@ -2955,9 +2992,18 @@ async def bind_foreign_concierge(
         ``sites.origin_verification_stale``), NotFound,
         ValidationError (``sites.origin_required``), InsufficientCredits.
     """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
     async with _foreign_bind_lock(workspace_id, pocket_id):
         existing = await foreign_site_for_pocket(workspace_id, pocket_id)
         if existing is not None:
+            # THE RESOLVE ARM'S OWN POCKET GATE. The mint arm below inherits one;
+            # this arm returns a row without ever reaching it, and that row carries
+            # the ``signed_key``. ``foreign_site_for_pocket`` is scoped to
+            # (workspace, pocket) so the tenancy half is already closed here — what
+            # is missing is whether THIS caller may open the pocket, which for a
+            # private one is a different question from being in the workspace.
+            await pockets_service.get(pocket_id, owner)
             logger.info(
                 "sites.bind_foreign: pocket %s in workspace %s already has concierge "
                 "site %s - resolved, not re-bought",
@@ -3084,6 +3130,7 @@ async def rebind_foreign_concierge(
     pocket_id: str,
     agent_id: str = "",
     widget_id: str = "",
+    caller_is_admin: bool = False,
 ) -> str | None:
     """Point this concierge's bar at a different agent, leaving the row alone.
 
@@ -3093,7 +3140,15 @@ async def rebind_foreign_concierge(
     again, which is the repair for a bar whose agent was deleted.
 
     ``widget_id`` picks the bar explicitly when a pocket carries more than one;
-    omitted, the pocket resolves it.
+    omitted, the pocket resolves it. The bar must belong to this site's pocket —
+    enforced in the funnel module, since a widget lookup is workspace-scoped and
+    an explicit id could otherwise name a colleague's published bar.
+
+    ``caller_is_admin`` RELAXES ONE RULE AND NOTHING ELSE: a non-admin may only
+    name an ``agent_id`` that already answers for a foreign concierge in this
+    workspace. Defaults to False, so a caller that forgets to pass it gets the
+    stricter path. See the block below for why the rule exists and why it is
+    written as a refusal that can be loosened later.
 
     THE CREDENTIAL ROW IS NOT TOUCHED. Nothing here rewrites, deletes or re-mints
     the Site: the customer's embedded ``signed_key`` keeps resolving, the tier
@@ -3106,12 +3161,49 @@ async def rebind_foreign_concierge(
     Raises:
         NotFound: ``site`` when the pocket has no foreign concierge; ``agent``
             when ``agent_id`` is not readable in this workspace.
+        Forbidden: ``sites.agent_not_published`` when a non-admin names an agent
+            that does not already front a foreign concierge here;
+            ``sites.widget_pocket_mismatch`` when ``widget_id`` is another
+            pocket's bar.
     """
     site = await foreign_site_for_pocket(workspace_id, pocket_id)
     if site is None:
         raise NotFound("site", f"foreign concierge for pocket {pocket_id}")
 
-    from pocketpaw_ee.paw_bar.agent_provisioning import rebind_site_agent
+    from pocketpaw_ee.paw_bar.agent_provisioning import rebind_site_agent, widget_for_agent
+
+    if agent_id and not caller_is_admin:
+        # A PUBLIC CONCIERGE IS A PUBLISHING SURFACE. ``rebind_site_agent``'s own
+        # gate asks whether the caller may READ this agent, and ``workspace``
+        # visibility means every MEMBER may read every such agent in the tenant.
+        # That is the wrong question here: a concierge run resolves
+        # ``agent:<agent_id>``, so the agent named here answers ANONYMOUS visitors
+        # on a public page. Pointing one at an agent that was never provisioned
+        # for public answering publishes its knowledge, and "readable by members"
+        # was never consent to that.
+        #
+        # The test is the BINDING, not the slug: an agent already fronting a
+        # foreign concierge in this workspace has been published deliberately
+        # once, so re-pointing another concierge at it changes nothing about who
+        # can reach it.
+        #
+        # REVERSIBLE BY DESIGN. Loosening this later — a flag on the agent, an
+        # explicit "may answer the public" opt-in — is safe. Tightening it after
+        # customers have built on the loose behaviour is not, which is why the
+        # refusal ships first and the escape hatch is a role rather than a
+        # setting.
+        holder = await widget_for_agent(agent_id, workspace_id)
+        holder_site = (
+            await foreign_site_for_pocket(workspace_id, str(getattr(holder, "pocket_id", "") or ""))
+            if holder is not None
+            else None
+        )
+        if holder_site is None:
+            raise Forbidden(
+                "sites.agent_not_published",
+                "That agent does not answer for a foreign concierge yet. "
+                "An admin can point a concierge at it.",
+            )
 
     bound = await rebind_site_agent(site, workspace_id, agent_id=agent_id, widget_id=widget_id)
     logger.info(

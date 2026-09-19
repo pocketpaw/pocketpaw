@@ -6,19 +6,19 @@
 # host and have its content fetched and compiled into their own workspace. This
 # module is the gate, and it gates the CRAWL, not merely an embed.
 #
-# CONSUMERS ASK ``verified_origin_record``, NOT THE BOOLEAN. Both of them — the
-# bind (``sites.service.mint_foreign_site``) and the crawl
-# (``sites.foreign_grounding``) — apply a freshness policy off ``verified_at``,
-# which the boolean cannot express. ``verified_origin`` is still the fail-closed
-# one-line form of the same question and is still tested, but nothing in
-# production calls it today; delete it or grow a caller rather than leaving a
-# third way to ask.
+# CONSUMERS ASK ``verified_origin_record``, NOT THE BOOLEAN. All three — the bind
+# (``sites.service.mint_foreign_site``), the crawl (``sites.foreign_grounding``)
+# and the panel read (``sites.router._foreign_concierge_response``) — apply a
+# freshness policy off ``verified_at``, which the boolean cannot express.
+# ``verified_origin`` has no production caller today; see its docstring.
 #
 # THE FLOW. ``claim_origin`` mints a secret bound to (workspace, host) and stores
 # it pending. The owner publishes it at ``/.well-known/paw-verify`` or as a
 # ``<meta name="paw-verify">`` in the origin's <head>. ``verify_origin`` fetches
-# the claimed host and compares. A failure writes NOTHING: the row stays pending,
-# no Site is minted, no crawl is scheduled.
+# the claimed host and compares. A failure writes NOTHING: the row is untouched,
+# no Site is minted, no crawl is scheduled. An ALREADY-VERIFIED row is RE-PROBED
+# rather than handed back, so ``verified_at`` moves — the freshness window above
+# is measured against it, and re-verifying is the click a refusal asks for.
 #
 # INVARIANTS A READER MUST NOT BREAK:
 #   * A CLAIM IS LOOKED UP BY (workspace, host), NEVER BY TOKEN. The comparison is
@@ -368,8 +368,12 @@ async def verify_origin(
     """Prove this workspace controls ``host``, or raise and leave nothing behind.
 
     At most two GETs: the well-known file, then the homepage's <head>. A failure
-    persists NOTHING — the claim stays pending, no Site row is minted, and no
-    crawl is scheduled from here (this module has a path to neither).
+    persists NOTHING — the claim keeps the status it had, no Site row is minted,
+    and no crawl is scheduled from here (this module has a path to neither).
+
+    RUNS ON AN ALREADY-VERIFIED CLAIM TOO, and that is the point: the proof is
+    re-fetched and ``verified_at`` moves, which is the only way an owner can
+    answer a consumer that has refused their 31-day-old proof.
 
     ``transport`` / ``resolver`` are safe_fetch's test seams, threaded so the
     suite never opens a socket.
@@ -386,9 +390,35 @@ async def verify_origin(
         # — the codebase's 404 convention, so this is the one code on this
         # surface outside the ``sites.origin_*`` family.
         raise NotFound("site_origin_claim", normalized)
-    if claim.status == _STATUS_VERIFIED:
-        return claim
-    if _expires_at(claim) <= datetime.now(UTC):
+    # A VERIFIED CLAIM IS RE-PROBED, NOT HANDED BACK. ``_record_verified`` is the
+    # only writer of ``verified_at``, so returning early here froze that date at the
+    # first proof for the life of the row — while three consumers (the mint, the
+    # grounding crawl, the concierge panel) refuse a proof older than 30 days and
+    # tell the owner to verify the domain again. That click landed here and did
+    # nothing, so a paid concierge could reach a state where its knowledge can never
+    # refresh while the renewal sweep keeps charging for it.
+    #
+    # UNCONDITIONALLY, NOT ONLY WHEN STALE. Which proofs are too old is not a
+    # question this module answers: the window lives with the feature acting on the
+    # proof (``foreign_grounding.VERIFICATION_MAX_AGE``), and reaching for a
+    # consumer's number here to decide whether to fetch would put one policy in two
+    # files. Two GETs on the owner's own button press is the cheaper side of that
+    # trade.
+    #
+    # A FAILED RE-PROBE UN-PROVES NOTHING. Every raise below persists nothing, so an
+    # origin that has stopped serving its token keeps its row and the binding that
+    # row backs — the owner is told what is wrong instead of being cut off. Only a
+    # successful fetch writes, which is what keeps the re-stamp a proof rather than
+    # a touch.
+    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):
+        # THE TTL BOUNDS AN UNREDEEMED INVITATION, NOT A PUBLISHED PROOF. A token
+        # nobody ever used expires after ``CLAIM_TTL`` so a leaked one cannot be
+        # redeemed months later. One the owner DID publish, and which their origin
+        # still serves, is re-checked on every call above. Applying the TTL to a
+        # verified row would be worse than the bug it replaces: CLAIM_TTL (7 days)
+        # is shorter than the freshness window (30), so every re-verify would demand
+        # a fresh token and a freshly published file — not the one click per invoice
+        # the window was argued on.
         raise ValidationError(
             "sites.origin_claim_expired",
             "That verification token has expired. Claim the domain again for a new one.",
@@ -488,9 +518,12 @@ async def verified_origin_record(workspace_id: str, host: str) -> SiteOriginClai
     """The verified claim row for (workspace, host), or None.
 
     Returned beside the boolean so a consumer can apply its own freshness policy
-    off ``verified_at``. Nothing here expires a proven origin: how often control
-    must be re-proved is a decision for the feature that acts on it, and inventing
-    a TTL in this module would silently break a live binding on its anniversary.
+    off ``verified_at``. This module still owns no TTL — how often control must be
+    re-proved is a decision for the feature that acts on it, and inventing one here
+    would silently break a live binding on its anniversary. What the module DOES
+    own is the way back: ``verify_origin`` re-probes a verified row and re-stamps
+    ``verified_at``, so a consumer that refuses an old proof is refusing something
+    the owner can fix rather than a dead end.
     """
     try:
         normalized = normalize_claim_host(host)
