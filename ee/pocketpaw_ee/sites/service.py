@@ -520,10 +520,12 @@
 # ``concierge_entitled`` needs that rung AND an active subscription, so the mint
 # stamps the tier, debits the month from the workspace credit wallet on the CREDITS
 # rail, and activates only after the money moves — a failed charge leaves no row.
-# It gates on a VERIFIED origin (``sites.ownership``) and on the pockets-service
-# ownership check (``pockets_service.get``), both before any write, so a caller can
-# bind a concierge neither to another workspace's pocket (which would leak that
-# pocket's KB to the resolved context) nor to a domain it does not control.
+# It gates on a VERIFIED origin (``sites.ownership``), on the pockets-service
+# ownership check (``pockets_service.get``) and — separately, because that check
+# denies only a PRIVATE pocket — on the pocket living in the MINTING workspace, all
+# before any write, so a caller can bind a concierge neither to another workspace's
+# pocket (which would leak that pocket's KB to an anonymous visitor's resolved
+# context) nor to a domain it does not control.
 # ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
 # ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
 # foreign concierge must not collide with a published site's stable per-pocket id).
@@ -2576,10 +2578,12 @@ async def mint_foreign_site(
 
     ORDER, and each step's failure mode:
 
-      1. Refuse a pocket the caller cannot access, then refuse an origin this
-         workspace has not PROVED it controls — or proved more than 30 days ago.
-         All before any write: minting on someone else's domain is how a concierge
-         becomes a crawler-for-hire.
+      1. Refuse a pocket the caller cannot access OR that belongs to another
+         workspace, then refuse an origin this workspace has not PROVED it
+         controls — or proved more than 30 days ago. All before any write: minting
+         on someone else's domain is how a concierge becomes a crawler-for-hire,
+         and minting on someone else's POCKET is how it becomes a reader of their
+         knowledge.
       2. Insert the row UNPAID — tier stamped, subscription ``none``. It confers
          nothing; it exists so the debit has a stable ``site_id`` to key on.
       3. CHARGE. A refusal (a short wallet raises ``InsufficientCredits``, 402)
@@ -2637,7 +2641,8 @@ async def mint_foreign_site(
 
     Raises:
         Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
-            ``pocket_id``; ``sites.origin_unverified`` when the workspace has not
+            ``pocket_id`` or when that pocket belongs to another workspace;
+            ``sites.origin_unverified`` when the workspace has not
             proved it controls one of ``allowed_origins``;
             ``sites.origin_verification_stale`` when it did, over 30 days ago.
         NotFound: when ``pocket_id`` does not exist.
@@ -2651,14 +2656,41 @@ async def mint_foreign_site(
     from pocketpaw_ee.sites import foreign_grounding, ownership
 
     # Ownership gate — the SAME check every other pocket-touching path in this
-    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
-    # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
-    # resolved CONCIERGE context would then read that victim pocket's KB
-    # (``pocket:<pocket_id>``). Run it BEFORE minting the key / inserting the doc so
-    # a denied caller leaves no orphan Site behind. ``get`` raises
-    # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
-    # pocket is missing; we only need it for the side-effect of that check.
-    await pockets_service.get(pocket_id, owner)
+    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Run it BEFORE
+    # minting the key / inserting the doc so a denied caller leaves no orphan Site
+    # behind. It raises NotFound when the pocket is missing and
+    # Forbidden("pocket.access_denied") when the caller cannot read it.
+    #
+    # IT IS NOT A TENANCY GATE, WHICH IS THE OTHER HALF. Its refusal reads
+    # ``... and pocket.visibility == "private"``, so it denies a PRIVATE pocket
+    # only — and the model's default is "workspace" (``cloud.models.pocket``), a
+    # value that check never scopes to the SAME workspace. Left at one call, a
+    # member of tenant A could mint a concierge against a default-visibility pocket
+    # in tenant B. The read direction is the worse one: a concierge run is locked to
+    # ``pocket:<pocket_id>`` taken off THIS row, so A's public bar would answer
+    # ANONYMOUS visitors out of B's knowledge, and grounding would write into B's
+    # scope on every sync.
+    #
+    # FIXED HERE RATHER THAN THERE. ``pockets_service.get``'s permissiveness is
+    # deliberate and shared by many callers; narrowing it is a far larger decision
+    # than this row. What is particular to a foreign mint is that it turns a pocket
+    # into a PUBLIC, ANONYMOUS read surface, so it wants the same strict
+    # (workspace, pocket) scope ``foreign_site_for_pocket`` already applies on the
+    # way back out.
+    #
+    # FAIL-CLOSED, off the ``workspace`` key the wire dict carries
+    # (``cloud.pockets.dto.pocket_to_wire_dict``). A missing or empty value refuses:
+    # "this pocket did not say whose it is" is not a tenancy proof.
+    #
+    # THE SAME CODE AS THE ACCESS DENIAL, on purpose. A distinct code would confirm
+    # to whoever guessed the id that the pocket is real and lives somewhere else,
+    # which is an existence oracle the private-pocket refusal does not give away.
+    pocket = await pockets_service.get(pocket_id, owner)
+    if str(pocket.get("workspace") or "") != str(workspace_id):
+        raise Forbidden(
+            "pocket.access_denied",
+            "You do not have access to this pocket",
+        )
 
     hosts = _normalize_origin_hosts(allowed_origins)
     if not hosts:
@@ -2928,9 +2960,12 @@ async def bind_foreign_concierge(
     next bind instead of staying a paid bar that cannot answer.
 
     The gates are INHERITED, not re-implemented: a pocket the caller cannot
-    access and an origin the workspace has not proved it controls are both
-    refused inside the mint, before any row or debit exists. A refused bind
-    leaves nothing behind, exactly as a refused mint does.
+    access, a pocket belonging to another workspace, and an origin the workspace
+    has not proved it controls are all refused inside the mint, before any row or
+    debit exists. A refused bind leaves nothing behind, exactly as a refused mint
+    does. The resolve half needs no gate of its own — ``foreign_site_for_pocket``
+    is already scoped to (workspace, pocket), so a foreign pocket id resolves to
+    nothing and falls through to the mint's refusal.
 
     ``allowed_origins`` / ``name`` / ``scopes`` apply to the MINT only. An
     existing row is returned untouched: silently widening a live concierge's

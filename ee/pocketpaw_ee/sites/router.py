@@ -1766,8 +1766,10 @@ async def bind_pocket_foreign_concierge(
     this endpoint is shaped around.
 
     Every refusal happens before a row exists and before money moves: a pocket
-    the caller cannot access (403 ``pocket.access_denied``), an origin the
-    workspace has not proved it controls (403 ``sites.origin_unverified``), a
+    the caller cannot access, or one that belongs to a different workspace (403
+    ``pocket.access_denied`` for both — the same code, so a guessed id is not
+    told which), an origin the workspace has not proved it controls (403
+    ``sites.origin_unverified``), a
     proof older than 30 days (403 ``sites.origin_verification_stale``), no usable
     origin (422 ``sites.origin_required``) and a wallet that cannot cover the
     month (402 ``credits.insufficient``). The last one deletes the unpaid row it

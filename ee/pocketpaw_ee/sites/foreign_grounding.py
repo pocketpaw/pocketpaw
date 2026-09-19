@@ -37,6 +37,10 @@
 #     crawling both apex and www would have the second write over the first.
 #   * Fetching goes through ``url_crawler`` → ``safe_fetch`` and nowhere else.
 #     Do not add an httpx call to this file.
+#   * The whole crawl runs under ONE WALL-CLOCK DEADLINE
+#     (``GROUNDING_MAX_WALL_CLOCK_SEC``). safe_fetch's per-socket timeout cannot
+#     end a target that trickles a byte under it forever, and this lane is
+#     awaited inside a web request rather than on a queue.
 #   * Every failure is REPORTED as a status code, never swallowed: a concierge
 #     that silently knows nothing is the bug this lane exists to end.
 
@@ -44,6 +48,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -108,6 +113,35 @@ VERIFICATION_MAX_AGE = timedelta(days=30)
 # scope.
 GROUNDING_MAX_PAGES = 25
 GROUNDING_BYTE_CAP = 8 * 1024 * 1024
+
+# THE DEADLINE, AND WHY IT IS NOT THE IMPORTER'S NUMBER.
+#
+# Every cap above counts something the target hands us, so a target that hands us
+# almost nothing escapes all of them. safe_fetch's ``httpx.Timeout(10.0)`` is a
+# per-socket-OPERATION timeout, not a request deadline: a server that writes one
+# byte every nine seconds resets it on every read, and 8 MB at that rate is over
+# two years. Without a wall clock the crawl simply does not return.
+#
+# ``import_service.MAX_CRAWL_WALL_CLOCK_SEC`` is 120 and wraps the SAME
+# ``crawl_site``, so sharing it was the obvious move. It is the wrong number
+# here, in both directions:
+#   * ITS BUDGET IS 10x THIS ONE. The importer may fetch 50 pages AND 200 assets;
+#     this lane fetches at most 25 pages and no assets (26 requests including
+#     robots.txt). A ceiling sized for 250 requests is not a ceiling for 26.
+#   * ITS RUN IS BACKGROUNDED AND THIS ONE IS NOT. The importer's crawl is a
+#     background job; grounding runs at bind and is AWAITED INLINE in the owner's
+#     re-sync handler (``paw_bar.router.sync_site_knowledge_now``), so this number
+#     is also how long one HTTP request may be held open. Inheriting a constant
+#     someone later raises for the importer's benefit would lengthen a web
+#     request nobody was thinking about.
+#
+# 60 seconds: 26 requests against a slow-but-honest origin at ~2s a page lands
+# well inside it (the measured site finishes in 16 requests), and the politeness
+# delay adds 0.15s a page. A real site slower than that fails the sync rather
+# than hanging it, which is recoverable — the harvest reports ``crawl_timeout``,
+# nothing is ingested, nothing is pruned, and the previous articles survive for
+# the owner to press sync again.
+GROUNDING_MAX_WALL_CLOCK_SEC = 60.0
 
 # AN HONEST, SEPARATE IDENTITY. Not the importer's: this is a recurring read of
 # the customer's own pages on their own behalf, not a one-shot import, and it is
@@ -253,16 +287,32 @@ async def harvest_foreign_site(
         return ForeignHarvest(error=reason)
 
     try:
-        crawl = await url_crawler.crawl_site(
-            f"https://{host}/",
-            total_byte_cap=GROUNDING_BYTE_CAP,
-            transport=transport,
-            resolver=resolver,
-            politeness_delay=politeness_delay,
-            max_pages=GROUNDING_MAX_PAGES,
-            fetch_assets=False,
-            user_agent=GROUNDING_USER_AGENT,
+        # THE DEADLINE WRAPS THE WHOLE WALK, not one fetch — the same shape
+        # ``import_service`` uses around this call, for the same reason (see
+        # ``GROUNDING_MAX_WALL_CLOCK_SEC`` for why the number is its own).
+        async with asyncio.timeout(GROUNDING_MAX_WALL_CLOCK_SEC):
+            crawl = await url_crawler.crawl_site(
+                f"https://{host}/",
+                total_byte_cap=GROUNDING_BYTE_CAP,
+                transport=transport,
+                resolver=resolver,
+                politeness_delay=politeness_delay,
+                max_pages=GROUNDING_MAX_PAGES,
+                fetch_assets=False,
+                user_agent=GROUNDING_USER_AGENT,
+            )
+    except TimeoutError:
+        # ITS OWN CODE, ahead of the catch-all below. "The crawl failed" and "your
+        # server never finished answering" are different sentences for the owner,
+        # and only one of them is about us. The generic arm would swallow this:
+        # ``asyncio.timeout`` raises the builtin ``TimeoutError``, which is an
+        # ``OSError`` and therefore an ``Exception``.
+        logger.warning(
+            "sites.grounding: crawl of %s exceeded %.0fs and was abandoned",
+            host,
+            GROUNDING_MAX_WALL_CLOCK_SEC,
         )
+        return ForeignHarvest(host=host, error="crawl_timeout")
     except url_crawler.CrawlError as exc:
         logger.info("sites.grounding: crawl of %s failed (%s)", host, exc.code)
         return ForeignHarvest(host=host, error=_crawl_error_code(exc.code))
@@ -306,6 +356,7 @@ async def harvest_foreign_site(
 __all__ = [
     "GROUNDING_BYTE_CAP",
     "GROUNDING_MAX_PAGES",
+    "GROUNDING_MAX_WALL_CLOCK_SEC",
     "GROUNDING_USER_AGENT",
     "VERIFICATION_MAX_AGE",
     "ForeignHarvest",
