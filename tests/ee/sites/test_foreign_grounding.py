@@ -27,6 +27,8 @@
 # the wrong reason.
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -447,6 +449,78 @@ async def test_the_byte_budget_reports_crawl_too_large(beanie_test_db, monkeypat
 
     assert harvest.error == "crawl_too_large"
     assert harvest.source == {}
+
+
+async def test_a_target_that_never_finishes_answering_is_abandoned_on_the_clock(
+    beanie_test_db, monkeypatch
+):
+    """The slow-loris backstop. Every other budget counts something the target
+    HANDS US — pages, bytes — so a target that hands us almost nothing escapes all
+    of them: ``safe_fetch``'s ``httpx.Timeout(10.0)`` is per-socket-OPERATION and a
+    server writing one byte every nine seconds resets it forever.
+
+    The transport below never completes a request, which is that target with the
+    trickle removed. Without the wall clock this call does not return, and this
+    lane is awaited INSIDE a web request (the owner's re-sync handler), so "does
+    not return" means a held request coroutine and a held connection.
+
+    ``asyncio.wait_for`` is the test's OWN deadline, deliberately much longer than
+    the lane's: delete the wrapper under test and this fails in three seconds
+    instead of hanging CI until somebody kills it.
+    """
+    await _claim()
+    monkeypatch.setattr(foreign_grounding, "GROUNDING_MAX_WALL_CLOCK_SEC", 0.3)
+
+    class _NeverAnswers(httpx.AsyncBaseTransport):
+        """Accepts the connection and then says nothing, forever.
+
+        A MockTransport cannot express this — its handler is synchronous, so it
+        must return a response. This one awaits a future nothing resolves, which
+        is what a request against a trickling origin looks like from up here.
+        """
+
+        def __init__(self) -> None:
+            self.seen: list[httpx.Request] = []
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.seen.append(request)
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")  # pragma: no cover
+
+    transport = _NeverAnswers()
+
+    harvest = await asyncio.wait_for(
+        foreign_grounding.harvest_foreign_site(
+            _FakeSite(),
+            transport=transport,
+            resolver=_resolver(),
+            politeness_delay=0,
+        ),
+        timeout=3,
+    )
+
+    # REPORTED, not raised. The sync's contract is a status code the dashboard can
+    # turn into a sentence, and an escaping exception would surface as a generic
+    # "sync failed" that says nothing about whose server stopped answering.
+    assert harvest.error == "crawl_timeout"
+    assert harvest.source == {}
+    assert transport.seen, "the transport must have been reached, or the deadline proves nothing"
+
+
+async def test_the_deadline_does_not_fire_on_a_site_that_answers(beanie_test_db):
+    """The other half, and the reason the number is not 1.0. A deadline that also
+    refuses honest sites is an outage, so the ordinary two-page crawl is asserted
+    to finish well inside the budget rather than merely to finish."""
+    await _claim()
+
+    started = time.monotonic()
+    harvest = await _harvest()
+    elapsed = time.monotonic() - started
+
+    assert harvest.error == ""
+    assert elapsed < foreign_grounding.GROUNDING_MAX_WALL_CLOCK_SEC / 2, (
+        "a normal crawl must land far inside the deadline, not just inside it"
+    )
 
 
 async def test_an_unexpected_crawler_failure_is_still_reported(beanie_test_db, monkeypatch):
