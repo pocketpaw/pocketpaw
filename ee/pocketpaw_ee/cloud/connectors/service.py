@@ -58,6 +58,16 @@
 #   into the config blob passed to ``adapter.connect`` so the per-workspace
 #   egress allow-list additions reach the adapter on that path too (the primary
 #   ensure_connected path folds them in ``state_provider.get``).
+# Updated: 2026-07-16 (SR-1 catalog-wide discovery) — added
+#   ``list_bound_connector_names``: a names-only companion to
+#   ``is_connector_bound_to_pocket`` that returns the SET of connector names
+#   enabled + reachable from one pocket (pocket-scoped for this pocket OR
+#   workspace-scoped) in a single tenant-filtered Beanie read. The new
+#   ``sense_search`` MCP tool (catalog-wide discovery) reads this once to mark
+#   each catalog hit BOUND-vs-unbound for the current pocket, instead of N
+#   per-connector ``is_connector_bound_to_pocket`` calls. Keeps the
+#   WorkspaceConnector read in THIS service (OSS-EE boundary §2 + tenant rule
+#   §7) so the catalog / MCP layers never import the Beanie doc.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -904,6 +914,33 @@ async def is_connector_bound_to_pocket(workspace_id: str, pocket_id: str, name: 
     return doc is not None
 
 
+async def list_bound_connector_names(workspace_id: str, pocket_id: str) -> set[str]:
+    """The SET of connector names enabled + reachable from one pocket.
+
+    The names-only companion to ``is_connector_bound_to_pocket``: same tenant
+    gate (``scope == "workspace"`` OR ``scope == "pocket"`` for THIS pocket,
+    ``enabled == True``), but returns every matching name in one read instead of
+    one bool per name. The ``sense_search`` MCP tool reads this once to mark each
+    catalog hit BOUND-vs-unbound for the current pocket — catalog discovery is
+    catalog-wide, so it needs the reachable set, not a per-connector probe.
+
+    Tenant-filtered on ``workspace`` (cloud rule §7). An empty/unknown
+    ``pocket_id`` (an unanchored chat passes ``""``) matches the pocket arm
+    against nothing, so only workspace-scoped rows come back — the same
+    fall-through the other pocket-reach reads use. The Beanie read lives HERE
+    (not in the catalog / MCP layer) so the OSS-EE boundary holds.
+    """
+    docs = await _WCDoc.find(
+        _WCDoc.workspace == workspace_id,
+        Or(
+            _WCDoc.scope == "workspace",
+            And(_WCDoc.scope == "pocket", _WCDoc.pocket_id == pocket_id),
+        ),
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    ).to_list()
+    return {d.name for d in docs}
+
+
 async def is_connector_enabled_for_workspace(workspace_id: str, name: str) -> bool:
     """True when ``name`` is a real registry connector AND enabled for the workspace.
 
@@ -1101,6 +1138,7 @@ __all__ = [
     "get_connector",
     "is_connector_bound_to_pocket",
     "is_connector_enabled_for_workspace",
+    "list_bound_connector_names",
     "list_connectors",
     "list_pocket_connectors",
     "list_widget_recipes",
