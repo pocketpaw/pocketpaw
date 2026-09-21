@@ -24,6 +24,13 @@
 #   (g) the stamp — all FOUR constructors apply the cohort flag, including
 #       ``agent_create``, which is the one a real Paw Site is born on. A
 #       structural test fails if a fifth constructor is added without it.
+#   (h) the reach back — ``sites_source_gate_retroactive``, the second switch
+#       that applies the gate to pockets that already exist. It matters because
+#       (a)'s cohort rule plus a gate that shipped disabled means EVERY pocket
+#       alive was born ungated, so the master flag alone gates nothing that is
+#       already here. Check that it is inert while the master flag is off, that
+#       it never reaches past the entitlement onto a paying customer, and that
+#       the gallery and the single read still agree.
 #
 # Every test drives the real resolver with ``get_workspace_plan`` /
 # ``get_workspace_overrides`` monkeypatched, which is the pattern the whole tree
@@ -92,6 +99,23 @@ def gate(monkeypatch: pytest.MonkeyPatch):
 
     def _set(on: bool) -> None:
         monkeypatch.setattr(settings, "sites_source_gate_enabled", on)
+
+    return _set
+
+
+@pytest.fixture
+def retro(monkeypatch: pytest.MonkeyPatch):
+    """Turn ``sites_source_gate_retroactive`` on or off for one test.
+
+    ``raising=False`` so this file still COLLECTS on a tree where the setting
+    does not exist yet — the failure a reader should see is the behavioural one
+    below it, not an AttributeError in a fixture."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+
+    def _set(on: bool) -> None:
+        monkeypatch.setattr(settings, "sites_source_gate_retroactive", on, raising=False)
 
     return _set
 
@@ -799,3 +823,112 @@ async def test_g_every_pocket_constructor_stamps_the_cohort() -> None:
         "constructor must pass source_gated=_source_gated_at_create(), including "
         "ones that cannot carry a source map today — see its docstring for why."
     )
+
+
+# ---------------------------------------------------------------------------
+# (h) The retroactive switch — reaching the pockets the cohort stamp excludes.
+#
+# WHY THIS SECTION EXISTS. (a) pins the cohort: a pocket born before the flip
+# keeps its source forever, so that turning the gate on never takes a capability
+# away from somebody who already had it. That is right as a default and it has
+# one consequence nobody wrote down — the gate shipped disabled, so EVERY pocket
+# that exists was born outside the cohort, and switching the master flag on
+# therefore gates nothing that exists. Free-tier sites keep serving their source
+# and the Code tab keeps rendering over it.
+#
+# ``sites_source_gate_retroactive`` is the second, independent switch that says
+# "apply the entitlement to the pockets already here too". It is ANDed under the
+# master flag rather than replacing it, so both directions stay reversible: turn
+# either one off and every grandfathered pocket has its source back immediately,
+# with no migration and no stored state to unwind.
+# ---------------------------------------------------------------------------
+
+
+async def test_h_retroactive_gates_a_pre_flip_free_pocket(gate, retro, plan) -> None:
+    """The bug, stated as a test. A free-tier pocket created before the flip —
+    which is every pocket in existence, because the gate shipped off — is still
+    served its source when the master flag goes on. With the retroactive switch
+    on as well, it is not."""
+    gate(False)
+    created = await _make_site_pocket(FREE_WS, name="Pre-flip free site")
+    assert created["source"] == SOURCE_MAP
+
+    gate(True)
+    retro(True)
+
+    fetched = await pockets_service.get_for_wire(created["_id"], USER)
+    assert fetched["source"] is None
+    assert fetched["sourceVisible"] is False
+
+
+async def test_h_retroactive_leaves_a_paid_workspace_alone(gate, retro, plan) -> None:
+    """The regression that matters most. Reaching further back must not reach
+    past the entitlement — a paying customer's source is untouched no matter
+    which cohort their pocket was born into."""
+    gate(False)
+    created = await _make_site_pocket(PAID_WS, name="Pre-flip paid site")
+
+    gate(True)
+    retro(True)
+
+    fetched = await pockets_service.get_for_wire(created["_id"], USER)
+    assert fetched["source"] == SOURCE_MAP
+    assert fetched["sourceVisible"] is True
+
+
+async def test_h_retroactive_is_inert_without_the_master_switch(gate, retro, plan) -> None:
+    """The two flags are ANDed, master first. Retroactive alone gates nothing —
+    it widens the reach of a gate that is off, which is still off."""
+    gate(False)
+    retro(True)
+    created = await _make_site_pocket(FREE_WS, name="Master off")
+
+    fetched = await pockets_service.get_for_wire(created["_id"], USER)
+    assert fetched["source"] == SOURCE_MAP
+    assert fetched["sourceVisible"] is True
+
+
+async def test_h_turning_retroactive_back_off_restores_source(gate, retro, plan) -> None:
+    """Reversible in both directions, exactly as the master flag is. Nothing is
+    written to the document, so flipping retroactive off hands every
+    grandfathered pocket its source back with no migration."""
+    gate(True)
+    retro(True)
+    created = await _make_site_pocket(FREE_WS, name="Reversible")
+    gate(False)
+    pre_flip = await _make_site_pocket(FREE_WS, name="Reversible pre-flip")
+    gate(True)
+
+    assert (await pockets_service.get_for_wire(pre_flip["_id"], USER))["source"] is None
+
+    retro(False)
+    assert (await pockets_service.get_for_wire(pre_flip["_id"], USER))["source"] == SOURCE_MAP
+    # The in-cohort pocket is still gated by the master flag alone.
+    assert (await pockets_service.get_for_wire(created["_id"], USER))["source"] is None
+
+
+async def test_h_gallery_and_single_read_agree_when_retroactive(gate, retro, plan) -> None:
+    """The two readers must not drift. ``list_pockets`` resolves the entitlement
+    once for the page and projects ``source`` out of its query, so it takes a
+    different path to the same answer — if it disagrees, the gallery offers a
+    Code tab that vanishes when the pocket is opened."""
+    gate(False)
+    created = await _make_site_pocket(FREE_WS, name="Listed pre-flip site")
+    gate(True)
+    retro(True)
+
+    rows = await pockets_service.list_pockets(FREE_WS, USER)
+    row = next(r for r in rows if r["_id"] == created["_id"])
+    single = await pockets_service.get_for_wire(created["_id"], USER)
+
+    assert row["sourceVisible"] is False
+    assert row["sourceVisible"] == single["sourceVisible"]
+
+
+async def test_h_retroactive_ships_disabled(plan) -> None:
+    """Merging this changes nothing for anybody. Taking source away from existing
+    free-tier sites is an operational decision, so it is a switch somebody turns
+    on deliberately, not a behaviour that arrives with a deploy."""
+    from pocketpaw.config import Settings
+
+    assert Settings.model_fields["sites_source_gate_retroactive"].default is False

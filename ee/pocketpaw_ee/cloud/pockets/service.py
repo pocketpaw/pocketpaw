@@ -441,18 +441,33 @@ async def _source_visible_for_doc(
 ) -> bool:
     """May this pocket's authored ``source`` go out over the wire? (SF-2)
 
-    Two conditions ANDed, cheapest first:
+    Conditions ANDed, cheapest first, and none of them touches the database until
+    the last:
 
-    1. **The pocket was born gated AND the gate is still on.** ``doc.source_gated``
-       is stamped at create time from ``sites_source_gate_enabled`` and the setting
-       is re-read here, so BOTH must hold. That is what makes the rollout
-       reversible in both directions — flipping the setting on never re-classifies
-       a pocket that already exists (D3), and flipping it back off restores source
-       to every pocket that was stamped, with no migration and no second flag.
-       Neither check touches the database, so a pocket outside the cohort — which
-       is every pocket until somebody turns the gate on — costs nothing.
-    2. **The workspace is entitled.** ``Entitlements.site_source_visible``: every
-       paid rung grants it, ``free`` does not.
+    1. **The gate is on.** ``sites_source_gate_enabled``, read live. It ships off,
+       so by default this returns immediately and nothing below runs.
+    2. **The pocket is in scope.** Either it was born gated (``doc.source_gated``,
+       stamped at create time from the same setting) OR
+       ``sites_source_gate_retroactive`` is on.
+
+       The cohort stamp is D3: flipping the gate on never re-classifies a pocket
+       that already exists, so turning it on cannot take source away from somebody
+       who already had it. That is the right default and it has a consequence that
+       went unwritten for a while — the gate shipped disabled, so EVERY pocket in
+       existence was born outside the cohort, and turning the master flag on
+       therefore gated nothing that was already here. Free-tier sites kept serving
+       their source and the Code tab kept rendering over it. The retroactive flag
+       is the deliberate second switch that closes that, and it is ANDed UNDER the
+       master flag rather than replacing it, so with the gate off it does nothing.
+
+       Neither flag writes to the document, so the rollout stays reversible in
+       both directions from either one: turn either off and every grandfathered
+       pocket has its source back immediately, with no migration and no stored
+       state to unwind.
+    3. **The workspace is entitled.** ``Entitlements.site_source_visible``: every
+       paid rung grants it, ``free`` does not. Retroactive widens WHICH pockets
+       are asked this question; it never changes the answer, so a paying
+       customer's source is untouched in every cohort.
 
     IT DOES NOT SHORT-CIRCUIT ON ``doc.source`` BEING ABSENT, and that is not an
     oversight to optimize away. The answer is PUBLISHED as ``sourceVisible`` on the
@@ -479,12 +494,14 @@ async def _source_visible_for_doc(
     would reject it. For a capability that exposes code, "unknown means no" is the
     only direction a mistake may fail in.
     """
-    if not getattr(doc, "source_gated", False):
-        return True
-
     from pocketpaw.config import get_settings
 
-    if not get_settings().sites_source_gate_enabled:
+    settings = get_settings()
+
+    if not settings.sites_source_gate_enabled:
+        return True
+
+    if not getattr(doc, "source_gated", False) and not settings.sites_source_gate_retroactive:
         return True
 
     if workspace_entitled is not None:
