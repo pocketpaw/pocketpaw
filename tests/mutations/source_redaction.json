@@ -117,5 +117,41 @@
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_e_list_resolves_the_entitlement_once_for_the_page"
     ]
+  },
+  {
+    "label": "never stamp the cohort on the home pocket, so the gate can never fire on anything ensure_home_pocket makes",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        source_gated=_source_gated_at_create(),\n    )\n    await doc.insert()",
+    "replace": "        source_gated=False,\n    )\n    await doc.insert()",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_ensure_home_pocket_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "never stamp the cohort on the inline ripple auto-create path, so a pocket that later grows a source map is outside the cohort forever",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            source_gated=_source_gated_at_create(),\n            # New agent-generated pockets start with no connectors allowed.",
+    "replace": "            source_gated=False,\n            # New agent-generated pockets start with no connectors allowed.",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_create_from_ripple_spec_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "never stamp the cohort in agent_create — the gate can then never fire on an agent-built Paw Site, which is every real one",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            source_gated=_source_gated_at_create(),\n            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "replace": "            source_gated=False,\n            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_agent_create_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "drop agent_create's stamp line altogether, which is how a NEW constructor would ship unstamped — only the structural test can see it",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            source_gated=_source_gated_at_create(),\n            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "replace": "            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_every_pocket_constructor_stamps_the_cohort"
+    ]
   }
 ]

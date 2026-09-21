@@ -20,7 +20,10 @@
 #       A gate that blanks the preview is worse than no gate at all;
 #   (e) the flag — ``sourceVisible`` publishes the EFFECTIVE answer beside the
 #       payload, because the client can see only half the rule it comes from;
-#   (f) the signature — ``source_visible`` is required. A default is the bug.
+#   (f) the signature — ``source_visible`` is required. A default is the bug;
+#   (g) the stamp — all FOUR constructors apply the cohort flag, including
+#       ``agent_create``, which is the one a real Paw Site is born on. A
+#       structural test fails if a fifth constructor is added without it.
 #
 # Every test drives the real resolver with ``get_workspace_plan`` /
 # ``get_workspace_overrides`` monkeypatched, which is the pattern the whole tree
@@ -597,3 +600,202 @@ async def test_e_serializer_redacts_only_when_told_to(gate, plan) -> None:
 
     assert pocket_to_wire_dict(domain, source_visible=True)["source"] == SOURCE_MAP
     assert pocket_to_wire_dict(domain, source_visible=False)["source"] is None
+
+
+# ---------------------------------------------------------------------------
+# (g) The stamp itself — every constructor, not just the one a test is easiest
+# to write against.
+#
+# ``_source_gated_at_create`` is the whole cohort mechanism, and FOUR
+# constructors call it. Everything above this section reaches the DB through
+# ``pockets_service.create`` (the REST path), which means the other three were
+# stamped on the author's word alone — including ``agent_create``, the path a
+# real Paw Site is born on: the ``create_svelte_site`` / ``create_react_site``
+# MCP tools call it, not the REST route. A stamp missing there would leave every
+# agent-built site permanently outside the cohort, the gate would resolve
+# ``True`` for all of them, and every test above this line would still pass.
+#
+# So: one test per constructor, plus a structural one that fails when the NEXT
+# constructor is added without a stamp — the failure mode the helper's own
+# docstring warns about, and the only one no behavioural test can see.
+# ---------------------------------------------------------------------------
+
+
+async def test_g_agent_create_stamps_the_cohort(gate, plan) -> None:
+    """The path production sites actually take. ``agent_create`` is what the
+    site-building MCP tools call; the REST ``create`` covered above is what the
+    dashboard calls. Same stamp, and the gate fires on the result."""
+    gate(True)
+    view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id=FREE_WS,
+        owner_id=USER,
+        name="Agent-built site",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="svelte",
+        source=dict(SOURCE_MAP),
+        trusted=True,
+    )
+    assert err is None
+    assert pocket_id is not None
+    assert view is not None
+
+    assert (await PocketDoc.get(pocket_id)).source_gated is True
+    wire = await pockets_service.get_for_wire(pocket_id, USER)
+    assert wire["source"] is None
+    assert wire["sourceVisible"] is False
+
+
+async def test_g_agent_create_before_the_flip_is_outside_the_cohort(gate, plan) -> None:
+    """D3 through the agent path. An agent-built site that predates the flip keeps
+    its source after the flip, exactly like a REST-created one — the grandfather
+    clause is a property of the stamp, so it has to hold wherever the stamp is
+    written."""
+    gate(False)
+    _, pocket_id, err = await pockets_service.agent_create(
+        workspace_id=FREE_WS,
+        owner_id=USER,
+        name="Pre-flip agent site",
+        type_="site",
+        ripple_spec=None,
+        engine="svelte",
+        source=dict(SOURCE_MAP),
+        trusted=True,
+    )
+    assert err is None
+    assert pocket_id is not None
+    assert (await PocketDoc.get(pocket_id)).source_gated is False
+
+    gate(True)
+    wire = await pockets_service.get_for_wire(pocket_id, USER)
+    assert wire["source"] == SOURCE_MAP
+    assert wire["sourceVisible"] is True
+
+
+async def test_g_agent_create_still_hands_the_source_back_to_the_agent(gate, plan) -> None:
+    """Section (d)'s argument, applied to the return value of the create call
+    itself. ``agent_create`` answers through ``_agent_view_dict``, not the wire
+    serializer, and it is ungated for the same reason ``get`` is: the agent that
+    just wrote this source map is the build lane, and the tool chain reads the
+    file map back out of these responses to keep editing. Redacting here would
+    not hide a site, it would break the tool that makes one."""
+    gate(True)
+    view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id=FREE_WS,
+        owner_id=USER,
+        name="Agent sees its own files",
+        type_="site",
+        ripple_spec=None,
+        engine="svelte",
+        source=dict(SOURCE_MAP),
+        trusted=True,
+    )
+    assert err is None
+    assert view is not None
+    # The pocket IS in the cohort — this is an ungated LANE, not an ungated pocket.
+    assert (await PocketDoc.get(pocket_id)).source_gated is True
+    assert view["source"] == SOURCE_MAP
+
+
+async def test_g_create_from_ripple_spec_stamps_the_cohort(gate, plan) -> None:
+    """The inline auto-create path. It cannot carry a source map today and is
+    stamped anyway — which is the point of stamping by constructor rather than by
+    engine: the flag records which side of the flip a pocket was born on, a fact
+    about the pocket, so a constructor that grows a source map later does not
+    silently ship its pockets outside the cohort."""
+    spec: dict[str, Any] = {
+        "version": "1.0",
+        "state": {},
+        "ui": {"id": "n_root0001", "type": "flex", "props": {}, "children": []},
+    }
+
+    gate(True)
+    gated_id = await pockets_service.create_from_ripple_spec(FREE_WS, USER, spec)
+    gate(False)
+    ungated_id = await pockets_service.create_from_ripple_spec(FREE_WS, USER, spec)
+
+    assert gated_id is not None
+    assert ungated_id is not None
+    assert (await PocketDoc.get(gated_id)).source_gated is True
+    assert (await PocketDoc.get(ungated_id)).source_gated is False
+
+
+async def test_g_ensure_home_pocket_stamps_the_cohort(gate, plan) -> None:
+    """The home pocket. Same reasoning as the ripple path — it holds widgets, not
+    files, and is stamped so the cohort stays a statement about time rather than
+    about which constructor happened to accept ``source=`` in 2026."""
+    from pocketpaw_ee.cloud.models.user import User as UserDoc
+
+    user = UserDoc(
+        email="home@sf2.test",
+        hashed_password="x",
+        is_active=True,
+        is_verified=True,
+        full_name="Home Owner",
+        active_workspace=FREE_WS,
+    )
+    await user.insert()
+
+    gate(True)
+    pocket, created = await pockets_service.ensure_home_pocket(FREE_WS, str(user.id))
+
+    assert created is True
+    assert pocket["type"] == "home"
+    assert (await PocketDoc.get(pocket["_id"])).source_gated is True
+
+
+async def test_g_every_pocket_constructor_stamps_the_cohort() -> None:
+    """The guard for the constructor that does not exist yet.
+
+    Every behavioural test above names one call site. This one reads the service
+    module and asserts that EVERY direct ``_PocketDoc(...)`` construction passes
+    ``source_gated`` — so adding a fifth constructor without the stamp fails here
+    rather than quietly minting pockets the gate can never apply to.
+
+    Parsed with ``ast``, not grepped: a regex over a 6000-line module also matches
+    ``_PocketDoc.find`` and comments. The ``>= 4`` floor is not decoration — if
+    the ``_PocketDoc`` alias is ever renamed, the walk finds nothing and every
+    per-call assertion below passes vacuously."""
+    import ast
+    import inspect as _inspect
+
+    source_path = _inspect.getsourcefile(pockets_service)
+    assert source_path is not None
+    with open(source_path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    constructors: dict[str, bool] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == "_PocketDoc"
+            ):
+                stamped = any(kw.arg == "source_gated" for kw in inner.keywords)
+                # A function with two constructions counts as stamped only if both are.
+                constructors[node.name] = constructors.get(node.name, True) and stamped
+
+    assert len(constructors) >= 4, (
+        f"found only {len(constructors)} _PocketDoc construction site(s) in "
+        f"{source_path} — the model alias was probably renamed, which would make "
+        "every assertion below vacuous. Update the walk, do not delete it."
+    )
+    # The four known at the time of writing. A new constructor is welcome; an
+    # unstamped one is the bug.
+    assert {
+        "create",
+        "ensure_home_pocket",
+        "create_from_ripple_spec",
+        "agent_create",
+    } <= constructors.keys()
+
+    unstamped = sorted(name for name, stamped in constructors.items() if not stamped)
+    assert not unstamped, (
+        f"these pocket constructors do not stamp source_gated: {unstamped}. Every "
+        "constructor must pass source_gated=_source_gated_at_create(), including "
+        "ones that cannot carry a source map today — see its docstring for why."
+    )
