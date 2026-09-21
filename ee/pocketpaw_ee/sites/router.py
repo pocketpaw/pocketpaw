@@ -284,7 +284,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
@@ -1210,6 +1210,50 @@ async def get_site_entitlements(
     lookup.
     """
     return await sites_service.site_entitlements(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.get("/sites/{site_id}/project")
+async def download_site_project(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> Response:
+    """This site's project as a zip attachment — the copy its owner keeps.
+
+    A PAID per-site capability. A site whose plan does not include it gets 402
+    ``billing.project_download_not_entitled``, and the pre-check that lets the UI
+    disable the button instead of provoking that is ``project_download`` on
+    ``GET /sites/{site_id}/entitlements``. Do not gate the button on the workspace's
+    source visibility instead — different plan, different resolver, and a paid site
+    in a free workspace may download a project whose Code tab is hidden.
+
+    A Ripple site is a 400 ``sites.project_not_downloadable``, never a zero-byte zip:
+    an empty archive is indistinguishable from a site whose files vanished, and the
+    archive is the one thing a customer cannot re-derive.
+
+    ``Response`` and not ``StreamingResponse``, unlike the export download beside it.
+    The archive is assembled whole in memory before any of it can be sent — it is one
+    zip built from one Mongo document, capped at 16 MiB — so wrapping those bytes in
+    an iterator would add a streaming interface over a payload that is already
+    complete. The export streams because it reads pages from D1 as it goes.
+
+    Tenant-scoped through the service's ``_load``, so a cross-tenant or missing site
+    is a 404, and that check runs BEFORE the entitlement so a 402 can never confirm
+    that another workspace's site exists.
+    """
+    assembled = await sites_service.download_site_project(
+        workspace_id=ctx.workspace_id, site_id=site_id, user_id=ctx.user_id
+    )
+    return Response(
+        content=assembled.data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="' + assembled.filename + '"',
+            # Set explicitly because the whole payload is already in hand, so a
+            # download UI can show real progress instead of an indeterminate spinner.
+            "Content-Length": str(len(assembled.data)),
+        },
+    )
 
 
 @router.get("/sites/{site_id}/analytics", response_model=SiteAnalyticsResponse)

@@ -1050,6 +1050,19 @@ class SiteEntitlementsResponse(BaseModel):
     include this" from "it does, and you have not republished since you upgraded".
     Those need different sentences and different buttons. This field is the cheap
     pre-check; the endpoint is the answer.
+
+    ``project_download`` says whether this site's plan buys taking the project away
+    as an archive. Like ``analytics`` it is echoed straight off the resolver with no
+    second condition ANDed in, and like every field here it exists so the Download
+    button can disable itself with a reason instead of 402ing when pressed.
+
+    It is NOT the same question as whether the source is VISIBLE. That one is a
+    WORKSPACE capability (``Entitlements.site_source_visible``, which gates the
+    builder's Code tab) resolved off the workspace plan by a different resolver; this
+    is a PER-SITE capability resolved off the site's own plan. A paid site inside a
+    free workspace can legitimately download a project whose source the Code tab
+    hides. A UI that gates the download button on source visibility would hide a
+    control the customer has paid for — read this field, not that one.
     """
 
     site_id: str
@@ -1063,6 +1076,7 @@ class SiteEntitlementsResponse(BaseModel):
     analytics: bool = False
     concierge_entitled: bool = False
     concierge_enabled: bool = False
+    project_download: bool = False
 
 
 class SiteClientResponse(BaseModel):
