@@ -1093,6 +1093,7 @@ from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
+    BadRequest,
     CloudError,
     ConflictError,
     CustomDomainLimitError,
@@ -1100,6 +1101,7 @@ from pocketpaw_ee.cloud._core.errors import (
     Forbidden,
     Internal,
     NotFound,
+    ProjectDownloadNotEntitled,
     ValidationError,
     with_cause,
 )
@@ -1109,6 +1111,7 @@ from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
+from pocketpaw_ee.sites import project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -4883,7 +4886,83 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         analytics=resolved.analytics,
         concierge_entitled=resolved.concierge_entitled,
         concierge_enabled=resolved.concierge_enabled,
+        # Echoed off the resolver like analytics, and for the same reason there is
+        # nothing to AND in: the download spends no per-workspace allowance. Note this
+        # is the PER-SITE capability and not the workspace's source visibility — see
+        # the DTO docstring for why a UI must not substitute one for the other.
+        project_download=resolved.project_download,
     )
+
+
+async def download_site_project(
+    *, workspace_id: str, site_id: str, user_id: str
+) -> project_zip.ProjectZip:
+    """This site's project as an archive (GET /sites/{site_id}/project).
+
+    Three steps in a fixed order, and the order is the contract.
+
+    TENANCY FIRST, through ``_load``, so a missing, malformed or cross-tenant site id
+    is a 404 exactly like every sibling per-site read. Before the entitlement, on
+    purpose: a caller must not be able to learn that another workspace's site exists
+    by watching a 402 come back instead of a 404.
+
+    THEN THE ENTITLEMENT. ``_assert_entitled_to_project_download`` is the only gate on
+    this feature — the assembler reads the pocket through the deliberately ungated
+    pipeline reader and adds no rules beyond tenancy of its own. Keyed on the doc
+    loaded HERE by ``site_id``, not on whatever the assembler resolves internally, so
+    the plan that was checked is the plan of the site that was asked for.
+
+    THEN THE ARCHIVE, from ``site.pocket_id``. The pocket is the source of truth for
+    source (the build dir is ephemeral and the sandbox self-deletes), which is why
+    this is keyed on a site but assembled from a pocket.
+
+    A RIPPLE SITE IS A 400, NEVER AN EMPTY 200. ``build_project_zip`` answers None for
+    an engine that keeps no source map, and ``sites/export.py`` already states the
+    rule this follows: something with nothing to give must say so rather than come
+    back empty, because a zero-byte download is indistinguishable from a site whose
+    files vanished. The archive is the one thing a customer cannot re-derive.
+
+    EVERY ASSEMBLER FAILURE BECOMES A ``CloudError``. The ``ProjectZipError`` family
+    is not part of this hierarchy, so an uncaught one would leave the router as an
+    unhandled 500 — which on a cross-origin call arrives in the browser stripped of
+    its CORS headers and reads to the frontend as a CORS misconfiguration rather than
+    as a failed download. The three are mapped as 500s rather than 4xx because none of
+    them is the caller's fault: a source map too large for BSON to have stored, a
+    stored path that escapes its root, or a source engine holding no source map all
+    mean our own data broke an invariant, and blaming the request would send somebody
+    looking in the wrong place.
+    """
+    doc = await _load(workspace_id, site_id)
+    _assert_entitled_to_project_download(doc)
+
+    try:
+        assembled = await project_zip.build_project_zip(
+            workspace_id=workspace_id, pocket_id=doc.pocket_id, user_id=user_id
+        )
+    except project_zip.ProjectZipTooLarge as exc:
+        logger.error("sites: project zip for site %s exceeded a cap: %s", site_id, exc)
+        raise with_cause(
+            Internal("sites.project_too_large", "This project is too large to package."), exc
+        ) from exc
+    except project_zip.UnsafeSourcePath as exc:
+        logger.error("sites: project zip for site %s holds an unsafe path: %s", site_id, exc)
+        raise with_cause(
+            Internal("sites.project_unsafe_path", "This project could not be packaged safely."),
+            exc,
+        ) from exc
+    except project_zip.ProjectZipError as exc:
+        logger.error("sites: project zip for site %s could not be assembled: %s", site_id, exc)
+        raise with_cause(
+            Internal("sites.project_unavailable", "This project could not be packaged."), exc
+        ) from exc
+
+    if assembled is None:
+        raise BadRequest(
+            "sites.project_not_downloadable",
+            "This site is built from a Ripple spec rather than source files, so there "
+            "is no project to download.",
+        )
+    return assembled
 
 
 async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
@@ -5495,6 +5574,70 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
         ent.subscription_active,
     )
     raise CustomDomainNotEntitled(
+        plan_tier=ent.plan_tier,
+        subscription_active=ent.subscription_active,
+    )
+
+
+def _assert_entitled_to_project_download(site: Any) -> None:
+    """Refuse the download unless this site's own plan grants the project archive.
+
+    The third caller of ``resolve_site_entitlements``, and written to look exactly
+    like the second (``_assert_entitled_to_custom_domain`` above) because it answers
+    the same SHAPE of question: a per-site capability the tier either sells or does
+    not, ANDed with an active subscription. Reading ``plan_tier`` here instead would
+    hand a free download to every site whose subscription lapsed and to every site
+    whose Dodo product was never configured, since neither of those resets the tier.
+
+    Gated on ``sites_enforced()`` first, like every per-site cap in this module: OSS
+    and self-hosted deployments have no billing and must not acquire a paywall on
+    their own source code. That early return is load-bearing, not defensive — a
+    self-hoster who cannot download their own project would be right to call it a
+    bug.
+
+    THIS IS THE ONLY GATE ON THE DOWNLOAD, which is the fact worth knowing before
+    changing anything here. ``project_zip.build_project_zip`` reads the pocket
+    through ``pockets_service.get`` — the deliberately UNGATED pipeline reader that
+    hands back the real source map whatever the plan says, because the build lane
+    needs it to. The assembler's docstring says it "adds no isolation rules of its
+    own", meaning tenancy only. So deleting the call to this function does not
+    degrade the download, it gives it away.
+
+    Deliberately does NOT also check ``Entitlements.site_source_visible``. That is a
+    workspace capability governing whether the builder shows a Code tab, resolved off
+    the workspace plan; this is a per-site capability resolved off the site's plan.
+    Two questions, two resolvers, and a paid site in a free workspace may download a
+    project whose source the Code tab hides. Adding the second check would also make
+    it impossible to write a test that proves this one fires (see the mutation plan:
+    two guards on one seam let a mutation escape).
+
+    Synchronous and handed the loaded doc, because the resolver is pure and
+    ``entitlements`` may not import ``models.site`` (EE cloud rule 2).
+    """
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+
+    if not sites_enforced():
+        return
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+    if ent.project_download:
+        return
+
+    logger.info(
+        "sites: refused a project download for site %s — tier %s, subscription active: %s",
+        site.id,
+        ent.plan_tier,
+        ent.subscription_active,
+    )
+    raise ProjectDownloadNotEntitled(
         plan_tier=ent.plan_tier,
         subscription_active=ent.subscription_active,
     )

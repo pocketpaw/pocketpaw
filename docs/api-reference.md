@@ -2,6 +2,13 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-21 (feat/site-project-download-endpoint) — added "Sites — Download the
+project". Written around the three things a client cannot infer: the 402 covers two
+different customers (a floor site and a lapsed paid one) whose remedies differ, a Ripple
+site is a 400 rather than an empty archive, and the pre-check field is the PER-SITE
+`project_download` and not the workspace's `site_source_visible` — a paid site in a free
+workspace may download a project whose Code tab is hidden.
+
 Updated: 2026-09-19 (SF-13) — added "Sites — the foreign-origin concierge": the
 four endpoints that finally reach the bind. Written around the three things a
 client cannot infer from the field names. The bind SPENDS MONEY and is
@@ -2498,6 +2505,59 @@ Nothing about the purchase moves: the embedded `signed_key` keeps resolving, the
 tier stays bought, the renewal date stays where it was. An `agent_id` in another
 tenant is a 404 from inside the funnel, deliberately indistinguishable from an
 agent that does not exist.
+
+## Sites — Download the project
+
+The built site handed back to its owner as an archive, rather than only served from our
+edge. A **paid per-site capability**. Source: `ee/pocketpaw_ee/sites/router.py`,
+`ee/pocketpaw_ee/sites/service.py` (`download_site_project`),
+`ee/pocketpaw_ee/sites/project_zip.py`.
+
+**Assembled from the stored pocket, not from a built tree.** The archive carries the
+authored source plus the smallest manifest and config set that makes it install and build
+elsewhere — no `wrangler.toml`, no `adapter-cloudflare`, no edit bridge, no D1 layer, and
+no lockfile. It is **buildable, not byte-identical to what we deploy**. The archive itself
+is byte-reproducible (sorted entries, fixed timestamps), so the same pocket always
+produces the same bytes.
+
+### `GET /sites/{site_id}/project`
+
+Auth: `fabric.read`. Tenant-scoped, and the tenancy check runs **before** the entitlement
+— a site in another workspace is `404`, never `402`, because a `402` would confirm the id
+is real and leak which plan it is on.
+
+Response `200`: the zip itself, `Content-Type: application/zip`, with
+`Content-Disposition: attachment` and an explicit `Content-Length` (the payload is
+assembled whole before anything is sent, so a client can show real progress).
+
+Three refusals, and they are three different situations:
+
+| Status | Code | Means |
+|---|---|---|
+| `402` | `billing.project_download_not_entitled` | This site's plan does not include the download, **or** it is on a paid tier whose subscription has lapsed. The message distinguishes them — "upgrade" versus "renew" — because the remedies differ and a paying customer must not be told to buy a bigger plan. |
+| `400` | `sites.project_not_downloadable` | A Ripple site. It is built from a spec rather than source files, so there is no project. **Never a zero-byte zip**: an empty archive cannot be told apart from a site whose files vanished. |
+| `500` | `sites.project_unavailable`, `sites.project_too_large`, `sites.project_unsafe_path` | Our data broke an invariant — a source map larger than BSON can have stored, a stored path that escapes its root, or a source engine holding no source map. Deliberately not `4xx`: none of these is the caller's fault, and blaming the request sends an investigator to the wrong layer. |
+
+**The remedy is in `error.message`, not in `detail`.** These refusals travel through the
+standard `CloudError` envelope (`{"error": {"code", "message"}}`), and the 402's message is
+the part that differs between "upgrade" and "renew". paw-enterprise's
+`friendlyErrorMessage` reads `body.detail` — which this envelope does not carry — so a
+client that relies on it will render a generic failure and lose the distinction the two
+messages exist to draw. Read `error.code` to decide what to show and `error.message` to
+show it.
+
+**Check `project_download` on `GET /sites/{site_id}/entitlements` (documented above as
+"the pre-check") before offering the button.** That is what the field is for — discovering the refusal by
+provoking it is the failure the per-site entitlements read exists to end.
+
+**Do not gate the button on source visibility instead.** `site_source_visible` is a
+**workspace** capability that governs whether the builder shows a Code tab;
+`project_download` is a **per-site** capability resolved off the site's own plan. A paid
+site inside a free workspace may legitimately download a project whose Code tab is
+hidden, so gating on the workspace field would hide a control the customer has paid for.
+
+Self-hosted and OSS deployments have no billing, so the gate is skipped entirely there
+(`sites_enforced()`) and the download always works.
 
 ## Deleting a site
 

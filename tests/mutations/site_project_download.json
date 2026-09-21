@@ -1,0 +1,60 @@
+[
+  {
+    "label": "delete the entitlement call — every floor site downloads its project, because the assembler has no gate of its own",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await _load(workspace_id, site_id)\n    _assert_entitled_to_project_download(doc)",
+    "replace": "    doc = await _load(workspace_id, site_id)",
+    "tests": [
+      "tests/ee/sites/test_project_download_endpoint.py::test_a_floor_site_is_refused_and_told_to_upgrade",
+      "tests/ee/sites/test_project_download_endpoint.py::test_a_lapsed_paid_site_is_refused_and_told_to_renew"
+    ]
+  },
+  {
+    "label": "drop the tenant filter on the load — another workspace's site answers 402 instead of 404, confirming the id is real and leaking its plan",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await _load(workspace_id, site_id)\n    _assert_entitled_to_project_download(doc)",
+    "replace": "    doc = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n    _assert_entitled_to_project_download(doc)",
+    "tests": [
+      "tests/ee/sites/test_project_download_endpoint.py::test_d_another_workspaces_site_is_a_404_not_a_402",
+      "tests/ee/sites/test_project_download_endpoint.py::test_d_a_malformed_site_id_is_a_404_not_a_500"
+    ]
+  },
+  {
+    "label": "remove the sites_enforced early return — a self-hosted install acquires a paywall on its own source code",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.project_download:",
+    "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.project_download:",
+    "tests": [
+      "tests/ee/sites/test_project_download_endpoint.py::test_b_self_hosted_download_is_not_paywalled"
+    ]
+  },
+  {
+    "label": "the gate always returns — it resolves the entitlement, ignores the answer, and refuses nobody",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if ent.project_download:\n        return",
+    "replace": "    if True:\n        return",
+    "tests": [
+      "tests/ee/sites/test_project_download_endpoint.py::test_a_floor_site_is_refused_and_told_to_upgrade",
+      "tests/ee/sites/test_project_download_endpoint.py::test_a_lapsed_paid_site_is_refused_and_told_to_renew"
+    ]
+  },
+  {
+    "label": "stop refusing the ripple case — a site with no source map answers with something other than an honest 400",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if assembled is None:\n        raise BadRequest(",
+    "replace": "    if False:\n        raise BadRequest(",
+    "tests": [
+      "tests/ee/sites/test_project_download_endpoint.py::test_c_a_ripple_site_is_a_400_not_an_empty_zip"
+    ]
+  },
+  {
+    "label": "the pre-check lies — the entitlements read hardcodes project_download true, so the UI offers a button that 402s",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        project_download=resolved.project_download,",
+    "replace": "        project_download=True,",
+    "tests": [
+      "tests/ee/sites/test_project_download_endpoint.py::test_f_entitlements_read_publishes_the_download_capability",
+      "tests/ee/sites/test_project_download_endpoint.py::test_f_the_precheck_agrees_with_the_endpoint"
+    ]
+  }
+]
