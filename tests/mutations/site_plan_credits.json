@@ -202,8 +202,8 @@
   {
     "label": "cancelling closes the plan on the spot, forfeiting the month already paid for",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if _period_end is not None:",
-    "replace": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if False:",
+    "find": "    _period_end = getattr(site, \"renewal_date\", None)\n    if _period_end is not None:",
+    "replace": "    _period_end = getattr(site, \"renewal_date\", None)\n    if False:",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_downgrading_to_free_schedules_the_close_for_the_period_end"
     ]
@@ -256,8 +256,8 @@
   {
     "label": "a cancel with no period to run to schedules instead of closing, leaving a paid tier nothing ever ends",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if _period_end is not None:",
-    "replace": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if True:",
+    "find": "    _period_end = getattr(site, \"renewal_date\", None)\n    if _period_end is not None:",
+    "replace": "    _period_end = getattr(site, \"renewal_date\", None)\n    if True:",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_cancelling_a_site_with_no_renewal_date_closes_it_immediately"
     ]

@@ -31,6 +31,15 @@
 #     takes two payments for one site.
 #
 # Created 2026-09-05 (fix/sites-plan-credits): new test module.
+#
+# Updated 2026-09-16 (PS-1, refactor/sites-extract-plan-close): added
+# ``test_closing_a_plan_writes_the_same_document_through_either_branch``. The
+# close logic moved out of ``publish_pocket`` into a helper a second verb can
+# call, and the two tests above it each assert a SUBSET of the fields — between
+# them neither pins ``billing_rail`` or ``deployed`` on both branches, so a move
+# that dropped a write could pass both. The new test drives BOTH branches
+# through publish and compares one whole snapshot per branch, which is the shape
+# that actually fails when a field stops being written.
 
 from __future__ import annotations
 
@@ -754,3 +763,97 @@ async def test_cancelling_a_site_with_no_renewal_date_closes_it_immediately(
     assert fresh.plan_tier == "free"
     assert fresh.subscription_status == "none"
     assert fresh.period_paid_usd == 0
+
+
+# --------------------------------------------------------------------------- #
+# The close is one decision, reached by two verbs
+# --------------------------------------------------------------------------- #
+
+
+def _billing_state(doc: Site) -> dict:
+    """Every field a close writes, or that a close decides the value of.
+
+    A snapshot rather than a handful of asserts because the thing under test is a
+    MOVE. Picking fields one at a time is how a move loses a write: the assert for
+    the line you deleted is the assert you did not think to write."""
+    return {
+        "plan_cancels_at_period_end": doc.plan_cancels_at_period_end,
+        "plan_tier": doc.plan_tier,
+        "subscription_status": doc.subscription_status,
+        "renewal_date": doc.renewal_date,
+        "period_paid_usd": doc.period_paid_usd,
+        "billing_rail": doc.billing_rail,
+        "deployed": doc.deployed,
+    }
+
+
+async def test_closing_a_plan_writes_the_same_document_through_either_branch(
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+):
+    """Both branches of the close, pinned as whole documents.
+
+    The close lives in ``_close_site_plan_at_period_end`` so that a verb other than
+    publish can schedule it. Publish is still the only caller, and it has to keep
+    writing exactly what it wrote when the code sat inline — which is what this
+    asserts, one snapshot per branch, both driven through ``publish_pocket``.
+
+    The two branches are not variations on one outcome. WITH a period to honour
+    the row is left almost entirely alone: the paid tier, the active status, the
+    renewal date and the high-water mark all stand, and a single flag tells the
+    renewal sweep to close it when the month runs out. WITHOUT one there is no
+    month to run to, so the same request has to settle the row on the spot — four
+    fields written, the flag deliberately left DOWN, because a flag raised over a
+    row the sweep selects by ``renewal_date`` schedules a close nothing ever
+    performs."""
+    _local_deploy(monkeypatch)
+
+    # ---- branch one: a period the customer has paid for, so the close waits.
+    ws = await _make_workspace()
+    await _fund(ws, 9000)
+    pocket_id = await _make_pocket(ws)
+
+    await _publish(ws, pocket_id, "site")
+    bought = await _site(ws)
+    renewal = bought.renewal_date
+    assert renewal is not None, "the fixture must reach the branch that has a period"
+
+    await _publish(ws, pocket_id, "free")
+
+    assert _billing_state(await _site(ws)) == {
+        "plan_cancels_at_period_end": True,
+        # The PAID tier survives, and that is the point of scheduling rather than
+        # closing: entitlements read the tier and the status, so writing "free"
+        # here would strip the custom domain and the badge removal mid-month from
+        # a customer who has paid through to the renewal.
+        "plan_tier": "site",
+        "subscription_status": "active",
+        "renewal_date": renewal,
+        "period_paid_usd": 7,
+        "billing_rail": "credits",
+        "deployed": True,
+    }
+
+    # ---- branch two: no period to honour, so the same request closes it now.
+    ws2 = await _make_workspace()
+    await _fund(ws2, 9000)
+    pocket2 = await _make_pocket(ws2)
+
+    await _publish(ws2, pocket2, "site")
+    stranded = await _site(ws2)
+    stranded.renewal_date = None
+    await stranded.save()
+
+    await _publish(ws2, pocket2, "free")
+
+    assert _billing_state(await _site(ws2)) == {
+        "plan_cancels_at_period_end": False,
+        "plan_tier": "free",
+        "subscription_status": "none",
+        "renewal_date": None,
+        "period_paid_usd": 0,
+        "billing_rail": "credits",
+        # Closing the PLAN is not taking the SITE down. The page stays served on
+        # the free floor; only the paid capabilities stop.
+        "deployed": True,
+    }
