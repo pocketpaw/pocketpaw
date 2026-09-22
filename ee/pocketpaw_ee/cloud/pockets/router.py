@@ -482,7 +482,12 @@ async def get_pocket(
         user_id = str(user.id)
     else:
         raise CloudError(401, "auth.required", "Authentication required.")
-    return await pockets_service.get(pocket_id, user_id)
+    # ``get_for_wire`` and not ``get``: this is the one route that hands a
+    # pocket's full wire dict straight to a client, so it is where SF-2's source
+    # gate has to bite. ``get`` is the pipeline's reader and never redacts — see
+    # its docstring for why gating it would stop sites being built rather than
+    # hide them. A new endpoint that returns a pocket belongs on this one too.
+    return await pockets_service.get_for_wire(pocket_id, user_id)
 
 
 @router.patch("/{pocket_id}", dependencies=[Depends(require_pocket_edit)])

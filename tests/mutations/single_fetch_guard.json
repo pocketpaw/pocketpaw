@@ -1,0 +1,99 @@
+[
+  {
+    "label": "the forbidden-IP check always passes, so EVERY private, loopback and metadata address is fetchable",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "def _forbidden_ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:\n    \"\"\"Why this address may NOT be fetched",
+    "replace": "def _forbidden_ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:\n    return None\n    \"\"\"Why this address may NOT be fetched",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_host_that_resolves_to_a_private_address",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_mixed_public_and_private_dns_answer_outright",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_redirect_whose_target_resolves_private",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_forbidden_url_shapes_before_any_request"
+    ]
+  },
+  {
+    "label": "the resolved addresses are never checked at all — DNS rebinding straight through to 169.254.169.254",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "            reason = _forbidden_ip_reason(addr)\n            if reason:\n                raise ValidationError(\n                    \"sites.import_url_forbidden\",\n                    f\"Crawl target resolves to a non-public address ({reason}).\",\n                )",
+    "replace": "            _unchecked = addr",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_host_that_resolves_to_a_private_address",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_mixed_public_and_private_dns_answer_outright"
+    ]
+  },
+  {
+    "label": "a private record is FILTERED OUT instead of failing the host, so one public record is a passkey for a mixed answer",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "            reason = _forbidden_ip_reason(addr)\n            if reason:\n                raise ValidationError(\n                    \"sites.import_url_forbidden\",\n                    f\"Crawl target resolves to a non-public address ({reason}).\",\n                )",
+    "replace": "            reason = _forbidden_ip_reason(addr)\n            if reason:\n                continue",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_mixed_public_and_private_dns_answer_outright",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_host_that_resolves_to_a_private_address"
+    ]
+  },
+  {
+    "label": "only the FIRST resolved address is checked, so a private record behind a public one is never seen",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "        for raw in ips:",
+    "replace": "        for raw in ips[:1]:",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_mixed_answer_whose_private_record_is_last",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_mixed_public_and_private_dns_answer_outright"
+    ]
+  },
+  {
+    "label": "httpx follows redirects itself, so no hop after the first is revalidated (and none is pinned)",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "            follow_redirects=False,  # hops are validated manually",
+    "replace": "            follow_redirects=True,  # hops are validated manually",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_redirect_whose_target_resolves_private",
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_a_redirect_to_a_non_http_scheme"
+    ]
+  },
+  {
+    "label": "the off-host redirect guard never fires, so allowed_host is decorative and a 30x leaves the pinned host",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "                if allowed_host is not None and urlparse(current).netloc.lower() != allowed_host:",
+    "replace": "                if False and urlparse(current).netloc.lower() != allowed_host:",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_allowed_host_pins_the_hop_chain_to_one_host"
+    ]
+  },
+  {
+    "label": "the size cap is checked only AFTER the whole body is buffered, so a hostile 10GB response is held in memory first",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "            buf = bytearray()\n            async for chunk in response.aiter_bytes():\n                buf += chunk\n                if len(buf) > self._per_fetch_cap:",
+    "replace": "            buf = bytearray()\n            async for chunk in response.aiter_bytes():\n                buf += chunk\n            for _once in [1]:\n                if len(buf) > self._per_fetch_cap:",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_oversized_response_aborts_mid_stream_without_buffering_it"
+    ]
+  },
+  {
+    "label": "the declared content-length is ignored, so an oversized body is streamed before anyone objects",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "            if declared.isdigit() and int(declared) > self._per_fetch_cap:",
+    "replace": "            if False and int(declared) > self._per_fetch_cap:",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_declared_content_length_over_the_cap_is_refused_before_the_body"
+    ]
+  },
+  {
+    "label": "URLs with embedded credentials are accepted, so the fetch carries the attacker's Basic auth to the target",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "    if parsed.username is not None or parsed.password is not None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_forbidden_url_shapes_before_any_request"
+    ]
+  },
+  {
+    "label": "any port is fetchable, so the whole non-web port range (6379, 11211, 22) is in reach",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "    if port not in (None, 80, 443):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_safe_fetch.py::test_rejects_forbidden_url_shapes_before_any_request"
+    ]
+  }
+]

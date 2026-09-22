@@ -9,6 +9,8 @@
 # second verb (pause) has to schedule the same close and could not reach the logic
 # while it sat among publish's locals. ``log_prefix`` defaults to
 # ``sites.publish`` so the publish path's log lines are byte-identical.
+# Updated 2026-09-06 (feat/fx-mcp-server): comment only. The html reachability scan
+# now also walks ES module imports, so the "imports nothing" wording below was corrected.
 #
 # Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the
 # DELETE lifecycle — ``start_site_delete`` / ``site_delete_status`` (the two
@@ -123,7 +125,7 @@
 # more. An unimported react component is invisible; an unlinked html page is written
 # AND DEPLOYED and simply cannot be navigated to, which is a state an agent can
 # reasonably describe as finished. The QUESTION is shared and the ANSWER is not — an
-# html site imports nothing, so ``html_path_is_referenced`` resolves URL references
+# html site has no module graph to walk, so ``html_path_is_referenced`` resolves URL references
 # instead of module specifiers (see that module's header).
 #
 # Updated 2026-09-01 (fix/sites-react-orphan-create): ``edit_react_component`` now
@@ -517,20 +519,28 @@
 # the edit-bridge to public pages. The ``_store`` seam keeps "where the render comes
 # from" injectable so a later client-side-REPL compile wave can swap it cheaply.
 #
-# Updated 2026-07-14 (Paw Bar concierge seam, T1): added ``mint_foreign_site`` — a
-# minimal Site writer for a FOREIGN origin (a site we did NOT generate). It creates
-# a ``script_name=""`` / ``deployed=False`` Site that carries only the concierge
-# credential (a freshly minted ``signed_key`` + normalized ``allowed_origins`` +
-# ``scopes``); it is resolved by ``signed_key`` (via ``auth.site_keys.resolve_site_key``),
-# not by ``script_name``, so the empty script name is fine. Kept HERE, not in the
-# auth module, because this service is the sole owner of Site writes. Helper
+# ``mint_foreign_site`` is the Site writer for a FOREIGN origin — a site we did NOT
+# generate, where a Paw Bar concierge embeds on a page the customer already hosts.
+# It writes a ``script_name=""`` / ``deployed=False`` / ``foreign_origin=True`` row
+# resolved by its ``signed_key`` (``auth.site_keys.resolve_site_key``) rather than by
+# ``script_name``, so the empty script name is fine. It is A PURCHASE, not a bare
+# credential writer: the concierge is sold on the ``staff`` rung and
+# ``concierge_entitled`` needs that rung AND an active subscription, so the mint
+# stamps the tier, debits the month from the workspace credit wallet on the CREDITS
+# rail, and activates only after the money moves — a failed charge leaves no row.
+# It gates on a VERIFIED origin (``sites.ownership``), on the pockets-service
+# ownership check (``pockets_service.get``) and — separately, because that check
+# denies only a PRIVATE pocket — on the pocket living in the MINTING workspace, all
+# before any write, so a caller can bind a concierge neither to another workspace's
+# pocket (which would leak that pocket's KB to an anonymous visitor's resolved
+# context) nor to a domain it does not control.
 # ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
 # ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
 # foreign concierge must not collide with a published site's stable per-pocket id).
-# Review follow-up (HIGH): ``mint_foreign_site`` now runs the pockets-service
-# ownership check (``pockets_service.get(pocket_id, owner)``) BEFORE inserting, the
-# same gate ``publish_pocket`` uses, so a caller cannot bind a concierge to another
-# workspace's pocket (which would leak that pocket's KB to the resolved context).
+# It mints UNCONDITIONALLY, so it is not the entry point: ``bind_foreign_concierge``
+# is the resolve-or-buy layer over it (one row and one charge per pocket, plus the
+# concierge funnel), with ``rotate_foreign_concierge_key`` and
+# ``rebind_foreign_concierge`` beside it.
 #
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
@@ -1087,9 +1097,11 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from dateutil.relativedelta import relativedelta
 from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
+    BadRequest,
     CloudError,
     ConflictError,
     CustomDomainLimitError,
@@ -1097,6 +1109,7 @@ from pocketpaw_ee.cloud._core.errors import (
     Forbidden,
     Internal,
     NotFound,
+    ProjectDownloadNotEntitled,
     ValidationError,
     with_cause,
 )
@@ -1106,6 +1119,7 @@ from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
+from pocketpaw_ee.sites import project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -1243,6 +1257,16 @@ _PLAN_RAIL = "plan"
 # live in another (this rung), rather than being spelled out a second time here.
 # Change the rung the plans include and this is the line to change.
 _PLAN_CARRIED_TIER_KEY = "staff"
+# The rung a FOREIGN concierge is sold on — a Paw Bar embedded on a site the
+# customer hosts themselves (``mint_foreign_site``). It is the same rung a
+# plan-carried site gets and for the same reason: ``staff`` is the rung that
+# SELLS THE CONCIERGE, and a concierge is the entire product here. Named
+# separately from ``_PLAN_CARRIED_TIER_KEY`` despite holding the same string,
+# because the two answer different questions — "what does the workspace plan
+# include" and "what does a foreign concierge cost" — and a future ladder that
+# splits them must not have to guess which call sites meant which. The PRICE is
+# never written here; it is read off the catalog at mint time.
+_FOREIGN_CONCIERGE_TIER_KEY = "staff"
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -1851,6 +1875,49 @@ def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
     import hashlib
 
     digest = hashlib.sha1(f"{workspace_id}:{pocket_id}".encode()).digest()
+    return ObjectId(digest[:12])
+
+
+def _foreign_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
+    """A STABLE per-(workspace, pocket) ObjectId for the FOREIGN concierge row.
+
+    The THIRD id namespace in this module, beside ``_preview_id`` (a preview
+    build's directory) and ``_live_object_id`` (a published site's Worker). It
+    exists so that ONE pocket cannot end up with two foreign concierges and two
+    $19 charges: ``_id`` is the one index MongoDB enforces natively, on every
+    deployment, across every process, with nothing to declare and nothing a test
+    double can fail to represent. A duplicate bind loses at the insert, which in
+    ``mint_foreign_site`` happens BEFORE the debit — so the loser never reaches
+    the charge at all, rather than being refunded afterwards.
+
+    THE SALT IS THE WHOLE POINT. ``_live_object_id`` is
+    ``sha1("<ws>:<pocket>")[:12]``; this is ``sha1("foreign:<ws>:<pocket>")[:12]``,
+    a different preimage and therefore a different 12 bytes. That preserves what
+    the mint was careful about from the start: a foreign row must never collide
+    with, or overwrite, the published Worker doc for the same pocket. The two
+    rows coexist deliberately, at two ids, and this derivation must never be
+    given ``_live_object_id``'s preimage to "simplify" it.
+
+    IT MAKES THE DEBIT KEY DETERMINISTIC, WHICH IS A DECISION AND NOT AN
+    ACCIDENT. ``billing.site_plan_debit_key`` is
+    ``site_plan:<site_id>:<tier>:<date>``, so with a derived id the key for a
+    given (workspace, pocket) is now fixed for a given day and tier. The
+    consequence: deleting a foreign concierge and binding it again the SAME day
+    charges nothing. That is the correct reading rather than a leak — the
+    customer bought that pocket's concierge for that month and a second debit
+    inside it would be a double charge — and it is the same reading
+    ``site_plan_debit_key`` already takes for a same-day tier flip-flop. A rebind
+    on a LATER day lands on a new key and charges normally.
+
+    Unlike ``_live_object_id`` this needs no ``_resolve_live_site_oid`` twin. That
+    lookup exists because a TRANSFERRED site keeps the id it was minted with, and
+    a foreign concierge cannot be transferred: ``transfer._check_not_paying``
+    refuses any site with an active subscription, which a bought concierge always
+    has.
+    """
+    import hashlib
+
+    digest = hashlib.sha1(f"foreign:{workspace_id}:{pocket_id}".encode()).digest()
     return ObjectId(digest[:12])
 
 
@@ -2466,6 +2533,32 @@ def _normalize_origin_hosts(origins: list[str]) -> list[str]:
     return hosts
 
 
+async def _discard_unpaid_foreign_site(site: _SiteDoc) -> None:
+    """Remove a just-inserted foreign Site whose charge did not go through.
+
+    A plain delete and deliberately NOT ``delete_cascade``: this row is seconds
+    old and nothing has been built from it — no Worker, no hostname, no lead, no
+    emitted event, no ledger entry (the debit is what failed). The cascade exists
+    to unwind a LIVE site and would be the wrong tool and the slower one.
+
+    Swallows its own failure, and only its own. The caller re-raises the charge
+    error, which is the one the buyer needs to see; a delete that also failed would
+    otherwise replace a clear "your wallet is short" with a Mongo error. What is
+    left behind in that case is an unpaid row with ``subscription_status="none"``,
+    which holds no paid capability — so the log line is for an operator, not an
+    incident.
+    """
+    try:
+        await site.delete()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "sites.mint_foreign: could not delete site %s after its charge failed — "
+            "it is left UNPAID (subscription_status=none) and holds no paid "
+            "capability, but it should be removed by hand",
+            str(site.id),
+        )
+
+
 async def mint_foreign_site(
     *,
     workspace_id: str,
@@ -2475,64 +2568,203 @@ async def mint_foreign_site(
     name: str = "",
     scopes: list[str] | None = None,
 ) -> _SiteDoc:
-    """Mint a Site for a FOREIGN origin — one PocketPaw did not generate (T1).
+    """BUY a Paw Bar concierge for a FOREIGN origin — a site PocketPaw does not host.
 
-    A normal Site is created by ``publish`` for a pocket we render into a Worker;
-    its ``script_name`` is the deployed Worker id and it is looked up by that id.
-    A Paw Bar concierge instead embeds on a site the customer already owns (a
-    Squarespace page, a hand-rolled marketing site, …). There is no Worker to
-    deploy, so this mints a Site with ``script_name=""`` and ``deployed=False``
-    whose ONLY job is to carry the concierge credential: the world-visible
-    ``signed_key`` (minted here, same ``site_key_...`` format ``publish`` seeds),
-    the ``allowed_origins`` the embed is valid from, and the ``scopes`` a resolved
-    request may exercise. It is resolved not by ``script_name`` (empty) but by that
-    ``signed_key`` — ``auth.site_keys.resolve_site_key`` does the key→Site lookup —
-    so an empty ``script_name`` is not a problem.
+    A normal Site is created by ``publish`` for a pocket we render into a Worker.
+    A foreign concierge instead embeds on a page the customer already owns (a
+    Squarespace site, a hand-rolled marketing page). There is no Worker to deploy,
+    so this mints a Site with ``script_name=""``, ``deployed=False`` and
+    ``foreign_origin=True``, carrying the world-visible ``signed_key``, the
+    ``allowed_origins`` the embed is valid from and the ``scopes`` a resolved
+    request may exercise. It is resolved by that key, never by ``script_name``
+    (``auth.site_keys.resolve_site_key``), so the empty script name is fine.
 
-    Site writes are owned by this service (the sole Site writer), which is why the
-    mint lives here rather than in the auth module that reads the key back.
+    IT IS A PURCHASE, AND THAT IS THE WHOLE POINT. The concierge is sold on the
+    ``staff`` rung and nothing else grants it: ``concierge_entitled`` is
+    ``tier.sells_concierge`` AND an active subscription. A row minted without both
+    halves resolves to the free floor, and every visitor's first message is
+    answered with a 403 by the key resolver — which is exactly what this primitive
+    did for as long as it had no caller. So the mint stamps the tier, debits a
+    month from the workspace credit wallet, and only then activates.
 
-    v1 mints a FRESH doc per call (fresh ObjectId, fresh key). It deliberately does
-    NOT reuse ``_live_object_id`` — that derives a stable per-(workspace, pocket)
-    id for a PUBLISHED site, and a foreign concierge for the same pocket must not
-    collide with (or overwrite) a real published Worker doc. Idempotent binding
-    management (one canonical concierge per pocket, rotate/rebind) is a follow-up
-    (the pilot-bind slice); this primitive just creates the credential row.
+    ORDER, and each step's failure mode:
+
+      1. Refuse a pocket the caller cannot access OR that belongs to another
+         workspace, then refuse an origin this workspace has not PROVED it
+         controls — or proved more than 30 days ago. All before any write: minting
+         on someone else's domain is how a concierge becomes a crawler-for-hire,
+         and minting on someone else's POCKET is how it becomes a reader of their
+         knowledge.
+      2. Insert the row UNPAID — tier stamped, subscription ``none``. It confers
+         nothing; it exists so the debit has a stable ``site_id`` to key on.
+      3. CHARGE. A refusal (a short wallet raises ``InsufficientCredits``, 402)
+         DELETES the row and re-raises. Nothing may leave a paid tier with no money
+         behind it, which is the state removing the gateway set out to end.
+      4. Only then stamp the renewal + the period's price and flip the
+         subscription ACTIVE, through the same ``_mark_subscription_active`` the
+         hosted path uses.
+
+    ON THE CREDITS RAIL, WITH NO PLAN SLOT. ``billing_rail`` is set explicitly so
+    the monthly sweep finds it and the Dodo add-on cart does not; it is NOT the
+    plan rail, so ``plan_site_slots`` does not count it and
+    ``reconcile_plan_carried_sites`` never releases it. The sweep re-charges it
+    without deploying anything — see ``foreign_origin`` on the model for how it
+    tells this undeployed row apart from a broken one.
+
+    A VERIFIED ORIGIN IS A FACT WITH A DATE, not a permanent license. Ownership
+    records ``verified_at`` and expires nothing, because how long a proof stays
+    good belongs to the feature acting on it. This feature's answer is the CRAWL's
+    (``foreign_grounding.VERIFICATION_MAX_AGE``, 30 days), asked here rather than
+    restated, so a month is never sold against a proof the first grounding run
+    would refuse.
+
+    IT ALWAYS TRIES TO MINT, AND CALLERS MUST NOT USE IT DIRECTLY. It has no
+    resolve step: it buys a month every time it runs to completion.
+    ``bind_foreign_concierge`` is the resolve-or-buy layer over this, it is the
+    entry point, and it is also where the concierge agent gets provisioned.
+
+    A SECOND CALL FOR THE SAME POCKET NOW FAILS RATHER THAN CHARGING. The id is
+    derived (``_foreign_object_id``), so the insert below hits the primary key and
+    raises ``DuplicateKeyError`` — before the debit, so no money moves. That is
+    the cross-process guard, and it is deliberately the PRIMARY key rather than a
+    declared index: ``_id`` is enforced by every MongoDB, on every deployment,
+    with nothing to migrate. The salt keeps it clear of ``_live_object_id``, so a
+    foreign row still cannot collide with the published Worker doc for the same
+    pocket. Callers handle the conflict by adopting the winner; see
+    ``bind_foreign_concierge``.
 
     Args:
-        workspace_id: Owning tenant (the Site's ``workspace``).
+        workspace_id: Owning tenant, and the tenant whose wallet is debited.
         pocket_id: The pocket the concierge is grounded in (drives the KB scope
             ``pocket:<pocket_id>`` downstream).
-        owner: The acting user. Recorded as the Site's ``owner`` AND used as the
-            identity for the pocket ownership check below — so it must be a user
-            who can access ``pocket_id``, not an arbitrary label.
+        owner: The acting user. Recorded as the Site's ``owner``, used as the
+            identity for the pocket ownership check, and attributed on the ledger
+            row — so it must be a user who can access ``pocket_id``.
         allowed_origins: Origins the embed is valid from; normalized to bare hosts.
+            EVERY one must already be verified for this workspace.
         name: Optional display name.
         scopes: Optional override of what the key may do; defaults to the Site
             model's concierge baseline when omitted.
 
     Returns:
-        The inserted ``Site`` doc, carrying its freshly-minted ``signed_key`` so the
-        caller can hand the embed snippet back to the owner.
+        The inserted, PAID, active ``Site`` doc carrying its freshly-minted
+        ``signed_key`` so the caller can hand the embed snippet back to the owner.
 
     Raises:
         Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
-            ``pocket_id`` (via the pockets service ownership check).
+            ``pocket_id`` or when that pocket belongs to another workspace;
+            ``sites.origin_unverified`` when the workspace has not
+            proved it controls one of ``allowed_origins``;
+            ``sites.origin_verification_stale`` when it did, over 30 days ago.
         NotFound: when ``pocket_id`` does not exist.
+        ValidationError: ``sites.origin_required`` when no usable origin is given.
+        InsufficientCredits: (402) when the wallet cannot cover the month. No Site
+            survives it.
     """
-    # Ownership gate — the SAME check every other pocket-touching path in this
-    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
-    # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
-    # resolved CONCIERGE context would then read that victim pocket's KB
-    # (``pocket:<pocket_id>``). Run it BEFORE minting the key / inserting the doc so
-    # a denied caller leaves no orphan Site behind. ``get`` raises
-    # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
-    # pocket is missing; we only need it for the side-effect of that check.
+    from pocketpaw_ee.cloud.billing import service as billing_service
+    from pocketpaw_ee.cloud.billing import site_plans
     from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import foreign_grounding, ownership
 
-    await pockets_service.get(pocket_id, owner)
+    # Ownership gate — the SAME check every other pocket-touching path in this
+    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Run it BEFORE
+    # minting the key / inserting the doc so a denied caller leaves no orphan Site
+    # behind. It raises NotFound when the pocket is missing and
+    # Forbidden("pocket.access_denied") when the caller cannot read it.
+    #
+    # IT IS NOT A TENANCY GATE, WHICH IS THE OTHER HALF. Its refusal reads
+    # ``... and pocket.visibility == "private"``, so it denies a PRIVATE pocket
+    # only — and the model's default is "workspace" (``cloud.models.pocket``), a
+    # value that check never scopes to the SAME workspace. Left at one call, a
+    # member of tenant A could mint a concierge against a default-visibility pocket
+    # in tenant B. The read direction is the worse one: a concierge run is locked to
+    # ``pocket:<pocket_id>`` taken off THIS row, so A's public bar would answer
+    # ANONYMOUS visitors out of B's knowledge, and grounding would write into B's
+    # scope on every sync.
+    #
+    # FIXED HERE RATHER THAN THERE. ``pockets_service.get``'s permissiveness is
+    # deliberate and shared by many callers; narrowing it is a far larger decision
+    # than this row. What is particular to a foreign mint is that it turns a pocket
+    # into a PUBLIC, ANONYMOUS read surface, so it wants the same strict
+    # (workspace, pocket) scope ``foreign_site_for_pocket`` already applies on the
+    # way back out.
+    #
+    # FAIL-CLOSED, off the ``workspace`` key the wire dict carries
+    # (``cloud.pockets.dto.pocket_to_wire_dict``). A missing or empty value refuses:
+    # "this pocket did not say whose it is" is not a tenancy proof.
+    #
+    # THE SAME CODE AS THE ACCESS DENIAL, on purpose. A distinct code would confirm
+    # to whoever guessed the id that the pocket is real and lives somewhere else,
+    # which is an existence oracle the private-pocket refusal does not give away.
+    pocket = await pockets_service.get(pocket_id, owner)
+    if str(pocket.get("workspace") or "") != str(workspace_id):
+        raise Forbidden(
+            "pocket.access_denied",
+            "You do not have access to this pocket",
+        )
+
+    hosts = _normalize_origin_hosts(allowed_origins)
+    if not hosts:
+        # ``origin_allowed`` fails closed on an empty list, so a site minted with no
+        # usable origin could never serve its concierge anywhere — and it would
+        # still have been charged for. Refuse before the money moves.
+        raise ValidationError(
+            "sites.origin_required",
+            "A foreign concierge needs at least one origin to embed on.",
+        )
+
+    # PROOF OF CONTROL, PER ORIGIN, BEFORE ANY ROW EXISTS. Every host on the
+    # allowlist is a host this concierge will answer on and a host whose pages the
+    # grounding crawl fetches. An unverified one is someone naming a third party's
+    # domain, so ALL of them must be proved rather than any of them: a single
+    # unproved entry on an otherwise legitimate list is still a live embed on a
+    # domain that is not the buyer's.
+    #
+    # AND THE PROOF MUST STILL BE FRESH, asked of the rule the CRAWL already owns
+    # (``foreign_grounding.VERIFICATION_MAX_AGE`` — 30 days, argued there) rather
+    # than a second number invented here. Without this the bind sells a concierge
+    # on a proof its first grounding run then refuses: the buyer pays for a bar
+    # that can never learn anything about the site it sits on, and nothing in the
+    # purchase says why.
+    #
+    # TWO ARMS, TWO CODES, AND THEY MASK EACH OTHER. "Never proved" and "proved
+    # too long ago" are different instructions to the owner, so they are different
+    # codes. Delete the first arm and the second refuses in its place —
+    # ``verification_is_fresh(None)`` is False — which means a test asserting only
+    # the status is green against a deleted gate. Assert the code.
+    for host in hosts:
+        record = await ownership.verified_origin_record(workspace_id, host)
+        if record is None:
+            raise Forbidden(
+                "sites.origin_unverified",
+                f"This workspace has not proved that it controls '{host}'. "
+                "Verify the domain first, then mint the concierge.",
+            )
+        if not foreign_grounding.verification_is_fresh(record):
+            raise Forbidden(
+                "sites.origin_verification_stale",
+                f"The proof that this workspace controls '{host}' is more than "
+                f"{foreign_grounding.VERIFICATION_MAX_AGE.days} days old. Verify "
+                "the domain again, then mint the concierge.",
+            )
+
+    # The rung, and its price, read from the catalog rather than written here — the
+    # ladder is allowed to re-price without this file changing. The guard is not
+    # ceremony: if the rung ever stops selling the concierge or loses its price,
+    # minting would charge nothing, or charge for a capability the resolver then
+    # refuses, and a loud 422 beats either.
+    tier = site_plans.site_scoped_tier(_FOREIGN_CONCIERGE_TIER_KEY)
+    if tier is None or not tier.sells_concierge or tier.monthly_price_usd <= 0:
+        raise ValidationError(
+            "sites.foreign_concierge_unsellable",
+            f"Site tier '{_FOREIGN_CONCIERGE_TIER_KEY}' does not sell a priced concierge.",
+        )
 
     site = _SiteDoc(
+        # DERIVED, not minted. The primary key is the cross-process guard against
+        # one pocket buying two concierges: a duplicate bind fails HERE, at the
+        # insert below, which is before the debit — so a loser never charges.
+        id=_foreign_object_id(workspace_id, pocket_id),
         workspace=workspace_id,
         pocket_id=pocket_id,
         owner=owner,
@@ -2540,7 +2772,15 @@ async def mint_foreign_site(
         script_name="",
         deployed=False,
         url="",
-        allowed_origins=_normalize_origin_hosts(allowed_origins),
+        # The row is what makes this site chargeable-but-not-yet-paid: the tier and
+        # the rail are stamped now (the debit's idempotency key is built from the
+        # id this insert mints), while ``subscription_status`` stays at its "none"
+        # default until the money has actually moved. ``concierge_entitled`` is the
+        # AND of the two, so between here and the charge the row confers nothing.
+        plan_tier=tier.key,
+        billing_rail=_CREDITS_RAIL,
+        foreign_origin=True,
+        allowed_origins=hosts,
         signed_key=f"site_key_{secrets.token_urlsafe(24)}",
     )
     # Only override the model's default scope set when the caller asked to narrow
@@ -2548,7 +2788,441 @@ async def mint_foreign_site(
     if scopes is not None:
         site.scopes = scopes
     await site.insert()
+
+    period_start = datetime.now(UTC)
+    try:
+        await billing_service.charge_site_plan_credits(
+            workspace_id=workspace_id,
+            site_id=str(site.id),
+            tier_key=tier.key,
+            amount_usd=tier.monthly_price_usd,
+            period_start=period_start,
+            member_id=owner,
+        )
+    except Exception:
+        # FAIL CLOSED. Anything that stops the debit — a short wallet, a ledger
+        # error — must leave NO Site behind, because a row on a paid tier that
+        # nobody paid for is precisely the state this rail exists to make
+        # impossible, and here it would be indistinguishable from a real purchase.
+        await _discard_unpaid_foreign_site(site)
+        raise
+
+    # The month is bought, so the row may now say so. All three fields ride the one
+    # save inside ``_mark_subscription_active``: the renewal date the monthly sweep
+    # selects on, the price this period has been paid (what a later tier change
+    # prices against, so an upgrade does not charge a second full month), and the
+    # status flip itself, which is the half of ``concierge_entitled`` nothing else
+    # sets. ``period_start`` rather than a second ``now()`` — the date the wallet
+    # was charged for is the date the next month is due from.
+    _stamp_next_renewal(site, at=period_start)
+    site.period_paid_usd = int(tier.monthly_price_usd)
+    await _mark_subscription_active(site)
+
+    logger.info(
+        "sites.mint_foreign: site %s minted for workspace %s on %s ($%s/month from "
+        "the credit wallet), origins=%s",
+        str(site.id),
+        workspace_id,
+        tier.key,
+        tier.monthly_price_usd,
+        hosts,
+    )
     return site
+
+
+# ---------------------------------------------------------------------------
+# Foreign concierge BINDING — one canonical concierge per pocket.
+#
+# ``mint_foreign_site`` is the always-mints primitive: every call inserts a fresh
+# row and BUYS a month. That is correct for a primitive and wrong for a caller,
+# because a repeat bind of the same pocket would then be a second concierge and a
+# SECOND month. ``bind_foreign_concierge`` is the resolve-or-buy layer over it,
+# and it is the function a router or a tool should reach for.
+#
+# ONE ROW IS WHAT MAKES ONE CHARGE. The wallet debit is keyed
+# ``site_plan:<site_id>:<tier>:<date>`` (``billing.site_plan_debit_key``), so
+# deduping the ROW is what dedupes the MONEY — there is no second idempotency
+# mechanism to keep in step with this one. A bind that resolves an existing row
+# does not re-charge at all; it must not, because that key carries the DATE and a
+# re-charge on a later calendar day would go through.
+#
+# THE FOREIGN ROW IS FOUND BY ``foreign_origin``, NEVER BY THE CANONICAL
+# RESOLVER. ``canonical_site_for_pocket`` answers "which published site is this
+# pocket's live one" and would hand back the Worker doc when a pocket has both.
+# Binding would then read that row's key, and a rotate would invalidate the embed
+# of a site somebody is actually serving. The two rows coexist on purpose, and
+# this lookup is the boundary between them.
+#
+# IDS STAY RANDOM. ``mint_foreign_site`` deliberately does not derive its id from
+# (workspace, pocket) the way a published site does, so a foreign row can never
+# collide with or overwrite a real Worker doc. Dedupe therefore has to come from
+# a LOOKUP rather than from the id, which is what everything above is.
+#
+# TWO GUARDS, AND THEY PREVENT DIFFERENT THINGS. Read them as a pair or one of
+# them looks redundant and gets deleted.
+#
+#   * THE PRIMARY KEY stops the DOUBLE CHARGE, across processes. The foreign row
+#     is inserted at a DERIVED id (``_foreign_object_id``), so a second bind for
+#     the same pocket loses at the insert — which in ``mint_foreign_site`` is
+#     before the debit, so the loser never charges. This is the real dedupe, and
+#     it holds between API workers, pods and machines. It is the primary key
+#     rather than a declared partial index because mongomock ignores
+#     ``partialFilterExpression`` and would enforce uniqueness on EVERY site row,
+#     while ``_id`` is enforced natively by both the real driver and the double.
+#
+#   * ``_foreign_bind_lock`` stops a loser ADOPTING A ROW THE WINNER IS ABOUT TO
+#     DELETE. The winner inserts, then charges; a charge that fails deletes the
+#     row (``_discard_unpaid_foreign_site``). In between, an unserialised loser
+#     catches the primary-key conflict, re-reads, and adopts a row that is one
+#     step from being removed — so it returns a PHANTOM concierge: a Site its
+#     caller was handed, that is not in the collection, that nobody was charged
+#     for, carrying an embed key the resolver will never find. Measured with the
+#     lock removed: outcomes ``['InsufficientCredits', 'Site']`` and that Site
+#     absent from the collection. With the lock both callers fail honestly.
+#
+#     It serialises per (workspace, pocket) inside ONE interpreter and does not
+#     span processes, so the phantom is still reachable across workers. It is not
+#     a money error in either case (no charge happens on that path), which is why
+#     the primary key above carries the billing guarantee and this carries the
+#     consistency one.
+#
+# ONE CONSEQUENCE OF KEEPING BOTH, SAID OUT LOUD: with the lock in place the
+# ``except DuplicateKeyError`` recovery below is unreachable IN-PROCESS, so the
+# concurrency tests cannot exercise it. It is covered instead by two tests that
+# drive the conflict directly through the mint seam. A branch that only a second
+# process can reach still needs a test; it just cannot be a race test.
+# ---------------------------------------------------------------------------
+
+# One lock per (workspace, pocket). Never evicted: a deployment holds one entry
+# per pocket ever bound, which is bounded by the tenant's pocket count and far
+# below anything worth an eviction policy (the same shape as the admin-proposal
+# executor's per-action locks).
+_FOREIGN_BIND_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _foreign_bind_lock(workspace_id: str, pocket_id: str) -> asyncio.Lock:
+    """The bind mutex for one (workspace, pocket).
+
+    NOT the dedupe mechanism — the derived ``_id`` is (see the section header).
+    What this prevents is a PHANTOM: the winner inserts, its charge fails, and it
+    deletes the row; an unserialised loser catches the primary-key conflict in
+    that window, re-reads, and adopts a row that is about to vanish. Its caller
+    is handed a concierge that is not in the collection and was never paid for.
+    Holding the mutex across the whole mint means the loser either sees a
+    finished purchase or sees nothing and mints for itself.
+
+    Keyed on both halves so two tenants binding pockets that happen to share an
+    id never serialise against each other. Created on first use; there is no
+    await between the lookup and the insert, so this is race-free without a lock
+    of its own.
+    """
+    key = f"{workspace_id}:{pocket_id}"
+    lock = _FOREIGN_BIND_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _FOREIGN_BIND_LOCKS[key] = lock
+    return lock
+
+
+async def foreign_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The one FOREIGN concierge row for (workspace, pocket), or ``None``.
+
+    Filtered on ``foreign_origin`` so a PUBLISHED site for the same pocket is
+    never returned — see the section header for why conflating the two would let
+    a rotate invalidate a live site's embed key.
+
+    Oldest ``_id`` wins when several exist. Rows minted before this slice landed
+    (when every call was a fresh mint) can leave a pocket with more than one, and
+    an arbitrary pick would make the SAME pocket resolve to different keys on
+    different reads. Oldest-first also means the row the customer was first given
+    a snippet for is the one that keeps working.
+    """
+    if not workspace_id or not pocket_id:
+        return None
+    docs = (
+        await _SiteDoc.find(
+            {"workspace": workspace_id, "pocket_id": pocket_id, "foreign_origin": True}
+        )
+        .sort("_id")
+        .to_list()
+    )
+    return docs[0] if docs else None
+
+
+async def bind_foreign_concierge(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    owner: str,
+    allowed_origins: list[str],
+    name: str = "",
+    scopes: list[str] | None = None,
+) -> _SiteDoc:
+    """Resolve-or-buy the ONE foreign concierge for (workspace, pocket).
+
+    The first call mints and charges through ``mint_foreign_site``; every call
+    after it returns that same row and charges NOTHING. This is the entry point
+    callers want — the mint is a primitive that buys a month unconditionally, so
+    a UI that called it on every "connect" click would bill per click.
+
+    Both paths then run the concierge funnel
+    (``paw_bar.agent_provisioning.provision_foreign_concierge``), so a row minted
+    before it had a funnel, or one whose agent was deleted, gets its agent on the
+    next bind instead of staying a paid bar that cannot answer.
+
+    The gates are INHERITED, not re-implemented: a pocket the caller cannot
+    access, a pocket belonging to another workspace, and an origin the workspace
+    has not proved it controls are all refused inside the mint, before any row or
+    debit exists. A refused bind leaves nothing behind, exactly as a refused mint
+    does. The resolve half inherits the TENANCY half for free —
+    ``foreign_site_for_pocket`` is scoped to (workspace, pocket), so another
+    tenant's pocket id resolves to nothing and falls through to the mint's
+    refusal — but it asks the ACCESS question itself, because returning an
+    existing row hands back a ``signed_key`` without ever reaching the mint.
+
+    ``allowed_origins`` / ``name`` / ``scopes`` apply to the MINT only. An
+    existing row is returned untouched: silently widening a live concierge's
+    origin allowlist from a call that reads as "make sure this exists" is how a
+    verified-origin gate gets walked around one bind at a time. Changing them is
+    a deliberate edit, not a side effect of binding.
+
+    Args:
+        workspace_id: Owning tenant, and the wallet debited on a first bind.
+        pocket_id: The pocket the concierge is grounded in.
+        owner: The acting user; must be able to access ``pocket_id``.
+        allowed_origins: Origins the embed is valid from (first bind only).
+        name: Optional display name (first bind only).
+        scopes: Optional scope override (first bind only).
+
+    Returns:
+        The single foreign ``Site`` doc for this pocket, paid and active.
+
+    Raises:
+        Whatever ``mint_foreign_site`` raises on a FIRST bind — Forbidden
+        (``pocket.access_denied`` / ``sites.origin_unverified`` /
+        ``sites.origin_verification_stale``), NotFound,
+        ValidationError (``sites.origin_required``), InsufficientCredits.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    async with _foreign_bind_lock(workspace_id, pocket_id):
+        existing = await foreign_site_for_pocket(workspace_id, pocket_id)
+        if existing is not None:
+            # THE RESOLVE ARM'S OWN POCKET GATE. The mint arm below inherits one;
+            # this arm returns a row without ever reaching it, and that row carries
+            # the ``signed_key``. ``foreign_site_for_pocket`` is scoped to
+            # (workspace, pocket) so the tenancy half is already closed here — what
+            # is missing is whether THIS caller may open the pocket, which for a
+            # private one is a different question from being in the workspace.
+            await pockets_service.get(pocket_id, owner)
+            logger.info(
+                "sites.bind_foreign: pocket %s in workspace %s already has concierge "
+                "site %s - resolved, not re-bought",
+                pocket_id,
+                workspace_id,
+                str(existing.id),
+            )
+            await _provision_foreign_concierge(existing, workspace_id)
+            return existing
+
+        try:
+            site = await mint_foreign_site(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                owner=owner,
+                allowed_origins=allowed_origins,
+                name=name,
+                scopes=scopes,
+            )
+        except DuplicateKeyError:
+            # Lost the insert race to another PROCESS (in-process the lock above
+            # makes this unreachable). No debit happened — the mint inserts before
+            # it charges — so adopting the winner is simply correct.
+            adopted = await foreign_site_for_pocket(workspace_id, pocket_id)
+            if adopted is None:
+                # The winner rolled back: its own charge failed and it deleted the
+                # row (``_discard_unpaid_foreign_site``), freeing the id between
+                # our conflict and our re-read. Nobody has a concierge and nobody
+                # has been charged, so the buy is still owed. Once — a second
+                # conflict here means a third party is minting in a loop, and a
+                # retry loop on a path that spends money is worse than a 409.
+                logger.info(
+                    "sites.bind_foreign: lost the insert race for pocket %s then found "
+                    "no winner (it rolled back); minting once more",
+                    pocket_id,
+                )
+                site = await mint_foreign_site(
+                    workspace_id=workspace_id,
+                    pocket_id=pocket_id,
+                    owner=owner,
+                    allowed_origins=allowed_origins,
+                    name=name,
+                    scopes=scopes,
+                )
+            else:
+                site = adopted
+                logger.info(
+                    "sites.bind_foreign: lost the insert race for pocket %s; adopted "
+                    "site %s without charging",
+                    pocket_id,
+                    str(site.id),
+                )
+
+    # Outside the lock: the row is committed, so every later bind resolves it and
+    # holding the mutex through a network-bound agent mint would only serialise
+    # unrelated callers behind it. The funnel is idempotent, so a bind that races
+    # in here converges on the same agent.
+    await _provision_foreign_concierge(site, workspace_id)
+    return site
+
+
+async def _provision_foreign_concierge(site: _SiteDoc, workspace_id: str) -> None:
+    """Run the concierge funnel for a foreign site, swallowing everything.
+
+    Lazily imported for the same reason every other paw_bar reach-in here is: the
+    sites service must load in a deployment that does not carry the bar.
+
+    Never raises. The month is ALREADY PAID by the time this runs, so a failure
+    to mint the agent must not unwind the purchase — the customer keeps their row
+    and their key, the next bind retries the funnel, and the failure is logged
+    rather than turned into a refund problem.
+    """
+    try:
+        from pocketpaw_ee.paw_bar.agent_provisioning import provision_foreign_concierge
+
+        agent_id = await provision_foreign_concierge(site, workspace_id)
+        if not agent_id:
+            logger.warning(
+                "sites.bind_foreign: site %s is paid but has no concierge agent bound",
+                str(site.id),
+            )
+    except Exception:  # noqa: BLE001 - a paid row must survive a provisioning failure
+        logger.warning(
+            "sites.bind_foreign: concierge provisioning failed for site %s",
+            str(site.id),
+            exc_info=True,
+        )
+
+
+async def rotate_foreign_concierge_key(*, workspace_id: str, pocket_id: str) -> _SiteDoc:
+    """Retire this concierge's embed key and issue a new one.
+
+    The ``signed_key`` is world-visible by design — it ships inside the snippet on
+    a public page — so it leaks the way public things leak, and rotation is the
+    only remedy. Afterwards the OLD key resolves to nothing
+    (``auth.site_keys.resolve_site_key`` looks a key up directly), and the owner
+    has to update the snippet on their page.
+
+    Mints through ``Site.rotate_signed_key()`` rather than formatting a token
+    here, so exactly one place knows what an embed key looks like.
+
+    The row is otherwise untouched: same id, same tier, same subscription, same
+    allowlist. A rotation is not a repurchase and must never read as one.
+
+    Raises:
+        NotFound: ``site`` — this pocket has no foreign concierge to rotate.
+    """
+    site = await foreign_site_for_pocket(workspace_id, pocket_id)
+    if site is None:
+        raise NotFound("site", f"foreign concierge for pocket {pocket_id}")
+    site.rotate_signed_key()
+    await site.save()
+    logger.info(
+        "sites.bind_foreign: rotated the embed key for site %s (workspace %s)",
+        str(site.id),
+        workspace_id,
+    )
+    return site
+
+
+async def rebind_foreign_concierge(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    agent_id: str = "",
+    widget_id: str = "",
+    caller_is_admin: bool = False,
+) -> str | None:
+    """Point this concierge's bar at a different agent, leaving the row alone.
+
+    ``agent_id`` names the replacement, and is tenancy-checked inside the funnel
+    module before anything is written. Omitted, the bar is RE-PROVISIONED: the
+    stale bind is cleared and the funnel resolve-or-mints the canonical agent
+    again, which is the repair for a bar whose agent was deleted.
+
+    ``widget_id`` picks the bar explicitly when a pocket carries more than one;
+    omitted, the pocket resolves it. The bar must belong to this site's pocket —
+    enforced in the funnel module, since a widget lookup is workspace-scoped and
+    an explicit id could otherwise name a colleague's published bar.
+
+    ``caller_is_admin`` RELAXES ONE RULE AND NOTHING ELSE: a non-admin may only
+    name an ``agent_id`` that already answers for a foreign concierge in this
+    workspace. Defaults to False, so a caller that forgets to pass it gets the
+    stricter path. See the block below for why the rule exists and why it is
+    written as a refusal that can be loosened later.
+
+    THE CREDENTIAL ROW IS NOT TOUCHED. Nothing here rewrites, deletes or re-mints
+    the Site: the customer's embedded ``signed_key`` keeps resolving, the tier
+    they bought stays bought, and the renewal date stays where it was. A rebind
+    that stranded the row would silently turn a paid concierge into a 403 on the
+    buyer's own live page.
+
+    Returns the newly bound agent id, or ``None`` when there was no bar to bind.
+
+    Raises:
+        NotFound: ``site`` when the pocket has no foreign concierge; ``agent``
+            when ``agent_id`` is not readable in this workspace.
+        Forbidden: ``sites.agent_not_published`` when a non-admin names an agent
+            that does not already front a foreign concierge here;
+            ``sites.widget_pocket_mismatch`` when ``widget_id`` is another
+            pocket's bar.
+    """
+    site = await foreign_site_for_pocket(workspace_id, pocket_id)
+    if site is None:
+        raise NotFound("site", f"foreign concierge for pocket {pocket_id}")
+
+    from pocketpaw_ee.paw_bar.agent_provisioning import rebind_site_agent, widget_for_agent
+
+    if agent_id and not caller_is_admin:
+        # A PUBLIC CONCIERGE IS A PUBLISHING SURFACE. ``rebind_site_agent``'s own
+        # gate asks whether the caller may READ this agent, and ``workspace``
+        # visibility means every MEMBER may read every such agent in the tenant.
+        # That is the wrong question here: a concierge run resolves
+        # ``agent:<agent_id>``, so the agent named here answers ANONYMOUS visitors
+        # on a public page. Pointing one at an agent that was never provisioned
+        # for public answering publishes its knowledge, and "readable by members"
+        # was never consent to that.
+        #
+        # The test is the BINDING, not the slug: an agent already fronting a
+        # foreign concierge in this workspace has been published deliberately
+        # once, so re-pointing another concierge at it changes nothing about who
+        # can reach it.
+        #
+        # REVERSIBLE BY DESIGN. Loosening this later — a flag on the agent, an
+        # explicit "may answer the public" opt-in — is safe. Tightening it after
+        # customers have built on the loose behaviour is not, which is why the
+        # refusal ships first and the escape hatch is a role rather than a
+        # setting.
+        holder = await widget_for_agent(agent_id, workspace_id)
+        holder_site = (
+            await foreign_site_for_pocket(workspace_id, str(getattr(holder, "pocket_id", "") or ""))
+            if holder is not None
+            else None
+        )
+        if holder_site is None:
+            raise Forbidden(
+                "sites.agent_not_published",
+                "That agent does not answer for a foreign concierge yet. "
+                "An admin can point a concierge at it.",
+            )
+
+    bound = await rebind_site_agent(site, workspace_id, agent_id=agent_id, widget_id=widget_id)
+    logger.info(
+        "sites.bind_foreign: rebound site %s to agent %s",
+        str(site.id),
+        bound or "<none>",
+    )
+    return bound
 
 
 async def publish(
@@ -4220,7 +4894,83 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         analytics=resolved.analytics,
         concierge_entitled=resolved.concierge_entitled,
         concierge_enabled=resolved.concierge_enabled,
+        # Echoed off the resolver like analytics, and for the same reason there is
+        # nothing to AND in: the download spends no per-workspace allowance. Note this
+        # is the PER-SITE capability and not the workspace's source visibility — see
+        # the DTO docstring for why a UI must not substitute one for the other.
+        project_download=resolved.project_download,
     )
+
+
+async def download_site_project(
+    *, workspace_id: str, site_id: str, user_id: str
+) -> project_zip.ProjectZip:
+    """This site's project as an archive (GET /sites/{site_id}/project).
+
+    Three steps in a fixed order, and the order is the contract.
+
+    TENANCY FIRST, through ``_load``, so a missing, malformed or cross-tenant site id
+    is a 404 exactly like every sibling per-site read. Before the entitlement, on
+    purpose: a caller must not be able to learn that another workspace's site exists
+    by watching a 402 come back instead of a 404.
+
+    THEN THE ENTITLEMENT. ``_assert_entitled_to_project_download`` is the only gate on
+    this feature — the assembler reads the pocket through the deliberately ungated
+    pipeline reader and adds no rules beyond tenancy of its own. Keyed on the doc
+    loaded HERE by ``site_id``, not on whatever the assembler resolves internally, so
+    the plan that was checked is the plan of the site that was asked for.
+
+    THEN THE ARCHIVE, from ``site.pocket_id``. The pocket is the source of truth for
+    source (the build dir is ephemeral and the sandbox self-deletes), which is why
+    this is keyed on a site but assembled from a pocket.
+
+    A RIPPLE SITE IS A 400, NEVER AN EMPTY 200. ``build_project_zip`` answers None for
+    an engine that keeps no source map, and ``sites/export.py`` already states the
+    rule this follows: something with nothing to give must say so rather than come
+    back empty, because a zero-byte download is indistinguishable from a site whose
+    files vanished. The archive is the one thing a customer cannot re-derive.
+
+    EVERY ASSEMBLER FAILURE BECOMES A ``CloudError``. The ``ProjectZipError`` family
+    is not part of this hierarchy, so an uncaught one would leave the router as an
+    unhandled 500 — which on a cross-origin call arrives in the browser stripped of
+    its CORS headers and reads to the frontend as a CORS misconfiguration rather than
+    as a failed download. The three are mapped as 500s rather than 4xx because none of
+    them is the caller's fault: a source map too large for BSON to have stored, a
+    stored path that escapes its root, or a source engine holding no source map all
+    mean our own data broke an invariant, and blaming the request would send somebody
+    looking in the wrong place.
+    """
+    doc = await _load(workspace_id, site_id)
+    _assert_entitled_to_project_download(doc)
+
+    try:
+        assembled = await project_zip.build_project_zip(
+            workspace_id=workspace_id, pocket_id=doc.pocket_id, user_id=user_id
+        )
+    except project_zip.ProjectZipTooLarge as exc:
+        logger.error("sites: project zip for site %s exceeded a cap: %s", site_id, exc)
+        raise with_cause(
+            Internal("sites.project_too_large", "This project is too large to package."), exc
+        ) from exc
+    except project_zip.UnsafeSourcePath as exc:
+        logger.error("sites: project zip for site %s holds an unsafe path: %s", site_id, exc)
+        raise with_cause(
+            Internal("sites.project_unsafe_path", "This project could not be packaged safely."),
+            exc,
+        ) from exc
+    except project_zip.ProjectZipError as exc:
+        logger.error("sites: project zip for site %s could not be assembled: %s", site_id, exc)
+        raise with_cause(
+            Internal("sites.project_unavailable", "This project could not be packaged."), exc
+        ) from exc
+
+    if assembled is None:
+        raise BadRequest(
+            "sites.project_not_downloadable",
+            "This site is built from a Ripple spec rather than source files, so there "
+            "is no project to download.",
+        )
+    return assembled
 
 
 async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
@@ -4832,6 +5582,70 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
         ent.subscription_active,
     )
     raise CustomDomainNotEntitled(
+        plan_tier=ent.plan_tier,
+        subscription_active=ent.subscription_active,
+    )
+
+
+def _assert_entitled_to_project_download(site: Any) -> None:
+    """Refuse the download unless this site's own plan grants the project archive.
+
+    The third caller of ``resolve_site_entitlements``, and written to look exactly
+    like the second (``_assert_entitled_to_custom_domain`` above) because it answers
+    the same SHAPE of question: a per-site capability the tier either sells or does
+    not, ANDed with an active subscription. Reading ``plan_tier`` here instead would
+    hand a free download to every site whose subscription lapsed and to every site
+    whose Dodo product was never configured, since neither of those resets the tier.
+
+    Gated on ``sites_enforced()`` first, like every per-site cap in this module: OSS
+    and self-hosted deployments have no billing and must not acquire a paywall on
+    their own source code. That early return is load-bearing, not defensive — a
+    self-hoster who cannot download their own project would be right to call it a
+    bug.
+
+    THIS IS THE ONLY GATE ON THE DOWNLOAD, which is the fact worth knowing before
+    changing anything here. ``project_zip.build_project_zip`` reads the pocket
+    through ``pockets_service.get`` — the deliberately UNGATED pipeline reader that
+    hands back the real source map whatever the plan says, because the build lane
+    needs it to. The assembler's docstring says it "adds no isolation rules of its
+    own", meaning tenancy only. So deleting the call to this function does not
+    degrade the download, it gives it away.
+
+    Deliberately does NOT also check ``Entitlements.site_source_visible``. That is a
+    workspace capability governing whether the builder shows a Code tab, resolved off
+    the workspace plan; this is a per-site capability resolved off the site's plan.
+    Two questions, two resolvers, and a paid site in a free workspace may download a
+    project whose source the Code tab hides. Adding the second check would also make
+    it impossible to write a test that proves this one fires (see the mutation plan:
+    two guards on one seam let a mutation escape).
+
+    Synchronous and handed the loaded doc, because the resolver is pure and
+    ``entitlements`` may not import ``models.site`` (EE cloud rule 2).
+    """
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+
+    if not sites_enforced():
+        return
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+    if ent.project_download:
+        return
+
+    logger.info(
+        "sites: refused a project download for site %s — tier %s, subscription active: %s",
+        site.id,
+        ent.plan_tier,
+        ent.subscription_active,
+    )
+    raise ProjectDownloadNotEntitled(
         plan_tier=ent.plan_tier,
         subscription_active=ent.subscription_active,
     )
@@ -7403,6 +8217,48 @@ async def _publish_pending_site(
     return doc
 
 
+async def _mark_subscription_active(doc: _SiteDoc) -> None:
+    """Flip a paid site's subscription to ACTIVE and persist it immediately.
+
+    THE SAVE IS THE POINT, not the assignment. Every paid capability is resolved
+    from ``subscription_status`` by code that RE-READS the document:
+    ``_embed_concierge_bar`` and ``_stamp_free_badge`` each ``find_one`` it fresh
+    in the middle of a deploy, and ``auth.site_keys.concierge_available`` reads
+    whatever the collection holds when a visitor arrives. An in-memory flip that
+    has not landed yet is invisible to all of them, so a customer who has just paid
+    gets the free-tier answer — the attribution badge stamped on, the concierge
+    absent, and nothing that re-runs either stamper afterwards.
+
+    Shared by the two paths that turn a charge into capabilities — ``activate_site``
+    (hosted, immediately before its deploy) and ``mint_foreign_site`` (foreign,
+    where there is no deploy at all) — so the ordering the capabilities depend on
+    cannot drift between them. Anything a caller wants written in the SAME round
+    trip must be set on ``doc`` before calling this.
+    """
+    doc.subscription_status = "active"
+    await doc.save()
+
+
+def _stamp_next_renewal(doc: _SiteDoc, *, at: datetime | None = None) -> None:
+    """Set the date the renewal sweep will next charge this site — IN MEMORY.
+
+    A month on from ``at`` (default: now) for every rail that actually moved
+    money, and None on the plan rail. That branch is load-bearing: the sweep
+    selects on ``renewal_date <= now``, so a date on a plan-carried site would
+    hand it a row to debit for a site nobody bought.
+
+    ``relativedelta`` rather than ``timedelta(days=30)`` — fixed 30-day steps walk
+    a customer's billing day backwards through the calendar, five days a year.
+
+    Deliberately does not save: both callers have other fields to write in the
+    same round trip, and a second write here would be a second chance to lose one.
+    """
+    if getattr(doc, "billing_rail", "") == _PLAN_RAIL:
+        doc.renewal_date = None
+    else:
+        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)
+
+
 async def activate_site(
     *,
     workspace_id: str,
@@ -7472,23 +8328,12 @@ async def activate_site(
     pocket_id = doc.pocket_id
     # Deploy live using the inputs captured at publish time (NOT a fresh pocket read
     # — the webhook has no pocket scope, and the pocket's draft may have advanced).
-    # Mark the subscription ACTIVE BEFORE the deploy, not after.
-    #
-    # This call only happens on the ``subscription.active`` webhook — the payment is
-    # already confirmed — so "active" is true the moment we get here, and the old
-    # ordering made it true only after the artifact had been built. That mattered
-    # because the deploy stamps the site's PAID capabilities off this very field:
-    # ``_embed_concierge_bar`` and ``_stamp_free_badge`` both re-read the doc mid-
-    # deploy and resolve entitlements from it. With the flip afterwards, both read
-    # "pending", so a customer who had just paid got a page with the FREE
-    # attribution badge stamped on it and no concierge loader — and nothing
-    # re-runs either stamper, so the page stayed that way until some unrelated
-    # publish. A republish makes it recur: ``_publish_pending_site`` resets the
-    # status to "pending" every time.
-    #
-    # Saved separately from the post-deploy save below so the value is on the doc
-    # the deploy re-reads (both stampers ``find_one`` it fresh rather than taking
-    # the in-memory object).
+    # Mark the subscription ACTIVE BEFORE the deploy, not after — and SAVE it
+    # first, which is why this goes through ``_mark_subscription_active`` rather
+    # than two lines here. That helper carries the reasoning and is shared with the
+    # foreign mint, so the one ordering the paid capabilities depend on is written
+    # down once. This call only happens once payment is confirmed, so "active" is
+    # already true by the time we reach it.
     #
     # Safe on the failure path: if the deploy raises, this row is "active" with
     # ``deployed=False`` for the duration of the retry. The webhook is at-least-once
@@ -7497,8 +8342,7 @@ async def activate_site(
     # exposure the pre-existing ``no captured inputs`` branch reasons about, in the
     # opposite direction, and it is the lesser of the two: a paid site that retries
     # its deploy beats a paid site permanently branded as free.
-    doc.subscription_status = "active"
-    await doc.save()
+    await _mark_subscription_active(doc)
 
     deployed = await _deploy_site_doc(
         workspace_id=workspace_id,
@@ -7545,10 +8389,7 @@ async def activate_site(
     # ``renewal_date <= now`` and would find this one a month later — so the rail
     # check is what keeps a free site free.
     deployed.subscription_status = "active"
-    if getattr(deployed, "billing_rail", "") != _PLAN_RAIL:
-        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)
-    else:
-        deployed.renewal_date = None
+    _stamp_next_renewal(deployed)
     await deployed.save()
 
     # Promote the pocket's draft to published — the durable "this was published"
@@ -7710,6 +8551,14 @@ async def read_site_source(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
+    # ``pockets_service.get`` is the pipeline reader and is NOT subject to SF-2's
+    # source gate, which is what this tool needs: it is the agent's only way to read
+    # a file before editing it, so gating it would not withhold code from a free
+    # workspace so much as end agent-driven editing there — "change the headline"
+    # begins with a read.
+    # KNOWN GAP, deliberately taken: a user who asks the agent to print the whole
+    # source map gets it on any tier. Closing that means a policy on what the agent
+    # may echo, not a narrower read here, and it is tracked separately.
     pocket = await pockets_service.get(pocket_id, user_id)
     source = pocket.get("source")
     engine = pocket.get("engine") or "ripple"
@@ -8910,6 +9759,13 @@ async def preview_pocket(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
+    # ``pockets_service.get`` is not subject to SF-2's source gate, and the Preview
+    # tab depends on that: it IS the editor, and the gate is about what a pocket read
+    # hands a browser, not about stopping an author seeing their own draft. Redacting
+    # here would blank the preview for every free-tier site while it was being built,
+    # which is worse than not gating at all. The DRAFT snapshot read below is a
+    # SECOND copy of the same source living in the versions spine and reached by a
+    # different path, so it is unaffected either way.
     pocket = await pockets_service.get(pocket_id, user_id)
     engine = pocket.get("engine") or "ripple"
 

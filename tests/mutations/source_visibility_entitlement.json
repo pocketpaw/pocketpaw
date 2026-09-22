@@ -1,0 +1,121 @@
+[
+  {
+    "label": "the grant is deleted outright — every paid workspace loses source access",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "        site_source_visible=tier.key in _SOURCE_VISIBLE_PLANS,",
+    "replace": "        site_source_visible=False,",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_paid_workspace_may_read_its_site_source"
+    ]
+  },
+  {
+    "label": "the grant reads the RAW stored plan key, so a retired studio/agency key is paid",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "        site_source_visible=tier.key in _SOURCE_VISIBLE_PLANS,",
+    "replace": "        site_source_visible=(plan_key or \"free\") != \"free\",",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_retired_or_unknown_plan_key_is_withheld"
+    ]
+  },
+  {
+    "label": "the free floor joins the granting set — every signup can read site source",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "_SOURCE_VISIBLE_PLANS = frozenset({\"go\", \"pro\", \"pro_max\", \"enterprise\"})",
+    "replace": "_SOURCE_VISIBLE_PLANS = frozenset({\"free\", \"go\", \"pro\", \"pro_max\", \"enterprise\"})",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_free_workspace_may_not_read_its_site_source",
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_free_floor_is_not_in_the_granting_set"
+    ]
+  },
+  {
+    "label": "the catalog's base-floor fallback grants source when the catalog loses its base tier",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "                site_source_visible=False,",
+    "replace": "                site_source_visible=True,",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_a_catalog_with_no_base_tier_is_withheld"
+    ]
+  },
+  {
+    "label": "the override never reaches the resolved entitlement — an operator's grant is inert",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "        site_source_visible=_resolve_override_flag(\n            entitlements.site_source_visible, overrides.site_source_visible\n        ),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_override_grants_source_to_a_free_workspace",
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_override_revokes_source_from_a_paid_workspace"
+    ]
+  },
+  {
+    "label": "the flag overlay is truthy, so a REVOCATION reads as no opinion and source stays on",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    if override is None:\n        return catalog_value\n    return override",
+    "replace": "    return catalog_value or override",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_override_revokes_source_from_a_paid_workspace"
+    ]
+  },
+  {
+    "label": "an expired override is applied anyway, so a lapsed grant keeps handing out source",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "        if expires_at <= datetime.now(UTC):\n            return entitlements",
+    "replace": "        if False:\n            return entitlements",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_expired_override_cannot_grant_source"
+    ]
+  },
+  {
+    "label": "the domain default grants source, so any construction that omits the field leaks code",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/domain.py",
+    "find": "    site_source_visible: bool = False",
+    "replace": "    site_source_visible: bool = True",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_entitlements_object_built_without_the_field_withholds_source"
+    ]
+  },
+  {
+    "label": "the override field vanishes from the document model, so pydantic drops it silently",
+    "file": "ee/pocketpaw_ee/cloud/models/workspace.py",
+    "find": "    site_source_visible: bool | None = None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_override_grants_source_to_a_free_workspace"
+    ]
+  },
+  {
+    "label": "the capability never reaches the /entitlements wire — the client cannot name the reason",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/dto.py",
+    "find": "        site_source_visible=ent.site_source_visible,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_capability_reaches_the_entitlements_wire"
+    ]
+  },
+  {
+    "label": "the console's catalog/resolved pair stops carrying it, so an operator cannot see the state",
+    "file": "ee/pocketpaw_ee/cloud/platform/entitlements.py",
+    "find": "        site_source_visible=ent.site_source_visible,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_operator_console_can_set_and_read_back_the_capability"
+    ]
+  },
+  {
+    "label": "the raw-override read-back reports nothing, so a set override displays as unset",
+    "file": "ee/pocketpaw_ee/cloud/platform/entitlements.py",
+    "find": "        site_source_visible=overrides.site_source_visible,",
+    "replace": "        site_source_visible=None,",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_the_operator_console_can_set_and_read_back_the_capability"
+    ]
+  },
+  {
+    "label": "the PUT drops the flag before writing, so the operator's write succeeds and changes nothing",
+    "file": "ee/pocketpaw_ee/cloud/platform/entitlements.py",
+    "find": "        site_source_visible=body.site_source_visible,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/entitlements/test_source_visibility_entitlement.py::test_an_operators_write_reaches_the_stored_override_document"
+    ]
+  }
+]

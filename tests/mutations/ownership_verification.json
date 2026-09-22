@@ -1,0 +1,137 @@
+[
+  {
+    "label": "the token comparison is GONE — any value published at the well-known path proves ownership of any domain",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    return any(hmac.compare_digest(candidate.encode(\"utf-8\"), expected) for candidate in candidates)",
+    "replace": "    return bool(candidates)",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_different_token_refuses_as_mismatch_not_missing",
+      "tests/ee/sites/test_domain_ownership.py::test_a_token_that_only_shares_a_prefix_refuses",
+      "tests/ee/sites/test_domain_ownership.py::test_workspace_a_token_on_the_site_does_not_verify_the_host_for_workspace_b",
+      "tests/ee/sites/test_domain_ownership.py::test_reclaiming_a_pending_origin_remints_the_token_and_invalidates_the_old_one"
+    ]
+  },
+  {
+    "label": "the comparison degrades to a prefix match, so a truncated token is accepted",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    return any(hmac.compare_digest(candidate.encode(\"utf-8\"), expected) for candidate in candidates)",
+    "replace": "    return any(token.startswith(candidate) for candidate in candidates if candidate)",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_token_that_only_shares_a_prefix_refuses"
+    ]
+  },
+  {
+    "label": "the pre-fetch IP validation never fires, so 127.0.0.1 / 10.0.0.5 / 169.254.169.254 are claimable origins",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if literal is not None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_non_public_or_malformed_claim_is_refused_before_any_row_or_packet",
+      "tests/ee/sites/test_domain_ownership.py::test_a_public_literal_ip_is_not_a_claimable_origin",
+      "tests/ee/sites/test_domain_ownership.py::test_a_refused_claim_mints_no_site"
+    ]
+  },
+  {
+    "label": "the claim is looked up by host alone, so one workspace's proof verifies the domain for every other workspace",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    claim = await SiteOriginClaim.find_one(\n        SiteOriginClaim.workspace == workspace_id, SiteOriginClaim.host == normalized\n    )\n    if claim is None:",
+    "replace": "    claim = await SiteOriginClaim.find_one(SiteOriginClaim.host == normalized)\n    if claim is None:",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_workspace_a_token_on_the_site_does_not_verify_the_host_for_workspace_b",
+      "tests/ee/sites/test_domain_ownership.py::test_workspace_b_cannot_verify_a_host_it_never_claimed"
+    ]
+  },
+  {
+    "label": "the expiry window is not enforced, so an abandoned token stays redeemable forever",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_an_expired_claim_refuses_without_fetching_anything"
+    ]
+  },
+  {
+    "label": "the meta scan runs past </head>, so a comment on the homepage can prove ownership of the domain",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    def handle_endtag(self, tag: str) -> None:\n        if tag == \"head\":\n            self._done = True",
+    "replace": "    def handle_endtag(self, tag: str) -> None:\n        self._seen_endtag = tag",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_meta_tag_after_head_closes_does_not_prove_ownership"
+    ]
+  },
+  {
+    "label": "the <body> stop is removed too, so user-supplied markup anywhere on the page counts as proof",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "        if tag == \"body\":\n            self._done = True\n            return",
+    "replace": "        if tag == \"body\":\n            return",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_meta_tag_in_a_headless_document_body_does_not_prove_ownership"
+    ]
+  },
+  {
+    "label": "the hop chain is no longer pinned to the claimed host, so a 30x onto a shared service proves a parked domain",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "            allowed_host=host,",
+    "replace": "            allowed_host=None,",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_the_probe_is_pinned_to_the_claimed_host_across_redirects"
+    ]
+  },
+  {
+    "label": "the probe wears the import crawler's identity again, so a verification lies about what it is",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "VERIFIER_USER_AGENT = \"PawSitesVerifier/1.0 (+https://pocketpaw.dev; domain-ownership check)\"",
+    "replace": "VERIFIER_USER_AGENT = \"PawSitesImporter/1.0 (+https://pocketpaw.dev; site-import crawler)\"",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_the_probe_sends_the_verifier_user_agent_not_the_importers"
+    ]
+  },
+  {
+    "label": "the caller's user_agent is ignored and every fetch wears the importer's UA, undoing the parameter entirely",
+    "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
+    "find": "            headers={\"User-Agent\": user_agent, \"Accept\": \"*/*\"},",
+    "replace": "            headers={\"User-Agent\": USER_AGENT, \"Accept\": \"*/*\"},",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_the_probe_sends_the_verifier_user_agent_not_the_importers"
+    ]
+  },
+  {
+    "label": "THE EARLY RETURN IS BACK — a verified row is handed straight back, so verified_at freezes at the first proof and every consumer that refuses a 31-day-old one refuses forever",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if claim.status == _STATUS_VERIFIED:\n        return claim\n    if _expires_at(claim) <= datetime.now(UTC):",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_a_stale_proof_is_re_proved_and_the_date_moves",
+      "tests/ee/sites/test_domain_ownership.py::test_re_verifying_a_verified_row_actually_FETCHES"
+    ]
+  },
+  {
+    "label": "THE FIX'S OWN FAILURE MODE — verified_at is re-stamped WITHOUT re-probing, so the window crossing passes while the proof is a touch rather than a proof",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if claim.status == _STATUS_VERIFIED:\n        return await _record_verified(claim, claim.method or METHOD_WELL_KNOWN)\n    if _expires_at(claim) <= datetime.now(UTC):",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_re_verifying_a_verified_row_actually_FETCHES",
+      "tests/ee/sites/test_domain_ownership.py::test_a_re_verify_that_finds_NOTHING_leaves_the_old_proof_standing",
+      "tests/ee/sites/test_domain_ownership.py::test_a_wrong_token_on_a_re_verify_does_not_re_stamp_the_date"
+    ]
+  },
+  {
+    "label": "the 7-day token TTL is applied to a VERIFIED row too, which makes re-verification unreachable — every row due for it expired weeks ago",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if claim.status != _STATUS_VERIFIED and _expires_at(claim) <= datetime.now(UTC):",
+    "replace": "    if _expires_at(claim) <= datetime.now(UTC):",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_an_expired_TOKEN_does_not_block_re_verifying_a_proven_origin"
+    ]
+  },
+  {
+    "label": "re-claiming a verified origin re-mints its token, so the owner must publish a NEW file before they can re-verify — a renewal priced at one deploy",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if existing is not None and existing.status == _STATUS_VERIFIED:\n        return existing",
+    "replace": "    if False:\n        return existing",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_reclaiming_a_verified_origin_does_not_unprove_it"
+    ]
+  }
+]

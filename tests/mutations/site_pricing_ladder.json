@@ -165,19 +165,19 @@
   {
     "label": "activation stamps an annual renewal again on a monthly plan",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
-    "replace": "    deployed.renewal_date = datetime.now(UTC) + timedelta(days=365)",
+    "find": "        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)",
+    "replace": "        doc.renewal_date = (at or datetime.now(UTC)) + timedelta(days=365)",
     "tests": [
-      "tests/cloud/sites/test_charge_first.py::test_activation_stamps_a_MONTHLY_renewal_not_an_annual_one"
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_shared_renewal_stamp_steps_one_calendar_month"
     ]
   },
   {
     "label": "activation steps 30 days instead of a month — the date walks back through the year",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
-    "replace": "    deployed.renewal_date = datetime.now(UTC) + timedelta(days=90)",
+    "find": "        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)",
+    "replace": "        doc.renewal_date = (at or datetime.now(UTC)) + timedelta(days=90)",
     "tests": [
-      "tests/cloud/sites/test_charge_first.py::test_activation_stamps_a_MONTHLY_renewal_not_an_annual_one"
+      "tests/cloud/sites/test_foreign_site_mint.py::test_the_shared_renewal_stamp_steps_one_calendar_month"
     ]
   },
   {

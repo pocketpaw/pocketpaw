@@ -121,8 +121,8 @@
   {
     "label": "static capture: the svelte track loses the contract",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            + native_form_contract()\r\n        )",
-    "replace": "        )",
+    "find": "            + native_form_contract()\r\n            + \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'make the hero \"",
+    "replace": "            + \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'make the hero \"",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py"
     ]

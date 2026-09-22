@@ -26,6 +26,14 @@ description: |
 
 # Build a Paw Site — the Svelte-track authoring brain
 
+<!--
+  Updated: 2026-09-17 (docs/sites-multipage-skills): STEP 2 now teaches extra
+  routes at CREATE time, not just in the edit lane — the two-key route recipe,
+  a heuristic for when a brief warrants a second page, and the
+  author-before-you-link rule (`handleHttpError` is `warn`, so a nav href with
+  no route behind it builds green and 404s on the visitor's first click).
+-->
+
 You're building a **Paw Site** on the **Svelte track**: a real, standalone
 marketing website that you **author as hand-written SvelteKit components**
 and that gets **prerendered to static HTML** (server-side, no client JS on
@@ -271,7 +279,9 @@ src/lib/components/*.svelte   your section components (Hero.svelte, Pricing.svel
 Add as needed:
 
 ```
-src/lib/*.js                 helpers (e.g. reveal.js — a use:reveal scroll action)
+src/lib/*.js                     helpers (e.g. reveal.js — a use:reveal scroll action)
+src/routes/<slug>/+page.svelte   a second page, served at /<slug>
+src/routes/<slug>/+page.ts       export const prerender = true;  (per route)
 ```
 
 A minimal valid map therefore looks like:
@@ -299,6 +309,35 @@ Notes that the tool enforces, so get them right:
 - Every component you `import` in `+page.svelte` must exist as a key in the
   map (a missing import breaks the build).
 - Values are **strings**. Keep real newlines/indentation; this is source.
+
+### When the site needs more than one page
+
+One page is still right for a landing page: one story, one nav of `#anchors`,
+one CTA. Add a route when the brief names something a visitor would go looking
+for on its own — a service line with real copy behind it, a menu or price list,
+a catalogue, a portfolio, a genuine About / Team / Contact story, or anything the
+user asked for by name ("and a page for our team"). A section that runs three
+sentences is a section; don't split a thin page into four thin ones.
+
+A route is TWO keys, and the pair is the whole recipe:
+
+```
+src/routes/menu/+page.svelte    the page — imports the same $lib components
+src/routes/menu/+page.ts        export const prerender = true;
+```
+
+Write the `+page.ts` every time: the root page's flag is page-level and does
+**not** cascade to a child route. The skeleton already ships a second route —
+`src/routes/thank-you/`, where a submitted lead form lands — so a multi-route
+site is the ordinary shape here, not an escape hatch. Nav and
+footer are components under `src/lib/components/`, so every page imports the same
+two files rather than retyping the markup.
+
+**Author the route before you link it.** The static adapter runs with
+`handleHttpError: 'warn'`, so a nav `href="/menu"` with no `src/routes/menu/`
+behind it builds green, deploys, and 404s on the visitor's first click — nothing
+downstream catches it. Put every route in the same `source` map as the nav that
+links to it.
 
 ## STEP 3 — Call `create_svelte_site`
 
@@ -586,3 +625,6 @@ D1 + wires the read/write layer. Done.
   (draft-first — STEP 4); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
+  On this engine only dependency-free effects (empty `needs`) are served; pass
+  `needs_js=false` to `search_effects`.

@@ -25,6 +25,13 @@
 # site with a Dodo subscription id or an add-on cart line renews at the gateway,
 # and debiting it here would charge the customer twice for one month. The rail
 # check is the whole tenancy of this module.
+#
+# A RENEWAL IS A DEBIT AND A DATE, AND NOTHING ELSE. It must stay that way: the
+# rail now carries FOREIGN sites — a Paw Bar concierge on a page the customer
+# hosts themselves — which have no Worker to redeploy and would fail any sweep
+# that tried. That is also why ``foreign_origin`` is the one exception to the
+# "never charge an undeployed site" skip below; every other undeployed row still
+# means a deploy that went wrong, and still goes uncharged.
 
 from __future__ import annotations
 
@@ -165,7 +172,22 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # A dynamic site mid-provision has this shape too, legitimately and for
         # minutes. Deferring its renewal by one five-minute tick is the correct
         # answer there as well.
-        if not getattr(doc, "deployed", False):
+        #
+        # A FOREIGN SITE IS THE ONE UNDEPLOYED ROW THAT IS FINISHED. A Paw Bar
+        # concierge minted for a site the customer hosts themselves
+        # (``sites.service.mint_foreign_site``) has no Worker, no ``script_name``
+        # and no URL, and never will — ``deployed`` is False because there is
+        # nothing to deploy, not because a deploy failed. It was bought on this
+        # rail at a real monthly price, so skipping it here would give it away
+        # free forever, which is the exact failure this whole module exists to
+        # prevent, arriving through the safety check rather than around it.
+        #
+        # Nothing below deploys anything: the renewal is a debit and a date, so
+        # charging a foreign site needs no new path and must not grow one. The
+        # flag is a stamp only the mint writes rather than a derivation from
+        # ``script_name == ""``, so a draft or a half-written row cannot talk its
+        # way past the skip.
+        if not getattr(doc, "deployed", False) and not getattr(doc, "foreign_origin", False):
             counts["not_live"] += 1
             logger.warning(
                 "sites.renewal_sweeper: site %s (workspace=%s) is due but is NOT "

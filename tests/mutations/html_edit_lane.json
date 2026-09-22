@@ -65,7 +65,7 @@
   {
     "label": "create no longer requires new_source",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new file needs `new_source` — the full contents of the new \"\n            \"file. There is nothing for `edits` to search against.\",\n        )",
+    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new file needs `new_source` \u2014 the full contents of the new \"\n            \"file. There is nothing for `edits` to search against.\",\n        )",
     "replace": "    pass",
     "tests": [
       "tests/ee/sites/test_html_file_edit.py"
@@ -119,8 +119,8 @@
   {
     "label": "the edit republishes (pushes unvalidated markup live)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph",
-    "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id, name=\"\")\n    # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph",
+    "find": "    # NO publish, NO enqueue, NO native pre-warm \u2014 see the DRAFT-ONLY paragraph",
+    "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id, name=\"\")\n    # NO publish, NO enqueue, NO native pre-warm \u2014 see the DRAFT-ONLY paragraph",
     "tests": [
       "tests/ee/sites/test_html_file_edit.py"
     ]
@@ -138,8 +138,8 @@
   {
     "label": "the html create step stops naming the edit tool, so a follow-up change in the same conversation goes back to a second create_html_site and a second site pocket",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"page' — is `mcp__pocketpaw_sites_manager__edit_html_file` with the \"",
-    "replace": "            \"page' — is `create_html_site` again with the \"",
+    "find": "            \"page' \u2014 is `mcp__pocketpaw_sites_manager__edit_html_file` with the \"",
+    "replace": "            \"page' \u2014 is `create_html_site` again with the \"",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_html_create_routes_follow_up_changes_to_the_edit_tool"
     ]
@@ -223,10 +223,19 @@
   {
     "label": "the handler drops the outstanding-link warning, so the agent narrates an unreachable page as an ordinary success",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "    if unreferenced:\n        message = (\n            f\"HALF DONE — `{result['file_path']}` was created",
-    "replace": "    if False and unreferenced:\n        message = (\n            f\"HALF DONE — `{result['file_path']}` was created",
+    "find": "    if unreferenced:\n        message = (\n            f\"HALF DONE \u2014 `{result['file_path']}` was created",
+    "replace": "    if False and unreferenced:\n        message = (\n            f\"HALF DONE \u2014 `{result['file_path']}` was created",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_html_file.py::TestUnreferencedCreateWarning::test_orphan_create_tells_the_agent_nothing_links_to_the_page"
+    ]
+  },
+  {
+    "label": "ES module imports are not scanned (a file reached only via import reads unreferenced)",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "    refs.extend(_JS_IMPORT_RE.findall(text))\n    refs.extend(_JS_DYNAMIC_IMPORT_RE.findall(text))\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_html_paths_js_imports.py"
     ]
   }
 ]

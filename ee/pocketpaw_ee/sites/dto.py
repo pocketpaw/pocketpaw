@@ -2,6 +2,17 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# ONE SHAPE HERE CARRIES A SECRET: ``OriginClaimResponse.token`` is the
+# domain-ownership proof the claiming workspace publishes on its own site. It
+# belongs only in the response to the workspace that asked for it — never in a
+# list, a card, or anything another tenant can read.
+#
+# ``ForeignConciergeResponse.site_key`` IS NOT ONE, and the distinction is worth
+# keeping straight because the two travel together on the same surface: the embed
+# key ships inside a ``<script>`` tag on a page anyone can view, is origin-bound,
+# and is revoked by rotation. ``SiteResponse`` has carried it since RFC 12 for
+# the same reason. The token above is the only secret on this module.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
 # ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
 # ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a
@@ -1039,6 +1050,19 @@ class SiteEntitlementsResponse(BaseModel):
     include this" from "it does, and you have not republished since you upgraded".
     Those need different sentences and different buttons. This field is the cheap
     pre-check; the endpoint is the answer.
+
+    ``project_download`` says whether this site's plan buys taking the project away
+    as an archive. Like ``analytics`` it is echoed straight off the resolver with no
+    second condition ANDed in, and like every field here it exists so the Download
+    button can disable itself with a reason instead of 402ing when pressed.
+
+    It is NOT the same question as whether the source is VISIBLE. That one is a
+    WORKSPACE capability (``Entitlements.site_source_visible``, which gates the
+    builder's Code tab) resolved off the workspace plan by a different resolver; this
+    is a PER-SITE capability resolved off the site's own plan. A paid site inside a
+    free workspace can legitimately download a project whose source the Code tab
+    hides. A UI that gates the download button on source visibility would hide a
+    control the customer has paid for — read this field, not that one.
     """
 
     site_id: str
@@ -1052,6 +1076,7 @@ class SiteEntitlementsResponse(BaseModel):
     analytics: bool = False
     concierge_entitled: bool = False
     concierge_enabled: bool = False
+    project_download: bool = False
 
 
 class SiteClientResponse(BaseModel):
@@ -1409,3 +1434,169 @@ class SiteTransferListResponse(BaseModel):
     """Everything offered TO the calling workspace."""
 
     transfers: list[SiteTransferResponse] = []
+
+
+# --- SF-8: proving a workspace controls an origin --------------------------
+#
+# Request and response stay separate per the DTO rule. The request carries the one
+# field the client supplies; everything else — the token, the deadline, the proven
+# status — is minted server-side, because a client that can name them can forge a
+# proof.
+
+
+class OriginClaimRequest(BaseModel):
+    """The domain a workspace claims to control. Body of BOTH origin endpoints.
+
+    Claim and verify take the same single field, so they share a shape rather
+    than carrying two identical models. If either ever grows a field the other
+    does not want, split them then — not before.
+
+    A BARE HOST, never a URL. The service normalizes and refuses (lowercase, no
+    scheme/port/path/credentials, no single-label name, no literal IP); this cap
+    only stops an absurd value from reaching it.
+    """
+
+    host: str = Field(min_length=1, max_length=253)
+
+
+class OriginClaimResponse(BaseModel):
+    """A pending claim, with everything the owner needs to publish the proof.
+
+    ``token`` IS A SECRET and this is the only shape that carries it. It is
+    readable by the workspace that asked for it and nobody else — do not add this
+    model to a list endpoint, a gallery card, or any response a different tenant
+    can reach.
+    """
+
+    host: str
+    token: str
+    status: str
+    expires_at: datetime
+    # The two places the owner may publish it, rendered rather than described, so
+    # the panel can offer a copy button instead of an instruction to interpret.
+    well_known_url: str
+    meta_tag: str
+    verified_at: datetime | None = None
+    method: str = ""
+
+
+class OriginVerificationResponse(BaseModel):
+    """The outcome of a verification attempt that SUCCEEDED.
+
+    It carries no token: by the time this is returned the secret has done its job,
+    and echoing it back widens the number of places it can leak from. A failed
+    attempt is an error response (``sites.origin_token_missing`` /
+    ``_token_mismatch`` / ``_claim_expired`` / ``_probe_failed``), not a status on
+    this model — a client must not be able to read a refusal as a mild success.
+    """
+
+    host: str
+    status: str
+    method: str
+    verified_at: datetime | None = None
+
+
+class ForeignConciergeBindRequest(BaseModel):
+    """Buy (or re-resolve) the one foreign concierge for a pocket.
+
+    ``allowed_origins`` applies to the FIRST bind only — the service returns an
+    existing concierge untouched rather than widening its allowlist, because a
+    call that reads as "make sure this exists" must not be a way around the
+    verified-origin gate one bind at a time. Every host named here must already
+    carry a fresh verified ownership claim for the workspace.
+
+    THERE IS DELIBERATELY NO ``scopes`` FIELD. ``bind_foreign_concierge`` accepts
+    a scope override, and the Site model's concierge baseline is what a
+    world-visible embed key is allowed to do. Letting a request widen that would
+    put the ceiling on the public key in the caller's hands, so the override stays
+    reachable only from in-process callers.
+    """
+
+    allowed_origins: list[str] = Field(min_length=1, max_length=10)
+    name: str = Field(default="", max_length=200)
+
+
+class ForeignConciergeRebindRequest(BaseModel):
+    """Point an existing concierge's bar at a different agent.
+
+    Both fields optional, and an empty ``agent_id`` is not a no-op: it means
+    RE-PROVISION — clear the stale bind and let the funnel resolve-or-mint the
+    canonical agent again, which is the repair for a bar whose agent was deleted.
+    ``widget_id`` picks the bar when a pocket carries more than one.
+    """
+
+    agent_id: str = Field(default="", max_length=64)
+    widget_id: str = Field(default="", max_length=64)
+
+
+class ForeignConciergeOrigin(BaseModel):
+    """One host on a concierge's allowlist, with the state of its ownership proof.
+
+    Three fields rather than one boolean because the three states need different
+    sentences from the owner: never proved, proved and still good, and proved too
+    long ago to act on. A panel that collapses the last two shows a working
+    concierge that will refuse its next crawl and says nothing about why.
+    """
+
+    host: str
+    verified: bool
+    verified_at: datetime | None = None
+    verification_fresh: bool = False
+
+
+class ForeignConciergeResponse(BaseModel):
+    """The state of a pocket's foreign concierge — the shape the setup UI renders.
+
+    ``exists`` IS THE ANSWER, not the HTTP status. The read answers 200 with
+    ``exists: false`` for a pocket that has never been bound, because "no
+    concierge yet" is the normal first state of the panel rather than an error —
+    a 404 there would make the happy path indistinguishable from a wrong pocket
+    id. The two mutations that need a concierge to act on (rotate, rebind) DO 404,
+    since for them a missing row is a real failure.
+
+    ``embed_snippet`` IS AUTHORITATIVE and ``""`` is meaningful: it is the answer
+    from ``paw_bar.embed.concierge_snippet``, which is the one definition of the
+    five gates a site must pass to earn a bar. ``widget_id`` / ``agent_id`` are
+    diagnostics for the empty case, not inputs to it — an empty snippet beside a
+    bound agent means the owner's kill switch or the plan, and an empty snippet
+    beside an empty ``agent_id`` means provisioning has not completed.
+
+    ``site_key`` is the world-visible embed credential — it ships inside the
+    snippet on a public page, and ``SiteResponse`` already carries it for the same
+    reason. It is not a secret; ``OriginClaimResponse.token`` is, and nothing here
+    carries that.
+
+    EVERY TIMESTAMP HERE IS UTC AND ARRIVES WITHOUT A ZONE, said out loud because
+    a client that parses ``verified_at`` as local time renders a proof that
+    expires a day early or late. Mongo stores UTC and hands back naive datetimes,
+    so ``verified_at`` and ``renewal_date`` serialize as ``2026-09-01T10:22:04``
+    with no trailing ``Z`` — the same shape every other datetime on this router
+    has. ``verification_fresh`` is computed server-side against the same 30-day
+    rule the bind enforces, so a panel never has to do that arithmetic itself.
+
+    NO "created" / "charged" FLAG, and its absence is deliberate. A bind is
+    idempotent, so only the call that actually minted spent money — and the
+    router cannot tell whether it was the one, because a pre-read outside the
+    service's lock reports "nothing here" to both of two concurrent first binds
+    while only one of them charges. A field that lies about money on a race is
+    worse than no field: read this endpoint before binding, and ``exists``
+    answers the same question honestly.
+    """
+
+    exists: bool
+    site_id: str = ""
+    pocket_id: str = ""
+    name: str = ""
+    site_key: str = ""
+    embed_snippet: str = ""
+    widget_id: str = ""
+    agent_id: str = ""
+    origins: list[ForeignConciergeOrigin] = Field(default_factory=list)
+    plan_tier: str = ""
+    subscription_status: str = "none"
+    renewal_date: datetime | None = None
+    # The resolver's own answer to "would a visitor get a bar that talks?" —
+    # ``auth.site_keys.concierge_available``, the predicate every public paw-bar
+    # seam asks. Kept beside the snippet because they can disagree for one
+    # legitimate reason: entitled and enabled, but the agent is not bound yet.
+    concierge_available: bool = False

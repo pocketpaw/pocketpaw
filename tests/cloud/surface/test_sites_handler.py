@@ -1,5 +1,15 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
+# WHAT THIS FILE GUARDS (current state): the /sites preamble's three modes
+# (create / refine / chat), its four engine branches, and the routing that picks
+# between them. The routing tests at the BOTTOM are the ones to read first —
+# they pin that a meta carrying only a ``site_id`` resolves to REFINE and that an
+# unresolvable one fails closed rather than falling into create, which is how the
+# builder used to mint a duplicate site. They seed a real Site row and a real
+# site pocket and go through ``build_preamble``, because the whole defect class
+# only exists on the live path: a test that hands the handler a ``pocket_id``
+# directly tests a wire shape the loading builder never sends.
+#
 # Created: 2026-06-03 — Guards the /sites surface preamble.
 # Updated: 2026-09-01 (fix/sites-drop-bundled-design-systems) — the bundled
 # DESIGN.md library and its ``pocketpaw_design_systems`` MCP server are gone, so
@@ -124,8 +134,24 @@
 # ``test_every_registered_edit_tool_is_named_by_its_refine_branch`` fails when a
 # REGISTERED tool goes unnamed, where the existing gate only failed when a NAMED
 # tool was unregistered.
+# Updated: 2026-09-16 (feat/sites-inspo-design-research) — five tests at the
+# BOTTOM pin `PHASE 1b`, the create-preamble step that grounds the design
+# direction in an archive of real shipped pages. They run the gate in BOTH
+# directions, which is the point: absent by default (the control — an external
+# MCP server is opt-in per deploy, so an unconditional block would command a tool
+# most installs do not have), present once `POCKETPAW_SITES_MCP_SERVERS` grants
+# it, and absent again when the setting names a DIFFERENT server. The other two
+# pin what keeps a reference archive from flattening every site: the embedded
+# design system still outranks it on any visual value, and the rotation ban
+# survives it. `_INSPO_TOOLS` records that server's real tool names so the step
+# cannot drift into naming one that does not exist — the external-server
+# analogue of `test_every_tool_a_refine_branch_names_is_a_registered_tool`,
+# which cannot help here because an external server's tools are unknown until
+# the client connects.
 
 from __future__ import annotations
+
+import re
 
 import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
@@ -2044,3 +2070,295 @@ async def test_html_create_routes_follow_up_changes_to_the_edit_tool() -> None:
     assert "SAME pocket_id" in preamble
     # Create is still the FIRST thing named — this is a create preamble.
     assert preamble.index("create_html_site") < preamble.index("edit_html_file")
+
+
+# ── PHASE 1b: design research (feat/sites-bundled-design-research) ──────────
+#
+# Rewritten 2026-09-16. This first shipped (#2204) with the archive as an
+# EXTERNAL MCP server behind `POCKETPAW_SITES_MCP_SERVERS`, so the step was
+# conditional and most of these tests pinned the gate. That design needed TWO
+# switches — install the server, then grant it — both defaulting off and neither
+# implying the other, and the first deploy duly researched nothing and said
+# nothing about it. The server is bundled in-process now, so the step is
+# unconditional and what needs pinning is different: that the tools it names are
+# ones this surface can actually reach.
+
+
+async def test_the_research_step_is_always_on() -> None:
+    """No setting, no install, no grant: every create preamble carries it.
+
+    The point of bundling. `pocketpaw_inspo` is an ordinary in-process server
+    like stock and icons, so the preamble names its tools the way it names
+    theirs — unconditionally, because they are unconditionally there.
+
+    THE MUTATION THAT BREAKS THIS: make `_design_research_step` return "" again.
+    Run: sites build with no research and nothing anywhere says why.
+    """
+    for engine in (None, "ripple", "svelte", "react"):
+        preamble = await _preamble_for(engine)
+        assert "PHASE 1b" in preamble, f"{engine} create lost the research step"
+        assert "mcp__pocketpaw_inspo__research_page_design" in preamble
+
+
+async def test_the_research_step_names_only_tools_sites_can_reach() -> None:
+    """The coupling that decides whether any of this works at all.
+
+    /sites runs a HARD whitelist: an id absent from `sites_allow` is stripped
+    from `allowed_tools` before the subprocess launches, and the agent is simply
+    told the capability does not exist. So a preamble naming a bundled tool is
+    not enough — the id has to be in the allow-list too, and the two live in
+    different files edited by different changes.
+
+    This is the sibling of
+    `test_every_tool_a_refine_branch_names_is_a_registered_tool`, run against
+    the resolved profile rather than the server registry.
+
+    THE MUTATION THAT BREAKS THIS: drop `INSPO_TOOL_IDS` from the `sites_allow`
+    union in `surface_registry`. Run: the preamble still commands the tools, the
+    agent never sees them, and every generated site skips research silently —
+    which is exactly how the first deploy of this feature failed.
+    """
+    from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    step = sites_handler._design_research_step()
+    named = set(re.findall(r"mcp__pocketpaw_inspo__\w+", step))
+    assert named, "the step named no research tools at all"
+
+    # Every named tool is one the server really builds...
+    unknown = named - set(INSPO_TOOL_IDS)
+    assert not unknown, f"the step names {sorted(unknown)}, which the server does not expose"
+
+    # ...and one /sites is allowed to call.
+    allow = resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids
+    assert allow is not None, "the /sites profile stopped pinning an MCP allow-list"
+    unreachable = named - set(allow)
+    assert not unreachable, (
+        f"{sorted(unreachable)} is named by the preamble but missing from the "
+        "/sites allow-list — it is silently unreachable and the instruction "
+        "commands nothing"
+    )
+
+
+async def test_the_research_step_keeps_the_design_system_and_the_rotation_ban() -> None:
+    """The two rails that stop a reference archive from flattening every site.
+
+    An archive returns the SAME exemplars for the same brief, so an unqualified
+    "build what they built" points straight at the repetition Phase 1 exists to
+    prevent — a reference that outranks the embedded system makes the
+    homogenisation worse than having no reference at all.
+
+    THE MUTATION THAT BREAKS THIS: delete the precedence clause. Run: nothing
+    fails, every dentist brief converges on the same returned exemplar, and the
+    regression is invisible until a human looks at two sites side by side.
+    """
+    lower = sites_handler._design_research_step().lower()
+
+    assert "does not outrank the embedded design system" in lower
+    assert "wholesale" in lower  # never lift a palette/font stack off a reference
+    assert "rotation ban" in lower
+    assert "one round" in lower  # bounded: someone else's service, user is waiting
+
+
+async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
+    """Phase 1b, not Phase 2.
+
+    It is evidence for the direction, not a substitute for choosing one. Phase 1
+    is the last point a real reference can still change the answer; by the time
+    Phase 2 is writing tokens a late reference only muddies them.
+    """
+    preamble = await _preamble_for(None)
+
+    assert preamble.index("PHASE 1b") < preamble.index("LOCK THE TOKENS")
+    assert preamble.index("PHASE 1 — CREATIVE DIRECTION") < preamble.index("PHASE 1b")
+
+
+# ---------------------------------------------------------------------------
+# fix/sites-edit-mints-duplicate — a site_id with no pocket_id must not create
+# ---------------------------------------------------------------------------
+#
+# THE BUG: editing an existing site could mint a DUPLICATE. The dispatch forked
+# on ``meta.pocket_id`` ALONE and never read ``meta.site_id``, and only the
+# frontend supplied ``pocket_id`` — the builder page's SurfaceMetaProvider adds
+# it from ``sitesStore.sites.find(...)``, a whole-workspace list fetch, while
+# ``site_id`` is stamped from the route param the moment the URL changes. The
+# chat rail is a SIBLING of the page's main content, so the composer is live
+# through the whole loading / load-failed / not-found window. A send inside that
+# window carried site_id and NO pocket_id, so the handler rendered the CREATE
+# preamble — and nothing downstream could refuse it: refine mode leaves every
+# create tool reachable, and no create tool's schema even accepts a pocket id,
+# so the tool minted a fresh pocket and a second Site doc.
+#
+# The fix resolves the pocket SERVER-SIDE from the site id, which is why these
+# tests seed a real Site row and go through ``build_preamble``.
+
+UNRESOLVED_SITE_ID = "68f1a0c0c0c0c0c0c0c0c0c0"  # a well-formed ObjectId, no row
+
+
+async def _seed_site_row(pocket_id: str, *, workspace: str = WORKSPACE) -> str:
+    """Insert a real Site row pointing at ``pocket_id``; return its site id."""
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    doc = _SiteDoc(workspace=workspace, pocket_id=pocket_id, owner=USER, name="seeded site")
+    await doc.insert()
+    return str(doc.id)
+
+
+def _route_only_meta(site_id: str, **kwargs: str) -> SurfaceMeta:
+    """The meta the builder REALLY sends before its site list resolves.
+
+    ``metaFromRouteParams`` in paw-enterprise stamps ``site_id`` from the route
+    param and nothing else; ``pocket_id`` arrives later from the page's provider,
+    or never (a failed list load, a deleted site). This is that wire shape.
+    """
+    return SurfaceMeta(route_path=f"/sites/{site_id}", site_id=site_id, mode="build", **kwargs)
+
+
+async def test_a_site_id_with_no_pocket_id_refines_instead_of_creating(
+    mongo_db: object,
+) -> None:
+    """THE TEST THE FIX EXISTS FOR: site_id alone must never reach create.
+
+    The handler resolves the source pocket from the site id — a primary-key,
+    workspace-scoped read — so the preamble is the REFINE one, addressed to the
+    pocket the user is actually looking at.
+
+    THE MUTATION THAT BREAKS THIS: delete the site_id resolution from
+    ``build_preamble`` so the dispatch forks on ``meta.pocket_id`` alone.
+    """
+    user_id, pocket_id = await _seed_site_pocket("html")
+    site_id = await _seed_site_row(pocket_id)
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _route_only_meta(site_id))
+    ).text
+
+    assert 'mode="refine"' in preamble
+    assert 'mode="create"' not in preamble
+    # It edits the pocket the site really points at, on that site's own engine.
+    assert pocket_id in preamble
+    assert HTML_TOOL in preamble
+    # And it is NOT the create flow: no clarity gate, no create tool commanded.
+    assert "PHASE 1 — CREATIVE DIRECTION" not in preamble
+    assert "create_html_site` with the `source`" not in preamble
+
+
+async def test_an_unresolvable_site_id_fails_closed_never_into_create(
+    mongo_db: object,
+) -> None:
+    """FAIL CLOSED. A site id we cannot resolve is not a licence to create.
+
+    Falling back to ``_create_preamble`` here is the original bug with an extra
+    step: the agent is told to build a new site while the user is sitting on an
+    existing one. The preamble instead says the site could not be identified and
+    tells the agent to establish which site it is before touching anything.
+
+    THE MUTATION THAT BREAKS THIS: make the unresolved branch fall through to
+    ``_create_preamble``.
+    """
+    meta = _route_only_meta(UNRESOLVED_SITE_ID)
+    preamble = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text
+
+    assert preamble != sites_handler._create_preamble(meta)
+    assert 'mode="create"' not in preamble
+    lower = preamble.lower()
+    # It says what went wrong and refuses the create.
+    assert "could not" in lower
+    assert "existing" in lower
+    # No create tool is commanded — that is the whole point of failing closed.
+    for create_tool in (
+        "create_html_site",
+        "create_react_site",
+        "create_svelte_site",
+        "create_landing_site",
+    ):
+        assert create_tool not in preamble, f"{create_tool} is reachable and now named"
+
+
+async def test_a_site_id_from_another_workspace_fails_closed(mongo_db: object) -> None:
+    """The resolution is tenant-scoped, and a miss fails closed like any other.
+
+    ``_load`` filters on ``{_id, workspace}``, so a site id pasted from another
+    tenant resolves to nothing here. That must land in the same refuse-and-ask
+    branch rather than quietly becoming a create.
+    """
+    _other_user, other_pocket = await _seed_site_pocket("html", workspace="ws-other-tenant")
+    foreign_site_id = await _seed_site_row(other_pocket, workspace="ws-other-tenant")
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, USER, _route_only_meta(foreign_site_id))
+    ).text
+
+    assert 'mode="create"' not in preamble
+    assert other_pocket not in preamble
+    assert "create_html_site" not in preamble
+
+
+async def test_a_stamped_pocket_id_still_wins(mongo_db: object) -> None:
+    """The existing path is untouched: when the frontend DOES stamp a pocket_id,
+    the handler uses it and does not need the site row at all.
+
+    Stated as a test because the fix adds a read in front of a branch that has
+    always been meta-only, and a regression there would break every refine turn
+    the frontend gets right.
+    """
+    user_id, pocket_id = await _seed_site_pocket("ripple")
+
+    stamped = (await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))).text
+    assert pocket_id in stamped
+    assert RIPPLE_TOOL in stamped
+
+
+async def test_svelte_create_routes_follow_up_changes_to_the_edit_tool() -> None:
+    """The second, INDEPENDENT cause: svelte's create step never forbade the
+    re-create.
+
+    react got this clause in RX-3 and html got it later; svelte and ripple were
+    left behind, and the module header records the html fix as an html fix rather
+    than a general one. On svelte the agent's one available move for "shorten the
+    hero headline" was another ``create_svelte_site``, which mints a SECOND site.
+
+    THE MUTATION THAT BREAKS THIS: delete the clause from the svelte build step.
+    """
+    preamble = await _preamble_for("svelte")
+
+    assert SVELTE_TOOL in preamble
+    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
+    assert "SAME pocket_id" in preamble
+    lower = preamble.lower()
+    assert "second site" in lower
+    # Named the same way react's clause names it: the re-create is the wrong move.
+    assert "second `create_svelte_site`" in preamble or "second create_svelte_site" in lower
+
+
+async def test_ripple_create_routes_follow_up_changes_to_the_edit_tool() -> None:
+    """Same hole on the ripple track, one engine over.
+
+    Ripple's edit path is the pocket specialist's merge rather than a file-level
+    edit tool, so the clause names that instead — but the failure it prevents is
+    identical: a second ``create_landing_site`` mints a second site pocket and
+    leaves the page the user is looking at unchanged.
+
+    THE MUTATION THAT BREAKS THIS: delete the clause from the ripple build step.
+    """
+    preamble = await _preamble_for("ripple")
+
+    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
+    assert RIPPLE_TOOL in preamble
+    assert "SAME pocket_id" in preamble
+    assert "second site" in preamble.lower()
+
+
+async def test_every_create_branch_forbids_the_re_create() -> None:
+    """The gate that stops this being fixed one engine at a time AGAIN.
+
+    Every engine that can create a site from chat can also be changed from chat,
+    so every create branch must say so. A fifth engine joins this by existing.
+    """
+    for engine in (None, "html", "svelte", "react", "ripple"):
+        preamble = await _preamble_for(engine)
+        assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble, (
+            f"the {engine or 'default'} create branch never forbids the re-create, "
+            "so a follow-up change in the same conversation mints a second site"
+        )

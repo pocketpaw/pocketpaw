@@ -645,10 +645,9 @@ def _projects_path() -> Path:
     return d / "flow-projects.jsonl"
 
 
-def _load_projects() -> list[dict[str, Any]]:
-    """Read the persisted flow-project records (best-effort — a corrupt/missing
-    file degrades to an empty list, never a crash)."""
-    path = _projects_path()
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL record file (best-effort — a corrupt/missing file degrades to
+    an empty list, never a crash)."""
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
@@ -660,20 +659,28 @@ def _load_projects() -> list[dict[str, Any]]:
             try:
                 records.append(json.loads(line))
             except ValueError:
-                logger.warning("studio: skipping corrupt flow-project line")
+                logger.warning("studio: skipping corrupt line in %s", path.name)
     except OSError:
-        logger.warning("studio: could not read flow projects", exc_info=True)
+        logger.warning("studio: could not read %s", path.name, exc_info=True)
     return records
 
 
-def _rewrite_projects(records: list[dict[str, Any]]) -> None:
-    """Full rewrite of the flow-projects JSONL (best-effort)."""
+def _rewrite_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    """Full rewrite of a JSONL record file (best-effort)."""
     try:
-        with _projects_path().open("w") as fh:
+        with path.open("w") as fh:
             for record in records:
                 fh.write(json.dumps(record) + "\n")
     except OSError:
-        logger.warning("studio: could not rewrite flow projects", exc_info=True)
+        logger.warning("studio: could not rewrite %s", path.name, exc_info=True)
+
+
+def _load_projects() -> list[dict[str, Any]]:
+    return _load_jsonl(_projects_path())
+
+
+def _rewrite_projects(records: list[dict[str, Any]]) -> None:
+    _rewrite_jsonl(_projects_path(), records)
 
 
 def list_flow_projects(workspace_id: str) -> list[schemas.FlowProject]:
@@ -740,6 +747,93 @@ def delete_flow_project(project_id: str, workspace_id: str) -> bool:
     if len(remaining) == len(records):
         return False
     _rewrite_projects(remaining)
+    return True
+
+
+# ── Editor timelines (JSONL persistence, workspace-scoped) ──────────────────
+# Same upsert-in-place shape as flow projects, with two deliberate differences:
+# the stored ``doc`` is the client's TimelineDoc kept OPAQUE (the backend is a
+# sync target, not a second renderer — the doc's schema evolves on the client
+# alone), and ``updatedAt`` is the CLIENT's edit clock rather than server-now,
+# because cross-device ordering and the staleness guard must read one clock.
+
+
+class TimelineConflict(Exception):
+    """A save arrived carrying an older edit clock than the stored record."""
+
+    def __init__(self, stored_updated_at: int) -> None:
+        super().__init__("timeline is stale")
+        self.stored_updated_at = stored_updated_at
+
+
+def _timelines_path() -> Path:
+    d = get_config_dir() / "studio"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "timelines.jsonl"
+
+
+def _load_timelines() -> list[dict[str, Any]]:
+    return _load_jsonl(_timelines_path())
+
+
+def list_timeline_projects(workspace_id: str) -> list[schemas.TimelineProject]:
+    mine = [r for r in _load_timelines() if r.get("_workspace") == workspace_id]
+    mine.sort(key=lambda r: r.get("updatedAt", 0), reverse=True)
+    return [schemas.TimelineProject.model_validate(r) for r in mine]
+
+
+def get_timeline_project(project_id: str, workspace_id: str) -> schemas.TimelineProject | None:
+    for r in _load_timelines():
+        if r.get("id") == project_id and r.get("_workspace") == workspace_id:
+            return schemas.TimelineProject.model_validate(r)
+    return None
+
+
+def save_timeline_project(
+    project_id: str,
+    workspace_id: str,
+    *,
+    name: str | None,
+    doc: dict[str, Any],
+    updated_at: int,
+) -> schemas.TimelineProject:
+    records = _load_timelines()
+    now = time_now_ms()
+    prior = next(
+        (r for r in records if r.get("id") == project_id and r.get("_workspace") == workspace_id),
+        None,
+    )
+    stored_clock = int((prior or {}).get("updatedAt", 0))
+    if prior is not None and updated_at and updated_at < stored_clock:
+        raise TimelineConflict(stored_clock)
+    record = {
+        "id": project_id,
+        "name": (name or (prior or {}).get("name") or "Timeline").strip() or "Timeline",
+        "createdAt": (prior or {}).get("createdAt", now),
+        "updatedAt": updated_at or now,
+        "doc": doc,
+        "_workspace": workspace_id,
+    }
+    remaining = [
+        r
+        for r in records
+        if not (r.get("id") == project_id and r.get("_workspace") == workspace_id)
+    ]
+    remaining.append(record)
+    _rewrite_jsonl(_timelines_path(), remaining)
+    return schemas.TimelineProject.model_validate(record)
+
+
+def delete_timeline_project(project_id: str, workspace_id: str) -> bool:
+    records = _load_timelines()
+    remaining = [
+        r
+        for r in records
+        if not (r.get("id") == project_id and r.get("_workspace") == workspace_id)
+    ]
+    if len(remaining) == len(records):
+        return False
+    _rewrite_jsonl(_timelines_path(), remaining)
     return True
 
 

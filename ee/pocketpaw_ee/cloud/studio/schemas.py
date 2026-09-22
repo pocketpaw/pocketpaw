@@ -476,6 +476,28 @@ class FlowProjectSave(BaseModel):
     edges: list[FlowEdge] = Field(default_factory=list)
 
 
+class TimelineProject(BaseModel):
+    """A saved editor timeline. ``doc`` is the client's own TimelineDoc, stored
+    opaquely — the backend never inspects or validates its shape."""
+
+    id: str
+    name: str
+    createdAt: int
+    updatedAt: int
+    doc: dict[str, Any] = Field(default_factory=dict)
+
+
+class TimelineProjectSave(BaseModel):
+    """Body of ``PUT /studio/timelines/{id}`` — UPSERT. ``updatedAt`` is the
+    client's edit clock and doubles as the staleness guard: a write carrying an
+    older clock than the stored one is rejected with 409 rather than silently
+    overwriting a newer device's work."""
+
+    name: str | None = None
+    updatedAt: int = 0
+    doc: dict[str, Any] = Field(default_factory=dict)
+
+
 # ── Envelopes ───────────────────────────────────────────────────────────────
 
 
@@ -496,6 +518,13 @@ class FlowProjectsResponse(BaseModel):
     workspace, most-recently-updated first."""
 
     projects: list[FlowProject]
+
+
+class TimelineProjectsResponse(BaseModel):
+    """Response of ``GET /studio/timelines`` — every timeline in the workspace,
+    most-recently-updated first."""
+
+    projects: list[TimelineProject]
 
 
 # ── Media list (reuses the /media router's shape) ───────────────────────────
@@ -547,6 +576,9 @@ __all__ = [
     "FlowProject",
     "FlowProjectSave",
     "FlowProjectsResponse",
+    "TimelineProject",
+    "TimelineProjectSave",
+    "TimelineProjectsResponse",
     "MediaFile",
     "MediaListResponse",
 ]

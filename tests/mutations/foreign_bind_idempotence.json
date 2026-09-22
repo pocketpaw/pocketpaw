@@ -1,0 +1,197 @@
+[
+  {
+    "label": "the foreign row's id goes back to random - a second bind mints again and charges again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        id=_foreign_object_id(workspace_id, pocket_id),",
+    "replace": "        id=ObjectId(),",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_second_mint_for_the_same_pocket_loses_before_it_can_charge"
+    ]
+  },
+  {
+    "label": "the foreign id loses its salt - it collides with the pocket's PUBLISHED site row",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    digest = hashlib.sha1(f\"foreign:{workspace_id}:{pocket_id}\".encode()).digest()",
+    "replace": "    digest = hashlib.sha1(f\"{workspace_id}:{pocket_id}\".encode()).digest()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_the_foreign_id_never_lands_on_the_published_id"
+    ]
+  },
+  {
+    "label": "the bind mutex is dropped - a loser adopts a row the winner deletes and returns a phantom concierge",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    async with _foreign_bind_lock(workspace_id, pocket_id):\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "replace": "    if True:\n        existing = await foreign_site_for_pocket(workspace_id, pocket_id)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_concurrent_loser_is_never_handed_a_row_the_winner_deletes"
+    ]
+  },
+  {
+    "label": "the resolve-or-create check is deleted - every bind mints again and charges again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        existing = await foreign_site_for_pocket(workspace_id, pocket_id)\n        if existing is not None:",
+    "replace": "        existing = await foreign_site_for_pocket(workspace_id, pocket_id)\n        if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_sequential_binds_buy_one_concierge",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_concurrent_binds_buy_one_concierge",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_repeat_bind_does_not_widen_the_origin_allowlist"
+    ]
+  },
+  {
+    "label": "a cross-process conflict is re-raised instead of adopting the winner - the caller gets a 500 for a concierge that exists",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        except DuplicateKeyError:\n            # Lost the insert race to another PROCESS",
+    "replace": "        except ValueError:\n            # Lost the insert race to another PROCESS",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_process_loser_adopts_the_winner_without_charging",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_process_loser_mints_again_when_the_winner_rolled_back"
+    ]
+  },
+  {
+    "label": "a conflict adopts blindly - a winner that rolled back leaves the loser holding nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            adopted = await foreign_site_for_pocket(workspace_id, pocket_id)\n            if adopted is None:",
+    "replace": "            adopted = await foreign_site_for_pocket(workspace_id, pocket_id)\n            if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_cross_process_loser_mints_again_when_the_winner_rolled_back"
+    ]
+  },
+  {
+    "label": "the foreign filter is dropped - a bind adopts the pocket's PUBLISHED site and charges nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            {\"workspace\": workspace_id, \"pocket_id\": pocket_id, \"foreign_origin\": True}",
+    "replace": "            {\"workspace\": workspace_id, \"pocket_id\": pocket_id}",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_bind_never_touches_a_published_site_for_the_same_pocket"
+    ]
+  },
+  {
+    "label": "the rotated key is never persisted - the leaked key keeps resolving forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site.rotate_signed_key()\n    await site.save()",
+    "replace": "    site.rotate_signed_key()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_rotating_retires_the_old_key_at_the_resolver"
+    ]
+  },
+  {
+    "label": "a rotate on a pocket with no concierge returns nothing instead of raising",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site = await foreign_site_for_pocket(workspace_id, pocket_id)\n    if site is None:\n        raise NotFound(\"site\", f\"foreign concierge for pocket {pocket_id}\")\n    site.rotate_signed_key()",
+    "replace": "    site = await foreign_site_for_pocket(workspace_id, pocket_id)\n    if site is None:\n        return site  # type: ignore[return-value]\n    site.rotate_signed_key()",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_rotating_a_pocket_with_no_concierge_is_a_404"
+    ]
+  },
+  {
+    "label": "the rebind tenancy gate is deleted - a bar is bound to another workspace's agent",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "        await agents_service.get_for_viewer(agent_id, workspace_id, None)\n        updated = await _store().update_fields(",
+    "replace": "        updated = await _store().update_fields(",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_to_another_tenants_agent_is_refused"
+    ]
+  },
+  {
+    "label": "the rebind gate is workspace-blind - a cross-tenant agent id passes the check",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "        await agents_service.get_for_viewer(agent_id, workspace_id, None)",
+    "replace": "        await agents_service.get(agent_id)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_to_another_tenants_agent_is_refused"
+    ]
+  },
+  {
+    "label": "a re-provision no longer clears the old bind - the bar can never be reset to its own concierge",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    cleared = await _store().update_fields(widget.id, {\"agent_id\": \"\"}, workspace_id=workspace_id)\n    return await ensure_site_agent(site, cleared or widget)",
+    "replace": "    return await ensure_site_agent(site, widget)",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_reprovision_resets_a_bar_bound_to_a_LIVE_but_wrong_agent"
+    ]
+  },
+  {
+    "label": "the foreign bind stops funnelling into ensure_site_agent - a paid concierge with no agent",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    widget = await ensure_site_widget(site, workspace_id)\n    if widget is None:\n        return None\n    return str(getattr(widget, \"agent_id\", \"\") or \"\") or None",
+    "replace": "    return None",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_first_bind_buys_a_concierge_and_provisions_its_agent",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_points_the_bar_at_a_new_agent_without_stranding_the_row"
+    ]
+  },
+  {
+    "label": "THE WIDGET-POCKET CHECK IS GONE - a rebind naming a colleague's bar clears its agent and repoints their published page at your concierge",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    if str(getattr(widget, \"pocket_id\", \"\") or \"\") != str(getattr(site, \"pocket_id\", \"\") or \"\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_cannot_repoint_another_pockets_bar"
+    ]
+  },
+  {
+    "label": "the widget-pocket mismatch is LOGGED and not refused, so the warning is the only trace of a repointed page",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "        raise Forbidden(\n            \"sites.widget_pocket_mismatch\",\n            \"That bar belongs to a different pocket and cannot be bound to this concierge.\",\n        )",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_cannot_repoint_another_pockets_bar"
+    ]
+  },
+  {
+    "label": "THE PUBLISH RULE IS GONE - any workspace-visibility agent can be pointed at a public concierge, so a member publishes an internal agent's knowledge to anonymous visitors",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if agent_id and not caller_is_admin:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors"
+    ]
+  },
+  {
+    "label": "the ADMIN ESCAPE IS INVERTED - the rule lands on admins and lets every member through, which is the opposite of both halves",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if agent_id and not caller_is_admin:",
+    "replace": "    if agent_id and caller_is_admin:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_an_admin_may_point_a_concierge_at_any_agent_they_can_read"
+    ]
+  },
+  {
+    "label": "the rule accepts any agent the workspace can read - holder_site is never consulted, so the check is decorative",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if holder_site is None:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors"
+    ]
+  },
+  {
+    "label": "the rule is keyed on the WIDGET rather than on that widget's foreign site, so any agent fronting any bar counts as published",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if holder_site is None:",
+    "replace": "        if holder is None:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_an_agent_whose_bar_is_not_a_foreign_concierge_does_not_count_as_published"
+    ]
+  },
+  {
+    "label": "caller_is_admin DEFAULTS TO TRUE, so every caller that does not describe itself gets the admin path - a permission flag that fails open",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    caller_is_admin: bool = False,",
+    "replace": "    caller_is_admin: bool = True,",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_the_refusal_defaults_to_on_when_the_caller_is_not_described",
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors"
+    ]
+  },
+  {
+    "label": "an agent already fronting a sibling concierge is refused too, which makes the rule about provisioning history rather than exposure",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if holder_site is None:",
+    "replace": "        if holder_site is not None or True:",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_member_may_point_one_concierge_at_another_concierges_agent"
+    ]
+  }
+]

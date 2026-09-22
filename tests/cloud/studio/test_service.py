@@ -101,6 +101,8 @@ def studio_env(tmp_path, monkeypatch, mongo_db):
     projects = tmp_path / "studio" / "flow-projects.jsonl"
     projects.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(service, "_projects_path", lambda: projects)
+    timelines = tmp_path / "studio" / "timelines.jsonl"
+    monkeypatch.setattr(service, "_timelines_path", lambda: timelines)
 
     async def _tenant_key(workspace_id):
         return "sk-tenant-ws"
@@ -1333,3 +1335,81 @@ def test_delete_flow_project(studio_env) -> None:
     assert service.delete_flow_project("proj_1", "ws-1") is True
     assert service.get_flow_project("proj_1", "ws-1") is None
     assert service.delete_flow_project("proj_1", "ws-1") is False
+
+
+# ── Editor timelines ─────────────────────────────────────────────────────────
+
+
+def _doc(updated_at: int = 100, name: str = "Reel") -> dict:
+    return {
+        "version": 1,
+        "id": "tl_1",
+        "name": name,
+        "width": 1080,
+        "height": 1920,
+        "fps": 30,
+        "assets": [{"id": "a1", "kind": "video", "remoteUrl": "/api/v1/media/x.mp4"}],
+        "tracks": [],
+        "updatedAt": updated_at,
+    }
+
+
+def test_save_timeline_upserts_and_keeps_the_client_clock(studio_env) -> None:
+    """An unknown id creates, a known id updates in place. ``updatedAt`` is the
+    client's edit clock verbatim — the whole sync orders on it."""
+    saved = service.save_timeline_project(
+        "tl_1", "ws-1", name="Reel", doc=_doc(100), updated_at=100
+    )
+    assert saved.id == "tl_1"
+    assert saved.updatedAt == 100
+    assert saved.createdAt > 0
+    assert saved.doc["assets"][0]["id"] == "a1"
+
+    moved = service.save_timeline_project(
+        "tl_1", "ws-1", name=None, doc=_doc(200, "Reel v2"), updated_at=200
+    )
+    assert moved.name == "Reel"  # preserved when omitted
+    assert moved.createdAt == saved.createdAt
+    assert moved.updatedAt == 200
+    assert service.get_timeline_project("tl_1", "ws-1").doc["name"] == "Reel v2"
+
+
+def test_save_timeline_rejects_a_stale_clock(studio_env) -> None:
+    """A device that has been offline must not overwrite newer work: an older
+    edit clock is a 409, and the stored record is untouched."""
+    service.save_timeline_project("tl_1", "ws-1", name="Reel", doc=_doc(500), updated_at=500)
+
+    with pytest.raises(service.TimelineConflict) as exc:
+        service.save_timeline_project(
+            "tl_1", "ws-1", name="Reel", doc=_doc(400, "stale"), updated_at=400
+        )
+    assert exc.value.stored_updated_at == 500
+    assert service.get_timeline_project("tl_1", "ws-1").doc["name"] == "Reel"
+
+    # Equal clocks are NOT a conflict — the same device re-sending its own save.
+    same = service.save_timeline_project("tl_1", "ws-1", name="Reel", doc=_doc(500), updated_at=500)
+    assert same.updatedAt == 500
+
+
+def test_save_timeline_blank_name_falls_back(studio_env) -> None:
+    saved = service.save_timeline_project("tl_2", "ws-1", name="  ", doc=_doc(), updated_at=100)
+    assert saved.name == "Timeline"
+
+
+def test_list_timelines_workspace_scoped(studio_env) -> None:
+    """Only the caller's workspace, most-recently-updated first."""
+    service.save_timeline_project("a", "ws-1", name="A", doc=_doc(100), updated_at=100)
+    service.save_timeline_project("b", "ws-1", name="B", doc=_doc(300), updated_at=300)
+    service.save_timeline_project("c", "ws-2", name="C", doc=_doc(200), updated_at=200)
+
+    mine = service.list_timeline_projects("ws-1")
+    assert [p.id for p in mine] == ["b", "a"]
+    assert [p.id for p in service.list_timeline_projects("ws-2")] == ["c"]
+    assert service.get_timeline_project("a", "ws-2") is None
+
+
+def test_delete_timeline(studio_env) -> None:
+    service.save_timeline_project("tl_1", "ws-1", name="Reel", doc=_doc(), updated_at=100)
+    assert service.delete_timeline_project("tl_1", "ws-1") is True
+    assert service.get_timeline_project("tl_1", "ws-1") is None
+    assert service.delete_timeline_project("tl_1", "ws-1") is False

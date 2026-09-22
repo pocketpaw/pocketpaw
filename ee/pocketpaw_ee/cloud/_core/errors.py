@@ -7,6 +7,14 @@ to JSON responses.
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
 
+Changed 2026-09-21 (feat/site-project-download-endpoint): added
+`ProjectDownloadNotEntitled` (402, `billing.project_download_not_entitled`) for
+the project-download seam. Modelled on `CustomDomainNotEntitled` rather than on
+the `*LimitError` classes, because this is a capability a per-site plan grants or
+withholds and there is no ceiling to report. Its docstring carries the one thing a
+future reader is likely to get wrong: this is NOT the same question as
+`Entitlements.site_source_visible`, and the two must not be folded together.
+
 Changed 2026-09-14 (feat/uploads-multipart-endpoints): added `PayloadTooLarge`
 (413). The multipart upload contract refuses an over-ceiling file at init with
 413 `multipart.too_large`, and this hierarchy had no 413 at all — the nearest
@@ -391,6 +399,45 @@ class CustomDomainLimitError(CloudError):
                 "upgrade a site's plan to connect another"
             )
         super().__init__(402, "billing.custom_domain_limit", f"Custom domain: {detail}")
+
+
+class ProjectDownloadNotEntitled(CloudError):
+    """A site's project was requested on a plan that does not include the download (402).
+
+    Sibling of ``CustomDomainNotEntitled`` — same 402 family, same per-SITE shape,
+    same two-remedies message — for the project-download seam. Distinct
+    ``billing.project_download_not_entitled`` code so the UI prompts a per-site plan
+    upgrade rather than a workspace one, exactly as its sibling does.
+
+    Not a count limit: there is no ceiling to report, only a capability
+    ``SiteEntitlements.project_download`` either grants or does not.
+
+    **This is a different question from whether the source is VISIBLE.** The workspace
+    capability ``Entitlements.site_source_visible`` governs whether the builder shows a
+    Code tab; this governs whether the assembled project may be taken away as an
+    archive. A paid per-site tier inside a free workspace can legitimately download a
+    project whose source the UI hides, and that is the design rather than a hole — the
+    two are resolved by different resolvers off different plans. Do not fold them
+    together, and do not add the other one as a second check at this seam.
+
+    Gated on ``sites_enforced()`` like every other per-site cap, so OSS / self-host
+    never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include the project download — "
+                "upgrade this site's plan to download its source"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to download the project"
+            )
+        super().__init__(
+            402, "billing.project_download_not_entitled", f"Project download: {detail}"
+        )
 
 
 class CallLimitError(CloudError):

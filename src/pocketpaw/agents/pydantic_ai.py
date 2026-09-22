@@ -429,6 +429,25 @@ every past version of one page with nothing marking the current one.
 ``_without_attachments`` rewrites those parts down to their words on the way
 INTO retention, so the guarantee holds for every caller instead of for whichever
 read path someone remembered.
+
+Updated 2026-09-15 (fix/surface-external-mcp-grant) — **a surface could grant an
+external MCP server and this backend would drop every one of its tools.** An
+external server's tool names are unknown until the client connects, so
+``claude_sdk._collect_mcp_tool_ids`` allow-lists one wholesale with a BARE
+``mcp__<server>`` id. ``_gate_mcp_toolsets`` ran that id through
+``_expand_tool_ids``, which turned ``mcp__refero`` into ``refero`` and matched
+no tool the server exposes — so the SDK backend admitted the whole server while
+this one refused it, and the asymmetry landed exactly where external servers
+live: per that method's docstring, its toolsets ARE "the user's EXTERNAL
+configured servers". ``_bare_mcp_server`` now reads a bare id as a server-level
+grant and keeps tools by their ``<server>_`` prefix, the shape
+``PrefixedToolset`` gives them.
+
+The same change fixes a second divergence found by its test: the method's early
+return fired on ``exclusive_mcp_tools`` with no allow set and no deny set,
+returning every toolset UNTOUCHED — the opposite of the documented CX-1 rule
+that an exclusive turn with no allow set strips all MCP tools, and the opposite
+of what the SDK backend does.
 """
 
 from __future__ import annotations
@@ -756,6 +775,21 @@ def _normalize_tool_id(tool_id: str) -> str:
     if tool_id.startswith("mcp__"):
         return tool_id.removeprefix("mcp__").replace("__", "_")
     return tool_id
+
+
+def _bare_mcp_server(tool_id: str) -> str:
+    """``mcp__refero`` -> ``refero``; anything with a tool segment -> ``""``.
+
+    A bare server id is a SERVER-LEVEL grant ("all tools of this server"), and
+    is the only spelling available for an external MCP server, whose tool names
+    are not known until the client connects. Distinguished from a
+    fully-qualified id purely by segment count, so ``mcp__refero__search`` and a
+    non-MCP name both return ``""``.
+    """
+    parts = tool_id.split("__")
+    if len(parts) == 2 and parts[0] == "mcp" and parts[1]:
+        return parts[1]
+    return ""
 
 
 # A surface's tool id -> the bridged PocketPaw tool that is the SAME CAPABILITY
@@ -1926,7 +1960,16 @@ class PydanticAIBackend:
         (``POCKET_CREATION_GRANT`` / widget / atlas ids). Restricting them here
         would be stricter than the surface asks for and would break /sites.
         """
-        if not mcp_toolsets or (not deny and allow_mcp_tool_ids is None):
+        # ``exclusive_mcp_tools`` must reach the gate even with nothing to
+        # allow and nothing to deny: an EXCLUSIVE turn with no allow set is an
+        # EMPTY permitted set, i.e. "strip every MCP tool", which is how a
+        # dedicated agent wins over a broad surface (claude_sdk CX-1). Without
+        # it in this guard the whole call short-circuits and returns every
+        # toolset untouched — the exact opposite, and a divergence from the SDK
+        # backend, which strips them all.
+        if not mcp_toolsets or (
+            not deny and allow_mcp_tool_ids is None and not exclusive_mcp_tools
+        ):
             return mcp_toolsets
 
         # An exclusive turn CAPS the surface to the allow set alone — with no
@@ -1936,12 +1979,35 @@ class PydanticAIBackend:
             (allow_mcp_tool_ids or frozenset()) if exclusive_mcp_tools else allow_mcp_tool_ids
         )
         allowed = None if permitted is None else _expand_tool_ids(permitted)
+        # A BARE ``mcp__<server>`` id — no tool segment — is a SERVER-LEVEL
+        # grant, the Claude Code permission convention for "all of this
+        # server's tools". It is the only spelling available for an EXTERNAL
+        # server, whose tool names are unknown until the client connects, so
+        # ``claude_sdk._collect_mcp_tool_ids`` allow-lists external servers with
+        # exactly this token.
+        #
+        # Without this branch the grant silently means nothing HERE, which is
+        # the worst place for it to mean nothing: per this method's own
+        # docstring, our MCP toolsets ARE "the user's EXTERNAL configured
+        # servers". ``_expand_tool_ids`` maps ``mcp__refero`` to ``refero``,
+        # which matches no tool the server exposes, so every tool was dropped
+        # while the SDK backend admitted them all.
+        #
+        # Matching is by prefix because external servers are wrapped in
+        # ``PrefixedToolset(MCPToolset(client), cfg.name)`` — a tool arrives
+        # named ``<server>_<tool>``, the same shape ``_normalize_tool_id``
+        # produces for a fully-qualified id.
+        server_grants = frozenset(
+            server for server in map(_bare_mcp_server, permitted or ()) if server
+        )
 
         def _keep(_ctx: Any, tool_def: Any) -> bool:
             name = getattr(tool_def, "name", "")
             if name in deny:
                 return False
-            return allowed is None or name in allowed
+            if allowed is None or name in allowed:
+                return True
+            return any(name.startswith(f"{server}_") for server in server_grants)
 
         return [ts.filtered(_keep) for ts in mcp_toolsets]
 

@@ -96,6 +96,9 @@ output.txt
 !/deploy/paw-sites/.gitkeep
 /deploy/ripple/*
 !/deploy/ripple/.gitkeep
+# Vendored paw-fx effects registry (feat/fx-mcp-server), staged by scripts/vendor-paw-fx.sh.
+/deploy/paw-fx/*
+!/deploy/paw-fx/.gitkeep
 
 # Load-test artifacts (scripts/loadtest)
 out/

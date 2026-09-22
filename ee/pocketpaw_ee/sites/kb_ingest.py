@@ -17,30 +17,35 @@
 # That is all this module does, and it is why a re-publish can never clobber what an
 # owner attached to the agent — the two scopes have separate writers.
 #
-# SOURCE OF TRUTH — the POCKET, not the built artifact and not the live URL:
+# SOURCE OF TRUTH — for a site WE HOST it is the POCKET, not the built artifact and
+# not the live URL:
 #   * the pocket is durable, so this works at publish time, at agent-provision time
 #     for a site published months ago, and on an owner's manual re-sync — a build
 #     directory only exists during a publish;
-#   * it needs no network, so there is no SSRF surface. Fetching a site's own
-#     ``url`` would mean fetching a customer-controlled hostname server-side, which
-#     is exactly the class of request ``url_crawler`` had to be hardened against;
+#   * it needs no network, so those three lanes have no SSRF surface at all;
 #   * it is what a re-publish would deploy, so the KB never describes a page the
 #     site no longer serves.
 #
-# LANES. Three engines, three shapes, one extractor each (see ``extract_site_documents``):
-#   * html   — the ``source`` map is the site's real HTML (this is also what the
-#              URL-import crawler writes, so an agency's imported client site is
-#              covered by this path);
-#   * svelte — the ``source`` map is hand-written components; script/style blocks and
-#              template expressions are dropped, the prose survives;
-#   * ripple — there is no HTML yet, the copy lives in the rippleSpec, so the spec is
-#              walked for its text-bearing values.
+# LANES. Four, one extractor each, and only the first three read the pocket (see
+# ``extract_site_documents``):
+#   * html    — the ``source`` map is the site's real HTML (this is also what the
+#               URL-import crawler writes, so an agency's imported client site is
+#               covered by this path);
+#   * svelte  — the ``source`` map is hand-written components; script/style blocks
+#               and template expressions are dropped, the prose survives;
+#   * ripple  — there is no HTML yet, the copy lives in the rippleSpec, so the spec
+#               is walked for its text-bearing values;
+#   * FOREIGN — a site minted by ``mint_foreign_site``: a concierge embedded on a
+#               page we never rendered, whose pocket therefore holds nothing. Its
+#               truth IS the live origin, so ``sites.foreign_grounding`` crawls that
+#               origin (verified, fresh, one host, through the SSRF-hardened
+#               ``url_crawler``) and hands back a source map the HTML LANE ABOVE
+#               reads — there is no fourth extractor. The pocket stays the truth
+#               for the other three precisely because they have one.
 #
-# NOT COVERED (deliberate, named so it is not mistaken for done): a site minted by
-# ``mint_foreign_site`` — a concierge embedded on a site we do not host — has no
-# content in its pocket, so it syncs zero documents. Grounding those means crawling
-# the customer's own origin, which is the ``url_crawler`` SSRF-hardened path, and is
-# its own slice. ``sync_site_knowledge`` reports it as skipped rather than pretending.
+# The crawl happens at bind and on the owner's explicit re-sync, NEVER on a
+# visitor's turn: a concierge run reads this scope out of the KB and fetches
+# nothing, which is what keeps a public caller from aiming a server-side request.
 #
 # IDEMPOTENCE. kb-go derives an article id from ``--source`` and re-ingesting the
 # same source bumps that article's version instead of duplicating it, so the page
@@ -413,41 +418,15 @@ async def _load_pocket_content(site: Any) -> dict[str, Any] | None:
         return None
 
 
-async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
-    """Ingest a site's own content into its pocket KB and prune what it replaced.
+async def _ingest_documents(
+    site: Any, scope: str, docs: list[SiteDocument], report: SiteKnowledgeReport
+) -> None:
+    """Ingest each document, counting what landed and what did not.
 
-    Idempotent: the same content re-syncs to the same article ids (kb-go versions
-    them), and ids this site produced previously but no longer produces are deleted,
-    so a removed page stops being quotable. Only ids recorded on THIS Site are ever
-    deleted — the pocket scope also holds owner-uploaded files and must survive.
-
-    Records ``kb_article_ids`` / ``kb_synced_at`` / ``kb_sync_error`` on the Site so
-    the dashboard can show whether the concierge actually has anything to work with.
+    One bad page must not lose the rest, so a per-page failure increments
+    ``skipped`` and the loop continues. Shared by every lane.
     """
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
-
-    report = SiteKnowledgeReport()
-    scope = kb_scope_for_pocket(site.pocket_id or "")
-    previous = list(getattr(site, "kb_article_ids", None) or [])
-
-    pocket = await _load_pocket_content(site)
-    if pocket is None:
-        report.error = "pocket_unavailable"
-        await _record_sync(site, report, previous=previous)
-        return report
-
-    docs = extract_site_documents(
-        engine=pocket.get("engine") or "ripple",
-        ripple_spec=pocket.get("rippleSpec") or {},
-        source=pocket.get("source") if isinstance(pocket.get("source"), dict) else None,
-    )
-    if not docs:
-        # Nothing to ingest is a real state, not an error: a foreign site's pocket
-        # holds no pages. Previously-ingested articles are left alone rather than
-        # purged on what may be a transient empty read.
-        report.error = "no_content"
-        await _record_sync(site, report, previous=previous)
-        return report
 
     for doc in docs:
         try:
@@ -468,6 +447,65 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         report.ingested += 1
         report.article_ids.append(article_id)
 
+
+async def _prune_stale(scope: str, previous: list[str], report: SiteKnowledgeReport) -> None:
+    """Delete the ids this site used to produce and no longer does.
+
+    Callable ONLY after a successful ingest whose document set is a TRUSTWORTHY
+    answer to "what pages does this site have": the fresh set is what "no longer
+    produced" is measured against, so a failed or partial run would mark existing
+    articles stale and delete a knowledge base over a transient outage.
+    """
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+    fresh = set(report.article_ids)
+    for article_id in [a for a in previous if a not in fresh]:
+        if await KnowledgeService.remove_article(scope, article_id):
+            report.removed += 1
+
+
+async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
+    """Ingest a site's own content into its pocket KB and prune what it replaced.
+
+    Idempotent: the same content re-syncs to the same article ids (kb-go versions
+    them), and ids this site produced previously but no longer produces are deleted,
+    so a removed page stops being quotable. Only ids recorded on THIS Site are ever
+    deleted — the pocket scope also holds owner-uploaded files and must survive.
+
+    Records ``kb_article_ids`` / ``kb_synced_at`` / ``kb_sync_error`` on the Site so
+    the dashboard can show whether the concierge actually has anything to work with.
+
+    A FOREIGN site forks first, into ``_sync_foreign_site_knowledge``: its pocket
+    holds no pages, so the content comes off its own verified origin instead.
+    """
+    report = SiteKnowledgeReport()
+    scope = kb_scope_for_pocket(site.pocket_id or "")
+    previous = list(getattr(site, "kb_article_ids", None) or [])
+
+    if getattr(site, "foreign_origin", False):
+        return await _sync_foreign_site_knowledge(site, report, scope=scope, previous=previous)
+
+    pocket = await _load_pocket_content(site)
+    if pocket is None:
+        report.error = "pocket_unavailable"
+        await _record_sync(site, report, previous=previous)
+        return report
+
+    docs = extract_site_documents(
+        engine=pocket.get("engine") or "ripple",
+        ripple_spec=pocket.get("rippleSpec") or {},
+        source=pocket.get("source") if isinstance(pocket.get("source"), dict) else None,
+    )
+    if not docs:
+        # Nothing to ingest is a real state, not an error: a foreign site's pocket
+        # holds no pages. Previously-ingested articles are left alone rather than
+        # purged on what may be a transient empty read.
+        report.error = "no_content"
+        await _record_sync(site, report, previous=previous)
+        return report
+
+    await _ingest_documents(site, scope, docs, report)
+
     if not report.ingested:
         # The site HAS pages and not one of them made it in — the ingest engine is
         # unreachable or broken. That is a failure, not a clean sync of nothing, and
@@ -483,16 +521,9 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         return report
 
     # Prune what this site used to publish and no longer does. Anything not in the
-    # fresh set is a page that was renamed or deleted.
-    #
-    # Reachable ONLY after a successful ingest, deliberately: the fresh set is the
-    # thing "no longer produced" is measured against, so an empty one from a failed
-    # run would mark EVERY existing article stale and delete the site's whole
-    # knowledge base over a transient outage.
-    stale = [a for a in previous if a not in set(report.article_ids)]
-    for article_id in stale:
-        if await KnowledgeService.remove_article(scope, article_id):
-            report.removed += 1
+    # fresh set is a page that was renamed or deleted. Reachable only after a
+    # successful ingest — see ``_prune_stale``.
+    await _prune_stale(scope, previous, report)
 
     await _record_sync(site, report, previous=previous)
     logger.info(
@@ -506,7 +537,97 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
     return report
 
 
-async def _record_sync(site: Any, report: SiteKnowledgeReport, *, previous: list[str]) -> None:
+async def _sync_foreign_site_knowledge(
+    site: Any,
+    report: SiteKnowledgeReport,
+    *,
+    scope: str,
+    previous: list[str],
+) -> SiteKnowledgeReport:
+    """The FOREIGN lane's sync: the site's own live origin into its pocket scope.
+
+    Same destination and same idempotence as the hosted lanes — the crawler emits
+    the source map the HTML lane already reads, so the extraction, the article ids
+    and the prune rule are shared code, not a parallel implementation.
+
+    WHAT IS DIFFERENT IS THE FAILURE POLICY, because the input is a third party's
+    live server rather than a durable document:
+
+      * EVERY REFUSAL AND FAILURE IS REPORTED, and each has its own status code
+        (``origin_unverified``, ``origin_verification_stale``,
+        ``crawl_blocked_by_robots``, ``crawl_too_large``, ``crawl_failed``, …). A
+        concierge that silently knows nothing, on a site whose own robots.txt is
+        the cause, is unguessable from the owner's side unless we name it.
+      * A FAILED CRAWL INGESTS NOTHING. It returns before ``_ingest_documents``,
+        so the scope is never left half-refreshed and the previous article ids
+        survive for a future prune.
+      * A PARTIAL CRAWL DOES NOT PRUNE. If a page failed mid-walk the harvest is
+        not a trustworthy answer to "what pages does this site have", so the
+        pages that DID arrive are ingested (a re-ingest only versions an article)
+        while nothing is deleted, the previous ids are kept alongside the fresh
+        ones so nothing is orphaned, and the status says ``crawl_partial``. A
+        half-crawled site that reported success would quietly delete the articles
+        for whichever pages happened to 502.
+    """
+    from pocketpaw_ee.sites import foreign_grounding
+
+    harvest = await foreign_grounding.harvest_foreign_site(site)
+    if harvest.error:
+        report.error = harvest.error
+        await _record_sync(site, report, previous=previous)
+        return report
+
+    docs = extract_site_documents(engine="html", source=harvest.source)
+    if not docs:
+        # The origin was reachable and carried no answerable text (a JS-rendered
+        # shell, a parked page). A real state, not a failure, and the previous
+        # articles are left alone rather than purged on one empty read.
+        report.error = "no_content"
+        await _record_sync(site, report, previous=previous)
+        return report
+
+    await _ingest_documents(site, scope, docs, report)
+    if not report.ingested:
+        report.error = "ingest_failed"
+        await _record_sync(site, report, previous=previous)
+        logger.warning(
+            "sites.kb: every crawled page failed to ingest for foreign site %s (%d skipped)",
+            getattr(site, "id", "?"),
+            report.skipped,
+        )
+        return report
+
+    if harvest.complete:
+        await _prune_stale(scope, previous, report)
+        await _record_sync(site, report, previous=previous)
+    else:
+        report.error = "crawl_partial"
+        await _record_sync(site, report, previous=previous, keep_previous=True)
+
+    logger.info(
+        "sites.kb: grounded foreign site %s from %s into %s "
+        "(ingested=%d removed=%d skipped=%d robots_skipped=%d status=%s)",
+        getattr(site, "id", "?"),
+        harvest.host,
+        scope,
+        report.ingested,
+        report.removed,
+        report.skipped,
+        harvest.skipped_by_robots,
+        report.error or "ok",
+    )
+    for warning in harvest.warnings:
+        logger.info("sites.kb: %s crawl note — %s", harvest.host, warning)
+    return report
+
+
+async def _record_sync(
+    site: Any,
+    report: SiteKnowledgeReport,
+    *,
+    previous: list[str],
+    keep_previous: bool = False,
+) -> None:
     """Persist the sync bookkeeping on the Site.
 
     Writes ONLY the three kb_* fields, via ``$set`` rather than a whole-document
@@ -520,9 +641,20 @@ async def _record_sync(site: Any, report: SiteKnowledgeReport, *, previous: list
     so forgetting them would strand them beyond the reach of any future prune. The
     reason is recorded so the dashboard can tell "no knowledge yet" from "syncing is
     broken".
+
+    ``keep_previous`` is for a sync that ingested successfully but was NOT allowed
+    to prune (the foreign lane's partial crawl). It records the union — fresh ids
+    first, then the ones that were not re-produced — because those older articles
+    are still in the scope, and dropping them from the Site's list would strand
+    them where no later prune could ever reach them.
     """
+    if report.ingested and keep_previous:
+        fresh = set(report.article_ids)
+        ids = report.article_ids + [a for a in previous if a not in fresh]
+    else:
+        ids = report.article_ids if report.ingested else previous
     updates = {
-        "kb_article_ids": report.article_ids if report.ingested else previous,
+        "kb_article_ids": ids,
         "kb_synced_at": datetime.now(UTC),
         "kb_sync_error": report.error,
     }

@@ -184,8 +184,8 @@
   {
     "label": "the billing_enforced guard is dropped from the capability gate",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
-    "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
+    "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_even_a_zero_floor_attaches"
     ]
@@ -193,8 +193,8 @@
   {
     "label": "the capability guard inverts \u2014 the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
-    "replace": "    if sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
+    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
+    "replace": "    if sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"

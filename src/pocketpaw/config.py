@@ -1210,6 +1210,70 @@ class Settings(BaseSettings):
             "to reveal itself."
         ),
     )
+    sites_source_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "Withhold a Paw Site's authored SOURCE from the wire unless the "
+            "workspace is entitled to read it (``Entitlements."
+            "site_source_visible``, which every paid rung grants and ``free`` "
+            "does not). OFF by default so turning the gate on is a separate, "
+            "revertible operational step rather than something that ships with "
+            "the code. "
+            "It is ANDed with a per-pocket cohort stamp (``Pocket."
+            "source_gated``), set at create time from this same setting, so "
+            "flipping it on never re-classifies a pocket that already exists — "
+            "only pockets created while it is on can ever be gated. Flipping it "
+            "back off restores source to every one of them immediately, which is "
+            "what makes the rollout reversible in both directions rather than "
+            "only forward. "
+            "It gates the POCKET WIRE DICT only — what a browser is handed by "
+            "``GET /pockets/{id}``, the gallery list, a write response and the "
+            "WebSocket broadcast. The build / publish / edit pipeline reads "
+            "source through ``pockets.service.get_with_source`` and is never "
+            "redacted, because withholding source from the generator would stop "
+            "the site being built at all."
+        ),
+    )
+    inspo_mcp_url: str = Field(
+        default="",
+        description=(
+            "Override the endpoint the BUNDLED design-research server "
+            "(``pocketpaw_inspo``) calls. Empty (the default) uses the hosted "
+            "archive at https://inspomcp.dev/api/mcp. "
+            "The reason this exists: the hosted service rate-limits PER IP, and a "
+            "multi-tenant deploy presents a single egress IP for every tenant it "
+            "serves, so a busy install can exhaust the limit for all of its users "
+            "at once. The upstream is MIT-licensed with a documented self-host "
+            "path; point this at your own instance and nothing else changes. "
+            "Read per tool call, not cached, so it takes effect without a restart."
+        ),
+    )
+    sites_mcp_servers: str = Field(
+        default="",
+        description=(
+            "Comma-separated names of EXTERNAL MCP servers (from "
+            "``~/.pocketpaw/mcp_servers.json``) that the /sites surface may "
+            "call — e.g. ``refero`` for live design research. Empty (the "
+            "default) grants none, so an install that has not opted in sees no "
+            "behaviour change. "
+            "Names must match ``MCPServerConfig.name``; a name matching no "
+            "configured server is inert rather than an error, because the "
+            "server list is per-deploy and a surface should not fail to resolve "
+            "because an optional integration is absent. "
+            "MECHANISM: /sites runs a hard allow-list of fully-qualified "
+            "``mcp__<server>__<tool>`` ids, but an external server's tool names "
+            "are unknown until the SDK connects, so ``_collect_mcp_tool_ids`` "
+            "allow-lists it wholesale with a BARE ``mcp__<server>`` token. "
+            "Naming a server here puts that same bare token in the /sites allow "
+            "set, where it matches by exact string — scoping the grant to this "
+            "surface alone, unlike ``ALWAYS_ALLOWED_MCP_SERVERS`` which hands a "
+            "server to every surface at once. "
+            "A comma-separated STRING rather than ``list[str]`` on purpose: "
+            "pydantic-settings JSON-decodes complex types before any validator "
+            "runs, so ``POCKETPAW_SITES_MCP_SERVERS=refero`` would crash boot "
+            "on a list field."
+        ),
+    )
     sdk_load_bundled_skills: bool = Field(
         default=True,
         description=(

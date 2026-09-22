@@ -258,6 +258,7 @@ from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
+from pocketpaw_ee.cloud.models.platform_rollup import PlatformDailyRollup
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
@@ -272,6 +273,7 @@ from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_export import SiteExport
+from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
@@ -454,6 +456,7 @@ __all__ = [
     "SiteDesignBrief",
     "SiteExport",
     "SiteDomain",
+    "SiteOriginClaim",
     "SiteRateCounter",
     "SpendReconciliation",
     "StudioGeneration",
@@ -605,6 +608,9 @@ def get_all_documents():
         Site,
         SiteDesignBrief,
         SiteExport,
+        # SF-8 — the proof that a workspace controls an origin. The later
+        # concierge crawl reads it before fetching anyone's pages.
+        SiteOriginClaim,
         SiteRateCounter,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
@@ -628,6 +634,10 @@ def get_all_documents():
         WorkspaceSensePreference,
         AuditEvent,
         PlatformAuditEvent,
+        # Platform-wide per-tenant daily spend rollup (chunk 8, Paw Admin
+        # PRD). Read by ee.cloud.platform.stats; nothing writes it in this
+        # PR (the nightly backfill job is a follow-up — see stats.py).
+        PlatformDailyRollup,
         AuditWebhook,
         AuthSession,
         APIKey,

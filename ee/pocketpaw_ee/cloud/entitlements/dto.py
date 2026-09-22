@@ -2,63 +2,36 @@
 # entitlements + plan-catalog HTTP surface (BC-6, the Plan + Entitlement
 # primitives).
 #
-# Read-only surface, so there is no request DTO. ``PlanTierResponse`` mirrors a
-# ``billing.plans.PlanTier`` (one catalog row); ``PlanCatalogResponse`` wraps the
-# list for ``GET /billing/plans``. ``EntitlementsResponse`` mirrors
-# ``entitlements.domain.Entitlements`` for ``GET /entitlements``. ``features`` is
-# serialized as a SORTED list (a JSON array is deterministic on the wire; a set
-# is not), so the response is stable and diff-friendly for clients.
+# A READ-ONLY surface, so there are no request DTOs. Four responses:
+#   * ``PlanCatalogResponse`` / ``PlanTierResponse`` — ``GET /billing/plans``, the
+#     WORKSPACE plan ladder. Mirrors ``billing.plans.PlanTier``.
+#   * ``EntitlementsResponse`` — ``GET /entitlements``, one workspace's RESOLVED
+#     entitlements. Mirrors ``entitlements.domain.Entitlements``.
+#   * ``SitePlanCatalogResponse`` / ``SitePlanTierResponse`` —
+#     ``GET /billing/site-plans``, the PER-SITE ladder. Mirrors ``SitePlanTier``.
 #
-# Created 2026-06-24 (integration/billing-credits, BC-6): new entity.
-# Updated 2026-06-24 (BC-10): added ``SitePlanTierResponse`` / ``SitePlanCatalogResponse``
-#   for ``GET /billing/site-plans`` — the PER-SITE plan catalog (each tier ->
-#   annual price + the Cloudflare features it resells). ``cloudflare_features`` is a
-#   SORTED list (deterministic JSON, same rule as ``features`` above). The frontend
-#   (BC-11) reads this to render the publish tier picker.
-# Updated 2026-06-25 (feat/consumer-plan-ladder): ``PlanTierResponse`` now carries
-#   the user-facing display + price fields (display_name, usage_label, usage_detail,
-#   INR/USD monthly+annual prices) so the billing UI can render ChatGPT/Claude-style
-#   "usage" wording instead of raw credits. ``monthly_credit_allotment`` stays as a
-#   back-office field; ``enterprise`` prices serialize as null ("talk to us").
-# Updated 2026-07-08 (feat/billing-smb-caps): both ``PlanTierResponse`` and
-#   ``EntitlementsResponse`` now carry the SMB resource caps ``max_seats`` /
-#   ``max_pockets`` / ``max_connectors`` (the enforced ceilings the plan ladder
-#   added), so the plan cards can render real per-tier limits and the settings UI
-#   can show a workspace's resolved caps. ``None`` == uncapped (Enterprise).
-# Updated 2026-08-08 (feat/billing-storage-caps): both responses now also carry
-#   ``max_storage_bytes`` (the workspace S3 storage cap in bytes; ``None`` ==
-#   uncapped Enterprise) so the plan cards can render the storage limit and the
-#   Settings storage page can show used vs cap.
-# Updated 2026-08-19 (feat/site-plan-catalog-inclusions): ``SitePlanTierResponse``
-#   now also carries ``badge_removal`` and ``sells_concierge``. Both existed
-#   server-side and neither reached the wire, so the buyer-facing plan cards could
-#   only list ``cloudflare_features`` — they showed nothing about the attribution
-#   badge or the concierge, which are the two capabilities the paid tiers are
-#   actually sold on. A card that cannot name what a tier includes cannot name what
-#   it omits either, which is the half buyers ask about.
-# Updated 2026-08-22 (feat/site-pricing-ladder): ``SitePlanTierResponse`` carries
-#   the rest of the catalog row now that the catalog is the five-tier pricing spec
-#   — ``scope`` (site rung vs org flat), the card copy the backend owns
-#   (``display_name`` / ``tagline`` / ``highlights``), and the ladder facts a card
-#   has to state to be comparable (``white_label``, ``included_sites``,
-#   ``conversation_allowance``, ``conversation_rate_cents``). The storefront was
-#   deriving its own per-key labels and blurbs client-side, which the rekey would
-#   have blanked; owning the copy here means renaming a tier is one edit.
-#   NOTE the asymmetry with ``SiteEntitlementsResponse``, and keep it: this DTO
-#   describes what a TIER SELLS, that one describes what a SITE MAY DO. The
-#   conversation meter and white-label are unenforced claims today and appear only
-#   here, never there.
-
-# Updated 2026-09-08 (fix/sites-plan-domain-allowance): ``SitePlanTierResponse``
-#   now also carries ``max_domained_sites``. It is the field custom-domain
-#   entitlement has actually been resolved from since 2026-08-21
-#   (``site_domain_allowance``), and it was the one capability on the ladder the
-#   wire could not express — so the plan cards answered "does this tier get a
-#   custom domain?" from ``cloudflare_features``. That is a different question:
-#   RESOLD Cloudflare capability BC-10 provisions. The two disagree on exactly the
-#   tier a buyer reads first. FREE grants one domained site and resells no
-#   Cloudflare features, so its card printed "Custom domain ✗" while the backend
-#   was granting it. A card cannot stop guessing until the field ships.
+# INVARIANTS a reader must not break:
+#   * FEATURE COLLECTIONS SERIALIZE SORTED. ``features`` and
+#     ``cloudflare_features`` are sets server-side and sorted lists on the wire,
+#     so a response is stable and diff-friendly. ``highlights`` is the exception
+#     and must stay one: it is ordered card copy, so it is cast, not sorted.
+#   * A CATALOG DTO SAYS WHAT A TIER SELLS; ``SiteEntitlementsResponse`` SAYS WHAT
+#     A SITE MAY DO. Keep the asymmetry. ``conversation_allowance``,
+#     ``conversation_rate_cents`` and ``white_label`` are unenforced ladder claims
+#     and appear only on the catalog row, never as an entitlement.
+#   * ``SitePlanTierResponse.scope`` IS REQUIRED, WITH NO DEFAULT, and that is the
+#     point of it. The client filters its tier picker on this field, so a default
+#     of ``"site"`` made a dropped ``scope=tier.scope`` in the mapper invisible —
+#     every row still read "site" and an org-scoped tier would have been offered
+#     for sale. Required turns that omission into a construction error.
+#   * READ ``max_domained_sites``, NOT ``cloudflare_features``, to answer "does
+#     this tier get a custom domain". The two disagree on the free floor and
+#     always will: free carries one domained site beside an empty
+#     ``cloudflare_features``, because that collection means only RESOLD
+#     Cloudflare capability. ``site_domain_allowance`` — the gate that decides
+#     whether an attach succeeds — reads the former.
+#   * Prices are integers in their natural denomination and rates are CENTS.
+#     $0.05 has no exact float representation and gets multiplied by a count.
 
 from __future__ import annotations
 
@@ -126,6 +99,12 @@ class EntitlementsResponse(BaseModel):
     # next site is covered or costs credits. Reading it from the plan catalog on
     # the client would mean re-deriving the workspace's own tier there.
     included_sites: int | None = None
+    # May this account read the source code of the sites it owns. On the wire so
+    # the builder can hide the source view and NAME the reason, rather than
+    # offering it and having the read refused. Defaults to False: a response
+    # assembled without the field withholds source, matching the domain object's
+    # own fail-closed default.
+    site_source_visible: bool = False
 
 
 def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
@@ -162,6 +141,7 @@ def entitlements_to_dto(ent: Entitlements) -> EntitlementsResponse:
         max_connectors=ent.max_connectors,
         max_storage_bytes=ent.max_storage_bytes,
         included_sites=ent.included_sites,
+        site_source_visible=ent.site_source_visible,
     )
 
 

@@ -2,6 +2,25 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-21 (feat/site-project-download-endpoint) — added "Sites — Download the
+project". Written around the three things a client cannot infer: the 402 covers two
+different customers (a floor site and a lapsed paid one) whose remedies differ, a Ripple
+site is a 400 rather than an empty archive, and the pre-check field is the PER-SITE
+`project_download` and not the workspace's `site_source_visible` — a paid site in a free
+workspace may download a project whose Code tab is hidden.
+
+Updated: 2026-09-19 (SF-13) — added "Sites — the foreign-origin concierge": the
+four endpoints that finally reach the bind. Written around the three things a
+client cannot infer from the field names. The bind SPENDS MONEY and is
+idempotent, so it needs `sites.buy_plan` on top of `fabric.write` and a repeat is
+a 200 rather than a second $19 — and it carries no `created` flag, because the
+route cannot honestly say which of two concurrent first binds charged. The two
+verification refusals are different codes (never proved vs proved over 30 days
+ago) and must stay that way, since they are different instructions to the owner.
+And the grounding read is NOT here: `/paw-bar/admin/site/{site_id}/knowledge`
+already serves it for any Site in the workspace, so this response carries the
+`site_id` to call it with instead of a second copy of those fields.
+
 Updated: 2026-09-11 (feat/otherhand-tools-toggle) — added the "Agent chat — the
 `tools` switch" section for the new per-send request field. Written around the
 two things a client cannot infer from a `bool | None`: the field is subtractive
@@ -2327,6 +2346,219 @@ that stopped rather than repeating the ones that finished.
 `WorkspaceSettings.site_transfers_allowed` (default `true`). A site leaving takes its
 leads with it, so an admin can forbid the outbound half outright. Only the source
 side is gated — the receiving side is governed by consent, not by a setting.
+
+## Sites — the foreign-origin concierge
+
+A concierge on a site **PocketPaw does not host** — a Squarespace page, a
+hand-rolled marketing site. There is no Worker to deploy, so instead of a publish
+the owner buys a credential: a `Site` row with `foreign_origin: true`, a
+world-visible `signed_key`, and the origins the embed is valid from. The snippet
+goes on the page they already own. Source: `ee/pocketpaw_ee/sites/router.py`,
+`ee/pocketpaw_ee/sites/service.py`.
+
+| Method | Path | Action |
+|--------|------|--------|
+| `POST` | `/sites/by-pocket/{pocket_id}/foreign-concierge` | `fabric.write` **and** `sites.buy_plan` |
+| `GET` | `/sites/by-pocket/{pocket_id}/foreign-concierge` | `fabric.read` |
+| `POST` | `/sites/by-pocket/{pocket_id}/foreign-concierge/rotate-key` | `fabric.write` |
+| `POST` | `/sites/by-pocket/{pocket_id}/foreign-concierge/rebind` | `fabric.write` |
+
+**Prove the domain first.** `POST /sites/origins/claims` mints a token bound to
+(workspace, host); publish it at `/.well-known/paw-verify` or as a
+`<meta name="paw-verify">` in the origin's `<head>`; `POST /sites/origins/verify`
+reads it back off the live domain. The bind refuses an origin that has not been
+through this, and refuses one whose proof is over **30 days** old — the same
+window the grounding crawl applies, so a bind can never sell a concierge that the
+next crawl will refuse to feed.
+
+### `POST .../foreign-concierge` — buy or resolve
+
+```json
+{ "allowed_origins": ["https://brewco.example"], "name": "Brew Co" }
+```
+
+**It charges $19/month from the workspace credit wallet, and it is idempotent.**
+The first call mints and debits; every call after it returns the same concierge
+and debits nothing, so a double-clicked button is a 200 with the same `site_id`
+rather than a second purchase. The guarantee is a derived primary key — a
+duplicate insert fails before the debit — which is why the endpoint calls the
+resolve-or-buy layer and never the always-mints primitive underneath it.
+
+`allowed_origins` and `name` apply to the **first** bind only. An existing
+concierge comes back untouched: widening a live allowlist from a call that reads
+as "make sure this exists" would be a way around the verified-origin gate, one
+bind at a time. There is deliberately no `scopes` field — what a world-visible
+embed key may do is the model's baseline, not the caller's to widen.
+
+`sites.buy_plan` sits at ADMIN. A member gets 403 `sites.plan_purchase_forbidden`
+on the bind and still gets the `GET`, so "does one already exist" never needs an
+admin.
+
+Response (all four endpoints share it):
+
+```json
+{
+  "exists": true,
+  "site_id": "68c1f0...",
+  "pocket_id": "pk-brewco",
+  "name": "Brew Co",
+  "site_key": "site_key_kP3...",
+  "embed_snippet": "<!-- Paw Bar concierge (embedded at publish) -->\n<script src=\"https://api.pocketpaw.dev/api/v1/paw-bar/widget.js\" data-paw-bar-embed=\"1\" data-site-key=\"site_key_kP3...\" data-widget-id=\"w_9f2\" data-endpoint=\"https://api.pocketpaw.dev/api/v1\" async></script>",
+  "widget_id": "w_9f2",
+  "agent_id": "ag_71c",
+  "origins": [
+    {
+      "host": "brewco.example",
+      "verified": true,
+      "verified_at": "2026-09-01T10:22:04",
+      "verification_fresh": true
+    }
+  ],
+  "plan_tier": "staff",
+  "subscription_status": "active",
+  "renewal_date": "2026-10-19T00:00:00",
+  "concierge_available": true
+}
+```
+
+**The timestamps are UTC and carry no zone suffix.** Mongo stores UTC and hands
+back naive datetimes, so `verified_at` and `renewal_date` have no trailing `Z` —
+parse them as UTC, not as local time, or a proof looks like it expires a day
+early. `verification_fresh` is already computed against the 30-day rule the bind
+enforces, so a panel never has to do that arithmetic itself.
+
+`embed_snippet` is authoritative and `""` is meaningful — it is the answer from
+the one definition of the five gates a site must pass to earn a bar (plan,
+owner's kill switch, a key, a widget, a bound agent). `widget_id` / `agent_id`
+say **why** it is empty: an empty snippet beside a bound agent is the plan or the
+kill switch, an empty snippet beside an empty `agent_id` is provisioning that has
+not completed yet — retry the bind, which re-runs the funnel.
+
+`site_key` is not a secret. It ships inside the snippet on a public page and is
+origin-bound; `OriginClaimResponse.token` is the secret on this surface and
+nothing here carries it.
+
+**There is no `created` or `charged` flag.** Only the call that actually minted
+spent money, and the endpoint cannot honestly say whether it was the one — a read
+outside the service's lock reports "nothing here" to both of two concurrent first
+binds while one of them charges. Call the `GET` before binding; `exists` answers
+the same question without lying on a race.
+
+Refusals, all of them before a row exists and before money moves:
+
+| Status | Code | Means |
+|--------|------|-------|
+| 403 | `pocket.access_denied` | the pocket is not the caller's to ground a concierge in |
+| 403 | `sites.origin_unverified` | this workspace never proved it controls that host |
+| 403 | `sites.origin_verification_stale` | it did, over 30 days ago — verify again |
+| 403 | `sites.plan_purchase_forbidden` | the caller may write here but may not buy |
+| 404 | `pocket.not_found` | no such pocket |
+| 422 | `sites.origin_required` | no usable origin survived normalization |
+| 422 | `sites.foreign_concierge_unsellable` | the catalog rung stopped selling a priced concierge |
+| 402 | `credits.insufficient` | the wallet cannot cover the month |
+
+The two 403s on verification are **different codes on purpose**: "re-verify your
+domain" and "you never claimed this domain" are different instructions, and a
+panel that collapsed them would tell a customer to re-verify a domain they have
+never heard of. The 402 deletes the unpaid row it had just inserted, so nothing
+survives it either — a paid tier with no money behind it is the state this rail
+exists to make impossible.
+
+### `GET .../foreign-concierge` — the panel's read
+
+A pocket that has never been bound is `200` with `exists: false`, not a 404:
+that is the normal first state of the setup panel, and a 404 there would be
+indistinguishable from a wrong pocket id. The lookup filters on `foreign_origin`,
+so a pocket that ALSO has a published Worker site never has that site reported
+here — conflating them would put a rotate button in front of the embed key of a
+site somebody is actually serving.
+
+For what the concierge can **answer from** — the article count, the last sync
+stamp, the sync error, and an owner-triggered re-crawl — use
+`GET`/`POST /paw-bar/admin/site/{site_id}/knowledge` with the `site_id` from this
+response. That surface already covers every Site in the workspace, a foreign row
+included, and is not duplicated here.
+
+### `POST .../foreign-concierge/rotate-key`
+
+Retires the embed key and issues a new one; the old key stops resolving
+immediately (401 at the key resolver), so the owner's page is serving a dead
+credential until they paste the new snippet in. The response carries it. Same
+row, same tier, same renewal date — a rotation is not a repurchase, which is why
+it is `fabric.write` and not the bind's admin gate: the member who can see a
+leaked key should be able to act on it. `404 site.not_found` when the pocket has
+no foreign concierge.
+
+### `POST .../foreign-concierge/rebind`
+
+```json
+{ "agent_id": "ag_new", "widget_id": "" }
+```
+
+Points the bar at a different agent. Both fields are optional and an empty
+`agent_id` is **not** a no-op: it means re-provision — clear the stale bind and
+let the funnel resolve-or-mint the canonical agent again, which is the repair for
+a bar whose agent was deleted. `widget_id` picks the bar when a pocket carries
+more than one.
+
+Nothing about the purchase moves: the embedded `signed_key` keeps resolving, the
+tier stays bought, the renewal date stays where it was. An `agent_id` in another
+tenant is a 404 from inside the funnel, deliberately indistinguishable from an
+agent that does not exist.
+
+## Sites — Download the project
+
+The built site handed back to its owner as an archive, rather than only served from our
+edge. A **paid per-site capability**. Source: `ee/pocketpaw_ee/sites/router.py`,
+`ee/pocketpaw_ee/sites/service.py` (`download_site_project`),
+`ee/pocketpaw_ee/sites/project_zip.py`.
+
+**Assembled from the stored pocket, not from a built tree.** The archive carries the
+authored source plus the smallest manifest and config set that makes it install and build
+elsewhere — no `wrangler.toml`, no `adapter-cloudflare`, no edit bridge, no D1 layer, and
+no lockfile. It is **buildable, not byte-identical to what we deploy**. The archive itself
+is byte-reproducible (sorted entries, fixed timestamps), so the same pocket always
+produces the same bytes.
+
+### `GET /sites/{site_id}/project`
+
+Auth: `fabric.read`. Tenant-scoped, and the tenancy check runs **before** the entitlement
+— a site in another workspace is `404`, never `402`, because a `402` would confirm the id
+is real and leak which plan it is on.
+
+Response `200`: the zip itself, `Content-Type: application/zip`, with
+`Content-Disposition: attachment` and an explicit `Content-Length` (the payload is
+assembled whole before anything is sent, so a client can show real progress).
+
+Three refusals, and they are three different situations:
+
+| Status | Code | Means |
+|---|---|---|
+| `402` | `billing.project_download_not_entitled` | This site's plan does not include the download, **or** it is on a paid tier whose subscription has lapsed. The message distinguishes them — "upgrade" versus "renew" — because the remedies differ and a paying customer must not be told to buy a bigger plan. |
+| `400` | `sites.project_not_downloadable` | A Ripple site. It is built from a spec rather than source files, so there is no project. **Never a zero-byte zip**: an empty archive cannot be told apart from a site whose files vanished. |
+| `500` | `sites.project_unavailable`, `sites.project_too_large`, `sites.project_unsafe_path` | Our data broke an invariant — a source map larger than BSON can have stored, a stored path that escapes its root, or a source engine holding no source map. Deliberately not `4xx`: none of these is the caller's fault, and blaming the request sends an investigator to the wrong layer. |
+
+**The remedy is in `error.message`, not in `detail`.** These refusals travel through the
+standard `CloudError` envelope (`{"error": {"code", "message"}}`), and the 402's message is
+the part that differs between "upgrade" and "renew". paw-enterprise's
+`friendlyErrorMessage` reads `body.detail` — which this envelope does not carry — so a
+client that relies on it will render a generic failure and lose the distinction the two
+messages exist to draw. Read `error.code` to decide what to show and `error.message` to
+show it.
+
+**Check `project_download` on `GET /sites/{site_id}/entitlements` (documented above as
+"the pre-check") before offering the button.** That is what the field is for — discovering the refusal by
+provoking it is the failure the per-site entitlements read exists to end.
+
+**Do not gate the button on source visibility instead.** `site_source_visible` is a
+**workspace** capability that governs whether the builder shows a Code tab;
+`project_download` is a **per-site** capability resolved off the site's own plan. A paid
+site inside a free workspace may legitimately download a project whose Code tab is
+hidden, so gating on the workspace field would hide a control the customer has paid for.
+
+Self-hosted and OSS deployments have no billing, so the gate is skipped entirely there
+(`sites_enforced()`) and the download always works.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and
@@ -4410,4 +4642,79 @@ not compiled.
   "total": 1,
   "scope": "workspace:w1"
 }
+```
+
+## Platform — Plan & Entitlement Overrides
+
+Cross-tenant operator routes under `/api/v1/platform/workspaces/{workspace_id}/entitlements*`
+(chunk 7 of the Paw Admin PRD, `ee/pocketpaw_ee/cloud/platform/entitlements.py`). These
+sit on the platform authority axis, not workspace RBAC: `workspace_id` is a caller-supplied
+path parameter (every route under `/platform` inverts the usual "workspace comes from the
+session" rule), reads require the `platform.entitlements.read` action (SUPPORT rung),
+writes require `platform.entitlements.write` (OPERATOR rung), and every call is recorded
+as a `PlatformAuditEvent`.
+
+Only seven fields can be overridden — `monthly_ceiling`, `max_seats`, `max_pockets`,
+`max_connectors`, `max_call_seconds_per_day`, `max_storage_bytes`, `included_sites`.
+These are exactly the fields `resolve_entitlements` enforces. Two catalog fields,
+`monthly_credit_allotment` and `extra_features`, are deliberately absent: both are read
+by their enforcement points straight off the plan catalog rather than through
+`resolve_entitlements`, so an override on either would be stored and displayed but would
+never change behavior. Each overridable field is a tri-state: omitted/`null` means "not
+overridden", `"uncapped"` means "override to no limit", and an integer overrides to
+exactly that value. An override set's `expires_at` is whole-set — once past, the entire
+set reads back as absent, not per-field.
+
+### `GET /api/v1/platform/workspaces/{workspace_id}/entitlements`
+
+Returns the tenant's plan key alongside three views of the seven fields: `catalog` (the
+plan alone, no override applied), `resolved` (what `resolve_entitlements` — and therefore
+every enforcement path in the codebase — currently returns), and `overrides` (the raw
+override document, or `null` if none is active). Keeping all three separate is deliberate:
+a merged number can't tell an operator "the plan gives this" from "an override changed it
+to that." Returns `404` if the workspace doesn't exist.
+
+```json
+{
+  "workspace_id": "<id>",
+  "plan": "free",
+  "catalog": { "monthly_ceiling": 1000, "max_seats": 0, "max_pockets": 1, "max_connectors": 1, "max_call_seconds_per_day": 0, "max_storage_bytes": 104857600, "included_sites": 0 },
+  "resolved": { "monthly_ceiling": 1000, "max_seats": 7, "max_pockets": 1, "max_connectors": 1, "max_call_seconds_per_day": 3600, "max_storage_bytes": 104857600, "included_sites": 0 },
+  "overrides": { "monthly_ceiling": null, "max_seats": 7, "max_pockets": null, "max_connectors": null, "max_call_seconds_per_day": 3600, "max_storage_bytes": null, "included_sites": null, "expires_at": null }
+}
+```
+
+### `PUT /api/v1/platform/workspaces/{workspace_id}/entitlements/overrides`
+
+Replaces the workspace's entire override set (PUT, not PATCH — a field left off the body
+is "not overridden," the same as sending it `null`). Requires a non-empty, free-text
+`reason` (no canned options — a dropdown produces a log that says nothing); a missing or
+whitespace-only reason returns `422` before anything is read or written. Accepts an
+optional `idempotency_key` for the console to send on retry, but nothing in
+`cloud/platform/` has dedup infrastructure to check it against yet, so it is not
+persisted or enforced — a plain no-op safety net rather than a promise, documented as a
+scoping decision in the module. Returns the same shape as the `GET`, recomputed after the
+write. Records an `attempted` audit row before mutating and settles it to `applied` or
+`failed`.
+
+Request body:
+
+```json
+{
+  "max_seats": 7,
+  "max_call_seconds_per_day": 3600,
+  "monthly_ceiling": "uncapped",
+  "expires_at": "2026-12-31T00:00:00Z",
+  "reason": "Comping a design-partner trial past the Free caps"
+}
+```
+
+### `DELETE /api/v1/platform/workspaces/{workspace_id}/entitlements/overrides`
+
+Clears the workspace's override set back to whatever the plan alone gives. Still a write:
+requires the same non-empty `reason`, and is audited the same way as the `PUT`, including
+when there was nothing to clear.
+
+```json
+{ "reason": "Trial ended" }
 ```

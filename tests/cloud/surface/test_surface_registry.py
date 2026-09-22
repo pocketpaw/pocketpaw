@@ -1,4 +1,5 @@
 # tests/cloud/surface/test_surface_registry.py — SR-2 registry guarantees.
+# Updated: 2026-09-06 (feat/fx-mcp-server) — the /sites toolbelt pins FX_TOOL_IDS too.
 #
 # Created: 2026-06-22 (feat/surface-registry-backend-profiles, SR-2) — guards the
 # two SR-2 additions to the declarative SURFACES registry:
@@ -262,6 +263,7 @@ def test_sites_all_modes_drop_file_and_shell_builtins():
 # the real SDK filter predicate.
 # ---------------------------------------------------------------------------
 
+from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS  # noqa: E402
@@ -276,6 +278,7 @@ _TOOLBELT_IDS = (
     | frozenset(ICON_TOOL_IDS)
     | frozenset(PALETTE_TOOL_IDS)
     | frozenset(SITE_MEDIA_TOOL_IDS)
+    | frozenset(FX_TOOL_IDS)
 )
 
 
@@ -559,3 +562,115 @@ async def test_sites_craft_refine_carries_the_floor_and_names_the_rest():
     floor = sites_handler._craft_system("floor")
     full = sites_handler._craft_system("full")
     assert len(floor) < len(full) / 3, (len(floor), len(full))
+
+
+# ── external MCP servers on /sites (POCKETPAW_SITES_MCP_SERVERS) ────────────
+#
+# Added 2026-09-15 (fix/surface-external-mcp-grant). An EXTERNAL MCP server's
+# tool names are unknown until the client connects, so ``_collect_mcp_tool_ids``
+# allow-lists one wholesale with a BARE ``mcp__<server>`` token. These pin that
+# naming a server in the setting puts that exact token in the /sites allow set,
+# that it then survives the real SDK filter, and — the control that matters —
+# that an UNNAMED external server still does not.
+
+
+def _reload_sites_allow(monkeypatch, value: str):
+    """Resolve /sites' allow set with ``POCKETPAW_SITES_MCP_SERVERS`` set.
+
+    Both the settings object and the registry's tool-id table are memoized, so
+    the env var alone changes nothing — each has to be dropped for the setting
+    to be read again.
+    """
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+
+    from pocketpaw import config as pp_config
+
+    # The cache is cleared by ASSIGNMENT, not ``monkeypatch.setattr``. setattr
+    # records the value it replaced and restores it at teardown — and the value
+    # restored here would be the table built WITH this test's env var, which
+    # then leaks into the next test. Not hypothetical: it made
+    # ``test_sites_external_grant_parses_a_list_and_ignores_blanks`` pass alone
+    # and fail in the suite.
+    # ``get_settings.cache_clear()``, NOT ``get_settings(force_reload=True)``.
+    # get_settings is ``@lru_cache``d with ``force_reload`` as part of the KEY,
+    # so the reload branch runs on the first call and every later call with the
+    # same argument is a cache HIT returning the stale object — force_reload
+    # works exactly once per process.
+    monkeypatch.setenv("POCKETPAW_SITES_MCP_SERVERS", value)
+    reg._MCP_TOOL_IDS_CACHE = None
+    pp_config.get_settings.cache_clear()
+    try:
+        return resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids
+    finally:
+        monkeypatch.delenv("POCKETPAW_SITES_MCP_SERVERS", raising=False)
+        pp_config.get_settings.cache_clear()
+        reg._MCP_TOOL_IDS_CACHE = None
+
+
+def _survives_sdk_filter(tool_id: str, allow: frozenset[str]) -> bool:
+    """Mirror claude_sdk's non-exclusive allow-filter predicate exactly."""
+    from pocketpaw.agents.claude_sdk import (
+        ALWAYS_ALLOWED_MCP_SERVERS,
+        POCKET_CREATION_GRANT,
+        _mcp_server_of,
+    )
+    from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
+    from pocketpaw.agents.sdk_mcp_studio import STUDIO_TOOL_IDS
+    from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+
+    grant = (
+        allow
+        | POCKET_CREATION_GRANT
+        | frozenset(WIDGET_TOOL_IDS)
+        | frozenset(ATLAS_TOOL_IDS)
+        | frozenset(STUDIO_TOOL_IDS)
+    )
+    return (
+        not tool_id.startswith("mcp__")
+        or tool_id in grant
+        or _mcp_server_of(tool_id) in ALWAYS_ALLOWED_MCP_SERVERS
+    )
+
+
+def test_sites_grants_no_external_mcp_server_by_default():
+    """The default is inert: an external server reaches /sites only on opt-in."""
+    allow = resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids
+    assert allow is not None
+    assert not {t for t in allow if t.count("__") == 1}, (
+        f"a bare server grant leaked into the default /sites allow set: {sorted(allow)}"
+    )
+    assert not _survives_sdk_filter("mcp__refero", allow)
+
+
+def test_a_named_external_mcp_server_reaches_sites(monkeypatch):
+    """Naming a server grants it — and ONLY it."""
+    allow = _reload_sites_allow(monkeypatch, "refero")
+    assert allow is not None
+    assert "mcp__refero" in allow
+
+    assert _survives_sdk_filter("mcp__refero", allow)
+
+    # Controls. Without these the test would pass on a filter that kept
+    # everything, which is the failure mode this whole allow-list exists to
+    # prevent.
+    assert not _survives_sdk_filter("mcp__someother", allow), (
+        "an UNNAMED external server survived — the grant is not scoped"
+    )
+    assert not _survives_sdk_filter("mcp__pocketpaw_foresight__save_scenario", allow)
+
+
+def test_sites_external_grant_parses_a_list_and_ignores_blanks(monkeypatch):
+    allow = _reload_sites_allow(monkeypatch, " refero , , other ")
+    assert {"mcp__refero", "mcp__other"} <= allow
+    assert "mcp__" not in allow
+
+
+def test_sites_external_grant_survives_an_unreadable_setting(monkeypatch):
+    """Config trouble must not break profile resolution — /sites still resolves."""
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", _boom)
+    assert reg._external_sites_mcp_grants() == frozenset()

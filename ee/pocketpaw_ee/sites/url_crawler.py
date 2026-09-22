@@ -1,62 +1,53 @@
-# ee/pocketpaw_ee/sites/url_crawler.py — Paw Sites same-site URL crawler (SI-5).
+# ee/pocketpaw_ee/sites/url_crawler.py — the same-site crawler behind
+# POST /sites/import/from-url. It walks a customer's live site into a FileMap
+# that the shared import pipeline then treats exactly like an uploaded zip.
 #
-# Created 2026-07-23 (feat/sites-import-crawler, stacked on SI-4): the fetch half of
-# POST /sites/import/from-url. Fills the ``crawl_site_from_url`` seam SI-4 left open.
-# SECURITY-CRITICAL — this module is the SSRF surface of the import path. Guards:
-#   * Seed/hop URL validation: http(s) only, no credentials in the URL, ports limited
-#     to 80/443/default, length-capped (``validate_seed_url`` — the endpoint calls it
-#     too, so a hostile seed 422s before anything is minted or fetched).
-#   * DNS is resolved HERE and the connection is PINNED to the validated IP (the
-#     request rides ``scheme://ip/...`` with the original Host header + SNI hostname
-#     for https), so a re-resolution between check and fetch (TOCTOU / DNS rebinding)
-#     cannot swap in a private address. ALL resolved addresses must pass — a mixed
-#     public+private answer is rejected outright.
-#   * Forbidden targets (both families): loopback, RFC1918/private, link-local (incl.
-#     169.254.169.254 metadata), CGNAT 100.64/10, unspecified/reserved/multicast,
-#     IPv6 ULA fc00::/7, fe80::/10, and v4 addresses EMBEDDED in v6 forms
-#     (IPv4-mapped, 6to4, Teredo, NAT64 64:ff9b::/96) are re-checked as v4.
-#   * Redirects are followed MANUALLY (max 5) and EVERY hop re-runs the full URL +
-#     DNS + IP validation; non-http(s) redirect targets are rejected.
-#   * Per-fetch timeout, per-response size cap, total crawl byte budget (streamed —
-#     the response is aborted the moment a cap is crossed, never buffered past it),
-#     no cookies (jar cleared after every response), no auth, no env proxies
-#     (trust_env=False), an honest User-Agent.
-# Crawl scope: BFS from the seed, EXACT host match only. The seed MAY redirect
-# off-host (apex->www is the common case) — the crawl then re-seeds to the final
-# host so the whole site imports; every OTHER fetch is scope-locked, so a
-# same-site page/asset cannot 30x us into fetching foreign content. Depth <= 3,
-# pages <= 50, assets <= 200,
-# robots.txt honored (simple RobotFileParser matching for our UA + '*'; a failed
-# robots fetch degrades to a polite warning), small politeness delay between fetches.
-# Harvest: pages/assets map to safe relative paths (sanitized through import_service's
-# ``_safe_entry_path`` — the SAME rule zip entries pass), absolute same-origin URLs in
-# HTML/CSS are rewritten root-relative, CSS url()/@import refs are chased same-origin.
-# Cross-origin refs are left as-is and counted for the import report.
-# Edited 2026-07-23 (SSRF review): redirect scope guard (off-host 30x rejected
-# for non-seed fetches) + seed apex->www re-seed; opposite-scheme origin rewrite.
-# Edited 2026-09-04 (page/dir collision): the asset loop gained the page loop's
-# content-type guard, the other way round. A <link href> that answers text/html
-# (rel="canonical" above all) now claims the PAGE path, so /about stops landing at
-# the file "about" beside the directory "about/" the same page claims through
-# <a href="/about/">. That FileMap cannot exist on a filesystem: the generator
-# mkdirs over the file, EEXIST, and the whole URL import reports "failed". On one
-# real site 48 of 112 harvested files collided this way. Such a page counts
-# against MAX_CRAWL_PAGES, and against the asset loop's fetch ceiling (which is
-# now counted in slots, not stored files, so re-routing a fetch out of
-# assets_fetched cannot widen it). _LinkScan also stops queueing navigational
-# <link rel> values outright (canonical, prefetch, alternate & co) — the
-# content-type guard stays as the backstop for the ones it can't know about.
-# Scope, SSRF, robots and byte-budget behaviour are unchanged.
+# Fetching is NOT done here. Every request goes through safe_fetch, the one SSRF
+# surface in this codebase; this module supplies only the crawl policy around it.
+# Do not add an httpx call to this file — extend safe_fetch instead.
+#
+# SCOPE IS EXACT-HOST, AND THAT IS A SECURITY BOUNDARY. A same-site page or asset
+# must not be able to 30x the crawler into fetching (and then deploying) foreign
+# content, so every non-seed fetch passes allowed_host. The SEED is the one
+# exception: it may redirect off-host, because apex->www is the common case, and
+# the crawl re-seeds `scope` to the final host so the whole site imports instead
+# of one page plus a wall of warnings. Cross-origin refs are left as-is, counted.
+#
+# CAPS, all load-bearing against a hostile site: depth <= MAX_CRAWL_DEPTH,
+# MAX_CRAWL_PAGES pages, MAX_CRAWL_ASSETS fetch SLOTS (slots, not stored files,
+# so re-routing a fetch cannot widen the ceiling), MAX_TRACKED_URLS on the
+# discovery sets so link soup cannot balloon memory, and a total byte budget that
+# aborts the whole import when crossed.
+#
+# CONTENT TYPE DECIDES THE PATH, not the tag that pointed at it — both loops
+# check it. A <link href> answering text/html must claim the PAGE path, or /about
+# lands as a file beside the directory /about/ that the same page claims through
+# <a href="/about/">, and that FileMap cannot exist on a filesystem: the
+# generator mkdirs over the file and the import reports "failed". _LinkScan's
+# navigational-rel list (canonical, prefetch, alternate) is a DENYLIST, so an
+# unfamiliar rel is still fetched and the content-type check is the backstop.
+#
+# TWO CONSUMERS, ONE POLICY. The import endpoint wants a deployable site, so it
+# takes the defaults (every cap above, assets included). Site-KB GROUNDING
+# (sites.foreign_grounding) wants prose only, and passes ``max_pages`` +
+# ``fetch_assets=False`` to say so: a stylesheet cannot be quoted to a visitor, so
+# fetching one is a request against a customer's origin that can only be thrown
+# away. Both knobs NARROW ONLY — ``max_pages`` is clamped to MAX_CRAWL_PAGES, so a
+# caller can spend less of the budget but never more.
+#
+# Harvested paths run through import_service._safe_entry_path, the SAME sanitizer
+# zip entries pass. Absolute same-origin URLs in HTML/CSS are rewritten
+# root-relative; CSS url()/@import refs are chased same-origin. robots.txt is
+# honored for our UA and '*'; a FAILED robots fetch degrades to a report warning
+# rather than blocking the import.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import re
-import socket
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -68,14 +59,37 @@ from urllib.parse import unquote, urljoin, urlparse, urlunparse
 import httpx
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites.safe_fetch import (
+    USER_AGENT,
+    FetchBudgetExceeded,
+    FetchError,
+    FetchResult,
+    SafeFetcher,
+    validate_fetch_url,
+)
 
 logger = logging.getLogger(__name__)
 
-# Honest UA — robots groups for "pawsitesimporter" or "*" apply to us.
-USER_AGENT = "PawSitesImporter/1.0 (+https://pocketpaw.dev; site-import crawler)"
+# Compat aliases — the SSRF fetch machinery moved to safe_fetch (SF-7) but this
+# module is its historical home, and import_service plus the crawler test suite
+# import these names from here. They are the SAME objects, so `except
+# CrawlError` and `isinstance` keep working across the move.
+CrawlError = FetchError
+CrawlBudgetExceeded = FetchBudgetExceeded
+validate_seed_url = validate_fetch_url
 
-MAX_URL_LENGTH = 2048
-MAX_REDIRECTS = 5
+__all__ = [
+    "CrawlBudgetExceeded",
+    "CrawlError",
+    "CrawlResult",
+    "CrawlStats",
+    "FetchResult",
+    "SafeFetcher",
+    "crawl_site",
+    "validate_seed_url",
+]
+
+
 MAX_CRAWL_DEPTH = 3
 MAX_CRAWL_PAGES = 50
 MAX_CRAWL_ASSETS = 200
@@ -83,293 +97,12 @@ MAX_CRAWL_ASSETS = 200
 # discovery sets (assets to fetch, cross-origin URLs to count) stop growing at
 # this bound so link soup can't balloon the crawler's memory.
 MAX_TRACKED_URLS = 2000
-# Per-response cap — one file may not eat the whole budget.
-MAX_FETCH_BYTES = 10 * 1024 * 1024
-PER_FETCH_TIMEOUT_SEC = 10.0
 # Politeness delay between consecutive fetches (tests pass 0).
 POLITENESS_DELAY_SEC = 0.15
 
-_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-_CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
-_NAT64_V6 = ipaddress.ip_network("64:ff9b::/96")
 
 _CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", re.IGNORECASE)
 _CSS_IMPORT_RE = re.compile(r"@import\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
-
-
-class CrawlError(RuntimeError):
-    """A crawl failure with a FIXED, safe message (it lands in the import report,
-    which viewers read — never raw upstream text, never a traceback)."""
-
-    def __init__(self, message: str, *, code: str = "sites.import_crawl_failed") -> None:
-        super().__init__(message)
-        self.code = code
-
-
-class CrawlBudgetExceeded(CrawlError):
-    """The total crawl byte budget was crossed — the whole import fails closed."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="sites.import_crawl_budget_exceeded")
-
-
-# --------------------------------------------------------------------------- #
-# URL + IP validation (the SSRF floors)
-# --------------------------------------------------------------------------- #
-
-
-def validate_seed_url(url: str) -> Any:
-    """Validate one crawl-target URL's SHAPE and return its ``urlparse`` result.
-
-    Enforced (each raises ``ValidationError`` → 422 at the endpoint, a failed
-    report in the background crawl): http/https only; a real hostname; NO
-    credentials in the URL; NO ports beyond 80/443/default; length cap. A
-    literal-IP host is additionally run through the forbidden-IP check here, so
-    ``http://169.254.169.254/`` dies at validation, before any socket."""
-    candidate = (url or "").strip()
-    if not candidate or len(candidate) > MAX_URL_LENGTH:
-        raise ValidationError("sites.import_url_invalid", "A non-empty http(s) URL is required.")
-    parsed = urlparse(candidate)
-    if parsed.scheme not in ("http", "https"):
-        raise ValidationError(
-            "sites.import_url_invalid", "Only http and https URLs can be imported."
-        )
-    if not parsed.hostname:
-        raise ValidationError("sites.import_url_invalid", "The import URL must carry a hostname.")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValidationError(
-            "sites.import_url_forbidden", "URLs with embedded credentials are not allowed."
-        )
-    try:
-        port = parsed.port  # raises ValueError on a malformed port
-    except ValueError as exc:
-        raise ValidationError(
-            "sites.import_url_invalid", "The import URL port is invalid."
-        ) from exc
-    if port not in (None, 80, 443):
-        raise ValidationError(
-            "sites.import_url_forbidden",
-            "Only the standard web ports (80/443) can be imported.",
-        )
-    try:
-        literal = ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        literal = None
-    if literal is not None:
-        reason = _forbidden_ip_reason(literal)
-        if reason:
-            raise ValidationError(
-                "sites.import_url_forbidden",
-                f"The import URL points at a non-public address ({reason}).",
-            )
-    return parsed
-
-
-def _forbidden_ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
-    """Why this address may NOT be fetched, or None when it is publicly routable.
-
-    v6 forms that EMBED a v4 address (IPv4-mapped, 6to4, Teredo, NAT64) are
-    re-checked as the embedded v4 — ``::ffff:127.0.0.1`` is still loopback."""
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            return _forbidden_ip_reason(ip.ipv4_mapped)
-        if ip.sixtofour is not None and _forbidden_ip_reason(ip.sixtofour):
-            return "6to4-embedded private address"
-        if ip.teredo is not None and any(_forbidden_ip_reason(a) for a in ip.teredo):
-            return "teredo-embedded private address"
-        if ip in _NAT64_V6:
-            embedded = ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
-            if _forbidden_ip_reason(embedded):
-                return "NAT64-embedded private address"
-    if ip.is_unspecified:
-        return "unspecified address"
-    if ip.is_loopback:
-        return "loopback address"
-    if ip.is_link_local:
-        return "link-local address"
-    if ip.is_multicast:
-        return "multicast address"
-    if ip.is_reserved:
-        return "reserved address"
-    if ip.is_private:
-        return "private address"
-    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_V4:
-        return "carrier-grade NAT address"
-    return None
-
-
-async def _default_resolve(host: str) -> list[str]:
-    """Resolve ``host`` to its addresses via the event loop's resolver."""
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    ips: list[str] = []
-    for info in infos:
-        addr = info[4][0]
-        if addr not in ips:
-            ips.append(addr)
-    return ips
-
-
-# --------------------------------------------------------------------------- #
-# The SSRF-pinned fetcher
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class FetchResult:
-    """One completed (post-redirect) fetch."""
-
-    url: str
-    status: int
-    content_type: str
-    body: bytes
-
-
-class SafeFetcher:
-    """httpx-based fetcher that resolves DNS itself and pins the connection.
-
-    Every ``fetch`` re-validates the URL shape, resolves the host, checks EVERY
-    resolved address against the forbidden ranges, then connects to the validated
-    IP with the original Host header (and SNI hostname for https) — the classic
-    check-then-fetch TOCTOU is closed because the socket never re-resolves.
-    Redirects are followed manually (max ``MAX_REDIRECTS``) with the full check
-    re-run per hop. Responses stream against a per-fetch cap and a shared total
-    byte budget. ``transport`` / ``resolver`` are test seams (MockTransport +
-    a fake resolver — tests never touch the network)."""
-
-    def __init__(
-        self,
-        *,
-        total_byte_cap: int,
-        per_fetch_cap: int = MAX_FETCH_BYTES,
-        timeout_sec: float = PER_FETCH_TIMEOUT_SEC,
-        transport: httpx.AsyncBaseTransport | None = None,
-        resolver: Callable[[str], Awaitable[list[str]]] | None = None,
-    ) -> None:
-        self._total_byte_cap = total_byte_cap
-        self._per_fetch_cap = per_fetch_cap
-        self._resolver = resolver or _default_resolve
-        self.bytes_fetched = 0
-        self._client = httpx.AsyncClient(
-            transport=transport,
-            timeout=httpx.Timeout(timeout_sec),
-            follow_redirects=False,  # hops are validated manually
-            trust_env=False,  # no env proxies — the pin must not be bypassed
-            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
-        )
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-    async def _checked_ip(self, host: str) -> str:
-        """Resolve ``host`` and return a validated connect address. ALL resolved
-        addresses must be public — one private record fails the whole host."""
-        try:
-            literal = ipaddress.ip_address(host)
-        except ValueError:
-            literal = None
-        if literal is not None:
-            reason = _forbidden_ip_reason(literal)
-            if reason:
-                raise ValidationError(
-                    "sites.import_url_forbidden",
-                    f"Crawl target resolves to a non-public address ({reason}).",
-                )
-            return str(literal)
-        try:
-            ips = await self._resolver(host)
-        except (OSError, socket.gaierror) as exc:
-            raise CrawlError(
-                "DNS resolution failed for the crawl target",
-                code="sites.import_crawl_dns_failed",
-            ) from exc
-        if not ips:
-            raise CrawlError(
-                "DNS resolution returned no addresses for the crawl target",
-                code="sites.import_crawl_dns_failed",
-            )
-        for raw in ips:
-            try:
-                addr = ipaddress.ip_address(raw)
-            except ValueError as exc:
-                raise CrawlError(
-                    "DNS resolution returned an unparseable address",
-                    code="sites.import_crawl_dns_failed",
-                ) from exc
-            reason = _forbidden_ip_reason(addr)
-            if reason:
-                raise ValidationError(
-                    "sites.import_url_forbidden",
-                    f"Crawl target resolves to a non-public address ({reason}).",
-                )
-        return ips[0]
-
-    async def fetch(self, url: str, *, allowed_host: str | None = None) -> FetchResult:
-        """GET ``url`` with the full SSRF pipeline, following redirects manually.
-
-        Every hop is SSRF-revalidated regardless. ``allowed_host`` adds an
-        orthogonal SCOPE guard: when set, a redirect that leaves that host
-        raises ``sites.import_crawl_offsite_redirect`` so a same-site asset/page
-        can't 30x us into fetching (and deploying) foreign content. The seed
-        fetch passes ``None`` — the caller re-seeds the crawl host from the
-        final URL instead (so an apex->www redirect imports the whole site)."""
-        current = url
-        for _hop in range(MAX_REDIRECTS + 1):
-            parsed = validate_seed_url(current)
-            ip = await self._checked_ip(parsed.hostname)
-            status, content_type, location, body = await self._pinned_get(parsed, ip)
-            if status in _REDIRECT_STATUSES:
-                if not location:
-                    raise CrawlError("redirect response carried no Location header")
-                current = urljoin(current, location)
-                if allowed_host is not None and urlparse(current).netloc.lower() != allowed_host:
-                    raise CrawlError(
-                        f"redirect left the site ({allowed_host} -> "
-                        f"{urlparse(current).netloc.lower()})",
-                        code="sites.import_crawl_offsite_redirect",
-                    )
-                continue
-            return FetchResult(url=current, status=status, content_type=content_type, body=body)
-        raise CrawlError(f"too many redirects (max {MAX_REDIRECTS})")
-
-    async def _pinned_get(self, parsed: Any, ip: str) -> tuple[int, str, str, bytes]:
-        """One GET pinned to ``ip``: URL host swapped for the validated address,
-        original Host header (and SNI hostname for https) supplied explicitly."""
-        port = parsed.port
-        default_port = port is None or (parsed.scheme, port) in (("http", 80), ("https", 443))
-        host_header = parsed.hostname if default_port else f"{parsed.hostname}:{port}"
-        ip_host = f"[{ip}]" if ":" in ip else ip
-        netloc = ip_host if default_port else f"{ip_host}:{port}"
-        pinned = urlunparse((parsed.scheme, netloc, parsed.path or "/", "", parsed.query, ""))
-        request = self._client.build_request("GET", pinned, headers={"Host": host_header})
-        if parsed.scheme == "https":
-            # TLS must negotiate + verify against the REAL name, not the IP.
-            request.extensions["sni_hostname"] = parsed.hostname
-        response = await self._client.send(request, stream=True)
-        try:
-            declared = response.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > self._per_fetch_cap:
-                raise CrawlError(
-                    "response exceeds the per-fetch size cap",
-                    code="sites.import_crawl_response_too_large",
-                )
-            buf = bytearray()
-            async for chunk in response.aiter_bytes():
-                buf += chunk
-                if len(buf) > self._per_fetch_cap:
-                    raise CrawlError(
-                        "response exceeds the per-fetch size cap",
-                        code="sites.import_crawl_response_too_large",
-                    )
-                if self.bytes_fetched + len(buf) > self._total_byte_cap:
-                    raise CrawlBudgetExceeded("crawl exceeded the total byte budget")
-        finally:
-            await response.aclose()
-            # No cookie persistence — the crawler is stateless by design.
-            self._client.cookies.clear()
-        self.bytes_fetched += len(buf)
-        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        return response.status_code, content_type, response.headers.get("location", ""), bytes(buf)
 
 
 # --------------------------------------------------------------------------- #
@@ -485,6 +218,10 @@ class CrawlStats:
     """Counters surfaced on the import report."""
 
     pages_fetched: int = 0
+    # Non-seed pages that were queued and did not arrive (fetch error, non-200).
+    # Each one is ALSO a warning; the counter exists because a consumer has to
+    # decide "is this harvest complete" without parsing warning prose.
+    pages_failed: int = 0
     assets_fetched: int = 0
     bytes_fetched: int = 0
     skipped_by_robots: int = 0
@@ -493,6 +230,7 @@ class CrawlStats:
     def as_dict(self) -> dict[str, int]:
         return {
             "pages_fetched": self.pages_fetched,
+            "pages_failed": self.pages_failed,
             "assets_fetched": self.assets_fetched,
             "bytes_fetched": self.bytes_fetched,
             "skipped_by_robots": self.skipped_by_robots,
@@ -536,11 +274,16 @@ async def _load_robots(
     return parser, None
 
 
-def _allowed_by_robots(robots: robotparser.RobotFileParser | None, url: str) -> bool:
+def _allowed_by_robots(
+    robots: robotparser.RobotFileParser | None, url: str, user_agent: str
+) -> bool:
+    """robots for the UA WE ANNOUNCE, not a hardcoded one. A caller that fetches
+    under its own identity must be checked under that identity, or the operator's
+    rule for the name in our request header is silently the wrong rule."""
     if robots is None:
         return True
     try:
-        return robots.can_fetch(USER_AGENT, url)
+        return robots.can_fetch(user_agent, url)
     except Exception:  # noqa: BLE001 — a pathological robots file never blocks the crawl
         return True
 
@@ -552,18 +295,36 @@ async def crawl_site(
     transport: httpx.AsyncBaseTransport | None = None,
     resolver: Callable[[str], Awaitable[list[str]]] | None = None,
     politeness_delay: float | None = None,
+    max_pages: int | None = None,
+    fetch_assets: bool = True,
+    user_agent: str = USER_AGENT,
 ) -> CrawlResult:
     """BFS-crawl ``url``'s site (same exact host only) into a FileMap.
 
     Raises on the FATAL failure modes — bad/forbidden seed, unreachable seed,
     seed blocked by robots, byte budget exceeded. Per-page/per-asset problems
     degrade to report warnings. ``transport``/``resolver`` are test seams;
-    ``politeness_delay`` overrides the module default (tests pass 0)."""
+    ``politeness_delay`` overrides the module default (tests pass 0).
+
+    ``max_pages`` and ``fetch_assets`` NARROW the budget for a caller that wants
+    less than a deployable copy of the site. ``max_pages`` is clamped into
+    [1, MAX_CRAWL_PAGES] so it can only spend less; ``fetch_assets=False`` skips
+    the asset pass entirely, which also means a page reachable ONLY through a
+    <link rel> is not discovered (that page arrives via the asset loop's
+    content-type guard). The grounding caller accepts that: it wants prose, and a
+    page nothing links to with <a href> is not part of the site's navigation.
+
+    ``user_agent`` is the identity announced to the customer's server AND the
+    identity robots.txt is evaluated for — the two must be the same string or an
+    operator's rule about the name in our header is not the rule we obeyed."""
     # Lazy import — import_service imports this module; the safe-path rule is
     # shared with the zip path deliberately (ONE sanitizer for both imports).
     from pocketpaw_ee.sites.import_service import _safe_entry_path
 
     delay = POLITENESS_DELAY_SEC if politeness_delay is None else politeness_delay
+    # Clamped, not trusted: MAX_CRAWL_PAGES stays the ceiling no matter what a
+    # caller asks for, so this knob cannot be used to widen the crawl.
+    page_budget = MAX_CRAWL_PAGES if max_pages is None else max(1, min(max_pages, MAX_CRAWL_PAGES))
     seed = validate_seed_url(url)
     # Crawl scope is MUTABLE: if the seed redirects to another host (apex->www,
     # the overwhelmingly common case), we re-seed to the final host after the
@@ -581,7 +342,12 @@ async def crawl_site(
     }
 
     result = CrawlResult()
-    fetcher = SafeFetcher(total_byte_cap=total_byte_cap, transport=transport, resolver=resolver)
+    fetcher = SafeFetcher(
+        total_byte_cap=total_byte_cap,
+        user_agent=user_agent,
+        transport=transport,
+        resolver=resolver,
+    )
     fetched_once = False
 
     async def _polite_fetch(target: str, *, allowed_host: str | None = None) -> FetchResult:
@@ -651,10 +417,10 @@ async def crawl_site(
                 seen_assets.add(normalized)
                 asset_queue.append(normalized)
 
-        while queue and result.stats.pages_fetched < MAX_CRAWL_PAGES:
+        while queue and result.stats.pages_fetched < page_budget:
             page_url, depth = queue.popleft()
             is_seed = page_url == seed_url
-            if not _allowed_by_robots(robots, page_url):
+            if not _allowed_by_robots(robots, page_url, user_agent):
                 result.stats.skipped_by_robots += 1
                 if is_seed:
                     raise CrawlError(
@@ -677,6 +443,7 @@ async def crawl_site(
                         "the seed URL could not be fetched",
                         code="sites.import_crawl_seed_unreachable",
                     ) from exc
+                result.stats.pages_failed += 1
                 result.warnings.append(f"skipped {page_url} — fetch failed")
                 continue
             if is_seed and urlparse(fetched.url).netloc.lower() != scope["netloc"]:
@@ -687,6 +454,7 @@ async def crawl_site(
                         f"the seed URL answered HTTP {fetched.status}",
                         code="sites.import_crawl_seed_unreachable",
                     )
+                result.stats.pages_failed += 1
                 result.warnings.append(f"skipped {page_url} — HTTP {fetched.status}")
                 continue
 
@@ -724,7 +492,7 @@ async def crawl_site(
                 normalized = _normalize(absolute)
                 if normalized in seen_pages or depth >= MAX_CRAWL_DEPTH:
                     continue
-                if len(seen_pages) >= MAX_CRAWL_PAGES:
+                if len(seen_pages) >= page_budget:
                     pages_truncated = True
                     continue
                 seen_pages.add(normalized)
@@ -755,9 +523,9 @@ async def crawl_site(
         # would let this loop drain the whole 2000-entry queue on a link-heavy
         # site — several hundred page fetches where 200 was the ceiling.
         asset_slots = 0
-        while asset_queue and asset_slots < MAX_CRAWL_ASSETS:
+        while fetch_assets and asset_queue and asset_slots < MAX_CRAWL_ASSETS:
             asset_url = asset_queue.popleft()
-            if not _allowed_by_robots(robots, asset_url):
+            if not _allowed_by_robots(robots, asset_url, user_agent):
                 result.stats.skipped_by_robots += 1
                 continue
             try:
@@ -795,7 +563,7 @@ async def crawl_site(
                 )
                 if rel is None:
                     continue
-                if result.stats.pages_fetched >= MAX_CRAWL_PAGES:
+                if result.stats.pages_fetched >= page_budget:
                     pages_truncated = True
                     continue
                 html_text = fetched.body.decode("utf-8", errors="replace")
@@ -826,13 +594,17 @@ async def crawl_site(
             result.stats.assets_fetched += 1
             asset_slots += 1
 
-        if asset_queue:
+        if asset_queue and not fetch_assets:
+            result.warnings.append(
+                f"{len(asset_queue)} asset(s) not fetched — this crawl harvests pages only"
+            )
+        elif asset_queue:
             result.warnings.append(
                 f"asset cap reached ({MAX_CRAWL_ASSETS}) — {len(asset_queue)} assets not fetched"
             )
         if queue or pages_truncated:
             result.warnings.append(
-                f"page cap reached ({MAX_CRAWL_PAGES}) — some linked pages were not crawled"
+                f"page cap reached ({page_budget}) — some linked pages were not crawled"
             )
         result.stats.cross_origin_refs = len(cross_origin)
         result.stats.bytes_fetched = fetcher.bytes_fetched
