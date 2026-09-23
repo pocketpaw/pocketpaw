@@ -4,6 +4,12 @@
 #     (one synchronous call per site; live on 200; no per-account script cap),
 #     and DELETE it again on teardown; see put_worker / delete_worker.
 #
+# Updated 2026-09-23 (VS-2 -- name-based addresses): added ``list_account_scripts``,
+# the names of every account-level Worker script. A new ``workers`` site now claims a
+# Worker name built from its own name, and a name already taken in the account (by
+# another product, a hand-made Worker, or our own ``paw-sites-dispatch``) must be
+# skipped rather than overwritten by the next ``wrangler deploy``.
+#
 # Updated 2026-09-08 (sites lifecycle, wave 1 chunk 1 — the teardown primitives):
 # added ``delete_worker``, ``delete_account_script`` and ``delete_database``. Deleting
 # a site had no way to remove the two most expensive things a publish creates: the
@@ -439,6 +445,20 @@ class CloudflareClient:
         if resp.status_code == 404:
             return
         self._unwrap(resp)
+
+    async def list_account_scripts(self) -> list[str]:
+        """Names of every ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).
+
+        ``GET /accounts/{id}/workers/scripts``. Each result's ``id`` is the script name,
+        which on workers.dev is also the subdomain. Read before a new site claims a
+        Worker name, so it never lands on a script it does not own. Fails closed like
+        every other call here (a non-2xx raises); the caller decides to fail open."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts"
+        async with self._client() as client:
+            resp = await client.get(url)
+        result = self._unwrap(resp)
+        rows = result if isinstance(result, list) else []
+        return [str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")]
 
     async def create_custom_hostname(
         self, hostname: str, *, features: set[str] | None = None

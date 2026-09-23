@@ -1,5 +1,10 @@
 """Pytest configuration.
 
+Updated: 2026-09-23 (VS-2, feat/sites-first-publish-slug) -- mongomock's
+``Collection.create_indexes`` drops ``partialFilterExpression``, so a partial unique
+index (``Site.slug``) became a plain unique one in every Beanie test DB and the second
+row with ``slug: null`` failed to insert. Real MongoDB honours the filter; the shim
+below forwards it so tests see the same index production does.
 Updated: 2026-06-12 (connector-store-unification CS-1) — added
 _isolate_connector_state so the registry's write-through state store never
 persists test config to the real ~/.pocketpaw/connectors/state.
@@ -71,6 +76,40 @@ for _var, _safe in (
     ("LOGFIRE_TOKEN", ""),
 ):
     os.environ[_var] = _safe
+
+
+def _forward_partial_filter_in_mongomock() -> None:
+    """Make mongomock's ``create_indexes`` keep ``partialFilterExpression``.
+
+    ``mongomock.Collection.create_indexes`` (what Beanie's ``init_beanie`` calls) rebuilds
+    each ``IndexModel`` from ``key`` / ``unique`` / ``sparse`` / ``expireAfterSeconds`` /
+    ``name`` only, although ``create_index`` itself supports the filter. A partial unique
+    index then enforces uniqueness on EVERY row, nulls included -- the opposite of what
+    MongoDB does -- and any model declaring one breaks every test that inserts two rows.
+    """
+    try:
+        from mongomock.collection import Collection
+    except ImportError:  # OSS-only install without the test DB stack
+        return
+
+    def create_indexes(self, indexes, session=None):
+        return [
+            self.create_index(
+                index.document["key"].items(),
+                session=session,
+                expireAfterSeconds=index.document.get("expireAfterSeconds"),
+                unique=index.document.get("unique", False),
+                sparse=index.document.get("sparse", False),
+                name=index.document.get("name"),
+                partialFilterExpression=index.document.get("partialFilterExpression"),
+            )
+            for index in indexes
+        ]
+
+    Collection.create_indexes = create_indexes
+
+
+_forward_partial_filter_in_mongomock()
 
 
 def pytest_report_header() -> str | None:

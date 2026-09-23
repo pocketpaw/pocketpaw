@@ -16,6 +16,9 @@
 # The WfP lane is deliberately NOT covered by the stored name: a dispatch-namespace
 # script is named by the bare site id, and one test here pins that it stays so.
 #
+# Updated 2026-09-23 (VS-2): a first ``workers`` publish now claims a name-based
+# address, so the publish test no longer expects ``paw-site-<id>`` on the first deploy.
+#
 # MUTATION THAT BREAKS THIS FILE: reverting ``workers_deploy.site_worker_name`` to
 # ``worker_name(str(doc.id))``.
 from __future__ import annotations
@@ -162,21 +165,23 @@ async def _publish(pocket_id: str, deployer):
 
 @pytest.mark.asyncio
 async def test_publish_deploys_under_the_rows_stored_name(beanie_test_db, monkeypatch):
-    """A first publish has no row yet, so it takes the derived name. Once the row
-    stores a name, the re-publish deploys under it — the same Worker, not a second."""
+    """Once the row stores a name, the re-publish deploys under it — the same Worker,
+    not a second. (Since VS-2 a first publish claims a name-based address itself; that
+    lane is pinned in test_sites_first_publish_slug.py. Here the stored name is changed
+    by hand to prove the deploy reads the row, not the claim.)"""
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
     seen: list = []
 
     site = await _publish("pk-acme", _recording_deployer(seen))
-    assert seen == [f"paw-site-{site.id}"]
+    assert seen == ["acme"]
 
-    site.worker_name = "acme"
+    site.worker_name = "acme-by-hand"
     await site.save()
     site = await _publish("pk-acme", _recording_deployer(seen))
 
-    assert seen[-1] == "acme"
-    assert site.url == "https://acme.acct.workers.dev"
+    assert seen[-1] == "acme-by-hand"
+    assert site.url == "https://acme-by-hand.acct.workers.dev"
 
 
 @pytest.mark.asyncio
