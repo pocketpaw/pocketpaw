@@ -47,7 +47,7 @@
   {
     "label": "the worker delete ignores deploy_target and always uses the dispatch path, so a workers-mode site 404s (which is success here) and the cascade records a completed teardown over a Worker still serving",
     "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
-    "find": "    if target == \"wfp\":\n        await deps.cloudflare.delete_worker(script)\n    else:\n        await deps.cloudflare.delete_account_script(script)",
+    "find": "    if target == \"wfp\":\n        await deps.cloudflare.delete_worker(script)\n    else:\n        # The account-level Worker a ``workers`` deploy created, by the name it was\n        # deployed under -- not ``script_name``, which is the site id (VS-1).\n        from pocketpaw_ee.sites.workers_deploy import site_worker_name\n\n        await deps.cloudflare.delete_account_script(site_worker_name(site))",
     "replace": "    await deps.cloudflare.delete_worker(script)",
     "tests": [
       "tests/ee/sites/test_delete_cascade.py"

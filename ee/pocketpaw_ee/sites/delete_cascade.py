@@ -3,6 +3,14 @@
 #
 # Created 2026-09-09 (sites lifecycle wave 1 chunk 3, feat/sites-delete-cascade).
 #
+# Updated 2026-09-23 (VS-1, feat/sites-worker-name-decouple): the ``workers``-target
+# script delete now names the Worker through ``workers_deploy.site_worker_name``. It
+# used to pass ``script_name``, which is the site id, while the Worker a ``workers``
+# deploy creates is ``paw-site-<id>`` -- so the account-level delete asked for a script
+# that never existed, got the 404 this module counts as success, and recorded a
+# teardown over a Worker that kept serving. The ``wfp`` delete is unchanged: a
+# dispatch-namespace script IS named by the site id.
+#
 # THE ORDER IS THE DESIGN. Every step here can fail, and the sequence is chosen so
 # that a failure at ANY point leaves the site LESS live than before and never still
 # charging:
@@ -260,7 +268,11 @@ async def _delete_script(*, site: Any, deps: Any) -> str:
     if target == "wfp":
         await deps.cloudflare.delete_worker(script)
     else:
-        await deps.cloudflare.delete_account_script(script)
+        # The account-level Worker a ``workers`` deploy created, by the name it was
+        # deployed under -- not ``script_name``, which is the site id (VS-1).
+        from pocketpaw_ee.sites.workers_deploy import site_worker_name
+
+        await deps.cloudflare.delete_account_script(site_worker_name(site))
     return OUTCOME_DONE
 
 

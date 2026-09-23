@@ -121,6 +121,16 @@
 # html on the assets-only path — with ``assets.directory: "dist"`` — and the question
 # this module asks is now about the OUTPUT SHAPE, never about how it was produced.
 #
+# Updated 2026-09-23 (VS-1 — the Worker name is stored, not derived) — the Worker a
+# site deploys under is now read from ``Site.worker_name`` when the row carries one,
+# through the new ``site_worker_name(doc)`` accessor. ``deploy_workers`` takes an
+# optional ``worker_name`` keyword; unset (every legacy row, every existing caller) it
+# still computes ``paw-site-<sanitized id>`` byte for byte. Two things stay tied to the
+# SITE ID on purpose: the D1 ``database_name`` in the emitted config (the database is
+# created and migrated as ``d1_migrate.database_name(site_id)``, so renaming the Worker
+# must not rename the database it binds) and the Analytics Engine index the counter
+# stamps. Nothing sets ``worker_name`` yet; a later slice names Workers after a slug.
+#
 # This is the third deploy target for a Paw Site, beside the LOCAL static server
 # (local_server.deploy_local — dev/smoke) and Workers-for-Platforms
 # (cloudflare_client.put_worker — the multi-tenant dispatch namespace). The
@@ -177,6 +187,7 @@ import os
 import re
 import secrets
 from pathlib import Path
+from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
 from pocketpaw_ee.sites import analytics_worker
@@ -304,6 +315,22 @@ def worker_name(site_id: str) -> str:
     return f"paw-site-{_sanitize(site_id)}"
 
 
+def site_worker_name(doc: Any) -> str:
+    """The Worker script name THIS site is deployed under — the one answer every
+    caller that means "this site's Worker" (deploy, custom-domain routes, the delete
+    cascade) must share, since Cloudflare rejects a route naming a script that does
+    not exist and a delete aimed at the wrong name 404s, which reads as success.
+
+    ``Site.worker_name`` when the row stores one; otherwise the legacy derivation
+    ``worker_name(str(doc.id))``, so every row written before the field existed
+    resolves to exactly the name it was deployed under. ``getattr`` rather than an
+    attribute read so a duck-typed row without the field takes the legacy answer.
+
+    Not for the Workers-for-Platforms lane: a WfP script is named by the bare site id
+    (``put_worker(script_name=site_id)``) and the dispatch worker routes on that id."""
+    return getattr(doc, "worker_name", None) or worker_name(str(doc.id))
+
+
 # Back-compat alias — the private name predates the route lane and is still what the
 # deploy path reads below.
 _worker_name = worker_name
@@ -316,6 +343,7 @@ def _wrangler_jsonc(
     *,
     project_dir: str | os.PathLike[str],
     count_pageviews: bool = True,
+    d1_database_name: str | None = None,
 ) -> str:
     """The clean wrangler config for a workers.dev deploy (the proven recipe).
 
@@ -491,7 +519,14 @@ def _wrangler_jsonc(
         }
     if d1_database_id:
         config["d1_databases"] = [
-            {"binding": _D1_BINDING_NAME, "database_name": name, "database_id": d1_database_id}
+            {
+                "binding": _D1_BINDING_NAME,
+                # The DATABASE's name, not the Worker's. They were one value while the
+                # Worker name was derived from the site id; VS-1 stores the Worker
+                # name, and the database is still created as ``paw-site-<id>``.
+                "database_name": d1_database_name or name,
+                "database_id": d1_database_id,
+            }
         ]
     return json.dumps(config, indent=2) + "\n"
 
@@ -529,6 +564,7 @@ def _write_deploy_files(
     *,
     site_id: str = "",
     analytics_entitled: bool = True,
+    d1_database_name: str | None = None,
 ) -> None:
     """Write the recipe files into the project: an ``.assetsignore`` inside the asset
     dir + the clean ``wrangler.jsonc`` at the project root, and — on the assets-only
@@ -686,6 +722,7 @@ def _write_deploy_files(
             d1_database_id,
             project_dir=project_dir,
             count_pageviews=count_pageviews,
+            d1_database_name=d1_database_name,
         )
     )
 
@@ -705,6 +742,7 @@ async def deploy_workers(
     engine: str = "ripple",
     d1_database_id: str | None = None,
     analytics_entitled: bool = True,
+    worker_name: str | None = None,
 ) -> str:
     """Deploy a Paw Site as a regular Worker on the free workers.dev tier.
 
@@ -756,12 +794,20 @@ async def deploy_workers(
     (``resolve_static_output_rel(project_dir, engine)`` — generator.build() emits it
     before this is called, which is what makes resolving it off disk possible).
     On a non-zero wrangler exit this raises ``Internal`` with the stderr tail so the
-    failure surfaces as a clean 5xx envelope, not an opaque crash."""
-    name = _worker_name(site_id)
-    if not _WORKER_NAME_RE.match(name):  # defensive — _worker_name always sanitizes
+    failure surfaces as a clean 5xx envelope, not an opaque crash.
+
+    VS-1 — ``worker_name`` is the Worker script name to deploy under, which callers
+    resolve with ``site_worker_name(doc)``. None keeps the legacy derivation from
+    ``site_id`` (the parameter shadows the module function, hence the ``_worker_name``
+    alias below). The URL fallback and the ``wrangler.jsonc`` ``name`` both follow it;
+    the D1 ``database_name`` and the counter's site index stay keyed on ``site_id``."""
+    name = worker_name or _worker_name(site_id)
+    # Defensive for the derived name (_worker_name sanitizes); a real guard for a
+    # stored one, which nothing here sanitizes.
+    if not _WORKER_NAME_RE.match(name):
         raise ValidationError(
             "sites.workers_bad_name",
-            f"Computed an invalid worker name from site id {site_id!r}.",
+            f"Invalid worker name {name!r} for site id {site_id!r}.",
         )
     _write_deploy_files(
         project_dir,
@@ -770,6 +816,9 @@ async def deploy_workers(
         d1_database_id,
         site_id=site_id,
         analytics_entitled=analytics_entitled,
+        # The D1 was created and migrated under the site-id-derived name, whatever the
+        # Worker is called. Today the two are the same string.
+        d1_database_name=_worker_name(site_id),
     )
 
     # ``--config`` is REQUIRED, not cosmetic: a dynamic project dir also holds the
@@ -813,4 +862,4 @@ async def deploy_workers(
     return url
 
 
-__all__ = ["deploy_workers", "worker_name"]
+__all__ = ["deploy_workers", "site_worker_name", "worker_name"]

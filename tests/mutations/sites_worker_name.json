@@ -1,0 +1,38 @@
+[
+  {
+    "label": "the accessor ignores the stored name and re-derives it from the site id, so a site with its own Worker name deploys, routes and deletes against a Worker that does not exist",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "    return getattr(doc, \"worker_name\", None) or worker_name(str(doc.id))",
+    "replace": "    return worker_name(str(doc.id))",
+    "tests": [
+      "tests/ee/sites/test_sites_worker_name.py"
+    ]
+  },
+  {
+    "label": "the workers-target cascade deletes the site id instead of the Worker name, which 404s (success here) and leaves the Worker serving",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "        await deps.cloudflare.delete_account_script(site_worker_name(site))",
+    "replace": "        await deps.cloudflare.delete_account_script(script)",
+    "tests": [
+      "tests/ee/sites/test_sites_worker_name.py"
+    ]
+  },
+  {
+    "label": "the publish path stops handing the deployer the row's Worker name, so a re-publish deploys a second Worker under the derived name",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            worker_name=await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id),\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_worker_name.py"
+    ]
+  },
+  {
+    "label": "the D1 binding takes the Worker's name, so a renamed Worker binds a database that was never created",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "                \"database_name\": d1_database_name or name,",
+    "replace": "                \"database_name\": name,",
+    "tests": [
+      "tests/ee/sites/test_sites_worker_name.py"
+    ]
+  }
+]
