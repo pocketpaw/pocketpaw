@@ -479,6 +479,13 @@
 # server has no switches. The tools are there, so the preamble says so, the same
 # way it does for stock, palette and icons.
 #
+# Changes: 2026-09-23 (feat/sites-design-research) — PHASE 1b leads with Refero
+# (`pocketpaw_refero`) when `refero_api_token` is set and keeps Inspo as the
+# fallback: one Inspo call when a Refero call errors OR comes back empty. Empty
+# matters as much as error, because Refero's helpers swallow network trouble
+# into an empty result. No token, or settings that cannot be read, and the step
+# is the Inspo step unchanged. Read per preamble, so no restart is needed.
+#
 # Reachability is still not automatic: `sites_allow` is a hard whitelist and an
 # id absent from it is silently unreachable, so the preamble and the allow-list
 # are coupled by `test_the_research_step_names_only_tools_sites_can_reach`.
@@ -1104,6 +1111,22 @@ def _design_skills_note(mode: str) -> str:
 _RESEARCH_TOOL = "mcp__pocketpaw_inspo__research_page_design"
 _REFERENCE_SYSTEM_TOOL = "mcp__pocketpaw_inspo__get_reference_design_system"
 
+# The bundled Refero server (``ee/agent/mcp_servers/refero.py``). Primary for
+# PHASE 1b when a token is configured; see ``_design_research_step``.
+_REFERO_STYLES_TOOL = "mcp__pocketpaw_refero__search_styles"
+_REFERO_STYLE_TOOL = "mcp__pocketpaw_refero__get_style"
+
+
+def _refero_configured() -> bool:
+    """Is a Refero token set? Any failure reading settings answers no, so config
+    trouble drops back to the Inspo step instead of out of research altogether."""
+    try:
+        from pocketpaw.config import get_settings
+
+        return bool((getattr(get_settings(), "refero_api_token", None) or "").strip())
+    except Exception:  # noqa: BLE001 - a preamble must render regardless
+        return False
+
 
 def _design_research_step() -> str:
     """The PHASE 1 grounding step. Always on.
@@ -1145,7 +1168,42 @@ def _design_research_step() -> str:
     of our model backends. Both tools named here return a STRING the agent can
     act on — a macrostructure with exemplar slugs, and a DESIGN.md. Naming an
     image tool would promise the agent an eye it does not have on this path.
+
+    REFERO FIRST WHEN CONFIGURED: with ``refero_api_token`` set the step leads
+    with Refero's style search and keeps Inspo as a one-call fallback. The
+    fallback fires on an EMPTY result as well as an error, because Refero's
+    helpers turn network trouble into ``count: 0`` rather than raising. Without
+    a token Refero answers nothing, so the step does not name it at all. The
+    rails below apply to both archives unchanged.
     """
+    if _refero_configured():
+        return _refero_research_intro() + _research_rails()
+    return _inspo_research_intro() + _research_rails()
+
+
+def _refero_research_intro() -> str:
+    return (
+        "\n"
+        "PHASE 1b — GROUND THE DIRECTION IN REAL SITES (one call, then move on).\n"
+        f"You have `{_REFERO_STYLES_TOOL}` — Refero's library of real shipped "
+        "design systems, not a generator. Call it ONCE with the brief in plain "
+        "words after you have committed to a direction in Phase 1, and read what "
+        "comes back as EVIDENCE for how products like this one are actually "
+        "built. "
+        f"`{_REFERO_STYLE_TOOL}` on the strongest returned style id is worth one "
+        "follow-up call when you want to see how a real system relates its type "
+        "sizes and where its accent is actually spent — read the relationships, "
+        "not the hex values.\n"
+        "FALLBACK: if a Refero call errors, or comes back empty (`count` 0, no "
+        "`results`, or no `style`), call "
+        f"`{_RESEARCH_TOOL}` ONCE with the same brief and use that instead — an "
+        "archive of real shipped pages that answers the same question. The "
+        "fallback call is the one exception to the budget below. Never call both "
+        "when Refero answered.\n"
+    )
+
+
+def _inspo_research_intro() -> str:
     return (
         "\n"
         "PHASE 1b — GROUND THE DIRECTION IN REAL SITES (one call, then move on).\n"
@@ -1159,6 +1217,11 @@ def _design_research_step() -> str:
         "follow-up call when you want to see how a real page relates its type "
         "sizes and where its accent is actually spent — read the relationships, "
         "not the hex values.\n"
+    )
+
+
+def _research_rails() -> str:
+    return (
         "THE LIMITS ON IT, which are the whole reason it helps rather than "
         "flattens:\n"
         "- It does NOT outrank the embedded DESIGN SYSTEM. On any visual VALUE — "

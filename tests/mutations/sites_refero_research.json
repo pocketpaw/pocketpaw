@@ -1,0 +1,57 @@
+[
+  {
+    "label": "ignore the Refero token, so a deploy that pays for Refero never calls it",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    if _refero_configured():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_refero_leads_the_research_step_when_its_token_is_set",
+      "tests/cloud/surface/test_sites_handler.py::test_a_create_preamble_carries_refero_when_configured"
+    ]
+  },
+  {
+    "label": "name Refero with no token, so every build wastes a call on an empty answer",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        return bool((getattr(get_settings(), \"refero_api_token\", None) or \"\").strip())",
+    "replace": "        return True",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_without_a_refero_token_the_step_is_inspo_only"
+    ]
+  },
+  {
+    "label": "settings trouble answers yes, so a broken config still sends the agent to Refero",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    except Exception:  # noqa: BLE001 - a preamble must render regardless\r\n        return False",
+    "replace": "    except Exception:  # noqa: BLE001 - a preamble must render regardless\r\n        return True",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_a_settings_failure_keeps_the_inspo_step"
+    ]
+  },
+  {
+    "label": "fall back on error only, so a Refero that swallowed its failure into count 0 never reaches Inspo",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"FALLBACK: if a Refero call errors, or comes back empty (`count` 0, no \"",
+    "replace": "        \"FALLBACK: if a Refero call errors (\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_the_refero_step_falls_back_to_inspo_on_empty_as_well_as_error"
+    ]
+  },
+  {
+    "label": "drop the Inspo fallback entirely",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        f\"`{_RESEARCH_TOOL}` ONCE with the same brief and use that instead — an \"",
+    "replace": "        \"nothing and design on your own judgement — an \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_refero_leads_the_research_step_when_its_token_is_set"
+    ]
+  },
+  {
+    "label": "Refero loses the shared rails, so a reference can outrank the design system",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        return _refero_research_intro() + _research_rails()",
+    "replace": "        return _refero_research_intro()",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_the_refero_step_keeps_the_same_rails"
+    ]
+  }
+]
