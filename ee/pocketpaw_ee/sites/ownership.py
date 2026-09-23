@@ -1,5 +1,10 @@
 # ee/pocketpaw_ee/sites/ownership.py — proof that a workspace controls an origin.
 #
+# Updated 2026-09-23: ``claim_origin`` no longer re-mints a PENDING claim that has
+# not expired. It hands back the same token, so an owner whose host was slow to
+# deploy is not left with a published proof that mismatches. Only an expired
+# pending claim is re-minted; a verified one is still returned untouched.
+#
 # WHY IT EXISTS. A later slice binds a concierge to a site the customer hosts
 # themselves and CRAWLS that site's pages to ground the agent. Without a proof of
 # control that feature is a crawler-for-hire: anyone could name a third party's
@@ -189,26 +194,32 @@ def normalize_claim_host(host: str) -> str:
 
 
 async def claim_origin(*, workspace_id: str, user_id: str, host: str) -> SiteOriginClaim:
-    """Mint (or re-mint) this workspace's pending token for ``host``.
+    """Mint this workspace's pending token for ``host``, or hand back the live one.
 
-    One row per (workspace, host): re-claiming REPLACES the token and restarts
-    the window, so an owner who lost the value can ask again without a second
-    row. Re-claiming an ALREADY VERIFIED origin is a no-op that returns the
-    verified row — re-issuing there would quietly unprove a live binding.
+    One row per (workspace, host). What a re-claim does depends on that row:
+
+    * VERIFIED — returned untouched. Re-issuing would quietly unprove a live
+      binding.
+    * PENDING and not yet expired — returned untouched, SAME token, nothing
+      saved. The owner may already have published that token and be waiting on
+      a slow deploy; re-minting here would break a proof they already put up and
+      the verify would fail ``sites.origin_token_mismatch``. An owner who lost
+      the value gets the same one back by claiming again.
+    * PENDING and expired — the token is re-minted and the window restarts.
+
+    No row inserts a fresh pending claim. If a concurrent click wins the insert,
+    the winner is re-read and the same rules apply to it.
     """
     normalized = normalize_claim_host(host)
     existing = await SiteOriginClaim.find_one(
         SiteOriginClaim.workspace == workspace_id, SiteOriginClaim.host == normalized
     )
-    if existing is not None and existing.status == _STATUS_VERIFIED:
-        return existing
     now = datetime.now(UTC)
-    token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     if existing is None:
         claim = SiteOriginClaim(
             workspace=workspace_id,
             host=normalized,
-            token=token,
+            token=TOKEN_PREFIX + secrets.token_urlsafe(32),
             status=_STATUS_PENDING,
             issued_at=now,
             expires_at=now + CLAIM_TTL,
@@ -230,7 +241,11 @@ async def claim_origin(*, workspace_id: str, user_id: str, host: str) -> SiteOri
                 raise
         else:
             return claim
-    existing.token = token
+    if existing.status == _STATUS_VERIFIED:
+        return existing
+    if existing.status == _STATUS_PENDING and _expires_at(existing) > now:
+        return existing
+    existing.token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     existing.status = _STATUS_PENDING
     existing.issued_at = now
     existing.expires_at = now + CLAIM_TTL

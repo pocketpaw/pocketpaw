@@ -25,6 +25,9 @@
 # tests/mutations/ownership_verification.json is the other half of this gate: it
 # deletes the token comparison and the pre-fetch IP check on purpose and expects
 # these tests to notice.
+# Updated 2026-09-23: a re-claim of a PENDING, unexpired origin keeps its token
+# (re-minting it broke a proof the owner had already published); only an expired
+# claim is re-minted.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -488,14 +491,35 @@ async def test_the_predicate_fails_closed_on_a_host_it_would_never_accept(beanie
         assert await ownership.verified_origin(_WS_A, host) is False
 
 
-async def test_reclaiming_a_pending_origin_remints_the_token_and_invalidates_the_old_one(
+async def test_reclaiming_a_pending_origin_keeps_its_token_so_a_published_proof_still_verifies(
     beanie_test_db,
 ):
+    """The owner publishes the token, their host takes a while to deploy it, and
+    they come back and enter the host again. That second claim must hand back
+    the SAME token: re-minting it made the proof they had just published read as
+    ``origin_token_mismatch`` (reported 2026-09-23)."""
+    first = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+    second = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
+
+    assert second.token == first.token
+    assert await SiteOriginClaim.find_all().count() == 1
+
+    await _verify(routes=_well_known(first.token.encode()))
+    assert await ownership.verified_origin(_WS_A, _HOST) is True
+
+
+async def test_reclaiming_an_expired_pending_origin_mints_a_fresh_token(beanie_test_db):
+    """Past its window a pending token can no longer verify, so a re-claim is the
+    way back in and must issue a new one — still one row per (workspace, host)."""
     first = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
     first_token = first.token
+    first.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await first.save()
+
     second = await ownership.claim_origin(workspace_id=_WS_A, user_id="u1", host=_HOST)
 
     assert second.token != first_token
+    assert second.expires_at.replace(tzinfo=UTC) > datetime.now(UTC)
     assert await SiteOriginClaim.find_all().count() == 1
 
     with pytest.raises(ValidationError) as exc:

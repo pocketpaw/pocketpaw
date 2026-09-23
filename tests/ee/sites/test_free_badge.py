@@ -20,6 +20,14 @@
 #   * The gate: basic is badged, pro/business are not, and an unknown or missing
 #     tier is BADGED (fail-closed on the gate too, so a typo can't buy a free
 #     removal).
+#
+# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): the owner's ``badge_hidden``
+# preference. ``_Doc`` only sets the attribute when a test passes it, so every
+# older fixture still models a row written before the field existed. New cases:
+# entitled + shown is stamped, entitled + hidden ships clean, a free site that
+# somehow holds hidden=True is still stamped, and a legacy doc behaves as before.
+# The mutation that drops ``badge_hidden`` from the stamper's rule fails
+# ``test_an_entitled_site_that_shows_the_badge_is_stamped``.
 
 from __future__ import annotations
 
@@ -559,10 +567,22 @@ class _Doc:
     purpose: a fixture carrying only ``plan_tier`` models a site that never paid,
     and pretending that is a paid site is how the cancelled-site hole hides."""
 
-    def __init__(self, plan_tier, subscription_status="active", concierge_enabled=True):
+    _UNSET = object()
+
+    def __init__(
+        self,
+        plan_tier,
+        subscription_status="active",
+        concierge_enabled=True,
+        badge_hidden=_UNSET,
+    ):
         self.plan_tier = plan_tier
         self.subscription_status = subscription_status
         self.concierge_enabled = concierge_enabled
+        # Absent unless passed, so the default fixture is a LEGACY row: a Site
+        # document written before ``badge_hidden`` existed.
+        if badge_hidden is not _Doc._UNSET:
+            self.badge_hidden = badge_hidden
 
 
 @pytest.mark.asyncio
@@ -633,6 +653,55 @@ async def test_a_paid_tier_that_stopped_paying_gets_its_badge_back(tmp_path, mon
     )
 
     assert badge.BADGE_MARKER in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+async def _stamp(tmp_path, monkeypatch, doc) -> str:
+    """Run the stamper over a one-page tree for ``doc`` and return the page."""
+    _site_doc_returning(monkeypatch, doc)
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+    await sites_service._stamp_free_badge(
+        workspace_id="w1",
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        project_dir=str(tmp_path),
+        engine="html",
+    )
+    return (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_an_entitled_site_that_shows_the_badge_is_stamped(tmp_path, monkeypatch):
+    """VS-3: entitlement only PERMITS removal. An owner who chose to show the badge
+    gets it. Dropping ``badge_hidden`` from the stamper's rule fails this test."""
+    page = await _stamp(tmp_path, monkeypatch, _Doc("pro", badge_hidden=False))
+    assert badge.BADGE_MARKER in page
+
+
+@pytest.mark.asyncio
+async def test_an_entitled_site_that_hides_the_badge_ships_clean(tmp_path, monkeypatch):
+    page = await _stamp(tmp_path, monkeypatch, _Doc("pro", badge_hidden=True))
+    assert badge.BADGE_MARKER not in page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tier", "status"), [("free", "active"), ("pro", "cancelled"), ("pro", "none")]
+)
+async def test_hidden_on_a_site_not_entitled_is_still_stamped(tmp_path, monkeypatch, tier, status):
+    """The flag can only ADD the badge. A free or lapsed site holding
+    ``badge_hidden=True`` (a stale row, a self-host write, a lapsed plan) is badged."""
+    page = await _stamp(
+        tmp_path, monkeypatch, _Doc(tier, subscription_status=status, badge_hidden=True)
+    )
+    assert badge.BADGE_MARKER in page
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_entitled_doc_without_the_field_ships_clean(tmp_path, monkeypatch):
+    """A row from before VS-3 has no ``badge_hidden``; it must behave as today."""
+    doc = _Doc("pro")
+    assert not hasattr(doc, "badge_hidden")
+    page = await _stamp(tmp_path, monkeypatch, doc)
+    assert badge.BADGE_MARKER not in page
 
 
 @pytest.mark.asyncio
