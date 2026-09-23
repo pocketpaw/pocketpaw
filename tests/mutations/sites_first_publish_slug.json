@@ -1,0 +1,110 @@
+[
+  {
+    "label": "the paw- prefix guard is dropped, so a user site can claim paw-site-<id> or paw-sites-dispatch and overwrite our own Worker",
+    "file": "ee/pocketpaw_ee/sites/slug.py",
+    "find": "    return slug.startswith(_RESERVED_PREFIX)",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_sites_slug.py"
+    ]
+  },
+  {
+    "label": "the numbered-variant patterns are dropped, so www2 and mail10 become customer addresses",
+    "file": "ee/pocketpaw_ee/sites/slug.py",
+    "find": "        or any(p.match(slug) for p in _RESERVED_PATTERNS)",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_slug.py"
+    ]
+  },
+  {
+    "label": "a suffixed candidate no longer leaves room for its suffix, so a long name yields candidates over 40 chars",
+    "file": "ee/pocketpaw_ee/sites/slug.py",
+    "find": "    return f\"{_cut(base, MAX_LEN - len(suffix) - 1)}-{suffix}\"",
+    "replace": "    return f\"{base}-{suffix}\"",
+    "tests": [
+      "tests/ee/sites/test_sites_slug.py"
+    ]
+  },
+  {
+    "label": "the DuplicateKeyError retry is dropped, so losing a race on the unique slug index fails the publish instead of taking the next address",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        except DuplicateKeyError:\n            # Lost a race for this address (or, with no row, for the row itself).",
+    "replace": "        except KeyError:\n            # Lost a race for this address (or, with no row, for the row itself).",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "a legacy site (deployed, no stored name) is given a slug on republish, which moves a live address",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if doc is not None and (doc.url or doc.deployed):\n        return None\n\n    taken_in_account",
+    "replace": "\n    taken_in_account",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "the pre-deploy guard is removed, so a stored name that already exists in the account is overwritten by wrangler",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if prior_name is not None:\n            await _refuse_foreign_worker(prior_name)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "the claim ignores the account's Worker scripts, so a new site lands on a script someone else owns",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if slug_mod.validate(candidate) is not None or candidate in taken_in_account:",
+    "replace": "        if slug_mod.validate(candidate) is not None:",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "the claim is never made, so a new site keeps paw-site-<id>",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        prior_name = await _reserve_first_publish_slug(",
+    "replace": "        prior_name = None and await _reserve_first_publish_slug(",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "the listing reads the dispatch-namespace path instead of the account-level scripts",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        url = f\"{_CF_API}/accounts/{self._account_id}/workers/scripts\"\r\n        async with self._client() as client:\r\n            resp = await client.get(url)",
+    "replace": "        url = f\"{_CF_API}/accounts/{self._account_id}/workers/dispatch/namespaces/{self._namespace}/scripts\"\r\n        async with self._client() as client:\r\n            resp = await client.get(url)",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "a failed account listing is not swallowed, so an unconfigured Cloudflare fails every first publish",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    except Exception:  # noqa: BLE001 - fail open, see the docstring",
+    "replace": "    except ZeroDivisionError:  # noqa: BLE001 - fail open, see the docstring",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py"
+    ]
+  },
+  {
+    "label": "the slug index loses its partial filter, so every slug-less row collides on slug: null and the second site ever created fails to insert",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "                partialFilterExpression={\"slug\": {\"$type\": \"string\"}},",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+    ]
+  },
+  {
+    "label": "the test harness stops forwarding partialFilterExpression to mongomock, so test DBs build a stricter index than production",
+    "file": "tests/conftest.py",
+    "find": "                partialFilterExpression=index.document.get(\"partialFilterExpression\"),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+    ]
+  }
+]

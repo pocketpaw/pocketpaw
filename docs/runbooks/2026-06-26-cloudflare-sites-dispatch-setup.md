@@ -4,6 +4,9 @@ Created 2026-06-25 (feat/sites-cf-dispatch-worker): end-to-end runbook to take P
 Sites live on Cloudflare Workers for Platforms — provision the account/token/zone,
 create the dispatch namespace, deploy the dispatch worker, set up wildcard DNS +
 TLS, set the backend env, and smoke a publish.
+Updated 2026-09-23 (VS-2, feat/sites-first-publish-slug): added "Site addresses
+(workers mode)" -- new sites publish at a name-based workers.dev address, existing
+sites keep theirs.
 -->
 
 # Runbook — Cloudflare Paw Sites dispatch go-live
@@ -168,12 +171,48 @@ opens) or via the API (`GET /sites`).
 | `502 Site error` | the user worker threw at runtime |
 | TLS error | step 5 cert does not cover the wildcard — fix the cert |
 
+## Site addresses (workers mode)
+
+**Added 2026-09-23.** With `PAW_CF_DEPLOY_MODE=workers`, a site's Worker name is also
+its public address: `https://<worker name>.<account subdomain>.workers.dev`.
+
+- **New sites get a name-based address on their first publish.** The site's name is
+  lowercased, accents are stripped and everything else becomes hyphens, so "Acme
+  Bakery!" publishes at `acme-bakery`. If that is taken the next tries are
+  `acme-bakery-2` through `-6`, then a short random suffix. The claimed name is stored
+  on the Site as `slug` and `worker_name`, and a republish keeps it.
+- **Taken means any of:** another site already holds it (a unique index on `slug`
+  enforces this, and a lost race just moves to the next candidate), or a Worker script
+  by that name already exists in the Cloudflare account (read from
+  `GET /accounts/{id}/workers/scripts`, cached for five minutes; if the listing fails
+  the publish carries on without it).
+- **Reserved names are never given out:** infrastructure and product words such as
+  `www`, `api`, `admin`, `mail`, `status`, `docs`, `billing`, `login`, `pocketpaw`,
+  with numbered variants like `www2` and `mail10` (the full list is `RESERVED` in
+  `ee/pocketpaw_ee/sites/slug.py`). Anything starting with **`paw-`** is refused too,
+  because our own Workers live there (`paw-sites-dispatch`, every `paw-site-<id>`). A
+  name that yields nothing usable (emoji only, too short, reserved) gets
+  `site-<4 random characters>`.
+- **Addresses are 3–40 characters** of lowercase letters, digits and hyphens, with no
+  hyphen at either end. Cloudflare allows up to 63; the smaller limit keeps the full
+  URL readable.
+- **We never overwrite a Worker we do not own.** If a site stored a name but has never
+  deployed under it, and a script with that name now exists in the account, the
+  publish is refused with `409 sites.worker_name_conflict` instead of letting
+  `wrangler deploy` replace that script.
+- **Existing sites keep their address.** A site that has already deployed without a
+  stored name stays at `paw-site-<site_id>`. Nothing migrates automatically; moving a
+  live address would break every link to it and every custom-domain route pointing at
+  its Worker.
+- The WfP lane is unchanged: its script is still the bare site id.
+
 ## Custom domains
 
 **Updated 2026-08-12.** Custom domains now work — but only in `workers` deploy mode
 (`PAW_CF_DEPLOY_MODE=workers`), not on the dispatch-worker path this runbook sets up.
 
-In `workers` mode each site is deployed as its own Worker (`paw-site-<site_id>`), so
+In `workers` mode each site is deployed as its own Worker (see "Site addresses" above
+for its name), so
 connecting a domain writes a Cloudflare Worker **route** scoped to that one hostname
 (`<hostname>/*` → that site's Worker) alongside the custom hostname. Two API calls
 from the control plane, no dispatcher, and nothing to do in the dashboard per site.

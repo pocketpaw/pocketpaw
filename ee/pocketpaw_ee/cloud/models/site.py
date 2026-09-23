@@ -4,6 +4,12 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-23 (VS-2 -- name-based addresses): added ``slug``, the name-based
+# address a site claims on its FIRST ``workers`` publish (``acme-bakery``), with a
+# unique index. The index is PARTIAL on ``slug`` being a string, not ``sparse``: Beanie
+# writes ``slug: null`` on every row, and a sparse index still indexes an explicit null,
+# so the second slug-less row would collide. Legacy rows keep ``slug`` unset.
+#
 # Updated 2026-09-23 (VS-1 -- the Worker name is stored): added ``worker_name``, the
 # Cloudflare Worker script name (and workers.dev subdomain) a ``workers``-target site
 # deploys under. None on every existing row, and None resolves through
@@ -266,6 +272,7 @@ from typing import Any
 
 from beanie import Indexed
 from pydantic import BaseModel, Field, PrivateAttr
+from pymongo import IndexModel
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -331,6 +338,12 @@ class Site(TimestampedDocument):
     # was deployed under. Read it only through that accessor -- deploy, custom-domain
     # routes and the delete cascade must all name the same script.
     worker_name: str | None = None
+    # VS-2: the name-based address this site claimed on its first ``workers`` publish
+    # (``acme-bakery``). Set together with ``worker_name`` and never changed by a
+    # republish. None on every site that published before it existed; those keep
+    # ``paw-site-<id>``. Globally unique (workers.dev is one namespace per account),
+    # enforced by the partial unique index in ``Settings.indexes``.
+    slug: str | None = None
     deployed: bool = False
     # Which target the last SUCCESSFUL deploy actually used: "" (never deployed) |
     # "local" | "workers" | "wfp". Stamped only after a deploy returns, so it records
@@ -849,4 +862,12 @@ class Site(TimestampedDocument):
             # be, since the row still belongs to the source until it is accepted
             # -- so without this it scans the whole collection.
             [("transfer_to_workspace", 1), ("transfer_status", 1)],
+            # VS-2: one site per address. PARTIAL, not sparse -- see the header note:
+            # every slug-less row stores ``slug: null``, which a sparse index would
+            # still index and treat as a duplicate.
+            IndexModel(
+                [("slug", 1)],
+                unique=True,
+                partialFilterExpression={"slug": {"$type": "string"}},
+            ),
         ]

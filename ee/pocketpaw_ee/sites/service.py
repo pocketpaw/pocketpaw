@@ -1,6 +1,22 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-23 (VS-2, feat/sites-first-publish-slug): a NEW site on the ``workers``
+# lane now gets an address built from its name (``acme-bakery.<account>.workers.dev``)
+# instead of ``paw-site-<id>``. ``_reserve_first_publish_slug`` runs in
+# ``_deploy_site_doc``'s workers branch, before the deploy, and only for a site that has
+# never deployed and has no stored Worker name: it walks ``slug.candidates``, skips
+# invalid / reserved / ``paw-`` names, names already in the Cloudflare account
+# (``account_script_names``, cached, fail-open) and names another site holds, then
+# persists ``slug`` + ``worker_name``. A first publish has no row yet, so the claim
+# INSERTS the row in the same pre-deploy shape ``_enqueue_static_build`` uses, and the
+# post-deploy upsert takes its update branch over it. A ``DuplicateKeyError`` (a race on
+# the unique ``slug`` index) moves to the next candidate. Legacy sites (deployed, no
+# stored name) are never touched and keep ``paw-site-<id>``. Then a pre-deploy guard
+# refuses (``sites.worker_name_conflict``) to deploy a site under a name it stored
+# earlier but has never deployed under when that script already exists in the account,
+# so ``wrangler deploy`` never overwrites a Worker we do not own. WfP is unchanged.
+#
 # Updated 2026-09-23 (VS-1, feat/sites-worker-name-decouple): a ``workers``-target
 # site's Worker script name is read through ``workers_deploy.site_worker_name`` instead
 # of being re-derived from the site id. Three seams route through it: the publish
@@ -3738,6 +3754,21 @@ async def _deploy_site_doc(
         # billed where a static asset is not, so a free site must deploy the config
         # that ships no Worker at all.
         counts_pageviews = await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        # VS-2: a site that has never deployed and has no stored Worker name claims a
+        # name-based address now, BEFORE the deploy, so the Worker is created under it.
+        # Returns the name the row stored BEFORE this call, which is what the guard
+        # below needs: a name claimed just now was already checked against the account.
+        prior_name = await _reserve_first_publish_slug(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            builder_origin=builder_origin,
+        )
+        if prior_name is not None:
+            await _refuse_foreign_worker(prior_name)
         # VS-1: the Worker this site already lives under, read from its row, so a
         # re-publish overwrites that Worker rather than deploying a second one.
         url = await deploy_w(
@@ -4152,6 +4183,152 @@ async def _stamp_free_badge(
         len(changed),
         site_id,
     )
+
+
+# VS-2: how long a listing of the account's Worker scripts is reused. Only new sites
+# read it, and the unique index plus the pre-deploy guard are the real protection, so
+# a few minutes of staleness costs little.
+_ACCOUNT_SCRIPTS_TTL_S = 300.0
+_account_scripts_cache: tuple[float, frozenset[str]] | None = None
+
+
+async def account_script_names(*, refresh: bool = False) -> frozenset[str]:
+    """Every Worker script name in the Cloudflare account, cached for a few minutes.
+
+    FAILS OPEN: with Cloudflare unconfigured (local dev, tests) or the listing erroring,
+    it returns an empty set and logs. Refusing every first publish because a list call
+    failed would take publishing off the air, while the unique ``slug`` index and
+    ``_refuse_foreign_worker`` still stand between a name and a script we do not own.
+    A failed read is not cached, so the next publish asks again."""
+    global _account_scripts_cache
+    now = time.monotonic()
+    if not refresh and _account_scripts_cache is not None and _account_scripts_cache[0] > now:
+        return _account_scripts_cache[1]
+    try:
+        names = frozenset(await _cf_client().list_account_scripts())
+    except Exception:  # noqa: BLE001 - fail open, see the docstring
+        logger.warning(
+            "sites: could not list the Cloudflare account's Worker scripts; "
+            "choosing a site address without that check",
+            exc_info=True,
+        )
+        return frozenset()
+    _account_scripts_cache = (now + _ACCOUNT_SCRIPTS_TTL_S, names)
+    return names
+
+
+async def _reserve_first_publish_slug(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    builder_origin: str | None,
+) -> str | None:
+    """Give a site its name-based address on its FIRST ``workers`` publish (VS-2).
+
+    Returns the Worker name the row stored BEFORE this call when that name has never
+    been deployed under, so the caller can guard it; None otherwise. Claims nothing for:
+
+    * a row that already stores a ``worker_name`` (slugged earlier, or operator-set);
+    * a row that has deployed before (``url`` or ``deployed``) -- every legacy site.
+      Its Worker is ``paw-site-<id>`` and moving it would change a live address.
+      ``deployed`` as well as ``url`` because a WfP site with no sites domain has
+      ``deployed=True, url=""``.
+
+    A first publish reaches the deploy with NO row, so the claim INSERTS it, shaped
+    exactly like ``_enqueue_static_build``'s pre-deploy row (undeployed, capture config
+    seeded). The post-deploy upsert then takes its update branch, re-reads the row and
+    keeps ``slug`` / ``worker_name``. A row that exists (a draft, a pending charge-first
+    site, a queued async build) is claimed with an atomic update that only matches while
+    ``worker_name`` is still unset.
+
+    If every candidate is taken, it logs and leaves the name unset, so the site deploys
+    under ``paw-site-<id>`` as before. A naming collision must never fail a publish.
+    """
+    from pocketpaw_ee.sites import slug as slug_mod
+
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is not None and doc.worker_name:
+        return None if (doc.url or doc.deployed) else doc.worker_name
+    if doc is not None and (doc.url or doc.deployed):
+        return None
+
+    taken_in_account = await account_script_names()
+    for candidate in slug_mod.candidates(site_name):
+        if slug_mod.validate(candidate) is not None or candidate in taken_in_account:
+            continue
+        # global-read: workers.dev is one namespace for the whole account, so an
+        # address is taken no matter which workspace holds it. A cheap pre-check only:
+        # the unique index is the guarantee, and the DuplicateKeyError arm below does
+        # the same job when this read misses, so no test can tell them apart.
+        if await _SiteDoc.find_one({"slug": candidate}) is not None:
+            continue
+        try:
+            if doc is None:
+                await _SiteDoc(
+                    id=oid,
+                    workspace=workspace_id,
+                    pocket_id=pocket_id,
+                    owner=user_id,
+                    name=site_name,
+                    script_name=site_id,
+                    deployed=False,
+                    url="",
+                    signed_key=signed_key,
+                    builder_origin=builder_origin or "",
+                    allowed_origins=_default_allowed_origins(),
+                    event_mapping=_DEFAULT_EVENT_MAPPING,
+                    slug=candidate,
+                    worker_name=candidate,
+                ).insert()
+            else:
+                result = await _SiteDoc.get_pymongo_collection().update_one(
+                    {"_id": oid, "workspace": workspace_id, "worker_name": None},
+                    {"$set": {"slug": candidate, "worker_name": candidate}},
+                )
+                if result.matched_count == 0:
+                    # Another publish of this site claimed a name first; keep it.
+                    return None
+        except DuplicateKeyError:
+            # Lost a race for this address (or, with no row, for the row itself).
+            # Re-read: if the row now exists with a name, that publish won and its
+            # name stands; otherwise try the next candidate.
+            doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+            if doc is not None and doc.worker_name:
+                return None
+            continue
+        logger.info("sites: site %s claimed the address %s", site_id, candidate)
+        return None
+
+    logger.warning(
+        "sites: no free address for site %s (%r); deploying under its legacy Worker name",
+        site_id,
+        site_name,
+    )
+    return None
+
+
+async def _refuse_foreign_worker(name: str) -> None:
+    """Refuse to deploy a never-deployed site under a name that already exists.
+
+    Reached only for a name the row stored BEFORE this publish and has never deployed
+    under (an earlier publish claimed it and its deploy failed, or an operator set it).
+    If a script by that name is in the account now, it is not provably ours, and
+    ``wrangler deploy`` would silently replace it. A name claimed during this publish
+    does not come here: the claim already skipped every name the account listed.
+
+    Reads the account FRESH rather than from the cache, because this is the last check
+    before an overwrite. Fails open like the listing itself."""
+    if name in await account_script_names(refresh=True):
+        raise ConflictError(
+            "sites.worker_name_conflict",
+            f"A Worker named {name!r} already exists in the Cloudflare account, and "
+            "this site has never deployed under it. Refusing to overwrite it.",
+        )
 
 
 async def _site_worker_name_for(*, workspace_id: str, site_id: str) -> str:
