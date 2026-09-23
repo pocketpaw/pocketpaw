@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-23 (VS-2 review): the pre-deploy guard skips a name this row claimed
+# itself (``slug == worker_name``). The claim already refused every name the account
+# listed, so a script found later under it is this site's own, left by a first deploy
+# that failed after wrangler created it; refusing it made the site unpublishable. And
+# ``account_script_names`` builds its client from the account id + token alone
+# (``_cf_account_client``), so a deploy without ``PAW_CF_ZONE_ID`` still checks.
+#
 # Updated 2026-09-23 (VS-2, feat/sites-first-publish-slug): a NEW site on the ``workers``
 # lane now gets an address built from its name (``acme-bakery.<account>.workers.dev``)
 # instead of ``paw-site-<id>``. ``_reserve_first_publish_slug`` runs in
@@ -4192,6 +4199,28 @@ _ACCOUNT_SCRIPTS_TTL_S = 300.0
 _account_scripts_cache: tuple[float, frozenset[str]] | None = None
 
 
+def _cf_account_client() -> Any | None:
+    """A Cloudflare client for ACCOUNT-level calls only, or None without credentials.
+
+    ``_cf_client`` also demands ``PAW_CF_ZONE_ID``, which listing the account's Worker
+    scripts does not use, so a workers deploy with no zone configured would skip the
+    account check entirely. This needs only the account id and the token."""
+    import os
+
+    from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
+
+    account_id = os.environ.get("PAW_CF_ACCOUNT_ID")
+    api_token = os.environ.get("PAW_CF_API_TOKEN")
+    if not (account_id and api_token):
+        return None
+    return CloudflareClient(
+        account_id=account_id,
+        api_token=api_token,
+        zone_id="",
+        dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
+    )
+
+
 async def account_script_names(*, refresh: bool = False) -> frozenset[str]:
     """Every Worker script name in the Cloudflare account, cached for a few minutes.
 
@@ -4205,7 +4234,14 @@ async def account_script_names(*, refresh: bool = False) -> frozenset[str]:
     if not refresh and _account_scripts_cache is not None and _account_scripts_cache[0] > now:
         return _account_scripts_cache[1]
     try:
-        names = frozenset(await _cf_client().list_account_scripts())
+        client = _cf_account_client()
+        if client is None:
+            logger.warning(
+                "sites: no Cloudflare account credentials (PAW_CF_ACCOUNT_ID / "
+                "PAW_CF_API_TOKEN); choosing a site address without the account check"
+            )
+            return frozenset()
+        names = frozenset(await client.list_account_scripts())
     except Exception:  # noqa: BLE001 - fail open, see the docstring
         logger.warning(
             "sites: could not list the Cloudflare account's Worker scripts; "
@@ -4230,7 +4266,8 @@ async def _reserve_first_publish_slug(
     """Give a site its name-based address on its FIRST ``workers`` publish (VS-2).
 
     Returns the Worker name the row stored BEFORE this call when that name has never
-    been deployed under, so the caller can guard it; None otherwise. Claims nothing for:
+    been deployed under AND was not claimed here (``slug != worker_name``), so the
+    caller can guard it; None otherwise. Claims nothing for:
 
     * a row that already stores a ``worker_name`` (slugged earlier, or operator-set);
     * a row that has deployed before (``url`` or ``deployed``) -- every legacy site.
@@ -4253,7 +4290,14 @@ async def _reserve_first_publish_slug(
     oid = ObjectId(site_id)
     doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is not None and doc.worker_name:
-        return None if (doc.url or doc.deployed) else doc.worker_name
+        if doc.url or doc.deployed:
+            return None
+        # A name this row claimed itself: the claim refused every name the account
+        # listed, so a script under it now is ours, from a first deploy that failed
+        # after wrangler created it. Guarding it would 409 the site forever.
+        if doc.slug == doc.worker_name:
+            return None
+        return doc.worker_name
     if doc is not None and (doc.url or doc.deployed):
         return None
 
@@ -4315,8 +4359,10 @@ async def _reserve_first_publish_slug(
 async def _refuse_foreign_worker(name: str) -> None:
     """Refuse to deploy a never-deployed site under a name that already exists.
 
-    Reached only for a name the row stored BEFORE this publish and has never deployed
-    under (an earlier publish claimed it and its deploy failed, or an operator set it).
+    Reached only for a name the row stored BEFORE this publish, has never deployed
+    under, and did not claim through the slug path (an operator set it). A claimed
+    name whose first deploy failed after wrangler created the script is skipped by
+    the caller: that script is this site's own.
     If a script by that name is in the account now, it is not provably ours, and
     ``wrangler deploy`` would silently replace it. A name claimed during this publish
     does not come here: the claim already skipped every name the account listed.

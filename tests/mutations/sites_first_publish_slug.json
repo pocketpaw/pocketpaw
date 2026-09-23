@@ -50,7 +50,7 @@
     "find": "        if prior_name is not None:\n            await _refuse_foreign_worker(prior_name)\n",
     "replace": "",
     "tests": [
-      "tests/ee/sites/test_sites_first_publish_slug.py"
+      "tests/ee/sites/test_sites_first_publish_slug.py::test_the_guard_refuses_to_overwrite_a_foreign_script"
     ]
   },
   {
@@ -105,6 +105,24 @@
     "replace": "",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+    ]
+  },
+  {
+    "label": "a name this row claimed itself is guarded again, so a retry after a first deploy that failed once wrangler created the script 409s against the site's own Worker forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if doc.slug == doc.worker_name:\n            return None\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py::test_a_retry_after_a_failed_first_deploy_reuses_its_own_worker"
+    ]
+  },
+  {
+    "label": "the account listing demands a zone id it never uses, so a workers deploy without PAW_CF_ZONE_ID silently skips the account check",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not (account_id and api_token):\n        return None\n    return CloudflareClient(\n        account_id=account_id,\n        api_token=api_token,\n        zone_id=\"\",",
+    "replace": "    if not (account_id and api_token and os.environ.get(\"PAW_CF_ZONE_ID\")):\n        return None\n    return CloudflareClient(\n        account_id=account_id,\n        api_token=api_token,\n        zone_id=\"\",",
+    "tests": [
+      "tests/ee/sites/test_sites_first_publish_slug.py::test_the_account_check_runs_without_a_zone_id"
     ]
   }
 ]

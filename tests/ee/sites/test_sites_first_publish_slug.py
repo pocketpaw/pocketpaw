@@ -18,6 +18,11 @@
 # dropping the DuplicateKeyError retry, claiming a slug on a legacy republish, removing
 # the pre-deploy guard, and skipping the account-script check.
 #
+# Updated 2026-09-23 (VS-2 review): a name this row CLAIMED (slug == worker_name) is
+# never guarded, so a retry after a first deploy that failed once wrangler had created
+# the script deploys under it instead of 409-ing forever. The guard now applies only to
+# a stored name with no matching slug, and the account listing needs no zone id.
+#
 # Every publish test pins PAW_CF_DEPLOY_MODE and replaces ``account_script_names``:
 # python-dotenv can climb out of the worktree and load real PAW_CF_* values.
 from __future__ import annotations
@@ -251,7 +256,9 @@ async def test_a_slugged_site_republishes_under_its_own_name(beanie_test_db, acc
 # ── the pre-deploy guard ─────────────────────────────────────────────────────
 
 
-async def _seed_undeployed_named(pocket_id: str, worker_name: str) -> ObjectId:
+async def _seed_undeployed_named(
+    pocket_id: str, worker_name: str, *, slug: str | None = None
+) -> ObjectId:
     oid = sites_service._live_object_id(WS, pocket_id)
     await _SiteDoc(
         id=oid,
@@ -260,7 +267,7 @@ async def _seed_undeployed_named(pocket_id: str, worker_name: str) -> ObjectId:
         owner="u1",
         name="Acme Bakery",
         worker_name=worker_name,
-        slug=worker_name,
+        slug=slug,
         deployed=False,
         url="",
     ).insert()
@@ -269,6 +276,8 @@ async def _seed_undeployed_named(pocket_id: str, worker_name: str) -> ObjectId:
 
 @pytest.mark.asyncio
 async def test_the_guard_refuses_to_overwrite_a_foreign_script(beanie_test_db, account):
+    """A stored name that was NOT claimed through the slug path (no matching ``slug``,
+    e.g. set by an operator) and already exists in the account is not provably ours."""
     await _seed_undeployed_named("pk-guard", "taken-name")
     account.add("taken-name")
     deploy = _Deployer()
@@ -290,6 +299,51 @@ async def test_a_stored_name_not_in_the_account_deploys(beanie_test_db, account)
 
     assert deploy.names == ["free-name"]
     assert (await _row(oid))["url"] == "https://free-name.acct.workers.dev"
+
+
+class _FailsAfterCreating(_Deployer):
+    """wrangler created the script in the account, then the deploy failed."""
+
+    def __init__(self, account: set[str]):
+        super().__init__()
+        self._account = account
+
+    async def __call__(self, site_id, project_dir, *, worker_name=None, **_):
+        self.names.append(worker_name)
+        self._account.add(worker_name)
+        raise RuntimeError("wrangler: upload of assets failed")
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_failed_first_deploy_reuses_its_own_worker(beanie_test_db, account):
+    """The first deploy left ``acme-bakery`` in the account and the row undeployed. That
+    script is this site's own; the retry must deploy under it, not 409."""
+    failing = _FailsAfterCreating(account)
+    with pytest.raises(Exception, match="wrangler"):
+        await _publish("pk-acme", failing)
+    assert failing.names == ["acme-bakery"]
+    assert "acme-bakery" in account
+
+    retry = _Deployer()
+    site = await _publish("pk-acme", retry)
+    row = await _row(site.id)
+
+    assert retry.names == ["acme-bakery"]
+    assert (row["slug"], row["worker_name"]) == ("acme-bakery", "acme-bakery")
+    assert row["url"] == "https://acme-bakery.acct.workers.dev"
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_name_in_the_account_is_not_refused(beanie_test_db, account):
+    """Same state seeded directly: a claimed, never-deployed name present in the account."""
+    oid = await _seed_undeployed_named("pk-own", "own-name", slug="own-name")
+    account.add("own-name")
+    deploy = _Deployer()
+
+    await _publish("pk-own", deploy)
+
+    assert deploy.names == ["own-name"]
+    assert (await _row(oid))["url"] == "https://own-name.acct.workers.dev"
 
 
 # ── the WfP lane ─────────────────────────────────────────────────────────────
@@ -362,7 +416,7 @@ async def test_account_script_names_caches_and_fails_open(monkeypatch):
             calls.append(1)
             return ["acme"]
 
-    monkeypatch.setattr(sites_service, "_cf_client", lambda: _Client())
+    monkeypatch.setattr(sites_service, "_cf_account_client", lambda: _Client())
     assert await sites_service.account_script_names() == {"acme"}
     assert await sites_service.account_script_names() == {"acme"}
     assert len(calls) == 1
@@ -373,5 +427,37 @@ async def test_account_script_names_caches_and_fails_open(monkeypatch):
         raise RuntimeError("Cloudflare is not configured")
 
     monkeypatch.setattr(sites_service, "_account_scripts_cache", None)
-    monkeypatch.setattr(sites_service, "_cf_client", _unconfigured)
+    monkeypatch.setattr(sites_service, "_cf_account_client", _unconfigured)
     assert await sites_service.account_script_names() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_the_account_check_runs_without_a_zone_id(monkeypatch):
+    """Listing the account's scripts needs the account id and token only. Requiring
+    PAW_CF_ZONE_ID (as ``_cf_client`` does) silently skipped the check."""
+    monkeypatch.setattr(sites_service, "_account_scripts_cache", None)
+    monkeypatch.setenv("PAW_CF_ACCOUNT_ID", "acct_1")
+    monkeypatch.setenv("PAW_CF_API_TOKEN", "tok_1")
+    monkeypatch.delenv("PAW_CF_ZONE_ID", raising=False)
+
+    async def _list(self):
+        assert self._account_id == "acct_1"
+        return ["acme"]
+
+    monkeypatch.setattr(CloudflareClient, "list_account_scripts", _list)
+
+    assert await sites_service.account_script_names(refresh=True) == {"acme"}
+
+
+@pytest.mark.asyncio
+async def test_no_account_credentials_fails_open(monkeypatch):
+    monkeypatch.setattr(sites_service, "_account_scripts_cache", None)
+    monkeypatch.setenv("PAW_CF_ACCOUNT_ID", "")
+    monkeypatch.setenv("PAW_CF_API_TOKEN", "")
+
+    async def _list(self):  # pragma: no cover - must not be reached
+        raise AssertionError("listed without credentials")
+
+    monkeypatch.setattr(CloudflareClient, "list_account_scripts", _list)
+
+    assert await sites_service.account_script_names(refresh=True) == frozenset()

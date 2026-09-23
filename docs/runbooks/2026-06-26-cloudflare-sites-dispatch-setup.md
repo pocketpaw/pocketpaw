@@ -6,7 +6,8 @@ create the dispatch namespace, deploy the dispatch worker, set up wildcard DNS +
 TLS, set the backend env, and smoke a publish.
 Updated 2026-09-23 (VS-2, feat/sites-first-publish-slug): added "Site addresses
 (workers mode)" -- new sites publish at a name-based workers.dev address, existing
-sites keep theirs.
+sites keep theirs. Same day (review): a name the site claimed itself is not refused
+when its script already exists, and the account check needs no zone id.
 -->
 
 # Runbook — Cloudflare Paw Sites dispatch go-live
@@ -184,7 +185,8 @@ its public address: `https://<worker name>.<account subdomain>.workers.dev`.
 - **Taken means any of:** another site already holds it (a unique index on `slug`
   enforces this, and a lost race just moves to the next candidate), or a Worker script
   by that name already exists in the Cloudflare account (read from
-  `GET /accounts/{id}/workers/scripts`, cached for five minutes; if the listing fails
+  `GET /accounts/{id}/workers/scripts`, which needs only `PAW_CF_ACCOUNT_ID` and
+  `PAW_CF_API_TOKEN`, cached for five minutes; if those are unset or the listing fails
   the publish carries on without it).
 - **Reserved names are never given out:** infrastructure and product words such as
   `www`, `api`, `admin`, `mail`, `status`, `docs`, `billing`, `login`, `pocketpaw`,
@@ -196,10 +198,14 @@ its public address: `https://<worker name>.<account subdomain>.workers.dev`.
 - **Addresses are 3–40 characters** of lowercase letters, digits and hyphens, with no
   hyphen at either end. Cloudflare allows up to 63; the smaller limit keeps the full
   URL readable.
-- **We never overwrite a Worker we do not own.** If a site stored a name but has never
+- **We never overwrite a Worker we do not own.** If a site has a stored Worker name it
+  did not claim through this flow (for example one an operator set), has never
   deployed under it, and a script with that name now exists in the account, the
   publish is refused with `409 sites.worker_name_conflict` instead of letting
-  `wrangler deploy` replace that script.
+  `wrangler deploy` replace that script. A name the site claimed itself is exempt: the
+  claim already skipped every name in the account, so a script found under it later is
+  the site's own, left by a first deploy that failed after wrangler created it, and the
+  retry simply deploys over it.
 - **Existing sites keep their address.** A site that has already deployed without a
   stored name stays at `paw-site-<site_id>`. Nothing migrates automatically; moving a
   live address would break every link to it and every custom-domain route pointing at
