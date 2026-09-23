@@ -7,6 +7,12 @@ to JSON responses.
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
 
+Changed 2026-09-23 (feat/sites-badge-switch, VS-3): added
+`BadgeRemovalNotEntitled` (402, `billing.badge_removal_not_entitled`) for the
+per-site "hide the PocketPaw badge" switch. A copy of `ProjectDownloadNotEntitled`
+in shape: a capability the site's plan grants or withholds, two remedies in the
+message (upgrade vs renew), no ceiling to report.
+
 Changed 2026-09-21 (feat/site-project-download-endpoint): added
 `ProjectDownloadNotEntitled` (402, `billing.project_download_not_entitled`) for
 the project-download seam. Modelled on `CustomDomainNotEntitled` rather than on
@@ -438,6 +444,34 @@ class ProjectDownloadNotEntitled(CloudError):
         super().__init__(
             402, "billing.project_download_not_entitled", f"Project download: {detail}"
         )
+
+
+class BadgeRemovalNotEntitled(CloudError):
+    """A site asked to hide the PocketPaw badge on a plan that does not remove it (402).
+
+    Sibling of ``CustomDomainNotEntitled`` / ``ProjectDownloadNotEntitled`` — same
+    402 family, same per-SITE shape, same two-remedies message. Raised by
+    ``PATCH /sites/{id}/branding`` when ``badge_hidden=True`` is requested and
+    ``SiteEntitlements.badge_required`` is still True, BEFORE anything is written.
+
+    Refusing here is a UI courtesy, not the enforcement. The stamper would badge a
+    free site whatever the stored preference says; this only stops the switch from
+    reading "hidden" on a site that will keep shipping the badge. Gated on
+    ``sites_enforced()`` like its siblings, so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include removing the PocketPaw badge — "
+                "upgrade this site's plan to hide it"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to hide the PocketPaw badge"
+            )
+        super().__init__(402, "billing.badge_removal_not_entitled", f"Badge removal: {detail}")
 
 
 class CallLimitError(CloudError):

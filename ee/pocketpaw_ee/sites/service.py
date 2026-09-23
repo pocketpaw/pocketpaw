@@ -1,6 +1,17 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): a per-site "hide the PocketPaw
+# badge" preference. ``_stamp_free_badge`` now drops the badge only when the plan
+# grants removal AND ``Site.badge_hidden`` is True (a doc without the field reads
+# True, which is exactly the old behaviour); free sites stay badged whatever the flag
+# says, and the stamper still reads no billing FLAG. ``update_site_branding`` is the
+# only writer: it refuses ``badge_hidden=True`` with ``BadgeRemovalNotEntitled``
+# (402) via ``_assert_entitled_to_badge_removal`` before any write. The preference
+# is stored and takes effect on the site's next publish. There is no redeploy of the
+# current build yet, because nothing stores the live build's inputs (the reasons are
+# listed in ``update_site_branding``).
+#
 # Updated 2026-09-16 (PS-1, refactor/sites-extract-plan-close): the decision to end
 # a paid plan at the close of the period it bought is now
 # ``_close_site_plan_at_period_end`` instead of an inline block in
@@ -1101,6 +1112,7 @@ from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
+    BadgeRemovalNotEntitled,
     BadRequest,
     CloudError,
     ConflictError,
@@ -1135,6 +1147,7 @@ from pocketpaw_ee.sites.dto import (
     SiteAnalyticsSeries,
     SiteAnalyticsSeriesPoint,
     SiteAnalyticsVisits,
+    SiteBrandingUpdate,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -2311,6 +2324,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # (where it is 0), because the client subtracts against it unconditionally.
         period_paid_usd=int(getattr(doc, "period_paid_usd", 0) or 0),
         plan_cancels_at_period_end=bool(getattr(doc, "plan_cancels_at_period_end", False)),
+        # VS-3: the owner's badge preference. getattr-defaulted True so a row that
+        # predates the field reads the model default rather than raising.
+        badge_hidden=bool(getattr(doc, "badge_hidden", True)),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
         # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
         # None for a static publish / any DB-loaded doc / a single-flight no-op).
@@ -4093,7 +4109,7 @@ async def _stamp_free_badge(
 
     The site's billing fields are read off its EXISTING doc and resolved by
     ``entitlements.resolve_site_entitlements``, which is where the "may this site
-    drop its badge" rule lives — NOT here, and not off ``plan_tier`` alone. A paid
+    drop its badge" rule lives — not off ``plan_tier`` alone. A paid
     tier whose subscription is cancelled, pending, or was never charged at all
     keeps its ``plan_tier``, so reading the tier by itself hands those sites a
     free badge removal.
@@ -4102,6 +4118,13 @@ async def _stamp_free_badge(
     concierge embed above documents, so "no doc" must mean "free" rather than
     "skip" — the opposite default would ship every brand-new site unbadged, which
     is the bug this whole module exists to prevent.
+
+    VS-3 adds the OWNER's half: an entitled site ships clean only while
+    ``Site.badge_hidden`` is True. The flag can only ever ADD the badge (entitled
+    AND hidden is the one way to skip it), so a free site's stored preference is
+    irrelevant and the posture stays fail-closed. ``getattr`` defaulting to True is
+    the legacy contract: a row written before the field existed skips the badge
+    exactly as it did before.
     """
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
     from pocketpaw_ee.sites import badge
@@ -4120,9 +4143,10 @@ async def _stamp_free_badge(
         concierge_enabled=bool(getattr(doc, "concierge_enabled", True)),
     )
 
-    if not ent.badge_required:
+    if not ent.badge_required and bool(getattr(doc, "badge_hidden", True)):
         logger.info(
-            "sites: site %s is on paid tier %s with an active subscription — badge not required",
+            "sites: site %s is on paid tier %s with an active subscription and the "
+            "owner hid the badge — not stamping",
             site_id,
             ent.plan_tier,
         )
@@ -6835,6 +6859,88 @@ async def update_site_metadata(
     if updates:
         await site.set(updates)
         site = await _load(workspace_id, site_id)
+    return _to_response(site)
+
+
+def _assert_entitled_to_badge_removal(site: Any) -> None:
+    """Refuse ``badge_hidden=True`` unless this site's own plan removes the badge.
+
+    Written to look like ``_assert_entitled_to_custom_domain``: same resolver, same
+    ``sites_enforced()`` gate, same per-site 402 shape. Reading ``plan_tier`` alone
+    would let a lapsed or never-charged paid tier flip the switch.
+
+    This is a courtesy check, not the enforcement. ``_stamp_free_badge`` badges a
+    free site whatever the stored flag says; refusing here only keeps the switch
+    from claiming "hidden" on a page that will keep its badge. On OSS / self-host
+    (``sites_enforced()`` off) the write is accepted and the stamper still decides.
+    """
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+
+    if not sites_enforced():
+        return
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+    if not ent.badge_required:
+        return
+
+    logger.info(
+        "sites: refused hiding the badge on site %s — tier %s, subscription active: %s",
+        site.id,
+        ent.plan_tier,
+        ent.subscription_active,
+    )
+    raise BadgeRemovalNotEntitled(
+        plan_tier=ent.plan_tier,
+        subscription_active=ent.subscription_active,
+    )
+
+
+async def update_site_branding(
+    *, workspace_id: str, site_id: str, body: SiteBrandingUpdate
+) -> SiteResponse:
+    """Set the owner's "hide the PocketPaw badge" preference (VS-3).
+
+    ``badge_hidden=True`` is gated on the site's plan and raises
+    ``BadgeRemovalNotEntitled`` (402) BEFORE any write, so a refused request
+    leaves the stored flag alone. ``False`` is always allowed.
+
+    A PATCH that repeats the stored value writes nothing. A real change is written
+    with a targeted ``set()``, for the reason ``update_site_metadata`` gives.
+
+    The preference is stored and takes effect on the site's next publish. There is
+    no redeploy of the current build yet, because nothing stores the live build's
+    inputs.
+    """
+    body = SiteBrandingUpdate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+
+    if body.badge_hidden:
+        _assert_entitled_to_badge_removal(site)
+
+    if bool(getattr(site, "badge_hidden", True)) == body.badge_hidden:
+        return _to_response(site)
+
+    # No redeploy here, and not by omission. Restamping a live site means redeploying
+    # the CURRENT build, and nothing can reach it without rebuilding:
+    #   * ``publish_pocket`` rebuilds from the pocket's DRAFT and promotes it, so it
+    #     would ship the owner's unreviewed edits;
+    #   * ``activate_site`` replays ``pending_deploy_inputs``, which a successful
+    #     deploy clears;
+    #   * ``build_home()/<pocket_id>`` is shared with draft previews, is per-replica,
+    #     and is empty for sites built on the SL-3 sandbox lane.
+    # Making this immediate needs a stored snapshot of the live build's inputs.
+    await site.set({"badge_hidden": body.badge_hidden})
+    site = await _load(workspace_id, site_id)
+    # no-event: the preference only changes what the NEXT stamp does. No search
+    # index, soul memory or ripple view reads it, and the site response carries it.
     return _to_response(site)
 
 
