@@ -1714,6 +1714,31 @@ class Settings(BaseSettings):
         default="auto", description="URL extract provider: 'auto', 'parallel', or 'local'"
     )
 
+    # Design research (Refero)
+    refero_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Refero API token — enables the design-research tools "
+            "(``refero_design_styles`` / ``refero_design_screens``) that ground "
+            "generated UI in real shipped design systems instead of model defaults. "
+            "Requires a paid Refero plan. UNSET (the default) degrades to empty "
+            "results everywhere: a site build proceeds WITHOUT design research rather "
+            "than failing, exactly like an unconfigured stock-photo provider. "
+            "NOTE on licensing: a per-seat Refero plan is licensed to ONE user and "
+            "forbids sharing access, so a token serving a multi-tenant deploy needs "
+            "Refero's usage-based integration agreement, not a Pro seat."
+        ),
+    )
+    refero_endpoint: str = Field(
+        default="",
+        description=(
+            "Override the Refero MCP endpoint. Empty uses the documented default "
+            "(``https://api.refero.design/mcp``). Exists so a deploy can point at a "
+            "proxy or a staging host without a code change; there is no reason to set "
+            "it otherwise."
+        ),
+    )
+
     # Image Generation
     google_api_key: str | None = Field(default=None, description="Google API key (for Gemini)")
     image_model: str = Field(
