@@ -1,6 +1,9 @@
 # ee/pocketpaw_ee/sites/dto.py — request/response DTOs for the Sites control
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+# Updated: 2026-09-23 — SiteResponse carries ``foreign_origin`` + ``allowed_origins``
+# so the gallery can tell a connected site (Paw Bar on a customer-hosted page)
+# from a draft that was never published.
 #
 # ONE SHAPE HERE CARRIES A SECRET: ``OriginClaimResponse.token`` is the
 # domain-ownership proof the claiming workspace publishes on its own site. It
@@ -467,6 +470,15 @@ class SiteResponse(BaseModel):
     # not be read, or the icon was over the cap; the card falls back to the globe,
     # which is exactly the pre-existing card, so this is never a gate on anything.
     favicon_url: str | None = None
+    # A CONNECTED site: a Paw Bar concierge on a website the customer hosts
+    # themselves (``mint_foreign_site``). There is no Worker behind it, so
+    # ``deployed`` is False and ``url`` is "" for its whole life. Without this flag
+    # the gallery reads such a row as a draft that was never published and opens
+    # it in the builder over an empty pocket. ``allowed_origins`` names the hosts
+    # the embed answers on, which is what the card shows instead of a URL. Neither
+    # is a secret: the origins are public by construction.
+    foreign_origin: bool = False
+    allowed_origins: list[str] = Field(default_factory=list)
 
 
 class SiteExportResponse(BaseModel):

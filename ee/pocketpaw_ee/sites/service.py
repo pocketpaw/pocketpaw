@@ -1,6 +1,9 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-23: ``_to_response`` sends ``foreign_origin`` + ``allowed_origins``
+# so a connected site is distinguishable from an unpublished draft on the wire.
+#
 # Updated 2026-09-16 (PS-1, refactor/sites-extract-plan-close): the decision to end
 # a paid plan at the close of the period it bought is now
 # ``_close_site_plan_at_period_end`` instead of an inline block in
@@ -2328,6 +2331,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # predates the field via the getattr default, read as None on the wire) and
         # whenever the site declares no icon — the card falls back to the globe.
         favicon_url=getattr(doc, "favicon_url", "") or None,
+        # A connected (foreign-origin) site — see SiteResponse.foreign_origin.
+        foreign_origin=bool(getattr(doc, "foreign_origin", False)),
+        allowed_origins=list(getattr(doc, "allowed_origins", None) or []),
         # SL-3: the build lane's state, straight off the persisted row. These three
         # were declared on the DTO by SG-9i and never populated here, so every
         # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
