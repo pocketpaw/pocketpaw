@@ -6,6 +6,9 @@
 # helper); the REAL Site-doc seams + real pockets-service reads run against the
 # in-memory mongomock DB so the persistence contract is asserted for real.
 #
+# Updated 2026-09-23 (VS-1): a workers-mode provision deploys under the row's stored
+# ``worker_name`` (``test_workers_mode_deploys_under_the_rows_stored_worker_name``).
+#
 # Pins the DP0-3 acceptance criteria:
 #   * guarded create is a NO-OP when Site.d1_database_id is already set (create_database
 #     not called, the stored id is reused for build + binding);
@@ -295,6 +298,40 @@ async def test_cf_client_construction_failure_marks_failed(
 # Deploy target follows PAW_CF_DEPLOY_MODE — a dynamic site must not require the
 # paid Workers-for-Platforms dispatch namespace.
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workers_mode_deploys_under_the_rows_stored_worker_name(
+    seed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """VS-1: the job holds the Site row, so it is the one that hands the deploy the
+    row's Worker name. A row that stores one deploys under it rather than a name
+    re-derived from the id.
+
+    MUTATION THAT BREAKS THIS: dropping ``worker_name=site_worker_name(site)`` from the
+    job's ``provision_deploy`` call."""
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+    ctx = await seed(d1_database_id="d1-existing-0007")
+    site = await Site.get(ctx["site_id"])
+    assert site is not None
+    site.worker_name = "acme"
+    await site.save()
+    cf = _FakeCF()
+    _install_fakes(monkeypatch, cf=cf)
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    seen: list[str | None] = []
+
+    async def _fake_deploy(site_id: str, project_dir: str, *, worker_name=None, **_: object):
+        seen.append(worker_name)
+        return "https://acme.acct.workers.dev"
+
+    monkeypatch.setattr(workers_deploy_mod, "deploy_workers", _fake_deploy)
+
+    await ProvisionSiteJob()(workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-7", params={})
+
+    assert seen == ["acme"]
 
 
 @pytest.mark.asyncio

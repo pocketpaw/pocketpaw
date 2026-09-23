@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-23 (VS-1, feat/sites-worker-name-decouple): a ``workers``-target
+# site's Worker script name is read through ``workers_deploy.site_worker_name`` instead
+# of being re-derived from the site id. Three seams route through it: the publish
+# deploy (``_deploy_site_doc`` resolves it from the existing row before calling the
+# deployer, falling back to the derivation on a first publish), ``provision_deploy``
+# (a new optional ``worker_name`` the provision job fills from its row) and
+# ``_route_target``, which names the script every custom-domain route points at. With
+# ``Site.worker_name`` unset -- every row today -- all three give ``paw-site-<id>``
+# exactly as before. The WfP lane is untouched: its script is the bare site id, and
+# ``script_name`` keeps meaning the site id everywhere it is written or read.
 # Updated 2026-09-23: ``_to_response`` sends ``foreign_origin`` + ``allowed_origins``
 # so a connected site is distinguishable from an unpublished draft on the wire.
 # Updated 2026-09-23 (feat/sites-badge-switch, VS-3): a per-site "hide the PocketPaw
@@ -3748,8 +3758,14 @@ async def _deploy_site_doc(
         # billed where a static asset is not, so a free site must deploy the config
         # that ships no Worker at all.
         counts_pageviews = await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        # VS-1: the Worker this site already lives under, read from its row, so a
+        # re-publish overwrites that Worker rather than deploying a second one.
         url = await deploy_w(
-            site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews
+            site_id,
+            build.project_dir,
+            engine=engine,
+            analytics_entitled=counts_pageviews,
+            worker_name=await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id),
         )
         # SA-4: and read back what the deploy ACTUALLY did, from the artifact rather
         # than from ``counts_pageviews``. The counting rule has three parts — the plan
@@ -4164,6 +4180,24 @@ async def _stamp_free_badge(
         len(changed),
         site_id,
     )
+
+
+async def _site_worker_name_for(*, workspace_id: str, site_id: str) -> str:
+    """The Worker script name a ``workers`` publish of this site deploys under (VS-1).
+
+    ``workers_deploy.site_worker_name`` over the existing row. A FIRST publish reaches
+    the deploy before its ``Site`` row is inserted, so "no doc" takes the same legacy
+    derivation the accessor falls back to -- ``paw-site-<id>``. Its own ``find_one``
+    for the reason ``_site_counts_pageviews`` gives for its own: one read per question
+    on a path that runs a full build."""
+    from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    if doc is None:
+        # Intentionally the raw derivation: there is no row to read a stored name
+        # from, and this is the name the accessor itself falls back to.
+        return workers_deploy_mod.worker_name(site_id)
+    return workers_deploy_mod.site_worker_name(doc)
 
 
 async def _site_counts_pageviews(*, workspace_id: str, site_id: str) -> bool:
@@ -5190,6 +5224,7 @@ async def provision_deploy(
     bundle: bytes,
     d1_database_id: str,
     cloudflare: Any = None,
+    worker_name: str | None = None,
 ) -> tuple[str, str]:
     """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
     and return ``(public_url, resolved_target)``. The one seam the provision job
@@ -5216,7 +5251,12 @@ async def provision_deploy(
 
     ``local`` is not a dynamic target (nothing serves the D1 binding locally), so it
     degrades to ``workers`` rather than deploying a site that cannot reach its own
-    database."""
+    database.
+
+    VS-1 -- ``worker_name`` is the row's ``workers_deploy.site_worker_name``, which the
+    provision job holds and this function does not. None keeps the derivation from
+    ``site_id``. The ``wfp`` branch ignores it: a dispatch-namespace script is named by
+    the site id."""
     mode = _deploy_mode()
     if mode == "local":
         logger.info("sites.provision: local mode has no dynamic target — using workers mode")
@@ -5233,7 +5273,11 @@ async def provision_deploy(
         # site whose plan was never consulted — this function holds a site id and a
         # directory, and cannot resolve one.
         url = await workers_deploy_mod.deploy_workers(
-            site_id, project_dir, d1_database_id=d1_database_id, analytics_entitled=False
+            site_id,
+            project_dir,
+            d1_database_id=d1_database_id,
+            analytics_entitled=False,
+            worker_name=worker_name,
         )
         return url, "workers"
 
@@ -5511,7 +5555,8 @@ def _route_target(site: Any) -> str:
     route-addressable was deployed for this site.
 
     A route is meaningful only where the site was deployed as its OWN addressable
-    Worker (``paw-site-<id>``, via ``workers_deploy``). ``wfp`` uploads into a dispatch
+    Worker (``workers_deploy.site_worker_name`` -- ``paw-site-<id>`` unless the row
+    stores a name). ``wfp`` uploads into a dispatch
     namespace, where the script is not route-addressable at all and the namespace's own
     dispatch Worker routes; ``local`` serves from localhost. Those keep the prior
     hostname-only behaviour rather than writing a route naming a script Cloudflare
@@ -5550,9 +5595,10 @@ def _route_target(site: Any) -> str:
     The fallback is deliberately NOT extended to unstamped rows that are not
     ``deployed``: there, "" really does mean no Worker.
 
-    The name comes from ``workers_deploy.worker_name`` rather than being rebuilt here:
-    a route naming a script that does not exist is rejected, so the deploy's answer and
-    this one have to be the same function."""
+    The name comes from ``workers_deploy.site_worker_name`` rather than being rebuilt
+    here: a route naming a script that does not exist is rejected, so the deploy's
+    answer and this one have to be the same function. It reads the ROW, not the id,
+    because since VS-1 a site's Worker name is stored."""
     target = site.deploy_target
     if not target and site.deployed:
         # Migration bridge for pre-field rows. Mirrors provision_deploy's local->workers
@@ -5563,9 +5609,9 @@ def _route_target(site: Any) -> str:
             target = "workers"
     if target != "workers":
         return ""
-    from pocketpaw_ee.sites.workers_deploy import worker_name
+    from pocketpaw_ee.sites.workers_deploy import site_worker_name
 
-    return worker_name(str(site.id))
+    return site_worker_name(site)
 
 
 def _assert_entitled_to_custom_domain(site: Any) -> None:
@@ -11008,9 +11054,11 @@ async def _resolve_live_site_oid(workspace_id: str, pocket_id: str) -> ObjectId:
     derivation, unchanged, for every site that has never moved.
 
     A TRANSFERRED site is the one exception, and it has to be. That derived id is
-    ALSO the Cloudflare Worker's script name and the subdomain the site is served
-    at, so a transfer cannot re-derive it without renaming a live Worker and moving
-    a public URL. The row therefore keeps the id it was minted with — and without
+    ALSO the WfP script name, and -- for every row whose ``worker_name`` is unset,
+    which today is every row -- the source of the workers.dev Worker's name and the
+    subdomain the site is served at (``workers_deploy.site_worker_name``). So a
+    transfer cannot re-derive it without renaming a live Worker and moving a public
+    URL. The row therefore keeps the id it was minted with — and without
     this lookup the next publish in the new workspace would derive a DIFFERENT id,
     insert a SECOND Site doc, upload a SECOND Worker and serve it at a SECOND
     address, while every custom domain kept resolving to the first one. The site

@@ -4,6 +4,12 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-23 (VS-1 -- the Worker name is stored): added ``worker_name``, the
+# Cloudflare Worker script name (and workers.dev subdomain) a ``workers``-target site
+# deploys under. None on every existing row, and None resolves through
+# ``workers_deploy.site_worker_name`` to the old ``paw-site-<id>`` derivation, so no
+# migration. The note below that ``_id`` IS the Worker's script name is now true of
+# legacy rows and of the WfP lane only; ``script_name`` still holds the site id.
 # Updated 2026-09-23 (feat/sites-badge-switch, VS-3): added ``badge_hidden``, the
 # owner's per-site choice to hide the "Built with PocketPaw" badge. It is a
 # PREFERENCE, not an entitlement: the stamper drops the badge only when the site's
@@ -320,8 +326,16 @@ class Site(TimestampedDocument):
     # waiting for. Capped at the DTO edge rather than here, so an over-long value is
     # a 422 the form can show instead of a record that silently lost its tail.
     description: str = ""
-    # Workers-for-Platforms script name (== site id) once deployed.
+    # Workers-for-Platforms script name (== site id) once deployed. Also the id the
+    # public lead-capture URL is keyed by. NOT the workers.dev Worker's name: that is
+    # ``worker_name`` below.
     script_name: str = ""
+    # VS-1: the Worker script name (and workers.dev subdomain) a ``workers``-target
+    # deploy uses. None means "derive it": ``workers_deploy.site_worker_name`` falls
+    # back to ``paw-site-<id>``, which is what every row written before this field
+    # was deployed under. Read it only through that accessor -- deploy, custom-domain
+    # routes and the delete cascade must all name the same script.
+    worker_name: str | None = None
     deployed: bool = False
     # Which target the last SUCCESSFUL deploy actually used: "" (never deployed) |
     # "local" | "workers" | "wfp". Stamped only after a deploy returns, so it records
