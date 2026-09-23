@@ -11,6 +11,11 @@
 # directly tests a wire shape the loading builder never sends.
 #
 # Created: 2026-06-03 — Guards the /sites surface preamble.
+# Updated: 2026-09-23 (feat/sites-design-research) — PHASE 1b now leads with
+# Refero when ``refero_api_token`` is set and falls back to Inspo when a Refero
+# call errors or comes back empty; with no token it is the Inspo step as before.
+# The tests after `test_the_research_step_runs_before_the_tokens_are_locked`
+# pin both states, the fallback wording, and reachability of every named id.
 # Updated: 2026-09-01 (fix/sites-drop-bundled-design-systems) — the bundled
 # DESIGN.md library and its ``pocketpaw_design_systems`` MCP server are gone, so
 # ``test_create_names_design_and_asset_tools`` split in two: the asset half kept
@@ -2172,6 +2177,113 @@ async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
 
     assert preamble.index("PHASE 1b") < preamble.index("LOCK THE TOKENS")
     assert preamble.index("PHASE 1 — CREATIVE DIRECTION") < preamble.index("PHASE 1b")
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1b with Refero: primary when a token is set, Inspo as the fallback.
+#
+# Refero's helpers swallow network trouble into an EMPTY result rather than an
+# error, so "Refero failed" usually reads as `count: 0`. The fallback therefore
+# has to trigger on empty as well as on error, or a dead Refero means a site
+# built on no research while Inspo sat right there.
+# ---------------------------------------------------------------------------
+
+_REFERO_STYLES = "mcp__pocketpaw_refero__search_styles"
+_INSPO_RESEARCH = "mcp__pocketpaw_inspo__research_page_design"
+
+
+def _with_refero_token(monkeypatch, token: str | None) -> None:
+    from types import SimpleNamespace
+
+    import pocketpaw.config as config
+
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(refero_api_token=token))
+
+
+async def test_refero_leads_the_research_step_when_its_token_is_set(monkeypatch) -> None:
+    """THE MUTATION THAT BREAKS THIS: ignore the token and always emit the Inspo
+    step. Run: a deploy pays for Refero and never calls it."""
+    _with_refero_token(monkeypatch, "rf_test")
+    step = sites_handler._design_research_step()
+
+    assert _REFERO_STYLES in step
+    assert _INSPO_RESEARCH in step, "the Inspo fallback is missing"
+    assert step.index(_REFERO_STYLES) < step.index(_INSPO_RESEARCH), "Refero must come first"
+
+
+async def test_the_refero_step_falls_back_to_inspo_on_empty_as_well_as_error(monkeypatch) -> None:
+    """THE MUTATION THAT BREAKS THIS: drop the "comes back empty" trigger. Run:
+    an unreachable Refero returns `count: 0`, the agent reads that as "no
+    references exist", and Inspo is never asked."""
+    _with_refero_token(monkeypatch, "rf_test")
+    lower = sites_handler._design_research_step().lower()
+
+    assert "fallback" in lower
+    assert "errors" in lower
+    assert "empty" in lower
+
+
+async def test_without_a_refero_token_the_step_is_inspo_only(monkeypatch) -> None:
+    """No token means Refero answers nothing, so naming it would only cost a
+    wasted call before every build."""
+    for token in (None, "", "   "):
+        _with_refero_token(monkeypatch, token)
+        step = sites_handler._design_research_step()
+        assert "pocketpaw_refero" not in step, f"token={token!r} still named Refero"
+        assert _INSPO_RESEARCH in step
+
+
+async def test_a_settings_failure_keeps_the_inspo_step(monkeypatch) -> None:
+    """Config trouble must not take research out of the create path."""
+    import pocketpaw.config as config
+
+    def _boom():
+        raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr(config, "get_settings", _boom)
+    step = sites_handler._design_research_step()
+    assert "pocketpaw_refero" not in step
+    assert _INSPO_RESEARCH in step
+
+
+async def test_both_research_steps_name_only_tools_sites_can_reach(monkeypatch) -> None:
+    """The reachability coupling above, extended to the Refero state: every id
+    either step names must be one its server builds and /sites may call."""
+    from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+    from pocketpaw_ee.agent.mcp_servers.refero import REFERO_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    allow = set(resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids or ())
+    known = set(INSPO_TOOL_IDS) | set(REFERO_TOOL_IDS)
+    for token in (None, "rf_test"):
+        _with_refero_token(monkeypatch, token)
+        named = set(
+            re.findall(
+                r"mcp__pocketpaw_(?:inspo|refero)__\w+", sites_handler._design_research_step()
+            )
+        )
+        assert named
+        assert not (named - known), f"token={token!r}: unknown ids {sorted(named - known)}"
+        assert not (named - allow), f"token={token!r}: unreachable ids {sorted(named - allow)}"
+
+
+async def test_the_refero_step_keeps_the_same_rails(monkeypatch) -> None:
+    """Switching archives must not drop the precedence clause or the rotation ban."""
+    _with_refero_token(monkeypatch, "rf_test")
+    lower = sites_handler._design_research_step().lower()
+
+    assert "does not outrank the embedded design system" in lower
+    assert "wholesale" in lower
+    assert "rotation ban" in lower
+    assert "one round" in lower
+
+
+async def test_a_create_preamble_carries_refero_when_configured(monkeypatch) -> None:
+    """End to end through build_preamble, not just the helper."""
+    _with_refero_token(monkeypatch, "rf_test")
+    for engine in (None, "svelte", "react"):
+        assert _REFERO_STYLES in await _preamble_for(engine), f"{engine} create lost Refero"
 
 
 # ---------------------------------------------------------------------------
