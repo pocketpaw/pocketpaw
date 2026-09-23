@@ -42,7 +42,7 @@
   {
     "label": "D3 — drop the cohort check, so the flip retroactively gates existing pockets",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    if not getattr(doc, \"source_gated\", False):\n        return True",
+    "find": "    if not getattr(doc, \"source_gated\", False) and not settings.sites_source_gate_retroactive:\n        return True",
     "replace": "    if False:\n        return True",
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_a_existing_free_pocket_keeps_its_source"
@@ -103,8 +103,8 @@
   {
     "label": "restore the source-presence short-circuit, so a projected gallery row reports visible while the single-pocket read reports withheld",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    if not getattr(doc, \"source_gated\", False):\n        return True\n\n    from pocketpaw.config import get_settings",
-    "replace": "    if getattr(doc, \"source\", None) is None:\n        return True\n    if not getattr(doc, \"source_gated\", False):\n        return True\n\n    from pocketpaw.config import get_settings",
+    "find": "    settings = get_settings()\n\n    if not settings.sites_source_gate_enabled:",
+    "replace": "    if getattr(doc, \"source\", None) is None:\n        return True\n\n    settings = get_settings()\n\n    if not settings.sites_source_gate_enabled:",
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_is_honest_in_the_gallery_list"
     ]
@@ -152,6 +152,34 @@
     "replace": "            visibility=\"workspace\",\n        )\n        await doc.insert()",
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_g_every_pocket_constructor_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "ignore the retroactive flag, so switching it on still gates nothing that already exists",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not getattr(doc, \"source_gated\", False) and not settings.sites_source_gate_retroactive:\n        return True",
+    "replace": "    if not getattr(doc, \"source_gated\", False):\n        return True",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_gates_a_pre_flip_free_pocket",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_gallery_and_single_read_agree_when_retroactive"
+    ]
+  },
+  {
+    "label": "let retroactive stand in for the master flag, so it gates pockets while the gate is off",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not settings.sites_source_gate_enabled:\n        return True",
+    "replace": "    if not settings.sites_source_gate_enabled and not settings.sites_source_gate_retroactive:\n        return True",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_is_inert_without_the_master_switch"
+    ]
+  },
+  {
+    "label": "ship retroactive on, so a deploy takes source away from every existing free site",
+    "file": "src/pocketpaw/config.py",
+    "find": "    sites_source_gate_retroactive: bool = Field(\n        default=False,",
+    "replace": "    sites_source_gate_retroactive: bool = Field(\n        default=True,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_ships_disabled"
     ]
   }
 ]
