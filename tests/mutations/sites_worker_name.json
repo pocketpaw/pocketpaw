@@ -34,5 +34,14 @@
     "tests": [
       "tests/ee/sites/test_sites_worker_name.py"
     ]
+  },
+  {
+    "label": "the provision job stops handing provision_deploy the row's Worker name, so a dynamic site deploys under the derived name",
+    "file": "ee/pocketpaw_ee/cloud/jobs/builtin/provision_site.py",
+    "find": "                worker_name=site_worker_name(site),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/jobs/test_provision_site.py::test_workers_mode_deploys_under_the_rows_stored_worker_name"
+    ]
   }
 ]
