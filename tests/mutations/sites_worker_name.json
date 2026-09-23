@@ -20,7 +20,7 @@
   {
     "label": "the publish path stops handing the deployer the row's Worker name, so a re-publish deploys a second Worker under the derived name",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            worker_name=await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id),\n",
+    "find": "                worker_name=deploy_name,\n",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_sites_worker_name.py"

@@ -1,0 +1,191 @@
+[
+  {
+    "label": "the held check is skipped, so another workspace can take an address the day after its old owner gave it up",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if await _slug_held_from(slug, workspace_id):\n        return \"held\"",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py"
+    ]
+  },
+  {
+    "label": "the first-publish claim ignores holds, so a new site lands on an address another workspace released yesterday",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if await _slug_held_from(candidate, workspace_id):\n            continue",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_first_publish_skips_a_name_another_workspace_holds"
+    ]
+  },
+  {
+    "label": "the rename rate limit is skipped, so a site can churn its address without bound",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if len(recent) >= _SLUG_RENAME_LIMIT:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py"
+    ]
+  },
+  {
+    "label": "renames older than 24h are not trimmed, so the limit becomes 3 for the life of the site",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    recent = [t for t in site.slug_changes if _as_utc(t) > now - _SLUG_RENAME_WINDOW]",
+    "replace": "    recent = list(site.slug_changes)",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_renames_older_than_24h_do_not_count"
+    ]
+  },
+  {
+    "label": "a failed re-point does not put the moved routes back, so a custom domain is left on a Worker that is then deleted",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        restored = True\n        for dom in moved:",
+    "replace": "        restored = True\n        for dom in []:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_failed_re_point_puts_everything_back"
+    ]
+  },
+  {
+    "label": "the old Worker is deleted before the routes move, so a failed re-point leaves the site with nothing serving it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    cf: Any = None\n    try:\n        if routed:",
+    "replace": "    cf: Any = None\n    await _discard_worker(old_name, reason=\"a rename\")\n    try:\n        if routed:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_failed_re_point_puts_everything_back"
+    ]
+  },
+  {
+    "label": "the new Worker is not deleted after a failed re-point, so the next publish refuses its own residue as a foreign script",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if restored:\n            await _discard_worker(new_name, reason=\"a failed rename re-point\")",
+    "replace": "        if restored:\n            pass",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_failed_re_point_puts_everything_back"
+    ]
+  },
+  {
+    "label": "the Worker name is held instead of the slug, without the paw- guard, so a legacy paw-site-<id> name gets a hold row",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if old_slug and not slug_mod.has_reserved_prefix(old_slug):\n        now = datetime.now(UTC)",
+    "replace": "    old_slug = old_name\n    if old_slug:\n        now = datetime.now(UTC)",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_legacy_site_renames_and_holds_nothing"
+    ]
+  },
+  {
+    "label": "the reserve drops its cross-field verify, so a pending name can equal a slug a first publish claimed in the same instant",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if await _address_claimed_by_other_site(\"slug\", normalized, site.id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_reserve_backs_off_when_a_first_publish_claims_the_name_mid_write"
+    ]
+  },
+  {
+    "label": "the first-publish claim drops its cross-field verify, so a new site's slug can equal a pending rename reserved in the same instant",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if await _address_claimed_by_other_site(\"slug_pending\", candidate, oid):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_first_publish_backs_off_when_a_rename_reserves_the_name_mid_write"
+    ]
+  },
+  {
+    "label": "the reserve's undo is dropped, so a rename that lost the race still holds the pending name",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await coll.update_one({\"_id\": site.id, \"slug_pending\": normalized}, {\"$set\": previous})",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_reserve_backs_off_when_a_first_publish_claims_the_name_mid_write"
+    ]
+  },
+  {
+    "label": "the slug_pending index is not unique, so two sites reserving one address at once both win",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "                [(\"slug_pending\", 1)],\r\n                unique=True,",
+    "replace": "                [(\"slug_pending\", 1)],\r\n                unique=False,",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_two_sites_reserving_one_name_at_once_exactly_one_wins"
+    ]
+  },
+  {
+    "label": "the slug_pending index loses its partial filter, so every site without a pending rename collides on null and the second site ever created fails to insert",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "                partialFilterExpression={\"slug_pending\": {\"$type\": \"string\"}},",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+    ]
+  },
+  {
+    "label": "a pending name that appeared in the account is deployed over, so wrangler replaces a Worker the site does not own",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            await _refuse_taken_pending_name(rename.slug_pending)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_pending_name_that_appeared_in_the_account_is_refused"
+    ]
+  },
+  {
+    "label": "the publish ignores slug_pending, so a reserved rename never goes live",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            deploy_name = rename.slug_pending\n",
+    "replace": "            deploy_name = await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id)\n",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_rename_moves_the_worker_and_both_domains"
+    ]
+  },
+  {
+    "label": "the new name is not written before the post-deploy save, so the full-document save rolls the rename back",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        {\"$set\": {\"slug\": new_name, \"worker_name\": new_name, \"url\": url, \"slug_pending\": None}},",
+    "replace": "        {\"$set\": {\"slug_pending\": None}},",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_rename_moves_the_worker_and_both_domains"
+    ]
+  },
+  {
+    "label": "a failed old-Worker delete fails the publish after the site already moved",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    except Exception:  # noqa: BLE001 - cleanup only; the caller's outcome stands",
+    "replace": "    except ZeroDivisionError:  # noqa: BLE001 - cleanup only; the caller's outcome stands",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_failed_old_worker_delete_does_not_fail_the_publish"
+    ]
+  },
+  {
+    "label": "the availability check ignores the account's Worker scripts, so a name another product uses reads as free",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if slug in await account_script_names() and (own is None or site_worker_name(own) != slug):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_worker_in_the_account_is_taken"
+    ]
+  },
+  {
+    "label": "the route re-point uses POST, which Cloudflare refuses with 10020 for a pattern that already has a route",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "            resp = await client.put(url, json={\"pattern\": pattern, \"script\": script})",
+    "replace": "            resp = await client.post(url, json={\"pattern\": pattern, \"script\": script})",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_update_worker_route_puts_the_route_in_place"
+    ]
+  },
+  {
+    "label": "the availability check has no rate limit, so it is a free oracle for which site addresses exist",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "    _rl: None = Depends(rate_limit_slug_check),\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_http_slug_available_is_rate_limited_per_user"
+    ]
+  },
+  {
+    "label": "cancelling a pending rename does nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site = await _load(workspace_id, site_id)\n    if site.slug_pending is not None:\n        await site.set({\"slug_pending\": None})\n        site = await _load(workspace_id, site_id)",
+    "replace": "    site = await _load(workspace_id, site_id)",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_delete_cancels_a_pending_rename"
+    ]
+  }
+]

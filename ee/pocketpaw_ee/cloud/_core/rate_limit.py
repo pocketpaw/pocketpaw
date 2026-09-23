@@ -9,6 +9,12 @@ single authenticated actor is bounded even when the IP bucket isn't.
 In-memory backing is per-process. A multi-instance backend needs the
 Redis-backed Wave 3 limiter; until then a single-instance deploy is the
 assumption.
+
+Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``rate_limit_slug_check``,
+a per-user bucket (30/min) on ``GET /sites/slug-available``. The check reads Mongo
+and the Cloudflare account listing on every keystroke of an address field, and
+it answers "is this name taken" for names in any workspace, so it must not be a
+free enumeration oracle.
 """
 
 from __future__ import annotations
@@ -37,6 +43,12 @@ _invite_resend_limiter = RateLimiter(rate=5.0 / 1800.0, capacity=5)
 # desktop client turns a callback into its first token, so there is no actor
 # to key on yet.
 _social_exchange_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
+
+
+# 30 address-availability checks per minute per user. A rename field checks as the
+# owner types, so the burst is generous; the refill still stops a script walking the
+# namespace to learn which site addresses exist.
+_slug_check_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 
 
 def _client_ip(request: Request) -> str:
@@ -142,8 +154,18 @@ async def rate_limit_invite_resend(
         )
 
 
+async def rate_limit_slug_check(ctx: RequestContext = Depends(request_context)) -> None:
+    """Per-user bucket guarding GET /sites/slug-available (VS-4)."""
+    if not _slug_check_limiter.check(f"slug-check:{ctx.user_id}").allowed:
+        raise RateLimited(
+            "sites.slug_check_rate_limited",
+            "Too many address checks - wait a moment and try again.",
+        )
+
+
 __all__ = [
     "consume_invite_create_tokens",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
+    "rate_limit_slug_check",
 ]

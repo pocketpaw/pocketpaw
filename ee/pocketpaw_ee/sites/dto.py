@@ -13,6 +13,11 @@
 # and is revoked by rotation. ``SiteResponse`` has carried it since RFC 12 for
 # the same reason. The token above is the only secret on this module.
 #
+# Updated 2026-09-23 (VS-4, feat/sites-rename): ``SiteResponse`` carries ``slug`` (the
+# address the site serves at) and ``slug_pending`` (the address it moves to on its next
+# publish). Added ``SlugAvailability`` (``GET /sites/slug-available``) and
+# ``SlugRenameRequest`` (``PUT /sites/{id}/slug``).
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
 # ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
 # ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a
@@ -308,6 +313,12 @@ class SiteResponse(BaseModel):
     deployed: bool
     signed_key: str
     url: str = ""
+    # VS-4: the name-based address this site serves at (``acme-bakery``), or None for a
+    # site still on ``paw-site-<id>``.
+    slug: str | None = None
+    # VS-4: the address a rename reserved, which goes live on the site's NEXT publish.
+    # None when no rename is waiting.
+    slug_pending: str | None = None
     # SE-2b: the builder origin the site was published with, or "" for a normal
     # (non-editable) site. Non-empty means the page carries the edit-bridge.
     builder_origin: str = ""
@@ -550,6 +561,30 @@ class SiteDeleteStatusResponse(BaseModel):
     #: it is NOT stored on the document the cascade deletes.
     delete_export_id: str = ""
     delete_job_id: str | None = None
+
+
+class SlugAvailability(BaseModel):
+    """``GET /sites/slug-available``: may this address be taken, and if not, why.
+
+    ``normalized`` is what the raw input becomes (``Acme Bakery!`` -> ``acme-bakery``)
+    and is what ``PUT /sites/{id}/slug`` would reserve. ``reason`` is None when
+    ``available``; otherwise ``invalid`` (shape), ``reserved`` (a name the platform
+    keeps, including anything under ``paw-``), ``taken`` (another site has it or is
+    moving to it, or a Worker by that name exists) or ``held`` (another workspace gave
+    it up within the last 30 days). ``suggestion`` is a free alternative, when one is
+    found."""
+
+    available: bool
+    normalized: str
+    reason: Literal["invalid", "reserved", "taken", "held"] | None = None
+    suggestion: str | None = None
+
+
+class SlugRenameRequest(BaseModel):
+    """``PUT /sites/{id}/slug``: the address to move this site to on its next publish.
+    Raw input; the service normalizes it exactly as the availability check does."""
+
+    slug: str = Field(..., max_length=200)
 
 
 class SiteMetadataUpdate(BaseModel):

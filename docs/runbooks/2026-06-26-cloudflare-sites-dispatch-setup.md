@@ -8,6 +8,8 @@ Updated 2026-09-23 (VS-2, feat/sites-first-publish-slug): added "Site addresses
 (workers mode)" -- new sites publish at a name-based workers.dev address, existing
 sites keep theirs. Same day (review): a name the site claimed itself is not refused
 when its script already exists, and the account check needs no zone id.
+Updated 2026-09-23 (VS-4, feat/sites-rename): "Site addresses" now covers renaming --
+it goes live on the next publish, the old name is held 30 days, 3 requests a day.
 -->
 
 # Runbook — Cloudflare Paw Sites dispatch go-live
@@ -211,6 +213,35 @@ its public address: `https://<worker name>.<account subdomain>.workers.dev`.
   live address would break every link to it and every custom-domain route pointing at
   its Worker.
 - The WfP lane is unchanged: its script is still the bare site id.
+
+### Renaming a site's address
+
+**Added 2026-09-23.** An owner can move a published site to a new address
+(`PUT /sites/{site_id}/slug`, see `docs/api-reference.md`). Legacy `paw-site-<id>`
+sites can rename too.
+
+- **It goes live on the site's NEXT publish, not immediately.** A live build cannot be
+  redeployed without rebuilding the draft, so the request only reserves the name
+  (`Site.slug_pending`, unique like `slug`). Until the owner publishes again the site
+  keeps serving at its current address. `DELETE /sites/{site_id}/slug/pending` cancels.
+- **What that publish does:** deploys the Worker under the new name, then points every
+  custom domain's Worker route at it **in place** (`PUT` on the existing route id; a
+  second route for the same pattern is refused by Cloudflare with code 10020), then
+  records the new name and deletes the old Worker. If a route cannot be moved, the ones
+  already moved are pointed back, the new Worker is deleted, the rename stays pending,
+  and the publish fails; the old address keeps serving. If deleting the old Worker
+  fails, the publish still succeeds and a WARNING is logged; remove it by hand.
+- **If a Worker with the pending name has appeared in the account** since the rename
+  was reserved, the publish is refused (`409 sites.slug_taken`) rather than overwriting
+  it. The owner cancels the rename or picks another name.
+- **The old address is held for 30 days** (`released_slugs`). No other workspace can
+  take it in that time; the same workspace can take it back. `paw-site-<id>` names are
+  never held (nobody else can claim them anyway).
+- **At most 3 accepted rename requests per site in any 24 hours** (`429
+  sites.slug_rate_limited`). Asking for the current address (which clears a pending
+  rename) or for the already-pending one does not count; a cancelled request does.
+- The site's old workers.dev host stays in its `allowed_origins`. It no longer serves,
+  so this grants nothing, but it is not cleaned up.
 
 ## Custom domains
 

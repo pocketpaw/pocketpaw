@@ -16,6 +16,13 @@
 # must keep calling the service's resolve-or-buy layer rather than the mint
 # beneath it. Its section comment at the end of the file is the full contract.
 #
+# Updated 2026-09-23 (VS-4, feat/sites-rename): three address endpoints.
+# ``GET /sites/slug-available`` (fabric.read, 30/min per user) says whether an address
+# is free and suggests one when it is not; ``PUT /sites/{id}/slug`` (fabric.write)
+# reserves a rename that goes live on the site's next publish; ``DELETE
+# /sites/{id}/slug/pending`` cancels it. The GET is registered before every
+# ``/sites/{site_id}/...`` route so the path never reads "slug-available" as an id.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): four endpoints for
 # moving a site to another workspace, appended at end-of-file.
 # POST/DELETE ``/sites/{site_id}/transfer`` are the SOURCE half (offer, withdraw);
@@ -288,6 +295,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
 from pocketpaw_ee.sites import import_service, ownership
 from pocketpaw_ee.sites import service as sites_service
@@ -338,6 +346,8 @@ from pocketpaw_ee.sites.dto import (
     SiteTransferOfferRequest,
     SiteTransferResponse,
     SiteVersionResponse,
+    SlugAvailability,
+    SlugRenameRequest,
     VersionHistoryResponse,
 )
 from pocketpaw_ee.versions import service as versions_service
@@ -738,6 +748,53 @@ async def import_site_from_url(
 @router.get("/sites", response_model=list[SiteResponse])
 async def list_sites(ctx: RequestContext = Depends(request_context)) -> list[SiteResponse]:
     return await sites_service.list_for_workspace(ctx.workspace_id)
+
+
+@router.get("/sites/slug-available", response_model=SlugAvailability)
+async def slug_available(
+    slug: str = Query(..., max_length=200),
+    site_id: str | None = Query(None),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+    _rl: None = Depends(rate_limit_slug_check),
+) -> SlugAvailability:
+    """Is this address free? ``slug`` is raw input; the answer carries what it
+    normalizes to, why it is not free (``invalid`` | ``reserved`` | ``taken`` |
+    ``held``) and a free suggestion. With ``site_id`` that site's own current and
+    pending address read as available; a site outside the workspace is a 404."""
+    return await sites_service.check_slug_availability(
+        workspace_id=ctx.workspace_id, raw=slug, site_id=site_id
+    )
+
+
+@router.put("/sites/{site_id}/slug", response_model=SiteResponse)
+async def rename_site_slug(
+    site_id: str,
+    body: SlugRenameRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Reserve a new address for this site. It goes live on the NEXT publish, which
+    moves the Worker and every custom domain to it; until then the site serves at its
+    current address and the response shows the new one as ``slug_pending``.
+
+    422 ``sites.slug_invalid``; 409 ``sites.slug_reserved`` / ``sites.slug_taken`` /
+    ``sites.slug_held`` / ``sites.slug_unsupported_lane`` / ``sites.slug_needs_publish``
+    / ``sites.slug_changed``; 429 ``sites.slug_rate_limited`` (3 a day per site); 404
+    for a site outside the workspace."""
+    return await sites_service.reserve_slug_rename(
+        workspace_id=ctx.workspace_id, site_id=site_id, raw=body.slug
+    )
+
+
+@router.delete("/sites/{site_id}/slug/pending", response_model=SiteResponse)
+async def cancel_site_slug_rename(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Cancel a waiting rename. Idempotent; the site keeps its current address."""
+    return await sites_service.cancel_slug_rename(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
 @router.get("/sites/by-pocket/{pocket_id}/preview", response_model=SitePreviewResponse)

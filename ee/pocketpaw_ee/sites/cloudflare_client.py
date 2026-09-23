@@ -4,6 +4,13 @@
 #     (one synchronous call per site; live on 200; no per-account script cap),
 #     and DELETE it again on teardown; see put_worker / delete_worker.
 #
+# Updated 2026-09-23 (VS-4 -- rename a site's address): added ``update_worker_route``,
+# the ``PUT`` that points an existing route at a different Worker. A rename moves a
+# site onto a new Worker name, and its custom domains' routes must follow. POSTing a
+# second route for the same pattern is refused by Cloudflare (409, code 10020 "a route
+# with the same pattern already exists"), and delete-then-create leaves the domain
+# unrouted in between, so the route is updated in place and keeps its id.
+#
 # Updated 2026-09-23 (VS-2 -- name-based addresses): added ``list_account_scripts``,
 # the names of every account-level Worker script. A new ``workers`` site now claims a
 # Worker name built from its own name, and a name already taken in the account (by
@@ -554,6 +561,20 @@ class CloudflareClient:
                 "Cloudflare accepted the Worker route but returned no id — it cannot "
                 "be recorded, and an unrecorded route cannot be removed later.",
             ) from exc
+
+    async def update_worker_route(self, route_id: str, *, pattern: str, script: str) -> None:
+        """Point an existing Worker route at ``script``, keeping its id and pattern.
+
+        ``PUT /zones/{zone}/workers/routes/{id}``. The rename apply step uses it to move
+        a custom domain from a site's old Worker to its new one. A second ``POST`` with
+        the same pattern is a 10020 duplicate-route error, and delete-then-create would
+        leave the domain serving nothing in between. Fails closed like every call here:
+        a non-2xx (including a 404 for a route that is gone) raises, because the caller
+        has to know which routes actually moved in order to roll them back."""
+        url = f"{_CF_API}/zones/{self._zone_id}/workers/routes/{route_id}"
+        async with self._client() as client:
+            resp = await client.put(url, json={"pattern": pattern, "script": script})
+        self._unwrap(resp)
 
     async def delete_worker_route(self, route_id: str) -> None:
         """Remove a Worker route. Idempotent on a 404, for the same reason

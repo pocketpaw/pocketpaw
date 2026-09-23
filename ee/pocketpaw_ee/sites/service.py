@@ -1,6 +1,23 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-23 (VS-4, feat/sites-rename): an owner can check whether an address
+# is free (``check_slug_availability``) and rename a site's address
+# (``reserve_slug_rename`` / ``cancel_slug_rename``). A rename goes live on the site's
+# NEXT publish: nothing can redeploy a live build without rebuilding the draft, so the
+# request only RESERVES the name in ``Site.slug_pending`` (partial unique index), capped
+# at 3 accepted requests per site per rolling 24h. ``_deploy_site_doc``'s workers branch
+# then deploys under the pending name, re-points every custom-domain route to it with
+# an in-place ``PUT`` (a second route for the same pattern is a Cloudflare 10020), and
+# only then records the new name, deletes the old Worker (warn-only) and holds a real
+# old slug for 30 days (``ReleasedSlug``). A failed re-point puts the routes back,
+# deletes the new Worker and keeps ``slug_pending``; the old site keeps serving. A
+# pending name that shows up in the account by deploy time is refused, not overwritten.
+# ``slug`` vs ``slug_pending`` uniqueness spans two fields, which no index covers, so
+# both writers (the rename reserve and the first-publish claim) write, then re-read the
+# other field, and undo on a hit -- see ``_address_claimed_by_other_site``. The claim
+# now also skips another site's pending name and another workspace's held name.
+#
 # Updated 2026-09-23 (VS-2 review): the pre-deploy guard skips a name this row claimed
 # itself (``slug == worker_name``). The claim already refused every name the account
 # listed, so a script found later under it is this site's own, left by a first deploy
@@ -1144,6 +1161,7 @@ from pocketpaw_ee.cloud._core.errors import (
     Internal,
     NotFound,
     ProjectDownloadNotEntitled,
+    RateLimited,
     ValidationError,
     with_cause,
 )
@@ -1185,6 +1203,7 @@ from pocketpaw_ee.sites.dto import (
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
+    SlugAvailability,
 )
 from pocketpaw_ee.sites.engines import (
     content_key,
@@ -2294,6 +2313,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         deployed=doc.deployed,
         signed_key=doc.signed_key,
         url=doc.url,
+        # VS-4: the address the site serves at, and the one it moves to next publish.
+        slug=getattr(doc, "slug", None),
+        slug_pending=getattr(doc, "slug_pending", None),
         # SE-2b: surface whether the site is editable (non-empty = carries the
         # edit-bridge) so the UI can show/hide the inline-edit affordance.
         builder_origin=getattr(doc, "builder_origin", ""),
@@ -3776,15 +3798,36 @@ async def _deploy_site_doc(
         )
         if prior_name is not None:
             await _refuse_foreign_worker(prior_name)
-        # VS-1: the Worker this site already lives under, read from its row, so a
-        # re-publish overwrites that Worker rather than deploying a second one.
-        url = await deploy_w(
-            site_id,
-            build.project_dir,
-            engine=engine,
-            analytics_entitled=counts_pageviews,
-            worker_name=await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id),
-        )
+        # VS-4: a live site with a reserved rename deploys under the NEW name this time.
+        # The reserve checked the account, but minutes or days may have passed, so a
+        # script that appeared under the pending name since is refused, not overwritten.
+        rename = await _pending_rename(workspace_id=workspace_id, site_id=site_id)
+        if rename is not None:
+            await _refuse_taken_pending_name(rename.slug_pending)
+            deploy_name = rename.slug_pending
+        else:
+            # VS-1: the Worker this site already lives under, read from its row, so a
+            # re-publish overwrites that Worker rather than deploying a second one.
+            deploy_name = await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id)
+        try:
+            url = await deploy_w(
+                site_id,
+                build.project_dir,
+                engine=engine,
+                analytics_entitled=counts_pageviews,
+                worker_name=deploy_name,
+            )
+        except Exception:
+            if rename is not None:
+                # Whatever wrangler created under the new name before failing is ours
+                # (the name was absent from the account a moment ago). Removing it keeps
+                # the next publish's pending-name check from refusing our own residue.
+                await _discard_worker(deploy_name, reason="a failed rename deploy")
+            raise
+        if rename is not None:
+            # Moves the custom domains, then records the new name. Raises (after
+            # putting every route back) when a route cannot move; the old site serves on.
+            await _apply_rename(rename, new_name=deploy_name, url=url)
         # SA-4: and read back what the deploy ACTUALLY did, from the artifact rather
         # than from ``counts_pageviews``. The counting rule has three parts — the plan
         # (above), the operator kill switch, and whether the engine emits its own
@@ -4311,6 +4354,13 @@ async def _reserve_first_publish_slug(
         # the same job when this read misses, so no test can tell them apart.
         if await _SiteDoc.find_one({"slug": candidate}) is not None:
             continue
+        # VS-4: nor one another site is renaming to, nor one another workspace gave up
+        # within the hold window. Pre-checks again; the verify after the write is what
+        # closes the slug / slug_pending race.
+        if await _SiteDoc.find_one({"slug_pending": candidate}) is not None:
+            continue
+        if await _slug_held_from(candidate, workspace_id):
+            continue
         try:
             if doc is None:
                 await _SiteDoc(
@@ -4345,6 +4395,18 @@ async def _reserve_first_publish_slug(
             if doc is not None and doc.worker_name:
                 return None
             continue
+        # VS-4: write-then-verify against the OTHER field. A rename reserving this name
+        # as ``slug_pending`` is not seen by the ``slug`` index; see
+        # ``_address_claimed_by_other_site`` for why both sides re-reading after their
+        # own write means at most one of them keeps the name.
+        if await _address_claimed_by_other_site("slug_pending", candidate, oid):
+            await _SiteDoc.get_pymongo_collection().update_one(
+                {"_id": oid, "slug": candidate},
+                {"$set": {"slug": None, "worker_name": None}},
+            )
+            doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+            continue
+        await _release_hold(candidate)
         logger.info("sites: site %s claimed the address %s", site_id, candidate)
         return None
 
@@ -4374,6 +4436,369 @@ async def _refuse_foreign_worker(name: str) -> None:
             "sites.worker_name_conflict",
             f"A Worker named {name!r} already exists in the Cloudflare account, and "
             "this site has never deployed under it. Refusing to overwrite it.",
+        )
+
+
+# ── VS-4: renaming a site's address ──────────────────────────────────────────
+
+# How many alternatives ``check_slug_availability`` tries before giving up on a
+# suggestion. Each costs a Mongo read or two, and this answers a keystroke.
+_SLUG_SUGGESTION_TRIES = 8
+# At most this many ACCEPTED rename requests per site in any rolling window.
+_SLUG_RENAME_LIMIT = 3
+_SLUG_RENAME_WINDOW = timedelta(hours=24)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Mongo hands back naive UTC datetimes; compare them as aware ones."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _live_hold(slug: str) -> Any | None:
+    """The unexpired ``ReleasedSlug`` hold on ``slug``, or None. An expired hold is
+    the same as no hold: the row may linger until a claim deletes it."""
+    from pocketpaw_ee.cloud.models.released_slug import ReleasedSlug
+
+    row = await ReleasedSlug.find_one({"slug": slug})
+    if row is None or _as_utc(row.hold_until) <= datetime.now(UTC):
+        return None
+    return row
+
+
+async def _slug_held_from(slug: str, workspace_id: str) -> bool:
+    """True when another workspace gave ``slug`` up within its hold window. The
+    workspace that released it may take it back at any time."""
+    hold = await _live_hold(slug)
+    return hold is not None and hold.workspace_id != workspace_id
+
+
+async def _release_hold(slug: str) -> None:
+    """Drop any hold on ``slug`` once a site has claimed it (own-workspace or
+    expired; a live hold for another workspace never reaches a claim)."""
+    from pocketpaw_ee.cloud.models.released_slug import ReleasedSlug
+
+    await ReleasedSlug.get_pymongo_collection().delete_many({"slug": slug})
+
+
+async def _address_claimed_by_other_site(field: str, slug: str, oid: ObjectId) -> bool:
+    """Does a site other than ``oid`` hold ``slug`` in ``field`` (``slug`` or
+    ``slug_pending``)? The VERIFY half of write-then-verify.
+
+    An address is unique across TWO fields: a site's live ``slug`` and every site's
+    ``slug_pending``. Each field has its own partial unique index, which settles two
+    writers of the same field, but no index spans both, so a rename reserving ``X`` as
+    pending and a first publish claiming ``X`` as its slug could both succeed. Each of
+    those writers therefore writes its own field FIRST, then calls this for the other
+    field, and undoes its write and backs off on a hit. Because every writer reads only
+    after its own write has landed, in any interleaving the later reader sees the
+    earlier writer: at most one keeps the name. Both may back off (each saw the other),
+    which is safe -- the rename answers 409 and the claim tries its next candidate.
+
+    Reads the raw collection, fresh, and never from a cache.
+    """
+    # global-read: workers.dev is one namespace for the whole account, so an address
+    # is taken whichever workspace holds it.
+    found = await _SiteDoc.get_pymongo_collection().find_one(
+        {field: slug, "_id": {"$ne": oid}}, {"_id": 1}
+    )
+    return found is not None
+
+
+async def _slug_unavailable_reason(slug: str, *, workspace_id: str, own: Any | None) -> str | None:
+    """Why ``slug`` (already normalized) cannot be this site's address, or None.
+
+    ``invalid`` / ``reserved`` from ``slug.validate``; ``taken`` when another site
+    serves at it, is renaming to it, or deploys under it, or a Worker by that name is
+    in the Cloudflare account; ``held`` when another workspace released it within 30
+    days. ``own`` (the site asking, when there is one) may keep its own current or
+    pending name."""
+    from pocketpaw_ee.sites import slug as slug_mod
+    from pocketpaw_ee.sites.workers_deploy import site_worker_name
+
+    error = slug_mod.validate(slug)
+    if error is not None:
+        return error.reason
+    if own is not None and slug in (own.slug, own.slug_pending):
+        return None
+    query: dict[str, Any] = {
+        "$or": [{"slug": slug}, {"slug_pending": slug}, {"worker_name": slug}],
+    }
+    if own is not None:
+        query["_id"] = {"$ne": own.id}
+    # global-read: see ``_address_claimed_by_other_site``.
+    if await _SiteDoc.get_pymongo_collection().find_one(query, {"_id": 1}) is not None:
+        return "taken"
+    if slug in await account_script_names() and (own is None or site_worker_name(own) != slug):
+        return "taken"
+    if await _slug_held_from(slug, workspace_id):
+        return "held"
+    return None
+
+
+async def check_slug_availability(
+    *, workspace_id: str, raw: str, site_id: str | None = None
+) -> SlugAvailability:
+    """``GET /sites/slug-available``: normalize ``raw`` and say whether it is free.
+
+    With ``site_id`` (tenant-scoped, 404 otherwise) the site's own current and pending
+    names read as available. When not available, ``suggestion`` is the first free name
+    from ``slug.candidates``, looking at no more than ``_SLUG_SUGGESTION_TRIES``."""
+    from pocketpaw_ee.sites import slug as slug_mod
+
+    own = await _load(workspace_id, site_id) if site_id else None
+    normalized = slug_mod.normalize(raw)
+    reason = await _slug_unavailable_reason(normalized, workspace_id=workspace_id, own=own)
+    if reason is None:
+        return SlugAvailability(available=True, normalized=normalized)
+    suggestion = None
+    for tries, candidate in enumerate(slug_mod.candidates(normalized)):
+        if tries >= _SLUG_SUGGESTION_TRIES:
+            break
+        if candidate == normalized:
+            continue
+        if await _slug_unavailable_reason(candidate, workspace_id=workspace_id, own=own) is None:
+            suggestion = candidate
+            break
+    return SlugAvailability(
+        available=False, normalized=normalized, reason=reason, suggestion=suggestion
+    )
+
+
+_SLUG_REFUSALS = {
+    "taken": ("sites.slug_taken", "That address is already taken."),
+    "held": (
+        "sites.slug_held",
+        "That address was released by another workspace recently and is on hold.",
+    ),
+}
+
+
+async def reserve_slug_rename(*, workspace_id: str, site_id: str, raw: str) -> SiteResponse:
+    """``PUT /sites/{id}/slug``: reserve a new address, applied on the NEXT publish.
+
+    * ``raw`` normalizes like the availability check; an invalid name is a 422
+      (``sites.slug_invalid``), a reserved one a 409 (``sites.slug_reserved``), a taken
+      or held one a 409 (``sites.slug_taken`` / ``sites.slug_held``).
+    * Workers lane only (``sites.slug_unsupported_lane``, 409): the address IS the
+      Worker name there, and nothing else has one. And only for a site that has
+      published (``sites.slug_needs_publish``, 409): a draft gets its address from
+      its name on the first publish.
+    * The current slug clears any pending rename; the current pending slug is a no-op.
+      Neither counts against the limit, which is 3 accepted requests per site per
+      rolling 24h (``sites.slug_rate_limited``, 429).
+    """
+    from pocketpaw_ee.sites import slug as slug_mod
+
+    site = await _load(workspace_id, site_id)
+    if _deploy_mode() != "workers":
+        raise ConflictError(
+            "sites.slug_unsupported_lane",
+            "Site addresses can only be changed on the workers.dev deploy lane.",
+        )
+    if not (site.url or site.deployed):
+        raise ConflictError(
+            "sites.slug_needs_publish",
+            "Publish the site first. A new site takes its address from its name on "
+            "its first publish.",
+        )
+    normalized = slug_mod.normalize(raw)
+    error = slug_mod.validate(normalized)
+    if error is not None:
+        if error.reason == "invalid":
+            raise ValidationError("sites.slug_invalid", error.message)
+        raise ConflictError("sites.slug_reserved", error.message)
+
+    if normalized == site.slug:
+        # Back to the name it already has: cancel whatever rename was waiting.
+        if site.slug_pending is not None:
+            await site.set({"slug_pending": None})
+        return _to_response(await _load(workspace_id, site_id))
+    if normalized == site.slug_pending:
+        return _to_response(site)
+
+    now = datetime.now(UTC)
+    recent = [t for t in site.slug_changes if _as_utc(t) > now - _SLUG_RENAME_WINDOW]
+    if len(recent) >= _SLUG_RENAME_LIMIT:
+        raise RateLimited(
+            "sites.slug_rate_limited",
+            f"A site's address can be changed {_SLUG_RENAME_LIMIT} times a day. "
+            "Try again tomorrow.",
+        )
+    reason = await _slug_unavailable_reason(normalized, workspace_id=workspace_id, own=site)
+    if reason is not None:
+        raise ConflictError(*_SLUG_REFUSALS[reason])
+
+    coll = _SiteDoc.get_pymongo_collection()
+    previous = {"slug_pending": site.slug_pending, "slug_changes": list(site.slug_changes)}
+    try:
+        # Conditional on the pending name this request read, so two renames of one
+        # site cannot both think they replaced the same value.
+        result = await coll.update_one(
+            {"_id": site.id, "workspace": workspace_id, "slug_pending": site.slug_pending},
+            {"$set": {"slug_pending": normalized, "slug_changes": [*recent, now]}},
+        )
+    except DuplicateKeyError:
+        # Another site reserved the same name between the check and this write; the
+        # ``slug_pending`` index let exactly one of us have it.
+        raise ConflictError(*_SLUG_REFUSALS["taken"]) from None
+    if result.matched_count == 0:
+        raise ConflictError(
+            "sites.slug_changed", "This site's address changed while saving. Try again."
+        )
+    if await _address_claimed_by_other_site("slug", normalized, site.id):
+        # A first publish claimed it as its live slug in the same instant. Undo only
+        # our own write (still ours if slug_pending is still this name) and back off.
+        await coll.update_one({"_id": site.id, "slug_pending": normalized}, {"$set": previous})
+        raise ConflictError(*_SLUG_REFUSALS["taken"])
+    logger.info("sites: site %s reserved the address %s", site_id, normalized)
+    # no-event: no Site event type exists; update_site_metadata emits none either.
+    return _to_response(await _load(workspace_id, site_id))
+
+
+async def cancel_slug_rename(*, workspace_id: str, site_id: str) -> SiteResponse:
+    """``DELETE /sites/{id}/slug/pending``: drop a waiting rename. Idempotent. The
+    request it cancels still counts toward the daily limit."""
+    site = await _load(workspace_id, site_id)
+    if site.slug_pending is not None:
+        await site.set({"slug_pending": None})
+        site = await _load(workspace_id, site_id)
+    # no-event: no Site event type exists; update_site_metadata emits none either.
+    return _to_response(site)
+
+
+async def _pending_rename(*, workspace_id: str, site_id: str) -> Any | None:
+    """The row when this publish should move the site to ``slug_pending``: a rename is
+    waiting and the site has deployed before (a draft never gets one, see
+    ``reserve_slug_rename``). None otherwise."""
+    from pocketpaw_ee.sites.workers_deploy import site_worker_name
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    if doc is None or not doc.slug_pending or not (doc.url or doc.deployed):
+        return None
+    if doc.slug_pending == site_worker_name(doc):
+        return None
+    return doc
+
+
+async def _refuse_taken_pending_name(name: str) -> None:
+    """Refuse to deploy a rename onto a Worker name that exists in the account now.
+
+    Unlike VS-2's claimed-name exemption, a renaming site already has a live Worker
+    under its OLD name, so a script under the pending name is not the residue of its
+    own first deploy. It is either a Worker someone created since the reserve, which
+    ``wrangler deploy`` would silently replace, or what a failed rename left when
+    even its cleanup failed. Overwriting the first is unrecoverable; the second costs
+    the owner one cancel. So refuse, keep ``slug_pending``, and say how to get out.
+    Reads the account FRESH, and fails open like the listing."""
+    if name in await account_script_names(refresh=True):
+        raise ConflictError(
+            "sites.slug_taken",
+            f"A Worker named {name!r} now exists in the Cloudflare account, so this "
+            "site cannot move to that address. Cancel the pending rename or choose "
+            "another address, then publish again.",
+        )
+
+
+async def _discard_worker(name: str, *, reason: str) -> bool:
+    """Delete an account-level Worker, best effort. Logs WARNING and returns False on
+    any failure: every caller is cleaning up after something that already happened."""
+    try:
+        client = _cf_account_client()
+        if client is None:
+            raise RuntimeError("no Cloudflare account credentials")
+        await client.delete_account_script(name)
+    except Exception:  # noqa: BLE001 - cleanup only; the caller's outcome stands
+        logger.warning(
+            "sites: could not delete the Worker %s after %s; it may need removing by hand",
+            name,
+            reason,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
+    """Finish a rename the deploy just shipped under ``new_name`` (VS-4).
+
+    The order is the contract:
+      1. Re-point every custom-domain route to the new Worker, IN PLACE (``PUT``,
+         same id and pattern). If any fails, put back the ones already moved, delete
+         the new Worker, and raise: the doc is untouched, ``slug_pending`` stays, and
+         the old Worker still answers every address. A route that cannot be put back
+         still points at the new Worker, so then the new Worker is KEPT (deleting it
+         would take that domain down) and the failure is logged at ERROR.
+      2. Record the new name on the row with a targeted write, BEFORE the post-deploy
+         upsert re-reads it, so that full-document save carries it instead of undoing it.
+      3. Delete the old Worker. Nothing routes to it any more; a failure only logs.
+      4. Hold a real old slug for 30 days. ``paw-site-<id>`` is never held.
+    """
+    from pocketpaw_ee.cloud.models.released_slug import HOLD_DAYS, ReleasedSlug
+    from pocketpaw_ee.sites import slug as slug_mod
+    from pocketpaw_ee.sites.workers_deploy import site_worker_name
+
+    old_name = site_worker_name(doc)
+    old_slug = doc.slug
+    routed = [d for d in doc.domains if d.cf_route_id]
+    moved: list[Any] = []
+    cf: Any = None
+    try:
+        if routed:
+            cf = _cf_client()
+        for dom in routed:
+            await cf.update_worker_route(
+                dom.cf_route_id, pattern=_route_pattern(dom.hostname), script=new_name
+            )
+            moved.append(dom)
+    except Exception:
+        restored = True
+        for dom in moved:
+            try:
+                await cf.update_worker_route(
+                    dom.cf_route_id, pattern=_route_pattern(dom.hostname), script=old_name
+                )
+            except Exception:  # noqa: BLE001 - keep restoring the rest
+                restored = False
+                logger.error(
+                    "sites: rename of site %s failed and route %s (%s) could not be "
+                    "pointed back at %s; it still targets %s",
+                    doc.id,
+                    dom.cf_route_id,
+                    dom.hostname,
+                    old_name,
+                    new_name,
+                    exc_info=True,
+                )
+        if restored:
+            await _discard_worker(new_name, reason="a failed rename re-point")
+        else:
+            logger.error(
+                "sites: keeping Worker %s because a custom domain still routes to it",
+                new_name,
+            )
+        raise
+
+    await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": doc.id},
+        {"$set": {"slug": new_name, "worker_name": new_name, "url": url, "slug_pending": None}},
+    )
+    await _release_hold(new_name)
+    logger.info("sites: site %s moved from %s to %s", doc.id, old_name, new_name)
+
+    await _discard_worker(old_name, reason="a rename")
+
+    if old_slug and not slug_mod.has_reserved_prefix(old_slug):
+        now = datetime.now(UTC)
+        await ReleasedSlug.get_pymongo_collection().replace_one(
+            {"slug": old_slug},
+            {
+                "slug": old_slug,
+                "site_id": str(doc.id),
+                "workspace_id": doc.workspace,
+                "released_at": now,
+                "hold_until": now + timedelta(days=HOLD_DAYS),
+            },
+            upsert=True,
         )
 
 
