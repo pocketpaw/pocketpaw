@@ -4,6 +4,12 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): added ``badge_hidden``, the
+# owner's per-site choice to hide the "Built with PocketPaw" badge. It is a
+# PREFERENCE, not an entitlement: the stamper drops the badge only when the site's
+# plan grants badge removal AND this is True, so a free site stays badged whatever
+# it says. Defaults True so every existing entitled site keeps shipping clean.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): added the
 # ``transfer_*`` lifecycle fields, ``transferred_at``, ``identity_workspace`` and
 # ``asset_source_prefixes``. Two of those carry the whole design and are worth
@@ -730,6 +736,14 @@ class Site(TimestampedDocument):
     # takes effect immediately. Defaults True (every existing site stays live), so
     # no migration.
     concierge_enabled: bool = True
+    # VS-3: the owner's "hide the PocketPaw badge" preference. Only half of the
+    # rule: ``sites.service._stamp_free_badge`` drops the badge when the site is
+    # ENTITLED to remove it (``SiteEntitlements.badge_required`` is False) AND this is
+    # True. On a free site it changes nothing. Defaults True, which is exactly
+    # today's behaviour for an entitled site, so a row without the field needs no
+    # migration. Written only through ``PATCH /sites/{id}/branding``, which refuses
+    # True with a 402 on a site that is not entitled.
+    badge_hidden: bool = True
     # Paw Bar concierge (D1 / SS-6): the opening line the glass bar renders. Rides
     # into the frame's ``window.__PAWBAR__`` config as ``greeting``; the glass app
     # reads it in a parallel slice and falls back to its own default when "".

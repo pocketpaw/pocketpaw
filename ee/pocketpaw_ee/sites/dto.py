@@ -16,6 +16,11 @@
 # and is revoked by rotation. ``SiteResponse`` has carried it since RFC 12 for
 # the same reason. The token above is the only secret on this module.
 #
+# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): added ``SiteBrandingUpdate``
+# (the ``PATCH /sites/{id}/branding`` body, one required ``badge_hidden`` bool) and
+# ``SiteResponse.badge_hidden``, so the builder can render the badge switch from
+# the same site read it already makes.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
 # ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
 # ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a
@@ -381,6 +386,12 @@ class SiteResponse(BaseModel):
     # "renews on the 14th" to somebody who cancelled is how a cancellation gets
     # made twice, or gets escalated as one that did not take.
     plan_cancels_at_period_end: bool = False
+    # VS-3: the owner's "hide the PocketPaw badge" preference, read straight off the
+    # doc. It is only the PREFERENCE: whether the published page actually carries
+    # the badge also depends on the plan (``GET /sites/{id}/entitlements`` ->
+    # ``badge_required``). A free site can read True here and still be badged. True
+    # for every row that predates the field, matching the model default.
+    badge_hidden: bool = True
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -598,6 +609,18 @@ class SiteMetadataUpdate(BaseModel):
         if v is not None and len(v) > 500:
             raise ValueError("description must be 500 characters or fewer")
         return v
+
+
+class SiteBrandingUpdate(BaseModel):
+    """PATCH body for a site's branding switches (VS-3).
+
+    One REQUIRED field rather than the three-way shape ``SiteMetadataUpdate`` uses:
+    there is a single switch, so an empty body has nothing to mean and is a 422.
+    ``badge_hidden=True`` needs a plan that grants badge removal (402 otherwise);
+    ``False`` is always accepted.
+    """
+
+    badge_hidden: bool
 
 
 class SitePreviewRefreshResponse(BaseModel):
