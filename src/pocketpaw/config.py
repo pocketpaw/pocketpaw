@@ -1234,6 +1234,29 @@ class Settings(BaseSettings):
             "the site being built at all."
         ),
     )
+    sites_source_gate_retroactive: bool = Field(
+        default=False,
+        description=(
+            "Apply ``sites_source_gate_enabled`` to pockets that ALREADY EXIST, "
+            "not only to ones created after it was switched on. "
+            "The cohort stamp (``Pocket.source_gated``) exists so that turning "
+            "the gate on never takes source away from somebody who already had "
+            "it. That default has a consequence: the gate shipped disabled, so "
+            "every pocket in existence was born outside the cohort, and turning "
+            "the master flag on therefore gates nothing that is already here — "
+            "free-tier sites keep serving their source. This is the second, "
+            "deliberate switch that closes that gap. "
+            "It is ANDed UNDER the master flag, never a replacement for it: with "
+            "``sites_source_gate_enabled`` off this does nothing at all. Both "
+            "flags stay reversible in both directions because neither writes to "
+            "the document — turn either one off and every grandfathered pocket "
+            "has its source back immediately, with no migration and no stored "
+            "state to unwind. "
+            "OFF by default. Taking a capability away from existing free-tier "
+            "customers is an operational decision, so it is switched on "
+            "deliberately rather than arriving with a deploy."
+        ),
+    )
     inspo_mcp_url: str = Field(
         default="",
         description=(
