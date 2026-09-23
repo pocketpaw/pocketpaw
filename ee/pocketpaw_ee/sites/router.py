@@ -22,6 +22,10 @@
 # reserves a rename that goes live on the site's next publish; ``DELETE
 # /sites/{id}/slug/pending`` cancels it. The GET is registered before every
 # ``/sites/{site_id}/...`` route so the path never reads "slug-available" as an id.
+# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): ``PATCH /sites/{id}/branding``
+# sets the per-site "hide the PocketPaw badge" preference, authorized exactly like
+# ``PATCH /sites/{id}/metadata`` (fabric.write, tenant-scoped). A site whose plan does
+# not remove the badge gets 402 ``billing.badge_removal_not_entitled``.
 #
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): four endpoints for
 # moving a site to another workspace, appended at end-of-file.
@@ -326,6 +330,7 @@ from pocketpaw_ee.sites.dto import (
     SiteAssetDeleteRequest,
     SiteAssetListResponse,
     SiteAssetResponse,
+    SiteBrandingUpdate,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -1362,6 +1367,27 @@ async def update_site_metadata(
     is a 404.
     """
     return await sites_service.update_site_metadata(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+    )
+
+
+@router.patch("/sites/{site_id}/branding", response_model=SiteResponse)
+async def update_site_branding(
+    site_id: str,
+    body: SiteBrandingUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Show or hide the "Built with PocketPaw" badge on this site (VS-3).
+
+    ``badge_hidden=true`` needs a plan that grants badge removal: a site that is not
+    entitled gets 402 ``billing.badge_removal_not_entitled`` and nothing is written.
+    ``badge_hidden=false`` is always accepted. Repeating the stored value is a no-op.
+
+    Authorized like ``PATCH /sites/{id}/metadata``: ``fabric.write`` in the caller's
+    workspace, tenant-scoped, so a missing or cross-tenant site is a 404.
+    """
+    return await sites_service.update_site_branding(
         workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )
 

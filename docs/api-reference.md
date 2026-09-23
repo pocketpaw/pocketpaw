@@ -8,6 +8,12 @@ Updated: 2026-09-23 (VS-4, feat/sites-rename) — added "Sites — Addresses and
 response. Written around the thing a client cannot infer: a rename is a reservation
 that goes live on the next publish, so the response keeps showing the old `slug`.
 
+Updated: 2026-09-23 (feat/sites-badge-switch, VS-3) — added "Sites — Hide the PocketPaw
+badge": `PATCH /sites/{site_id}/branding` and `badge_hidden` on the site response. Written
+around the two things a client cannot infer: the flag is a preference that only takes
+effect on a site whose plan removes the badge, and on a live site the change lands at the
+next publish rather than immediately.
+
 Updated: 2026-09-21 (feat/site-project-download-endpoint) — added "Sites — Download the
 project". Written around the three things a client cannot infer: the 402 covers two
 different customers (a floor site and a lapsed paid one) whose remedies differ, a Ripple
@@ -2652,6 +2658,63 @@ that time; yours can take it back. `paw-site-<id>` names are never held.
 
 Auth: `fabric.write`, tenant-scoped. Cancels a waiting rename. Idempotent: `200` with
 the site (`slug_pending: null`) whether or not one was waiting.
+
+## Sites — Hide the PocketPaw badge
+
+A free site ships with a "Built with PocketPaw" badge stamped into every page at publish
+time. A paid per-site plan may remove it, and `badge_hidden` is the owner's choice about
+whether to. Source: `ee/pocketpaw_ee/sites/router.py`, `ee/pocketpaw_ee/sites/service.py`
+(`update_site_branding`, `_stamp_free_badge`).
+
+**The badge is dropped only when both are true:** the site's plan grants badge removal
+(`badge_required: false` on `GET /sites/{site_id}/entitlements`) **and** `badge_hidden` is
+`true`. The flag can only add the badge back; it can never remove one the plan does not
+pay for. A lapsed paid site gets its badge back on its next publish whatever the flag says.
+
+Every site response (`GET /sites`, `GET /sites/{site_id}`, the publish response, and so
+on) now carries `badge_hidden: bool`. It defaults to `true`, and a site written before the
+field existed reads `true`, which is how an entitled site behaved before the switch.
+
+### `PATCH /sites/{site_id}/branding`
+
+Auth: `fabric.write`, tenant-scoped, same as `PATCH /sites/{site_id}/metadata`. A missing
+or cross-tenant site is `404`.
+
+Request:
+
+```json
+{ "badge_hidden": false }
+```
+
+`badge_hidden` is required; an empty body is `422`.
+
+Response `200`: the full site response, carrying the stored value.
+
+```json
+{ "id": "68b6f2c1a4d3e50012ab34cd", "name": "Bright Smile", "badge_hidden": false, "...": "..." }
+```
+
+| Status | Code | Means |
+|---|---|---|
+| `402` | `billing.badge_removal_not_entitled` | `badge_hidden: true` was asked for on a site whose plan does not remove the badge, **or** a paid tier whose subscription is not active. Nothing is written. The message says "upgrade" or "renew" accordingly. |
+| `404` | `site.not_found` | No such site in this workspace. |
+| `422` | — | Missing or non-boolean `badge_hidden`. |
+
+`badge_hidden: false` is always accepted. Sending the value the site already has is a
+no-op.
+
+The 402 uses the standard envelope, `{"error": {"code", "message"}}`. Read `error.code`
+to decide what to show and `error.message` to show it (see the note under "Sites —
+Download the project" on why `detail` is empty).
+
+**The change takes effect on the next publish.** The preference is stored immediately,
+but a live site keeps serving the page it was last published with until it is published
+again. There is no redeploy of the current build yet, because nothing stores the live
+build's inputs. Tell the owner this when they flip the switch on a published site.
+
+Self-hosted and OSS deployments have no billing: the `402` is skipped (`sites_enforced()`)
+and the flag is stored, but the stamper still badges any site whose plan does not remove
+the badge.
 
 ## Deleting a site
 

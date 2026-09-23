@@ -1,6 +1,9 @@
 # ee/pocketpaw_ee/sites/dto.py — request/response DTOs for the Sites control
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+# Updated: 2026-09-23 — SiteResponse carries ``foreign_origin`` + ``allowed_origins``
+# so the gallery can tell a connected site (Paw Bar on a customer-hosted page)
+# from a draft that was never published.
 #
 # ONE SHAPE HERE CARRIES A SECRET: ``OriginClaimResponse.token`` is the
 # domain-ownership proof the claiming workspace publishes on its own site. It
@@ -17,6 +20,10 @@
 # address the site serves at) and ``slug_pending`` (the address it moves to on its next
 # publish). Added ``SlugAvailability`` (``GET /sites/slug-available``) and
 # ``SlugRenameRequest`` (``PUT /sites/{id}/slug``).
+# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): added ``SiteBrandingUpdate``
+# (the ``PATCH /sites/{id}/branding`` body, one required ``badge_hidden`` bool) and
+# ``SiteResponse.badge_hidden``, so the builder can render the badge switch from
+# the same site read it already makes.
 #
 # Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
 # ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
@@ -389,6 +396,12 @@ class SiteResponse(BaseModel):
     # "renews on the 14th" to somebody who cancelled is how a cancellation gets
     # made twice, or gets escalated as one that did not take.
     plan_cancels_at_period_end: bool = False
+    # VS-3: the owner's "hide the PocketPaw badge" preference, read straight off the
+    # doc. It is only the PREFERENCE: whether the published page actually carries
+    # the badge also depends on the plan (``GET /sites/{id}/entitlements`` ->
+    # ``badge_required``). A free site can read True here and still be badged. True
+    # for every row that predates the field, matching the model default.
+    badge_hidden: bool = True
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -478,6 +491,15 @@ class SiteResponse(BaseModel):
     # not be read, or the icon was over the cap; the card falls back to the globe,
     # which is exactly the pre-existing card, so this is never a gate on anything.
     favicon_url: str | None = None
+    # A CONNECTED site: a Paw Bar concierge on a website the customer hosts
+    # themselves (``mint_foreign_site``). There is no Worker behind it, so
+    # ``deployed`` is False and ``url`` is "" for its whole life. Without this flag
+    # the gallery reads such a row as a draft that was never published and opens
+    # it in the builder over an empty pocket. ``allowed_origins`` names the hosts
+    # the embed answers on, which is what the card shows instead of a URL. Neither
+    # is a secret: the origins are public by construction.
+    foreign_origin: bool = False
+    allowed_origins: list[str] = Field(default_factory=list)
 
 
 class SiteExportResponse(BaseModel):
@@ -621,6 +643,18 @@ class SiteMetadataUpdate(BaseModel):
         if v is not None and len(v) > 500:
             raise ValueError("description must be 500 characters or fewer")
         return v
+
+
+class SiteBrandingUpdate(BaseModel):
+    """PATCH body for a site's branding switches (VS-3).
+
+    One REQUIRED field rather than the three-way shape ``SiteMetadataUpdate`` uses:
+    there is a single switch, so an empty body has nothing to mean and is a 422.
+    ``badge_hidden=True`` needs a plan that grants badge removal (402 otherwise);
+    ``False`` is always accepted.
+    """
+
+    badge_hidden: bool
 
 
 class SitePreviewRefreshResponse(BaseModel):

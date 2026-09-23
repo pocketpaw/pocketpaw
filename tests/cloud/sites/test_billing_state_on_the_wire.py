@@ -26,6 +26,9 @@
 #
 # Created 2026-08-22 (feat/site-entitlement-ui-state): new test module.
 #
+# Updated 2026-09-23: covers ``SiteResponse.foreign_origin`` / ``allowed_origins``
+# (a connected site must not read as an unpublished draft).
+#
 # Updated 2026-09-02 (feat/sites-analytics-entitlement-field, SA-5): covers
 # ``SiteEntitlementsResponse.analytics``. The headline case is the same shape as the
 # original defect above — a capability the UI branches on that the wire never sent —
@@ -116,6 +119,43 @@ async def _seed_site(
     )
     await doc.insert()
     return doc
+
+
+# ---------------------------------------------------------------------------
+# A connected site (Paw Bar on a customer-hosted page) says so on the wire
+# ---------------------------------------------------------------------------
+
+
+async def test_a_connected_site_says_it_is_connected_and_where(mongo_db):
+    """A foreign row is ``deployed=False`` with no URL forever. Without the flag the
+    gallery reads it as a never-published draft and opens the builder on it."""
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = Site(
+        workspace=ws,
+        pocket_id=pocket_id,
+        name="Acme",
+        script_name="",
+        owner="u1",
+        deployed=False,
+        signed_key="site_key_foreign",
+        foreign_origin=True,
+        allowed_origins=["www.acme.test"],
+    )
+    await doc.insert()
+
+    resp = sites_service._to_response(doc)
+
+    assert resp.foreign_origin is True
+    assert resp.allowed_origins == ["www.acme.test"]
+
+
+async def test_a_hosted_site_is_not_connected(mongo_db):
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(workspace_id=ws, pocket_id=pocket_id)
+
+    assert sites_service._to_response(doc).foreign_origin is False
 
 
 # ---------------------------------------------------------------------------
