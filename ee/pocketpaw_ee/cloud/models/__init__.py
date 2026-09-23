@@ -1,5 +1,11 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``ReleasedSlug`` (a site
+address given up by a rename, held 30 days for the workspace that released it)
+to the imports and ``get_all_documents()`` so the ``released_slugs`` collection
+is wired into ``init_beanie``. Kept out of ``__all__``: only
+``pocketpaw_ee.sites.service`` imports the doc class directly.
+
 Updated: 2026-08-29 (T2 "Audio/video transcription at ingest") — added
 ``FileTranscriptionUsage`` (one row per workspace per UTC day, the atomic
 counter behind the media-transcription daily cap) to the imports and
@@ -265,6 +271,7 @@ from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.prospect import Prospect
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription
 from pocketpaw_ee.cloud.models.read_state import ReadState
+from pocketpaw_ee.cloud.models.released_slug import ReleasedSlug
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
@@ -612,6 +619,9 @@ def get_all_documents():
         # concierge crawl reads it before fetching anyone's pages.
         SiteOriginClaim,
         SiteRateCounter,
+        # VS-4 — an address a renamed site gave up, held 30 days for its old
+        # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
+        ReleasedSlug,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
         # ``ee.cloud.growth.service`` imports this doc directly (import-linter

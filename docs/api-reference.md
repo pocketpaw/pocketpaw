@@ -2,6 +2,12 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-23 (VS-4, feat/sites-rename) — added "Sites — Addresses and renaming":
+`GET /sites/slug-available`, `PUT /sites/{site_id}/slug` and
+`DELETE /sites/{site_id}/slug/pending`, plus `slug` / `slug_pending` on the site
+response. Written around the thing a client cannot infer: a rename is a reservation
+that goes live on the next publish, so the response keeps showing the old `slug`.
+
 Updated: 2026-09-23 (feat/sites-badge-switch, VS-3) — added "Sites — Hide the PocketPaw
 badge": `PATCH /sites/{site_id}/branding` and `badge_hidden` on the site response. Written
 around the two things a client cannot infer: the flag is a preference that only takes
@@ -2564,6 +2570,94 @@ hidden, so gating on the workspace field would hide a control the customer has p
 
 Self-hosted and OSS deployments have no billing, so the gate is skipped entirely there
 (`sites_enforced()`) and the download always works.
+
+## Sites — Addresses and renaming
+
+On the `workers` deploy lane a site's address is its Worker name:
+`https://<slug>.<account>.workers.dev`. A new site gets one from its name on its first
+publish (see the Cloudflare sites runbook, "Site addresses"). These endpoints let an
+owner check a name and move a published site to a different one. Source:
+`ee/pocketpaw_ee/sites/router.py`, `ee/pocketpaw_ee/sites/service.py`.
+
+Every site response now carries two fields:
+
+| Field | Meaning |
+|---|---|
+| `slug` | The address the site serves at (`acme-bakery`), or `null` for a site still on `paw-site-<id>` |
+| `slug_pending` | The address a rename reserved, which goes live on the next publish; `null` when none is waiting |
+
+**A rename does not take effect when you make it.** A live build cannot be redeployed
+without rebuilding the draft, so the request reserves the name and the site's next
+publish moves it: it deploys under the new name, re-points every custom domain, then
+deletes the old Worker. Until then `slug` and `url` still show the current address.
+Show `slug_pending` as "goes live when you next publish".
+
+### `GET /sites/slug-available?slug=<raw>&site_id=<optional>`
+
+Auth: `fabric.read`. Rate-limited to 30 checks a minute per user
+(`429 sites.slug_check_rate_limited`).
+
+`slug` is raw input; it is normalized the same way a rename would be (lowercased,
+accents stripped, other runs of characters become one hyphen). With `site_id`, that
+site's own current and pending address read as available; a `site_id` from another
+workspace is a `404`.
+
+```json
+{ "available": false, "normalized": "acme-bakery", "reason": "taken", "suggestion": "acme-bakery-2" }
+```
+
+`reason` is `null` when available, otherwise one of:
+
+| `reason` | Meaning |
+|---|---|
+| `invalid` | Not 3–40 lowercase letters, digits or hyphens with no hyphen at either end (includes an empty result) |
+| `reserved` | A platform name (`www`, `api`, `admin`, ...) or anything starting `paw-` |
+| `taken` | Another site serves at it or has it pending, or a Worker by that name exists in the Cloudflare account |
+| `held` | Another workspace gave it up by renaming within the last 30 days. A name your own workspace released reads as available |
+
+`suggestion` is a free alternative when one is found among the next few candidates,
+else `null`.
+
+### `PUT /sites/{site_id}/slug`
+
+Auth: `fabric.write`, tenant-scoped (a site in another workspace is a `404`).
+
+```json
+{ "slug": "Acme Cakes" }
+```
+
+Response `200`: the site, with `slug_pending` set to the normalized name.
+
+- Asking for the site's **current** `slug` cancels any pending rename (`200`,
+  `slug_pending: null`). Asking for the **pending** one again is a no-op `200`. Neither
+  counts toward the limit.
+- At most **3 accepted requests per site in any 24 hours**. A request that is later
+  cancelled still counts.
+
+| Status | `error.code` | When |
+|---|---|---|
+| 422 | `sites.slug_invalid` | The normalized name is not a valid address |
+| 409 | `sites.slug_reserved` | A reserved name or `paw-` prefix |
+| 409 | `sites.slug_taken` | Another site has it (live or pending), or a Worker by that name exists |
+| 409 | `sites.slug_held` | Another workspace released it within 30 days |
+| 409 | `sites.slug_unsupported_lane` | The deployment is not on the `workers` lane |
+| 409 | `sites.slug_needs_publish` | The site has never been published; its first publish picks an address from its name |
+| 409 | `sites.slug_changed` | The site's pending name changed while this request was saving; retry |
+| 429 | `sites.slug_rate_limited` | A 4th rename request within 24 hours |
+
+**The next publish can also refuse.** If a Worker with the pending name has appeared in
+the Cloudflare account since the reserve, that publish fails with
+`409 sites.slug_taken` and nothing moves; cancel the rename or pick another name. If a
+custom domain cannot be re-pointed, the publish fails, every domain stays on the old
+Worker and `slug_pending` is kept, so publishing again retries the move.
+
+**The old name is held for 30 days** after the move. No other workspace can take it in
+that time; yours can take it back. `paw-site-<id>` names are never held.
+
+### `DELETE /sites/{site_id}/slug/pending`
+
+Auth: `fabric.write`, tenant-scoped. Cancels a waiting rename. Idempotent: `200` with
+the site (`slug_pending: null`) whether or not one was waiting.
 
 ## Sites — Hide the PocketPaw badge
 

@@ -4,6 +4,12 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-23 (VS-4 -- rename a site's address): added ``slug_pending``, the
+# address an owner asked to move to, applied on the site's NEXT publish (a live build
+# cannot be redeployed without rebuilding the draft), with its own PARTIAL unique index
+# shaped like ``slug``'s. And ``slug_changes``, the times of the accepted rename
+# requests, which the service trims to the last 24h and caps at 3.
+#
 # Updated 2026-09-23 (VS-2 -- name-based addresses): added ``slug``, the name-based
 # address a site claims on its FIRST ``workers`` publish (``acme-bakery``), with a
 # unique index. The index is PARTIAL on ``slug`` being a string, not ``sparse``: Beanie
@@ -349,6 +355,14 @@ class Site(TimestampedDocument):
     # ``paw-site-<id>``. Globally unique (workers.dev is one namespace per account),
     # enforced by the partial unique index in ``Settings.indexes``.
     slug: str | None = None
+    # VS-4: the address the owner asked to rename this site to. RESERVED now (the
+    # partial unique index below keeps two sites from asking for one name) and applied
+    # on the next ``workers`` publish, which deploys under it, re-points the custom
+    # domains and then clears it. None when no rename is waiting.
+    slug_pending: str | None = None
+    # VS-4: when each accepted rename request landed. The service drops entries older
+    # than 24h and refuses a 4th within the window.
+    slug_changes: list[datetime] = Field(default_factory=list)
     deployed: bool = False
     # Which target the last SUCCESSFUL deploy actually used: "" (never deployed) |
     # "local" | "workers" | "wfp". Stamped only after a deploy returns, so it records
@@ -882,5 +896,13 @@ class Site(TimestampedDocument):
                 [("slug", 1)],
                 unique=True,
                 partialFilterExpression={"slug": {"$type": "string"}},
+            ),
+            # VS-4: one pending rename per address, PARTIAL for the same reason. A
+            # pending name must also not equal another site's ``slug``; no single index
+            # spans two fields, so the service enforces that with write-then-verify.
+            IndexModel(
+                [("slug_pending", 1)],
+                unique=True,
+                partialFilterExpression={"slug_pending": {"$type": "string"}},
             ),
         ]
