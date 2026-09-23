@@ -1,5 +1,12 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-09-23 (feat/refero-design-research) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_refero`` (search_styles / get_style /
+  search_screens, registered always-on via the ``refero`` mcp_servers entry
+  point). Same regime as ``pocketpaw_inspo``: an in-process built-in, so it
+  belongs in the strip list, not in these six tests' assertions about
+  EXTERNAL config.
+
 Updated: 2026-09-06 (feat/fx-mcp-server) — strip the always-on ``pocketpaw_fx``
   server too (search_effects / list_effect_categories / get_effect, registered
   always-on via the ``fx`` mcp_servers entry point). Another entry in the list;
@@ -187,6 +194,7 @@ from pocketpaw_ee.agent.mcp_servers.planner import (
 )
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.refero import SERVER_NAME as _REFERO_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
@@ -277,6 +285,10 @@ def _strip_builtin_servers(result: dict) -> dict:
     # identity, nothing persisted — same regime as stock. The /sites allow-list
     # is the door that decides which surfaces may call it.
     out.pop(_INSPO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_refero`` is always-on for the same reason: the bundled site
+    # skills reach for Refero's design research without an opt-in, and the tools
+    # answer empty when no token is configured rather than disappearing.
+    out.pop(_REFERO_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
     # (loom_model_path unset -> not registered) but stripped defensively: a
