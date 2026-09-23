@@ -128,10 +128,28 @@
   {
     "label": "re-claiming a verified origin re-mints its token, so the owner must publish a NEW file before they can re-verify — a renewal priced at one deploy",
     "file": "ee/pocketpaw_ee/sites/ownership.py",
-    "find": "    if existing is not None and existing.status == _STATUS_VERIFIED:\n        return existing",
+    "find": "    if existing.status == _STATUS_VERIFIED:\n        return existing",
     "replace": "    if False:\n        return existing",
     "tests": [
       "tests/ee/sites/test_domain_ownership.py::test_reclaiming_a_verified_origin_does_not_unprove_it"
+    ]
+  },
+  {
+    "label": "re-claiming a PENDING origin re-mints its token, so a proof the owner already published stops matching while their deploy is still landing",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if existing.status == _STATUS_PENDING and _expires_at(existing) > now:\n        return existing",
+    "replace": "    if False:\n        return existing",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_reclaiming_a_pending_origin_keeps_its_token_so_a_published_proof_still_verifies"
+    ]
+  },
+  {
+    "label": "an EXPIRED pending claim is handed back as-is on re-claim, so the owner is stuck with a token verify will always refuse",
+    "file": "ee/pocketpaw_ee/sites/ownership.py",
+    "find": "    if existing.status == _STATUS_PENDING and _expires_at(existing) > now:\n        return existing",
+    "replace": "    if existing.status == _STATUS_PENDING:\n        return existing",
+    "tests": [
+      "tests/ee/sites/test_domain_ownership.py::test_reclaiming_an_expired_pending_origin_mints_a_fresh_token"
     ]
   }
 ]
