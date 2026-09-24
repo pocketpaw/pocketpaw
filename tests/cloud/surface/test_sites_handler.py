@@ -1,4 +1,8 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
+# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — the react
+# and svelte refine assertions follow the preamble: packages via
+# set_site_dependencies instead of "no way to add a dependency", rolled_back
+# instead of a smoke-test, and the verification.status ready rule.
 #
 # WHAT THIS FILE GUARDS (current state): the /sites preamble's three modes
 # (create / refine / chat), its four engine branches, and the routing that picks
@@ -1387,11 +1391,16 @@ async def test_react_refine_carries_the_prerender_and_write_scope_rules(mongo_db
     assert "src/" in preamble and "public/" in preamble
     assert "package.json" in preamble
     assert "src/paw/" in preamble
-    # The dependency list, so the agent does not author an import it cannot install.
-    assert "no way to add a dependency" in lower
+    # Packages go through the resolver, never an edit to package.json, and a
+    # refused one must not be imported (PP-3: the old "no way to add a dependency"
+    # became false when set_site_dependencies shipped).
+    assert "set_site_dependencies" in preamble
+    assert "rejected" in lower
     # And that the edit is a DRAFT, so the agent does not announce a live change.
     assert "draft" in lower
-    assert "nothing is built and nothing goes live" in lower
+    assert "nothing goes live" in lower
+    # And that "ready" waits on the verify verdict.
+    assert "verification.status" in preamble
 
 
 async def test_ripple_refine_keeps_the_rippleSpec_merge(mongo_db: object) -> None:
@@ -1836,8 +1845,11 @@ async def test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft() -> 
     # SITE" escape: the surviving `status:"draft"` mention kept the test green while
     # the heading — the sentence the agent actually acts on — said the opposite.
     assert "not a deploy" in lower
-    assert "is not the live site" in lower
+    assert "the live page is unchanged" in lower
     assert "republish" not in lower
+    # PP-3: a failed static/build check rolls the edit back; ready waits on passed.
+    assert "rolled_back" in preamble
+    assert "verification.status" in preamble
     # Both edit shapes, so the agent prefers the diff over a whole-file rewrite.
     assert "old_string" in preamble
     assert "new_source" in preamble
