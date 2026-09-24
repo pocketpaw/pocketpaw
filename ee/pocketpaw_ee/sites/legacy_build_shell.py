@@ -256,15 +256,23 @@ _STOCK_SCRIPTS: dict[str, dict[str, set[str]]] = {
     },
 }
 _HARMLESS_PKG_KEYS = frozenset(
-    {"name", "private", "type", "version", "description", "scripts", "dependencies",
-     "devDependencies", "license", "author"}
+    {
+        "name",
+        "private",
+        "type",
+        "version",
+        "description",
+        "scripts",
+        "dependencies",
+        "devDependencies",
+        "license",
+        "author",
+    }
 )
 _REGISTRY_SPEC_RE = re.compile(r"^[\s0-9A-Za-z.^~<>=|*+-]+$")
 
 
-def _classify_package_json(
-    key: str, text: str, engine: str, keeps_client_bundle: bool
-) -> Finding:
+def _classify_package_json(key: str, text: str, engine: str, keeps_client_bundle: bool) -> Finding:
     def review(reason: str) -> Finding:
         return Finding(key, "package_json", Classification.NEEDS_REVIEW, reason)
 
@@ -375,9 +383,7 @@ def _classify_manifest_variant(key: str, text: str, source: Mapping[str, Any]) -
     except ValueError as exc:
         return Finding(key, "manifest_variant", Classification.NEEDS_REVIEW, str(exc))
     if not packages:
-        return Finding(
-            key, "manifest_variant", Classification.SAFE_DROP, "declares no packages."
-        )
+        return Finding(key, "manifest_variant", Classification.SAFE_DROP, "declares no packages.")
     return Finding(
         key,
         "manifest_variant",
@@ -652,8 +658,9 @@ async def run_migration(
             cursor = pocket["id"]
             report["scanned"] += 1
             report["last_pocket_id"] = cursor
-            await _migrate_one(pocket, report, apply, resolve_packages, _pockets, _resolve,
-                               _keeps_client_bundle)
+            await _migrate_one(
+                pocket, report, apply, resolve_packages, _pockets, _resolve, _keeps_client_bundle
+            )
         if len(page) < page_size:
             break
     return report
@@ -690,9 +697,14 @@ async def _migrate_one(
             rows, plan = await _resolve_conversions(pocket, findings, resolve)
         else:
             rows = [
-                {"file": f.key, "kind": f.kind, "class": f.classification.value,
-                 "action": f.action, "reason": f.reason,
-                 **({"requests": dict(f.requests)} if f.requests else {})}
+                {
+                    "file": f.key,
+                    "kind": f.kind,
+                    "class": f.classification.value,
+                    "action": f.action,
+                    "reason": f.reason,
+                    **({"requests": dict(f.requests)} if f.requests else {}),
+                }
                 for f in findings
             ]
             plan = _PocketPlan()
@@ -712,7 +724,9 @@ async def _migrate_one(
                 report["migrated_pockets"] += 1
     except Exception as exc:  # noqa: BLE001 — one bad pocket must not stop the run
         logger.warning("legacy_build_shell: pocket %s failed", pocket["id"], exc_info=True)
-        report["errors"].append({"pocket_id": pocket["id"], "error": f"{type(exc).__name__}: {exc}"})
+        report["errors"].append(
+            {"pocket_id": pocket["id"], "error": f"{type(exc).__name__}: {exc}"}
+        )
 
 
 __all__ = [
