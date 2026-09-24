@@ -98,7 +98,9 @@ def scrub_text(text: str) -> str:
         return ""
     out = _ANSI_RE.sub("", str(text))
     for root in SANDBOX_ROOTS:
-        out = out.replace(root, "")
+        # Both spellings: a location regex may have captured the path without its
+        # leading slash (``home/daytona/paw-build/src/x``).
+        out = out.replace(root, "").replace(root.lstrip("/"), "")
     out = _LOCAL_ORIGIN_RE.sub("/", out)
     out = _SITE_KEY_RE.sub("site_key_[redacted]", out)
     out = _ABS_PATH_RE.sub(lambda m: m.group(0).rstrip("/").rsplit("/", 1)[-1] or "[path]", out)

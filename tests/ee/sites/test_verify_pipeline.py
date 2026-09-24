@@ -21,11 +21,9 @@
 #   * ``status_summary`` (the ``/status`` view) carries counts and never a message.
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
-import pytest
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.sites import build_job as bj
 from pocketpaw_ee.sites import service as sites_service
@@ -33,7 +31,9 @@ from pocketpaw_ee.sites import verify, verify_store
 from pocketpaw_ee.sites.generator_client import StaticCheckUnavailable
 
 _SVELTE = {
-    "src/routes/+page.svelte": "<script>import Hero from '$lib/components/Hero.svelte'</script><Hero/>",
+    "src/routes/+page.svelte": (
+        "<script>import Hero from '$lib/components/Hero.svelte'</script><Hero/>"
+    ),
     "src/routes/+layout.svelte": "<script>import '../app.css'</script><slot/>",
     "src/routes/+page.ts": "export const prerender = true",
     "src/app.css": ":root{--brand:#0A84FF}",
@@ -232,7 +232,7 @@ class TestInfrastructure:
         assert verdict["reason"] == "queue_unavailable"
 
     async def test_a_wait_that_times_out_is_unverified(self, beanie_test_db) -> None:
-        verdict = await _verify(await _pocket(), _wait=Waiter(raises=asyncio.TimeoutError()))
+        verdict = await _verify(await _pocket(), _wait=Waiter(raises=TimeoutError()))
         assert verdict["status"] == "unverified"
         assert verdict["reason"] == "timeout"
 
