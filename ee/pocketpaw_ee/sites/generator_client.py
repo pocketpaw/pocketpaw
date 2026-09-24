@@ -8,10 +8,9 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 #
 # Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): paw-sites now prints a
-# structured ``{"error","code"}`` line on stdout for every failed ``build`` (contract §3).
-# ``_SubprocessRunner.generate`` parses it (``parse_structured_error``) and raises
-# ``GeneratorFailed`` carrying the code instead of treating stderr as the message;
-# an older generator without the line keeps the stderr fallback. NEW
+# structured ``{"error","code"}`` line on stdout for every failed ``build`` (contract §3),
+# parsed by PP-4's ``parse_generator_refusal`` into ``GeneratorRefused``; ``run_static_check``
+# reuses the same parser. NEW
 # ``run_static_check`` drives ``paw-sites-gen check`` — the static verification layer,
 # which installs nothing and is therefore safe on the API host for any source.
 #
@@ -25,6 +24,13 @@
 # ``build_generator_input`` untouched as an ordinary source-map file (the generator
 # parses it). ``_ripple_motion_dep`` now reads motion's pin from ``vetted_pins``
 # (the vendored ``paw-sites-gen allowlist`` output) instead of a hard-coded copy.
+#
+# Updated 2026-09-24 (PP-4, fix/sites-legacy-build-shell-migration): paw-sites PS-1
+# prints a structured ``{"error", "code"}`` line on stdout when ``build`` refuses on
+# purpose. ``_SubprocessRunner.generate`` now reads it and raises ``GeneratorRefused``
+# (a ``RuntimeError`` subclass, so every existing catch still holds) carrying the code
+# and, for ``reserved_path``, the offending source-map key. The sites service maps a
+# reserved_path refusal to a 422 that names the file instead of generator_failed.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
 # Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
@@ -743,6 +749,49 @@ class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
 
 
+class GeneratorRefused(RuntimeError):
+    """The generator refused the input on purpose (paw-sites ``failStructured``, PP-4).
+
+    ``code`` is the generator's stable wire code (``reserved_path``,
+    ``dependency_policy``, ``engine_unsupported``, ``invalid_input``). ``path`` is the
+    source-map key a ``reserved_path`` refusal names, when the message carries one.
+    A ``RuntimeError`` subclass so callers that caught a failed generate still do.
+    """
+
+    def __init__(self, code: str, message: str, path: str | None = None) -> None:
+        super().__init__(f"generator refused ({code}): {message}")
+        self.code = code
+        self.message = message
+        self.path = path
+
+
+_RESERVED_PATH_RE = re.compile(r'generator-owned path "([^"]+)"')
+
+
+def parse_generator_refusal(stdout: str) -> GeneratorRefused | None:
+    """The structured refusal on the generator's last stdout line, or ``None``.
+
+    ``internal_error`` is not a refusal (it is a crash the CLI still reports as a
+    line), so it returns ``None`` and the caller keeps its generic failure.
+    """
+    lines = [ln for ln in (stdout or "").strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code, message = payload.get("code"), payload.get("error")
+    if not isinstance(code, str) or not isinstance(message, str) or code == "internal_error":
+        return None
+    path = None
+    if code == "reserved_path" and (m := _RESERVED_PATH_RE.search(message)):
+        path = m.group(1)
+    return GeneratorRefused(code, message, path)
+
+
 class HostInstallRefused(RuntimeError):
     """A host build was asked to install author-declared npm packages (PP-1).
 
@@ -757,50 +806,6 @@ class HostInstallRefused(RuntimeError):
 AUTHOR_FIXABLE_GENERATOR_CODES: frozenset[str] = frozenset(
     {"dependency_policy", "reserved_path", "engine_unsupported", "invalid_input"}
 )
-
-
-class GeneratorFailed(RuntimeError):
-    """``paw-sites-gen build`` refused with a STRUCTURED ``{"error", "code"}`` line (PP-2).
-
-    A ``RuntimeError`` so every caller that already maps a failed generate keeps
-    working. ``code`` is paw-sites' stable wire value; ``author_fixable`` is True for the
-    deliberate refusals (a policy violation, a reserved path, an engine that cannot
-    honour the request, bad input), which the service surfaces as a 422 and the verify
-    pipeline as a static-layer error. ``message`` is the generator's own text, written
-    for the author.
-    """
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"generator failed ({code}): {message}")
-        self.code = code
-        self.message = message
-
-    @property
-    def author_fixable(self) -> bool:
-        return self.code in AUTHOR_FIXABLE_GENERATOR_CODES
-
-
-def parse_structured_error(stdout: bytes | str | None) -> tuple[str, str] | None:
-    """Return ``(message, code)`` from a paw-sites structured failure line, else None.
-
-    Reads the LAST non-empty stdout line only, the one the CLI's ``failStructured``
-    prints. An older generator without structured errors returns None and the caller
-    keeps its stderr fallback.
-    """
-    if not stdout:
-        return None
-    text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout
-    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
-    if not lines:
-        return None
-    try:
-        payload = json.loads(lines[-1])
-    except ValueError:
-        return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("error"), str):
-        return None
-    code = payload.get("code")
-    return payload["error"], code if isinstance(code, str) and code else "internal_error"
 
 
 class StaticCheckUnavailable(RuntimeError):
@@ -859,15 +864,19 @@ async def run_static_check(
             if not isinstance(report, dict) or not isinstance(report.get("errors"), list):
                 raise StaticCheckUnavailable("check_output_unreadable")
             return report
-        structured = parse_structured_error(stdout)
-        if proc.returncode == 1 and structured is not None:
-            message, code = structured
-            if code in AUTHOR_FIXABLE_GENERATOR_CODES:
+        refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+        if proc.returncode == 1 and refusal is not None:
+            if refusal.code in AUTHOR_FIXABLE_GENERATOR_CODES:
                 return {
                     "ok": False,
-                    "errors": [{"layer": "static", "code": code, "message": message}],
+                    "errors": [
+                        {"layer": "static", "code": refusal.code, "message": refusal.message}
+                    ],
                     "warnings": [],
                 }
+            raise StaticCheckUnavailable("check_crashed")
+        if proc.returncode == 1:
+            # A structured ``internal_error`` line, or none at all: a crash.
             raise StaticCheckUnavailable("check_crashed")
         # Exit 2 is usage — a generator that predates ``check`` lands here too.
         raise StaticCheckUnavailable("checker_unavailable")
@@ -1482,12 +1491,12 @@ class _SubprocessRunner:
                 # generator is a failed generate.
                 raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
-                # PP-2: paw-sites prints a structured ``{"error","code"}`` line on
-                # stdout for every failed build (contract §3); prefer it over stderr,
-                # which now carries a stack only for an internal error.
-                structured = parse_structured_error(stdout)
-                if structured is not None:
-                    raise GeneratorFailed(structured[1], structured[0])
+                # PP-4 / PP-2: paw-sites prints a structured ``{"error","code"}`` line on
+                # stdout for a deliberate refusal; stderr carries a stack only for an
+                # internal error.
+                refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+                if refusal is not None:
+                    raise refusal
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
         finally:

@@ -1200,13 +1200,13 @@ def _write_sandbox_report(
 def _scaffold_error_entry(exc: BaseException) -> dict[str, Any]:
     """A scaffold refusal as a diagnostic.
 
-    ``GeneratorFailed`` carries paw-sites' structured ``{error, code}`` (contract §3) — a
+    ``GeneratorRefused`` carries paw-sites' structured ``{error, code}`` (contract §3) — a
     deliberate refusal written for the author, so it is a STATIC-layer error. Anything
     else is reported by class name only: its text is not known to be safe.
     """
-    from pocketpaw_ee.sites.generator_client import GeneratorFailed
+    from pocketpaw_ee.sites.generator_client import GeneratorRefused
 
-    if isinstance(exc, GeneratorFailed):
+    if isinstance(exc, GeneratorRefused):
         return {"layer": "static", "code": exc.code, "message": exc.message}
     return {"layer": "build", "code": "scaffold_failed", "message": type(exc).__name__}
 
