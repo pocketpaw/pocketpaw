@@ -3675,3 +3675,61 @@ def test_deny_still_beats_a_server_grant():
 def test_an_exclusive_turn_with_no_grant_drops_the_server():
     """An exclusive turn caps to what it declared; declaring nothing keeps nothing."""
     assert _gate(None, exclusive=True) == []
+
+
+# ---------------------------------------------------------------------------
+# Prompt tool names are localized to this backend (feat/inspo-backend-parity)
+# ---------------------------------------------------------------------------
+#
+# Surface preambles are written for the SDK backend and name tools as
+# ``mcp__<server>__<tool>``. This backend bridges the same in-process servers
+# under ``<server>_<tool>`` (``tool_bridge.build_inprocess_mcp_toolsets``), and
+# ``_normalize_tool_id`` already translated the allow-list ids — but not the
+# prompt text, so the /sites preamble told the model to call tools it knew by a
+# different name.
+
+
+def test_prompt_tool_ids_are_rewritten_to_this_backends_names():
+    from pocketpaw.agents.pydantic_ai import _localize_tool_ids
+
+    text = (
+        "Call `mcp__pocketpaw_inspo__research_page_design` ONCE, then "
+        "`mcp__pocketpaw_refero__get_style`; photos via "
+        "mcp__pocketpaw_stock__search_stock_images."
+    )
+
+    assert _localize_tool_ids(text) == (
+        "Call `pocketpaw_inspo_research_page_design` ONCE, then "
+        "`pocketpaw_refero_get_style`; photos via "
+        "pocketpaw_stock_search_stock_images."
+    )
+
+
+def test_prompt_rewrite_leaves_everything_else_alone():
+    """Only fully-qualified ids move. A bare server grant has no tool name to
+    translate to, and native tool names already match."""
+    from pocketpaw.agents.pydantic_ai import _localize_tool_ids
+
+    text = "grant mcp__refero wholesale; call web_search or pocket_specialist__create"
+
+    assert _localize_tool_ids(text) == text
+
+
+async def test_the_run_puts_localized_tool_names_on_the_wire():
+    seen: list[str | None] = []
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen.append(messages[-1].instructions)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend,
+        "build me a landing site",
+        system_prompt="PHASE 1b: call `mcp__pocketpaw_inspo__research_page_design` once.",
+        session_key="cloud:session:ccc:agent1",
+    )
+
+    assert "`pocketpaw_inspo_research_page_design`" in (seen[0] or "")
+    assert "mcp__" not in (seen[0] or "")

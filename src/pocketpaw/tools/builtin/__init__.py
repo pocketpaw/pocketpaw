@@ -36,6 +36,11 @@
 #     two-surface split as StockImageTool, and for the same reason: the site
 #     skills run on claude_agent_sdk, which cannot see a BaseTool. Both return
 #     empty when no Refero token is set.
+#   - 2026-09-24: Added InspoResearchTool + InspoDesignSystemTool — design
+#     research over real shipped pages for the non-SDK backends (shared
+#     pocketpaw.tools.builtin.inspo helpers; the EE `pocketpaw_inspo` MCP
+#     server now wraps the same code). Before this, only claude_agent_sdk
+#     could reach Inspo.
 #   - 2026-08-04: Added WidgetSpecTool + InlineWidgetHelpTool. Both tools already
 #     existed on the `pocketpaw_widgets` in-process MCP server, which only
 #     `agents/claude_sdk.py` builds — so every other backend ran without them
@@ -61,6 +66,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "StockImageTool": (".stock_images", "StockImageTool"),
     "ReferoStylesTool": (".refero", "ReferoStylesTool"),
     "ReferoScreensTool": (".refero", "ReferoScreensTool"),
+    "InspoResearchTool": (".inspo", "InspoResearchTool"),
+    "InspoDesignSystemTool": (".inspo", "InspoDesignSystemTool"),
     "CreateSkillTool": (".skill_gen", "CreateSkillTool"),
     "GmailSearchTool": (".gmail", "GmailSearchTool"),
     "GmailReadTool": (".gmail", "GmailReadTool"),

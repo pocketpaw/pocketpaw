@@ -1,6 +1,13 @@
 # inspo.py — in-process MCP server exposing design research over real shipped
 # websites to the cloud chat backend.
 #
+# Changed: 2026-09-24 (feat/inspo-backend-parity). The upstream call (endpoint,
+# JSON-RPC POST, result unwrapping, the ``_UPSTREAM`` map) moved to the OSS core
+# ``pocketpaw.tools.builtin.inspo`` so the non-SDK backends can reach Inspo
+# through BaseTools. This server now wraps those helpers — one code path, two
+# surfaces, the split refero.py already uses. The MCP envelopes, tool ids and
+# error messages are unchanged.
+#
 # Created: 2026-09-16 (feat/sites-bundled-design-research). The /sites create
 # preamble embeds a design system and a craft system: between them they cover
 # HOW to build a page and WHAT NOT to do. Neither is a source of evidence, so
@@ -36,7 +43,8 @@
 # brings inside an already-running event loop. One request per call, one
 # timeout, nothing to leak.
 #
-# EE→OSS boundary: imports ``httpx`` and ``pocketpaw.config`` only; the surface
+# EE→OSS boundary: imports the helpers from ``pocketpaw.tools.builtin.inspo``
+# (allowed — EE depends on OSS core, as refero.py does); the surface
 # service loads INSPO_TOOL_IDS as a plain frozenset[str] inside a try/except.
 """Agent-side MCP surface for design research over real shipped websites."""
 
@@ -45,6 +53,8 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+
+from pocketpaw.tools.builtin import inspo as _inspo
 
 logger = logging.getLogger(__name__)
 
@@ -58,23 +68,10 @@ INSPO_TOOL_IDS = (
     GET_REFERENCE_DESIGN_SYSTEM_TOOL_ID,
 )
 
-# The upstream tool each of ours calls. Ours are named for the JOB (the house
-# style — cf. ``search_stock_images``), theirs for their catalogue, and keeping
-# the map explicit is what makes an upstream rename a one-line fix here.
-_UPSTREAM = {
-    "research_page_design": "recommend",
-    "get_reference_design_system": "get_design_system",
-}
-
-# A create turn is a person waiting. The archive is a free third-party service
-# with no SLA, so it gets a short leash and the caller proceeds without it —
-# the preamble's ROBUSTNESS rule already covers a tool that errors.
-_TIMEOUT_SECONDS = 20.0
-
-# Upstream accepts a token ceiling on every list-shaped tool. A create preamble
-# is already large and the agent needs a macrostructure and a handful of
-# exemplars, not the whole shortlist rendered long.
-_MAX_TOKENS = 1200
+# The upstream map and endpoint live in the OSS core so the BaseTools share them.
+# Re-exported under their old names so this module's contract is unchanged.
+_UPSTREAM = _inspo._UPSTREAM
+_endpoint = _inspo.endpoint
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -97,68 +94,6 @@ def _success_response(body: Any) -> dict[str, Any]:
     }
 
 
-def _endpoint() -> str:
-    """The archive's MCP endpoint.
-
-    Overridable because the hosted service rate-limits PER IP, and a
-    multi-tenant deploy is a single egress IP for every tenant it serves. The
-    upstream is MIT-licensed with a documented self-host path, so a deploy that
-    outgrows the hosted instance points this at its own without a code change.
-    """
-    try:
-        from pocketpaw.config import get_settings
-
-        url = (getattr(get_settings(), "inspo_mcp_url", "") or "").strip()
-        if url:
-            return url
-    except Exception:  # noqa: BLE001 — config must never break a tool call
-        pass
-    return "https://inspomcp.dev/api/mcp"
-
-
-async def _call_upstream(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """One JSON-RPC ``tools/call`` against the archive.
-
-    Returns the decoded tool result, or raises. The caller turns any failure
-    into an ``_error_response`` — this never returns a half-result, because a
-    partial design reference is worse than none: the agent would build on it.
-    """
-    import httpx
-
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": tool, "arguments": arguments},
-    }
-    headers = {
-        "Content-Type": "application/json",
-        # The server may answer either way; asking for both is what lets it
-        # choose, and a plain JSON body is what it returns for a stateless call.
-        "Accept": "application/json, text/event-stream",
-    }
-    async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-        response = await client.post(_endpoint(), json=payload, headers=headers)
-        response.raise_for_status()
-        body = response.json()
-
-    if "error" in body:
-        raise RuntimeError(str(body["error"].get("message", body["error"])))
-
-    result = body.get("result") or {}
-    # MCP wraps a tool result as ``content:[{type:"text", text:"<json>"}]``.
-    # Unwrap to the payload the model should actually read; if it is not JSON,
-    # hand back the text as-is rather than failing on a format change.
-    for block in result.get("content", []):
-        if block.get("type") == "text":
-            text = block.get("text", "")
-            try:
-                return json.loads(text)
-            except (ValueError, TypeError):
-                return {"text": text}
-    return result
-
-
 async def _research_handler(args: dict) -> dict:
     """MCP handler for ``inspo__research_page_design``."""
     brief = args.get("brief")
@@ -166,10 +101,7 @@ async def _research_handler(args: dict) -> dict:
         return _error_response("research_page_design requires a non-empty `brief`.")
 
     try:
-        body = await _call_upstream(
-            _UPSTREAM["research_page_design"],
-            {"brief": brief.strip(), "maxTokens": _MAX_TOKENS},
-        )
+        body = await _inspo.research_page_design(brief)
     except Exception as exc:  # noqa: BLE001
         logger.warning("inspo: research_page_design failed", exc_info=True)
         return _error_response(
@@ -189,9 +121,7 @@ async def _design_system_handler(args: dict) -> dict:
         )
 
     try:
-        body = await _call_upstream(
-            _UPSTREAM["get_reference_design_system"], {"slug": slug.strip()}
-        )
+        body = await _inspo.get_reference_design_system(slug)
     except Exception as exc:  # noqa: BLE001
         logger.warning("inspo: get_reference_design_system failed", exc_info=True)
         return _error_response(

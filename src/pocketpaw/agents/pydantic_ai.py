@@ -7,6 +7,17 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-24 (feat/inspo-backend-parity): the per-run ``instructions``
+now pass through ``_localize_tool_ids``, which rewrites ``mcp__srv__tool`` to
+the ``srv_tool`` names this backend bridges in-process servers under. Surface
+preambles (the /sites create step above all) are written for the SDK backend,
+so they named tools this agent knew by another name.
+
+Also: ``inspo_research_page_design``
+and ``inspo_reference_design_system`` join ``_TENANT_SAFE_TOOLS`` next to the
+Refero tools. Same class: a text brief out to a public archive, public design
+references back, no tenant data on the wire, nothing persisted.
+
 Changed 2026-09-15 (feat/chat-image-wiring): ``run`` grows
 ``image_attachments`` and the turn's prompt is now built from BOTH picture
 channels — ``images`` (the surface's snapshot, already ``(bytes, media_type)``)
@@ -645,6 +656,10 @@ _TENANT_SAFE_TOOLS = frozenset(
         # bounded upstream by the plan.
         "refero_design_screens",
         "refero_design_styles",
+        # Inspo: the same class as Refero above, over a FREE archive of real
+        # shipped pages (no key; the shared resource is its per-IP rate limit).
+        "inspo_reference_design_system",
+        "inspo_research_page_design",
         "research",
         "search_stock_images",
         "speech_to_text",
@@ -783,6 +798,24 @@ def _normalize_tool_id(tool_id: str) -> str:
     if tool_id.startswith("mcp__"):
         return tool_id.removeprefix("mcp__").replace("__", "_")
     return tool_id
+
+
+# A fully-qualified MCP tool id as a prompt names it. Server names never contain
+# a double underscore, so the lazy server group stops at the first ``__``.
+_MCP_TOOL_ID_RE = re.compile(r"\bmcp__[A-Za-z0-9_-]+?__[A-Za-z0-9_]+")
+
+
+def _localize_tool_ids(text: str) -> str:
+    """Rewrite every ``mcp__srv__do_thing`` in prompt text to ``srv_do_thing``.
+
+    Surface preambles are written for the claude_agent_sdk backend and name
+    tools by their SDK ids. This backend bridges the same in-process servers
+    under ``<server>_<tool>`` (``tool_bridge.build_inprocess_mcp_toolsets``), so
+    without this the /sites preamble told the model to call tools it knew by
+    another name. Same translation ``_normalize_tool_id`` applies to the
+    allow-list; a bare ``mcp__server`` grant has no tool segment and is left.
+    """
+    return _MCP_TOOL_ID_RE.sub(lambda m: _normalize_tool_id(m.group(0)), text)
 
 
 def _bare_mcp_server(tool_id: str) -> str:
@@ -2658,7 +2691,10 @@ class PydanticAIBackend:
                 yield AgentEvent(type="done", content="")
                 return
 
-            instructions = system_prompt or _DEFAULT_IDENTITY
+            # Tool names in the prompt are rewritten to this backend's names,
+            # so a surface preamble written for the SDK still points at tools
+            # this agent actually has. See ``_localize_tool_ids``.
+            instructions = _localize_tool_ids(system_prompt or _DEFAULT_IDENTITY)
             mcp_toolsets = await self._build_mcp_tools() if tools_enabled else []
             agent = self._get_or_create_agent(
                 model,
