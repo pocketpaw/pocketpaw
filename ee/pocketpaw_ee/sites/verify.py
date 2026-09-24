@@ -99,7 +99,9 @@ class RenderInputs:
     dynamic: bool
 
 
-def render_inputs(pocket: dict[str, Any]) -> RenderInputs | None:
+def render_inputs(
+    pocket: dict[str, Any], *, builder_origin: str | None = None
+) -> RenderInputs | None:
     """Resolve a pocket wire dict into the verify inputs, or ``None`` when the engine has
     nothing this pipeline can check.
 
@@ -118,7 +120,11 @@ def render_inputs(pocket: dict[str, Any]) -> RenderInputs | None:
         return None
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
-    origin = sites_service._builder_origin() if engine != "html" else ""
+    origin = (
+        ((builder_origin or "").strip() or sites_service._builder_origin())
+        if engine != "html"
+        else ""
+    )
     keeps = sites_service._resolve_keeps_client_bundle(pocket)
     content_hash = sites_service._artifact_content_hash(
         source=source,
@@ -165,6 +171,26 @@ def generator_input_for(inputs: RenderInputs, pocket_id: str) -> dict[str, Any]:
             keeps_client_bundle=inputs.keeps_client_bundle,
         )
     )
+
+
+async def resolve_builder_origin(workspace_id: str, pocket_id: str) -> str:
+    """The builder origin the armed hash is computed with.
+
+    The editor's VIEW hashes with its request Origin, and ``make_site_editable`` stores
+    that origin on the Site row — so the row's ``builder_origin`` is the best available
+    guess at the key the editor will read, and reusing it is what lets a verify warm the
+    editor's cache instead of building a second render. Falls back to the configured
+    ``PAW_SITES_BUILDER_ORIGIN`` (what the pre-warm and a view without an Origin use).
+    Never raises.
+    """
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        doc = await sites_service._canonical_site_doc(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 — an origin guess is never worth a failed verify
+        doc = None
+    stored = (getattr(doc, "builder_origin", "") or "").strip() if doc is not None else ""
+    return stored or sites_service._builder_origin()
 
 
 def _layer(name: str, status: str, reason: str = "") -> dict[str, str]:
@@ -353,6 +379,7 @@ async def verify_pocket(
     pocket: dict[str, Any],
     *,
     pocket_id: str,
+    builder_origin: str | None = None,
     wait_seconds: float | None = None,
     force: bool = False,
     _store: Any = None,
@@ -361,7 +388,7 @@ async def verify_pocket(
     _wait: Any = None,
 ) -> dict[str, Any]:
     """Verify an already-read pocket wire dict. See :func:`verify_site`."""
-    inputs = render_inputs(pocket)
+    inputs = render_inputs(pocket, builder_origin=builder_origin)
     if inputs is None:
         return unverifiable("engine_not_verifiable")
     store = _store if _store is not None else verify_store.default_verify_store()
@@ -471,8 +498,9 @@ async def verify_site(
     """Run the three-layer verification for a site pocket and return the §5 verdict.
 
     Reads the pocket through the pockets service's public ``get`` (tenancy: it raises
-    NotFound / Forbidden itself — propagated to the caller). ``workspace_id`` is taken
-    for symmetry with the other site entry points; tenancy is the pocket read's.
+    NotFound / Forbidden itself — propagated to the caller). ``workspace_id`` locates
+    the pocket's Site row, whose stored ``builder_origin`` picks the armed hash (see
+    :func:`resolve_builder_origin`).
 
     Never raises for a verification outcome: every infrastructure failure is an
     ``unverified`` verdict with a reason. ``force`` skips the per-hash cache (the stored
@@ -480,11 +508,12 @@ async def verify_site(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    del workspace_id  # tenancy is the pocket read's; see the docstring
     pocket = await pockets_service.get(pocket_id, user_id)
+    origin = await resolve_builder_origin(workspace_id, pocket_id)
     return await verify_pocket(
         pocket,
         pocket_id=pocket_id,
+        builder_origin=origin,
         wait_seconds=wait_seconds,
         force=force,
         _store=_store,
@@ -520,7 +549,8 @@ async def status_summary(
     }
     try:
         pocket = await pockets_service.site_render_inputs(workspace_id, pocket_id)
-        inputs = render_inputs(pocket) if pocket is not None else None
+        origin = await resolve_builder_origin(workspace_id, pocket_id)
+        inputs = render_inputs(pocket, builder_origin=origin) if pocket is not None else None
         if inputs is None:
             return empty
         store = _store if _store is not None else verify_store.default_verify_store()

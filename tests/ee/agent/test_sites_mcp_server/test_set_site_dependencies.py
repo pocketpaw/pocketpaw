@@ -1,4 +1,5 @@
 # tests/ee/agent/test_sites_mcp_server/test_set_site_dependencies.py — the agent-facing
+# Updated 2026-09-24 (PP-2): the svelte-edit seam test now asserts the verdict shape.
 # half of author npm packages (PP-1).
 #
 # Created: 2026-09-24 (feat/sites-author-dependencies). Covers the new
@@ -304,16 +305,23 @@ class TestCreateWithDependencies:
 
 
 @pytest.mark.asyncio
-async def test_edit_on_a_pocket_with_packages_says_no_preview_was_built() -> None:
+async def test_edit_without_a_site_row_returns_site_none_and_a_verdict() -> None:
+    """PP-2 replaced PP-1's "no preview was built" seam: every svelte edit is verified,
+    so the result always carries ``verification``; ``site`` is None when the pocket has
+    no Site row yet."""
     from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+    from pocketpaw_ee.sites.service import SvelteEditResult
 
+    verdict = {"status": "unverified", "reason": "sandbox_unavailable", "layers": []}
     a, b = _identity()
     with (
         a,
         b,
         patch(
             "pocketpaw_ee.sites.service.edit_svelte_component",
-            new=AsyncMock(return_value=(None, False)),
+            new=AsyncMock(
+                return_value=SvelteEditResult(site=None, unreferenced=False, verification=verdict)
+            ),
         ),
     ):
         body = _body(
@@ -328,4 +336,4 @@ async def test_edit_on_a_pocket_with_packages_says_no_preview_was_built() -> Non
     assert body["ok"] is True
     assert body["status"] == "draft" and body["is_live"] is False
     assert body["site"] is None and body["preview_built"] is False
-    assert "sandbox" in body["message"]
+    assert body["verification"] == verdict
