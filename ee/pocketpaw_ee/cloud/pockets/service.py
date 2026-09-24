@@ -13,7 +13,10 @@ new caller that needs a field adds a function here rather than a second reader.
 Public API: ``create`` / ``get`` / ``get_for_wire`` / ``list_pockets`` /
 ``update`` / ``delete``; ``ensure_home_pocket``; the share-link, collaborator,
 team and agent mutators; the per-pocket backend + write/tool allowlist setters;
-``merge_spec``; the ``set_{svelte,react,html}_source_file`` edit lane; and the
+``merge_spec``; the ``set_{svelte,react,html}_source_file`` edit lane and its
+``set_site_dependency_manifest`` sibling (added 2026-09-24, PP-1: the only writer of
+a site's ``paw.dependencies.json``, called after the sites resolver vets each
+package); and the
 ``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist subagent drives
 over MCP.
 
@@ -2420,6 +2423,60 @@ async def set_html_source_file(
     # snapshots ``doc.source`` whatever engine wrote it) — the same reuse
     # ``set_react_source_file`` makes.
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(file_path))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+#: Engines whose source map may carry an author dependency manifest.
+_DEPENDENCY_MANIFEST_ENGINES = ("svelte", "react", "html")
+
+
+async def set_site_dependency_manifest(
+    pocket_id: str,
+    user_id: str,
+    *,
+    manifest_path: str,
+    contents: str | None,
+) -> dict:
+    """Write (or, with ``contents=None``, remove) a site's dependency manifest.
+
+    Added 2026-09-24 (feat/sites-author-dependencies, PP-1). The per-file writers
+    above are reached through the sites path policies, which refuse this path —
+    deliberately, because ``paw.dependencies.json`` must only ever hold entries the
+    resolver vetted. This is the one writer for it, called only by
+    ``sites.service.set_site_dependencies`` after resolution, so it takes the whole
+    file rather than a create/exists flag: a dependency change is an upsert or a
+    removal, never "add a new file".
+
+    Access, engine check, persist, event and draft version mirror
+    ``set_react_source_file``. A non-source engine (ripple) is a ``ValidationError``
+    (422, ``pocket.not_source_site``): it has no authored code to import a package.
+    A write that changes nothing persists nothing and records no version.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") not in _DEPENDENCY_MANIFEST_ENGINES or not isinstance(
+        doc.source, dict
+    ):
+        raise ValidationError(
+            "pocket.not_source_site",
+            "This pocket is not a svelte, react or html Paw Site — it has no source "
+            "map to declare packages on.",
+        )
+    updated = dict(doc.source)
+    if contents is None:
+        if manifest_path not in updated:
+            return await _resolved_wire_dict(doc, user_id)
+        del updated[manifest_path]
+    else:
+        if updated.get(manifest_path) == contents:
+            return await _resolved_wire_dict(doc, user_id)
+        updated[manifest_path] = contents
+    # Reassign a fresh dict so Beanie tracks the change (same note as the peers).
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(manifest_path))
     return await _resolved_wire_dict(doc, user_id)
 
 

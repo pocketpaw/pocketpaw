@@ -1,5 +1,13 @@
 # html_paths.py — the ONE place the html-track source-map path policy lives.
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — ``paw.dependencies.json``
+# is reserved in any spelling, case included, and the ``_paw/`` namespace is now
+# matched case-insensitively too, as the generator (paw-sites PS-1) matches it.
+# An html site's root is authorable, so without this the edit lane could hand-write
+# the dependency manifest the generator turns into an importmap — skipping the
+# resolver that pins each package and computes its SRI hash. Only
+# ``set_site_dependencies`` writes it.
+#
 # Updated: 2026-09-06 (feat/fx-mcp-server) — ``_html_references`` also scans ES
 # ``import ... from '...'`` / ``import '...'`` / ``import('...')`` so a file reached
 # only through a module import (an ``_fx/`` effect's vendor dep) is not flagged
@@ -69,6 +77,8 @@ import posixpath
 import re
 from collections.abc import Mapping
 
+from pocketpaw_ee.sites.dependency_manifest import is_dependency_manifest_path
+
 # The namespace the html generator owns. Mirrors ``RESERVED_NAMESPACE`` in
 # paw-sites' html-scaffold.ts, which throws on a collision. Stored WITH the
 # trailing slash so the guard matches the directory and not a sibling that merely
@@ -94,8 +104,12 @@ def is_reserved_html_path(path: str) -> bool:
     Matches the directory itself as well as anything under it, so neither
     ``_paw`` nor ``_paw/edit-manifest.json`` is writable.
     """
-    norm = normalize_html_path(path)
-    return norm == HTML_RESERVED_PREFIX.rstrip("/") or norm.startswith(HTML_RESERVED_PREFIX)
+    folded = normalize_html_path(path).casefold()
+    return (
+        is_dependency_manifest_path(folded)
+        or folded == HTML_RESERVED_PREFIX.rstrip("/")
+        or folded.startswith(HTML_RESERVED_PREFIX)
+    )
 
 
 def escapes_project_root(path: str) -> bool:
@@ -129,6 +143,12 @@ def html_path_rejection(path: str) -> str | None:
             "An html site's files are project-relative — `index.html`, "
             "`styles.css`, `about/index.html`. A path that climbs out of the "
             "project with `..`, or an absolute path, is not writable."
+        )
+    if is_dependency_manifest_path(norm):
+        return (
+            f"`{path}` is the site's dependency manifest. Only "
+            "`set_site_dependencies` writes it, because each entry is vetted against "
+            "the npm registry and pinned with an integrity hash before it lands."
         )
     if is_reserved_html_path(path):
         return (

@@ -2,8 +2,8 @@
   {
     "label": "the read tool is dropped from SITES_TOOL_IDS, so the /sites allow-list filters it out silently and the edit lane is blind again",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
-    "find": "    GET_SITE_BUILD_STATUS_TOOL_ID,\n    READ_SITE_SOURCE_TOOL_ID,\n)",
-    "replace": "    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
+    "find": "    GET_SITE_BUILD_STATUS_TOOL_ID,\n    READ_SITE_SOURCE_TOOL_ID,\n    SET_SITE_DEPENDENCIES_TOOL_ID,\n)",
+    "replace": "    GET_SITE_BUILD_STATUS_TOOL_ID,\n    SET_SITE_DEPENDENCIES_TOOL_ID,\n)",
     "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReachableFromTheSitesSurface"]
   },
   {

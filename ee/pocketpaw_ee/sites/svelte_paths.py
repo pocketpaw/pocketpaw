@@ -1,5 +1,17 @@
 # svelte_paths.py — the ONE place the svelte-track source-map path policy lives.
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — the reserved build
+# shell grew to the set paw-sites PS-1 gives the generator: every ``vite.config.*``
+# spelling (ts/js/mjs/mts/cjs/cts), ``src/routes/+layout.ts`` / ``+layout.js``, the
+# dependency manifest ``paw.dependencies.json`` and the install config
+# (``bunfig.toml``, ``.npmrc``, ``bun.lock``, ``bun.lockb``, ``package-lock.json``)
+# join ``package.json`` / ``svelte.config.js``. Matching is now CASE-INSENSITIVE for
+# every reserved file and the ``src/lib/paw/`` namespace, as the generator's is.
+# Authors can now declare npm packages, and the manifest is written ONLY by the
+# resolver; an edit lane that could hand-write it (or a ``+layout.ts`` that turns
+# prerendering off) would route around that. The manifest
+# is matched in any spelling, case included (``dependency_manifest``).
+#
 # Created: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — the svelte peer of
 # ``react_paths.py`` / ``html_paths.py``, written for the same reason those were:
 # the EDIT lane is about to become a second WRITER of a svelte source map, and a
@@ -67,6 +79,13 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from pocketpaw_ee.sites.dependency_manifest import (
+    DEPENDENCY_MANIFEST_PATH,
+    INSTALL_CONFIG_FILES,
+    VITE_CONFIG_FILES,
+    is_dependency_manifest_path,
+)
+
 # The namespace + files paw-sites' ``svelte-scaffold.ts`` refuses to let a source
 # map write (``RESERVED_NAMESPACE`` / ``RESERVED_FILES``, enforced by its
 # ``isReservedPath``). Mirrored exactly — drift here means a path this module
@@ -82,14 +101,22 @@ SVELTE_RESERVED_AUTH_FILES: tuple[str, ...] = (
 # the per-file edit lane does not (see the module header for why).
 SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = (
     "package.json",
-    "vite.config.ts",
+    *VITE_CONFIG_FILES,
     "svelte.config.js",
+    "src/routes/+layout.ts",
+    "src/routes/+layout.js",
+    DEPENDENCY_MANIFEST_PATH,
+    *INSTALL_CONFIG_FILES,
 )
 
 SVELTE_RESERVED_FILES: tuple[str, ...] = (
     *SVELTE_RESERVED_AUTH_FILES,
     *SVELTE_RESERVED_SHELL_FILES,
 )
+
+# Case-folded once: the generator matches reserved paths case-insensitively (a
+# case-insensitive filesystem lands ``Package.JSON`` on the same file), so this must.
+_RESERVED_FOLDED = frozenset(f.casefold() for f in SVELTE_RESERVED_FILES)
 
 # The one directory an author may write into. A svelte Paw Site has no ``public/``
 # and no ``static/`` — neither exists in the generator's templates — so unlike the
@@ -110,11 +137,12 @@ def normalize_svelte_path(path: str) -> str:
 
 def is_reserved_svelte_path(path: str) -> bool:
     """True when ``path`` resolves onto a generator-owned file or namespace."""
-    norm = normalize_svelte_path(path)
+    folded = normalize_svelte_path(path).casefold()
     return (
-        norm in SVELTE_RESERVED_FILES
-        or norm == SVELTE_RESERVED_PREFIX.rstrip("/")
-        or norm.startswith(SVELTE_RESERVED_PREFIX)
+        is_dependency_manifest_path(folded)
+        or folded in _RESERVED_FOLDED
+        or folded == SVELTE_RESERVED_PREFIX.rstrip("/")
+        or folded.startswith(SVELTE_RESERVED_PREFIX)
     )
 
 
@@ -143,13 +171,20 @@ def svelte_path_rejection(path: str) -> str | None:
     error hierarchy (the same contract ``react_path_rejection`` keeps).
     """
     norm = normalize_svelte_path(path)
+    if is_dependency_manifest_path(norm):
+        return (
+            f"`{path}` is the site's dependency manifest. Only "
+            "`set_site_dependencies` writes it, because each entry is vetted against "
+            "the npm registry and the supply-chain policy before it lands."
+        )
     if is_reserved_svelte_path(norm):
         return (
             f"`{path}` resolves to `{norm}`, which the generator owns. The "
             "`src/lib/paw/` namespace and the auth files (src/hooks.server.ts, "
             "src/lib/auth.ts, src/app.d.ts) are what keep a gated site's session "
             "gate from being shadowed, and the build shell (package.json, "
-            "vite.config.ts, svelte.config.js) carries the dependency allowlist "
+            "vite.config.*, svelte.config.js, src/routes/+layout.ts/.js, and the "
+            "install config: bunfig.toml, .npmrc, lockfiles) carries the dependency allowlist "
             "and the adapter/prerender configuration. Edit under `src/` outside "
             "`src/lib/paw/`."
         )

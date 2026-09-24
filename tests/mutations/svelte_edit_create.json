@@ -31,7 +31,7 @@
   {
     "label": "the build shell drops out of the reserved set, so the edit lane can rewrite the dependency manifest one call at a time",
     "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
-    "find": "SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = (\n    \"package.json\",\n    \"vite.config.ts\",\n    \"svelte.config.js\",\n)",
+    "find": "SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = (\n    \"package.json\",\n    *VITE_CONFIG_FILES,\n    \"svelte.config.js\",\n    \"src/routes/+layout.ts\",\n    \"src/routes/+layout.js\",\n    DEPENDENCY_MANIFEST_PATH,\n    *INSTALL_CONFIG_FILES,\n)",
     "replace": "SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = ()",
     "tests": [
       "tests/ee/sites/test_svelte_component_create.py::test_every_reserved_path_spelling_is_rejected"

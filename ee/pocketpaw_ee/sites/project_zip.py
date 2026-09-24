@@ -1,6 +1,14 @@
 # ee/pocketpaw_ee/sites/project_zip.py — assemble a source-engine Paw Site's
 # downloadable project as in-memory zip bytes.
 #
+# Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): a site's author-declared
+# npm packages (``paw.dependencies.json``) are merged into the downloaded svelte /
+# react ``package.json`` at their exact resolved versions, and the manifest file
+# itself is left out of those archives (package.json now carries it). An html archive
+# keeps the file, since there is no package.json to carry it. The toolchain pins are
+# read from ``vetted_pins`` (the vendored ``paw-sites-gen allowlist`` output, with a
+# fallback constant) instead of a hand-mirrored copy here.
+#
 # BUILT FROM THE STORED POCKET, NEVER FROM A GENERATED TREE. That is the invariant a
 # future reader is most likely to break, and there are three reasons for it:
 #
@@ -50,7 +58,8 @@ import zipfile
 from dataclasses import dataclass
 from typing import Any
 
-from pocketpaw_ee.sites import engines, generator_client, react_paths, svelte_paths
+from pocketpaw_ee.sites import engines, generator_client, react_paths, svelte_paths, vetted_pins
+from pocketpaw_ee.sites.dependency_manifest import author_packages, is_dependency_manifest_path
 
 logger = logging.getLogger(__name__)
 
@@ -87,27 +96,16 @@ MAX_TOTAL_BYTES = 16 * 1024 * 1024
 # separator, so the leading-slash test alone does not catch it.
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
-# Mirrored from paw-sites/src/allowlist.ts ``VETTED_DEPENDENCIES`` — only the entries
-# a downloadable shell names. The rest of that map is hosting toolchain the generator
-# picks from what it emitted (adapter-cloudflare, valibot, @noble/hashes,
-# @ripple-ui/svelte), and a project someone takes away does not deploy to our edge.
+# The toolchain pins, from paw-sites/src/allowlist.ts ``VETTED_DEPENDENCIES`` via
+# ``vetted_pins`` — the vendored ``paw-sites-gen allowlist`` JSON when there is one,
+# the fallback constants otherwise. Only the entries a downloadable shell names are
+# looked up; the rest of that map is hosting toolchain the generator picks from what
+# it emitted (adapter-cloudflare, valibot, @noble/hashes, @ripple-ui/svelte), and a
+# project someone takes away does not deploy to our edge.
 #
-# Pins live here rather than being derived, because paw-sites is a different repo and
-# is not importable from this process. Every shell builder looks its names up in this
-# map, so adding a dependency without a vetted pin raises instead of shipping an
-# unvetted package.
-_VETTED_PINS: dict[str, str] = {
-    "@sveltejs/adapter-static": "^3.0.10",
-    "@sveltejs/kit": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^6.0.0",
-    "@tailwindcss/vite": "^4.2.2",
-    "@vitejs/plugin-react": "^4.3.4",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "svelte": "^5.0.0",
-    "tailwindcss": "^4.2.2",
-    "vite": "^6.0.0",
-}
+# Every shell builder looks its names up in this map, so adding a dependency without
+# a vetted pin raises instead of shipping an unvetted package.
+_VETTED_PINS: dict[str, str] = vetted_pins.vetted_pins()
 
 # (dependencies, devDependencies) per engine. html is absent on purpose: it has no
 # build at all (``engines.static_output_rel("html") == "."`` — its source IS the
@@ -185,8 +183,16 @@ def _escape_html(value: str) -> str:
     )
 
 
-def _package_json(engine: str, site_id: str, dev_script: str) -> str:
-    """The engine's manifest, with every dependency pinned from ``_VETTED_PINS``."""
+def _package_json(
+    engine: str, site_id: str, dev_script: str, author_deps: dict[str, str] | None = None
+) -> str:
+    """The engine's manifest, with every toolchain dependency pinned from
+    ``_VETTED_PINS`` and the site's author packages at their resolved EXACT versions.
+
+    An author package never displaces a toolchain one: the resolver refuses
+    toolchain names, and a manifest that got one past it anyway (it is reserved on
+    every edit lane) still loses here, because the toolchain entry is written last.
+    """
     deps, dev_deps = _SHELL_DEPENDENCIES[engine]
     manifest: dict[str, Any] = {
         "name": f"paw-site-{site_id or 'project'}",
@@ -194,13 +200,17 @@ def _package_json(engine: str, site_id: str, dev_script: str) -> str:
         "type": "module",
         "scripts": {"dev": dev_script, "build": "vite build", "preview": "vite preview"},
     }
-    if deps:
-        manifest["dependencies"] = {name: _VETTED_PINS[name] for name in deps}
+    runtime: dict[str, str] = dict(sorted((author_deps or {}).items()))
+    runtime.update({name: _VETTED_PINS[name] for name in deps})
+    if runtime:
+        manifest["dependencies"] = runtime
     manifest["devDependencies"] = {name: _VETTED_PINS[name] for name in dev_deps}
     return json.dumps(manifest, indent=2) + "\n"
 
 
-def _svelte_shell(*, site_id: str, title: str) -> dict[str, str]:
+def _svelte_shell(
+    *, site_id: str, title: str, author_deps: dict[str, str] | None = None
+) -> dict[str, str]:
     """The svelte build shell: adapter-static, Tailwind, and SvelteKit's app shell.
 
     adapter-STATIC rather than adapter-cloudflare, because a downloaded project is
@@ -209,7 +219,7 @@ def _svelte_shell(*, site_id: str, title: str) -> dict[str, str]:
     This is the same adapter a static svelte Paw Site already builds on.
     """
     return {
-        "package.json": _package_json("svelte", site_id, "vite dev"),
+        "package.json": _package_json("svelte", site_id, "vite dev", author_deps),
         "svelte.config.js": (
             "// The downloaded project's SvelteKit config: prerendered to static\n"
             "// files, which is what a Paw Site landing page is.\n"
@@ -293,7 +303,9 @@ def _svelte_shell(*, site_id: str, title: str) -> dict[str, str]:
     }
 
 
-def _react_shell(*, site_id: str, title: str) -> dict[str, str]:
+def _react_shell(
+    *, site_id: str, title: str, author_deps: dict[str, str] | None = None
+) -> dict[str, str]:
     """The react build shell: Vite, the React plugin, and a client entry.
 
     ``createRoot``, not the published build's ``hydrateRoot``: the deployed artifact
@@ -303,7 +315,7 @@ def _react_shell(*, site_id: str, title: str) -> dict[str, str]:
     serves.
     """
     return {
-        "package.json": _package_json("react", site_id, "vite"),
+        "package.json": _package_json("react", site_id, "vite", author_deps),
         "vite.config.ts": (
             "import { defineConfig } from 'vite';\n"
             "import react from '@vitejs/plugin-react';\n"
@@ -393,13 +405,20 @@ def _readme(engine: str, *, title: str, tokens_resolved: bool) -> str:
     )
 
 
-def _build_shell(engine: str, *, site_id: str, title: str, tokens_resolved: bool) -> dict[str, str]:
+def _build_shell(
+    engine: str,
+    *,
+    site_id: str,
+    title: str,
+    tokens_resolved: bool,
+    author_deps: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Every file the shell contributes for ``engine``, keyed by relative path."""
     shell: dict[str, str] = {}
     if engine == "svelte":
-        shell.update(_svelte_shell(site_id=site_id, title=title))
+        shell.update(_svelte_shell(site_id=site_id, title=title, author_deps=author_deps))
     elif engine == "react":
-        shell.update(_react_shell(site_id=site_id, title=title))
+        shell.update(_react_shell(site_id=site_id, title=title, author_deps=author_deps))
     shell["README.md"] = _readme(engine, title=title, tokens_resolved=tokens_resolved)
     return shell
 
@@ -470,7 +489,17 @@ def plan_project_files(
             capture_signed_key=capture_signed_key,
         )
 
-    shell = _build_shell(normalized, site_id=site_id, title=title, tokens_resolved=tokens_resolved)
+    # PP-1: the site's author packages, at their resolved exact versions. Read before
+    # the walk below so package.json can carry them; the manifest file itself is then
+    # left out of a svelte/react archive, where package.json is the manifest.
+    author_deps = author_packages(files)
+    shell = _build_shell(
+        normalized,
+        site_id=site_id,
+        title=title,
+        tokens_resolved=tokens_resolved,
+        author_deps=author_deps,
+    )
     # A shell file at an AUTHORABLE path goes on first, so the authored copy wins it.
     planned: dict[str, str] = {
         path: contents
@@ -479,6 +508,8 @@ def plan_project_files(
     }
 
     for raw, contents in files.items():
+        if normalized in ("svelte", "react") and is_dependency_manifest_path(str(raw)):
+            continue
         if not isinstance(contents, str):
             raise ProjectZipError(
                 f"source entry {raw!r} holds {type(contents).__name__}, not file contents"

@@ -123,7 +123,7 @@
   },
   {
     "label": "a shell pin drifts off the vetted version — the download installs a package paw-sites never vetted",
-    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "file": "ee/pocketpaw_ee/sites/vetted_pins.py",
     "find": "    \"react\": \"^19.0.0\",",
     "replace": "    \"react\": \"^20.0.0\",",
     "tests": [

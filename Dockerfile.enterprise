@@ -1,5 +1,9 @@
 # Dockerfile.enterprise — sovereign per-tenant PocketPaw Enterprise image.
 # Created: 2026-06-10 (sov/w1a-deploy).
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — the paw-sites stage
+#   also writes /out/allowlist.json (`paw-sites-gen allowlist`), shipped to
+#   /opt/paw-sites/allowlist.json, so pocketpaw reads toolchain pins from the
+#   generator instead of hand-mirroring them.
 #
 # WHY a separate Dockerfile (vs the root Dockerfile): the root image is the
 # OSS-default single-user build. This one ships the FSL enterprise layer
@@ -222,6 +226,12 @@ RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
     cp -R /build/paw-sites/templates /out/templates && \
     cp /build/paw-sites/package.json /out/package.json && \
     test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
+# PP-1 (2026-09-24): the generator's own dependency pins, read by
+# pocketpaw_ee.sites.vetted_pins from /opt/paw-sites/allowlist.json. Generated here so
+# the vendor and clone paths both get it. A generator without the subcommand leaves
+# no file and pocketpaw falls back to its pinned constants.
+RUN ( bun /out/dist/cli.js allowlist > /out/allowlist.json && test -s /out/allowlist.json ) \
+    || ( rm -f /out/allowlist.json && echo "WARN: paw-sites-gen allowlist unavailable; using pocketpaw's fallback pins" )
 
 # ---- Builder stage ----
 FROM python:3.12-slim AS builder

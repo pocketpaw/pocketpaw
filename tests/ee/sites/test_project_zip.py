@@ -1,5 +1,12 @@
 # tests/ee/sites/test_project_zip.py — the downloadable project archive.
 #
+# Updated 2026-09-24 (feat/sites-author-dependencies, PP-1): ``src/routes/+layout.ts``
+# is now generator-reserved on svelte (contract §2), so the "authored file beats the
+# shell default" test uses ``src/app.html`` alone and a sibling pins that the shell's
+# +layout.ts now wins. The pin-drift check reads ``vetted_pins.FALLBACK_PINS`` (the
+# constants the loader falls back to), and author packages from
+# ``paw.dependencies.json`` are checked to reach package.json at exact versions.
+#
 # What these pin, in the order the module's own invariants matter:
 #
 #   * the archive is assembled from the STORED pocket, so the capture placeholders
@@ -154,7 +161,11 @@ def test_the_vetted_pins_agree_with_paw_sites_allowlist():
     body = text.split("VETTED_DEPENDENCIES", 1)[1].split("export function", 1)[0]
     pairs = dict(re.findall(r"""['"]?([@a-z0-9/._-]+)['"]?:\s*['"]([^'"]+)['"]""", body))
     assert pairs, "could not parse VETTED_DEPENDENCIES out of allowlist.ts"
-    for name, pin in project_zip._VETTED_PINS.items():
+    from pocketpaw_ee.sites import vetted_pins
+
+    # The FALLBACK constants are what the loader serves when no vendored allowlist
+    # is present, so they are the copy that can silently rot.
+    for name, pin in vetted_pins.FALLBACK_PINS.items():
         assert name in pairs, f"{name} is no longer on the paw-sites allowlist"
         assert pairs[name] == pin, f"{name} pin drifted: ours {pin}, theirs {pairs[name]}"
 
@@ -375,16 +386,28 @@ async def test_an_authored_file_in_the_authorable_tree_beats_the_shell_default()
     """The split the other way round: the generator lets a map override these, so
     the archive must too, or a download silently discards authored work."""
     source = _svelte_source()
-    source["src/routes/+layout.ts"] = "export const prerender = true;\nexport const csr = false;\n"
     source["src/app.html"] = "<!doctype html><body>%sveltekit.body%</body>"
 
     _built, entries = await _archive("svelte", source)
 
-    assert "csr = false" in entries["src/routes/+layout.ts"]
     assert entries["src/app.html"] == "<!doctype html><body>%sveltekit.body%</body>"
     # Control: the reserved half of the same shell still won, so this is the split
     # and not the shell failing to apply at all.
     assert "@sveltejs/kit" in _named_dependencies(entries)
+
+
+@pytest.mark.asyncio
+async def test_the_shell_layout_ts_beats_an_authored_one_now_that_it_is_reserved():
+    """PP-1: ``src/routes/+layout.ts`` joined the generator's reserved svelte shell
+    (contract §2), because an authored one could turn prerendering off. The download
+    follows the generator: the shell copy wins. Breaks if the path is dropped from
+    ``svelte_paths.SVELTE_RESERVED_SHELL_FILES``."""
+    source = _svelte_source()
+    source["src/routes/+layout.ts"] = "export const prerender = false;\n"
+
+    _built, entries = await _archive("svelte", source)
+
+    assert "prerender = true" in entries["src/routes/+layout.ts"]
 
 
 def test_every_overriding_shell_path_is_one_the_generator_reserves():
@@ -562,3 +585,71 @@ async def test_a_pocket_with_no_site_doc_yet_still_assembles(patched_reads):
     assert built.filename == "paw-site-pkt-1.zip"
     with zipfile.ZipFile(io.BytesIO(built.data)) as zf:
         assert "__CAPTURE_SIGNED_KEY__" in zf.read("index.html").decode("utf-8")
+
+
+# ── PP-1: author packages reach the downloaded package.json ────────────────────
+
+
+def _manifest(packages: dict[str, dict[str, str]]) -> str:
+    from pocketpaw_ee.sites.dependency_manifest import render_manifest
+
+    return render_manifest(packages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["svelte", "react"])
+async def test_author_packages_land_in_package_json_at_exact_versions(engine):
+    """Mutation: drop ``author_deps`` from ``_package_json`` → three is missing."""
+    source = _svelte_source() if engine == "svelte" else _react_source()
+    source["paw.dependencies.json"] = _manifest({"three": {"version": "0.170.0"}})
+
+    _built, entries = await _archive(engine, source)
+
+    manifest = json.loads(entries["package.json"])
+    assert manifest["dependencies"]["three"] == "0.170.0"
+    # package.json IS the manifest in a node project; the reserved file stays out.
+    assert "paw.dependencies.json" not in entries
+
+
+@pytest.mark.asyncio
+async def test_an_author_entry_never_displaces_a_toolchain_pin():
+    source = _react_source()
+    source["paw.dependencies.json"] = _manifest({"react": {"version": "18.0.0"}})
+
+    _built, entries = await _archive("react", source)
+
+    assert json.loads(entries["package.json"])["dependencies"]["react"] == "^19.0.0"
+
+
+@pytest.mark.asyncio
+async def test_an_html_archive_keeps_the_manifest_and_invents_no_package_json():
+    source = _html_source()
+    source["paw.dependencies.json"] = _manifest({"three": {"version": "0.170.0"}})
+
+    _built, entries = await _archive("html", source)
+
+    assert "package.json" not in entries
+    assert json.loads(entries["paw.dependencies.json"])["packages"]["three"]["version"] == "0.170.0"
+
+
+def test_vetted_pins_prefer_the_vendored_allowlist(tmp_path, monkeypatch):
+    from pocketpaw_ee.sites import vetted_pins
+
+    path = tmp_path / "allowlist.json"
+    path.write_text(json.dumps({"authorDeclarable": ["motion"], "pinned": {"motion": "^12.99.0"}}))
+    monkeypatch.setenv(vetted_pins.ALLOWLIST_ENV, str(path))
+    vetted_pins.vetted_pins.cache_clear()
+    try:
+        pins = vetted_pins.vetted_pins()
+        assert pins["motion"] == "^12.99.0"
+        # Names the allowlist does not print fall back to the constants.
+        assert pins["svelte"] == vetted_pins.FALLBACK_PINS["svelte"]
+    finally:
+        vetted_pins.vetted_pins.cache_clear()
+
+
+def test_the_motion_rewrite_reads_the_shared_pin(monkeypatch):
+    from pocketpaw_ee.sites import generator_client, vetted_pins
+
+    monkeypatch.delenv("PAW_SITES_MOTION_DEP", raising=False)
+    assert generator_client._ripple_motion_dep() == vetted_pins.pin_for("motion")

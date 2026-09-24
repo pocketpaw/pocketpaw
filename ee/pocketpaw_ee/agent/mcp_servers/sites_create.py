@@ -1,6 +1,18 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — authors can declare
+# npm packages. New tool ``set_site_dependencies`` (add ``[{name, range?}]`` /
+# remove ``[name]``) resolves each request against the registry and the supply-chain
+# policy and writes the result as the reserved ``paw.dependencies.json``; it is the
+# only writer of that file. ``create_{svelte,react,html}_site`` gained an optional
+# ``dependencies`` param that runs the same resolver before the pocket is persisted:
+# a rejected package lands in ``rejected`` with its reason and the create still
+# succeeds without it. A ``source`` map that hand-writes the manifest (or, on svelte,
+# the newly reserved build shell) is refused. ``edit_svelte_component`` on a pocket
+# that declares packages persists the draft without the local preview build and says
+# so (``site`` is null) — installing those packages is sandbox-only.
+#
 # Updated: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — ``edit_svelte_component``
 # gained ``create``, closing the last hole of the set RX-3 and HE-10 closed for react
 # and html. It was the FIRST edit lane to ship and the last to be able to mint a file:
@@ -265,7 +277,7 @@ import logging
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
-from pocketpaw_ee.sites import react_paths
+from pocketpaw_ee.sites import dependency_manifest, html_paths, react_paths, svelte_paths
 
 from ._audit import record_tool_call
 
@@ -315,6 +327,10 @@ EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
 # not a component, because an html site has no component model to name.
 EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
 
+# PP-1 — declare / drop npm packages on a svelte, react or html site. Same server
+# again. The only writer of ``paw.dependencies.json``; every edit lane refuses it.
+SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -324,6 +340,7 @@ SITES_CREATE_TOOL_IDS = (
     CREATE_REACT_SITE_TOOL_ID,
     EDIT_REACT_COMPONENT_TOOL_ID,
     EDIT_HTML_FILE_TOOL_ID,
+    SET_SITE_DEPENDENCIES_TOOL_ID,
 )
 
 
@@ -469,6 +486,94 @@ def _reserved_react_keys(source: dict[str, Any]) -> list[str]:
     ``src\\paw\\x.tsx`` cannot slip past the check. Kept under this name because
     the create handler and its tests call it."""
     return react_paths.reserved_react_keys(source)
+
+
+# ── Author dependencies (PP-1) ──────────────────────────────────────────────
+# The JSON schema for the ``dependencies`` param every source-engine create tool
+# takes, and for ``set_site_dependencies``' ``add``. Shared so the three creates and
+# the setter describe the same shape.
+DEPENDENCY_REQUESTS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "description": (
+        "Optional npm packages this site's code imports, as [{name, range?}] — e.g. "
+        '[{"name": "three"}, {"name": "gsap", "range": "^3.12"}]. '
+        "Each is checked against the npm registry and the supply-chain policy (at "
+        "least 7 days old, no install scripts or native code, popular enough, no "
+        "known advisory) and pinned to an exact version. Toolchain packages "
+        "(svelte, react, vite, tailwindcss, ...) are already provided — do not "
+        "list them. A refused package comes back in `rejected` with the reason."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "The npm package name."},
+            "range": {
+                "type": "string",
+                "description": "Optional semver range; omit for the newest eligible version.",
+            },
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _manifest_keys(source: dict[str, Any]) -> list[str]:
+    """Keys that spell the reserved dependency manifest, in any form."""
+    return sorted(k for k in source if dependency_manifest.is_dependency_manifest_path(k))
+
+
+def _manifest_in_source_error(tool_name: str, keys: list[str]) -> dict[str, Any]:
+    return _error_response(
+        f"{tool_name} `source` may not contain {', '.join(keys)} — that is the site's "
+        "dependency manifest, and only the resolver writes it. Declare packages with "
+        "the `dependencies` argument instead."
+    )
+
+
+async def _resolve_create_dependencies(
+    engine: str, raw: object, source: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Resolve a create tool's ``dependencies`` and fold them into ``source``.
+
+    Returns ``(source, report)``. ``report`` is ``None`` when the caller passed no
+    ``dependencies`` (the create body stays exactly as before), else
+    ``{packages: {name: {version}}, rejected: [...]}``. A request the resolver
+    refuses never blocks the create: it is reported, and the site is created
+    without it. The manifest is only written when at least one package resolved.
+    """
+    if raw is None:
+        return source, None
+    from pocketpaw_ee.sites import dependency_resolver
+
+    requests, rejected = dependency_resolver.coerce_requests(raw)
+    report: dict[str, Any] = {"packages": {}, "rejected": [r.as_dict() for r in rejected]}
+    if not requests:
+        return source, report
+    result = await dependency_resolver.resolve_dependencies(requests, engine)
+    report["rejected"] += [r.as_dict() for r in result.rejected]
+    if not result.packages:
+        return source, report
+    entries = {name: pkg.manifest_entry() for name, pkg in result.packages.items()}
+    report["packages"] = {name: {"version": e["version"]} for name, e in sorted(entries.items())}
+    return {
+        **source,
+        dependency_manifest.DEPENDENCY_MANIFEST_PATH: dependency_manifest.render_manifest(entries),
+    }, report
+
+
+def _with_dependency_report(body: dict[str, Any], report: dict[str, Any] | None) -> dict[str, Any]:
+    """Add ``packages`` / ``rejected`` to a create body when dependencies were asked for."""
+    if report is None:
+        return body
+    body = {**body, "packages": report["packages"], "rejected": report["rejected"]}
+    if report["rejected"]:
+        body["message"] = (
+            "The site was created, but some packages were refused (see `rejected`). "
+            "Do not import them — pick an alternative or drop the feature, and tell "
+            "the user if it changes what they asked for."
+        )
+    return body
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -1044,7 +1149,7 @@ async def _create_svelte_site_handler(args: dict) -> dict:
         ok=True,
     )
 
-    args = coerce_json_object_args(args, ("source",))
+    args = coerce_json_object_args(args, ("source", "dependencies"))
     source = args.get("source")
     if not isinstance(source, dict) or not source:
         return _error_response(
@@ -1077,6 +1182,21 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "+layout.svelte (imports app.css), +page.ts (prerender=true), app.css, "
             "and at least one section component."
         )
+    # PP-1: the manifest and the build shell are the generator's (contract §2). The
+    # generator throws on them at build time; naming them here is the actionable form.
+    if manifest_keys := _manifest_keys(source):
+        return _manifest_in_source_error("create_svelte_site", manifest_keys)
+    reserved = svelte_paths.reserved_svelte_keys(
+        {k: v for k, v in source.items() if k not in SVELTE_BINDING_KEYS}
+    )
+    if reserved:
+        return _error_response(
+            "create_svelte_site `source` may not write generator-owned paths: "
+            f"{', '.join(reserved)}. The build shell (package.json, vite.config.ts/.js, "
+            "svelte.config.js, src/routes/+layout.ts/.js), the auth files and the "
+            "`src/lib/paw/` namespace are generated. Author routes under `src/routes/` "
+            "(a +layout.svelte is fine) and components under `src/lib/`."
+        )
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
@@ -1107,6 +1227,14 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     # pipeline (publish, refine, /sites listing) keys on. ``trusted=True``
     # short-circuits the strict catalog gate, which only runs on a non-null
     # rippleSpec anyway — the svelte path passes ``ripple_spec=None``.
+    # PP-1: resolve any declared npm packages BEFORE the persist, so the manifest
+    # lands with the first version of the source map. A refused package is reported
+    # and the create goes ahead without it; a registry outage refuses the package,
+    # never silently accepts it.
+    source, dep_report = await _resolve_create_dependencies(
+        "svelte", args.get("dependencies"), source
+    )
+
     from pocketpaw_ee.cloud.pockets.service import agent_create
 
     try:
@@ -1139,17 +1267,20 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
     return _success_response(
-        {
-            "ok": True,
-            "pocket_id": new_pocket_id,
-            "pocket": {
-                "id": new_pocket_id,
-                "name": view.get("name"),
-                "type": view.get("type"),
-                "pattern": view.get("pattern"),
-                "engine": view.get("engine"),
+        _with_dependency_report(
+            {
+                "ok": True,
+                "pocket_id": new_pocket_id,
+                "pocket": {
+                    "id": new_pocket_id,
+                    "name": view.get("name"),
+                    "type": view.get("type"),
+                    "pattern": view.get("pattern"),
+                    "engine": view.get("engine"),
+                },
             },
-        }
+            dep_report,
+        )
     )
 
 
@@ -1226,6 +1357,7 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
                     "type": "string",
                     "description": "Optional one-line pocket description.",
                 },
+                "dependencies": DEPENDENCY_REQUESTS_SCHEMA,
                 "icon": {"type": "string", "description": "Optional lucide icon name."},
                 "color": {"type": "string", "description": "Optional accent color hex."},
             },
@@ -1271,7 +1403,7 @@ async def _create_html_site_handler(args: dict) -> dict:
         ok=True,
     )
 
-    args = coerce_json_object_args(args, ("source",))
+    args = coerce_json_object_args(args, ("source", "dependencies"))
     source = args.get("source")
     if not isinstance(source, dict) or not source:
         return _error_response(
@@ -1297,6 +1429,15 @@ async def _create_html_site_handler(args: dict) -> dict:
             f"{', '.join(missing)}. An html site needs an `index.html` entry "
             "document — the edge serves it at the site root."
         )
+    # PP-1: the dependency manifest (which becomes the page's importmap) is written
+    # only by the resolver, and ``_paw/`` is the generator's editing namespace.
+    if manifest_keys := _manifest_keys(source):
+        return _manifest_in_source_error("create_html_site", manifest_keys)
+    if reserved := html_paths.reserved_html_keys(source):
+        return _error_response(
+            "create_html_site `source` may not write inside the generator-owned "
+            f"`_paw/` namespace: {', '.join(reserved)}."
+        )
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
@@ -1320,6 +1461,14 @@ async def _create_html_site_handler(args: dict) -> dict:
     # (publish, /sites listing) keys on. ``trusted=True`` short-circuits the strict
     # catalog gate, which only runs on a non-null rippleSpec anyway — the html
     # path passes ``ripple_spec=None``.
+    # PP-1: resolve any declared npm packages BEFORE the persist, so the manifest
+    # lands with the first version of the source map. A refused package is reported
+    # and the create goes ahead without it; a registry outage refuses the package,
+    # never silently accepts it.
+    source, dep_report = await _resolve_create_dependencies(
+        "html", args.get("dependencies"), source
+    )
+
     from pocketpaw_ee.cloud.pockets.service import agent_create
 
     try:
@@ -1352,17 +1501,20 @@ async def _create_html_site_handler(args: dict) -> dict:
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
     return _success_response(
-        {
-            "ok": True,
-            "pocket_id": new_pocket_id,
-            "pocket": {
-                "id": new_pocket_id,
-                "name": view.get("name"),
-                "type": view.get("type"),
-                "pattern": view.get("pattern"),
-                "engine": view.get("engine"),
+        _with_dependency_report(
+            {
+                "ok": True,
+                "pocket_id": new_pocket_id,
+                "pocket": {
+                    "id": new_pocket_id,
+                    "name": view.get("name"),
+                    "type": view.get("type"),
+                    "pattern": view.get("pattern"),
+                    "engine": view.get("engine"),
+                },
             },
-        }
+            dep_report,
+        )
     )
 
 
@@ -1421,6 +1573,7 @@ def make_create_html_site_tool(tool: Any) -> Any:
                     "type": "string",
                     "description": "Optional one-line pocket description.",
                 },
+                "dependencies": DEPENDENCY_REQUESTS_SCHEMA,
                 "icon": {"type": "string", "description": "Optional lucide icon name."},
                 "color": {"type": "string", "description": "Optional accent color hex."},
             },
@@ -1489,7 +1642,7 @@ async def _create_react_site_handler(args: dict) -> dict:
         ok=True,
     )
 
-    args = coerce_json_object_args(args, ("source",))
+    args = coerce_json_object_args(args, ("source", "dependencies"))
     source = args.get("source")
     if not isinstance(source, dict) or not source:
         return _error_response(
@@ -1519,6 +1672,8 @@ async def _create_react_site_handler(args: dict) -> dict:
     # Fail here rather than at publish: the generator throws on a reserved-path
     # collision, and a build-time throw names the path far from the authoring turn
     # that caused it.
+    if manifest_keys := _manifest_keys(source):
+        return _manifest_in_source_error("create_react_site", manifest_keys)
     reserved = _reserved_react_keys(source)
     if reserved:
         return _error_response(
@@ -1563,6 +1718,14 @@ async def _create_react_site_handler(args: dict) -> dict:
     # keys on. ``trusted=True`` short-circuits the strict catalog gate, which only
     # runs on a non-null rippleSpec anyway — the react path passes
     # ``ripple_spec=None``.
+    # PP-1: resolve any declared npm packages BEFORE the persist, so the manifest
+    # lands with the first version of the source map. A refused package is reported
+    # and the create goes ahead without it; a registry outage refuses the package,
+    # never silently accepts it.
+    source, dep_report = await _resolve_create_dependencies(
+        "react", args.get("dependencies"), source
+    )
+
     from pocketpaw_ee.cloud.pockets.service import agent_create
 
     try:
@@ -1596,17 +1759,20 @@ async def _create_react_site_handler(args: dict) -> dict:
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
     return _success_response(
-        {
-            "ok": True,
-            "pocket_id": new_pocket_id,
-            "pocket": {
-                "id": new_pocket_id,
-                "name": view.get("name"),
-                "type": view.get("type"),
-                "pattern": view.get("pattern"),
-                "engine": view.get("engine"),
+        _with_dependency_report(
+            {
+                "ok": True,
+                "pocket_id": new_pocket_id,
+                "pocket": {
+                    "id": new_pocket_id,
+                    "name": view.get("name"),
+                    "type": view.get("type"),
+                    "pattern": view.get("pattern"),
+                    "engine": view.get("engine"),
+                },
             },
-        }
+            dep_report,
+        )
     )
 
 
@@ -1638,8 +1804,8 @@ def make_create_react_site_tool(tool: Any) -> Any:
             "build shell is GENERATED and reserved: the map may NOT write "
             "index.html, package.json, vite.config.ts, paw-prerender.mjs, or "
             "anything under `src/paw/`. The project has react, react-dom and vite "
-            "and NOTHING else — no router, no CSS framework, no state or animation "
-            "library, and you cannot add dependencies; it is ONE page. CRITICAL "
+            "and NOTHING else unless you declare a package in `dependencies` — no "
+            "router, no CSS framework; it is ONE page. CRITICAL "
             "authoring rule: the page is PRERENDERED, so every component must render "
             "its resting/final state in its RETURNED MARKUP — useEffect does not run "
             "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
@@ -1700,6 +1866,7 @@ def make_create_react_site_tool(tool: Any) -> Any:
                     "type": "string",
                     "description": "Optional one-line pocket description.",
                 },
+                "dependencies": DEPENDENCY_REQUESTS_SCHEMA,
                 "icon": {"type": "string", "description": "Optional lucide icon name."},
                 "color": {"type": "string", "description": "Optional accent color hex."},
             },
@@ -1854,6 +2021,28 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
         if unreferenced
         else ""
     )
+    if doc is None:
+        # PP-1 seam: the site declares npm packages, so no local preview was built
+        # (those install only in the build sandbox). The draft IS saved. PP-2 adds the
+        # sandbox verification this response will then carry.
+        return _success_response(
+            {
+                "ok": True,
+                "status": "draft",
+                "is_live": False,
+                "component_path": component_path,
+                "created": create,
+                "unreferenced": unreferenced,
+                "site": None,
+                "preview_built": False,
+                "message": (
+                    "Your change is saved to the site's draft. This site declares npm "
+                    "packages, so the preview is built in the isolated build sandbox "
+                    "rather than here — no preview_url is returned for this edit. It is "
+                    "NOT live; the user publishes when ready." + orphan_note
+                ),
+            }
+        )
     return _success_response(
         {
             "ok": True,
@@ -2594,6 +2783,129 @@ async def _edit_html_file_handler(args: dict) -> dict:
     )
 
 
+async def _set_site_dependencies_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__set_site_dependencies`` (PP-1).
+
+    Identity → ``record_tool_call`` → argument shape → plan gate → the sites
+    service's ``set_site_dependencies``, which resolves every add against the npm
+    registry and the policy and rewrites ``paw.dependencies.json``. Returns
+    ``{ok, pocket_id, packages: {name: {version}}, rejected: [{name, code, reason}],
+    changed}``. A refused package is NOT an error: ``ok`` stays true and the reason
+    is in ``rejected``, so the agent can fix the request or change course.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "set_site_dependencies requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_set_site_dependencies",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("add", "remove"))
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "set_site_dependencies requires a `pocket_id` — the id of the svelte, "
+            "react or html site pocket."
+        )
+    add = args.get("add")
+    remove = args.get("remove")
+    if add is not None and not isinstance(add, list):
+        return _error_response("set_site_dependencies `add` must be a list of {name, range?}.")
+    if remove is not None and not isinstance(remove, list):
+        return _error_response("set_site_dependencies `remove` must be a list of package names.")
+    if not add and not remove:
+        return _error_response(
+            "set_site_dependencies needs `add` (packages to declare) or `remove` "
+            "(package names to drop)."
+        )
+
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.set_site_dependencies(
+            user_id=user_id, pocket_id=pocket_id, add=add, remove=remove
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("set_site_dependencies failed", exc_info=True)
+        return _error_response(f"set_site_dependencies failed: {exc}")
+
+    body: dict[str, Any] = {"ok": True, **result}
+    if result["rejected"]:
+        body["message"] = (
+            "Some requests were refused (see `rejected`). Do not import a refused "
+            "package; the others are declared on the site's draft."
+        )
+    else:
+        body["message"] = (
+            "Declared on the site's draft. Import each package inside onMount / "
+            "useEffect (client-side), never at module top level of a prerendered page."
+        )
+    return _success_response(body)
+
+
+def make_set_site_dependencies_tool(tool: Any) -> Any:
+    """Build the ``set_site_dependencies`` SDK tool object (PP-1).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as the create and edit
+    tools (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "set_site_dependencies",
+        (
+            "Declare or drop npm packages on an EXISTING svelte, react or html Paw "
+            "Site (not ripple/landing sites). `add` is [{name, range?}]; `remove` is "
+            "a list of names. Each added package is checked against the npm registry "
+            "and the supply-chain policy — at least 7 days old, no install scripts "
+            "or native code, at least 500 weekly downloads, no moderate-or-worse "
+            "advisory, at most 20 per site — and pinned to an exact version. This is "
+            "the ONLY way to change the site's dependencies: paw.dependencies.json "
+            "cannot be written with the edit tools. Toolchain packages (svelte, "
+            "react, vite, tailwindcss, ...) are provided already; do not declare "
+            "them. Returns {ok, packages, rejected, changed}; a refused package is "
+            "listed in `rejected` with the reason, and must not be imported."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the svelte, react or html site pocket.",
+                },
+                "add": {
+                    **DEPENDENCY_REQUESTS_SCHEMA,
+                    "description": "Packages to declare, as [{name, range?}].",
+                },
+                "remove": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Names of declared packages to drop.",
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def set_site_dependencies(args):  # type: ignore[no-untyped-def]
+        return await _set_site_dependencies_handler(args)
+
+    return set_site_dependencies
+
+
 def make_read_site_source_tool(tool: Any) -> Any:
     """Build the ``read_site_source`` SDK tool object.
 
@@ -2821,6 +3133,7 @@ __all__ = [
     "REACT_RESERVED_FILES",
     "REACT_RESERVED_PREFIX",
     "SERVER_NAME",
+    "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
     "SVELTE_REQUIRED_PREFIXES",
@@ -2833,4 +3146,5 @@ __all__ = [
     "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
     "make_read_site_source_tool",
+    "make_set_site_dependencies_tool",
 ]

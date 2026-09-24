@@ -1,5 +1,15 @@
 # react_paths.py — the ONE place the react-track source-map path policy lives.
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — mirrors paw-sites PS-1:
+# every ``vite.config.*`` spelling and the install config (``bunfig.toml``, ``.npmrc``,
+# ``bun.lock``, ``bun.lockb``, ``package-lock.json``) are reserved, and matching is
+# CASE-INSENSITIVE for every reserved file and the ``src/paw/`` namespace.
+# ``paw.dependencies.json`` (the author dependency manifest) is reserved in any
+# spelling, case included. Only the resolver behind ``set_site_dependencies`` writes
+# it; it sits at the map root, which was already outside ``src/``/``public/``, but it
+# is now classified RESERVED so the edit lane names the right tool instead of calling
+# it a stray root file.
+#
 # Updated: 2026-09-01 (fix/sites-react-orphan-create) — added
 # ``react_path_is_referenced``, which answers "does anything in this source map
 # reach that path". The module was pure POLICY (may this path be written); this is
@@ -76,16 +86,27 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from pocketpaw_ee.sites.dependency_manifest import (
+    DEPENDENCY_MANIFEST_PATH,
+    INSTALL_CONFIG_FILES,
+    VITE_CONFIG_FILES,
+    is_dependency_manifest_path,
+)
+
 # Paths the generator owns and no source map may write. Mirrors ``RESERVED_FILES``
 # + ``RESERVED_NAMESPACE`` in paw-sites' react-scaffold.ts, which throws on a
 # collision.
 REACT_RESERVED_FILES: tuple[str, ...] = (
     "index.html",
     "package.json",
-    "vite.config.ts",
+    *VITE_CONFIG_FILES,
     "paw-prerender.mjs",
+    DEPENDENCY_MANIFEST_PATH,
+    *INSTALL_CONFIG_FILES,
 )
 REACT_RESERVED_PREFIX = "src/paw/"
+# Case-folded once: the generator matches case-insensitively, so this must.
+_RESERVED_FOLDED = frozenset(f.casefold() for f in REACT_RESERVED_FILES)
 
 # The two directories an author may write into. Anything else — a root-level file,
 # a path that escapes the project with ``..``, an absolute path — is not authorable.
@@ -105,8 +126,13 @@ def normalize_react_path(path: str) -> str:
 
 def is_reserved_react_path(path: str) -> bool:
     """True when ``path`` resolves onto a generator-owned file or namespace."""
-    norm = normalize_react_path(path)
-    return norm in REACT_RESERVED_FILES or norm.startswith(REACT_RESERVED_PREFIX)
+    folded = normalize_react_path(path).casefold()
+    return (
+        is_dependency_manifest_path(folded)
+        or folded in _RESERVED_FOLDED
+        or folded == REACT_RESERVED_PREFIX.rstrip("/")
+        or folded.startswith(REACT_RESERVED_PREFIX)
+    )
 
 
 def is_authorable_react_path(path: str) -> bool:
@@ -145,7 +171,13 @@ def react_path_rejection(path: str) -> str | None:
     this module stays free of any dependency on the cloud error hierarchy.
     """
     norm = normalize_react_path(path)
-    if norm in REACT_RESERVED_FILES or norm.startswith(REACT_RESERVED_PREFIX):
+    if is_dependency_manifest_path(norm):
+        return (
+            f"`{path}` is the site's dependency manifest. Only "
+            "`set_site_dependencies` writes it, because each entry is vetted against "
+            "the npm registry and the supply-chain policy before it lands."
+        )
+    if is_reserved_react_path(norm):
         return (
             f"`{path}` resolves to `{norm}`, which the generator owns. The build "
             "shell (index.html, package.json, vite.config.ts, paw-prerender.mjs) "
