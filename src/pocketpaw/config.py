@@ -628,6 +628,23 @@ class Settings(BaseSettings):
         ),
     )
 
+    code_local_native_tools: bool = Field(
+        default=False,
+        description=(
+            "When True, a /code turn on a LOCAL-folder project (the desktop app "
+            "stamps the folder's absolute path as ``current_dir``) gives the agent "
+            "the SDK's native ``Read`` / ``Grep`` / ``Glob`` against that folder, "
+            "instead of the browser-delegated ``readFile`` / ``search`` / "
+            "``listDir``. Writes still go through ``editFile`` / ``writeFile``, and "
+            "``Bash`` / ``Write`` / ``Edit`` stay denied. Daytona, WebContainer and "
+            "hosted /code are unaffected. SINGLE-OPERATOR ONLY: the path comes from "
+            "the client and names a directory on the machine the backend runs on, "
+            "so it is only meaningful when that machine IS the user's. Ignored "
+            "whenever ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` is set (the shared "
+            "multi-tenant cloud marker)."
+        ),
+    )
+
     # Copilot SDK Settings
     copilot_sdk_provider: str = Field(
         default="copilot",

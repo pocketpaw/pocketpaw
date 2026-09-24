@@ -531,9 +531,8 @@ def test_surface_registry_import_assertion_still_passes() -> None:
     _assert_registry_complete()  # raises if the registry drifted
     code_specs = [spec for spec in SURFACES if spec.kind is SurfaceKind.CODE]
     assert len(code_specs) == 1
-    # CODE stays STATIC — a literal profile, not a resolver.
-    assert code_specs[0].profile is not None
-    assert code_specs[0].profile_resolver is None
+    assert code_specs[0].profile is None
+    assert code_specs[0].profile_resolver is not None
 
 
 def test_studio_and_code_kinds_map_from_wire_strings() -> None:
