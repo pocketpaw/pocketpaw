@@ -1,0 +1,198 @@
+[
+  {
+    "label": "PP-2 verdict: a failed layer no longer makes the verdict failed, so a build or browser failure is reported as unverified and the agent never learns its code is broken",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    if \"failed\" in statuses:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py::TestLayers::test_a_build_failure_is_failed_with_its_diagnostics",
+      "tests/ee/sites/test_verify_pipeline.py::TestLayers::test_a_browser_failure_is_failed"
+    ]
+  },
+  {
+    "label": "PP-2 verdict: an unverified layer no longer blocks a pass, so a browser that never launched reads as passed",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    elif \"unverified\" in statuses or not any(s == \"passed\" for s in statuses):",
+    "replace": "    elif False:",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py::TestLayers::test_a_browser_that_would_not_launch_is_unverified_never_passed",
+      "tests/ee/sites/test_verify_pipeline.py::TestInfrastructure::test_arq_down_is_unverified"
+    ]
+  },
+  {
+    "label": "PP-2 static short-circuit removed: a static failure still spends a sandbox on a build the author already has to fix",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    if static[\"status\"] == \"failed\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py::TestLayers::test_a_static_failure_spends_no_sandbox"
+    ]
+  },
+  {
+    "label": "PP-2 cache: an unverified verdict is served from the cache, so a site checked while the sandbox was down is never re-checked",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "verdict.get(\"status\") not in (\"passed\", \"failed\")",
+    "replace": "verdict.get(\"status\") not in (\"passed\", \"failed\", \"unverified\")",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py::TestCache::test_unverified_is_never_served_from_the_cache"
+    ]
+  },
+  {
+    "label": "PP-2 cache bypassed: every re-verify of unchanged source spends a sandbox",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    if not force and (\n",
+    "replace": "    if False and (\n",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py::TestCache::test_unchanged_source_is_a_free_re_verify"
+    ]
+  },
+  {
+    "label": "PP-2 /status leak: the summary carries the diagnostics list, putting agent-only messages on a UI wire",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "        \"error_count\": _count(verdict.get(\"errors\")),",
+    "replace": "        \"error_count\": _count(verdict.get(\"errors\")),\n        \"errors\": verdict.get(\"errors\"),",
+    "tests": [
+      "tests/ee/sites/test_verify_pipeline.py::TestStatusSummary::test_counts_only_and_no_message_ever",
+      "tests/ee/sites/test_verify_pipeline.py::TestStatusSummary::test_the_status_endpoint_carries_the_summary_without_messages"
+    ]
+  },
+  {
+    "label": "PP-2 diagnostics: site_key_* is not scrubbed, so a capture key in build output reaches the agent",
+    "file": "ee/pocketpaw_ee/sites/verify_diagnostics.py",
+    "find": "    out = _SITE_KEY_RE.sub(\"site_key_[redacted]\", out)",
+    "replace": "    out = out",
+    "tests": [
+      "tests/ee/sites/test_verify_diagnostics.py::TestScrub::test_site_keys_are_scrubbed",
+      "tests/ee/sites/test_verify_jobs.py::TestPreviewJobVerifies::test_a_browser_failure_keeps_the_preview_and_reports_it"
+    ]
+  },
+  {
+    "label": "PP-2 diagnostics: sandbox absolute paths are not relativized, so the build host's layout reaches the agent",
+    "file": "ee/pocketpaw_ee/sites/verify_diagnostics.py",
+    "find": "        out = out.replace(root, \"\").replace(root.lstrip(\"/\"), \"\")",
+    "replace": "        out = out",
+    "tests": [
+      "tests/ee/sites/test_verify_diagnostics.py::TestScrub::test_sandbox_paths_become_project_relative",
+      "tests/ee/sites/test_verify_jobs.py::TestPreviewJobVerifies::test_a_failed_build_carries_parsed_scrubbed_diagnostics"
+    ]
+  },
+  {
+    "label": "PP-2 diagnostics: redact_output is skipped, so tokens in build output reach the agent",
+    "file": "ee/pocketpaw_ee/sites/verify_diagnostics.py",
+    "find": "    out = redact_output(out)",
+    "replace": "    out = out",
+    "tests": [
+      "tests/ee/sites/test_verify_diagnostics.py::TestScrub::test_redact_output_runs"
+    ]
+  },
+  {
+    "label": "PP-2 diagnostics: the 2 KB cap is never applied",
+    "file": "ee/pocketpaw_ee/sites/verify_diagnostics.py",
+    "find": "    if not already_cut and _size(clean_errors, clean_warnings) <= cap_bytes:",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_diagnostics.py::TestCap::test_over_the_cap_is_cut_with_a_trailing_marker",
+      "tests/ee/sites/test_verify_diagnostics.py::TestCap::test_a_prior_marker_survives_a_merge"
+    ]
+  },
+  {
+    "label": "PP-2 UI wire leak: the preview outcome the UI reads carries the whole job result (diagnostics included) instead of the rung",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        return str(result.get(\"status\") or \"failed\"), result.get(\"reason\")",
+    "replace": "        return str(result.get(\"status\") or \"failed\"), str(result)",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py::TestPreviewJobVerifies::test_the_ui_outcome_reader_still_sees_only_status_and_reason"
+    ]
+  },
+  {
+    "label": "PP-2 build layer: a lost sandbox is blamed on the author as a build failure",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if classification.outcome == \"build_failed\" and classification.blames_user:",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py::TestPreviewJobVerifies::test_a_lost_sandbox_is_unverified_not_failed"
+    ]
+  },
+  {
+    "label": "PP-2 / PP-4 gap: any exception's code-like attribute reaches the scaffold rung, not only the closed set",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if isinstance(exc, GeneratorRefused) and exc.code in AUTHOR_FIXABLE_GENERATOR_CODES:",
+    "replace": "    if isinstance(exc, GeneratorRefused):",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py::TestStructuredRefusals::test_only_closed_set_codes_reach_the_rung"
+    ]
+  },
+  {
+    "label": "PP-2 run_build: after_build runs on a failed build, so a broken build is browser-checked into looking like something else",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "        if after_build is not None and artifact is not None and classification.deployable:",
+    "replace": "        if after_build is not None:",
+    "tests": [
+      "tests/ee/sites/test_browser_check.py::TestRunBuildSeams::test_after_build_never_runs_on_a_failed_build"
+    ]
+  },
+  {
+    "label": "PP-2 browser layer: harness exit 3 (no browser) is not recognized as browser_unavailable",
+    "file": "ee/pocketpaw_ee/sites/browser_check.py",
+    "find": "    if exit_code == 3:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_browser_check.py::TestParse::test_everything_else_is_unverified"
+    ]
+  },
+  {
+    "label": "PP-2 edit: a svelte edit that does not compile is left staged instead of rolled back",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if edit_verdict_requires_rollback(verdict):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_component_edit.py::test_an_edit_that_does_not_compile_is_rolled_back",
+      "tests/ee/sites/test_svelte_component_create.py::test_a_failed_create_removes_the_key_rather_than_blanking_it"
+    ]
+  },
+  {
+    "label": "PP-2 edit: a browser failure also rolls the edit back, throwing away the file the fix needs",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if layer.get(\"name\") in (\"static\", \"build\") and layer.get(\"status\") == \"failed\":",
+    "replace": "        if layer.get(\"status\") == \"failed\":",
+    "tests": [
+      "tests/ee/sites/test_component_edit.py::test_a_browser_failure_stays_staged_and_is_reported"
+    ]
+  },
+  {
+    "label": "PP-2 item 6: a dynamic svelte site accepts npm packages at declaration and later hits the publish-time 422",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if requests and site_refuses_author_packages(pocket):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py::TestDynamicSvelteRefusesPackages::test_declaration_is_refused_with_engine_unsupported"
+    ]
+  },
+  {
+    "label": "PP-2 item 6: create_svelte_site with bindings still writes the package manifest",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    if engine == \"svelte\" and _has_svelte_bindings(source):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py::TestDynamicSvelteRefusesPackages::test_create_with_bindings_drops_the_packages"
+    ]
+  },
+  {
+    "label": "PP-4 gap closed by PP-2: the pre-warm queues a legacy build-shell pocket, spending a sandbox on a build the generator refuses",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if generator_owned_keys_message(engine, source) is not None:\n        logger.info(\n            \"sites.prewarm:",
+    "replace": "    if False:\n        logger.info(\n            \"sites.prewarm:",
+    "tests": [
+      "tests/ee/sites/test_verify_jobs.py::TestPrewarmPreflight::test_a_legacy_build_shell_pocket_is_not_queued"
+    ]
+  },
+  {
+    "label": "PP-2 tools: a verification that hangs is not bounded, so a tool call waits forever",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "            timeout=deadline,",
+    "replace": "            timeout=None,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_verification_on_tools.py::TestDeadline::test_a_hung_verify_becomes_unverified_timeout"
+    ]
+  }
+]

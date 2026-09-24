@@ -164,8 +164,8 @@
   {
     "label": "the delete job is not registered on the lane that consumes its queue, so every delete is enqueued to a queue no worker reads",
     "file": "ee/pocketpaw_ee/sites/build_worker.py",
-    "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]",
-    "replace": "    functions = [site_build_fn, site_preview_build_fn]",
+    "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn, _site_html_verify_fn]",
+    "replace": "    functions = [site_build_fn, site_preview_build_fn, _site_html_verify_fn]",
     "tests": [
       "tests/ee/sites/test_delete_job.py",
       "tests/cloud/runs/test_worker_lanes.py"

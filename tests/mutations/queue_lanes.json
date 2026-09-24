@@ -11,8 +11,8 @@
   {
     "label": "the preview enqueue drops its queue kwarg, so draft renders - the lane a user hits by typing rather than by publishing - go back onto the chat lane's ceiling",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        _job_id=job_id,\n        _queue_name=SITE_BUILD_QUEUE_NAME,\n    )\n",
-    "replace": "        _job_id=job_id,\n    )\n",
+    "find": "        timeout,\n        _job_id=job_id,\n        _queue_name=SITE_BUILD_QUEUE_NAME,\n    )\n",
+    "replace": "        timeout,\n        _job_id=job_id,\n    )\n",
     "tests": [
       "tests/ee/sites/test_preview_build_lane.py"
     ]
@@ -20,8 +20,8 @@
   {
     "label": "the refused-enqueue status read looks in arq's default queue instead of the one the job was written to, so status() answers not_found, the lane reports 'building' forever, and a client polls a build that ended minutes ago",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "    job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)",
-    "replace": "    job = Job(job_id, pool)",
+    "find": "    job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)\n    status = await job.status()",
+    "replace": "    job = Job(job_id, pool)\n    status = await job.status()",
     "tests": [
       "tests/ee/sites/test_preview_build_lane.py"
     ]
@@ -84,8 +84,8 @@
   {
     "label": "the sites lane stops registering the preview function, so preview jobs enqueued onto the sites queue have no worker willing to claim them and arq says nothing",
     "file": "ee/pocketpaw_ee/sites/build_worker.py",
-    "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]",
-    "replace": "    functions = [site_build_fn, _site_delete_fn]",
+    "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn, _site_html_verify_fn]",
+    "replace": "    functions = [site_build_fn, _site_delete_fn, _site_html_verify_fn]",
     "tests": [
       "tests/cloud/runs/test_worker_lanes.py"
     ]
