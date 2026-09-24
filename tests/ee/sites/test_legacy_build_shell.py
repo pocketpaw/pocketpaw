@@ -1,5 +1,7 @@
 # tests/ee/sites/test_legacy_build_shell.py
 # Created 2026-09-24 (fix/sites-legacy-build-shell-migration, PP-4). Covers the
+# Updated 2026-09-24 (PP-2): author-fixable refusals other than reserved_path now map
+# to a 422 carrying the generator message; only an unknown code keeps the 500.
 # legacy build-shell migration end to end:
 #   1. the pure classifier matrix: every reserved file x SAFE_DROP / CONVERTIBLE /
 #      NEEDS_REVIEW, plus case and backslash spellings;

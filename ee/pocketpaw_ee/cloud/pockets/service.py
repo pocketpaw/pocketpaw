@@ -1,5 +1,10 @@
 """Pockets domain — business logic service.
 
+Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): added ``site_render_inputs`` —
+a workspace-scoped projection of the fields that decide a site's render, so the
+``/sites/by-pocket/{id}/status`` verification summary can hash the current source
+without a user id.
+
 SOLE OWNER OF WRITES to the ``Pocket`` Beanie document, and of the
 ``PocketBackendCredential`` collection beside it. Module-level ``async def`` API
 returning wire dicts (legacy router compatibility); the doc → domain mapping

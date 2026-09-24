@@ -2,6 +2,10 @@
 # ephemeral Daytona lane instead of shelling out to bun in the API container.
 # Created 2026-08-24.
 #
+# Updated 2026-09-24 (PP-2): the preview job result now also carries agent-only
+# diagnostics (the scaffold test asserts stderr still never appears anywhere in it),
+# and its arq timeout adds the browser step.
+#
 # WHAT BROKE, AND WHAT THIS PINS. ``get_native_artifact``'s cold miss used to call
 # ``generator.build`` → ``bun``. The deployed API container has no toolchain, so every
 # cold preview raised and reached the user as ``sites.generator_failed``. The PUBLISH

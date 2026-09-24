@@ -22,7 +22,9 @@ pytest.importorskip("pocketpaw_ee")
 from tests.ee.agent.test_sites_mcp_server.conftest import canned_verdict  # noqa: E402
 
 _SVELTE = {
-    "src/routes/+page.svelte": "<script>import Hero from '$lib/components/Hero.svelte'</script><Hero/>",
+    "src/routes/+page.svelte": (
+        "<script>import Hero from '$lib/components/Hero.svelte'</script><Hero/>"
+    ),
     "src/routes/+layout.svelte": "<script>import '../app.css'</script><slot/>",
     "src/routes/+page.ts": "export const prerender = true",
     "src/app.css": ":root{}",

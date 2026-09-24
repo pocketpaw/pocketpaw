@@ -2,6 +2,10 @@
 # agent backends (claude_agent_sdk). Created: 2026-06-01 (Phase 4 — chat→
 # create-site).
 #
+# Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): registers ``verify_site``
+# (``VERIFY_SITE_TOOL_ID``, on ``SITES_TOOL_IDS``) — re-runs the static / build /
+# browser verification on a site's draft. 14 tool ids now.
+#
 # Updated 2026-09-24 (feat/sites-author-dependencies, PP-1): ``set_site_dependencies``
 # registers on this SAME server (built in sites_create.py) and its id rides
 # ``SITES_TOOL_IDS``, so the hard /sites allow-list picks it up. It is the only way to

@@ -1,6 +1,20 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline):
+#   * ``edit_svelte_component`` no longer builds a local preview (publish(preview=True)
+#     → bun on the API host). It persists, then runs ``verify.verify_site`` for EVERY
+#     svelte pocket; a static/build failure rolls back and raises
+#     ``EditVerificationFailed`` (a SmokeGateFailed); browser failures and unverified
+#     verdicts stay staged. Returns ``SvelteEditResult``.
+#   * ``set_site_dependencies`` refuses packages on a DYNAMIC svelte site
+#     (``site_refuses_author_packages``, code ``engine_unsupported``) at declaration.
+#   * ``_build_or_cloud_error`` maps every author-fixable generator refusal to a 422
+#     (``sites.generator_<code>``); PP-4's reserved_path mapping is unchanged.
+#   * ``_prewarm_native_artifact`` skips a pocket with a generator-owned build-shell
+#     file instead of spending a sandbox on a build that must fail (PP-4 gap).
+#   * ``pocket_status`` carries ``verification`` — counts only (contract §6).
+#
 # Updated 2026-09-24 (PP-4, fix/sites-legacy-build-shell-migration): a svelte/react
 # site authored before paw-sites PS-1 may carry build-shell files the generator now
 # refuses (package.json, vite.config.*, +layout.ts, ...). Until the operator

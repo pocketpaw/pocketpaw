@@ -1,6 +1,16 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — every create_{svelte,react,
+# html}_site, edit_{svelte,react}_component, edit_html_file and set_site_dependencies
+# result carries ``verification`` (contract §5), computed by ``sites.verify`` under a
+# hard deadline (``_verification_for``: unverified/timeout, never a hang). ripple
+# creates return ``unverified``/``engine_not_verifiable`` honestly. NEW ``verify_site``
+# tool. ``edit_svelte_component`` now reports a failed compile as data (``ok: false``,
+# ``status: rolled_back``, the verdict) and has no preview_url any more (no local
+# preview deploy). A create with live-data bindings refuses npm packages
+# (``engine_unsupported``) — dynamic svelte cannot carry them yet.
+#
 # Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — authors can declare
 # npm packages. New tool ``set_site_dependencies`` (add ``[{name, range?}]`` /
 # remove ``[name]``) resolves each request against the registry and the supply-chain

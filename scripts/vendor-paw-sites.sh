@@ -4,6 +4,13 @@
 # WITHOUT clone access to the private paw-sites repo (the PAW_SITES_SOURCE=vendor
 # path, mirroring paw-enterprise/scripts/vendor-ripple.sh).
 #
+# Updated 2026-09-24 (feat/sites-verify-pipeline, PP-2): also copies the browser
+# verification harness (``harness/browser-check.mjs`` + its package.json, bun.lock and
+# bunfig.toml — never node_modules) to ``deploy/paw-sites/harness/``. pocketpaw uploads
+# it into the Daytona sandbox for the browser layer (``pocketpaw_ee.sites.browser_check``,
+# which reads it from /opt/paw-sites/harness). Missing harness is a WARNING: the browser
+# layer then reports ``unverified`` / ``harness_unavailable``, never a pass.
+#
 # Updated 2026-09-24 (feat/sites-author-dependencies, PP-1): also writes
 # ``deploy/paw-sites/allowlist.json`` — the output of ``paw-sites-gen allowlist`` —
 # next to the vendored generator. ``pocketpaw_ee.sites.vetted_pins`` reads its pins
@@ -72,6 +79,18 @@ mkdir -p "$DEST"
 cp "$SRC/package.json" "$DEST/package.json"
 cp -R "$SRC/dist" "$DEST/dist"
 cp -R "$SRC/templates" "$DEST/templates"
+
+# PP-2 — the browser verification harness. Only the four files the sandbox installs
+# from; node_modules is installed IN the sandbox from the frozen lockfile.
+if [ -f "$SRC/harness/browser-check.mjs" ]; then
+  mkdir -p "$DEST/harness"
+  for f in browser-check.mjs package.json bun.lock bunfig.toml; do
+    if [ -f "$SRC/harness/$f" ]; then cp "$SRC/harness/$f" "$DEST/harness/$f"; fi
+  done
+  echo "[vendor-paw-sites] vendored harness/"
+else
+  echo "[vendor-paw-sites] WARN: $SRC/harness/browser-check.mjs missing; the browser verify layer will report harness_unavailable" >&2
+fi
 
 # The toolchain pins, straight from the generator, so pocketpaw stops hand-mirroring
 # them (see the header). node first (the generator is pure Node), bun as the fallback.
