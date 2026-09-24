@@ -10504,6 +10504,34 @@ async def edit_html_file(
     }
 
 
+#: PP-2 — why a dynamic svelte site refuses author packages. Written for the agent.
+DYNAMIC_PACKAGES_REASON = (
+    "npm packages are not supported on a dynamic (live-data) svelte site yet: it is "
+    "rendered by a Cloudflare Worker, and packages install only in the isolated build "
+    "sandbox, whose output cannot deploy a Worker. Use a static svelte, react or html "
+    "site for package-based effects, or build the effect without a package."
+)
+
+
+def site_refuses_author_packages(pocket: dict[str, Any]) -> bool:
+    """True when this pocket may not declare npm packages (PP-2): a DYNAMIC svelte site.
+
+    Dynamic is read both ways the pipeline reads it — ``pattern == "dynamic"`` (what the
+    create tool stamps) and the live-data bindings in the source envelope
+    (``svelte_source_is_dynamic``, the generator's own adapter rule) — so a pocket that
+    became dynamic by either route is caught. Dynamic ripple is refused by the resolver's
+    engine rule already.
+    """
+    from pocketpaw_ee.sites.generator_client import svelte_source_is_dynamic
+
+    if normalize_engine(pocket.get("engine")) != "svelte":
+        return False
+    source = pocket.get("source")
+    return pocket.get("pattern") == "dynamic" or svelte_source_is_dynamic(
+        source if isinstance(source, dict) else None
+    )
+
+
 async def set_site_dependencies(
     *,
     user_id: str,
@@ -10580,6 +10608,16 @@ async def set_site_dependencies(
 
     requests, coerce_rejected = dependency_resolver.coerce_requests(add or [])
     rejected += [r.as_dict() for r in coerce_rejected]
+    if requests and site_refuses_author_packages(pocket):
+        # PP-2: a dynamic (worker-rendered) svelte site cannot carry author packages —
+        # see ``site_refuses_author_packages``. Refused HERE, at declaration, so no site
+        # can reach the publish-time 422. Removes above still apply, so a site that
+        # somehow holds packages can always be cleaned up.
+        rejected += [
+            {"name": req.name, "code": "engine_unsupported", "reason": DYNAMIC_PACKAGES_REASON}
+            for req in requests
+        ]
+        requests = []
     if requests:
         result = await resolve(requests, engine, already_declared=packages.keys())
         rejected += [r.as_dict() for r in result.rejected]

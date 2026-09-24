@@ -550,6 +550,17 @@ async def _resolve_create_dependencies(
     report: dict[str, Any] = {"packages": {}, "rejected": [r.as_dict() for r in rejected]}
     if not requests:
         return source, report
+    if engine == "svelte" and _has_svelte_bindings(source):
+        # PP-2: a dynamic (worker-rendered) svelte site refuses author packages at
+        # declaration time — the same rule ``set_site_dependencies`` applies — so the
+        # site is created without them and never reaches a publish-time 422.
+        from pocketpaw_ee.sites.service import DYNAMIC_PACKAGES_REASON
+
+        report["rejected"] += [
+            {"name": r.name, "code": "engine_unsupported", "reason": DYNAMIC_PACKAGES_REASON}
+            for r in requests
+        ]
+        return source, report
     result = await dependency_resolver.resolve_dependencies(requests, engine)
     report["rejected"] += [r.as_dict() for r in result.rejected]
     if not result.packages:

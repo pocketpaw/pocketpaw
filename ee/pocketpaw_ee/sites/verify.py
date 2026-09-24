@@ -377,6 +377,25 @@ async def verify_pocket(
 
     generator_input = generator_input_for(inputs, pocket_id)
     static, errors, warnings = await _static_layer(generator_input, check=_check)
+
+    # A dynamic svelte site holding packages can only have got them from outside the
+    # declaration tools (which refuse it). It can never publish, so say so as a static
+    # error the agent can act on (drop the packages) rather than let a build run.
+    from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
+    from pocketpaw_ee.sites.service import DYNAMIC_PACKAGES_REASON, site_refuses_author_packages
+
+    if site_refuses_author_packages(pocket) and has_author_dependencies(inputs.source):
+        errors = [
+            {
+                "layer": "static",
+                "file": "paw.dependencies.json",
+                "code": "engine_unsupported",
+                "message": DYNAMIC_PACKAGES_REASON
+                + " Remove them with set_site_dependencies(remove=[...]).",
+            },
+            *errors,
+        ]
+        static = _layer("static", "failed", "static_check_failed:engine_unsupported")
     if static["status"] == "failed":
         verdict = _verdict(
             content_hash=inputs.content_hash,

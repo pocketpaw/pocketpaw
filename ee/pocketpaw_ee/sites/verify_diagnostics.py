@@ -41,7 +41,7 @@ DIAGNOSTICS_CAP_BYTES = 2048
 
 #: One message never runs longer than this, so a single giant stack cannot spend the
 #: whole budget and push every other entry out.
-MESSAGE_MAX_CHARS = 300
+MESSAGE_MAX_CHARS = 400
 
 #: The marker appended when the cap cut something.
 TRUNCATED_ENTRY: dict[str, str] = {"code": "truncated"}
