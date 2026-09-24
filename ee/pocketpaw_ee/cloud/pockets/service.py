@@ -1989,6 +1989,37 @@ async def engines_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[
     return {str(row["_id"]): row.get("engine") for row in rows}
 
 
+async def site_render_inputs(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
+    """The fields that decide a site pocket's render, tenant-scoped, in wire spelling.
+
+    PP-2: ``/sites/by-pocket/{id}/status`` reports whether the CURRENT source has been
+    verified, which means hashing the current render inputs the same way the verify
+    pipeline does — without a user id (the status read has only the workspace). ONE
+    projected ``find_one`` scoped on ``workspace`` (a pocket in another workspace reads
+    as absent), returning ``{engine, source, rippleSpec, name, keepsClientBundle}`` —
+    the keys ``get`` puts on the wire — or ``None``. The Pocket read stays here, the
+    sole owner of Pocket reads.
+    """
+    try:
+        oid = PydanticObjectId(pocket_id)
+    except (InvalidId, TypeError, ValueError):
+        return None
+    collection = _PocketDoc.get_pymongo_collection()
+    row = await collection.find_one(
+        {"workspace": workspace_id, "_id": oid},
+        {"engine": 1, "source": 1, "rippleSpec": 1, "name": 1, "keeps_client_bundle": 1},
+    )
+    if row is None:
+        return None
+    return {
+        "engine": row.get("engine"),
+        "source": row.get("source"),
+        "rippleSpec": row.get("rippleSpec"),
+        "name": row.get("name") or "",
+        "keepsClientBundle": row.get("keeps_client_bundle"),
+    }
+
+
 async def _fetch_readable(pocket_id: str, user_id: str) -> _PocketDoc:
     """Fetch a pocket and assert the caller may READ it: owner, team member,
     shared_with, or workspace-visible. Raises NotFound / Forbidden.

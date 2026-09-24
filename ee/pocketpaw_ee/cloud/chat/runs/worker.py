@@ -1,5 +1,11 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-09-24 (PP-2, feat/sites-verify-pipeline) — the preview build's arq
+timeout is now ``site_preview_job_timeout_seconds()``: the build budget plus the
+in-sandbox browser check that runs after it. The html verify job is registered on
+the sites lane only (``pocketpaw_ee.sites.build_worker``) — it never had a backlog on
+the default queue to drain.
+
 Updated: 2026-09-04 (fix/queue-lanes, backend-perf C1) — THIS IS NO LONGER THE ONLY
 LANE. Site builds now enqueue onto their own queue and are consumed by
 ``pocketpaw_ee.sites.build_worker.WorkerSettings``; both lanes run in one container
@@ -127,6 +133,7 @@ from pocketpaw_ee.sites.build_job import (
     run_site_build,
     run_site_preview_build,
     site_build_job_timeout_seconds,
+    site_preview_job_timeout_seconds,
 )
 
 logger = logging.getLogger(__name__)
@@ -466,10 +473,11 @@ _site_build_fn = func(
 # what happens to the artifact differs), and the same ``max_tries=1``: a preview is billed
 # per attempt too, and a client re-triggers by asking for the render again rather than by
 # arq silently re-running a job whose result already says why it failed.
+# PP-2: plus the browser check that now runs in the same sandbox after the build.
 _site_preview_build_fn = func(
     run_site_preview_build,
     name=SITE_PREVIEW_BUILD_FUNCTION_NAME,
-    timeout=site_build_job_timeout_seconds(),
+    timeout=site_preview_job_timeout_seconds(),
     max_tries=1,
 )
 

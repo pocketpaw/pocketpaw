@@ -11235,6 +11235,15 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
     engine = engines.get(pocket_id) or ""
 
+    # PP-2: verification of the CURRENT source, counts only (contract §6). The summary
+    # never raises and never carries a message — see verify.status_summary.
+    from pocketpaw_ee.sites import verify as _verify
+    from pocketpaw_ee.sites.dto import SiteVerificationSummary
+
+    _verification = SiteVerificationSummary(
+        **(await _verify.status_summary(workspace_id=workspace_id, pocket_id=pocket_id))
+    )
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
         status=status,
@@ -11289,6 +11298,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         plan_sites_used=_plan_slots_used,
         plan_sites_included=_plan_slots_allowance,
         workspace_plan_name=_workspace_plan_name,
+        verification=_verification,
     )
 
 

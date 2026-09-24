@@ -1,6 +1,10 @@
 # ee/pocketpaw_ee/sites/dto.py — request/response DTOs for the Sites control
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+# Updated: 2026-09-24 (PP-2) — SiteStatusResponse carries ``verification``, a COUNTS-ONLY
+# summary of the current source's verification verdict (contract §6): status (passed /
+# failed / unverified / pending / none), error_count, checked_at, content_hash. No
+# message ever rides it — the diagnostics are agent-only.
 # Updated: 2026-09-23 — SiteResponse carries ``foreign_origin`` + ``allowed_origins``
 # so the gallery can tell a connected site (Paw Bar on a customer-hosted page)
 # from a draft that was never published.
@@ -261,7 +265,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PublishRequest(BaseModel):
@@ -695,6 +699,23 @@ class DevPreviewResponse(BaseModel):
     url: str
 
 
+class SiteVerificationSummary(BaseModel):
+    """PP-2: the ``/status`` view of a site's verification (contract §6).
+
+    ``status`` is passed | failed | unverified | pending | none (never verified, or the
+    source changed since). ``content_hash`` names the render it describes. Deliberately
+    has NO field that could carry a message: ``extra="forbid"`` makes adding one a
+    visible schema change, not a quiet leak.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = "none"
+    error_count: int = 0
+    checked_at: str | None = None
+    content_hash: str | None = None
+
+
 class SiteStatusResponse(BaseModel):
     """Authoritative draft/published + is_live state for a pocket, so the builder
     labels accurately even before the site appears in the gallery list. ``status``
@@ -808,6 +829,12 @@ class SiteStatusResponse(BaseModel):
     # that mapping is right. "" when it cannot be resolved, and every consumer
     # falls back to a generic phrase rather than rendering an empty name.
     workspace_plan_name: str = ""
+    # PP-2 — verification of the CURRENT draft source (contract §6). Counts only: the
+    # per-error messages are agent-only and never reach this response. Defaults to
+    # ``none`` so a pocket that was never verified reads as such.
+    verification: SiteVerificationSummary = Field(
+        default_factory=lambda: SiteVerificationSummary()
+    )
 
 
 class SiteVersionResponse(BaseModel):

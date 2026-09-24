@@ -695,8 +695,9 @@ class TestTheWorkerRunsThePreviewLane:
         assert bj.PREVIEW_ARQ_FUNCTION_NAME in registered
         preview = registered[bj.PREVIEW_ARQ_FUNCTION_NAME]
         assert preview.coroutine is bj.run_site_preview_build
-        # Same budget as the publish build — it IS the same build; only what happens to
-        # the artifact differs.
-        assert preview.timeout_s == bj.site_build_job_timeout_seconds()
+        # The publish build's budget PLUS the browser step (PP-2): it is the same build,
+        # followed by the harness in the same sandbox.
+        assert preview.timeout_s > bj.site_build_job_timeout_seconds()
+        assert preview.timeout_s == bj.site_preview_job_timeout_seconds()
         # A preview is billed per attempt too, so the retry decision is the caller's.
         assert preview.max_tries == 1

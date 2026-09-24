@@ -250,16 +250,27 @@ def finalize(
     was dropped, else to ``warnings`` — and the budget is measured WITH the marker, so the
     capped payload never exceeds ``cap_bytes``.
     """
-    clean_errors = [_clean_entry(e, layer) for e in errors or [] if isinstance(e, dict)]
-    clean_warnings = [_clean_entry(w, layer) for w in warnings or [] if isinstance(w, dict)]
-    if _size(clean_errors, clean_warnings) <= cap_bytes:
+    # A marker from an EARLIER finalize (a job's report being merged with the static
+    # layer) is not an entry: drop it and remember that something was already cut.
+    def _is_marker(entry: Any) -> bool:
+        return isinstance(entry, dict) and entry.get("code") == "truncated" and not entry.get(
+            "message"
+        )
+
+    raw_errors = [e for e in errors or [] if isinstance(e, dict)]
+    raw_warnings = [w for w in warnings or [] if isinstance(w, dict)]
+    errors_already_cut = any(_is_marker(e) for e in raw_errors)
+    already_cut = errors_already_cut or any(_is_marker(w) for w in raw_warnings)
+    clean_errors = [_clean_entry(e, layer) for e in raw_errors if not _is_marker(e)]
+    clean_warnings = [_clean_entry(w, layer) for w in raw_warnings if not _is_marker(w)]
+    if not already_cut and _size(clean_errors, clean_warnings) <= cap_bytes:
         return clean_errors, clean_warnings
 
     marker_bytes = len(json.dumps(TRUNCATED_ENTRY, separators=(",", ":")).encode()) + 1
     budget = cap_bytes - marker_bytes
     kept_errors: list[dict[str, Any]] = []
     kept_warnings: list[dict[str, Any]] = []
-    errors_cut = False
+    errors_cut = errors_already_cut
     for entry in clean_errors:
         if _size([*kept_errors, entry], kept_warnings) <= budget:
             kept_errors.append(entry)

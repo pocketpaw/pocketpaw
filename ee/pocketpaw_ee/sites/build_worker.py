@@ -1,5 +1,9 @@
 # ee/pocketpaw_ee/sites/build_worker.py — the site-build lane's OWN arq worker settings.
 #
+# Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): registers the html verify job
+# (``build_job.run_site_html_verify``) with the preview job's timeout — build budget plus
+# the browser step — and ``max_tries=1`` like every other sandbox job.
+#
 # Created 2026-09-04 (fix/queue-lanes, backend-perf C1). Until now every background lane
 # this product runs — chat runs, workspace jobs, both /ship jobs and both site builds —
 # shared arq's default queue, and therefore shared ONE ``max_jobs`` ceiling whose default
@@ -58,7 +62,13 @@ from pocketpaw_ee.cloud.chat.runs.worker import (
     worker_shutdown,
     worker_startup,
 )
-from pocketpaw_ee.sites.build_job import SITE_BUILD_QUEUE_NAME, site_build_job_timeout_seconds
+from pocketpaw_ee.sites.build_job import (
+    HTML_VERIFY_ARQ_FUNCTION_NAME,
+    SITE_BUILD_QUEUE_NAME,
+    run_site_html_verify,
+    site_build_job_timeout_seconds,
+    site_preview_job_timeout_seconds,
+)
 from pocketpaw_ee.sites.delete_job import (
     SITE_DELETE_FUNCTION_NAME,
     run_site_delete,
@@ -122,6 +132,16 @@ _site_delete_fn = func(
 )
 
 
+# PP-2: the html browser check. Sized like the preview job (it is the preview job's
+# browser step without the build in front of it, so the preview budget is generous).
+_site_html_verify_fn = func(
+    run_site_html_verify,
+    name=HTML_VERIFY_ARQ_FUNCTION_NAME,
+    timeout=site_preview_job_timeout_seconds(),
+    max_tries=1,
+)
+
+
 class WorkerSettings:
     """arq worker configuration for the site-build queue."""
 
@@ -130,7 +150,7 @@ class WorkerSettings:
     # carries its own timeout and ``max_tries=1``; re-wrapping them here would fork the
     # build timeout, and a build that arq cancels before its in-sandbox timeout fires is
     # recorded as lost infrastructure rather than as the slow-but-healthy build it was.
-    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]
+    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn, _site_html_verify_fn]
     on_startup = worker_startup
     on_shutdown = worker_shutdown
     # No auto-retry, matching every other lane: a build is billed per attempt in a
