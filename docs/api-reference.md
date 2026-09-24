@@ -8,6 +8,12 @@ Updated: 2026-09-23 (VS-4, feat/sites-rename) — added "Sites — Addresses and
 response. Written around the thing a client cannot infer: a rename is a reservation
 that goes live on the next publish, so the response keeps showing the old `slug`.
 
+Updated: 2026-09-24 (PP-2, feat/sites-verify-pipeline) — added "Draft verification":
+the `verification` verdict every site create/edit tool now returns, the `verify_site`
+agent tool, and the counts-only `verification` field on
+`GET /sites/by-pocket/{pocket_id}/status`. Rewrote the PP-1 note on
+`edit_svelte_component`, which now verifies instead of building locally.
+
 Updated: 2026-09-24 (PP-1, feat/sites-author-dependencies) — added the
 `set_site_dependencies` agent tool and the `dependencies` argument on the three
 source-engine create tools, under "Sites — Agent Editing Tools".
@@ -3395,10 +3401,118 @@ package never fails the create.
 
 **Author packages install only in the build sandbox.** A static svelte site that
 declares packages publishes through the ephemeral build lane even with
-`PAW_SITES_SVELTE_ASYNC_BUILD` off. On such a site, `edit_svelte_component` saves
-the draft without its local preview build and returns `site: null,
-preview_built: false`. A host build that gets one anyway is refused with
-`sites.author_dependencies_need_sandbox` (422).
+`PAW_SITES_SVELTE_ASYNC_BUILD` off. Since PP-2, `edit_svelte_component` never
+builds on the API host for any svelte site: it verifies the draft in the sandbox
+lane (see "Draft verification" below). A host build that gets author packages
+anyway is refused with `sites.author_dependencies_need_sandbox` (422).
+
+**Dynamic svelte sites refuse packages.** A svelte site with live-data bindings
+(`pattern: "dynamic"`, or `sources` / `actions` / `auth` on the source envelope) is
+rendered by a Worker that the sandbox build lane cannot deploy yet. Declaring a
+package on one is refused at declaration time with code `engine_unsupported`,
+from `set_site_dependencies` and from the create tools' `dependencies` alike, so no
+site can reach the publish-time 422.
+
+### Draft verification (`verification`, `verify_site`)
+
+Every `create_svelte_site`, `create_react_site`, `create_html_site`,
+`edit_svelte_component`, `edit_react_component`, `edit_html_file` and
+`set_site_dependencies` result carries a `verification` object. It says whether the
+draft actually works:
+
+```json
+"verification": {
+  "status": "passed | failed | unverified",
+  "reason": "sandbox_unavailable",
+  "content_hash": "…",
+  "layers": [
+    {"name": "static",  "status": "passed | failed | skipped | unverified", "reason": "…"},
+    {"name": "build",   "status": "…"},
+    {"name": "browser", "status": "…"}
+  ],
+  "errors":   [{"layer": "static | build | browser", "file": "…", "line": 1, "col": 1, "code": "…", "message": "…"}],
+  "warnings": [ … ],
+  "note": "worker-rendered site: browser layer checked the prerendered shell only",
+  "checked_at": "ISO-8601"
+}
+```
+
+`reason` is present only when `status` is `unverified`. `note` is optional.
+
+The three layers:
+
+| Layer | What runs | Where |
+|-------|-----------|-------|
+| `static` | `paw-sites-gen check` over the same generator input the build gets: svelte compile, TS parse, import resolution (every bare import must be a toolchain package or a declared one), html links and importmap coverage. Installs nothing. | API host, about a second. |
+| `build` | The draft preview build: scaffold, install, build. It is the same arq job the editor's `GET /sites/by-pocket/{id}/native-artifact` queues, keyed on the same content hash, so one sandbox warms the editor and answers the agent. html has no build and reports `skipped`. | Daytona sandbox. |
+| `browser` | The paw-sites harness (`browser-check.mjs`) loads every built page in headless Chromium and reports runtime exceptions, `console.error`, failed same-origin requests, blank pages, error pages and hydration errors. svelte / react run it in the build's sandbox after a clean build; html gets its own sandbox job. | Daytona sandbox. |
+
+**Status rules.** `passed` means every applicable layer ran and passed. Any
+`failed` layer makes the verdict `failed`. Anything that stopped a layer from
+running makes it `unverified`, never `passed`: `checker_unavailable`,
+`check_crashed`, `queue_unavailable` (arq/Redis down), `sandbox_unavailable`,
+`timeout`, `browser_unavailable`, `harness_unavailable`, `harness_install_failed`,
+`no_static_pages`, `engine_not_verifiable` (ripple sites, which have no authored
+code to check), `verify_unavailable`. A static failure skips the sandbox layers
+(`skipped`, reason `static_check_failed`), and spends no sandbox. A generator-owned
+build-shell file (see the legacy build-shell migration) or packages on a dynamic
+svelte site are static failures too.
+
+**Diagnostics are agent-only.** `errors` and `warnings` messages are run through
+`redact_output`, sandbox paths are made project-relative and `site_key_*` tokens are
+scrubbed. The whole `errors` + `warnings` payload is capped at 2 KB, with a trailing
+`{"code": "truncated"}` entry when something was cut. They never reach the Site row,
+`/status` or any UI payload.
+
+**Caching.** A `passed` or `failed` verdict is cached per content hash, so
+re-verifying unchanged source is free (the result then carries `"cached": true`).
+Any source change produces a new hash and a fresh verification. `unverified` is
+never served from the cache. The build job also stores its build + browser report
+under the hash, so an editor pre-warm answers the next verify without a second
+sandbox.
+
+**Deadline.** A tool waits at most `PAW_SITES_VERIFY_WAIT_SEC` (default 90) for the
+sandbox layers, plus a short slack for the static check. On expiry the verdict is
+`unverified` / `timeout` and the build keeps running; the next `verify_site`
+attaches to the same job.
+
+**`edit_svelte_component` rollback.** A `static` or `build` failure means the edit
+does not compile: the file is restored (a created file is removed) and the tool
+returns `{ok: false, status: "rolled_back", verification, message}` as data, not as
+an MCP error. A `browser` failure keeps the edit staged and reports it: the page
+builds, and the fix is usually a follow-up edit to the same file. `unverified`
+keeps the edit staged. react and html edits stay draft-only as before and simply
+carry the verdict. The svelte edit result's `site.preview_url` is now always `null`:
+no local preview deploy is made any more; the builder shows the draft from the
+verified build.
+
+#### `verify_site`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. |
+
+Returns `{ok, pocket_id, verification}`. `ok` means the check ran and answered;
+whether the site works is `verification.status`. A missing or foreign pocket is an
+error. Use it to re-check after a fix or after an `unverified` / `timeout` result.
+
+#### `GET /sites/by-pocket/{pocket_id}/status` — `verification`
+
+```json
+"verification": {"status": "passed | failed | unverified | pending | none", "error_count": 0, "checked_at": "ISO-8601", "content_hash": "…"}
+```
+
+Counts only; there is no message field (the model forbids extra keys). It
+describes the CURRENT source: after an edit it reads `none` until the new source is
+verified. `pending` is a verify in flight (a marker older than 15 minutes reads as
+`none`).
+
+**Deploy requirements.** The image ships the harness at `/opt/paw-sites/harness`
+(`scripts/vendor-paw-sites.sh` and the `Dockerfile.enterprise` paw-sites stage copy
+it; override with `PAW_SITES_HARNESS_DIR`). Set `PAW_SITES_VERIFY_IMAGE` to a Daytona
+sandbox image carrying bun, node and Playwright 1.62.1's Chromium; without it the
+sandbox tries `playwright-core install chromium` and, if the browser still cannot
+launch, the browser layer is `unverified` / `browser_unavailable`.
 
 ### Build state on the `publish` response
 
