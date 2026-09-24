@@ -1,5 +1,14 @@
 """Pytest configuration.
 
+Updated: 2026-09-24 (fix/tests-dotenv-hermetic, on feat/sites-author-dependencies) --
+the test process no longer reads ANY ``.env``. ``PYTHON_DOTENV_DISABLED`` is set before
+the first ``pocketpaw`` import (so ``url_validators``' import-time ``load_dotenv`` and
+every lazy call are no-ops) and ``Settings`` drops ``env_file``. A worktree nested
+under a checkout that has a real ``.env`` (``pocketPaw/.worktrees/*``) was picking the
+parent's file up, and variables outside the per-tree allowlists
+(``POCKETPAW_SITES_BILLING_ENFORCED``, ``PAW_SITES_GEN_CMD``) turned sites tests red
+on that machine only while CI stayed green. Export ``PYTHON_DOTENV_DISABLED=0`` to opt
+back in for a deliberate local integration run.
 Updated: 2026-09-23 (VS-2, feat/sites-first-publish-slug) -- mongomock's
 ``Collection.create_indexes`` drops ``partialFilterExpression``, so a partial unique
 index (``Site.slug``) became a plain unique one in every Beanie test DB and the second
@@ -21,7 +30,27 @@ from unittest.mock import patch
 
 import pytest
 
-from pocketpaw.security.audit import AuditLogger
+# A test run reads NO ``.env`` file. This must run before the first ``pocketpaw``
+# import: ``security/url_validators.py`` calls ``load_dotenv()`` at import, and
+# python-dotenv walks UP from the calling file, so a worktree under
+# ``pocketPaw/.worktrees/`` loads the parent checkout's operator ``.env``. The
+# per-tree allowlists (``tests/ee/sites/conftest.py`` OPERATOR_ENV_VARS, the Logfire
+# pins below) only cover the names someone thought of; anything else in the file
+# (``POCKETPAW_SITES_BILLING_ENFORCED`` switched on the custom-domain cap and the
+# concierge plan gate, ``PAW_SITES_GEN_CMD`` un-skipped the real-generator e2e) made
+# the suite's result a property of the machine. CI has no ``.env``, so this changes
+# nothing there — it makes every local run match CI. ``setdefault`` so a developer can
+# export ``PYTHON_DOTENV_DISABLED=0`` for a deliberate integration run.
+os.environ.setdefault("PYTHON_DOTENV_DISABLED", "1")
+
+from pocketpaw.config import Settings  # noqa: E402
+from pocketpaw.security.audit import AuditLogger  # noqa: E402
+
+# The pydantic-settings half of the same leak: ``env_file=".env"`` reads the CWD's
+# file into Settings fields (``sites_billing_enforced`` among them) without touching
+# os.environ, so the dotenv switch above cannot reach it. Same opt-in as above.
+if os.environ["PYTHON_DOTENV_DISABLED"].casefold() in {"1", "true", "t", "yes", "y"}:
+    Settings.model_config["env_file"] = None
 
 # Tests run with loopback / RFC1918 URLs in many places (`http://localhost:*`
 # ollama defaults, mock HTTP servers, etc). In production that's the exact
