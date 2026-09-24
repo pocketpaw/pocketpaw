@@ -619,12 +619,15 @@ class TestThePreviewJob:
             client=client,
         )
 
-        assert settlement == {
-            "status": "failed",
-            "reason": f"{bj.RUNG_SCAFFOLD_FAILED}:generator_raised",
-        }
+        assert settlement["status"] == "failed"
+        assert settlement["reason"] == f"{bj.RUNG_SCAFFOLD_FAILED}:generator_raised"
         assert client.calls == [], "a scaffold failure must not create a sandbox"
-        assert "bun: not found" not in settlement["reason"]
+        # PP-2: the result now carries agent diagnostics, and an UNSTRUCTURED raise's
+        # text is still not known to be safe, so it travels by class name only.
+        import json as _json
+
+        assert "bun: not found" not in _json.dumps(settlement)
+        assert settlement["layers"]["build"]["status"] == "failed"
 
     async def test_an_empty_scaffold_is_caught_before_a_sandbox_exists(self) -> None:
         client = _sandbox()

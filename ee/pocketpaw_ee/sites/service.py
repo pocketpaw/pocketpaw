@@ -1886,13 +1886,35 @@ async def _build_or_cloud_error(
     (``edit_svelte_component``) catches it to roll the component source back to its
     prior contents, a contract that must be preserved (mapping it to ``Internal``
     would silently break that rollback)."""
-    from pocketpaw_ee.sites.generator_client import HostInstallRefused, SmokeGateFailed
+    from pocketpaw_ee.sites.generator_client import (
+        GeneratorFailed,
+        HostInstallRefused,
+        SmokeGateFailed,
+    )
 
     try:
         return await generator.build(**build_kwargs)
     except CloudError:
         # Already a clean envelope — let it stand (status/code/message preserved).
         raise
+    except GeneratorFailed as exc:
+        # PP-2: a STRUCTURED generator refusal. The author-fixable codes (a dependency
+        # policy violation, a reserved path, an engine that cannot honour the request,
+        # bad input) are the author's to fix — a 422 carrying paw-sites' own message,
+        # which was written for them. ``internal_error`` stays a 500 below.
+        if exc.author_fixable:
+            raise with_cause(
+                ValidationError(f"sites.generator_{exc.code}", exc.message), exc
+            ) from exc
+        logger.error("sites.publish: generator raised internally", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.generator_failed",
+                "Site generation failed — the publishing toolchain is unavailable "
+                "or the build did not complete. See server logs for details.",
+            ),
+            exc,
+        ) from exc
     except HostInstallRefused as exc:
         # PP-1: the pocket declares author packages and this build would have
         # installed them on the API host. A caller that routes correctly never gets

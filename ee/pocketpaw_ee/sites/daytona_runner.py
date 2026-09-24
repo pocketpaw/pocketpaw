@@ -23,6 +23,21 @@
 # build rather than harden it. Enforcing it needs a vetted lockfile for the allowlisted
 # dependency set, which is its own design and is recorded as owed rather than pretended.
 #
+# Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): ``run_build`` takes two optional
+# arguments, both inert when omitted so every existing caller is byte-identical.
+#   * ``image`` — forwarded to ``create_sandbox`` only when set. The preview lane passes
+#     ``PAW_SITES_VERIFY_IMAGE`` (an image carrying Playwright's chromium) so the browser
+#     layer can run in the same sandbox as the build.
+#   * ``after_build`` — an async hook ``(client, sandbox_id, static_dir)`` run AFTER a
+#     clean build's artifact has been downloaded and verified, and BEFORE teardown. The
+#     browser harness rides it, so the build and its browser check share one sandbox.
+#     Its return value lands on ``BuildRunResult.post_build``; a hook that raises is
+#     logged and recorded as ``None`` — it can never cost the build its verdict or its
+#     artifact. It is never run for a build that failed, so a broken build is never
+#     "browser-checked" into looking like something else.
+# The never-snapshot invariant below is unchanged: the hook runs inside the same
+# create → delete window.
+#
 # THE ORDER OF STEPS IS THE CONTRACT, not an implementation detail:
 #
 #   1. Our clock starts BEFORE ``create_sandbox``. It is the only timing signal that
@@ -123,8 +138,9 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG, BUILD_BUNFIG_REL
 from pocketpaw_ee.sites.daytona_build import (
@@ -226,6 +242,9 @@ class BuildRunResult:
     artifact_bytes: int
     sandbox_id: str | None
     sandbox_deleted: bool
+    #: PP-2: what the ``after_build`` hook returned, or ``None`` when there was no hook,
+    #: the build was not clean, or the hook raised.
+    post_build: Any = None
 
     @property
     def ok(self) -> bool:
@@ -261,6 +280,8 @@ async def run_build(
     install_command: str = "bun install",
     build_command: str = "bun run build",
     artifact_rel: str | None = None,
+    image: str | None = None,
+    after_build: Callable[[Any, str, str], Awaitable[Any]] | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -282,6 +303,10 @@ async def run_build(
     all *results*, and the caller needs the classification to decide between reporting
     and retrying. It may still raise if the sandbox cannot be created at all, which is
     a distinct condition the caller must handle as retryable (nothing has run yet).
+
+    ``image`` / ``after_build`` (PP-2) — see the module header. ``after_build`` receives
+    ``(client, sandbox_id, static_dir)`` where ``static_dir`` is the absolute in-sandbox
+    path of the output dir this build wrote.
     """
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
@@ -321,18 +346,24 @@ async def run_build(
     deleted = False
     t_created = t_uploaded = t_exec_done = t_extracted = t_start
 
+    post_build: Any = None
+    create_kwargs: dict[str, Any] = {
+        "name": name,
+        "cpu": cpu,
+        "memory": memory_gb,
+        "disk": disk_gb,
+        # Idle auto-stop EXCEEDS the build budget (see _lifecycle_minutes).
+        "auto_stop_interval": idle_minutes,
+        # 0 = delete immediately on stop. This is the BACKSTOP for our own process
+        # dying, not the primary teardown — the explicit delete below is.
+        "auto_delete_interval": 0,
+    }
+    if image:
+        # PP-2: only when set, so a caller that passes nothing creates exactly as before.
+        create_kwargs["image"] = image
+
     try:
-        info = await client.create_sandbox(
-            name=name,
-            cpu=cpu,
-            memory=memory_gb,
-            disk=disk_gb,
-            # Idle auto-stop EXCEEDS the build budget (see _lifecycle_minutes).
-            auto_stop_interval=idle_minutes,
-            # 0 = delete immediately on stop. This is the BACKSTOP for our own process
-            # dying, not the primary teardown — the explicit delete below is.
-            auto_delete_interval=0,
-        )
+        info = await client.create_sandbox(**create_kwargs)
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
         t_created = time.monotonic()
@@ -443,6 +474,20 @@ async def run_build(
                     # what this check refused.
                     artifact = None
         t_extracted = time.monotonic()
+
+        # PP-2: the post-build hook (the browser harness), only on a CLEAN build and
+        # still inside the sandbox's lifetime. A raise is logged and swallowed: the
+        # build verdict and its artifact above are already decided and must survive.
+        if after_build is not None and artifact is not None and classification.deployable:
+            from pocketpaw_ee.sites.engines import static_output_rel
+
+            rel = artifact_rel or static_output_rel(engine)
+            static_dir = f"{SANDBOX_PROJECT_DIR}/{rel}".rstrip("/.") or SANDBOX_PROJECT_DIR
+            try:
+                post_build = await after_build(client, sandbox_id, static_dir)
+            except Exception as exc:  # noqa: BLE001 — see above
+                logger.warning("daytona_runner: after_build hook raised (%s)", exc)
+                post_build = None
     finally:
         # Explicit teardown. Swallows its own errors: a delete that fails must not mask
         # the build result, and the auto-delete backstop still reaps the sandbox.
@@ -482,6 +527,7 @@ async def run_build(
         artifact_bytes=len(artifact) if artifact else 0,
         sandbox_id=sandbox_id,
         sandbox_deleted=deleted,
+        post_build=post_build,
     )
 
 

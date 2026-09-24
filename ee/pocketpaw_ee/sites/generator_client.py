@@ -7,6 +7,14 @@
 # NOT proceed to deploy (Contract clause 4). The subprocess calls are isolated
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 #
+# Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): paw-sites now prints a
+# structured ``{"error","code"}`` line on stdout for every failed ``build`` (contract §3).
+# ``_SubprocessRunner.generate`` parses it (``parse_structured_error``) and raises
+# ``GeneratorFailed`` carrying the code instead of treating stderr as the message;
+# an older generator without the line keeps the stderr fallback. NEW
+# ``run_static_check`` drives ``paw-sites-gen check`` — the static verification layer,
+# which installs nothing and is therefore safe on the API host for any source.
+#
 # Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): this client builds on
 # the HOST it runs in — the API process, the dev server, draft markup, the native
 # pre-warm — and its install step is a real ``bun install``. Author-declared npm
@@ -744,6 +752,130 @@ class HostInstallRefused(RuntimeError):
     """
 
 
+#: The paw-sites structured-error codes that are DELIBERATE refusals of the author's
+#: input (contract §3) — the author can fix these. ``internal_error`` is not one.
+AUTHOR_FIXABLE_GENERATOR_CODES: frozenset[str] = frozenset(
+    {"dependency_policy", "reserved_path", "engine_unsupported", "invalid_input"}
+)
+
+
+class GeneratorFailed(RuntimeError):
+    """``paw-sites-gen build`` refused with a STRUCTURED ``{"error", "code"}`` line (PP-2).
+
+    A ``RuntimeError`` so every caller that already maps a failed generate keeps
+    working. ``code`` is paw-sites' stable wire value; ``author_fixable`` is True for the
+    deliberate refusals (a policy violation, a reserved path, an engine that cannot
+    honour the request, bad input), which the service surfaces as a 422 and the verify
+    pipeline as a static-layer error. ``message`` is the generator's own text, written
+    for the author.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"generator failed ({code}): {message}")
+        self.code = code
+        self.message = message
+
+    @property
+    def author_fixable(self) -> bool:
+        return self.code in AUTHOR_FIXABLE_GENERATOR_CODES
+
+
+def parse_structured_error(stdout: bytes | str | None) -> tuple[str, str] | None:
+    """Return ``(message, code)`` from a paw-sites structured failure line, else None.
+
+    Reads the LAST non-empty stdout line only, the one the CLI's ``failStructured``
+    prints. An older generator without structured errors returns None and the caller
+    keeps its stderr fallback.
+    """
+    if not stdout:
+        return None
+    text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("error"), str):
+        return None
+    code = payload.get("code")
+    return payload["error"], code if isinstance(code, str) and code else "internal_error"
+
+
+class StaticCheckUnavailable(RuntimeError):
+    """``paw-sites-gen check`` could not run: no generator on PATH, a generator that
+    predates the subcommand, a crash, or a timeout. ``reason`` is a fixed identifier."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: Budget for the static check. It parses TS and compiles svelte in-process and runs in
+#: about a second; anything near this is a wedged process.
+STATIC_CHECK_TIMEOUT_SEC = 60
+
+
+async def run_static_check(
+    input_json: dict[str, Any], *, _exec: Any = None, timeout_s: int | None = None
+) -> dict[str, Any]:
+    """Run ``paw-sites-gen check`` (the STATIC verification layer, contract §3).
+
+    Installs nothing and builds nothing — safe on the API host for any source,
+    including one with author packages. Returns the parsed ``{ok, errors, warnings}``
+    report. A structured refusal (exit 1 with an author-fixable code) is returned AS a
+    failed report with one static error, because it is the author's to fix. Everything
+    else that stops the check from running raises :class:`StaticCheckUnavailable`.
+    """
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump(input_json, fh)
+        try:
+            proc = await (_exec or asyncio.create_subprocess_exec)(
+                *_gen_cmd_argv(),
+                "check",
+                "--input",
+                input_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise StaticCheckUnavailable("checker_unavailable") from exc
+        try:
+            stdout, _stderr = await _communicate_bounded(
+                proc, timeout_s or STATIC_CHECK_TIMEOUT_SEC, "check"
+            )
+        except _BuildTimeout as exc:
+            raise StaticCheckUnavailable("timeout") from exc
+        if proc.returncode == 0:
+            try:
+                report = json.loads(stdout.decode().strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                raise StaticCheckUnavailable("check_output_unreadable") from exc
+            if not isinstance(report, dict) or not isinstance(report.get("errors"), list):
+                raise StaticCheckUnavailable("check_output_unreadable")
+            return report
+        structured = parse_structured_error(stdout)
+        if proc.returncode == 1 and structured is not None:
+            message, code = structured
+            if code in AUTHOR_FIXABLE_GENERATOR_CODES:
+                return {
+                    "ok": False,
+                    "errors": [{"layer": "static", "code": code, "message": message}],
+                    "warnings": [],
+                }
+            raise StaticCheckUnavailable("check_crashed")
+        # Exit 2 is usage — a generator that predates ``check`` lands here too.
+        raise StaticCheckUnavailable("checker_unavailable")
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
+
+
 # --------------------------------------------------------------------------- #
 # HE-3 — the html static smoke check (the html-path replacement for the workerd
 # SSR gate). ripple/svelte fail-gate a LIVE publish on a workerd SSR render (see
@@ -1350,6 +1482,12 @@ class _SubprocessRunner:
                 # generator is a failed generate.
                 raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
+                # PP-2: paw-sites prints a structured ``{"error","code"}`` line on
+                # stdout for every failed build (contract §3); prefer it over stderr,
+                # which now carries a stack only for an internal error.
+                structured = parse_structured_error(stdout)
+                if structured is not None:
+                    raise GeneratorFailed(structured[1], structured[0])
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
         finally:
