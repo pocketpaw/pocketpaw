@@ -171,7 +171,7 @@ async def test_arm_then_edit_leaves_a_reviewable_draft(
     )
 
     # 2. Edit a component — must persist a DRAFT + PREVIEW, not auto-publish.
-    edit_gen, edit_cf = _FakeGenerator(), _FakeCF()
+    edit_gen = _FakeGenerator()
     await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",

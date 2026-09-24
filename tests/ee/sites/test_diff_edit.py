@@ -224,7 +224,7 @@ async def test_targeted_edit_non_unique_match_errors_without_persisting(beanie_t
     ValidationError and does NOT mutate the pocket (the agent retries with a more
     specific old_string)."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
-    gen, cf = _FakeGenerator(), _FakeCF()
+    gen = _FakeGenerator()
 
     with pytest.raises(ValidationError):
         await sites_service.edit_svelte_component(
