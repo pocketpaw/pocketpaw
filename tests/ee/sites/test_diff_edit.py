@@ -1,4 +1,6 @@
 # tests/ee/sites/test_diff_edit.py — exercises the TARGETED / DIFF edit path for a
+# Updated 2026-09-24 (PP-2): the build these tests reach is the VERIFY pipeline's
+#   (the ``edit_verifier`` fixture records the source it saw); nothing builds locally.
 # svelte Paw Site component (P3 — sites edit-perf). Created: 2026-06-18
 # (feat/sites-diff-edit, P3).
 #
@@ -187,37 +189,29 @@ class TestApplyEdits:
 
 
 @pytest.mark.asyncio
-async def test_targeted_edit_applies_and_reaches_build(beanie_test_db):
+async def test_targeted_edit_applies_and_reaches_build(beanie_test_db, edit_verifier):
     """A targeted edit ([{old_string, new_string}]) is applied to the pocket's
-    CURRENT Hero source, the computed new source persists, and the regenerated
-    PREVIEW build materializes the edited component — without the agent ever
-    sending the whole file."""
+    CURRENT Hero source, the computed new source persists, and the VERIFIED build
+    (PP-2) sees the edited component — without the agent ever sending the whole file."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     gen, cf = _FakeGenerator(), _FakeCF()
 
-    site, _unreferenced = await sites_service.edit_svelte_component(
+    await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         edits=[{"old_string": "Bright Smile", "new_string": "Brighter Smiles, Whiter Teeth"}],
-        _generator=gen,
-        _cloudflare=cf,
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_fake_local_deploy,
     )
 
-    # Same preview contract as the full-new_source path: no live deploy.
+    # No live deploy and no host build.
     assert cf.put_calls == []
-    assert site.deployed is False
-    assert site.url.endswith(f"/preview-{pocket_id}/")
+    assert gen.built is None
 
     expected = "<section class='hero'><h1>Brighter Smiles, Whiter Teeth</h1></section>"
-    # The build materialized the diff-edited component.
-    assert gen.built is not None
-    assert gen.built["source"]["src/lib/components/Hero.svelte"] == expected
-    # Untouched files came through verbatim.
-    assert gen.built["source"]["src/routes/+page.ts"] == "export const prerender = true"
+    seen = edit_verifier.seen_sources[-1]
+    assert seen["src/lib/components/Hero.svelte"] == expected
+    assert seen["src/routes/+page.ts"] == "export const prerender = true"
 
     # The computed new source persisted on the pocket.
     wire = await pockets_service.get(pocket_id, "u1")
@@ -239,10 +233,6 @@ async def test_targeted_edit_non_unique_match_errors_without_persisting(beanie_t
             pocket_id=pocket_id,
             component_path="src/lib/components/Hero.svelte",
             edits=[{"old_string": "NOT IN THE FILE", "new_string": "x"}],
-            _generator=gen,
-            _cloudflare=cf,
-            _bundle_reader=lambda d: b"x",
-            _local_deploy=_fake_local_deploy,
         )
 
     # The bad edit never reached the generator and never mutated the pocket.
@@ -252,27 +242,21 @@ async def test_targeted_edit_non_unique_match_errors_without_persisting(beanie_t
 
 
 @pytest.mark.asyncio
-async def test_full_new_source_path_still_works(beanie_test_db):
+async def test_full_new_source_path_still_works(beanie_test_db, edit_verifier):
     """Compat: the full-file ``new_source`` path is unchanged — it still rewrites
-    the whole component and reaches the build."""
+    the whole component and reaches the (verified) build."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
-    gen, cf = _FakeGenerator(), _FakeCF()
     whole = "<section class='hero'><h1>Totally Rewritten</h1></section>"
 
-    site, _unreferenced = await sites_service.edit_svelte_component(
+    await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source=whole,
-        _generator=gen,
-        _cloudflare=cf,
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_fake_local_deploy,
     )
 
-    assert site.deployed is False
-    assert gen.built["source"]["src/lib/components/Hero.svelte"] == whole
+    assert edit_verifier.seen_sources[-1]["src/lib/components/Hero.svelte"] == whole
     wire = await pockets_service.get(pocket_id, "u1")
     assert wire["source"]["src/lib/components/Hero.svelte"] == whole
 
@@ -288,8 +272,4 @@ async def test_neither_edits_nor_new_source_raises(beanie_test_db):
             user_id="u1",
             pocket_id=pocket_id,
             component_path="src/lib/components/Hero.svelte",
-            _generator=_FakeGenerator(),
-            _cloudflare=_FakeCF(),
-            _bundle_reader=lambda d: b"x",
-            _local_deploy=_fake_local_deploy,
         )

@@ -1,6 +1,11 @@
 # tests/ee/sites/test_component_edit.py — exercises the targeted svelte-component
-# edit + republish path (sites_service.edit_svelte_component). Created:
+# edit path (sites_service.edit_svelte_component). Created:
 # 2026-06-17 (feat/sites-svelte-component-edit, SE-2).
+#
+# Updated 2026-09-24 (PP-2): the edit no longer builds a local preview; it VERIFIES the
+# draft (static, sandbox build, browser). The headline test asserts the verifier saw the
+# new source and nothing built on the host; the rollback tests drive a static / build
+# FAILED verdict; browser failures and unverified verdicts stay staged.
 #
 # Updated 2026-06-18 (fix/sites-edit-draft-not-publish): a component edit now
 # builds a PREVIEW (local serve, draft kept) instead of a live CF deploy +
@@ -133,48 +138,35 @@ async def _make_svelte_pocket(workspace_id: str, user_id: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_edit_component_republishes_with_new_source(beanie_test_db):
-    """A component edit is persisted on the pocket AND reaches the regenerated
-    PREVIEW build: the generator materializes the NEW Hero source, not the old one.
-
-    Branch primitive (fix/sites-edit-draft-not-publish): an edit now builds a
-    PREVIEW (local serve) — it is NOT a live deploy, so ``deployed`` is False and no
-    CF worker is put. The live deploy only happens on an approved review."""
+async def test_edit_component_verifies_the_new_source_and_stages_a_draft(
+    beanie_test_db, edit_verifier
+):
+    """PP-2: a component edit is persisted and then VERIFIED — the verify pipeline sees
+    the NEW Hero source — and it stays a reviewable draft. No local build runs, no CF
+    worker is put, and no preview Site doc is minted (there is no preview url)."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     gen, cf = _FakeGenerator(), _FakeCF()
 
-    site, _unreferenced = await sites_service.edit_svelte_component(
+    result = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source=_HERO_V2,
-        _generator=gen,
-        _cloudflare=cf,
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_fake_local_deploy,
     )
 
-    # An edit is a PREVIEW, not a live deploy: no CF worker put, not deployed,
-    # but it returns the STABLE per-pocket preview URL the builder iframe frames
-    # (preview-<pocket_id>, NOT the minted site id — so repeated builds don't churn
-    # the url).
     assert cf.put_calls == []
-    assert site.deployed is False
-    assert site.url.endswith(f"/preview-{pocket_id}/")
-    assert site.pocket_id == pocket_id
-    # The regenerated build materialized the EDITED component, not the original.
-    assert gen.built is not None
-    assert gen.built["engine"] == "svelte"
-    assert gen.built["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
-    # Untouched files came through verbatim.
-    assert gen.built["source"]["src/routes/+page.ts"] == "export const prerender = true"
+    assert gen.built is None, "the edit must not build on the API host any more"
+    assert result.verification["status"] == "passed"
+    # The verifier ran exactly once, over the EDITED source.
+    assert len(edit_verifier.calls) == 1
+    seen = edit_verifier.seen_sources[0]
+    assert seen["src/lib/components/Hero.svelte"] == _HERO_V2
+    assert seen["src/routes/+page.ts"] == "export const prerender = true"
 
-    # The edit persisted on the pocket — a re-read shows the new source.
     wire = await pockets_service.get(pocket_id, "u1")
     assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
 
-    # And it left a reviewable DRAFT — not promoted to published (the bug).
     from pocketpaw_ee.versions import service as versions
 
     draft = await versions.get_draft(scope_type="pocket", scope_id=pocket_id)
@@ -183,35 +175,100 @@ async def test_edit_component_republishes_with_new_source(beanie_test_db):
 
 
 @pytest.mark.asyncio
-async def test_broken_edit_propagates_smoke_gate_and_rolls_back(beanie_test_db):
-    """A deliberately-broken edit fails the smoke gate: SmokeGateFailed
-    propagates, NO worker is deployed (the prior deploy stays), and the persisted
-    source is ROLLED BACK to the last good contents so the next publish is not
-    broken."""
-    pocket_id = await _make_svelte_pocket("ws1", "u1")
-    gen, cf = _SmokeFailGenerator(), _FakeCF()
+@pytest.mark.parametrize("layer", ["static", "build"])
+async def test_an_edit_that_does_not_compile_is_rolled_back(
+    beanie_test_db, edit_verifier, layer
+):
+    """A STATIC or BUILD failure means the edit does not compile: the file is restored
+    and ``EditVerificationFailed`` (a ``SmokeGateFailed``, so the old contract holds)
+    carries the verdict for the agent."""
+    from tests.ee.sites.conftest import verdict_with
 
-    broken = "<script>onMount(() => { throw new Error('boom') })</script>"
-    with pytest.raises(SmokeGateFailed):
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    edit_verifier.verdict = verdict_with(**{layer: "failed"})
+
+    broken = "<script>import x from 'not-declared'</script>"
+    with pytest.raises(SmokeGateFailed) as info:
         await sites_service.edit_svelte_component(
             workspace_id="ws1",
             user_id="u1",
             pocket_id=pocket_id,
             component_path="src/lib/components/Hero.svelte",
             new_source=broken,
-            _generator=gen,
-            _cloudflare=cf,
-            _bundle_reader=lambda d: b"export default {}",
         )
 
-    # The smoke gate fired BEFORE any deploy — no worker was put.
-    assert cf.put_calls == []
-    # The broken edit WAS handed to the generator (so the gate saw it) ...
-    assert gen.built["source"]["src/lib/components/Hero.svelte"] == broken
-    # ... but the persisted source was rolled back to the last good contents, so a
-    # later publish would not rebuild the broken page.
+    assert isinstance(info.value, sites_service.EditVerificationFailed)
+    assert info.value.verdict["status"] == "failed"
+    # The broken edit WAS what got verified ...
+    assert edit_verifier.seen_sources[0]["src/lib/components/Hero.svelte"] == broken
+    # ... and the persisted source was rolled back to the last good contents.
     wire = await pockets_service.get(pocket_id, "u1")
     assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V1
+
+
+@pytest.mark.asyncio
+async def test_a_browser_failure_stays_staged_and_is_reported(beanie_test_db, edit_verifier):
+    """The page compiles and the browser found a runtime defect: the edit STAYS staged
+    (the fix is usually a follow-up edit to this very file) and the verdict says what
+    broke. Rolling it back would throw the work away."""
+    from tests.ee.sites.conftest import verdict_with
+
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    edit_verifier.verdict = verdict_with(browser="failed")
+
+    result = await sites_service.edit_svelte_component(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/lib/components/Hero.svelte",
+        new_source=_HERO_V2,
+    )
+
+    assert result.verification["status"] == "failed"
+    wire = await pockets_service.get(pocket_id, "u1")
+    assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_edit_stays_staged(beanie_test_db, edit_verifier):
+    """Nothing proved the edit wrong (no sandbox, a timeout): it stays staged and the
+    verdict is ``unverified`` — never reported as a pass."""
+    from tests.ee.sites.conftest import verdict_with
+
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    edit_verifier.verdict = verdict_with(build="unverified", browser="unverified")
+
+    result = await sites_service.edit_svelte_component(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/lib/components/Hero.svelte",
+        new_source=_HERO_V2,
+    )
+    assert result.verification["status"] == "unverified"
+    wire = await pockets_service.get(pocket_id, "u1")
+    assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
+
+
+@pytest.mark.asyncio
+async def test_a_verifier_that_raises_leaves_the_edit_staged_and_unverified(beanie_test_db):
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+
+    async def _boom(**_kw):
+        raise RuntimeError("redis is down")
+
+    result = await sites_service.edit_svelte_component(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/lib/components/Hero.svelte",
+        new_source=_HERO_V2,
+        _verify=_boom,
+    )
+    assert result.verification["status"] == "unverified"
+    assert result.verification["reason"] == "verify_unavailable"
+    wire = await pockets_service.get(pocket_id, "u1")
+    assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
 
 
 @pytest.mark.asyncio
@@ -227,9 +284,6 @@ async def test_edit_unknown_component_raises_not_found(beanie_test_db):
             pocket_id=pocket_id,
             component_path="src/lib/components/DoesNotExist.svelte",
             new_source="<section/>",
-            _generator=_FakeGenerator(),
-            _cloudflare=_FakeCF(),
-            _bundle_reader=lambda d: b"x",
         )
 
 
@@ -243,9 +297,6 @@ async def test_edit_missing_pocket_raises_not_found(beanie_test_db):
             pocket_id="0123456789abcdef01234567",
             component_path="src/lib/components/Hero.svelte",
             new_source="<section/>",
-            _generator=_FakeGenerator(),
-            _cloudflare=_FakeCF(),
-            _bundle_reader=lambda d: b"x",
         )
 
 
@@ -270,7 +321,4 @@ async def test_edit_ripple_pocket_rejected(beanie_test_db):
             pocket_id=pocket_id,
             component_path="src/lib/components/Hero.svelte",
             new_source="<section/>",
-            _generator=_FakeGenerator(),
-            _cloudflare=_FakeCF(),
-            _bundle_reader=lambda d: b"x",
         )

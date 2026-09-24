@@ -1,4 +1,6 @@
 # tests/ee/sites/test_author_dependencies_sandbox_only.py — author npm packages never
+# Updated 2026-09-24 (PP-2): the svelte edit seam test now asserts the edit is verified
+#   (sandbox lane) and the host generator is never reached.
 # install on the API host, and ``set_site_dependencies`` writes the manifest (PP-1).
 #
 # Created: 2026-09-24 (feat/sites-author-dependencies). Three layers of the
@@ -237,26 +239,28 @@ async def _make_pocket(engine: str, source: dict) -> str:
 
 
 @pytest.mark.asyncio
-async def test_edit_svelte_component_skips_the_local_build_for_a_pocket_with_packages(
-    beanie_test_db,
+async def test_edit_svelte_component_verifies_in_the_sandbox_for_a_pocket_with_packages(
+    beanie_test_db, edit_verifier, monkeypatch
 ):
-    """Mutation: delete the PP-1 seam branch → the generator is called."""
+    """PP-2 replaced PP-1's seam: an edit to a pocket with packages is VERIFIED (static
+    check on the host, build in the sandbox) and never reaches the host generator."""
+    from pocketpaw_ee.sites import generator_client
+
+    async def _must_not_build(self, **_kw):
+        raise AssertionError("the local preview build ran on the API host")
+
+    monkeypatch.setattr(generator_client.GeneratorClient, "build", _must_not_build)
     pocket_id = await _make_pocket("svelte", _with_manifest(_SVELTE_SOURCE))
 
-    class _MustNotBuild:
-        async def build(self, **_kw):
-            raise AssertionError("the local preview build ran on the API host")
-
-    doc, unreferenced = await sites_service.edit_svelte_component(
+    result = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source="<h1>Hello</h1>",
-        _generator=_MustNotBuild(),
     )
-    assert doc is None
-    assert unreferenced is False
+    assert result.unreferenced is False
+    assert len(edit_verifier.calls) == 1
     wire = await pockets_service.get(pocket_id, "u1")
     assert wire["source"]["src/lib/components/Hero.svelte"] == "<h1>Hello</h1>"
 

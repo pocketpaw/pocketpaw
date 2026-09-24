@@ -228,6 +228,9 @@ LIST_SITE_ASSETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_assets"
 # of ``paw.dependencies.json``. Must ride SITES_TOOL_IDS: an absent id is filtered out
 # of the /sites allow-list with no error, and the tool is silently unreachable.
 SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
+# PP-2 — re-run the three-layer verification on a site's draft. Must ride
+# SITES_TOOL_IDS: an absent id is filtered out of the hard /sites allow-list.
+VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -243,6 +246,7 @@ SITES_TOOL_IDS = (
     GET_SITE_BUILD_STATUS_TOOL_ID,
     READ_SITE_SOURCE_TOOL_ID,
     SET_SITE_DEPENDENCIES_TOOL_ID,
+    VERIFY_SITE_TOOL_ID,
 )
 
 
@@ -676,6 +680,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_svelte_component_tool,
         make_read_site_source_tool,
         make_set_site_dependencies_tool,
+        make_verify_site_tool,
     )
 
     create_landing_site = make_create_landing_site_tool(tool)
@@ -716,6 +721,8 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # PP-1 — the dependency setter. Same server, so declare → edit → publish sit
     # together on one allow-listed server.
     set_site_dependencies = make_set_site_dependencies_tool(tool)
+    # PP-2 — re-verify a draft (static, build, browser). Same server.
+    verify_site = make_verify_site_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -734,6 +741,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             edit_html_file,
             read_site_source,
             set_site_dependencies,
+            verify_site,
         ],
     )
     return SERVER_NAME, server
@@ -755,5 +763,6 @@ __all__ = [
     "SERVER_NAME",
     "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_TOOL_IDS",
+    "VERIFY_SITE_TOOL_ID",
     "build_sites_manager_server",
 ]

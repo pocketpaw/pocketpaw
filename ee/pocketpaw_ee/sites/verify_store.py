@@ -132,7 +132,9 @@ class BlobVerifyStore:
         if not (_safe(pocket_id) and _safe(key)):
             return None
         try:
-            raw = _run_coro(_read_all(self._adapter.open(self._key(pocket_id, key))), _timeout_sec())
+            raw = _run_coro(
+                _read_all(self._adapter.open(self._key(pocket_id, key))), _timeout_sec()
+            )
             data = json.loads(raw)
         except Exception:  # noqa: BLE001 — a miss is the common case
             return None

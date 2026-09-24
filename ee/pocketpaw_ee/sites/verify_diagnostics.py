@@ -110,8 +110,9 @@ def scrub_text(text: str) -> str:
     return out
 
 
-def _entry(layer: str, *, code: str, message: str, file: str = "", line: Any = None,
-           col: Any = None) -> dict[str, Any]:
+def _entry(
+    layer: str, *, code: str, message: str, file: str = "", line: Any = None, col: Any = None
+) -> dict[str, Any]:
     entry: dict[str, Any] = {"layer": layer, "code": code, "message": message}
     if file:
         entry["file"] = file
@@ -231,9 +232,7 @@ def harness_entries(report: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def _size(errors: list[Any], warnings: list[Any]) -> int:
-    return len(
-        json.dumps({"errors": errors, "warnings": warnings}, separators=(",", ":")).encode()
-    )
+    return len(json.dumps({"errors": errors, "warnings": warnings}, separators=(",", ":")).encode())
 
 
 def finalize(
@@ -250,11 +249,14 @@ def finalize(
     was dropped, else to ``warnings`` — and the budget is measured WITH the marker, so the
     capped payload never exceeds ``cap_bytes``.
     """
+
     # A marker from an EARLIER finalize (a job's report being merged with the static
     # layer) is not an entry: drop it and remember that something was already cut.
     def _is_marker(entry: Any) -> bool:
-        return isinstance(entry, dict) and entry.get("code") == "truncated" and not entry.get(
-            "message"
+        return (
+            isinstance(entry, dict)
+            and entry.get("code") == "truncated"
+            and not entry.get("message")
         )
 
     raw_errors = [e for e in errors or [] if isinstance(e, dict)]

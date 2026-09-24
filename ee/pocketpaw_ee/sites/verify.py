@@ -41,7 +41,6 @@
 # :func:`status_summary` — the ``/status`` view — returns counts and never a message.
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import secrets
@@ -230,9 +229,7 @@ async def _static_layer(
     except Exception:  # noqa: BLE001 — the check not running is not the author's fault
         logger.warning("sites.verify: static check raised", exc_info=True)
         return _layer("static", "unverified", "check_crashed"), [], []
-    errors = [
-        {**e, "layer": "static"} for e in report.get("errors") or [] if isinstance(e, dict)
-    ]
+    errors = [{**e, "layer": "static"} for e in report.get("errors") or [] if isinstance(e, dict)]
     warnings = [
         {**w, "layer": "static"} for w in report.get("warnings") or [] if isinstance(w, dict)
     ]
@@ -297,20 +294,34 @@ async def _sandbox_layers(
                 )
             active_pool = pool or await build_job._get_pool()
         except Exception:
-            logger.warning("sites.verify: could not queue the build for %s", pocket_id, exc_info=True)
+            logger.warning(
+                "sites.verify: could not queue the build for %s", pocket_id, exc_info=True
+            )
             reason = "queue_unavailable"
-            return [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)], [], []
+            return (
+                [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
+                [],
+                [],
+            )
         waiter = wait or build_job.wait_for_preview_result
         try:
             record = await waiter(active_pool, enqueued.job_id, timeout=wait_seconds)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             reason = "timeout"
-            return [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)], [], []
+            return (
+                [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
+                [],
+                [],
+            )
         except Exception:
             # The job raised: for this lane that means no sandbox could be created.
             logger.warning("sites.verify: build job for %s raised", pocket_id, exc_info=True)
             reason = "sandbox_unavailable"
-            return [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)], [], []
+            return (
+                [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
+                [],
+                [],
+            )
     layers = _layers_from_report(record, inputs.engine)
     diagnostics = record.get("diagnostics") if isinstance(record.get("diagnostics"), dict) else {}
     return layers, list(diagnostics.get("errors") or []), list(diagnostics.get("warnings") or [])
@@ -357,7 +368,9 @@ async def verify_pocket(
     budget = wait_seconds if wait_seconds is not None else verify_wait_seconds()
     started = time.monotonic()
 
-    if not force and (hit := _cached(store.read(pocket_id, verify_store.verdict_key(inputs.content_hash)))):
+    if not force and (
+        hit := _cached(store.read(pocket_id, verify_store.verdict_key(inputs.content_hash)))
+    ):
         return {**hit, "cached": True}
 
     note = WORKER_RENDERED_NOTE if inputs.dynamic else ""
@@ -382,7 +395,18 @@ async def verify_pocket(
     # declaration tools (which refuse it). It can never publish, so say so as a static
     # error the agent can act on (drop the packages) rather than let a build run.
     from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
+
+    # PP-4's legacy build-shell files: the generator refuses them at build time, so
+    # name them here as a static error and spend no sandbox finding out.
+    from pocketpaw_ee.sites.legacy_build_shell import generator_owned_keys_message
     from pocketpaw_ee.sites.service import DYNAMIC_PACKAGES_REASON, site_refuses_author_packages
+
+    if (owned := generator_owned_keys_message(inputs.engine, inputs.source)) is not None:
+        errors = [
+            {"layer": "static", "code": "reserved_path", "message": owned},
+            *errors,
+        ]
+        static = _layer("static", "failed", "static_check_failed:reserved_path")
 
     if site_refuses_author_packages(pocket) and has_author_dependencies(inputs.source):
         errors = [

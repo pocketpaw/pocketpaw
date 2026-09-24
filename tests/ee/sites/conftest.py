@@ -1,4 +1,6 @@
 # tests/ee/sites/conftest.py
+# Updated 2026-09-24 (PP-2): added the autouse ``edit_verifier`` fixture (and
+#   ``verdict_with``) — svelte edits now run the verify pipeline, which tests stub.
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
 # Updated 2026-08-24 (feat/sites-s3-artifact-store, SP-4): ``_artifact_store_tmp`` also
 #   clears PAW_SITES_ARTIFACT_STORE. PAW_SITES_ARTIFACT_DIR only points the store
@@ -385,3 +387,59 @@ async def _fake_run_import(monkeypatch):
         return stub_import_result(files, **kw)
 
     monkeypatch.setattr(generator_client, "run_import", _run)
+
+
+# ── PP-2 (feat/sites-verify-pipeline) ───────────────────────────────────────────
+# ``edit_svelte_component`` now VERIFIES the edited draft (static check, sandbox build,
+# browser) instead of building locally. Left real, every edit test would shell out to
+# ``paw-sites-gen check`` and reach for Redis. This autouse fixture swaps the service's
+# default verifier for a recorder returning a PASSED verdict; a test that wants a failing
+# layer requests ``edit_verifier`` by name and sets ``.verdict`` (see ``verdict_with``).
+def verdict_with(**layer_status: str) -> dict[str, Any]:
+    """A §5 verdict whose layers default to passed; ``build="failed"`` etc. overrides."""
+    layers = [
+        {"name": name, "status": layer_status.get(name, "passed")}
+        for name in ("static", "build", "browser")
+    ]
+    statuses = [layer["status"] for layer in layers]
+    status = (
+        "failed" if "failed" in statuses else "unverified" if "unverified" in statuses else "passed"
+    )
+    return {
+        "status": status,
+        "content_hash": "c" * 64,
+        "layers": layers,
+        "errors": (
+            [{"layer": "build", "code": "build_error", "message": "boom"}]
+            if status == "failed"
+            else []
+        ),
+        "warnings": [],
+    }
+
+
+class EditVerifier:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.verdict: dict[str, Any] = verdict_with()
+        #: The pocket's source at the moment the verifier ran — what was verified.
+        self.seen_sources: list[dict[str, Any]] = []
+
+    async def __call__(self, *, workspace_id: str, user_id: str, pocket_id: str) -> dict:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        self.calls.append(
+            {"workspace_id": workspace_id, "user_id": user_id, "pocket_id": pocket_id}
+        )
+        wire = await pockets_service.get(pocket_id, user_id)
+        self.seen_sources.append(dict(wire.get("source") or {}))
+        return self.verdict
+
+
+@pytest.fixture(autouse=True)
+def edit_verifier(monkeypatch) -> EditVerifier:
+    from pocketpaw_ee.sites import service as sites_service
+
+    verifier = EditVerifier()
+    monkeypatch.setattr(sites_service, "_default_edit_verifier", verifier)
+    return verifier

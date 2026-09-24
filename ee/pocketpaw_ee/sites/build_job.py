@@ -607,15 +607,16 @@ async def run_site_build(
     try:
         try:
             project_dir = await _scaffold(generator_input, work_dir, runner=_runner)
-        except Exception:
+        except Exception as exc:
             # The generator's own stderr can name paths and carry the user's content, so
-            # the row gets the rung and the log gets the detail.
+            # the row gets the rung and the log gets the detail. A STRUCTURED refusal
+            # (PP-2) names its closed-set code as the cause instead of the generic one.
             logger.exception("sites.build: scaffold failed for site %s", site_id)
             await _record(
                 site,
                 _settlement(
                     RUNG_SCAFFOLD_FAILED,
-                    "generator_raised",
+                    scaffold_failure_cause(exc),
                     retryable=False,
                     attempts_left=attempts_left,
                 ),
@@ -1197,6 +1198,24 @@ def _write_sandbox_report(
         logger.warning("sites.preview: could not record the verify report for %s", pocket_id)
 
 
+def scaffold_failure_cause(exc: BaseException) -> str:
+    """The ``<cause>`` half of a ``scaffold_failed`` rung (PP-2, closing PP-4's gap).
+
+    A structured generator refusal names its code — ``reserved_path``,
+    ``dependency_policy``, ``engine_unsupported``, ``invalid_input`` — which is a closed
+    set paw-sites owns (contract §3), so it is safe on the row and in ``/status``. Any
+    other raise stays ``generator_raised``: its text is not a bounded vocabulary.
+    """
+    from pocketpaw_ee.sites.generator_client import (
+        AUTHOR_FIXABLE_GENERATOR_CODES,
+        GeneratorRefused,
+    )
+
+    if isinstance(exc, GeneratorRefused) and exc.code in AUTHOR_FIXABLE_GENERATOR_CODES:
+        return exc.code
+    return "generator_raised"
+
+
 def _scaffold_error_entry(exc: BaseException) -> dict[str, Any]:
     """A scaffold refusal as a diagnostic.
 
@@ -1289,14 +1308,14 @@ async def run_site_preview_build(
             logger.exception("sites.preview: scaffold failed for pocket %s", pocket_id)
             report = _sandbox_report(
                 content_hash,
-                build=_layer("failed", f"{RUNG_SCAFFOLD_FAILED}:generator_raised"),
+                build=_layer("failed", f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}"),
                 browser=_layer("skipped", "build_failed"),
                 errors=[_scaffold_error_entry(exc)],
             )
             _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
             return {
                 "status": "failed",
-                "reason": f"{RUNG_SCAFFOLD_FAILED}:generator_raised",
+                "reason": f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}",
                 **report,
             }
 
@@ -1403,14 +1422,14 @@ async def run_site_html_verify(
             logger.exception("sites.verify: html scaffold failed for pocket %s", pocket_id)
             report = _sandbox_report(
                 content_hash,
-                build=_layer("failed", f"{RUNG_SCAFFOLD_FAILED}:generator_raised"),
+                build=_layer("failed", f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}"),
                 browser=_layer("skipped", "build_failed"),
                 errors=[_scaffold_error_entry(exc)],
             )
             _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
             return {
                 "status": "failed",
-                "reason": f"{RUNG_SCAFFOLD_FAILED}:generator_raised",
+                "reason": f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}",
                 **report,
             }
         files = read_generated_tree(project_dir)

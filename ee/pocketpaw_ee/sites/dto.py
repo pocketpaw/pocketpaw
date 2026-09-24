@@ -832,9 +832,7 @@ class SiteStatusResponse(BaseModel):
     # PP-2 — verification of the CURRENT draft source (contract §6). Counts only: the
     # per-error messages are agent-only and never reach this response. Defaults to
     # ``none`` so a pocket that was never verified reads as such.
-    verification: SiteVerificationSummary = Field(
-        default_factory=lambda: SiteVerificationSummary()
-    )
+    verification: SiteVerificationSummary = Field(default_factory=lambda: SiteVerificationSummary())
 
 
 class SiteVersionResponse(BaseModel):

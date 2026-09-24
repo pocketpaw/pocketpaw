@@ -1172,6 +1172,7 @@ import re
 import secrets
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1265,6 +1266,7 @@ from pocketpaw_ee.sites.export import (
 from pocketpaw_ee.sites.generator_client import (
     BuildResult,
     GeneratorClient,
+    SmokeGateFailed,
     svelte_source_is_dynamic,
 )
 from pocketpaw_ee.sites.html_paths import (
@@ -1794,6 +1796,20 @@ async def _prewarm_native_artifact(
     )
     if store.read(pocket_id, content_hash) is not None:
         return  # already warm — no rebuild
+    # PP-2 (closing PP-4's gap): a legacy pocket still carrying a generator-owned
+    # build-shell file would be refused inside the sandbox — a whole sandbox spent on a
+    # build that cannot succeed, fired in the background on every edit. The same
+    # preflight ``get_native_artifact`` runs, but answered quietly: a pre-warm has no
+    # caller to show a 422 to, and the next VIEW raises it where the user can see it.
+    from pocketpaw_ee.sites.legacy_build_shell import generator_owned_keys_message
+
+    if generator_owned_keys_message(engine, source) is not None:
+        logger.info(
+            "sites.prewarm: pocket %s carries a generator-owned build-shell file — "
+            "not queueing a build that the generator would refuse",
+            pocket_id,
+        )
+        return
     await _build_native_artifact(
         theme=theme,
         source=source,
@@ -9911,6 +9927,43 @@ async def get_native_artifact(
     }
 
 
+@dataclass(frozen=True)
+class SvelteEditResult:
+    """What :func:`edit_svelte_component` returns (PP-2)."""
+
+    site: Any
+    unreferenced: bool
+    verification: dict[str, Any]
+
+
+class EditVerificationFailed(SmokeGateFailed):
+    """A svelte edit failed its static or build verification and was rolled back (PP-2).
+
+    A ``SmokeGateFailed`` so every caller that treated "the edit did not pass its gate"
+    as a rollback keeps doing so; ``verdict`` is the full §5 verification for the agent.
+    """
+
+    def __init__(self, verdict: dict[str, Any]) -> None:
+        super().__init__("the edit failed verification")
+        self.verdict = verdict
+
+
+def edit_verdict_requires_rollback(verdict: dict[str, Any]) -> bool:
+    """True when the static or build layer FAILED — the edit does not compile."""
+    for layer in verdict.get("layers") or []:
+        if layer.get("name") in ("static", "build") and layer.get("status") == "failed":
+            return True
+    return False
+
+
+async def _default_edit_verifier(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> dict[str, Any]:
+    from pocketpaw_ee.sites import verify
+
+    return await verify.verify_site(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+
+
 async def edit_svelte_component(
     *,
     workspace_id: str,
@@ -9921,12 +9974,23 @@ async def edit_svelte_component(
     edits: list[dict[str, str]] | None = None,
     create: bool = False,
     name: str = "",
-    _generator: GeneratorClient | None = None,
-    _cloudflare: Any | None = None,
-    _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
-    _local_deploy: Callable[[str, str], str] | None = None,
-) -> tuple[_SiteDoc | None, bool]:
-    """Rewrite ONE component of a svelte Paw Site pocket and safely republish.
+    _verify: Callable[..., Any] | None = None,
+) -> SvelteEditResult:
+    """Rewrite ONE component of a svelte Paw Site pocket and VERIFY the draft.
+
+    PP-2 REWRITE — read this before the older paragraphs below. The edit no longer runs
+    a local preview build (``publish(preview=True)`` → ``bun install`` on the API host).
+    It persists the file, then runs ``verify.verify_site`` (static check on the host,
+    build + browser check in the Daytona preview lane) for EVERY svelte pocket, and:
+      * static or build ``failed`` → the file is rolled back and
+        :class:`EditVerificationFailed` (a ``SmokeGateFailed``) carries the verdict;
+      * browser ``failed`` → the edit STAYS staged and the verdict reports it;
+      * ``unverified`` → the edit stays staged and the verdict says why.
+    Returns :class:`SvelteEditResult` ``(site, unreferenced, verification)``; ``site``
+    is the pocket's existing Site row (or None) — no preview deploy is minted any more,
+    so there is no preview URL. ``_verify`` substitutes the verifier (tests). ``name``
+    is accepted for compatibility and unused. Where the paragraphs below speak of a
+    "republish", "smoke gate" or "builder origin", read "verification".
 
     The chat-agent entry point for a targeted component edit. The edit can be
     expressed two ways (exactly one is required):
@@ -9990,14 +10054,10 @@ async def edit_svelte_component(
     straight to ``publish_pocket`` so the path is unit-testable without
     Bun / workerd / Cloudflare.
 
-    PP-1: for a pocket whose source declares author packages
-    (``paw.dependencies.json``) the edit is persisted as a draft WITHOUT the local
-    preview build, and the first element of the returned tuple is ``None``. That
-    build would run ``bun install`` on the API host, which author packages must
-    never reach; PP-2's sandbox verify pipeline takes over this branch.
+    PP-1 had a seam here for pockets with author packages (persist, no build); PP-2
+    replaced it with the verify pipeline for every pocket, as described at the top.
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
-    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
 
     # P3 — resolve the edit shape to a single ``new_source`` string. Exactly one of
     # ``edits`` (targeted diff) / ``new_source`` (full rewrite) must be supplied.
@@ -10057,33 +10117,6 @@ async def edit_svelte_component(
         # violation, BEFORE anything is persisted or rebuilt.
         new_source = apply_edits(source_map[component_path], edits)
 
-    # SE-2b: recover the builder origin the site is currently published with so
-    # the republish keeps the edit-bridge. "" (or no prior site) republishes
-    # non-editable, exactly as before.
-    prior = await _latest_site_for_pocket(workspace_id, pocket_id)
-    builder_origin = prior.builder_origin if prior else ""
-
-    # PP-1 SEAM: a pocket that declares author packages must never install on the API
-    # host, and the preview below is a LOCAL build (``publish(preview=True)`` →
-    # ``GeneratorClient`` → ``bun install``). So for such a pocket the edit is
-    # persisted as a draft and NOT built here: no smoke gate, no rollback, no native
-    # pre-warm. The caller gets ``None`` for the site doc and says so. PP-2 replaces
-    # this branch with the sandbox verify pipeline, which is where this edit's build
-    # and browser verdict will come from.
-    if has_author_dependencies(source_map):
-        assert new_source is not None  # narrowing: the arg checks above guarantee it
-        await pockets_service.set_svelte_source_file(
-            pocket_id,
-            user_id,
-            component_path=component_path,
-            new_source=new_source,
-            create=create,
-        )
-        unreferenced = create and not svelte_path_is_referenced(
-            {**source_map, component_path: new_source}, component_path
-        )
-        return None, unreferenced
-
     # 1. Persist the edit (pockets service owns the Pocket write + validation).
     #    ``previous_source`` is the file's prior contents, held for rollback — None
     #    on a create, where the rollback removes the key instead.
@@ -10096,31 +10129,31 @@ async def edit_svelte_component(
         create=create,
     )
 
-    # 2. Build a PREVIEW of the edit (Branch primitive). The persist above already
-    #    wrote a fresh DRAFT ArtifactVersion (set_svelte_source_file hooks it); the
-    #    preview build smoke-gates + locally serves the working copy but does NOT
-    #    promote that draft to published and does NOT overwrite the canonical live
-    #    deploy. So an edit stays a reviewable draft (the prior live URL is
-    #    untouched, get_draft is non-None, request_publish_pocket can submit it) —
-    #    only an approved review (the real publish) takes the edit live.
-    # 3. On a smoke-gate failure, restore the prior source so the pocket never
-    #    carries a component the renderer rejects — then re-raise so the caller
-    #    surfaces the reason. The prior deploy is untouched because the gate fires
-    #    before publish deploys.
+    # 2. VERIFY the edited draft (PP-2). This replaced the local preview build
+    #    (``publish(preview=True)`` → ``GeneratorClient`` → ``bun install`` on the API
+    #    host) for EVERY svelte pocket, not only the ones with packages: the API image
+    #    has no business installing anything, and the old path built twice per edit
+    #    (locally, then again in the Daytona pre-warm). The verify pipeline's build IS
+    #    the pre-warm — it rides the preview lane under the same content hash — so the
+    #    editor's next view is a cache hit off the same sandbox.
+    verifier = _verify or _default_edit_verifier
     try:
-        doc = await publish_pocket(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            pocket_id=pocket_id,
-            name=name,
-            builder_origin=builder_origin or None,
-            preview=True,
-            _generator=_generator,
-            _cloudflare=_cloudflare,
-            _bundle_reader=_bundle_reader,
-            _local_deploy=_local_deploy,
-        )
-    except SmokeGateFailed:
+        verdict = await verifier(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+    except Exception:  # noqa: BLE001 — a verify that could not run is not a bad edit
+        logger.warning("sites.edit: verification raised for pocket %s", pocket_id, exc_info=True)
+        from pocketpaw_ee.sites.verify import unverifiable
+
+        verdict = unverifiable("verify_unavailable")
+
+    # 3. ROLL BACK when the STATIC or BUILD layer failed — the preserved contract that a
+    #    broken edit is never left staged: the author's code does not compile, so the
+    #    draft keeps its last-good contents and the caller gets the errors to fix.
+    #    A BROWSER failure (an onMount throw, a blank page, a 404 asset) stays staged
+    #    and is REPORTED: the page builds and renders server-side, the defect is often
+    #    confined to one interaction, and the fix is usually a follow-up edit to the
+    #    very file just written — rolling it back would throw away what that fix needs.
+    #    ``unverified`` stays staged too: nothing proved the edit wrong.
+    if edit_verdict_requires_rollback(verdict):
         if create:
             # A create has no prior contents to restore. Writing ``""`` back would
             # leave the pocket carrying an empty file at a real route — a blank page
@@ -10139,18 +10172,7 @@ async def edit_svelte_component(
                 component_path=component_path,
                 new_source=previous_source or "",
             )
-        raise
-
-    # feat/sites-native-artifact-no-build: the component source changed → pre-warm the
-    # native artifact cache in the BACKGROUND (re-applying the SE-2b builder origin) so
-    # the next native shadow-render is a read-through HIT. Best-effort, off this call's
-    # path; fired only after the preview republish above succeeded (no arm on rollback).
-    _schedule_native_prewarm(
-        workspace_id=workspace_id,
-        user_id=user_id,
-        pocket_id=pocket_id,
-        builder_origin=builder_origin or None,
-    )
+        raise EditVerificationFailed(verdict)
 
     # Does anything reach the file we just wrote? A create is HALF of adding a page
     # — the other half is the nav/footer edit that links it — and a create that
@@ -10161,13 +10183,12 @@ async def edit_svelte_component(
     # Scoped to ``create`` deliberately. An ordinary edit touches a file that is
     # already part of the site, and re-litigating its wiring on every headline change
     # is noise on the common path — which is how the signal on the rare path gets
-    # skimmed. The map scanned is the POST-write one: the write set exactly this one
-    # key, so re-reading the pocket to learn what we just sent it would be a round
-    # trip for an answer we already hold.
+    # skimmed. The map scanned is the POST-write one.
     unreferenced = create and not svelte_path_is_referenced(
         {**source_map, component_path: new_source}, component_path
     )
-    return doc, unreferenced
+    site = await _latest_site_for_pocket(workspace_id, pocket_id)
+    return SvelteEditResult(site=site, unreferenced=unreferenced, verification=verdict)
 
 
 async def edit_react_component(

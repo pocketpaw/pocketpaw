@@ -331,6 +331,10 @@ EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
 # again. The only writer of ``paw.dependencies.json``; every edit lane refuses it.
 SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
 
+# PP-2 — re-run the three-layer verification (static, build, browser) on a site's
+# current draft. Same server again.
+VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -341,6 +345,7 @@ SITES_CREATE_TOOL_IDS = (
     EDIT_REACT_COMPONENT_TOOL_ID,
     EDIT_HTML_FILE_TOOL_ID,
     SET_SITE_DEPENDENCIES_TOOL_ID,
+    VERIFY_SITE_TOOL_ID,
 )
 
 
@@ -585,6 +590,51 @@ def _with_dependency_report(body: dict[str, Any], report: dict[str, Any] | None)
             "the user if it changes what they asked for."
         )
     return body
+
+
+# ── Verification (PP-2) ─────────────────────────────────────────────────────
+# Every create and edit result carries ``verification`` — the §5 verdict of
+# docs/design/drafts/2026-09-24-sites-deps-verify-contract.md — so the agent can
+# tell the user the truth about whether the draft works. It is computed by
+# ``pocketpaw_ee.sites.verify`` and bounded here by a HARD deadline: the verify
+# waits ``PAW_SITES_VERIFY_WAIT_SEC`` for the sandbox layers, and this adds the static
+# check's own budget on top, so a tool call can never hang on a wedged queue. On
+# expiry the result is ``unverified`` / ``timeout`` and the build keeps running — the
+# next ``verify_site`` attaches to the same job.
+
+#: Seconds on top of the sandbox wait for the static check and bookkeeping.
+VERIFY_HARD_DEADLINE_SLACK_SEC = 45
+
+#: ripple sites (landing and dynamic) have no verify lane — see ``verify``'s header.
+RIPPLE_NOT_VERIFIABLE_NOTE = (
+    "ripple sites are assembled from vetted components (landing) or rendered by a "
+    "Worker (dynamic); there is no authored code for the verify pipeline to check."
+)
+
+
+async def _verification_for(workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """Run ``verify.verify_site`` for a just-written pocket; never raises, never hangs."""
+    import asyncio
+
+    from pocketpaw_ee.sites import verify
+
+    deadline = verify.verify_wait_seconds() + VERIFY_HARD_DEADLINE_SLACK_SEC
+    try:
+        return await asyncio.wait_for(
+            verify.verify_site(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id),
+            timeout=deadline,
+        )
+    except TimeoutError:
+        return verify.unverifiable("timeout")
+    except Exception:  # noqa: BLE001 — a verify that could not run is reported, not raised
+        logger.warning("sites: verification failed to run for %s", pocket_id, exc_info=True)
+        return verify.unverifiable("verify_unavailable")
+
+
+def _ripple_verification() -> dict[str, Any]:
+    from pocketpaw_ee.sites import verify
+
+    return verify.unverifiable("engine_not_verifiable", note=RIPPLE_NOT_VERIFIABLE_NOTE)
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -859,6 +909,8 @@ async def _create_landing_site_handler(args: dict) -> dict:
                 "type": view.get("type"),
                 "pattern": view.get("pattern"),
             },
+            # PP-2: honest, not faked — ripple has no verify lane.
+            "verification": _ripple_verification(),
         }
     )
 
@@ -1049,6 +1101,8 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
                 "type": view.get("type"),
                 "pattern": view.get("pattern"),
             },
+            # PP-2: honest, not faked — ripple has no verify lane.
+            "verification": _ripple_verification(),
         }
     )
 
@@ -1277,6 +1331,8 @@ async def _create_svelte_site_handler(args: dict) -> dict:
 
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
+    # PP-2: verify the draft that was just created (static, build, browser).
+    verification = await _verification_for(workspace_id, user_id, new_pocket_id)
     return _success_response(
         _with_dependency_report(
             {
@@ -1289,6 +1345,7 @@ async def _create_svelte_site_handler(args: dict) -> dict:
                     "pattern": view.get("pattern"),
                     "engine": view.get("engine"),
                 },
+                "verification": verification,
             },
             dep_report,
         )
@@ -1511,6 +1568,8 @@ async def _create_html_site_handler(args: dict) -> dict:
 
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
+    # PP-2: verify the draft that was just created (static, build, browser).
+    verification = await _verification_for(workspace_id, user_id, new_pocket_id)
     return _success_response(
         _with_dependency_report(
             {
@@ -1523,6 +1582,7 @@ async def _create_html_site_handler(args: dict) -> dict:
                     "pattern": view.get("pattern"),
                     "engine": view.get("engine"),
                 },
+                "verification": verification,
             },
             dep_report,
         )
@@ -1769,6 +1829,8 @@ async def _create_react_site_handler(args: dict) -> dict:
 
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
+    # PP-2: verify the draft that was just created (static, build, browser).
+    verification = await _verification_for(workspace_id, user_id, new_pocket_id)
     return _success_response(
         _with_dependency_report(
             {
@@ -1781,6 +1843,7 @@ async def _create_react_site_handler(args: dict) -> dict:
                     "pattern": view.get("pattern"),
                     "engine": view.get("engine"),
                 },
+                "verification": verification,
             },
             dep_report,
         )
@@ -1988,7 +2051,7 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
     from pocketpaw_ee.sites.generator_client import SmokeGateFailed
 
     try:
-        doc, unreferenced = await sites_service.edit_svelte_component(
+        edited = await sites_service.edit_svelte_component(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
@@ -1998,10 +2061,27 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             create=create,
             name=name,
         )
+    except sites_service.EditVerificationFailed as exc:
+        # PP-2: the edit failed its static or build verification and was ROLLED BACK —
+        # the draft keeps its previous contents. Not an MCP error: the agent needs the
+        # structured verdict to fix the code, so it comes back as data with ok=false.
+        return _success_response(
+            {
+                "ok": False,
+                "status": "rolled_back",
+                "is_live": False,
+                "component_path": component_path,
+                "created": create,
+                "verification": exc.verdict,
+                "message": (
+                    "The edit did not compile, so it was NOT staged — the draft still "
+                    "has the previous version of this file. Fix the errors in "
+                    "`verification.errors` and send the edit again."
+                ),
+            }
+        )
     except SmokeGateFailed as exc:
-        # The rebuilt site failed the workerd smoke render — the edit was rolled
-        # back and the live site stays on the prior deploy. Tell the agent so it
-        # can fix the component and retry, NOT report a successful edit.
+        # Any other gate failure keeps the pre-PP-2 contract: rolled back, reported.
         return _error_response(
             f"the edit did not pass the build smoke test, so it was not staged "
             f"(the previous version is unchanged): {exc}"
@@ -2014,46 +2094,29 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
         logger.warning("edit_svelte_component failed", exc_info=True)
         return _error_response(f"edit failed: {exc}")
 
-    # An edit stages a DRAFT PREVIEW — it does NOT publish or go live. The chat
-    # agent narrates this payload, so it must make the draft-not-live state
-    # unambiguous: ``status="draft"`` / ``is_live=False``, the url is a PREVIEW (not
-    # the live site), and the user must Submit for review to publish. The wording
-    # deliberately avoids "published"/"republished"/"live at" so the agent does not
-    # tell the user the change is live.
+    # An edit stages a DRAFT — it does NOT publish or go live. The chat agent narrates
+    # this payload, so it must make the draft-not-live state unambiguous:
+    # ``status="draft"`` / ``is_live=False``, and the user must Submit for review to
+    # publish. PP-2: there is no local preview deploy any more (the verify pipeline
+    # replaced it), so ``site.preview_url`` is null — the builder shows the draft from
+    # the verified build.
     # A create is HALF of adding a page or a section — the other half is the edit
     # that links or imports it. Saying so in the ``message`` (not only in the flag)
-    # is what keeps the agent from reading a clean success as "done" and telling the
-    # user about a page nothing navigates to.
+    # is what keeps the agent from reading a clean success as "done".
     orphan_note = (
         " NOTE: nothing in the site reaches this file yet — no other file links to "
         "or imports it, so visitors cannot get to it. You are half-done: make the "
         "follow-up edit that wires it in (a nav/footer link for a route, an import "
         "for a component) before you tell the user it was added."
-        if unreferenced
+        if edited.unreferenced
         else ""
     )
-    if doc is None:
-        # PP-1 seam: the site declares npm packages, so no local preview was built
-        # (those install only in the build sandbox). The draft IS saved. PP-2 adds the
-        # sandbox verification this response will then carry.
-        return _success_response(
-            {
-                "ok": True,
-                "status": "draft",
-                "is_live": False,
-                "component_path": component_path,
-                "created": create,
-                "unreferenced": unreferenced,
-                "site": None,
-                "preview_built": False,
-                "message": (
-                    "Your change is saved to the site's draft. This site declares npm "
-                    "packages, so the preview is built in the isolated build sandbox "
-                    "rather than here — no preview_url is returned for this edit. It is "
-                    "NOT live; the user publishes when ready." + orphan_note
-                ),
-            }
-        )
+    doc = edited.site
+    verification = edited.verification
+    build_passed = any(
+        layer.get("name") == "build" and layer.get("status") == "passed"
+        for layer in verification.get("layers") or []
+    )
     return _success_response(
         {
             "ok": True,
@@ -2061,20 +2124,24 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             "is_live": False,
             "component_path": component_path,
             "created": create,
-            "unreferenced": unreferenced,
-            "site": {
-                "id": str(doc.id),
-                "pocket_id": doc.pocket_id,
-                "name": doc.name,
-                # The preview URL — a draft preview of the edit, NOT the live site.
-                "preview_url": doc.url,
-                "deployed": doc.deployed,
-            },
+            "unreferenced": edited.unreferenced,
+            "site": (
+                {
+                    "id": str(doc.id),
+                    "pocket_id": doc.pocket_id,
+                    "name": doc.name,
+                    "preview_url": None,
+                    "deployed": doc.deployed,
+                }
+                if doc is not None
+                else None
+            ),
+            "preview_built": build_passed,
+            "verification": verification,
             "message": (
-                "Your change is staged as a draft preview — it is NOT live yet. "
-                "The preview_url shows a preview of the edit, not the live site. "
-                "To take it live, the user clicks 'Submit for review' (which sends "
-                "the draft for approval)." + orphan_note
+                "Your change is saved to the site's draft — it is NOT live yet. The "
+                "builder preview shows the draft; to take it live, the user clicks "
+                "'Submit for review'." + orphan_note
             ),
         }
     )
@@ -2402,6 +2469,9 @@ async def _edit_react_component_handler(args: dict) -> dict:
             "created": result["created"],
             "unreferenced": unreferenced,
             "message": message,
+            # PP-2: the edit stays a draft (react builds async, so there is nothing to
+            # roll back from); the verdict says whether that draft works.
+            "verification": await _verification_for(workspace_id, user_id, pocket_id),
         }
     )
 
@@ -2790,6 +2860,9 @@ async def _edit_html_file_handler(args: dict) -> dict:
             "created": result["created"],
             "unreferenced": unreferenced,
             "message": message,
+            # PP-2: html has no build, so no rollback; the browser layer is what checks
+            # the page actually loads.
+            "verification": await _verification_for(workspace_id, user_id, pocket_id),
         }
     )
 
@@ -2856,6 +2929,9 @@ async def _set_site_dependencies_handler(args: dict) -> dict:
         return _error_response(f"set_site_dependencies failed: {exc}")
 
     body: dict[str, Any] = {"ok": True, **result}
+    # PP-2 (contract §8): the dependency change is a source change, so verify the
+    # draft it produced — a removed package still imported shows up here.
+    body["verification"] = await _verification_for(workspace_id, user_id, pocket_id)
     if result["rejected"]:
         body["message"] = (
             "Some requests were refused (see `rejected`). Do not import a refused "
@@ -2915,6 +2991,91 @@ def make_set_site_dependencies_tool(tool: Any) -> Any:
         return await _set_site_dependencies_handler(args)
 
     return set_site_dependencies
+
+
+async def _verify_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__verify_site`` (PP-2).
+
+    Identity → ``record_tool_call`` → ``pocket_id`` → plan gate → the verify pipeline.
+    Returns ``{ok, pocket_id, verification}`` (contract §8). ``ok`` means the check
+    RAN and answered; whether the site passed is ``verification.status``. A re-verify
+    of unchanged source is served from the per-hash cache, and one whose build is
+    still running attaches to that build instead of starting another.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "verify_site requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_verify_site",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "verify_site requires a `pocket_id` — the id of the site pocket to check."
+        )
+
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        # Read first so a missing / foreign pocket is an error, not an "unverified".
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    if (pocket.get("engine") or "ripple") == "ripple":
+        return _success_response(
+            {"ok": True, "pocket_id": pocket_id, "verification": _ripple_verification()}
+        )
+
+    verification = await _verification_for(workspace_id, user_id, pocket_id)
+    return _success_response({"ok": True, "pocket_id": pocket_id, "verification": verification})
+
+
+def make_verify_site_tool(tool: Any) -> Any:
+    """Build the ``verify_site`` SDK tool object (PP-2). Same server as the create and
+    edit tools (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "verify_site",
+        (
+            "Check whether a svelte, react or html Paw Site's current DRAFT actually "
+            "works: a static check of the source, a real build in the isolated build "
+            "sandbox, and a headless-browser load of the built pages. Returns "
+            "{ok, verification: {status: passed|failed|unverified, layers, errors, "
+            "warnings}}. Every create/edit already returns `verification`; call this to "
+            "re-check after a fix, or when a previous result was `unverified` with "
+            "reason `timeout` (the build keeps running, and this attaches to it). "
+            "`errors` name file, line and message — fix them and verify again. Only "
+            "`passed` means the site works; `unverified` means it could not be checked."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the site pocket to verify.",
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def verify_site(args):  # type: ignore[no-untyped-def]
+        return await _verify_site_handler(args)
+
+    return verify_site
 
 
 def make_read_site_source_tool(tool: Any) -> Any:

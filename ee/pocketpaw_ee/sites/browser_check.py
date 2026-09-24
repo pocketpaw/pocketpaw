@@ -134,7 +134,9 @@ def harness_files() -> dict[str, bytes] | None:
     return files
 
 
-def browser_check_script(static_dir: str, *, budget_seconds: int = BROWSER_CHECK_BUDGET_SECONDS) -> str:
+def browser_check_script(
+    static_dir: str, *, budget_seconds: int = BROWSER_CHECK_BUDGET_SECONDS
+) -> str:
     """Render the bash the sandbox runs. Always exits 0 and records the harness's own
     exit code in ``SANDBOX_EXIT_PATH`` — the evidence pattern ``daytona_build`` uses for
     the build sentinel, so an exec that raises does not erase what happened."""
@@ -163,8 +165,9 @@ run_harness() {{
 }}
 run_harness
 if [ "$CODE" -eq 3 ] && [ -z "${{PAW_BROWSER_CHECK_CHROMIUM:-}}" ]; then
-  timeout {install_budget}s "$RUN" node_modules/playwright-core/cli.js install --with-deps chromium >>"$LOG" 2>&1 \\
-    || timeout {install_budget}s "$RUN" node_modules/playwright-core/cli.js install chromium >>"$LOG" 2>&1
+  PWCLI=node_modules/playwright-core/cli.js
+  timeout {install_budget}s "$RUN" "$PWCLI" install --with-deps chromium >>"$LOG" 2>&1 \\
+    || timeout {install_budget}s "$RUN" "$PWCLI" install chromium >>"$LOG" 2>&1
   run_harness
 fi
 echo "$CODE" > {exitf}
@@ -231,8 +234,12 @@ async def run_in_sandbox(
     uploads: list[tuple[str | bytes, str]] = [
         (contents, f"{SANDBOX_HARNESS_DIR}/{name}") for name, contents in harness.items()
     ]
-    uploads.append((browser_check_script(static_dir, budget_seconds=budget_seconds).encode(),
-                    SANDBOX_SCRIPT_PATH))
+    uploads.append(
+        (
+            browser_check_script(static_dir, budget_seconds=budget_seconds).encode(),
+            SANDBOX_SCRIPT_PATH,
+        )
+    )
     try:
         await client.bulk_upload(sandbox_id, uploads)
     except Exception as exc:  # noqa: BLE001 — a lost upload is an unverified layer
@@ -278,7 +285,9 @@ async def run_standalone(
 
         client = get_daytona_client()
         if client is None:
-            raise RuntimeError("Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)")
+            raise RuntimeError(
+                "Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)"
+            )
 
     create_kwargs: dict[str, Any] = {
         "name": f"paw-verify-{int(time.time() * 1000)}",
@@ -300,12 +309,16 @@ async def run_standalone(
         await client.bulk_upload(
             sandbox_id,
             [
-                (contents.encode() if isinstance(contents, str) else contents,
-                 f"{SANDBOX_SITE_DIR}/{rel}")
+                (
+                    contents.encode() if isinstance(contents, str) else contents,
+                    f"{SANDBOX_SITE_DIR}/{rel}",
+                )
                 for rel, contents in files.items()
             ],
         )
-        static_dir = SANDBOX_SITE_DIR if static_rel in ("", ".") else f"{SANDBOX_SITE_DIR}/{static_rel}"
+        static_dir = (
+            SANDBOX_SITE_DIR if static_rel in ("", ".") else f"{SANDBOX_SITE_DIR}/{static_rel}"
+        )
         return await run_in_sandbox(
             client, sandbox_id, static_dir=static_dir, budget_seconds=budget_seconds, files=harness
         )
