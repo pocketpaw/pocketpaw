@@ -1,4 +1,27 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-26 (fix/pawbar-public-route-gates) — the anonymous routes can
+#   no longer take a site's concierge offline or write into its owner's queue.
+#   (1) POST /paw-bar/events/{id} took no key and counted against the SAME
+#   per-widget bucket as chat, so one curl loop with a forged Origin and rotating
+#   customer_refs 429'd every real visitor, and each accepted event minted a
+#   Fabric object and an Instinct proposal. Its events now count in their own
+#   ``events`` bucket, and a widget with a concierge agent refuses a key-less
+#   write (401 ``signed_key_required``); with ``signed_key`` in the body it goes
+#   through ``_authenticate_widget_key``, the key+origin+binding half of the
+#   front gate. WHY NOT KEY-ONLY: the live glass app never posts events at all;
+#   the only key-less caller is the frozen paw-bar ``src/`` widget, which has no
+#   key to send and serves unbound legacy widgets, so those keep their key-less
+#   path (origin gate, customer_ref format, own bucket). (2) A per-IP token bucket
+#   (``_PUBLIC_IP_LIMITER``, in-process, keyed on the rightmost X-Forwarded-For hop
+#   via ``_core.rate_limit._client_ip``) runs first on spec, events, decision, chat
+#   and every ``_front_gate_for_key`` route. (3) Chat and ingest record through
+#   ``store.admit_event``: check and insert are one transaction. Chat's marker is
+#   written after the key resolves, so a bad-key flood no longer fills it. (4) The
+#   decision GET format-checks customer_ref and, for a concierge widget, needs the
+#   ``signed_key`` query param the glass app already sends. (5) Chat refuses a
+#   malformed customer_ref and a message over ``_CHAT_MESSAGE_MAX`` (400, same
+#   shape as the gate). (6) The visitor transcript is ``VisitorTranscriptMessage``
+#   (no author_*), and a visitor ``error`` frame always carries ``agent.error``.
 # Updated: 2026-09-26 (feat/pawbar-admin-widget-spec-route) — the owner can save
 #   the concierge's Catalog & Actions again, and gets a snippet that works. New
 #   PATCH /paw-bar/admin/site/{site_id}/widget/spec takes {spec} behind
@@ -556,7 +579,9 @@ from pocketpaw.paw_bar.models import (
     PawBarWidget,
     PawBarWidgetPublic,
 )
+from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
+from pocketpaw_ee.cloud._core.rate_limit import _client_ip
 from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
 logger = logging.getLogger(__name__)
@@ -590,6 +615,22 @@ def _store():
     from pocketpaw_ee.api import get_paw_bar_store
 
     return get_paw_bar_store()
+
+
+# Per-IP ceiling on the PUBLIC paw-bar routes (2026-09-26). The per-widget and
+# per-customer buckets live in the store and key on values the caller chooses
+# (customer_ref), so one IP rotating refs was bounded only by the widget total.
+# 2/s sustained with a 120 burst: the glass app polls one route every 7s, so an
+# office NAT with a dozen open panels stays well inside it. In-process, so each
+# replica keeps its own count (same caveat as ``_core.rate_limit``).
+_PUBLIC_IP_LIMITER = RateLimiter(rate=2.0, capacity=120)
+
+
+def _public_ip_gate(request: Request) -> None:
+    """429 when this client IP has spent its public paw-bar budget. No DB, so
+    it runs before anything else on a public route."""
+    if not _PUBLIC_IP_LIMITER.check(f"paw-bar:{_client_ip(request)}").allowed:
+        raise HTTPException(429, "Rate limit exceeded")
 
 
 def _require_owner_token(widget: PawBarWidget, header_token: str | None) -> None:
@@ -4525,7 +4566,12 @@ async def get_spec(
     matches the widget's allowlist. Any other origin gets a 403 — browsers
     would block the fetch anyway, but failing explicitly makes misconfigs
     loud instead of silent.
+
+    Per-IP limited (2026-09-26). No customer_ref, so no format check: the only
+    caller is the frozen key-less ``src/`` widget, and the glass app never
+    fetches it.
     """
+    _public_ip_gate(request)
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
@@ -4550,6 +4596,15 @@ class IngestPayload(BaseModel):
     type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     customer_ref: str
+    # The site's embed key. Optional because the frozen ``src/`` widget (the only
+    # caller that has ever posted here) has none; REQUIRED in effect for a widget
+    # with a concierge agent, which refuses a key-less write.
+    signed_key: str = ""
+
+
+# The rate budget ingested events count against — separate from the shared ''
+# budget chat and the front gate read, so an event flood cannot 429 a visitor.
+_EVENTS_BUCKET = "events"
 
 
 @router.post("/paw-bar/events/{widget_id}", response_model=EventIngestResponse)
@@ -4561,15 +4616,26 @@ async def ingest_event(
     """Inbound customer event.
 
     Enforces (in order):
-    1. Widget exists.
-    2. Origin is on the widget's allowlist.
-    3. Payload size is under MAX_PAYLOAD_BYTES.
-    4. Rate limits (overall + per customer_ref).
+    1. Per-IP limit (429) and customer_ref format (400).
+    2. Widget exists (404).
+    3. Caller: with ``signed_key``, the key + origin + widget binding
+       (``_authenticate_widget_key``, 401/403). Without one, a widget that has a
+       concierge agent refuses (401 ``signed_key_required``); an unbound legacy
+       widget falls back to its ``allowed_domains`` origin check (403).
+    4. Payload size is under MAX_PAYLOAD_BYTES.
     5. Injection screening: the stringified payload is run through the
        heuristic InjectionScanner and dropped on a HIGH-or-higher threat
        (degrades cleanly to accept when the security stack is absent).
-    After that, the event is persisted and — if the widget has a matching
-    `event_mapping` — a Fabric object is created.
+    6. Rate limits (overall + per customer_ref) in the ``events`` bucket,
+       checked and recorded in one step (``admit_event``). Screening runs
+       first so a rejected payload is never persisted as an accepted event.
+    After that — if the widget has a matching `event_mapping` — a Fabric object
+    is created.
+
+    Why the key is not required outright (2026-09-26): the glass app never posts
+    here, and the frozen ``src/`` widget that does has no key and serves unbound
+    legacy widgets. Every widget that CAN be reached by a real visitor's chat has
+    an agent, and those now need the key.
 
     gap2 — when the event maps to a Fabric object, ingest ALSO raises an
     Instinct proposal carrying the event context (best-effort) so a human can
@@ -4577,14 +4643,15 @@ async def ingest_event(
     open-the-loop half; the human decides on the existing Instinct surface and
     deliver_customer_decision closes it.
     """
+    _public_ip_gate(request)
+    if not _CUSTOMER_REF_RE.match(body.customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
     store = _store()
     widget = await store.get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
 
-    origin = request.headers.get("origin")
-    if not _origin_allowed(widget, origin):
-        raise HTTPException(403, "Origin not allowed for this widget")
+    await _authenticate_public_caller(widget, body.signed_key, body.customer_ref, request)
 
     event = PawBarEvent(
         widget_id=widget_id,
@@ -4596,19 +4663,18 @@ async def ingest_event(
     if event.payload_size() > MAX_PAYLOAD_BYTES:
         raise HTTPException(413, "Payload exceeds 4KB cap")
 
-    ok = await store.within_rate_limit(
-        widget_id,
-        overall_per_min=widget.rate_limit_per_min,
-        per_customer_per_min=widget.per_customer_limit_per_min,
-        customer_ref=event.customer_ref,
-    )
-    if not ok:
-        raise HTTPException(429, "Rate limit exceeded")
-
     if not await _screen_event_for_injection(event):
         return EventIngestResponse(accepted=False, reason="injection_rejected")
 
-    await store.record_event(event)
+    admitted = await store.admit_event(
+        event,
+        overall_per_min=widget.rate_limit_per_min,
+        per_customer_per_min=widget.per_customer_limit_per_min,
+        bucket=_EVENTS_BUCKET,
+    )
+    if not admitted:
+        raise HTTPException(429, "Rate limit exceeded")
+
     fabric_object_id = await _apply_event_mapping(widget, event)
 
     # gap2 — open the customer decision loop. Only events the widget actually
@@ -4638,6 +4704,7 @@ async def get_decision(
     widget_id: str,
     customer_ref: str,
     request: Request,
+    signed_key: str = "",
 ) -> JSONResponse:
     """Public endpoint the rendered widget polls to read the owner's decision.
 
@@ -4650,7 +4717,15 @@ async def get_decision(
     the row is scoped to the customer's own ``customer_ref`` on a specific
     widget, which is all the embedded widget knows. CORS is enforced per-widget
     exactly as on the spec endpoint so only allowlisted origins can read it.
+
+    2026-09-26: per-IP limited, customer_ref format-checked (400), and a widget
+    with a concierge agent needs ``?signed_key=`` — the glass app, this route's
+    only caller, already sends it. The reply is the owner's words to one
+    visitor, and the ref alone was the whole credential.
     """
+    _public_ip_gate(request)
+    if not _CUSTOMER_REF_RE.match(customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
     store = _store()
     widget = await store.get_widget(widget_id)
     if widget is None:
@@ -4662,8 +4737,7 @@ async def get_decision(
     # embedder was already gated by the frame CSP at render time (the same
     # dual-mode reasoning as resolve_site_key).
     origin = _request_origin(request)
-    if origin != _configured_frame_origin(request) and not _origin_allowed(widget, origin):
-        raise HTTPException(403, "Origin not allowed for this widget")
+    await _authenticate_public_caller(widget, signed_key, customer_ref, request, origin=origin)
 
     decision = await store.get_latest_decision(widget_id, customer_ref)
     headers: dict[str, str] = {}
@@ -4818,6 +4892,8 @@ class ConciergeChatRequest(BaseModel):
     # The anonymous, widget-minted customer handle — a session / rate-limit key,
     # NEVER an authenticated principal.
     customer_ref: str
+    # Bounded by ``_CHAT_MESSAGE_MAX`` in the handler (a 400, not a 422, so it
+    # fails in the same shape as the rest of the gate).
     message: str
     # Which of this visitor's conversations the turn belongs to (2026-08-19).
     #
@@ -4857,8 +4933,6 @@ def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> by
 
 _VISITOR_ERROR_MESSAGE = "Sorry, something went wrong. Please try again."
 _VISITOR_ERROR_CODE = "agent.error"
-# Engine codes look like ``agent.run_failed``; anything else is replaced.
-_SAFE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
 _SAFE_INTERRUPT_REASONS = frozenset({"cancelled", "timeout", "superseded"})
 
 
@@ -4878,10 +4952,11 @@ def _visitor_stream_end(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _visitor_error(data: dict[str, Any]) -> dict[str, Any]:
-    code = data.get("code")
-    if not (isinstance(code, str) and len(code) <= 64 and _SAFE_CODE_RE.match(code)):
-        code = _VISITOR_ERROR_CODE
-    return {"code": code, "message": _VISITOR_ERROR_MESSAGE}
+    # Always the one generic code. Well-formed engine codes still describe the
+    # OWNER's state (``agent.jail_over_quota`` says the site is out of quota), and
+    # the widget never reads ``code``. ``data`` is ignored on purpose.
+    del data
+    return {"code": _VISITOR_ERROR_CODE, "message": _VISITOR_ERROR_MESSAGE}
 
 
 def _visitor_interrupted(data: dict[str, Any]) -> dict[str, Any]:
@@ -4988,16 +5063,21 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     """Stream a concierge reply for a public visitor's message.
 
     Order (fail-closed, cheap gates first):
+      0. Per-IP limit (429), customer_ref format (400 ``invalid_customer_ref``),
+         message length (400 ``message_too_long``) — no DB touched.
       1. Widget exists (404).
       2. Resolve our frame origin (dual-mode origin model — no rejection here; the
          authoritative, fail-closed origin gate is folded into step 5).
-      3. Rate limit, overall + per-customer (429).
+      3. (moved to 6b, 2026-09-26)
       4. Injection screen the free-text message; drop on HIGH (400).
       5. Authenticate the embed key + dual-mode origin gate (``resolve_site_key`` —
          401 bad key / 403 disallowed origin, fail-closed).
       6. Bind the widget to the RESOLVED key: the widget must belong to the key's
          workspace AND pocket (403) — a key for pocket A must not drive a widget
          for a sibling pocket B (finding #2).
+      6b. Rate limit, overall + per-customer (429), checked and recorded as one
+          step (``admit_event``). After the key on purpose: a marker recorded for
+          a bad-key request would let anyone fill the bucket without a key.
       7. The widget must have a concierge agent bound (409).
       7b. The pocket must expose NO connectors (409) — public-safe lockdown until
           the claude_sdk untrusted-mode GA fix (a static deny can't strip dynamic
@@ -5009,6 +5089,13 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
       8. Dispatch a CONCIERGE-scoped run over the shared machinery and stream its
          frames back as SSE.
     """
+    # (0) Cheap, DB-free gates.
+    _public_ip_gate(request)
+    if not _CUSTOMER_REF_RE.match(body.customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
+    if len(body.message) > _CHAT_MESSAGE_MAX:
+        raise HTTPException(400, "message_too_long")
+
     origin = request.headers.get("origin")
     store = _store()
 
@@ -5028,17 +5115,6 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # time (iframe mode); any other Origin must be an allowlisted embedder (inline
     # mode). The authoritative, fail-closed decision is made in ``resolve_site_key``.
     frame_origin = _configured_frame_origin(request)
-
-    # (3) Rate limit (reuse the ingest limiter). Counts prior events for this
-    # (widget, customer); a recorded chat marker below feeds subsequent checks.
-    ok = await store.within_rate_limit(
-        body.widget_id,
-        overall_per_min=widget.rate_limit_per_min,
-        per_customer_per_min=widget.per_customer_limit_per_min,
-        customer_ref=body.customer_ref,
-    )
-    if not ok:
-        raise HTTPException(429, "Rate limit exceeded")
 
     # (4) Injection-screen the untrusted free-text message; drop on HIGH.
     if not await _screen_message_for_injection(body.message, body.widget_id):
@@ -5065,6 +5141,22 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         raise HTTPException(403, "widget_workspace_mismatch")
     if widget.pocket_id != ctx.pocket_id:
         raise HTTPException(403, "widget_pocket_mismatch")
+
+    # (6b) Rate limit — check and record the chat marker as ONE step, so a
+    # concurrent burst cannot all pass the check before any of them records. The
+    # marker carries no message body (the reply persists via the run).
+    admitted = await store.admit_event(
+        PawBarEvent(
+            widget_id=body.widget_id,
+            type="concierge_message",
+            payload={},
+            customer_ref=body.customer_ref,
+        ),
+        overall_per_min=widget.rate_limit_per_min,
+        per_customer_per_min=widget.per_customer_limit_per_min,
+    )
+    if not admitted:
+        raise HTTPException(429, "Rate limit exceeded")
 
     # (7) The widget must be bound to a concierge agent (T3 sets agent_id).
     if not widget.agent_id:
@@ -5093,20 +5185,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     if _bound_connectors:
         raise HTTPException(409, "concierge_pocket_has_connectors")
 
-    # Record a minimal chat marker so the rate limiter counts concierge traffic
-    # (the message body is NOT stored here — the assistant reply persists via the
-    # run). Best-effort: a store hiccup must not fail the reply.
-    try:
-        await store.record_event(
-            PawBarEvent(
-                widget_id=body.widget_id,
-                type="concierge_message",
-                payload={},
-                customer_ref=body.customer_ref,
-            )
-        )
-    except Exception:
-        logger.debug("concierge chat marker record failed (non-fatal)", exc_info=True)
+    # (The chat marker the rate limiter counts is recorded at step 6b.)
 
     # Touch the conversation's state row (owner inbox, slice 1). THIS is what makes
     # the queue backfill-free: the row is minted on a visitor's first message and
@@ -5494,6 +5573,70 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
 # follow-up (the 256-bit client ref makes enumeration impractical today).
 _CUSTOMER_REF_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
+# Longest visitor chat message accepted (2026-09-26). The composer has no limit
+# of its own; 8000 characters is twice the transcript cap (_STORED_USER_TEXT_CHARS),
+# so that clip still means something, and it bounds the scanner per request.
+_CHAT_MESSAGE_MAX = 8000
+
+
+async def _authenticate_widget_key(
+    widget: PawBarWidget,
+    *,
+    signed_key: str,
+    customer_ref: str,
+    origin: str | None,
+    request: Request,
+) -> tuple[Any, Any]:
+    """Authenticate the embed key for ``widget`` and bind the two together.
+
+    The key + dual-mode origin half of the front gate (``resolve_site_key_with_site``
+    — 401 bad/unknown/revoked key, 403 disallowed/missing origin), then the
+    binding: the widget must belong to the key's workspace AND pocket (403), so a
+    key for pocket A cannot drive a widget for pocket B. Returns ``(ctx, site)``."""
+    frame_origin = _configured_frame_origin(request)
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
+
+    ctx, site = await resolve_site_key_with_site(
+        signed_key, origin, customer_ref, frame_origin=frame_origin
+    )
+    if widget.workspace_id and widget.workspace_id != ctx.workspace_id:
+        raise HTTPException(403, "widget_workspace_mismatch")
+    if widget.pocket_id != ctx.pocket_id:
+        raise HTTPException(403, "widget_pocket_mismatch")
+    return ctx, site
+
+
+async def _authenticate_public_caller(
+    widget: PawBarWidget,
+    signed_key: str,
+    customer_ref: str,
+    request: Request,
+    *,
+    origin: str | None = None,
+) -> None:
+    """The caller check for the two legacy routes (event ingest, decision poll).
+
+    A key, when sent, is always verified. Without one, a widget that has a
+    concierge agent refuses (401): every legitimate caller of such a widget is the
+    glass app, which holds the key. An unbound legacy widget keeps the pre-key
+    rule — its ``allowed_domains`` origin check, plus our own frame's origin —
+    because the frozen ``src/`` widget that serves it has no key to send."""
+    if origin is None:
+        origin = request.headers.get("origin")
+    if signed_key:
+        await _authenticate_widget_key(
+            widget,
+            signed_key=signed_key,
+            customer_ref=customer_ref,
+            origin=origin,
+            request=request,
+        )
+        return
+    if widget.agent_id:
+        raise HTTPException(401, "signed_key_required")
+    if origin != _configured_frame_origin(request) and not _origin_allowed(widget, origin):
+        raise HTTPException(403, "Origin not allowed for this widget")
+
 
 async def _front_gate_for_key(
     *,
@@ -5506,7 +5649,8 @@ async def _front_gate_for_key(
     """The shared public front-gate: resolve the widget + authenticate the key.
 
     Mirrors ``concierge_chat`` steps 1-6 (fail-closed, cheap gates first):
-      0. ``customer_ref`` matches the charset + length bound (400) — cheapest gate.
+      0. Per-IP limit (429), then ``customer_ref`` matches the charset + length
+         bound (400) — the two gates that touch no DB.
       1. Widget exists (404) — UNSCOPED (workspace unknown until the key resolves).
       2. Rate limit, overall + per-customer (429).
       3. Authenticate the embed key + dual-mode origin gate
@@ -5519,6 +5663,7 @@ async def _front_gate_for_key(
     the Site the gate already loaded — handed back (same pattern as
     ``resolve_site_key_with_site``) so a caller that needs an owner-set Site field
     (the articles listing reads ``url`` + ``kb_article_ids``) never re-queries."""
+    _public_ip_gate(request)
     if not _CUSTOMER_REF_RE.match(customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
     store = _store()
@@ -5535,18 +5680,11 @@ async def _front_gate_for_key(
     if not ok:
         raise HTTPException(429, "Rate limit exceeded")
 
-    frame_origin = _configured_frame_origin(request)
-    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
-
-    ctx, site = await resolve_site_key_with_site(
-        signed_key, origin, customer_ref, frame_origin=frame_origin
+    # Key + origin, then bind the widget to the resolved key (finding #2 — no
+    # sibling-pocket reach).
+    ctx, site = await _authenticate_widget_key(
+        widget, signed_key=signed_key, customer_ref=customer_ref, origin=origin, request=request
     )
-
-    # Bind the widget to the resolved key (finding #2 — no sibling-pocket reach).
-    if widget.workspace_id and widget.workspace_id != ctx.workspace_id:
-        raise HTTPException(403, "widget_workspace_mismatch")
-    if widget.pocket_id != ctx.pocket_id:
-        raise HTTPException(403, "widget_pocket_mismatch")
     return widget, ctx, site
 
 
@@ -5665,16 +5803,31 @@ class VisitorConversationsResponse(BaseModel):
     conversations: list[VisitorConversationItem] = Field(default_factory=list)
 
 
+class VisitorTranscriptMessage(BaseModel):
+    """One transcript line as the VISITOR reads it (2026-09-26).
+
+    :class:`TranscriptMessage` minus ``author_*``: those name the operator who
+    typed an owner line, and the customer learns that a human replied, never
+    which one. A separate model rather than blanked fields so a new owner-side
+    field cannot reach this public endpoint by default.
+    """
+
+    role: str
+    content: str
+    created_at: str
+
+
 class VisitorTranscriptResponse(BaseModel):
     """One of THIS visitor's conversations, oldest-first (2026-08-21).
 
     The widget's own history. Same messages the owner drill-in renders, through
     the same loader — a visitor and the site owner reading one thread must not
-    be reading two different reconstructions of it.
+    be reading two different reconstructions of it. Projected onto
+    :class:`VisitorTranscriptMessage`, which carries no author.
     """
 
     conversation_id: str
-    messages: list[TranscriptMessage] = Field(default_factory=list)
+    messages: list[VisitorTranscriptMessage] = Field(default_factory=list)
 
 
 class OpenConversationRequest(BaseModel):
@@ -5868,7 +6021,13 @@ async def get_visitor_conversation_messages(
     # None means the ref has nothing stored at all; for a conversation the store
     # DOES know about, that is an empty thread rather than a missing one — a bot
     # muted the whole time, or a site with transcripts off and no owner replies.
-    return VisitorTranscriptResponse(conversation_id=conversation_id, messages=messages or [])
+    return VisitorTranscriptResponse(
+        conversation_id=conversation_id,
+        messages=[
+            VisitorTranscriptMessage(role=m.role, content=m.content, created_at=m.created_at)
+            for m in messages or []
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

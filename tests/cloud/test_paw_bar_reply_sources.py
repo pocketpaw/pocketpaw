@@ -1,4 +1,7 @@
 # tests/cloud/test_paw_bar_reply_sources.py — visible grounding for the concierge.
+# Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
+#   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
+#   route (fix/pawbar-public-route-gates, 2026-09-26).
 # Created 2026-07-30: covers the two public grounding surfaces added on
 # feat/paw-bar-reply-sources, against the exact contracts the widget team builds on:
 #   * The ``sources`` SSE event on POST /paw-bar/chat — at most ONE event, shaped
@@ -118,7 +121,7 @@ def _payload(widget_id: str, **ov) -> dict:
     p = dict(
         widget_id=widget_id,
         signed_key=_VALID_KEY,
-        customer_ref="cust-1",
+        customer_ref="cust-0001",
         message="What time do you open?",
     )
     p.update(ov)
@@ -495,7 +498,7 @@ async def test_articles_rate_limit_is_429(concierge_client):
     widget = await store.create_widget(_widget(rate_limit_per_min=2))
     for _ in range(2):
         await store.record_event(
-            PawBarEvent(widget_id=widget.id, type="pawbar_articles_read", customer_ref="cust-1")
+            PawBarEvent(widget_id=widget.id, type="pawbar_articles_read", customer_ref="cust-0001")
         )
     res = await client.get(
         "/paw-bar/articles", params=_articles_params(widget.id), headers={"Origin": _ORIGIN}

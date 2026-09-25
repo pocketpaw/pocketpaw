@@ -1,4 +1,6 @@
 # tests/cloud/test_paw_bar_conversation_identity.py — a Paw Bar visitor may hold
+# Updated 2026-09-26 (fix/pawbar-public-route-gates): the visitor transcript
+#   carries no author_* fields — pinned as an exact key set.
 # MORE THAN ONE conversation.
 #
 # Created 2026-08-19 as the reproduction for the reported bug: "multiple sessions
@@ -669,3 +671,48 @@ async def test_chat_without_a_conversation_id_still_works(chat):
     assert len(keys) == 1
     rows = await store.list_conversations_for_visitor(widget.id, _REF, workspace_id="ws-1")
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_visitor_transcript_never_names_the_operator(chat, monkeypatch):
+    """The customer learns that a human replied, never which one (2026-09-26).
+
+    The owner's drill-in resolves ``author_id`` / ``author_name`` /
+    ``author_avatar`` onto owner lines. The visitor's read shares the loader, so
+    it carried them too. Pinned as an exact key set so a new field has to be
+    argued for here rather than arriving on a public endpoint unnoticed.
+    """
+    client, store, executor, widget = chat
+    from pocketpaw_ee.cloud.auth.domain import UserIdentity
+
+    async def _identities(ids):
+        return {
+            i: UserIdentity(id=i, name="Maya Oyelaran", avatar="/uploads/avatars/maya.png")
+            for i in ids
+        }
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.auth.service.resolve_identities", _identities)
+
+    conversation = await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
+    await store.add_owner_message(
+        widget.id,
+        _REF,
+        "Hi, this is the team.",
+        conversation_id=conversation.id,
+        author="user-maya-01",
+        workspace_id="ws-1",
+    )
+
+    res = await client.get(
+        f"/paw-bar/conversations/{conversation.id}/messages",
+        params={"w": widget.id, "key": _VALID_KEY, "customer_ref": _REF},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 200, res.text
+    messages = res.json()["messages"]
+    assert [m["content"] for m in messages] == ["Hi, this is the team."]
+    for message in messages:
+        assert set(message) == {"role", "content", "created_at"}
+    assert "Maya" not in res.text
+    assert "user-maya-01" not in res.text

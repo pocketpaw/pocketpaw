@@ -1,4 +1,8 @@
 # tests/cloud/test_paw_bar_concierge_chat.py — Paw Bar public concierge chat (T2).
+# Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
+#   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
+#   route (fix/pawbar-public-route-gates, 2026-09-26). The rate-limit test
+#   seeds a Site because the chat limiter now runs after the key.
 # Created 2026-07-14: covers the PUBLIC POST /paw-bar/chat endpoint (front-gate +
 # auth + dispatch) and the grounding guard it relies on. Two layers:
 #   * Pure-function security proofs (no I/O): the CONCIERGE SurfaceProfile is
@@ -239,7 +243,7 @@ async def test_resolve_concierge_binds_pocket_and_agent(mongo_db):
     ctx = await resolve_scope_context(
         scope="concierge",
         scope_id=str(pocket.id),
-        user_id="cust-1",  # the anonymous handle
+        user_id="cust-0001",  # the anonymous handle
         agent_id_hint=str(agent.id),
         expected_workspace_id="ws-1",
     )
@@ -248,7 +252,7 @@ async def test_resolve_concierge_binds_pocket_and_agent(mongo_db):
     assert ctx.pocket_id == str(pocket.id)
     assert ctx.workspace_id == "ws-1"
     assert ctx.target_agent_id == str(agent.id)
-    assert ctx.user_id == "cust-1"
+    assert ctx.user_id == "cust-0001"
     # No workspace participant is exposed to a public concierge.
     assert ctx.members == []
     # And its KB is the site pocket + THIS agent, end-to-end through the resolved
@@ -270,7 +274,7 @@ async def test_resolve_concierge_rejects_cross_tenant_pocket(mongo_db):
         await resolve_scope_context(
             scope="concierge",
             scope_id=str(pocket.id),
-            user_id="cust-1",
+            user_id="cust-0001",
             agent_id_hint=str(agent.id),
             expected_workspace_id="ws-1",
         )
@@ -287,7 +291,7 @@ async def test_resolve_concierge_rejects_agent_from_another_workspace(mongo_db):
         await resolve_scope_context(
             scope="concierge",
             scope_id=str(pocket.id),
-            user_id="cust-1",
+            user_id="cust-0001",
             agent_id_hint=str(foreign_agent.id),
             expected_workspace_id="ws-1",
         )
@@ -307,7 +311,7 @@ async def test_concierge_scope_never_names_a_sibling_agent_end_to_end(mongo_db):
     ctx = await resolve_scope_context(
         scope="concierge",
         scope_id=str(pocket.id),
-        user_id="cust-1",
+        user_id="cust-0001",
         agent_id_hint=str(bound.id),
         expected_workspace_id="ws-1",
     )
@@ -325,7 +329,7 @@ async def test_resolve_concierge_requires_bound_agent(mongo_db):
         await resolve_scope_context(
             scope="concierge",
             scope_id=str(pocket.id),
-            user_id="cust-1",
+            user_id="cust-0001",
             agent_id_hint="",  # unbound
             expected_workspace_id="ws-1",
         )
@@ -423,7 +427,7 @@ def _payload(widget_id: str, **ov) -> dict:
     p = dict(
         widget_id=widget_id,
         signed_key=_VALID_KEY,
-        customer_ref="cust-1",
+        customer_ref="cust-0001",
         message="What time do you open?",
     )
     p.update(ov)
@@ -470,7 +474,7 @@ async def test_chat_happy_path_streams_and_dispatches_concierge_run(concierge_cl
     assert spec.scope_id == "pocket-1"  # the key's pocket, the run's binding
     assert spec.workspace_id == "ws-1"
     assert spec.agent_id == "agent-xyz"
-    assert spec.user_id == "cust-1"  # anonymous handle, never a principal
+    assert spec.user_id == "cust-0001"  # anonymous handle, never a principal
     assert spec.history == []  # first turn — this visitor has nothing to replay
     assert spec.surface_meta.get("pocket_id") == "pocket-1"
 
@@ -591,12 +595,13 @@ async def test_chat_widget_from_other_workspace_is_403(concierge_client):
 @pytest.mark.asyncio
 async def test_chat_rate_limit_is_429(concierge_client):
     client, store = concierge_client
+    await _site()
     widget = await store.create_widget(_widget(per_customer_limit_per_min=2))
-    # Pre-seed the customer up to the per-customer ceiling so the next chat 429s
-    # BEFORE auth (the rate limiter is part of the cheap front-gate).
+    # Pre-seed the customer up to the per-customer ceiling so the next chat 429s.
+    # The check runs AFTER the key resolves (2026-09-26), so the site must exist.
     for _ in range(2):
         await store.record_event(
-            PawBarEvent(widget_id=widget.id, type="concierge_message", customer_ref="cust-1")
+            PawBarEvent(widget_id=widget.id, type="concierge_message", customer_ref="cust-0001")
         )
     res = await client.post("/paw-bar/chat", json=_payload(widget.id), headers={"Origin": _ORIGIN})
     assert res.status_code == 429
@@ -709,9 +714,9 @@ async def test_create_run_writes_visitor_text_onto_the_run_doc(mongo_db):
         workspace_id="ws-1",
         context_type="concierge",
         scope_id="pocket-1",
-        session_key="cloud:concierge:pocket-1:cust-1:agent-xyz",
+        session_key="cloud:concierge:pocket-1:cust-0001:agent-xyz",
         group=None,
-        user_id="cust-1",
+        user_id="cust-0001",
         agent_id="agent-xyz",
         client_message_id="cmid-transcript-1",
         user_message_id="",
@@ -766,7 +771,7 @@ _MEMORY_CLOCK = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 async def _mk_run(*, minutes_ago: int = 0, **ov):
     """Insert one stored concierge turn — the row conversation memory reads back.
 
-    Defaults describe cust-1's turn on pocket-1 in ws-1, which is exactly what
+    Defaults describe cust-0001's turn on pocket-1 in ws-1, which is exactly what
     ``_dispatch``'s request resolves to; override a field to seed the turn of a
     sibling visitor, a sibling site, or another tenant.
     """
@@ -777,8 +782,8 @@ async def _mk_run(*, minutes_ago: int = 0, **ov):
         workspace="ws-1",
         context_type="concierge",
         scope_id="pocket-1",
-        session_key="cloud:concierge:pocket-1:cust-1:agent-xyz",
-        user_id="cust-1",
+        session_key="cloud:concierge:pocket-1:cust-0001:agent-xyz",
+        user_id="cust-0001",
         agent_id="agent-xyz",
         client_message_id=uuid.uuid4().hex,
         user_message_id="",
@@ -798,7 +803,7 @@ async def _mk_run(*, minutes_ago: int = 0, **ov):
 _MEMORY_WIDGET = "w-memory"
 
 
-async def _memory_conversation(store, *, customer_ref="cust-1"):
+async def _memory_conversation(store, *, customer_ref="cust-0001"):
     """Open this visitor's conversation and return ``(id, session_key)``.
 
     Memory is scoped to a CONVERSATION rather than to a visitor, so a seeded run
@@ -849,13 +854,16 @@ async def test_chat_history_never_carries_a_sibling_visitors_turns(concierge_cli
     never be replayed into another's run."""
     client, store = concierge_client
     _, key = await _memory_conversation(store)
-    _, sibling_key = await _memory_conversation(store, customer_ref="cust-2")
+    _, sibling_key = await _memory_conversation(store, customer_ref="cust-0002")
     await _mk_run(
-        minutes_ago=5, session_key=key, user_text="I am cust-1.", partial_text="Hello, cust-1."
+        minutes_ago=5,
+        session_key=key,
+        user_text="I am cust-0001.",
+        partial_text="Hello, cust-0001.",
     )
     await _mk_run(
         minutes_ago=4,
-        user_id="cust-2",
+        user_id="cust-0002",
         session_key=sibling_key,
         user_text="My order number is 99887 and my name is Bob.",
         partial_text="Thanks Bob, order 99887 ships Tuesday.",
@@ -866,8 +874,8 @@ async def test_chat_history_never_carries_a_sibling_visitors_turns(concierge_cli
     )
 
     assert spec.history == [
-        {"role": "user", "content": "I am cust-1."},
-        {"role": "assistant", "content": "Hello, cust-1."},
+        {"role": "user", "content": "I am cust-0001."},
+        {"role": "assistant", "content": "Hello, cust-0001."},
     ]
     assert "Bob" not in str(spec.history)
     assert "99887" not in str(spec.history)
@@ -881,7 +889,7 @@ async def test_chat_history_never_carries_a_sibling_sites_turns(concierge_client
     await _mk_run(
         minutes_ago=5,
         scope_id="pocket-2",
-        session_key="cloud:concierge:pocket-2:cust-1:agent-xyz",
+        session_key="cloud:concierge:pocket-2:cust-0001:agent-xyz",
         user_text="I asked this on the other site.",
         partial_text="Answered on the other site.",
     )
@@ -1067,7 +1075,7 @@ async def test_chat_does_not_replay_the_current_message_into_history(concierge_c
     # the dispatch used, since memory is conversation-scoped.
     from pocketpaw_ee.paw_bar.router import _load_concierge_history
 
-    next_turn = await _load_concierge_history("pocket-1", "cust-1", "ws-1", session_key=key)
+    next_turn = await _load_concierge_history("pocket-1", "cust-0001", "ws-1", session_key=key)
     assert {"role": "user", "content": message} in next_turn
 
 
@@ -1121,7 +1129,7 @@ async def test_a_used_up_month_refuses_a_NEW_conversation(concierge_client, monk
     widget = await store.create_widget(_widget(agent_id="agent-xyz"))
 
     for i in range(200):
-        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i}", "ws-1")
+        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i:04d}", "ws-1")
 
     res = await client.post(
         "/paw-bar/chat",
@@ -1150,13 +1158,13 @@ async def test_a_conversation_already_under_way_is_not_cut_off(concierge_client,
     widget = await store.create_widget(_widget(agent_id="agent-xyz"))
 
     for i in range(200):
-        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i}", "ws-1")
+        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i:04d}", "ws-1")
 
-    # spent-0 is one of the 200 already counted, so this turn continues a
+    # spent-0000 is one of the 200 already counted, so this turn continues a
     # conversation rather than starting one.
     res = await client.post(
         "/paw-bar/chat",
-        json=_payload(widget.id, customer_ref="spent-0"),
+        json=_payload(widget.id, customer_ref="spent-0000"),
         headers={"Origin": _ORIGIN},
     )
 
@@ -1173,7 +1181,7 @@ async def test_an_unenforced_deployment_serves_past_the_allowance(concierge_clie
     widget = await store.create_widget(_widget(agent_id="agent-xyz"))
 
     for i in range(250):
-        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i}", "ws-1")
+        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i:04d}", "ws-1")
 
     res = await client.post(
         "/paw-bar/chat",

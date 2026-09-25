@@ -1,4 +1,14 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-09-26 (fix/pawbar-public-route-gates) — the rate limiter grew
+#   BUCKETS and an atomic admit. paw_bar_events gains ``bucket TEXT DEFAULT ''``
+#   (additive ALTER, old rows land in the shared '' bucket). record_event,
+#   count_events_since and within_rate_limit take ``bucket`` and count only that
+#   bucket, so the public event-ingest route ("events") can no longer fill the
+#   budget visitor chat reads (''). New admit_event does the count and the
+#   insert in ONE ``BEGIN IMMEDIATE`` transaction behind a per-store asyncio
+#   lock, so a concurrent burst cannot all see "under the cap" and all insert.
+#   Atomic per SQLite file, which means per replica: separate replicas with
+#   separate disks each keep their own count.
 # Updated: 2026-08-24 (inbox freshness) — new list_recent_owner_messages: the
 #   newest out-of-band lines for a PAGE of visitors in ONE bounded read, so the
 #   owner's conversation list can say what was said LAST instead of what the last
@@ -132,6 +142,7 @@
 #   makes the count 0 — a quota that silently never fires.
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -210,7 +221,8 @@ CREATE TABLE IF NOT EXISTS paw_bar_events (
     type TEXT NOT NULL,
     payload TEXT DEFAULT '{}',
     customer_ref TEXT NOT NULL,
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    bucket TEXT DEFAULT ''
 );
 
 -- gap2: the customer-decision delivery sink. One row per inbound event that
@@ -522,6 +534,10 @@ class PawBarStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
+        # Serializes admit_event's count-then-insert inside this process, so
+        # concurrent coroutines queue here instead of contending for SQLite's
+        # write lock (BEGIN IMMEDIATE still covers other processes on the file).
+        self._admit_lock = asyncio.Lock()
 
     async def _ensure_schema(self) -> None:
         if self._initialized:
@@ -554,6 +570,11 @@ class PawBarStore:
                 return {row[1] for row in await cur.fetchall()}
 
         existing = await _tables()
+        # paw_bar_events: bucket (2026-09-26) — which rate budget a row counts
+        # against. '' is the shared budget, so every pre-existing row keeps
+        # counting exactly where it did.
+        if "paw_bar_events" in existing and "bucket" not in await _columns("paw_bar_events"):
+            await db.execute("ALTER TABLE paw_bar_events ADD COLUMN bucket TEXT DEFAULT ''")
         # paw_bar_widgets: workspace_id (W4a) + agent_id (T3). Column names are
         # literals (never user input), so the f-string ALTER is injection-safe.
         if "paw_bar_widgets" in existing:
@@ -950,23 +971,78 @@ class PawBarStore:
 
     # ---------------- Events ----------------
 
-    async def record_event(self, event: PawBarEvent) -> PawBarEvent:
+    _INSERT_EVENT_SQL = (
+        "INSERT INTO paw_bar_events"
+        " (widget_id, type, payload, customer_ref, timestamp, bucket)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+    )
+
+    @staticmethod
+    def _event_params(event: PawBarEvent, bucket: str) -> tuple[Any, ...]:
+        return (
+            event.widget_id,
+            event.type,
+            json.dumps(event.payload),
+            event.customer_ref,
+            event.timestamp.isoformat(),
+            bucket,
+        )
+
+    async def record_event(self, event: PawBarEvent, *, bucket: str = "") -> PawBarEvent:
+        """Persist one event. ``bucket`` names the rate budget it counts against:
+        '' is the shared budget visitor chat reads; the public ingest route writes
+        "events" so a flood of those cannot starve chat."""
         await self._ensure_schema()
         async with self._conn() as db:
-            await db.execute(
-                "INSERT INTO paw_bar_events"
-                " (widget_id, type, payload, customer_ref, timestamp)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (
-                    event.widget_id,
-                    event.type,
-                    json.dumps(event.payload),
-                    event.customer_ref,
-                    event.timestamp.isoformat(),
-                ),
-            )
+            await db.execute(self._INSERT_EVENT_SQL, self._event_params(event, bucket))
             await db.commit()
         return event
+
+    async def admit_event(
+        self,
+        event: PawBarEvent,
+        *,
+        overall_per_min: int,
+        per_customer_per_min: int,
+        bucket: str = "",
+        now: datetime | None = None,
+    ) -> bool:
+        """Check the rate limit and record ``event`` as ONE step.
+
+        ``within_rate_limit`` followed by ``record_event`` leaves a window in
+        which N concurrent requests all read "under the cap" and all insert. Here
+        the two counts and the insert share one ``BEGIN IMMEDIATE`` transaction
+        (SQLite's write lock, so another process on the same file waits too) and a
+        per-store asyncio lock (so coroutines in this process queue instead of
+        timing out on that write lock). Returns True when the event was admitted
+        and recorded, False when it was refused and nothing was written.
+        """
+        await self._ensure_schema()
+        window_start = ((now or datetime.now()) - timedelta(minutes=1)).isoformat()
+        count_sql = (
+            "SELECT COUNT(*),"
+            " COALESCE(SUM(CASE WHEN customer_ref = ? THEN 1 ELSE 0 END), 0)"
+            " FROM paw_bar_events"
+            " WHERE widget_id = ? AND timestamp >= ? AND COALESCE(bucket, '') = ?"
+        )
+        async with self._admit_lock:
+            async with self._conn() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    async with db.execute(
+                        count_sql, (event.customer_ref, event.widget_id, window_start, bucket)
+                    ) as cur:
+                        row = await cur.fetchone()
+                    total, per_customer = (row[0], row[1]) if row else (0, 0)
+                    if total >= overall_per_min or per_customer >= per_customer_per_min:
+                        await db.rollback()
+                        return False
+                    await db.execute(self._INSERT_EVENT_SQL, self._event_params(event, bucket))
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
+        return True
 
     async def recent_events(self, widget_id: str, limit: int = 100) -> list[PawBarEvent]:
         await self._ensure_schema()
@@ -984,15 +1060,21 @@ class PawBarStore:
         since: datetime,
         customer_ref: str | None = None,
         event_type: str | None = None,
+        bucket: str = "",
     ) -> int:
         """Count events in the last window — backs the rate limiter.
 
         ``event_type``, when given, restricts the count to one event type — used
         by the dedicated gated-action cap (C1) to count only proposal-generating
-        actions separately from the overall widget traffic."""
+        actions separately from the overall widget traffic.
+
+        ``bucket`` restricts the count to one rate budget (default the shared ''
+        one). A type filter alone is not enough: ingest event types are chosen by
+        the anonymous caller, so a legacy event named ``pawbar_gated_action``
+        would otherwise count against the gated-action cap."""
         await self._ensure_schema()
-        conditions = ["widget_id = ?", "timestamp >= ?"]
-        params: list[Any] = [widget_id, since.isoformat()]
+        conditions = ["widget_id = ?", "timestamp >= ?", "COALESCE(bucket, '') = ?"]
+        params: list[Any] = [widget_id, since.isoformat(), bucket]
         if customer_ref is not None:
             conditions.append("customer_ref = ?")
             params.append(customer_ref)
@@ -1015,17 +1097,22 @@ class PawBarStore:
         per_customer_per_min: int,
         customer_ref: str,
         now: datetime | None = None,
+        bucket: str = "",
     ) -> bool:
-        """Return True if the next event from `customer_ref` should be accepted."""
+        """Return True if the next event from `customer_ref` should be accepted.
+
+        A CHECK only — nothing is recorded. Where the check and the record belong
+        to the same request, use :meth:`admit_event`, which cannot be raced."""
         now = now or datetime.now()
         window_start = now - timedelta(minutes=1)
-        total = await self.count_events_since(widget_id, window_start)
+        total = await self.count_events_since(widget_id, window_start, bucket=bucket)
         if total >= overall_per_min:
             return False
         per_customer = await self.count_events_since(
             widget_id,
             window_start,
             customer_ref=customer_ref,
+            bucket=bucket,
         )
         return per_customer < per_customer_per_min
 

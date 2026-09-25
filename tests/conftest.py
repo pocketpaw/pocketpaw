@@ -1,5 +1,10 @@
 """Pytest configuration.
 
+Updated: 2026-09-26 (fix/pawbar-public-route-gates) -- autouse
+``_reset_paw_bar_public_ip_limiter`` empties the paw-bar router's per-IP bucket
+before each test. It is module-level and every in-process test client shares one
+address, so without the reset one suite's requests spend the next suite's budget
+and unrelated tests start answering 429.
 Updated: 2026-09-24 (fix/tests-dotenv-hermetic, on feat/sites-author-dependencies) --
 the test process no longer reads ANY ``.env``. ``PYTHON_DOTENV_DISABLED`` is set before
 the first ``pocketpaw`` import (so ``url_validators``' import-time ``load_dotenv`` and
@@ -316,3 +321,17 @@ async def aseed_gated_action(client, payload: dict):
             (_json.dumps(parameters), resp.json()["id"]),
         )
     return resp
+
+
+@pytest.fixture(autouse=True)
+def _reset_paw_bar_public_ip_limiter():
+    """Empty the paw-bar per-IP limiter before each test (see the module docstring).
+
+    Looked up in ``sys.modules`` rather than imported, so tests that never load the
+    EE router pay nothing and OSS-only runs do not need ``pocketpaw_ee``."""
+    router = sys.modules.get("pocketpaw_ee.paw_bar.router")
+    limiter = getattr(router, "_PUBLIC_IP_LIMITER", None)
+    if limiter is not None:
+        with limiter._lock:
+            limiter._buckets.clear()
+    yield
