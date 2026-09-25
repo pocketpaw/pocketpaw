@@ -6,7 +6,8 @@
 #   which the dashboard never holds) and writes through ``_save_widget_spec``, the
 #   archiving write ``update_spec`` now shares. The settings GET/PATCH gained
 #   ``embed_snippet``: ``embed.concierge_snippet`` on PAW_CAPTURE_API_BASE, the
-#   same tag publish injects. Token-gated routes unchanged.
+#   same tag publish injects. Token-gated routes unchanged. The admin route pins
+#   spec.widget_id / spec.pocket_id to the site's widget row (body values ignored).
 # Updated: 2026-09-26 (fix/pawbar-visitor-stream-allowlist) — POST /paw-bar/chat
 #   stopped relaying every run-engine frame to anonymous visitors. It forwarded
 #   ``thinking``, ``tool_start`` / ``tool_result`` (tool names, arguments,
@@ -1900,7 +1901,15 @@ async def update_site_widget_spec(
     _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
         raise HTTPException(status_code=404, detail="no_concierge_widget")
-    updated = await _save_widget_spec(widget.id, req.spec, workspace_id)
+    # The widget is chosen by the SITE, so the spec's own identity keys are pinned
+    # to that widget's row, not taken from the body. Overwritten, not rejected: the
+    # editor spreads the spec it loaded, and a provisioned spec was minted with
+    # widget_id="pending", so a strict equality check would refuse ordinary saves.
+    # Server-side these keys route nothing (Fabric writes and events key off the
+    # widget ROW); they are echoed to the visitor by GET /paw-bar/spec/{id}, which
+    # is why a body must not be able to rename them.
+    spec = req.spec.model_copy(update={"widget_id": widget.id, "pocket_id": widget.pocket_id})
+    updated = await _save_widget_spec(widget.id, spec, workspace_id)
     return AdminWidgetSpecResponse(id=updated.id, spec=updated.spec)
 
 

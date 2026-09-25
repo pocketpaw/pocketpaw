@@ -29,6 +29,8 @@
 #   cross-tenant / no widget, 422 invalid spec, 403 for a member), and the
 #   ``embed_snippet`` the settings GET/PATCH now return: the publish-time snippet,
 #   built on PAW_CAPTURE_API_BASE rather than the request host.
+#   Also pinned: the admin route overwrites spec.widget_id / spec.pocket_id with
+#   the resolved widget's own values, whatever the body sends.
 
 from __future__ import annotations
 
@@ -770,6 +772,35 @@ async def test_admin_spec_save_needs_no_widget_token_and_archives(owner_client):
     number, archived = revision
     assert number == 1
     assert archived == _spec()  # the PRIOR spec, not the new one
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_pins_widget_and_pocket_ids(owner_client):
+    """A body naming another widget / pocket inside ``spec`` saves with the
+    RESOLVED widget's own id and pocket_id; every other field lands as sent.
+    Overwritten rather than rejected: the editor spreads the spec it loaded, so
+    those two keys are not the owner's to edit."""
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    other = await store.create_widget(_widget(pocket_id="pocket-other"))
+    body = _new_spec_body("pp_foreign")
+    body["spec"]["pocket_id"] = "pocket-other"
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body)
+    assert res.status_code == 200, res.text
+    saved = res.json()["spec"]
+    assert saved["widget_id"] == widget.id
+    assert saved["pocket_id"] == "pocket-1"
+
+    stored = (await store.get_widget(widget.id)).spec
+    expected = PawBarSpec.model_validate(
+        {**body["spec"], "widget_id": widget.id, "pocket_id": "pocket-1"}
+    )
+    assert stored == expected  # nothing but the two ids differs from the body
+    # The widget the body named is untouched.
+    assert await store.latest_spec_revision(other.id) is None
+    assert (await store.get_widget(other.id)).spec == _spec()
 
 
 @pytest.mark.asyncio
