@@ -283,6 +283,15 @@ def test_unknown_transition_kind_is_rejected(summary: TimelineSummary) -> None:
     assert "Did you mean 'crossfade'?" in error or "dissolve" in error
 
 
+@pytest.mark.parametrize("kind", ["whip", "flip", "wipe", "iris", "spin"])
+def test_new_transition_kinds_are_accepted(summary: TimelineSummary, kind: str) -> None:
+    _, error = validate_ops(
+        [{"op": "set_transition", "clipId": "clip_bbb", "kind": kind, "direction": "up"}],
+        summary,
+    )
+    assert error is None
+
+
 def test_volume_out_of_range_is_rejected(summary: TimelineSummary) -> None:
     _, error = validate_ops([{"op": "set_volume", "target": "master", "volume": 9}], summary)
     assert error is not None
