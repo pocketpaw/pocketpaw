@@ -1,4 +1,7 @@
 # tests/cloud/test_paw_bar_actions.py — Paw Bar action registry (C1), end to end.
+# Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
+#   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
+#   route (fix/pawbar-public-route-gates, 2026-09-26).
 # Updated 2026-07-30: TestFormCardPreamble pins the form-card instruction block —
 # rendered only for gated actions WITH args (contract fence, per-verb arg list,
 # name-based type mapping, emit-once + skip-when-details-present), absent for
@@ -710,7 +713,7 @@ class TestSessionKeyInterlock:
             json={
                 "widget_id": widget.id,
                 "signed_key": _VALID_KEY,
-                "customer_ref": "cust-1",
+                "customer_ref": "cust-0001",
                 "message": "hi",
             },
             headers={"Origin": _ORIGIN},

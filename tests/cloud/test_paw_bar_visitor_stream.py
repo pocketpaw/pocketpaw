@@ -1,4 +1,7 @@
 # tests/cloud/test_paw_bar_visitor_stream.py — the public concierge stream only
+# Updated 2026-09-26 (fix/pawbar-public-route-gates): a visitor ``error``
+#   frame always carries ``agent.error`` — well-formed engine codes such as
+#   ``agent.jail_over_quota`` describe the owner's state. Test updated + one added.
 # carries what a website visitor is allowed to see.
 # Created 2026-09-26 (fix/pawbar-visitor-stream-allowlist): POST /paw-bar/chat is
 # a PUBLIC endpoint, and it used to relay every run-engine frame verbatim, so an
@@ -12,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -184,7 +188,9 @@ async def test_visitor_stream_error_is_generic(concierge_client, monkeypatch):
     assert [n for n, _ in events] == ["message.persisted", "chunk", "error"]
     err = events[-1][1]
     assert set(err) == {"code", "message"}
-    assert err["code"] == "agent.run_failed"
+    # Always the generic code (2026-09-26): an engine code is the owner's state,
+    # not the visitor's, and the widget never reads it.
+    assert err["code"] == "agent.error"
     assert isinstance(err["message"], str) and err["message"]
 
 
@@ -219,3 +225,21 @@ async def test_visitor_stream_interrupted_carries_reason_only(concierge_client, 
 
     events = await _chat(client, widget.id)
     assert events[-1] == ("interrupted", {"reason": "cancelled"})
+
+
+@pytest.mark.asyncio
+async def test_visitor_stream_error_never_names_the_owners_quota(concierge_client, monkeypatch):
+    """``agent.jail_over_quota`` passes any code-shape check, and it tells an
+    anonymous visitor the site owner is out of quota. The visitor gets the one
+    generic code whatever the engine said."""
+    client, store = concierge_client
+    await _site()
+    widget = await store.create_widget(_widget())
+    _stub(monkeypatch, [("error", {"code": "agent.jail_over_quota", "message": "over quota"})])
+    _stub_kb_search(monkeypatch, [])
+
+    events = await _chat(client, widget.id)
+    err = events[-1]
+    assert err[0] == "error"
+    assert err[1]["code"] == "agent.error"
+    assert "quota" not in json.dumps(err[1])

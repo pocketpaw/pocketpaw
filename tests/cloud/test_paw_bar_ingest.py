@@ -1,4 +1,7 @@
 # tests/cloud/test_paw_bar_ingest.py — PR-B: HTTP surface + event ingest.
+# Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
+#   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
+#   route (fix/pawbar-public-route-gates, 2026-09-26).
 # Created: 2026-04-13 — Covers spec serving (CORS), owner-authed CRUD, event
 # ingest with origin + payload-size + rate-limit + mapping-to-Fabric logic.
 # Updated: 2026-05-30 — Added TestInjectionScreening covering the real
@@ -272,7 +275,7 @@ class TestEventIngest:
         created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
         res = client.post(
             f"/paw-bar/events/{created['id']}",
-            json={"type": "order_click", "payload": {}, "customer_ref": "abc"},
+            json={"type": "order_click", "payload": {}, "customer_ref": "cust_abc_0001"},
             headers={"Origin": "https://evil.example"},
         )
         assert res.status_code == 403
@@ -282,7 +285,7 @@ class TestEventIngest:
         big_payload = {"blob": "x" * (MAX_PAYLOAD_BYTES + 50)}
         res = client.post(
             f"/paw-bar/events/{created['id']}",
-            json={"type": "order_click", "payload": big_payload, "customer_ref": "abc"},
+            json={"type": "order_click", "payload": big_payload, "customer_ref": "cust_abc_0001"},
             headers={"Origin": "https://brewco.com"},
         )
         assert res.status_code == 413
@@ -297,7 +300,7 @@ class TestEventIngest:
                 json={
                     "type": "order_click",
                     "payload": {"item": "oat_latte"},
-                    "customer_ref": "cust_a",
+                    "customer_ref": "cust_aaaa",
                 },
                 headers={"Origin": "https://brewco.com"},
             )
@@ -307,7 +310,7 @@ class TestEventIngest:
             json={
                 "type": "order_click",
                 "payload": {"item": "oat_latte"},
-                "customer_ref": "cust_a",
+                "customer_ref": "cust_aaaa",
             },
             headers={"Origin": "https://brewco.com"},
         )
@@ -323,7 +326,7 @@ class TestEventIngest:
         created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
         res = client.post(
             f"/paw-bar/events/{created['id']}",
-            json={"type": "order_click", "payload": {}, "customer_ref": "abc"},
+            json={"type": "order_click", "payload": {}, "customer_ref": "cust_abc_0001"},
             headers={"Origin": "https://brewco.com"},
         )
         assert res.status_code == 200
@@ -380,7 +383,7 @@ class TestEventIngest:
             json={
                 "type": "order_click",
                 "payload": {"item": "oat_latte"},
-                "customer_ref": "cust_a",
+                "customer_ref": "cust_aaaa",
             },
             headers={"Origin": "https://brewco.com"},
         )
