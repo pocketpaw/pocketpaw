@@ -1,6 +1,11 @@
 # ee/pocketpaw_ee/sites/kb_ingest.py — put a site's own content into the pocket KB
 # its concierge reads from.
 #
+# Updated 2026-09-25 (kb engine unavailable): a missing or outdated kb binary
+#   (KnowledgeEngineUnavailable) stops the page loop at the FIRST page and records
+#   `kb_unavailable`. It used to fail every page on its own — one paid agent
+#   compile, one verbatim article from the old binary and one warning per page —
+#   and then report `ingest_failed`, which blamed the save rather than the engine.
 # Created 2026-07-26. A dedicated concierge agent used to start KNOWLEDGE-EMPTY: it
 # was provisioned with a soul and a persona and a KB scope, and nothing was ever put
 # in that scope. Demos only looked grounded because the widget spec happened to
@@ -426,11 +431,24 @@ async def _ingest_documents(
     One bad page must not lose the rest, so a per-page failure increments
     ``skipped`` and the loop continues. Shared by every lane.
     """
-    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+    from pocketpaw_ee.cloud.agents.knowledge import (
+        KnowledgeEngineUnavailable,
+        KnowledgeService,
+    )
 
     for doc in docs:
         try:
             result = await KnowledgeService.ingest_text_to_scope(scope, doc.text, doc.source)
+        except KnowledgeEngineUnavailable as exc:
+            # The engine, not this page: every remaining page would fail the same
+            # way, each after a paid compile. Stop here and name the engine.
+            report.error = "kb_unavailable"
+            logger.error(
+                "sites.kb: kb engine unavailable, stopping the sync for site %s: %s",
+                getattr(site, "id", "?"),
+                exc,
+            )
+            return
         except Exception:  # noqa: BLE001 — one bad page must not lose the rest
             report.skipped += 1
             logger.warning(
@@ -505,6 +523,9 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         return report
 
     await _ingest_documents(site, scope, docs, report)
+    if report.error == "kb_unavailable":
+        await _record_sync(site, report, previous=previous)
+        return report
 
     if not report.ingested:
         # The site HAS pages and not one of them made it in — the ingest engine is
@@ -587,6 +608,9 @@ async def _sync_foreign_site_knowledge(
         return report
 
     await _ingest_documents(site, scope, docs, report)
+    if report.error == "kb_unavailable":
+        await _record_sync(site, report, previous=previous)
+        return report
     if not report.ingested:
         report.error = "ingest_failed"
         await _record_sync(site, report, previous=previous)
