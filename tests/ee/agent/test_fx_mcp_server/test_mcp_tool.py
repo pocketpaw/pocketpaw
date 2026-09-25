@@ -4,8 +4,13 @@
 # assertions (tool id namespacing, provider allowlist publication, the three tools
 # on the built server) plus handler tests against a tmp_path registry fixture:
 # search ranking + filters, get_effect happy path, unknown name with suggestions,
-# svelte + needs refusal, missing/malformed registry fail-open, path traversal
+# svelte/react `needs` served with packages to declare (dynamic svelte still
+# refuses), missing/malformed registry fail-open, path traversal
 # rejection, and mtime-driven cache refresh.
+# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — get_effect
+# no longer refuses svelte/react effects with `needs`; it returns them with a
+# `dependencies` list and a note pointing at set_site_dependencies. Dynamic
+# svelte (pattern=dynamic) still refuses with engine_unsupported.
 """MCP server registration + handler tests for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -191,16 +196,43 @@ class TestGetEffect:
         assert len(body["suggestions"]) == 3
 
     @pytest.mark.asyncio
-    async def test_svelte_refuses_needs(self, registry) -> None:
-        body = _decode(await fx_mcp._get_handler({"name": "paper-waves", "engine": "svelte"}))
-        assert body == {
-            "error": "needs_unsupported_on_engine",
-            "needs": ["paper"],
-            "engine": "svelte",
-        }
+    async def test_svelte_returns_needs_to_declare(self, registry) -> None:
+        """svelte/react now take npm packages, so an effect with `needs` is served
+        with the packages to declare instead of refused."""
+        for engine in ("svelte", "react"):
+            out = await fx_mcp._get_handler({"name": "paper-waves", "engine": engine})
+            assert not out.get("is_error")
+            body = _decode(out)
+            assert body["engine"] == engine
+            assert body["needs"] == ["paper"]
+            assert body["dependencies"] == [{"name": "paper"}]
+            assert "set_site_dependencies" in body["note"]
+            assert "onMount" in body["note"] or "useEffect" in body["note"]
         body = _decode(await fx_mcp._get_handler({"name": "aurora-css", "engine": "react"}))
         assert body["engine"] == "react"
+        assert "dependencies" not in body
         assert body["note"].startswith("svelte/react shells not yet available")
+
+    @pytest.mark.asyncio
+    async def test_dynamic_svelte_refuses_needs(self, registry) -> None:
+        """A dynamic svelte site cannot take packages, so an effect with `needs`
+        is still refused there, with the same code set_site_dependencies uses."""
+        out = await fx_mcp._get_handler(
+            {"name": "paper-waves", "engine": "svelte", "pattern": "dynamic"}
+        )
+        assert out["is_error"]
+        assert _decode(out) == {
+            "error": "engine_unsupported",
+            "needs": ["paper"],
+            "engine": "svelte",
+            "pattern": "dynamic",
+        }
+        body = _decode(
+            await fx_mcp._get_handler(
+                {"name": "aurora-css", "engine": "svelte", "pattern": "dynamic"}
+            )
+        )
+        assert body["name"] == "aurora-css"
 
     @pytest.mark.asyncio
     async def test_bad_engine_is_error(self, registry) -> None:

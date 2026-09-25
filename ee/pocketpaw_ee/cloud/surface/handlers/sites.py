@@ -9,6 +9,15 @@
 #   2. Every engine branch of ``_create_preamble`` names its own edit tool and
 #      forbids calling create a second time.
 #
+# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — the
+# preamble stops contradicting the tools: react no longer "has NOTHING else ... no
+# way to add dependencies" (packages go through ``dependencies`` /
+# set_site_dependencies and load client-side), the sites-design-sources blurb
+# drops "no npm", the svelte edit step describes ``rolled_back`` instead of a
+# smoke-test and a previewing ``preview_url``, and ``_VERIFY_RULE`` (only
+# ``verification.status == passed`` means ready) rides the DRAFT-FIRST step and
+# every source-engine edit step.
+#
 # Created: 2026-06-02 — Orients the chat agent when the user is on the /sites
 # surface (the Paw Sites gallery + describe-to-create rail). Without it the
 # surface fell back to GENERIC and the agent built + talked "pocket" instead of
@@ -1010,9 +1019,9 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "When you are about to hand-write a BACKGROUND, texture, canvas shader, "
         "CSS animation or text effect, when the brief NAMES an effect you want to "
         "build well rather than by reflex, or when picking type and Inter is not "
-        "allowed. Real techniques filtered to what this surface can build: no npm "
-        "and no file downloads, so everything there is CSS, inline SVG or GLSL "
-        "you retype.",
+        "allowed. Real techniques filtered to what this surface can build: no "
+        "file downloads, so everything there is CSS, inline SVG or GLSL you "
+        "retype (npm packages go through set_site_dependencies).",
     ),
     (
         "sites-interface-review",
@@ -1499,9 +1508,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "root; sections under `src/components/*.tsx`). The build shell is "
             "GENERATED and reserved — your map may NOT write `index.html`, "
             "`package.json`, `vite.config.ts`, `paw-prerender.mjs`, or anything "
-            "under `src/paw/`. The project has react, react-dom and vite and "
-            "NOTHING else — no router, no CSS framework, no state or animation "
-            "library, no way to add dependencies — and it is ONE page. Persist it "
+            "under `src/paw/`. The project provides react, react-dom and vite "
+            "and it is ONE page (no router). Declare any other npm package in "
+            "`dependencies` (or later with set_site_dependencies) and load "
+            "client-only ones via a dynamic import() inside useEffect. Persist it "
             "with `mcp__pocketpaw_sites_manager__create_react_site`, which stamps "
             'the source pocket `type="site"` + `pattern="landing"` + '
             '`engine="react"` as a reviewable DRAFT — it does NOT publish (see the '
@@ -1786,7 +1796,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "tool persists a reviewable DRAFT the user previews IN-APP (open /sites → "
         "the site's Preview tab). Publishing deploys the site to the public edge "
         "(and on a paid tier can open a checkout), so it is the user's call, not "
-        "an automatic next step. Tell the user the draft is ready, point them at "
+        "an automatic next step. "
+        + _VERIFY_RULE
+        + "Once it passed, tell the user the draft is ready, point them at "
         "the Preview, and OFFER to take it live — e.g. 'Your site is ready as a "
         'draft — preview it under /sites, and say publish (or "make it live") '
         "when you're happy with it.' Then STOP. Publish IN THIS SAME TURN only if "
@@ -1823,6 +1835,19 @@ def _create_preamble(meta: SurfaceMeta) -> str:
 # ripple branch keeps are the ones that do NOT transfer: they name widget types
 # (``pricing-table``'s ``tiers``, the ``accordion`` ban, the ``form`` /
 # ``newsletter`` ban) and a react/html/svelte page has no widgets to name.
+# PP-3 — the verify contract, stated once and used by the DRAFT-FIRST create step
+# and every source-engine edit step. The tools say the same thing in their own
+# descriptions; the preamble repeats it because "tell the user it is ready" is
+# written HERE, and a ready claim on a failed build is exactly the regression.
+_VERIFY_RULE = (
+    "VERIFY FIRST: every create/edit result carries `verification`. Call the site "
+    "ready ONLY when `verification.status` is `passed`. On `failed`, fix the listed "
+    "`errors` (file/line) and call `mcp__pocketpaw_sites_manager__verify_site` — at "
+    "most 3 rounds, then tell the user plainly which errors remain. On `unverified`, "
+    "say it could not be checked and why (on a ripple site `engine_not_verifiable` "
+    "only means there is no authored code to check). "
+)
+
 _REFINE_SHARED_RULES = (
     "PRESERVE the landing funnel (nav → hero → services → proof → pricing → "
     "call-to-action → lead form → footer): a refine changes a section, it does not "
@@ -1916,10 +1941,11 @@ def _react_write_scope() -> str:
         f"`{REACT_RESERVED_PREFIX}` are GENERATED and will be rejected — they carry "
         "the prerender contract and the dependency list. Paths are normalized "
         "before that check, so a `./` prefix or a `..` segment does not get around "
-        "it. The project has react, react-dom and vite and NOTHING else: no router, "
-        "no CSS framework, no state or animation library, and no way to add a "
-        "dependency — so build the change with what is there, and if it genuinely "
-        "needs a new package, say so instead of importing one.\n"
+        "it. The project provides react, react-dom and vite (no router, ONE page). "
+        "To add any other npm package call "
+        "`mcp__pocketpaw_sites_manager__set_site_dependencies` first, then load "
+        "client-only ones via a dynamic import() inside useEffect; a package it "
+        "returns in `rejected` must not be imported.\n"
     )
 
 
@@ -2109,13 +2135,18 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "rewrite). Read the file before you diff it. NEVER call a create tool "
             "to apply a change — that mints a second site and leaves this one "
             "untouched.\n"
-            "THE EDIT IS A DRAFT PREVIEW, NOT A DEPLOY. The tool returns "
-            '`status:"draft"`, `is_live:false` and a `preview_url` that previews '
-            "the edit — it is not the live site and the live page is unchanged. "
+            "THE EDIT IS A DRAFT, NOT A DEPLOY. The tool returns "
+            '`status:"draft"`, `is_live:false` and `verification`; the builder '
+            "preview shows the draft and the live page is unchanged. "
             "Relay the tool's own `message`, and never tell the user the change is "
             "published or live. On `ok:false` nothing was staged: an old_string "
-            "that matched 0 or more than 1 time needs more context, and a "
-            "smoke-test failure means fix the component and retry.\n"
+            "that matched 0 or more than 1 time needs more context, and "
+            '`status:"rolled_back"` means the edit failed the static or build '
+            "check, so fix `verification.errors` and send it again. A browser-layer "
+            "failure keeps the edit staged: fix it with a follow-up edit. To add an "
+            "npm package call set_site_dependencies, then import it inside onMount. "
+            + _VERIFY_RULE
+            + "\n"
         )
         rules = _REFINE_SHARED_RULES
     elif engine == "react":  # RX-3's `_react_refine_preamble`, folded in here
@@ -2145,12 +2176,12 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "pocket and leaves the one the user is looking at untouched.\n"
             f"{_react_write_scope()}"
             "THE EDIT IS SAVED TO THE DRAFT, NOT PUBLISHED. The tool returns "
-            '`status:"draft"` / `is_live:false`, nothing is built and nothing '
-            "goes live; the user previews it under /sites. Relay the tool's own "
+            '`status:"draft"` / `is_live:false`, and nothing goes live; the user '
+            "previews it under /sites. Relay the tool's own "
             "`message` and do not tell them it is live. On `ok:false` NOTHING was "
             "saved — relay the reason (a reserved path, the wrong engine, an "
             "old_string that matched 0 or more than 1 time) rather than reporting "
-            "a successful edit.\n"
+            "a successful edit. " + _VERIFY_RULE + "\n"
         )
         rules = _REFINE_SHARED_RULES + (
             "THE PRERENDER RULE governs every component you touch: at build time "
@@ -2215,13 +2246,14 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "them with `src/` — that is the react track. The generated `_paw/` "
             "namespace and any path climbing out with `..` are rejected.\n"
             "THE EDIT IS SAVED TO THE DRAFT, NOT PUBLISHED. The tool returns "
-            '`status:"draft"` / `is_live:false`; nothing is built and nothing goes '
+            '`status:"draft"` / `is_live:false`; nothing goes '
             "live, and the user previews it under /sites. Relay the tool's own "
             "`message` and do not tell them it is live. On `ok:false` NOTHING was "
             "saved — relay the reason (a reserved path, the wrong engine, a file "
             "that already exists or does not exist, an old_string that matched 0 or "
             "more than 1 time) rather than reporting a change that did not "
-            "happen.\n"
+            "happen. An npm package goes through set_site_dependencies and is "
+            'imported by bare name in a <script type="module">. ' + _VERIFY_RULE + "\n"
         )
         rules = _REFINE_SHARED_RULES + (
             "Whatever markup you write keeps the page working with no JavaScript: "

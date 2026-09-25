@@ -64,6 +64,11 @@ a frozen start-frame on the live page.
 
 `webgl-components` is already bundled separately for the cases that do keep a bundle.
 
+(2026-09-24: the "none of that runs" premise is dated. Sites keep their client
+bundle by default and can declare GSAP, Lenis or Three.js as npm packages through
+`set_site_dependencies`. The port stays CSS-only for the reason that still holds: a
+defect fix that needs JavaScript is a fix that fails with JavaScript off.)
+
 Also dropped:
 - **its stack-selection table** (Next.js / Vite / vanilla) — the engine is chosen by
   the /sites create flow, not by the design skill;

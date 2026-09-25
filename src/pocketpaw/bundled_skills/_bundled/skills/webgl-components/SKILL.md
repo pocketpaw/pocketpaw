@@ -6,6 +6,12 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 # WebGL Components
 
 <!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): constraint 2
+  rewritten. svelte and react sites declare `three` / `ogl` / `gsap` through
+  set_site_dependencies and import them client-side; get_effect returns an
+  effect's `needs` as `dependencies` there. Only a dynamic svelte site is still
+  dependency-free.
+
   Updated: 2026-09-06 (feat/fx-skill-amendments): constraint 2 no longer says
   libraries are impossible everywhere. It now sends the agent to the paw-fx
   registry first (search_effects / get_effect) and carves out the html engine,
@@ -27,11 +33,13 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 >    paints. Two cases prune the bundle and leave a `<canvas>` blank: a site that
 >    declared `keepsClientBundle: false`, and every **ripple** site, whose build
 >    deletes the emitted hydration bundle. There, ship the CSS fallback alone.
-> 2. **No npm imports on a Paw Site.** The generated `package.json` is
->    generator-owned and your source map supplies files only, so `three`, `ogl`,
->    `threlte` and `gsap` never resolve; only dependency-free effects (empty
->    `needs`) are served there (pass `needs_js=false` to `search_effects`), and
->    anything else is hand-written GLSL. See `pocketpaw-design-taste` §2.C, which
+> 2. **Libraries are declared packages.** On **svelte** and **react**, `three`,
+>    `ogl` or `gsap` go through `set_site_dependencies` (or the create's
+>    `dependencies`) and are imported inside `onMount` / a `useEffect` dynamic
+>    `import()`; a top-level import breaks the prerender. `get_effect` returns an
+>    effect's `needs` as `dependencies` to declare; on **html** it ships them
+>    vendored. A dynamic svelte site takes no packages: use `needs_js=false`
+>    effects or hand-written GLSL there. See `pocketpaw-design-taste` §2.C, which
 >    owns the canvas guardrail and stays authoritative on Paw Sites; this skill
 >    supplies the mechanics behind it.
 >

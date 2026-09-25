@@ -23,9 +23,13 @@
 # with ``_fx/`` and contain no ``..`` (registry is trusted, the check is cheap).
 #
 # Engines: ``get_effect`` accepts html|svelte|react. Only html has real shells
-# today; svelte/react return the same engine-neutral files with a note, and
-# REFUSE items with non-empty ``needs`` (only dependency-free effects work on
-# those engines in v1).
+# today; svelte/react return the same engine-neutral files with a note.
+# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — svelte and
+# react sites take npm packages now (set_site_dependencies), so an effect with
+# ``needs`` is no longer refused there: it comes back with a ``dependencies`` list
+# ready to declare and a note saying to import it client-side. Only a DYNAMIC
+# svelte site (optional ``pattern="dynamic"``) still refuses, with the same
+# ``engine_unsupported`` code set_site_dependencies returns.
 """Agent-side MCP surface for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -219,12 +223,21 @@ async def _get_handler(args: dict) -> dict:
         return _structured_error({"error": "unsafe_item_paths", "name": name, "paths": bad})
 
     needs = item.get("needs") or []
-    if engine != "html" and needs:
+    pattern = args.get("pattern")
+    if engine == "svelte" and pattern == "dynamic" and needs:
         return _structured_error(
-            {"error": "needs_unsupported_on_engine", "needs": needs, "engine": engine}
+            {"error": "engine_unsupported", "needs": needs, "engine": engine, "pattern": pattern}
         )
     item["engine"] = engine
-    if engine != "html":
+    if engine != "html" and needs:
+        item["dependencies"] = [{"name": n} for n in needs]
+        mount = "onMount" if engine == "svelte" else "a useEffect dynamic import()"
+        item["note"] = (
+            "Declare `dependencies` with set_site_dependencies before using this effect, "
+            f"import them inside {mount} (never at top level), and skip the _fx/vendor "
+            "copies. Files are engine-neutral."
+        )
+    elif engine != "html":
         item["note"] = "svelte/react shells not yet available; files are engine-neutral"
     return _success_response(item)
 
@@ -257,8 +270,7 @@ def build_fx_server() -> tuple[str, Any] | None:
             "then pass a filter), optional "
             "`category` (backgrounds|particles|3d-hero|scroll|text|cursor|transition|"
             "menu|gallery), "
-            "optional `needs_js` (false = only dependency-free effects, which is what "
-            "svelte and react sites can use), optional "
+            "optional `needs_js` (false = only dependency-free effects), optional "
             "`limit` (default 20). Returns {items:[{name, category, tags, summary, "
             "needs, license, preview_url}]}. Call get_effect with a `name` to fetch "
             "its files and snippet. Empty items means nothing matched; do not invent "
@@ -284,17 +296,18 @@ def build_fx_server() -> tuple[str, Any] | None:
             "Fetch one paw-fx effect by `name`: its files (write each `path` "
             "verbatim into the site, all live under `_fx/`), the HTML `snippet` "
             "to place, `usage` notes and `options`. Optional `engine` "
-            "(html|svelte|react, default html); svelte/react only accept "
-            "dependency-free effects (empty `needs`) for now and return "
-            "engine-neutral files with a `note`. Errors are structured: "
-            "{error:'unknown_effect', suggestions} or "
-            "{error:'needs_unsupported_on_engine', needs, engine}."
+            "(html|svelte|react, default html) and `pattern` (pass 'dynamic' for a "
+            "dynamic svelte site). On svelte/react an effect with `needs` returns "
+            "`dependencies` to declare via set_site_dependencies plus a `note`. "
+            "Errors are structured: {error:'unknown_effect', suggestions} or, on a "
+            "dynamic svelte site, {error:'engine_unsupported', needs}."
         ),
         {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "minLength": 1},
                 "engine": {"type": "string", "enum": list(ENGINES)},
+                "pattern": {"type": "string"},
             },
             "required": ["name"],
             "additionalProperties": False,

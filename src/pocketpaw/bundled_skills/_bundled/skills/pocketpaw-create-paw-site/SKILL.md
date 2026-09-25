@@ -25,6 +25,13 @@ description: |
 # Build a Paw Site — the marketing landing brain
 
 <!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): the raw-HTML
+  track can declare npm packages (`dependencies` / set_site_dependencies),
+  served through a generated importmap and imported by bare name in a module
+  script, and gains a "Verify loop" (only `verification.status == passed`
+  means ready; fix → verify_site, max 3 rounds; unverified said plainly). The
+  html edit section points at the same loop.
+
   Updated: 2026-09-06 (feat/fx-skill-amendments): added the "Sections from
   paw-fx" loop to the raw-HTML track (search_effects / list_effect_categories →
   get_effect → write `files` verbatim into `source`, place `snippet`, follow
@@ -81,9 +88,35 @@ It **must** include `index.html` (the edge serves it at the root); add
 stylesheets, scripts, and assets as sibling entries — every value is a
 content string. Publishing an html site skips the build step entirely, so
 the page must be complete on its own (inline or linked CSS/JS, real copy —
-never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket }`; hand
-`pocket_id` to `publish` exactly like the copy path (STEP 3). If `ok` is
-false, relay the error.
+never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket,
+verification }`; hand `pocket_id` to `publish` exactly like the copy path
+(STEP 3). If `ok` is false, relay the error.
+
+**npm packages on this track.** Pass `dependencies=[{"name": "gsap"}]` (or
+call `set_site_dependencies(pocket_id, add=[...])` later). Each is
+policy-checked, pinned, and served from jsDelivr with SRI through a generated
+importmap, so import it by bare name inside a module script:
+`<script type="module">import { gsap } from 'gsap';</script>`. A package in
+`rejected` must not be imported.
+
+### Verify loop — never call it ready unless it passed
+
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. On `timeout` the build is still running, so one more `verify_site` is
+  worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
 
 ### When a site needs more than one page
 
@@ -225,7 +258,8 @@ itself. The `action` and the hidden `paw_site_id` / `paw_key` / `paw_redirect`
 inputs are what make a submission arrive as a lead; a rewrite that drops them
 still renders and still submits, and every future enquiry goes nowhere.
 
-The edit is saved to the site's DRAFT — it is not published. Tell the user the
+The edit is saved to the site's DRAFT — it is not published. Its result
+carries `verification`, and the verify loop above applies. Tell the user the
 change is in the draft they can preview under /sites and offer to publish it;
 only call `publish` when they ask.
 
@@ -426,6 +460,8 @@ your copy is the only variable.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
   site; show the user the `url`. Call it only when the user asks to go live
   (draft-first — STEP 3); a plain "create a site" stops at the draft.
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` / `verify_site` —
+  declare npm packages on an html site; re-run its checks after a fix.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` / `list_effect_categories` —

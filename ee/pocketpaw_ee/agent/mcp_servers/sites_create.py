@@ -1,6 +1,13 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — tool
+# descriptions caught up with PP-1/PP-2: the "no way to add a dependency" /
+# "react + vite and NOTHING else" claims are gone, each source-engine create/edit
+# names ``set_site_dependencies`` (and where to import client-only packages), and
+# each appends ``VERIFY_CONTRACT`` so the agent calls a draft ready only on
+# ``verification.status == passed``. edit_svelte_component's ok=false text now
+# describes the rolled_back verdict and the staged browser-layer failure.
 # Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — every create_{svelte,react,
 # html}_site, edit_{svelte,react}_component, edit_html_file and set_site_dependencies
 # result carries ``verification`` (contract §5), computed by ``sites.verify`` under a
@@ -531,6 +538,17 @@ DEPENDENCY_REQUESTS_SCHEMA: dict[str, Any] = {
         "additionalProperties": False,
     },
 }
+
+
+#: PP-3 — appended to every source-engine create/edit description. The verdict is
+#: the agent's only evidence the draft works; "ready" on anything but ``passed``
+#: is the bug this whole pipeline exists to stop.
+VERIFY_CONTRACT = (
+    " VERIFY: the result carries `verification`. Tell the user the site is ready "
+    "ONLY when `verification.status` is `passed`. On `failed`, fix the "
+    "`verification.errors` (file/line) and call verify_site. On `unverified`, say "
+    "it could not be checked and give the `reason`."
+)
 
 
 def _manifest_keys(source: dict[str, Any]) -> list[str]:
@@ -1396,11 +1414,15 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
             "resting/final state in MARKUP — never set it only in onMount — "
             "because the page is PRERENDERED and onMount does not run at prerender "
             "time (a count-up initialized to 0 bakes '$0.00'; initialize it to the "
-            "final value). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
+            "final value). PACKAGES: declare npm packages in `dependencies` (or later "
+            "with set_site_dependencies; not on a dynamic site) and import client-only "
+            "ones (three, gsap, anything touching window) inside onMount, never at "
+            "top level. Returns {ok, pocket_id, pocket, verification}; hand "
+            "`pocket_id` to "
             "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
             "asks to go live (draft-first: a plain create stops at the draft for "
             "in-app preview). ok=false with an "
-            "error means relay the reason, do NOT report a created pocket."
+            "error means relay the reason, do NOT report a created pocket." + VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -1626,11 +1648,14 @@ def make_create_html_site_tool(tool: Any) -> Any:
             "STRING. Publishing an html site skips the Node build entirely: the raw "
             "files are served exactly as authored, so the page must be complete on "
             "its own (inline or linked CSS/JS, real copy — never 'TBD'/'Lorem "
-            "ipsum'). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
+            "ipsum'). PACKAGES: declare npm packages in `dependencies` (or later "
+            "with set_site_dependencies); the page gets a generated importmap, so "
+            'import them by bare name inside <script type="module">. Returns {ok, '
+            "pocket_id, pocket, verification}; hand `pocket_id` to "
             "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
             "asks to go live (draft-first: a plain create stops at the draft for "
             "in-app preview). ok=false with an "
-            "error means relay the reason, do NOT report a created pocket."
+            "error means relay the reason, do NOT report a created pocket." + VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -1887,9 +1912,11 @@ def make_create_react_site_tool(tool: Any) -> Any:
             "and a stylesheet App.tsx imports — every value is a content STRING. The "
             "build shell is GENERATED and reserved: the map may NOT write "
             "index.html, package.json, vite.config.ts, paw-prerender.mjs, or "
-            "anything under `src/paw/`. The project has react, react-dom and vite "
-            "and NOTHING else unless you declare a package in `dependencies` — no "
-            "router, no CSS framework; it is ONE page. CRITICAL "
+            "anything under `src/paw/`. The project provides react, react-dom and "
+            "vite; it is ONE page. Declare any other npm package in `dependencies` "
+            "(or later with set_site_dependencies) and load client-only ones (three, "
+            "gsap, anything touching window) with a dynamic import() inside "
+            "useEffect, never at top level. CRITICAL "
             "authoring rule: the page is PRERENDERED, so every component must render "
             "its resting/final state in its RETURNED MARKUP — useEffect does not run "
             "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
@@ -1900,12 +1927,12 @@ def make_create_react_site_tool(tool: Any) -> Any:
             "survives a deployment that turns the default off. Pass "
             "`interactive=false` for a purely static page (CSS-only hover/keyframe "
             "motion, anchors, a native form POST) to opt out of shipping a bundle it "
-            "never uses. Returns {ok, "
-            "pocket_id, pocket}; hand `pocket_id` to "
+            "never uses (never with packages). Returns {ok, "
+            "pocket_id, pocket, verification}; hand `pocket_id` to "
             "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
             "asks to go live (draft-first: a plain create stops at the draft for "
             "in-app preview). ok=false with an error means relay the reason, do NOT "
-            "report a created pocket."
+            "report a created pocket." + VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -2208,8 +2235,9 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "You may only write under `src/`. `package.json`, `vite.config.ts`, "
             "`svelte.config.js`, `src/lib/paw/`, `src/hooks.server.ts`, "
             "`src/lib/auth.ts` and `src/app.d.ts` are GENERATED and rejected — they "
-            "carry the dependency allowlist, the adapter/prerender configuration and "
-            "a gated site's session gate. There is no way to add a dependency.\n"
+            "carry the adapter/prerender configuration and a gated site's session "
+            "gate. To add an npm package call set_site_dependencies, then import it "
+            "(client-only libraries inside onMount).\n"
             "Other args: `pocket_id` (the svelte site pocket), `component_path` (the "
             "relative path of the file to write, e.g. "
             "'src/lib/components/Hero.svelte'), optional `create`, optional `name`. "
@@ -2217,20 +2245,24 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "authoring rule (same as create_svelte_site): the component must render "
             "its resting/final state in MARKUP — never set it only in onMount — "
             "because the page is PRERENDERED. Returns {ok, status:'draft', "
-            "is_live:false, site: {id, name, preview_url, deployed:false, "
-            "pocket_id}, component_path, created, unreferenced, message}. "
+            "is_live:false, site: {id, name, preview_url:null, deployed:false, "
+            "pocket_id}, component_path, created, unreferenced, verification, "
+            "message}. "
             "`unreferenced:true` means nothing in the site links to or imports the "
             "file you just created — visitors cannot reach it — so the follow-up "
             "call is still outstanding and you must NOT report the page or section "
             "as added yet. Relay the `message` to the user: "
-            "the change is a DRAFT PREVIEW (not live), `preview_url` is a PREVIEW "
-            "(not the published site), and to publish it the user clicks 'Submit for "
+            "the change is a DRAFT (not live), shown in the builder preview, and to "
+            "publish it the user clicks 'Submit for "
             "review'. Do NOT tell the user the change is published or live. ok=false "
-            "with an error means the edit was NOT staged: an `edits` old_string that "
-            "matched 0 or >1 times means make it more specific and retry, a "
-            "smoke-test failure leaves the previous version unchanged (fix the "
-            "component and retry), and a not-found / not-a-svelte-site error means "
-            "relay the reason. Do NOT report a successful edit when ok=false."
+            "means the edit was NOT staged: `status:'rolled_back'` means it failed "
+            "the static or build check and the previous version is unchanged (fix "
+            "`verification.errors` and send the edit again); an `edits` old_string "
+            "that matched 0 or >1 times means make it more specific and retry; a "
+            "not-found / not-a-svelte-site error means relay the reason. A "
+            "browser-layer failure (ok:true, verification failed) keeps the edit "
+            "staged: fix it with a follow-up edit. Do NOT report a successful edit "
+            "when ok=false." + VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -2529,14 +2561,15 @@ def make_edit_react_component_tool(tool: Any) -> Any:
             "You may only write under `src/` (outside `src/paw/`) and `public/`. "
             "`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` "
             "and `src/paw/` are GENERATED and rejected — they carry the prerender "
-            "contract and the dependency list, and there is no way to add a "
-            "dependency. PRERENDER RULE (same as create_react_site): every "
+            "contract. To add an npm package call set_site_dependencies, then load "
+            "client-only ones with a dynamic import() inside useEffect. "
+            "PRERENDER RULE (same as create_react_site): every "
             "component must render its resting/final state in its RETURNED MARKUP, "
             "because `useEffect` does not run at prerender time.\n"
             "Args: `pocket_id` (the react site pocket), `component_path`, and one "
             "of `edits` / `new_source`, plus optional `create`. Returns {ok, "
             "status:'draft', is_live:false, pocket_id, component_path, created, "
-            "unreferenced, message}. `unreferenced:true` means the file you just "
+            "unreferenced, verification, message}. `unreferenced:true` means the file you just "
             "created is imported by NOTHING — it is not in the bundle and the page "
             "is unchanged, so the second call is still outstanding and you must not "
             "report the section as added yet. Relay the `message`: the change is in "
@@ -2546,7 +2579,7 @@ def make_edit_react_component_tool(tool: Any) -> Any:
             "old_string that matched 0 or >1 times means make it more specific and "
             "retry; a reserved-path, wrong-engine, already-exists or not-found "
             "error means relay the reason. Do NOT report a successful edit when "
-            "ok=false."
+            "ok=false." + VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -2973,7 +3006,8 @@ def make_set_site_dependencies_tool(tool: Any) -> Any:
             "the ONLY way to change the site's dependencies: paw.dependencies.json "
             "cannot be written with the edit tools. Toolchain packages (svelte, "
             "react, vite, tailwindcss, ...) are provided already; do not declare "
-            "them. Returns {ok, packages, rejected, changed}; a refused package is "
+            "them. Not available on a dynamic (live-data) svelte site. Returns {ok, "
+            "packages, rejected, changed, verification}; a refused package is "
             "listed in `rejected` with the reason, and must not be imported."
         ),
         {
@@ -3204,7 +3238,9 @@ def make_edit_html_file_tool(tool: Any) -> Any:
             "`styles.css`, `about.html`, `img/logo.svg`. This is NOT like the react "
             "track: do NOT prefix paths with `src/`. The ONLY forbidden paths are "
             "the generated `_paw/` namespace and anything that climbs out of the "
-            "site with `..`.\n"
+            "site with `..`. To add an npm package call set_site_dependencies and "
+            'import it by bare name in <script type="module"> (the importmap is '
+            "generated).\n"
             "KEEP THE FORM PLUMBING. If the file contains a `<form>` posting to a "
             "`/capture/form` endpoint, leave its `action` and its hidden "
             "`paw_site_id` / `paw_key` / `paw_redirect` inputs EXACTLY as they are "
@@ -3214,7 +3250,7 @@ def make_edit_html_file_tool(tool: Any) -> Any:
             "Args: `pocket_id` (the html site pocket), `file_path`, and one of "
             "`edits` / `new_source`, plus optional `create`. Returns {ok, "
             "status:'draft', is_live:false, pocket_id, file_path, created, "
-            "unreferenced, message}. `unreferenced:true` means nothing in the site "
+            "unreferenced, verification, message}. `unreferenced:true` means nothing in the site "
             "links to the file you just created — no visitor can reach it — so the "
             "second call adding the link is still outstanding and you must not "
             "report the page as added yet. Relay the `message`: the change is in "
@@ -3224,7 +3260,7 @@ def make_edit_html_file_tool(tool: Any) -> Any:
             "old_string that matched 0 or >1 times means make it more specific and "
             "retry; a reserved-path, wrong-engine, already-exists or not-found "
             "error means relay the reason. Do NOT report a successful edit when "
-            "ok=false."
+            "ok=false." + VERIFY_CONTRACT
         ),
         {
             "type": "object",

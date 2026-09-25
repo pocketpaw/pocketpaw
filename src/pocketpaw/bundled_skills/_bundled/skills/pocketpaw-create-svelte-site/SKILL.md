@@ -27,6 +27,14 @@ description: |
 # Build a Paw Site — the Svelte-track authoring brain
 
 <!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): sites take npm
+  packages now. New "npm packages" subsection in STEP 2 (declare via
+  `dependencies` / set_site_dependencies, import client-only libraries inside
+  onMount, none on a dynamic site), a "Verify loop" section after STEP 3 (only
+  `verification.status == passed` means ready; fix → verify_site, max 3 rounds;
+  unverified said plainly; rolled-back vs staged svelte edits), and the edit
+  bullet / paw-fx entry no longer claim a dependency cannot be added.
+
   Updated: 2026-09-17 (docs/sites-multipage-skills): STEP 2 now teaches extra
   routes at CREATE time, not just in the edit lane — the two-key route recipe,
   a heuristic for when a brief warrants a second page, and the
@@ -339,6 +347,41 @@ behind it builds green, deploys, and 404s on the visitor's first click — nothi
 downstream catches it. Put every route in the same `source` map as the nav that
 links to it.
 
+### npm packages (when the design needs a library)
+
+The skeleton owns the toolchain (`svelte`, `@sveltejs/kit`, `vite`,
+`tailwindcss` and the rest), so never declare those. Any other npm package
+(`three`, `gsap`, `lenis`, `ogl`, a date library) you **declare**: pass
+`dependencies=[{"name": "three"}]` (optionally with a `"range"`) to
+`create_svelte_site`, or call `set_site_dependencies(pocket_id, add=[...],
+remove=[...])` on an existing site. Never write `package.json` or
+`paw.dependencies.json` yourself.
+
+Each package is checked (published at least 7 days ago, popular enough, no
+known advisory, no install scripts or native code, a size cap, at most 20 per
+site) and pinned to an exact version. A refused one comes back in `rejected`
+with its `reason`: don't import it; pick another or build without it.
+
+**Import client-only libraries inside `onMount`**, never at the top of
+`<script>`: the page is prerendered on the server, where `window` doesn't exist.
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+  let canvas;
+  onMount(async () => {
+    const THREE = await import('three');
+    // build the scene on `canvas`; the CSS fallback under it is the resting state
+  });
+</script>
+<canvas bind:this={canvas}></canvas>
+```
+
+A top-level `import * as THREE from 'three'` earns a `top_level_client_import`
+warning and usually fails the prerender build. Packages run because the site
+keeps its client bundle (the default). A **dynamic** svelte site takes no
+packages: they come back rejected with `engine_unsupported`.
+
 ## STEP 3 — Call `create_svelte_site`
 
 Hand the source map to the tool. It persists the pocket stamped
@@ -350,16 +393,42 @@ section). You don't pass `pattern`; the tool derives it from the bindings.
 
 ```
 mcp__pocketpaw_sites_manager__create_svelte_site(
-  source = <the source map from STEP 2>,
-  name   = "<the business name>"      // optional; defaults to "Svelte site"
+  source       = <the source map from STEP 2>,
+  name         = "<the business name>",  // optional; defaults to "Svelte site"
+  dependencies = [{"name": "three"}]     // optional; only what you import
 )
 ```
 
-It returns `{ ok, pocket_id, pocket }`. Keep `pocket_id` for STEP 4. If
+It returns `{ ok, pocket_id, pocket, verification }` (plus `packages` /
+`rejected` when you declared any). Keep `pocket_id` for STEP 4, and run the
+verify loop below before you say anything is ready. If
 `ok` is false, **relay the error** — do **not** claim a phantom create and
 do **not** fall back to drafting a rippleSpec. The tool fails closed when
 the map is missing a required §4.3 file and names which one; add it and
 retry.
+
+## Verify loop — never call it ready unless it passed
+
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. On `timeout` the build is still running, so one more `verify_site` is
+  worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
+- **After `edit_svelte_component`**: a static or build failure is rolled
+  back (`ok: false`, `status: "rolled_back"`, the previous file untouched), so
+  fix the errors and send the edit again. A browser-layer failure keeps the
+  edit staged: fix it with a follow-up edit, then `verify_site`.
 
 ## STEP 4 — Stop at the draft (publish only when asked)
 
@@ -370,8 +439,8 @@ site the user can preview in-app right now (open **/sites** → the site's
 tier, can open a checkout), so taking it live is the user's call, not an
 automatic next step.
 
-So **do NOT call `publish` by default.** Instead, tell the user the draft is
-ready, point them at the Preview, and offer to take it live — e.g. *"Your
+So **do NOT call `publish` by default.** Instead, once `verification.status`
+is `passed`, tell the user the draft is ready, point them at the Preview, and offer to take it live — e.g. *"Your
 site is ready as a draft. Preview it under /sites, and say
 **publish** (or 'make it live') when you're happy with it."* Then stop. Keep
 iterating on the draft if they want changes; an edit is a draft too.
@@ -419,8 +488,11 @@ mcp__pocketpaw_sites_manager__edit_svelte_component(
   `unreferenced: true`, and you must not report the page as added until you
   have cleared it.
 - The generator-owned paths stay refused — `package.json`, `vite.config.ts`,
-  `svelte.config.js`, `src/lib/paw/` and the auth files — so an edit **cannot**
-  add a dependency, and everything you write lives under `src/`.
+  `svelte.config.js`, `src/lib/paw/` and the auth files — and everything you
+  write lives under `src/`. To add a package, call `set_site_dependencies`
+  first, then import it inside `onMount`.
+- Every edit returns `verification`; the verify loop above applies, including
+  the rolled-back vs staged split.
 - Every rule in this skill still binds — above all the **prerender rule**: an
   edit that moves a resting value into `onMount` ships a blank section.
 - **The edit stages a DRAFT preview**; it does not publish. Say what changed
@@ -611,6 +683,8 @@ D1 + wires the read/write layer. Done.
    user got a pointer to the in-app Preview under /sites and an offer to
    publish — not an auto-publish. If they explicitly asked to go live, they got
    the `url` from publish. Errors were relayed, never masked.
+7. **`verification.status` was `passed`** before you called it ready, or you
+   told the user which errors remain, or that it could not be checked and why.
 
 ## Related tools (via MCP)
 
@@ -619,12 +693,16 @@ D1 + wires the read/write layer. Done.
   `type="site"` + `engine="svelte"`, and `pattern="landing"` (static) or
   `pattern="dynamic"` (when `source` carries `objects`/`sources`/`actions`/
   `auth` bindings — see [Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)).
-  Returns `{ok, pocket_id, pocket}`.
+  Returns `{ok, pocket_id, pocket, verification}`.
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm
+  packages on an existing site; returns `packages`, `rejected`, `verification`.
+- `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
   site; show the user the `url`. Call it only when the user asks to go live
   (draft-first — STEP 4); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
-  On this engine only dependency-free effects (empty `needs`) are served; pass
-  `needs_js=false` to `search_effects`.
+  Pass `engine="svelte"`: an effect with `needs` comes back with
+  `dependencies` to declare via `set_site_dependencies`, imported in `onMount`.
+  On a dynamic site pass `pattern="dynamic"` and `needs_js=false`.

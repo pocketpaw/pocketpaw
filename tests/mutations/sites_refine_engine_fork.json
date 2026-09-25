@@ -83,7 +83,7 @@
   {
     "label": "the svelte branch calls its staged draft a publish — the agent tells the user a change is live that nothing has built",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"THE EDIT IS A DRAFT PREVIEW, NOT A DEPLOY. The tool returns \"",
+    "find": "            \"THE EDIT IS A DRAFT, NOT A DEPLOY. The tool returns \"",
     "replace": "            \"THE EDIT REPUBLISHES THE SITE. The tool returns \"",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft"

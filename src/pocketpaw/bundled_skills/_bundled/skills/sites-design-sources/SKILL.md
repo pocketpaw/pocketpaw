@@ -9,10 +9,15 @@ description: |
   grain) and you want to build it WELL rather than reach for the first shape that
   comes to mind. Also the way out of the overused-font trap in
   `pocketpaw-design-taste` 2.F. Everything listed here is TEXT you author into the
-  source map: CSS, inline SVG, or a GLSL string. Nothing here is installed and
-  nothing here is downloaded, because this surface has neither a package manager
-  nor a filesystem.
+  source map: CSS, inline SVG, or a GLSL string. Nothing here is downloaded,
+  because this surface has no filesystem; npm packages are a separate, declared
+  path (set_site_dependencies).
 ---
+
+<!-- Updated 2026-09-24 (docs/sites-packages-and-verify-guidance): fact 1 no
+     longer says there is no package manager. svelte, react and html sites
+     declare npm packages through set_site_dependencies; what stays out is
+     anything that installs files into the project (shadcn registry, kits). -->
 
 # Design sources for a Paw Site
 
@@ -21,10 +26,12 @@ description: |
 Three facts decide whether a source is usable here, and together they rule out
 most of the web's design catalogue:
 
-1.  **No package manager.** `package.json` is generator-owned and your source map
-    supplies FILES ONLY, so `npm i` is not a step you have. Every component
-    library, every animation runtime (`motion`, `gsap`, `lenis`), every icon
-    package and every shadcn registry entry is out, however good it is.
+1.  **Packages are declared, not installed by you.** svelte, react and html
+    sites take npm packages through `set_site_dependencies` (policy-checked,
+    pinned, imported client-side), so a runtime like `gsap`, `lenis` or `three`
+    is there when it earns its weight. `npm i` is still not a step you have, and
+    anything that installs FILES into the project (shadcn registry entries,
+    copy-in component kits) is out, however good it is.
 2.  **No filesystem and no binary ingest.** Your belt is `create_*`, `edit_*`,
     `read_site_source`, `list_site_assets`, `publish`, plus image and video
     generation. There is no download tool and no upload-from-URL, so a WOFF2

@@ -22,6 +22,15 @@ description: |
 
 # Edit a Paw Site — the React-track edit brain
 
+<!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What you
+  cannot change" no longer says a dependency cannot be added; packages go
+  through set_site_dependencies and load client-side in useEffect. "Reading
+  the response" gains `verification` and a "Verify loop" section (only
+  `passed` means ready; fix → verify_site, max 3 rounds; unverified said
+  plainly). Quality bar and paw-fx entry follow.
+-->
+
 The user has a **react-track Paw Site** and wants it **changed**. This skill is
 the sibling of `pocketpaw-create-react-site`: same engine, same prerender
 contract, same quality bar — but the page already exists, so the unit of work
@@ -197,17 +206,23 @@ under `src/` or `public/`. So `./package.json` and `src/paw/../paw/thing.tsx` ar
 refused too — a relative dodge is not a way around the reservation, it is just a
 rejected call.
 
-**So you cannot add a dependency.** The manifest is allowlisted and owned by
-the generator; there is no call that installs a package. The project has
-**react**, **react-dom**, **vite** and **@vitejs/plugin-react**, and that is
-all — no router, no CSS framework, no state library, no animation library.
+**Packages are declared, never edited in.** `package.json` and
+`paw.dependencies.json` are generator-owned. The project starts with
+**react**, **react-dom**, **vite** and **@vitejs/plugin-react**; to add a
+library, call `set_site_dependencies(pocket_id, add=[{"name": "gsap"}])`
+(`remove=[...]` drops one), then import it: client-only libraries inside
+`useEffect` with a dynamic `import()`, never at the top of a module.
 
-When a request needs a library that is not there, you have two honest answers:
-implement it in **plain React and plain CSS** (which covers the large majority
-of real asks — carousels, accordions, reveals, sticky nav, marquees), or tell
-the user it is not available on this track. **Never claim you added a
-package.** The site is also **one page**; there is no router, so "add an About
-page" is a new section on the same page or a different conversation.
+Each package is checked (published at least 7 days ago, popular enough, no
+known advisory, no install scripts or native code, a size cap, at most 20 per
+site) and pinned to an exact version. A refused one comes back in `rejected`
+with its `reason`: don't import it; pick another or build without it.
+
+Plain React and plain CSS still cover most asks (carousels, accordions,
+reveals, sticky nav, marquees), so add a package only when it earns its weight.
+**Never claim you added a package that came back in `rejected`.** The site is
+also **one page**; there is no router, so "add an About page" is a new section
+on the same page or a different conversation.
 
 ## ⚠️ THE PRERENDER AUTHORING RULE — an edit is the easiest place to break it
 
@@ -372,7 +387,8 @@ publish.
 ## Reading the response
 
 A success is `{ok, status:"draft", is_live:false, pocket_id, component_path,
-created, message}` — no `site` object and no url, because nothing was built.
+created, unreferenced, verification, message}`: no `site` object and no url,
+because nothing was published.
 
 - **`ok: true`** — the draft is updated. Give a **one-line** summary of what
   changed, and be concrete, because the user cannot see it until a build runs.
@@ -388,6 +404,25 @@ created, message}` — no `site` object and no url, because nothing was built.
 
 Never fall back to another engine's tool, and never fall back to
 `create_react_site`, after a failed edit.
+
+## Verify loop — never call it ready unless it passed
+
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. On `timeout` the build is still running, so one more `verify_site` is
+  worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
 
 ## When NOT to use this skill
 
@@ -415,7 +450,9 @@ Never fall back to another engine's tool, and never fall back to
 - With **all JavaScript disabled**, the edited section still looks finished.
 - A new section was **both** written and rendered from `src/App.tsx` — and the
   last `create` did not come back `unreferenced: true`.
-- No claim was made about a package being added, or about the change being live.
+- No package was claimed that came back `rejected`, and nothing was called live.
+- `verification.status` was `passed` before you called the change ready, or you
+  told the user which errors remain, or that it could not be checked and why.
 - The user was told it is a draft, and was not invited to go and look at a
   rendered page that does not exist until a build runs.
 
@@ -425,6 +462,8 @@ Never fall back to another engine's tool, and never fall back to
 - `mcp__pocketpaw_sites_manager__read_site_source` — read the current `source`,
   `engine` and `keeps_client_bundle` (STEP 1). The /sites counterpart of
   `get_pocket`, which is NOT on this surface's allow-list
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm packages
+- `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_sites_manager__edit_svelte_component` — the svelte-track sibling
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
@@ -432,6 +471,6 @@ Never fall back to another engine's tool, and never fall back to
 - `mcp__pocketpaw_site_media__generate_site_image` — imagery stock cannot supply
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
-  On this engine only dependency-free effects (empty `needs`) are served; pass
-  `needs_js=false` to `search_effects`.
+  Pass `engine="react"`: an effect with `needs` comes back with `dependencies`
+  to declare via `set_site_dependencies`, loaded in `useEffect`.
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour

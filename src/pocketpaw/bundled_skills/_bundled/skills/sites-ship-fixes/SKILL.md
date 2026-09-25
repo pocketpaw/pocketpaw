@@ -16,10 +16,12 @@ description: |
 <!-- New file 2026-09-08: adapted from blackbrainpy/designs-by-kore (its "Ship-it
      checklist - recurring first-draft fixes" plus the reduced-motion/cleanup items of
      its quality bar) into a Paw Sites defect catalogue. Its GSAP / Lenis / ScrollTrigger
-     / React-Three-Fiber library patterns are deliberately NOT ported: Paw Sites prerender
-     with the client bundle pruned unless keepsClientBundle is set, so those libraries do
-     not run. Every fix here is expressible in CSS and survives with JS disabled.
-     See VENDORED.md. -->
+     / React-Three-Fiber library patterns are deliberately NOT ported: Paw Sites prerender,
+     and a defect fix that needs JS is one that fails with JS off. Every fix here is
+     expressible in CSS and survives with JS disabled. See VENDORED.md.
+     Updated 2026-09-24 (docs/sites-packages-and-verify-guidance): those libraries CAN
+     now be declared as packages (set_site_dependencies) on svelte/react/html; they
+     enhance a page, they don't fix one, so the catalogue stays CSS-only. -->
 
 # Sites: ship fixes
 

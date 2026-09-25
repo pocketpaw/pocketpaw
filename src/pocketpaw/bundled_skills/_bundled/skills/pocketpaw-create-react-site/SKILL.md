@@ -25,6 +25,16 @@ description: |
 
 # Build a Paw Site — the React-track authoring brain
 
+<!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What the
+  project has" now teaches declaring npm packages (`dependencies` /
+  set_site_dependencies) and loading client-only ones via a dynamic import()
+  in useEffect; a "Verify loop" section follows STEP 3 (only
+  `verification.status == passed` means ready; fix → verify_site, max 3
+  rounds; unverified said plainly). The edit bullet and paw-fx entry no longer
+  claim a dependency cannot be added.
+-->
+
 You're building a **Paw Site** on the **React track**: a real, standalone
 marketing website that you **author as hand-written React components** and that
 gets **prerendered to static HTML at build time** and deployed to the edge.
@@ -247,16 +257,41 @@ page.
 Do **not** wire an `onSubmit` handler that fetches. A static page should capture
 the lead whether or not JavaScript ran, and this is a plain native browser POST.
 
-### What the project has (and what it does not)
+### What the project has, and how to add a package
 
 The generator writes a deliberately tiny project: **react**, **react-dom**,
-**vite**, and **@vitejs/plugin-react**. That is all.
+**vite**, and **@vitejs/plugin-react**. Those are generator-owned, so never
+declare them. There is **no router**: the site is **one page**, and
+multi-route React is not supported on this track.
 
-There is **no router**, **no CSS framework**, **no state library**, **no
-animation library** installed, and you cannot add dependencies — the package
-manifest is generator-owned and dependency-allowlisted. Write plain components
-and plain CSS. The site is **one page**; multi-route React is not supported on
-this track.
+Anything else (an animation library like `gsap` or `motion`, `lenis`,
+`three`, a small utility) you **declare**: pass `dependencies=[{"name":
+"gsap"}]` to `create_react_site`, or call `set_site_dependencies(pocket_id,
+add=[...], remove=[...])` on an existing site. Reach for one when it earns its
+weight; plain components and plain CSS still cover most asks.
+
+Each package is checked (published at least 7 days ago, popular enough, no
+known advisory, no install scripts or native code, a size cap, at most 20 per
+site) and pinned to an exact version. A refused one comes back in `rejected`
+with its `reason`: don't import it; pick another or build without it.
+
+**Load client-only libraries inside `useEffect` with a dynamic `import()`**,
+never at the top of a module: the page is prerendered, where `window` doesn't
+exist.
+
+```tsx
+useEffect(() => {
+  let cancelled = false;
+  import('gsap').then(({ gsap }) => {
+    if (!cancelled) gsap.from('.hero h1', { y: 24, opacity: 0 });
+  });
+  return () => { cancelled = true; };
+}, []);
+```
+
+A top-level import earns a `top_level_client_import` warning and usually
+breaks the prerender. Packages need the client bundle, so never pass
+`interactive=false` alongside `dependencies`.
 
 ## STEP 2 — Assemble the `source` map
 
@@ -282,7 +317,8 @@ create:
 
 ```
 index.html                   the HTML template (carries the prerender outlet)
-package.json                 the dependency manifest (allowlisted)
+package.json                 the manifest (toolchain + your declared packages)
+paw.dependencies.json        written only by `dependencies` / set_site_dependencies
 vite.config.ts               the build config
 paw-prerender.mjs            the prerender pass
 src/paw/**                   the generated client + server entries
@@ -317,11 +353,12 @@ with no rippleSpec and no specialist.
 
 ```
 mcp__pocketpaw_sites_manager__create_react_site(
-  source      = <the source map from STEP 2>,
-  name        = "<the business name>",   // optional; defaults to "React site"
-  interactive = true                     // declare it: true when any component
+  source       = <the source map from STEP 2>,
+  name         = "<the business name>",  // optional; defaults to "React site"
+  interactive  = true,                   // declare it: true when any component
                                          // needs the browser, false to opt a
                                          // purely static page out of the bundle
+  dependencies = [{"name": "gsap"}]      // optional; only what you import
 )
 ```
 
@@ -330,10 +367,31 @@ interactivity flag section above. Set it to `true` when any component has client
 behaviour; leave it off for a purely static page. Getting it wrong is silent:
 the site builds, deploys and looks right, and the menu just never opens.
 
-It returns `{ ok, pocket_id, pocket }`. Keep `pocket_id` for STEP 4. If `ok` is
+It returns `{ ok, pocket_id, pocket, verification }` (plus `packages` /
+`rejected` when you declared any). Keep `pocket_id` for STEP 4, and run the
+verify loop below before you say anything is ready. If `ok` is
 false, **relay the error** — do **not** claim a phantom create and do **not**
 fall back to another engine. The tool fails closed when the map is missing
 `src/App.tsx` or writes a reserved path, and names which one; fix it and retry.
+
+## Verify loop — never call it ready unless it passed
+
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. On `timeout` the build is still running, so one more `verify_site` is
+  worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
 
 ## STEP 4 — Stop at the draft (publish only when asked)
 
@@ -414,8 +472,9 @@ mcp__pocketpaw_sites_manager__edit_react_component(
   `src/components/Testimonials.tsx`, then a second call with `edits` on
   `src/App.tsx` to import and render it. Stop after the first and you have
   shipped a component nothing renders.
-- The generator-owned paths above stay refused, so an edit **cannot** add a
-  dependency.
+- The generator-owned paths above stay refused. To add a package, call
+  `set_site_dependencies` first, then import it inside `useEffect`.
+- Every edit returns `verification`; the verify loop above applies.
 - Every rule in this skill still binds — above all the **prerender rule**: an
   edit that swaps a static value for a `useState(0)` + count-up effect bakes
   "0" into the shipped HTML.
@@ -439,6 +498,10 @@ surface loads only the skill you are reading.
 - If the page carries a lead form, it posts to
   `__CAPTURE_API_BASE__/capture/form` with its three hidden inputs and the four
   fixed field names.
+- Every declared package came back in `packages`, not `rejected`, and is
+  imported client-side.
+- `verification.status` was `passed` before you called it ready, or you told the
+  user which errors remain, or that it could not be checked and why.
 - The run stopped at the draft, unless publishing was explicitly asked for.
 
 ## Related tools (via MCP)
@@ -447,11 +510,13 @@ surface loads only the skill you are reading.
 - `mcp__pocketpaw_sites_manager__edit_react_component` — CHANGE a component of an
   existing react site (STEP 4). The tool for every follow-up edit; never
   re-create.
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm packages
+- `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
-  On this engine only dependency-free effects (empty `needs`) are served; pass
-  `needs_js=false` to `search_effects`.
+  Pass `engine="react"`: an effect with `needs` comes back with `dependencies`
+  to declare via `set_site_dependencies`, loaded in `useEffect`.
