@@ -1851,7 +1851,8 @@ class ConciergeKnowledgeResponse(BaseModel):
     ``status`` is "" for a clean sync; otherwise a stable machine code the dashboard
     can turn into a sentence. Every lane: ``never_synced`` (nothing has run yet),
     ``no_content`` (nothing ingestable was found), ``ingest_failed``,
-    ``pocket_unavailable`` or ``sync_failed``.
+    ``kb_unavailable`` (the server's kb engine is missing or too old — an operator
+    fix, never the owner's), ``pocket_unavailable`` or ``sync_failed``.
 
     A FOREIGN site — a concierge embedded on a page we do not host — is grounded by
     crawling its own verified origin, so it adds the codes that crawl can end on,

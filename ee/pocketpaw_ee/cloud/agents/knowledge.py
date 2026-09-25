@@ -1,4 +1,11 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-09-25 (sites kb engine) — KnowledgeEngineUnavailable, a
+#   RuntimeError subclass raised when the kb ENGINE is the problem rather than
+#   the document: the binary is missing, or it predates `ingest --article-json`
+#   (unknown flag, or a receipt with no compiled_with). Callers that loop over
+#   many documents (the site page sync) catch it to stop at the first page
+#   instead of paying a compile and writing a verbatim article for every one.
+#   Existing `except RuntimeError` callers are unaffected.
 # Updated: 2026-08-04 (living-wiki review follow-up) — Added
 #   extract_ingest_article_id(): kb-go's finishIngest receipt keys the new
 #   article as "article" (not "id"), so callers that read result["id"] never
@@ -158,6 +165,12 @@ def _resolve_kb_bin() -> str:
 KB_BIN = _resolve_kb_bin()
 
 
+class KnowledgeEngineUnavailable(RuntimeError):
+    """The kb binary cannot do the job at all: missing, or too old for the
+    ingest contract this module speaks. Retrying another document cannot help,
+    so a batch caller should stop rather than fail once per document."""
+
+
 def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict | list | str:
     """Call kb binary, return parsed JSON or raw text."""
     cmd = [KB_BIN, *args, "--json"]
@@ -172,7 +185,7 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
             timeout=timeout,
         )
     except FileNotFoundError:
-        raise RuntimeError(
+        raise KnowledgeEngineUnavailable(
             f"kb binary not found at {KB_BIN!r}. "
             "Install: go install github.com/qbtrix/kb-go@latest, "
             "or set POCKETPAW_KB_BIN to the binary path (e.g. /path/to/kb-go/kb), "
@@ -241,7 +254,7 @@ def _check_ingest_result(
             article_id,
             scope,
         )
-        raise RuntimeError(
+        raise KnowledgeEngineUnavailable(
             f"kb binary does not support `ingest --article-json` — it silently ignored "
             f"the flag and stored the payload verbatim (scope={scope}, "
             f"article_id={article_id}). Deploy the paired kb-go build (binary: {KB_BIN}) "
@@ -464,7 +477,7 @@ class KnowledgeService:
             # ``compiled_with`` key below (require_compiled_with).
             msg = str(exc)
             if "unknown flag" in msg or "flag provided but not defined" in msg:
-                raise RuntimeError(
+                raise KnowledgeEngineUnavailable(
                     "kb binary does not support `ingest --article-json` — it predates "
                     "the pre-compiled-article contract. Deploy the paired kb-go build "
                     f"(binary: {KB_BIN}). Original error: {msg}"

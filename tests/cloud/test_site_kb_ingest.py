@@ -443,3 +443,94 @@ async def test_a_failed_ingest_never_purges_the_existing_knowledge(monkeypatch):
 
     assert removed == []  # nothing deleted
     assert site.kb_article_ids == ["site-home", "site-about", "site-pricing"]  # all kept
+
+
+# --------------------------------------------------------------------------- #
+# The kb engine itself is missing or outdated
+# --------------------------------------------------------------------------- #
+
+_THREE_PAGES = {
+    "engine": "html",
+    "source": {
+        "index.html": f"<p>{_long('We open at 8am.')}</p>",
+        "about.html": f"<p>{_long('Baking since 1998.')}</p>",
+        "menu.html": f"<p>{_long('Sourdough, rye and seeded loaves.')}</p>",
+    },
+}
+
+
+def _patch_real_ingest(monkeypatch, kb_result):
+    """Run the REAL ingest_text_to_scope down the no-API-key lane, faking only the
+    agent compile and the kb subprocess. Returns the call counters."""
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    calls = {"compile": 0, "kb": 0}
+
+    async def _compile(text, source, lang=None):
+        calls["compile"] += 1
+        return {"title": source, "summary": "s", "content": text, "concepts": [], "tags": []}
+
+    def _kb(*args, input_text=None, timeout=120):
+        calls["kb"] += 1
+        if isinstance(kb_result, BaseException):
+            raise kb_result
+        return kb_result
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(knowledge, "_compile_article_with_agent", _compile)
+    monkeypatch.setattr(knowledge, "_kb", _kb)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_an_outdated_kb_binary_stops_the_sync_and_names_the_engine(monkeypatch):
+    """A kb-go build older than `ingest --article-json` ignores the flag, stores
+    the payload verbatim and answers without `compiled_with`. Every page then
+    failed on its own: one paid agent compile, one junk article and one warning
+    PER PAGE, ending in an `ingest_failed` that blamed the save. The first such
+    answer must stop the sync and report the engine, not the site."""
+    old_binary_receipt = {"article": "manual", "title": "manual", "words": 8}
+    calls = _patch_real_ingest(monkeypatch, old_binary_receipt)
+    _patch_pocket(monkeypatch, _THREE_PAGES)
+    site = _FakeSite(kb_article_ids=["site-home"])
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert report.error == "kb_unavailable"
+    assert site.kb_sync_error == "kb_unavailable"
+    assert calls["kb"] == 1  # stopped at the first page
+    assert calls["compile"] == 1  # no further paid compiles
+    assert site.kb_article_ids == ["site-home"]  # nothing pruned
+
+
+@pytest.mark.asyncio
+async def test_a_missing_kb_binary_reports_the_engine(monkeypatch):
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    monkeypatch.setattr(knowledge, "KB_BIN", "Z:/definitely/not/here/kb-go-missing")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    async def _compile(text, source, lang=None):
+        return {"title": source, "summary": "s", "content": text, "concepts": [], "tags": []}
+
+    monkeypatch.setattr(knowledge, "_compile_article_with_agent", _compile)
+    _patch_pocket(monkeypatch, _THREE_PAGES)
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert report.error == "kb_unavailable"
+    assert report.ingested == 0
+
+
+@pytest.mark.asyncio
+async def test_a_per_page_kb_error_still_skips_only_that_page(monkeypatch):
+    """An ordinary kb failure is still per page: the engine works, one page broke."""
+    calls = _patch_real_ingest(monkeypatch, RuntimeError("kb failed: bad utf-8"))
+    _patch_pocket(monkeypatch, _THREE_PAGES)
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert calls["kb"] == 3
+    assert report.error == "ingest_failed"
