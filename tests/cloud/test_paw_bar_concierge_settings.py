@@ -23,6 +23,12 @@
 #   a member is refused on both the PATCH and the GET with nothing written, and a
 #   widget DELETE shows the same split even when the caller holds the per-widget
 #   owner token.
+# Updated 2026-09-26 (feat/pawbar-admin-widget-spec-route): a seventh layer covers
+#   PATCH /paw-bar/admin/site/{id}/widget/spec, the session-authed save for the
+#   owner's Catalog & Actions editor (no X-Paw-Bar-Token, revision archived, 404
+#   cross-tenant / no widget, 422 invalid spec, 403 for a member), and the
+#   ``embed_snippet`` the settings GET/PATCH now return: the publish-time snippet,
+#   built on PAW_CAPTURE_API_BASE rather than the request host.
 
 from __future__ import annotations
 
@@ -689,3 +695,201 @@ async def test_transcript_retention_is_independent_of_the_kill_switch(client):
         json={"concierge_enabled": False},
     )
     assert res2.json()["concierge_store_transcripts"] is False  # still off, not reset
+
+
+# --------------------------------------------------------------------------- #
+# Layer 7 — the owner saves the widget spec, and reads the embed snippet
+# (feat/pawbar-admin-widget-spec-route)
+#
+# The dashboard's Catalog & Actions editor had no route it could save through:
+# PATCH /paw-bar/widgets/{id} wants an X-Paw-Bar-Token the dashboard never holds
+# and has no ``spec`` field. And the settings response carried no snippet, so
+# the owner had nothing authoritative to copy. Both are pinned here.
+# --------------------------------------------------------------------------- #
+
+# A public base that is NOT the test client's host (http://t), so a snippet
+# built from the request's own URL cannot pass the equality checks below.
+_PUBLIC_BASE = "https://api.paw.example/api/v1"
+
+
+@pytest_asyncio.fixture
+async def owner_client(tmp_path, mongo_db, monkeypatch):
+    """An ADMIN client whose paw_bar store backs BOTH the router and
+    ``agent_provisioning`` (the widget lookup ``embed.concierge_snippet`` runs).
+    Patching only the router would leave the snippet lookup on the real store,
+    where it finds nothing and every snippet reads "". Yields ``(client, store)``."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("PAW_CAPTURE_API_BASE", _PUBLIC_BASE)
+    app = _build_app(role="admin")
+    store = PawBarStore(tmp_path / "owner.db")
+    with (
+        patch("pocketpaw_ee.paw_bar.router._store", return_value=store),
+        patch("pocketpaw_ee.paw_bar.agent_provisioning._store", return_value=store),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            yield c, store
+
+
+def _new_spec_body(widget_id: str) -> dict[str, Any]:
+    return {
+        "spec": {
+            "widget_id": widget_id,
+            "pocket_id": "pocket-1",
+            "blocks": [{"type": "text", "content": "Now serving cold brew"}],
+            "catalog": [{"id": "cold-brew", "name": "Cold brew", "price_cents": 450}],
+            "checkout_url": "https://brewco.com/checkout",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_needs_no_widget_token_and_archives(owner_client):
+    """THE REPORTED BUG. The owner saves the catalog with only their session (no
+    X-Paw-Bar-Token) and the write goes through the same archiving path as the
+    token-gated route: the old spec becomes revision 1, so it can be rolled back."""
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body(widget.id)
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert set(body) == {"id", "spec"}
+    assert body["id"] == widget.id
+    assert body["spec"]["catalog"][0]["id"] == "cold-brew"
+    assert body["spec"]["checkout_url"] == "https://brewco.com/checkout"
+
+    stored = await store.get_widget(widget.id)
+    assert stored.spec.catalog[0].name == "Cold brew"
+    revision = await store.latest_spec_revision(widget.id)
+    assert revision is not None
+    number, archived = revision
+    assert number == 1
+    assert archived == _spec()  # the PRIOR spec, not the new one
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_cross_tenant_is_404(owner_client):
+    """A site in another workspace 404s, and its widget is not written."""
+    c, store = owner_client
+    site = await _site(workspace="ws-2")
+    widget = await store.create_widget(_widget(workspace_id="ws-2"))
+
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body(widget.id)
+    )
+    assert res.status_code == 404, res.text
+    assert await store.latest_spec_revision(widget.id) is None
+    assert (await store.get_widget(widget.id)).spec == _spec()
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_without_a_widget_is_404(owner_client):
+    c, _store = owner_client
+    site = await _site()
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body("x"))
+    assert res.status_code == 404, res.text
+    assert "no_concierge_widget" in res.text
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_rejects_an_invalid_spec(owner_client):
+    """The same PawBarSpec validation the token route applies: duplicate action
+    verbs are a 422, and nothing is written."""
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    body = _new_spec_body(widget.id)
+    action = {"verb": "book_table", "label": "Book", "policy": "gated"}
+    body["spec"]["actions"] = [action, dict(action)]
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body)
+    assert res.status_code == 422, res.text
+    assert await store.latest_spec_revision(widget.id) is None
+
+
+@pytest.mark.asyncio
+async def test_member_role_cannot_save_the_widget_spec(member_client, mongo_db):
+    """A MEMBER lacks paw_bar.manage: 403, and the spec is untouched."""
+    c, store = member_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body(widget.id)
+    )
+    assert res.status_code == 403, res.text
+    assert "workspace.insufficient_role" in res.text
+    assert await store.latest_spec_revision(widget.id) is None
+
+
+@pytest.mark.asyncio
+async def test_token_spec_route_still_demands_the_token(owner_client):
+    """The legacy token-gated route is unchanged: no token, no write; with it,
+    the same archiving write the admin route now shares."""
+    c, store = owner_client
+    widget = await store.create_widget(_widget())
+    spec = _new_spec_body(widget.id)["spec"]
+    res = await c.patch(f"/paw-bar/widgets/{widget.id}/spec", json=spec)
+    assert res.status_code == 401, res.text
+    assert await store.latest_spec_revision(widget.id) is None
+
+    ok = await c.patch(
+        f"/paw-bar/widgets/{widget.id}/spec",
+        json=spec,
+        headers={"X-Paw-Bar-Token": widget.access_token},
+    )
+    assert ok.status_code == 200, ok.text
+    assert (await store.latest_spec_revision(widget.id))[0] == 1
+
+
+def _expected_snippet(widget_id: str) -> str:
+    from pocketpaw_ee.paw_bar.embed import build_embed_snippet
+
+    return build_embed_snippet(api_base=_PUBLIC_BASE, site_key=_VALID_KEY, widget_id=widget_id)
+
+
+@pytest.mark.asyncio
+async def test_settings_get_returns_the_publish_time_snippet(owner_client):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    snippet = res.json()["embed_snippet"]
+    assert snippet == _expected_snippet(widget.id)
+    assert "http://t/" not in snippet  # never the dashboard request's own host
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_returns_the_snippet(owner_client):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_greeting": "Hey"}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == _expected_snippet(widget.id)
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_without_a_widget(owner_client):
+    c, _store = owner_client
+    site = await _site()
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_without_a_site_key(owner_client):
+    c, store = owner_client
+    site = await _site(signed_key="")
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
