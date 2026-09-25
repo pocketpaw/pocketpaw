@@ -1,4 +1,12 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-26 (feat/pawbar-admin-widget-spec-route) — the owner can save
+#   the concierge's Catalog & Actions again, and gets a snippet that works. New
+#   PATCH /paw-bar/admin/site/{site_id}/widget/spec takes {spec} behind
+#   ``paw_bar.manage`` with the widget resolved from the site (no X-Paw-Bar-Token,
+#   which the dashboard never holds) and writes through ``_save_widget_spec``, the
+#   archiving write ``update_spec`` now shares. The settings GET/PATCH gained
+#   ``embed_snippet``: ``embed.concierge_snippet`` on PAW_CAPTURE_API_BASE, the
+#   same tag publish injects. Token-gated routes unchanged.
 # Updated: 2026-09-26 (fix/pawbar-visitor-stream-allowlist) — POST /paw-bar/chat
 #   stopped relaying every run-engine frame to anonymous visitors. It forwarded
 #   ``thinking``, ``tool_start`` / ``tool_result`` (tool names, arguments,
@@ -1500,10 +1508,20 @@ async def update_spec(
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    updated = await _save_widget_spec(widget_id, spec, workspace_id)
+    return PawBarWidgetPublic.from_widget(updated)
+
+
+async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str) -> PawBarWidget:
+    """The ONE spec write both spec routes share: the token-gated
+    ``update_spec`` and the session-authed admin/site route. ``store.update_spec``
+    archives the prior spec as a revision in the same transaction, so either
+    caller leaves a rollback point. Workspace-scoped; a widget that vanished
+    between the caller's lookup and this write is a 404."""
     updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
     if updated is None:
         raise HTTPException(404, "Widget not found")
-    return PawBarWidgetPublic.from_widget(updated)
+    return updated
 
 
 @router.patch(
@@ -1696,6 +1714,84 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_greeting: str
     concierge_store_transcripts: bool
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+    # The snippet the published site itself carries (``embed.concierge_snippet``),
+    # so the owner copies the same tag the publish path injects. "" whenever the
+    # site has not earned a bar: no widget, no embed key, no bound agent, the
+    # concierge switched off, or a plan that does not sell it.
+    embed_snippet: str = ""
+
+
+class AdminWidgetSpecUpdate(BaseModel):
+    """Body of PATCH /paw-bar/admin/site/{id}/widget/spec: the FULL widget spec.
+
+    Validated as a ``PawBarSpec``, the same model the token-gated
+    ``PATCH /paw-bar/widgets/{id}/spec`` takes, so an invalid spec 422s the same
+    way on both routes."""
+
+    spec: PawBarSpec
+
+
+class AdminWidgetSpecResponse(BaseModel):
+    """The saved spec and the widget it belongs to. Nothing else: no token, no
+    agent binding, since the editor only needs to re-render what it saved."""
+
+    id: str
+    spec: PawBarSpec
+
+
+async def _site_embed_snippet(site: Any, workspace_id: str) -> str:
+    """The embed snippet this site has earned, exactly as publish builds it.
+
+    Calls ``embed.concierge_snippet`` (the gates + widget lookup the publish-time
+    injection runs) with the same inputs ``sites.router._foreign_concierge_response``
+    passes, rather than calling ``build_embed_snippet`` directly, so the settings
+    page can never show a tag the site itself would not get.
+
+    The API base is ``sites.service._capture_base()`` (PAW_CAPTURE_API_BASE), NOT
+    this request's host. The snippet is pasted into the customer's own pages and
+    must point at the PUBLIC API; the dashboard's request can arrive through a
+    different host (a proxy, the builder origin, localhost), and ``preview-frame``'s
+    request-derived base is fine only because that frame is same-origin with us.
+    One env var, the one the injected script already uses.
+
+    Failure-soft: a store or lookup error logs and yields "" so the settings page
+    still opens; the snippet is a convenience, the settings are the point.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.site_keys import concierge_available
+        from pocketpaw_ee.paw_bar import embed
+        from pocketpaw_ee.sites.service import _capture_base
+
+        return await embed.concierge_snippet(
+            workspace_id=workspace_id,
+            pocket_id=str(getattr(site, "pocket_id", "") or ""),
+            site_key=str(getattr(site, "signed_key", "") or ""),
+            api_base=_capture_base(),
+            concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
+            concierge_entitled=bool(concierge_available(site)),
+        )
+    except Exception:  # noqa: BLE001 — the settings response must not 500 on the bar
+        logger.warning(
+            "paw-bar settings: could not build the embed snippet for site %s",
+            str(getattr(site, "id", "?")),
+            exc_info=True,
+        )
+        return ""
+
+
+async def _concierge_settings_response(site: Any, workspace_id: str) -> ConciergeSettingsResponse:
+    """The settings view GET and PATCH both return."""
+    return ConciergeSettingsResponse(
+        site_id=str(site.id),
+        concierge_enabled=site.concierge_enabled,
+        concierge_greeting=site.concierge_greeting,
+        concierge_store_transcripts=site.concierge_store_transcripts,
+        # getattr, not attribute access: a Site document written before this
+        # field existed deserializes without it, and the settings page must open
+        # for those rather than 500 on the owner who has not saved a theme yet.
+        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
+        embed_snippet=await _site_embed_snippet(site, workspace_id),
+    )
 
 
 async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
@@ -1734,16 +1830,7 @@ async def get_site_concierge_settings(
     """Read a Site's concierge settings so the dashboard can render the toggle +
     greeting field. Admin-authed, workspace-scoped (cross-tenant id → 404)."""
     site = await _load_site_scoped(site_id, workspace_id)
-    return ConciergeSettingsResponse(
-        site_id=str(site.id),
-        concierge_enabled=site.concierge_enabled,
-        concierge_greeting=site.concierge_greeting,
-        concierge_store_transcripts=site.concierge_store_transcripts,
-        # getattr, not attribute access: a Site document written before this
-        # field existed deserializes without it, and the settings page must open
-        # for those rather than 500 on the owner who has not saved a theme yet.
-        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
-    )
+    return await _concierge_settings_response(site, workspace_id)
 
 
 @router.patch(
@@ -1787,16 +1874,34 @@ async def update_site_concierge_settings(
 
         await provision_on_concierge_enable(site, workspace_id)
 
-    return ConciergeSettingsResponse(
-        site_id=str(site.id),
-        concierge_enabled=site.concierge_enabled,
-        concierge_greeting=site.concierge_greeting,
-        concierge_store_transcripts=site.concierge_store_transcripts,
-        # getattr, not attribute access: a Site document written before this
-        # field existed deserializes without it, and the settings page must open
-        # for those rather than 500 on the owner who has not saved a theme yet.
-        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
-    )
+    return await _concierge_settings_response(site, workspace_id)
+
+
+@router.patch(
+    "/paw-bar/admin/site/{site_id}/widget/spec",
+    response_model=AdminWidgetSpecResponse,
+    dependencies=[Depends(_require_paw_bar_manage)],
+)
+async def update_site_widget_spec(
+    site_id: str,
+    req: AdminWidgetSpecUpdate,
+    workspace_id: str = Depends(current_workspace_id),
+) -> AdminWidgetSpecResponse:
+    """Save the site's concierge widget spec from the owner dashboard.
+
+    The session-authed sibling of ``PATCH /paw-bar/widgets/{id}/spec``: the
+    Catalog & Actions editor never holds the per-widget ``X-Paw-Bar-Token``, so
+    it saves here, behind ``paw_bar.manage``, with the widget resolved from the
+    site the same way ``overview`` / ``preview-frame`` resolve it. A foreign or
+    malformed site id and a site with no concierge widget are both 404. The write
+    is the shared ``_save_widget_spec``, so the prior spec is archived as a
+    revision exactly as the token route does. The token routes are unchanged.
+    """
+    _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if widget is None:
+        raise HTTPException(status_code=404, detail="no_concierge_widget")
+    updated = await _save_widget_spec(widget.id, req.spec, workspace_id)
+    return AdminWidgetSpecResponse(id=updated.id, spec=updated.spec)
 
 
 @router.post(
