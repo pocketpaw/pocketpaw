@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-26 (fix/pawbar-public-route-gates) — Paw Bar public table: the
+  per-IP limit, the key rule on events/decision, the chat input bounds, the
+  events rate bucket, the author-less visitor transcript and the one error code.
 Updated: 2026-09-26 (feat/pawbar-admin-widget-spec-route) — Paw Bar admin table:
   added PATCH /paw-bar/admin/site/{site_id}/widget/spec, and noted `embed_snippet`
   on the settings GET/PATCH; the route pins spec.widget_id / spec.pocket_id.
@@ -4048,7 +4051,11 @@ the split is the security model:
   is an anonymous visitor holding a world-visible embed key, so every one of
   them runs the same fail-closed chain — unknown widget 404, rate limit 429,
   bad/revoked key 401, disallowed origin or a key that doesn't own the widget
-  403 — and none of them expose owner-private data.
+  403 — and none of them expose owner-private data. Every public route also
+  sits behind a per-client-IP limit (429; 2/s sustained, 120 burst, keyed on the
+  rightmost `X-Forwarded-For` hop, held in process memory so each replica
+  counts separately). A `customer_ref` must be 8-128 characters of
+  `[A-Za-z0-9_-]` or the route answers 400 `invalid_customer_ref`.
 - **Admin** routes are called by the site's owner from the dashboard. They are
   workspace-scoped and gated on `paw_bar.read` (reads) or `paw_bar.manage`
   (writes).
@@ -4059,11 +4066,12 @@ the split is the security model:
 |---|---|
 | `GET /paw-bar/widget.js` | The embed loader a published page includes. |
 | `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. |
-| `GET /paw-bar/spec/{widget_id}` | The widget's render spec. |
-| `POST /paw-bar/events/{widget_id}` | Ingest a widget event. |
-| `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. |
-| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. |
+| `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. |
+| `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
+| `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. A widget with a concierge agent requires `?signed_key=`. |
+| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. |
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
+| `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |
 | `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. |
 | `GET /paw-bar/cart` | The visitor's own cart. |
