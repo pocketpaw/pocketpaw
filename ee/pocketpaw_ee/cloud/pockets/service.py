@@ -1,5 +1,10 @@
 """Pockets domain — business logic service.
 
+Updated 2026-09-25 (fix/shared-pocket-chat-visibility): added ``can_read`` — a
+boolean wrapper over ``_fetch_readable`` so the sessions service can share a
+pocket's conversations with everyone who may read the pocket, using the same
+read rule rather than a second copy of it.
+
 Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): added ``site_render_inputs`` —
 a workspace-scoped projection of the fields that decide a site's render, so the
 ``/sites/by-pocket/{id}/status`` verification summary can hash the current source
@@ -2046,6 +2051,24 @@ async def _fetch_readable(pocket_id: str, user_id: str) -> _PocketDoc:
     ):
         raise Forbidden("pocket.access_denied", "You do not have access to this pocket")
     return doc
+
+
+async def can_read(pocket_id: str, user_id: str) -> bool:
+    """Boolean form of ``_fetch_readable``: may ``user_id`` read the pocket?
+
+    Same rule, not a copy of it: owner, team member, ``shared_with``, or any
+    non-private visibility. An unknown or malformed pocket id is ``False``
+    rather than a raise, so a caller gating a secondary read (the pocket's
+    session list and transcripts) can fall back quietly.
+
+    Visibility alone does not scope by tenant. A caller must also check that the
+    user belongs to the pocket's workspace, as the sessions service does.
+    """
+    try:
+        await _fetch_readable(pocket_id, user_id)
+    except (NotFound, Forbidden):
+        return False
+    return True
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
@@ -6221,6 +6244,7 @@ __all__ = [
     "agent_update",
     "agent_update_widget",
     "agent_view",
+    "can_read",
     "create",
     "create_from_ripple_spec",
     "create_pocket_and_session",
