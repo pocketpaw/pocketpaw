@@ -6,6 +6,11 @@
 # ContextVars + the shared publish_pocket service and inspect the MCP envelope
 # the SDK returns to the agent.
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — the registration test
+# pins a THIRTEENTH id, ``set_site_dependencies``: the only way to declare or drop npm
+# packages on a svelte / react / html site, and the only writer of
+# ``paw.dependencies.json``.
+#
 # Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3 + RX-4) — the registration test
 # now pins the EIGHTH and NINTH tool ids on this server, ``edit_react_component`` and
 # the read-only ``get_site_build_status``. The count assertion did its job both times:
@@ -117,7 +122,16 @@ class TestSitesMcpServerRegistration:
         # The count is deliberate: adding a tool here widens the /sites surface
         # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
         # not a side effect. Bump it WITH an id assertion above — never alone.
-        assert len(SITES_TOOL_IDS) == 12
+        # PP-1 — the dependency setter. Every edit lane refuses the manifest path,
+        # so without this id on the allow-list no package could ever be declared on
+        # an existing site.
+        from pocketpaw_ee.agent.mcp_servers.sites import SET_SITE_DEPENDENCIES_TOOL_ID
+
+        assert (
+            SET_SITE_DEPENDENCIES_TOOL_ID == "mcp__pocketpaw_sites_manager__set_site_dependencies"
+        )
+        assert SET_SITE_DEPENDENCIES_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 13
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

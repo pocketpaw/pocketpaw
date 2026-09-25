@@ -8,6 +8,10 @@ Updated: 2026-09-23 (VS-4, feat/sites-rename) — added "Sites — Addresses and
 response. Written around the thing a client cannot infer: a rename is a reservation
 that goes live on the next publish, so the response keeps showing the old `slug`.
 
+Updated: 2026-09-24 (PP-1, feat/sites-author-dependencies) — added the
+`set_site_dependencies` agent tool and the `dependencies` argument on the three
+source-engine create tools, under "Sites — Agent Editing Tools".
+
 Updated: 2026-09-23 (feat/sites-badge-switch, VS-3) — added "Sites — Hide the PocketPaw
 badge": `PATCH /sites/{site_id}/branding` and `badge_hidden` on the site response. Written
 around the two things a client cannot infer: the flag is a preference that only takes
@@ -3343,6 +3347,58 @@ contract the react tool uses.
 `paw_redirect` inputs are what deliver leads. A rewrite that drops them leaves a
 form that still looks right and captures nothing, with no visible change to the
 page.
+
+### `set_site_dependencies`
+
+Declare or drop npm packages on a svelte, react or html site. This is the only
+writer of the reserved source-map file `paw.dependencies.json`. Every edit tool
+above refuses that path in any spelling, case included.
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. A svelte, react or html site pocket. ripple is refused (`site_deps.engine_unsupported`). |
+| `add` | array | `[{name, range?}]`. `range` is an npm semver range; omit it for the newest eligible version. `"name@range"` strings are accepted too. |
+| `remove` | array | Package names to drop. Dropping the last one removes the file. |
+
+Returns `{ok, pocket_id, packages: {name: {version}}, rejected: [{name, code,
+reason}], changed, message}`. A refused package is not an error: `ok` stays true,
+and the others still land.
+
+Each add is resolved from registry metadata only. Nothing is installed. The
+resolver picks the highest version that satisfies the range, was published at
+least 7 days ago (the same floor as the build sandbox's `bunfig.toml`), and is
+not deprecated. It then refuses the package when:
+
+| `code` | When |
+|--------|------|
+| `invalid_name` / `invalid_range` | Not a valid npm name, or not a semver range (dist-tags other than `latest` are refused). |
+| `non_registry_spec` | git, url, file, tarball, `npm:` alias or GitHub shorthand. |
+| `toolchain_reserved` | svelte, `@sveltejs/*`, vite, react, react-dom, `@vitejs/*`, tailwindcss, `@tailwindcss/*`, `@ripple-ui/*`, valibot, `@noble/hashes`, `@cloudflare/*`. The generator provides these. |
+| `not_found` / `no_eligible_version` | Not on the registry, or nothing matches the range once the 7-day floor is applied. The reason names the newest eligible version. |
+| `deprecated` | Every matching version is deprecated. |
+| `install_scripts` / `native_build` | The chosen version has `preinstall` / `install` / `postinstall` scripts, a `gypfile` or a `binary`. |
+| `too_large` | Unpacked size over 25 MB. |
+| `low_downloads` | Under 500 downloads last week. This is the typosquat guard. |
+| `advisory` | A moderate-or-worse advisory from npm's bulk advisory endpoint affects the chosen version. |
+| `too_many` | More than 20 packages on the site. |
+| `registry_unavailable` | The registry, downloads API, advisory endpoint or (html) jsdelivr could not be read. The package is refused, never accepted unvetted. |
+
+For html, each entry also carries `esm`
+(`https://cdn.jsdelivr.net/npm/<name>@<version>/+esm`) and `integrity` (sha384 of
+the bytes jsdelivr serves at that URL), which the generator turns into an
+importmap.
+
+`create_svelte_site`, `create_react_site` and `create_html_site` take the same
+requests as an optional `dependencies` argument. They resolve them before the
+pocket is saved and return `packages` and `rejected` in the create body. A refused
+package never fails the create.
+
+**Author packages install only in the build sandbox.** A static svelte site that
+declares packages publishes through the ephemeral build lane even with
+`PAW_SITES_SVELTE_ASYNC_BUILD` off. On such a site, `edit_svelte_component` saves
+the draft without its local preview build and returns `site: null,
+preview_built: false`. A host build that gets one anyway is refused with
+`sites.author_dependencies_need_sandbox` (422).
 
 ### Build state on the `publish` response
 

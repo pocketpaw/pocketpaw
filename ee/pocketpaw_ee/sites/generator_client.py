@@ -6,6 +6,17 @@
 # fail-gates on the workerd SSR render markers. If the gate fails the site does
 # NOT proceed to deploy (Contract clause 4). The subprocess calls are isolated
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
+#
+# Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): this client builds on
+# the HOST it runs in — the API process, the dev server, draft markup, the native
+# pre-warm — and its install step is a real ``bun install``. Author-declared npm
+# packages (``paw.dependencies.json`` in the source map) must install only in the
+# Daytona sandbox, so ``_build_one`` now REFUSES a node build of such a source with
+# ``HostInstallRefused`` before generate even runs. It is the last line: the service
+# routes those pockets to the sandbox lane first. The manifest itself passes through
+# ``build_generator_input`` untouched as an ordinary source-map file (the generator
+# parses it). ``_ripple_motion_dep`` now reads motion's pin from ``vetted_pins``
+# (the vendored ``paw-sites-gen allowlist`` output) instead of a hard-coded copy.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
 # Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
@@ -308,7 +319,9 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote
 
+from pocketpaw_ee.sites import vetted_pins
 from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG_REL, write_build_bunfig
+from pocketpaw_ee.sites.dependency_manifest import has_author_dependencies
 from pocketpaw_ee.sites.engines import (
     candidate_static_output_rels,
     is_source_engine,
@@ -722,6 +735,15 @@ class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
 
 
+class HostInstallRefused(RuntimeError):
+    """A host build was asked to install author-declared npm packages (PP-1).
+
+    Deliberately NOT a ``SmokeGateFailed``: nothing about the site failed. The build
+    was routed to the wrong place, and the edit lane's rollback-on-smoke-failure must
+    not treat it as a bad edit. The sites service maps it to a 422.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # HE-3 — the html static smoke check (the html-path replacement for the workerd
 # SSR gate). ripple/svelte fail-gate a LIVE publish on a workerd SSR render (see
@@ -1036,8 +1058,10 @@ def _ripple_motion_dep() -> str:
     declare it as a direct dep or `bun run build` can't resolve the dynamic
     import. Matters most on the local ``file:`` ripple path: a ``file:`` dep
     isn't hoisted, so ripple's own motion never reaches the consumer. Override
-    with PAW_SITES_MOTION_DEP; keep it in lockstep with ripple's motion pin."""
-    return os.environ.get("PAW_SITES_MOTION_DEP", "^12.40.0")
+    with PAW_SITES_MOTION_DEP; otherwise the pin comes from ``vetted_pins`` (the
+    vendored generator allowlist, with a fallback constant), so it moves when
+    paw-sites moves it rather than when someone remembers to edit this line."""
+    return os.environ.get("PAW_SITES_MOTION_DEP") or vetted_pins.pin_for("motion")
 
 
 def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
@@ -1816,6 +1840,18 @@ class GeneratorClient:
         static_build: bool = True,
         assets: dict[str, str] | None = None,
     ) -> BuildResult:
+        # PP-1: author-declared packages install ONLY in the Daytona sandbox. This
+        # client installs on whatever host it runs on, so a node build of a source
+        # that declares any is refused here, before generate — nothing is written and
+        # nothing installs. html is exempt: it never installs (its packages load from
+        # the CDN through an importmap). Fails closed: an unreadable manifest counts
+        # as declaring packages (``has_author_dependencies``).
+        if needs_node_build(engine) and has_author_dependencies(source):
+            raise HostInstallRefused(
+                "this site declares npm packages (paw.dependencies.json), and those "
+                "install only in the isolated build sandbox — never on the API host. "
+                "Publish it through the build lane instead."
+            )
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
         # so node_modules persists; fall back to a throwaway tempfile dir when no
         # pocket_id is given (legacy callers — no caching).

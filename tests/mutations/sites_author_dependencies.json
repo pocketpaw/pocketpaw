@@ -1,0 +1,169 @@
+[
+  {
+    "label": "PP-1 resolver: the 7-day release-age floor is ignored, so a version published yesterday (a possible compromised fresh publish) is pinned and handed to the sandbox, which then refuses it at install",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    aged = [p for p in satisfying if p[2] <= cutoff]",
+    "replace": "    aged = list(satisfying)",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_resolves_the_newest_version_old_enough_to_install",
+      "tests/ee/sites/test_dependency_resolver.py::test_only_too_new_versions_is_refused_with_the_floor_named"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: toolchain names are accepted as author packages, so an author can pin svelte/react/vite to a version the generator's toolchain was never vetted against",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    if is_toolchain_reserved(req.name):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: git / url / file / alias specs pass as ranges",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    if _NON_REGISTRY_RE.search(req.name) or _NON_REGISTRY_RE.search(req.range):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: deprecated versions are no longer skipped or refused",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    chosen = next((p for p in aged if not versions[p[1]].get(\"deprecated\")), None)",
+    "replace": "    chosen = aged[0]",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason",
+      "tests/ee/sites/test_dependency_resolver.py::test_a_deprecated_version_is_skipped_for_an_older_good_one"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: a package with lifecycle install scripts is accepted",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    if lifecycle:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: a native addon (gypfile / binary) is accepted",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    if manifest.get(\"gypfile\") or manifest.get(\"binary\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: the unpacked-size cap stops applying",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    if isinstance(size, int) and size > MAX_UNPACKED_BYTES:",
+    "replace": "    if isinstance(size, int) and size > MAX_UNPACKED_BYTES * 100:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: the popularity floor (the typosquat guard) is gone",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "    if count < MIN_WEEKLY_DOWNLOADS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: advisories are read but never block",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "            if str(adv.get(\"severity\", \"\")).lower() not in BLOCKING_SEVERITIES:",
+    "replace": "            if True:",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_every_rejection_reason"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: an unreachable advisory database is a silent ACCEPT instead of a registry_unavailable refusal",
+    "file": "ee/pocketpaw_ee/sites/dependency_resolver.py",
+    "find": "        return {p.name: _unavailable(p.name, \"the npm advisory database\", detail) for p in packages}",
+    "replace": "        return {}",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_an_unreachable_registry_refuses_rather_than_accepts"
+    ]
+  },
+  {
+    "label": "PP-1 resolver: the 20-package cap is effectively removed",
+    "file": "ee/pocketpaw_ee/sites/dependency_manifest.py",
+    "find": "MAX_DECLARED_PACKAGES = 20",
+    "replace": "MAX_DECLARED_PACKAGES = 2000",
+    "tests": [
+      "tests/ee/sites/test_dependency_resolver.py::test_more_than_twenty_is_refused_past_the_cap"
+    ]
+  },
+  {
+    "label": "PP-1 sandbox-only: the host generator client installs author packages on the API host",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        if needs_node_build(engine) and has_author_dependencies(source):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_the_host_client_refuses_to_install_author_packages",
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_an_unreadable_manifest_is_refused_too"
+    ]
+  },
+  {
+    "label": "PP-1 sandbox-only: an unreadable manifest counts as 'no packages', so a broken file unlocks a host install",
+    "file": "ee/pocketpaw_ee/sites/dependency_manifest.py",
+    "find": "    except ValueError:\n        return True",
+    "replace": "    except ValueError:\n        return False",
+    "tests": [
+      "tests/ee/sites/test_dependency_manifest.py::test_has_author_dependencies_fails_closed",
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_an_unreadable_manifest_is_refused_too"
+    ]
+  },
+  {
+    "label": "PP-1 sandbox-only: a static svelte pocket with packages stays on the inline (host) publish path when the SL-4 flag is off",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and has_author_dependencies(source)\n        and pattern != \"dynamic\"",
+    "replace": "        and False\n        and pattern != \"dynamic\"",
+    "tests": [
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_static_svelte_with_packages_goes_to_the_sandbox_lane_flag_off",
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_an_inline_publish_of_such_a_pocket_enqueues_instead_of_building"
+    ]
+  },
+  {
+    "label": "PP-1 sandbox-only: edit_svelte_component runs its local preview build (a host bun install) for a pocket with packages",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if has_author_dependencies(source_map):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_edit_svelte_component_skips_the_local_build_for_a_pocket_with_packages"
+    ]
+  },
+  {
+    "label": "PP-1 paths: the html edit lane can hand-write the dependency manifest (html's root is authorable, so nothing else stops it)",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "        is_dependency_manifest_path(folded)\n        or folded == HTML_RESERVED_PREFIX.rstrip(\"/\")",
+    "replace": "        False\n        or folded == HTML_RESERVED_PREFIX.rstrip(\"/\")",
+    "tests": [
+      "tests/ee/sites/test_dependency_manifest.py::test_html_edit_lane_refuses_the_manifest"
+    ]
+  },
+  {
+    "label": "PP-1 paths: svelte authors can ship a bunfig.toml / .npmrc / lockfile that changes how the sandbox resolves",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    DEPENDENCY_MANIFEST_PATH,\n    *INSTALL_CONFIG_FILES,\n)",
+    "replace": "    DEPENDENCY_MANIFEST_PATH,\n)",
+    "tests": [
+      "tests/ee/sites/test_dependency_manifest.py::test_svelte_and_react_reserve_install_config_and_every_vite_spelling"
+    ]
+  },
+  {
+    "label": "PP-1 project zip: author packages never reach the downloaded package.json, so the download does not build",
+    "file": "ee/pocketpaw_ee/sites/project_zip.py",
+    "find": "    runtime: dict[str, str] = dict(sorted((author_deps or {}).items()))",
+    "replace": "    runtime: dict[str, str] = {}",
+    "tests": [
+      "tests/ee/sites/test_project_zip.py::test_author_packages_land_in_package_json_at_exact_versions"
+    ]
+  }
+]

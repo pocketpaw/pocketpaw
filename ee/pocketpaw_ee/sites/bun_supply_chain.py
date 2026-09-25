@@ -1,6 +1,14 @@
 # bun_supply_chain.py — the ONE place the site-build install-time supply-chain
 # floor lives.
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — added
+# ``MINIMUM_RELEASE_AGE_SECONDS``, the same 7-day floor as a number. The dependency
+# resolver (``dependency_resolver``) picks the newest version that is at least this
+# old when an author declares a package, so the version the agent is told about is
+# the one the sandbox's bunfig will actually let install. The literal inside
+# ``BUILD_BUNFIG`` stays spelled out (a mutation plan anchors on it); a test pins the
+# two together.
+#
 # Created: 2026-09-12 (fix/sites-install-supply-chain-floor) — extracted from
 # ``daytona_runner.py``, which owned ``SANDBOX_BUNFIG`` / ``SANDBOX_BUNFIG_REL``
 # because the sandbox was the only build host that wrote one. It was not the only
@@ -53,6 +61,10 @@ logger = logging.getLogger(__name__)
 
 #: Where bun looks, relative to the project root it installs in.
 BUILD_BUNFIG_REL = "bunfig.toml"
+
+#: The release-age floor in seconds (7 days). ``BUILD_BUNFIG`` spells the same value
+#: out literally; ``test_dependency_resolver`` asserts they agree.
+MINIMUM_RELEASE_AGE_SECONDS = 604800
 
 #: The floor itself. Read the module docstring before changing either value.
 BUILD_BUNFIG = """# Written by pocketpaw's build lane — NOT part of your site's source.

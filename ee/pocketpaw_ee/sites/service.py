@@ -1,6 +1,17 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): authors can declare npm
+# packages. ``set_site_dependencies`` resolves add/remove requests through
+# ``dependency_resolver`` and writes the result as the reserved source-map file
+# ``paw.dependencies.json`` via the pockets service's only writer for it. Author
+# packages install ONLY in the Daytona sandbox: ``build_runs_async`` sends every
+# static svelte/react pocket that carries a manifest to the ephemeral lane whatever
+# the SL-4 flag says, ``edit_svelte_component`` skips its local preview build for such
+# a pocket (a seam PP-2's verify pipeline replaces), and ``_build_or_cloud_error``
+# turns the generator client's last-line refusal (``HostInstallRefused``) into a 422
+# instead of a toolchain 500.
+#
 # Updated 2026-09-23 (VS-4, feat/sites-rename): an owner can check whether an address
 # is free (``check_slug_availability``) and rename a site's address
 # (``reserve_slug_rename`` / ``cancel_slug_rename``). A rename goes live on the site's
@@ -1186,6 +1197,12 @@ from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
 from pocketpaw_ee.sites import project_zip
 from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
+from pocketpaw_ee.sites.dependency_manifest import (
+    DEPENDENCY_MANIFEST_PATH,
+    has_author_dependencies,
+    parse_manifest,
+    render_manifest,
+)
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
     ANALYTICS_STATUS_NEVER_COUNTED,
@@ -1869,13 +1886,22 @@ async def _build_or_cloud_error(
     (``edit_svelte_component``) catches it to roll the component source back to its
     prior contents, a contract that must be preserved (mapping it to ``Internal``
     would silently break that rollback)."""
-    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+    from pocketpaw_ee.sites.generator_client import HostInstallRefused, SmokeGateFailed
 
     try:
         return await generator.build(**build_kwargs)
     except CloudError:
         # Already a clean envelope — let it stand (status/code/message preserved).
         raise
+    except HostInstallRefused as exc:
+        # PP-1: the pocket declares author packages and this build would have
+        # installed them on the API host. A caller that routes correctly never gets
+        # here (build_runs_async / edit_svelte_component divert such pockets), so
+        # this is the last line — a 422 naming the reason, not a "toolchain
+        # unavailable" 500 that would send someone hunting for a missing binary.
+        raise with_cause(
+            ValidationError("sites.author_dependencies_need_sandbox", str(exc)), exc
+        ) from exc
     except SmokeGateFailed as exc:
         if not map_smoke_gate:
             # Preview/edit path: let the caller's rollback-on-SmokeGateFailed run.
@@ -5325,6 +5351,20 @@ def build_runs_async(
         return True
     if normalized != "svelte":
         return False
+    # PP-1: a static svelte pocket that declares author packages goes to the sandbox
+    # lane WHATEVER the staging flag says. Its install must never run on the API host
+    # (``generator_client.HostInstallRefused`` refuses it there), so the inline path is
+    # not an option for it; the flag only decides for pockets with nothing to install
+    # beyond the vetted toolchain. A DYNAMIC one still falls through to the checks
+    # below and stays inline — where the host guard refuses it, honestly, until the
+    # worker-rendered artifact can deploy from the lane.
+    if (
+        source is not None
+        and has_author_dependencies(source)
+        and pattern != "dynamic"
+        and not svelte_source_is_dynamic(source)
+    ):
+        return True
     if not svelte_async_build_enabled():
         return False
     if pattern == "dynamic":
@@ -9821,7 +9861,7 @@ async def edit_svelte_component(
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
-) -> tuple[_SiteDoc, bool]:
+) -> tuple[_SiteDoc | None, bool]:
     """Rewrite ONE component of a svelte Paw Site pocket and safely republish.
 
     The chat-agent entry point for a targeted component edit. The edit can be
@@ -9885,6 +9925,12 @@ async def edit_svelte_component(
     The generator / Cloudflare / bundle-reader / local-deploy seams forward
     straight to ``publish_pocket`` so the path is unit-testable without
     Bun / workerd / Cloudflare.
+
+    PP-1: for a pocket whose source declares author packages
+    (``paw.dependencies.json``) the edit is persisted as a draft WITHOUT the local
+    preview build, and the first element of the returned tuple is ``None``. That
+    build would run ``bun install`` on the API host, which author packages must
+    never reach; PP-2's sandbox verify pipeline takes over this branch.
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites.generator_client import SmokeGateFailed
@@ -9952,6 +9998,27 @@ async def edit_svelte_component(
     # non-editable, exactly as before.
     prior = await _latest_site_for_pocket(workspace_id, pocket_id)
     builder_origin = prior.builder_origin if prior else ""
+
+    # PP-1 SEAM: a pocket that declares author packages must never install on the API
+    # host, and the preview below is a LOCAL build (``publish(preview=True)`` →
+    # ``GeneratorClient`` → ``bun install``). So for such a pocket the edit is
+    # persisted as a draft and NOT built here: no smoke gate, no rollback, no native
+    # pre-warm. The caller gets ``None`` for the site doc and says so. PP-2 replaces
+    # this branch with the sandbox verify pipeline, which is where this edit's build
+    # and browser verdict will come from.
+    if has_author_dependencies(source_map):
+        assert new_source is not None  # narrowing: the arg checks above guarantee it
+        await pockets_service.set_svelte_source_file(
+            pocket_id,
+            user_id,
+            component_path=component_path,
+            new_source=new_source,
+            create=create,
+        )
+        unreferenced = create and not svelte_path_is_referenced(
+            {**source_map, component_path: new_source}, component_path
+        )
+        return None, unreferenced
 
     # 1. Persist the edit (pockets service owns the Pocket write + validation).
     #    ``previous_source`` is the file's prior contents, held for rollback — None
@@ -10412,6 +10479,108 @@ async def edit_html_file(
         "file_path": file_path,
         "created": create,
         "unreferenced": unreferenced,
+    }
+
+
+async def set_site_dependencies(
+    *,
+    user_id: str,
+    pocket_id: str,
+    add: list[Any] | None = None,
+    remove: list[Any] | None = None,
+    _pockets: Any = None,
+    _resolve: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Add or remove npm packages on a svelte / react / html Paw Site (PP-1).
+
+    The ONLY writer of ``paw.dependencies.json`` besides the create tools'
+    ``dependencies`` param, which runs the same resolver. ``add`` is a list of
+    ``{name, range?}`` requests; ``remove`` is a list of names. Removes apply first,
+    then every add goes through :func:`dependency_resolver.resolve_dependencies`
+    (registry metadata only — nothing installs). A rejected add is reported in
+    ``rejected`` with an actionable reason and changes nothing; the rest still land.
+
+    The manifest is rewritten whole, in canonical form, through the pockets
+    service's ``set_site_dependency_manifest`` (draft-versioned like every source
+    edit). An emptied set removes the file, so a site that drops its last package
+    goes back to building exactly as it did before it had any. Nothing changed →
+    nothing written.
+
+    A manifest that is present but unreadable is treated as empty and rewritten
+    from the adds: it can only have come from outside this function (the path is
+    reserved on every edit lane), and its entries were never vetted.
+
+    ``_pockets`` / ``_resolve`` are injectable seams for tests.
+
+    Returns ``{pocket_id, packages: {name: {version}}, rejected: [{name, code,
+    reason}], changed}``.
+    """
+    from pocketpaw_ee.sites import dependency_resolver
+
+    if _pockets is not None:
+        pockets_service = _pockets
+    else:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service  # type: ignore[no-redef]
+    resolve = _resolve or dependency_resolver.resolve_dependencies
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    engine = normalize_engine(pocket.get("engine"))
+    source_map = pocket.get("source")
+    if engine not in ("svelte", "react", "html") or not isinstance(source_map, dict):
+        raise ValidationError(
+            "site_deps.engine_unsupported",
+            "npm packages can be declared on svelte, react and html sites only. This "
+            "site has no authored code to import one into.",
+        )
+
+    try:
+        current = parse_manifest(source_map.get(DEPENDENCY_MANIFEST_PATH))
+    except ValueError:
+        logger.warning("sites.deps: unreadable manifest on pocket=%s, rewriting", pocket_id)
+        current = {}
+
+    rejected: list[dict[str, str]] = []
+    packages = dict(current)
+    for raw in remove or []:
+        name = raw.get("name") if isinstance(raw, dict) else raw
+        if isinstance(name, str) and name in packages:
+            del packages[name]
+        else:
+            rejected.append(
+                {
+                    "name": str(name),
+                    "code": "not_declared",
+                    "reason": (
+                        f"`{name}` is not declared on this site, so there is nothing to remove."
+                    ),
+                }
+            )
+
+    requests, coerce_rejected = dependency_resolver.coerce_requests(add or [])
+    rejected += [r.as_dict() for r in coerce_rejected]
+    if requests:
+        result = await resolve(requests, engine, already_declared=packages.keys())
+        rejected += [r.as_dict() for r in result.rejected]
+        for name, resolved in result.packages.items():
+            packages[name] = resolved.manifest_entry()
+
+    changed = packages != current
+    if changed:
+        await pockets_service.set_site_dependency_manifest(
+            pocket_id,
+            user_id,
+            manifest_path=DEPENDENCY_MANIFEST_PATH,
+            contents=render_manifest(packages) if packages else None,
+        )
+    # no-event: the pockets-service write above emits PocketUpdated; this function
+    # writes no Site doc.
+    return {
+        "pocket_id": pocket_id,
+        "packages": {
+            name: {"version": entry["version"]} for name, entry in sorted(packages.items())
+        },
+        "rejected": rejected,
+        "changed": changed,
     }
 
 

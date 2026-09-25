@@ -1,6 +1,13 @@
 # sites.py — in-process MCP server exposing the Paw Sites publish action to
 # agent backends (claude_agent_sdk). Created: 2026-06-01 (Phase 4 — chat→
-# create-site). Mirrors the layout of the sibling mcp_servers (tasks.py /
+# create-site).
+#
+# Updated 2026-09-24 (feat/sites-author-dependencies, PP-1): ``set_site_dependencies``
+# registers on this SAME server (built in sites_create.py) and its id rides
+# ``SITES_TOOL_IDS``, so the hard /sites allow-list picks it up. It is the only way to
+# declare or drop npm packages on a svelte / react / html site.
+#
+# Mirrors the layout of the sibling mcp_servers (tasks.py /
 # pockets.py): a single ``create_sdk_mcp_server`` with an SDK import-guard, the
 # ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants, and ContextVar-sourced
 # identity (the same ``current_workspace_id`` / ``current_user_id`` accessors in
@@ -217,6 +224,11 @@ READ_SITE_SOURCE_TOOL_ID = f"mcp__{SERVER_NAME}__read_site_source"
 # and the tool is silently unreachable.
 LIST_SITE_ASSETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_assets"
 
+# PP-1 — declare / drop npm packages on a svelte, react or html site. The only writer
+# of ``paw.dependencies.json``. Must ride SITES_TOOL_IDS: an absent id is filtered out
+# of the /sites allow-list with no error, and the tool is silently unreachable.
+SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
+
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
     LIST_SITE_ASSETS_TOOL_ID,
@@ -230,6 +242,7 @@ SITES_TOOL_IDS = (
     EDIT_HTML_FILE_TOOL_ID,
     GET_SITE_BUILD_STATUS_TOOL_ID,
     READ_SITE_SOURCE_TOOL_ID,
+    SET_SITE_DEPENDENCIES_TOOL_ID,
 )
 
 
@@ -662,6 +675,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
         make_read_site_source_tool,
+        make_set_site_dependencies_tool,
     )
 
     create_landing_site = make_create_landing_site_tool(tool)
@@ -699,6 +713,9 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # `old_string` has to be copied out of the CURRENT file, and this is the only
     # thing on /sites that can hand the agent that file.
     read_site_source = make_read_site_source_tool(tool)
+    # PP-1 — the dependency setter. Same server, so declare → edit → publish sit
+    # together on one allow-listed server.
+    set_site_dependencies = make_set_site_dependencies_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -716,6 +733,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             edit_react_component,
             edit_html_file,
             read_site_source,
+            set_site_dependencies,
         ],
     )
     return SERVER_NAME, server
@@ -735,6 +753,7 @@ __all__ = [
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",
     "SERVER_NAME",
+    "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_TOOL_IDS",
     "build_sites_manager_server",
 ]

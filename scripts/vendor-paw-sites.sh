@@ -4,6 +4,13 @@
 # WITHOUT clone access to the private paw-sites repo (the PAW_SITES_SOURCE=vendor
 # path, mirroring paw-enterprise/scripts/vendor-ripple.sh).
 #
+# Updated 2026-09-24 (feat/sites-author-dependencies, PP-1): also writes
+# ``deploy/paw-sites/allowlist.json`` — the output of ``paw-sites-gen allowlist`` —
+# next to the vendored generator. ``pocketpaw_ee.sites.vetted_pins`` reads its pins
+# from there (the downloadable project zip and the motion rewrite used to carry
+# hand-mirrored copies). Missing or unreadable, the Python side falls back to its
+# constants, so an older generator without the subcommand only prints a warning.
+#
 # Created 2026-06-25 (feat/paw-sites-prod-deploy, DEP-4). The Sites publish path
 # shells out to ``paw-sites-gen`` (the generator CLI) at publish time; the
 # enterprise image needs that binary on PATH. paw-sites is a SIBLING repo OUTSIDE
@@ -65,5 +72,16 @@ mkdir -p "$DEST"
 cp "$SRC/package.json" "$DEST/package.json"
 cp -R "$SRC/dist" "$DEST/dist"
 cp -R "$SRC/templates" "$DEST/templates"
+
+# The toolchain pins, straight from the generator, so pocketpaw stops hand-mirroring
+# them (see the header). node first (the generator is pure Node), bun as the fallback.
+RUNNER="$(command -v node || command -v bun || true)"
+if [ -n "$RUNNER" ] && "$RUNNER" "$DEST/dist/cli.js" allowlist > "$DEST/allowlist.json.tmp" 2>/dev/null    && [ -s "$DEST/allowlist.json.tmp" ]; then
+  mv "$DEST/allowlist.json.tmp" "$DEST/allowlist.json"
+  echo "[vendor-paw-sites] wrote allowlist.json"
+else
+  rm -f "$DEST/allowlist.json.tmp"
+  echo "[vendor-paw-sites] WARN: could not run 'paw-sites-gen allowlist'; pocketpaw falls back to its pinned constants" >&2
+fi
 
 echo "[vendor-paw-sites] done. deploy/paw-sites/ is ready for a PAW_SITES_SOURCE=vendor build."
