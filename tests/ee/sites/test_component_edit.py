@@ -176,9 +176,7 @@ async def test_edit_component_verifies_the_new_source_and_stages_a_draft(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("layer", ["static", "build"])
-async def test_an_edit_that_does_not_compile_is_rolled_back(
-    beanie_test_db, edit_verifier, layer
-):
+async def test_an_edit_that_does_not_compile_is_rolled_back(beanie_test_db, edit_verifier, layer):
     """A STATIC or BUILD failure means the edit does not compile: the file is restored
     and ``EditVerificationFailed`` (a ``SmokeGateFailed``, so the old contract holds)
     carries the verdict for the agent."""
