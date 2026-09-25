@@ -17,6 +17,13 @@
 # ``build_generator_input`` untouched as an ordinary source-map file (the generator
 # parses it). ``_ripple_motion_dep`` now reads motion's pin from ``vetted_pins``
 # (the vendored ``paw-sites-gen allowlist`` output) instead of a hard-coded copy.
+#
+# Updated 2026-09-24 (PP-4, fix/sites-legacy-build-shell-migration): paw-sites PS-1
+# prints a structured ``{"error", "code"}`` line on stdout when ``build`` refuses on
+# purpose. ``_SubprocessRunner.generate`` now reads it and raises ``GeneratorRefused``
+# (a ``RuntimeError`` subclass, so every existing catch still holds) carrying the code
+# and, for ``reserved_path``, the offending source-map key. The sites service maps a
+# reserved_path refusal to a 422 that names the file instead of generator_failed.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
 # Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
@@ -735,6 +742,49 @@ class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
 
 
+class GeneratorRefused(RuntimeError):
+    """The generator refused the input on purpose (paw-sites ``failStructured``, PP-4).
+
+    ``code`` is the generator's stable wire code (``reserved_path``,
+    ``dependency_policy``, ``engine_unsupported``, ``invalid_input``). ``path`` is the
+    source-map key a ``reserved_path`` refusal names, when the message carries one.
+    A ``RuntimeError`` subclass so callers that caught a failed generate still do.
+    """
+
+    def __init__(self, code: str, message: str, path: str | None = None) -> None:
+        super().__init__(f"generator refused ({code}): {message}")
+        self.code = code
+        self.message = message
+        self.path = path
+
+
+_RESERVED_PATH_RE = re.compile(r'generator-owned path "([^"]+)"')
+
+
+def parse_generator_refusal(stdout: str) -> GeneratorRefused | None:
+    """The structured refusal on the generator's last stdout line, or ``None``.
+
+    ``internal_error`` is not a refusal (it is a crash the CLI still reports as a
+    line), so it returns ``None`` and the caller keeps its generic failure.
+    """
+    lines = [ln for ln in (stdout or "").strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code, message = payload.get("code"), payload.get("error")
+    if not isinstance(code, str) or not isinstance(message, str) or code == "internal_error":
+        return None
+    path = None
+    if code == "reserved_path" and (m := _RESERVED_PATH_RE.search(message)):
+        path = m.group(1)
+    return GeneratorRefused(code, message, path)
+
+
 class HostInstallRefused(RuntimeError):
     """A host build was asked to install author-declared npm packages (PP-1).
 
@@ -1350,6 +1400,9 @@ class _SubprocessRunner:
                 # generator is a failed generate.
                 raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
+                refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+                if refusal is not None:
+                    raise refusal
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
         finally:

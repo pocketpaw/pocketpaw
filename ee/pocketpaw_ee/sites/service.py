@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-24 (PP-4, fix/sites-legacy-build-shell-migration): a svelte/react
+# site authored before paw-sites PS-1 may carry build-shell files the generator now
+# refuses (package.json, vite.config.*, +layout.ts, ...). Until the operator
+# migration (``legacy_build_shell``) runs, a publish or preview of such a pocket now
+# fails as a 422 ``sites.generator_owned_file`` NAMING the file, instead of a generic
+# ``generator_failed`` 500 or an opaque ``scaffold_failed`` rung: a preflight
+# (``_refuse_generator_owned_source``) runs before the build is queued, and
+# ``_build_or_cloud_error`` maps the generator's structured ``reserved_path`` refusal.
+#
 # Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): authors can declare npm
 # packages. ``set_site_dependencies`` resolves add/remove requests through
 # ``dependency_resolver`` and writes the result as the reserved source-map file
@@ -1886,13 +1895,38 @@ async def _build_or_cloud_error(
     (``edit_svelte_component``) catches it to roll the component source back to its
     prior contents, a contract that must be preserved (mapping it to ``Internal``
     would silently break that rollback)."""
-    from pocketpaw_ee.sites.generator_client import HostInstallRefused, SmokeGateFailed
+    from pocketpaw_ee.sites.generator_client import (
+        GeneratorRefused,
+        HostInstallRefused,
+        SmokeGateFailed,
+    )
 
     try:
         return await generator.build(**build_kwargs)
     except CloudError:
         # Already a clean envelope — let it stand (status/code/message preserved).
         raise
+    except GeneratorRefused as exc:
+        # PP-4: a deliberate generator refusal. reserved_path is the legacy
+        # build-shell case (an authored package.json / vite.config / +layout.ts the
+        # generator now owns): name the file, as a 422, because retrying cannot help.
+        # Any other code keeps the generic envelope below.
+        if exc.code == "reserved_path":
+            from pocketpaw_ee.sites.legacy_build_shell import reserved_path_message
+
+            raise with_cause(
+                ValidationError("sites.generator_owned_file", reserved_path_message(exc.path)),
+                exc,
+            ) from exc
+        logger.error("sites.publish: generator refused the input (%s)", exc.code, exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.generator_failed",
+                "Site generation failed — the publishing toolchain is unavailable "
+                "or the build did not complete. See server logs for details.",
+            ),
+            exc,
+        ) from exc
     except HostInstallRefused as exc:
         # PP-1: the pocket declares author packages and this build would have
         # installed them on the API host. A caller that routes correctly never gets
@@ -1927,6 +1961,21 @@ async def _build_or_cloud_error(
             ),
             exc,
         ) from exc
+
+
+def _refuse_generator_owned_source(engine: str, source: dict[str, Any] | None) -> None:
+    """Raise a 422 naming any build-shell file the generator would refuse (PP-4).
+
+    The runtime safety net until ``scripts/migrate_legacy_build_shell.py`` has run:
+    the generator's refusal happens inside the build, where the async lane records only
+    ``scaffold_failed:generator_raised``. Checking here, before anything is queued,
+    lets the agent and the user see WHICH file and why.
+    """
+    from pocketpaw_ee.sites.legacy_build_shell import generator_owned_keys_message
+
+    message = generator_owned_keys_message(engine, source)
+    if message is not None:
+        raise ValidationError("sites.generator_owned_file", message)
 
 
 def _preview_id(pocket_id: str) -> str:
@@ -3666,6 +3715,11 @@ async def _deploy_site_doc(
             site_name=site_name,
             builder_origin=builder_origin,
         )
+
+    # PP-4: an unmigrated legacy pocket would be refused by the generator deep in the
+    # build (an opaque scaffold_failed rung on the async lane). Name the file now.
+    if prebuilt_project_dir is None:
+        _refuse_generator_owned_source(engine, source)
 
     # SL-3: fork to the EPHEMERAL BUILD LANE for the engines whose artifact can
     # actually be deployed from it. A prebuilt dir means the worker already ran this
@@ -9811,6 +9865,8 @@ async def get_native_artifact(
 
     # MISS: queue the armed build and hand back a handle. The job writes {body_html, css}
     # under this exact content hash when it lands, so the next call takes the branch above.
+    # PP-4: an unmigrated legacy pocket cannot build; say which file, not "unavailable".
+    _refuse_generator_owned_source(engine, source)
     try:
         enqueued = await _build_native_artifact(
             theme=theme,

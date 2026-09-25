@@ -16,7 +16,10 @@ team and agent mutators; the per-pocket backend + write/tool allowlist setters;
 ``merge_spec``; the ``set_{svelte,react,html}_source_file`` edit lane and its
 ``set_site_dependency_manifest`` sibling (added 2026-09-24, PP-1: the only writer of
 a site's ``paw.dependencies.json``, called after the sites resolver vets each
-package); and the
+package); ``scan_source_site_pockets`` + ``migrate_legacy_build_shell`` (added
+2026-09-24, PP-4: the operator migration that moves build-shell files an old site
+authored out of its source map once the generator owns them — a draft-versioned
+write, never a publish); and the
 ``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist subagent drives
 over MCP.
 
@@ -2478,6 +2481,99 @@ async def set_site_dependency_manifest(
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(manifest_path))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def scan_source_site_pockets(
+    *,
+    engines: tuple[str, ...],
+    after_id: str | None = None,
+    limit: int = 100,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """One page of site pockets on the source-map engines, oldest id first (PP-4).
+
+    The read side of the legacy build-shell migration. An operator scan, not a user
+    read: it takes no ``user_id`` and returns raw rows (no wire redaction), so only a
+    maintenance script may call it. Paged by ``_id`` so a run can resume from the last
+    id it reported. Each row is ``{id, workspace, owner, engine, pattern,
+    keepsClientBundle, source}``.
+    """
+    query: dict[str, Any] = {"type": "site", "engine": {"$in": list(engines)}}
+    if workspace_id:
+        query["workspace"] = workspace_id
+    if after_id:
+        query["_id"] = {"$gt": PydanticObjectId(after_id)}
+    docs = await _PocketDoc.find(query).sort("+_id").limit(max(1, limit)).to_list()
+    return [
+        {
+            "id": str(doc.id),
+            "workspace": doc.workspace,
+            "owner": doc.owner,
+            "engine": getattr(doc, "engine", "ripple"),
+            "pattern": getattr(doc, "pattern", None),
+            "keepsClientBundle": getattr(doc, "keeps_client_bundle", None),
+            "source": dict(doc.source) if isinstance(doc.source, dict) else None,
+        }
+        for doc in docs
+    ]
+
+
+async def migrate_legacy_build_shell(
+    pocket_id: str,
+    *,
+    workspace_id: str,
+    remove: dict[str, Any],
+    manifest: str | None,
+    author: str,
+    manifest_path: str = "paw.dependencies.json",
+) -> bool:
+    """Drop generator-owned files from a site's source map in ONE draft-versioned write.
+
+    Added 2026-09-24 (PP-4). paw-sites PS-1 made the build shell (package.json,
+    vite.config.*, svelte.config.js, +layout.ts, install config) generator-owned, so a
+    site that authored one fails its next build. The migration
+    (``sites.legacy_build_shell``) decides which files are safe to drop and hands
+    them here with the contents it classified. Background-safe like
+    ``set_imported_source``: an explicit ``workspace_id`` that must match (a mismatch
+    is the same ``NotFound`` a missing pocket raises).
+
+    ``remove`` maps each key to the contents the caller saw. If any key has changed
+    or vanished since, NOTHING is written and a ``ConflictError`` names it, so a
+    migration never drops a file a user edited after the dry run. ``manifest``, when
+    given, becomes the canonical ``paw.dependencies.json`` (packages converted from an
+    authored package.json). The change is recorded as a draft version, so it is
+    revertible and reaches the live site only on the next publish.
+
+    Returns True when something was written, False for a no-op.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    if getattr(doc, "engine", "ripple") not in _DEPENDENCY_MANIFEST_ENGINES or not isinstance(
+        doc.source, dict
+    ):
+        raise ValidationError(
+            "pocket.not_source_site",
+            "This pocket is not a svelte, react or html Paw Site.",
+        )
+    for key, expected in remove.items():
+        if key not in doc.source or doc.source[key] != expected:
+            raise ConflictError(
+                "pocket.build_shell_changed",
+                f"`{key}` changed since it was classified. Re-run the dry run.",
+            )
+    updated = {k: v for k, v in doc.source.items() if k not in remove}
+    if manifest is not None:
+        updated[manifest_path] = manifest
+    if updated == doc.source:
+        return False
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(
+        doc, author=author, label="Moved build-shell files to the generator"
+    )
+    return True
 
 
 async def set_imported_source(
