@@ -1,4 +1,13 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-26 (fix/pawbar-visitor-stream-allowlist) — POST /paw-bar/chat
+#   stopped relaying every run-engine frame to anonymous visitors. It forwarded
+#   ``thinking``, ``tool_start`` / ``tool_result`` (tool names, arguments,
+#   outputs), ``token_usage`` and ``stream_end.usage`` (model, cost) and raw
+#   exception text on ``error``. The relay is now default-deny through
+#   ``_visitor_frame``: only ``chunk`` (text), ``stream_end``
+#   (assistant_message_id + cancelled), ``error`` (safe code + generic message)
+#   and ``interrupted`` (reason) pass, each rebuilt from the fields the widget
+#   reads. The owner's dashboard stream and run_core are untouched.
 # Updated: 2026-09-02 (fix/metering-dated-pricing) — the concierge stats panel
 #   prices each run at the moment it RAN, not at the moment somebody opened the
 #   page. ``resolve_cost`` now requires that timestamp because LLM prices are
@@ -4719,6 +4728,69 @@ def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> by
     return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
+# ---------------------------------------------------------------------------
+# Visitor-safe relay for the PUBLIC concierge stream
+#
+# The run engine writes every agent event to the transport: reasoning
+# (``thinking``), tool names/arguments/outputs (``tool_start`` / ``tool_result``),
+# model + cost (``token_usage``, ``stream_end.usage``) and raw exception text on
+# ``error``. The owner's dashboard stream shows those on purpose; an anonymous
+# website visitor must never see them. So the concierge relay is DEFAULT-DENY:
+# only events named below are forwarded, and each is rebuilt from the few fields
+# the widget reads (chat-client.ts ``dispatchFrame``). A new engine event is
+# dropped here until someone decides it is visitor-safe and adds a sanitizer.
+# ---------------------------------------------------------------------------
+
+_VISITOR_ERROR_MESSAGE = "Sorry, something went wrong. Please try again."
+_VISITOR_ERROR_CODE = "agent.error"
+# Engine codes look like ``agent.run_failed``; anything else is replaced.
+_SAFE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
+_SAFE_INTERRUPT_REASONS = frozenset({"cancelled", "timeout", "superseded"})
+
+
+def _visitor_chunk(data: dict[str, Any]) -> dict[str, Any] | None:
+    content = data.get("content")
+    if data.get("type", "text") != "text" or not isinstance(content, str) or not content:
+        return None
+    return {"content": content, "type": "text"}
+
+
+def _visitor_stream_end(data: dict[str, Any]) -> dict[str, Any]:
+    mid = data.get("assistant_message_id")
+    return {
+        "assistant_message_id": mid if isinstance(mid, str) else None,
+        "cancelled": data.get("cancelled") is True,
+    }
+
+
+def _visitor_error(data: dict[str, Any]) -> dict[str, Any]:
+    code = data.get("code")
+    if not (isinstance(code, str) and len(code) <= 64 and _SAFE_CODE_RE.match(code)):
+        code = _VISITOR_ERROR_CODE
+    return {"code": code, "message": _VISITOR_ERROR_MESSAGE}
+
+
+def _visitor_interrupted(data: dict[str, Any]) -> dict[str, Any]:
+    reason = data.get("reason")
+    return {"reason": reason if reason in _SAFE_INTERRUPT_REASONS else "interrupted"}
+
+
+_VISITOR_EVENT_SANITIZERS: dict[str, Any] = {
+    "chunk": _visitor_chunk,
+    "stream_end": _visitor_stream_end,
+    "error": _visitor_error,
+    "interrupted": _visitor_interrupted,
+}
+
+
+def _visitor_frame(event: str, data: Any) -> dict[str, Any] | None:
+    """The visitor-safe payload for one engine frame, or None to drop it."""
+    sanitize = _VISITOR_EVENT_SANITIZERS.get(event)
+    if sanitize is None:
+        return None
+    return sanitize(data if isinstance(data, dict) else {})
+
+
 async def _human_replying_response(
     store: Any,
     *,
@@ -5232,7 +5304,8 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
 
     async def gen() -> AsyncIterator[bytes]:
         # Mirror agent_router.post_agent_chat's tail: announce the run, then relay
-        # the transport frames the executor writes, verbatim, until a terminal one.
+        # the transport frames the executor writes until a terminal one, filtered
+        # through ``_visitor_frame`` (a PUBLIC stream: see that helper's comment).
         # One insertion: immediately BEFORE relaying a terminal ``stream_end``
         # frame, emit at most one ``sources`` event (CONTRACT: the widget renders
         # it only between the model stream completing and stream_end; nothing is
@@ -5260,7 +5333,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
                             sources = []
                         if sources:
                             yield _sse("sources", {"sources": sources})
-                    yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
+                    # Default-deny: only visitor-safe events, rebuilt from the
+                    # fields the widget reads. Termination still follows the
+                    # raw frame, so a dropped frame can never hang the stream.
+                    safe = _visitor_frame(ev.event, ev.data)
+                    if safe is not None:
+                        yield _sse(ev.event, safe, entry_id=ev.entry_id)
                     if ev.is_terminal:
                         saw_terminal = True
                 if saw_terminal:
