@@ -1,5 +1,16 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-25 (fix/shared-pocket-chat-visibility): a pocket's conversations
+(the Paw Site builder rail included) are now readable by everyone who may read
+the pocket, not only by the user who wrote them. ``list_for_pocket`` returns
+every owner's threads to a caller who passes the pocket read rule
+(``pockets_service.can_read``) AND belongs to the pocket's workspace
+(``_is_workspace_member``); anyone else keeps the old owner-only list. ``get``
+and ``get_history`` go through ``_fetch_readable_session``, which admits the
+owner or such a reader of the session's pocket. Group-context rows stay with
+their owner, since their history is the group's transcript. Writes (``update``, ``delete``,
+``touch``, sending a turn) stay owner-only through ``_fetch_owned``.
+
 Updated 2026-09-01 (feat/byok-guest-backend): ``create`` enforces the guest
 session cap on its NEW-ROW branch only (upsert/re-link of an existing session
 stays uncapped — it creates nothing), via ``auth.guest_gates``. Added
@@ -21,7 +32,8 @@ Public API:
 - ``create(ctx, workspace_id, body)`` — create or upsert a session
 - ``list_for_owner(ctx, workspace_id)``
 - ``list_by_agent(ctx, workspace_id, agent_id)``
-- ``list_for_pocket(ctx, pocket_id)``
+- ``list_for_pocket(ctx, pocket_id)`` — every owner's threads for a pocket
+  reader who belongs to its workspace; otherwise the caller's own
 - ``get(ctx, session_id)``
 - ``update(ctx, session_id, body)``
 - ``delete(ctx, session_id)`` — soft delete
@@ -44,7 +56,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
-from beanie.operators import In
+from beanie.operators import In, Or
 from bson.errors import InvalidId
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
@@ -441,13 +453,61 @@ async def list_by_agent(
     return [_to_domain(d) for d in docs]
 
 
+async def _is_workspace_member(workspace_id: str, user_id: str) -> bool:
+    """Is ``user_id`` a member of ``workspace_id`` (any role)?
+
+    Delegates to the workspace service's membership lookup (the one the API-key
+    routes use too), so there is a single answer to "who is in this workspace".
+    """
+    from pocketpaw_ee.cloud.workspace.service import _get_member_role
+
+    return await _get_member_role(workspace_id, user_id) is not None
+
+
+async def _readable_pocket_workspace(pocket_id: str, user_id: str) -> str | None:
+    """The pocket's workspace when ``user_id`` may read the pocket's threads.
+
+    Two conditions, both required: the pocket read rule
+    (``pockets_service.can_read``: owner, team, ``shared_with`` or a non-private
+    visibility) and membership of the POCKET's workspace. Visibility alone is
+    not tenant-scoped, so the membership check is what keeps a workspace-visible
+    pocket's threads inside its workspace. ``None`` when either fails or the
+    pocket does not exist.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    if not await pockets_service.can_read(pocket_id, user_id):
+        return None
+    workspace_id = await pockets_service.get_pocket_workspace(pocket_id)
+    if not workspace_id or not await _is_workspace_member(workspace_id, user_id):
+        return None
+    return workspace_id
+
+
 async def list_for_pocket(ctx: RequestContext, pocket_id: str) -> list[DomainSession]:
+    """Threads attached to ``pocket_id``, newest first.
+
+    A caller who may read the pocket and belongs to its workspace sees every
+    owner's threads, scoped to the pocket's workspace, so a teammate opening a
+    shared site sees the conversations that built it. Each row still carries
+    ``owner`` so the client can tell whose thread it is. Anyone else gets only
+    their own threads, which is what this returned for everyone before.
+    """
+    filters: list[Any] = [
+        _SessionDoc.pocket == pocket_id,
+        _SessionDoc.deleted_at == None,  # noqa: E711
+    ]
+    workspace_id = await _readable_pocket_workspace(pocket_id, ctx.user_id)
+    if workspace_id is not None:
+        filters.append(_SessionDoc.workspace == workspace_id)
+        # Someone else's group-context row would list a thread whose history
+        # ``_fetch_readable_session`` refuses (it is gated by group
+        # membership), so only the caller's own group rows are listed.
+        filters.append(Or(_SessionDoc.owner == ctx.user_id, _SessionDoc.context_type != "group"))
+    else:
+        filters.append(_SessionDoc.owner == ctx.user_id)
     docs = (
-        await _SessionDoc.find(
-            _SessionDoc.pocket == pocket_id,
-            _SessionDoc.owner == ctx.user_id,
-            _SessionDoc.deleted_at == None,  # noqa: E711
-        )
+        await _SessionDoc.find(*filters)
         .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
         .to_list()
     )
@@ -513,10 +573,9 @@ def _to_wire_dict(doc: _SessionDoc) -> dict:
     }
 
 
-async def _fetch_owned(session_id: str, user_id: str) -> _SessionDoc:
-    """Internal: fetch by ObjectId or sessionId; check owner; raise
-    NotFound / Forbidden as needed. Used by both ``get`` and the
-    history/touch helpers that need the raw doc."""
+async def _fetch_live(session_id: str) -> _SessionDoc:
+    """Internal: fetch a non-deleted session by ObjectId or sessionId, or
+    raise NotFound. No access check; callers add one."""
     doc: _SessionDoc | None = None
     try:
         doc = await _SessionDoc.get(PydanticObjectId(session_id))
@@ -526,13 +585,44 @@ async def _fetch_owned(session_id: str, user_id: str) -> _SessionDoc:
         doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
     if doc is None or doc.deleted_at:
         raise NotFound("session", session_id)
+    return doc
+
+
+async def _fetch_owned(session_id: str, user_id: str) -> _SessionDoc:
+    """Internal: fetch by ObjectId or sessionId; check owner; raise
+    NotFound / Forbidden as needed. The WRITE gate: ``update``, ``delete``
+    and ``touch`` use it. Reads go through ``_fetch_readable_session``."""
+    doc = await _fetch_live(session_id)
     if doc.owner != user_id:
         raise Forbidden("session.not_owner", "Not the session owner")
     return doc
 
 
+async def _fetch_readable_session(session_id: str, user_id: str) -> _SessionDoc:
+    """Internal: the READ gate for ``get`` and ``get_history``.
+
+    Admits the owner, exactly like ``_fetch_owned``. Also admits a non-owner
+    when the session is attached to a pocket, the caller may read that pocket
+    and belongs to its workspace, and the pocket's workspace is the session's
+    own. That last check stops a session row stamped with another workspace's
+    pocket from borrowing that pocket's audience. Everything else raises the
+    same Forbidden as ``_fetch_owned``.
+    """
+    doc = await _fetch_live(session_id)
+    if doc.owner == user_id:
+        return doc
+    # A group-context row reads the whole group's transcript, which is gated by
+    # group membership, not by the pocket. Those stay with their owner.
+    if doc.pocket and doc.context_type != "group":
+        workspace_id = await _readable_pocket_workspace(doc.pocket, user_id)
+        if workspace_id is not None and workspace_id == doc.workspace:
+            return doc
+    raise Forbidden("session.not_owner", "Not the session owner")
+
+
 async def get(ctx: RequestContext, session_id: str) -> DomainSession:
-    doc = await _fetch_owned(session_id, ctx.user_id)
+    """One session, for its owner or a reader of the session's pocket."""
+    doc = await _fetch_readable_session(session_id, ctx.user_id)
     return _to_domain(doc)
 
 
@@ -691,10 +781,13 @@ async def get_history(
     OLDEST message's cursor to fetch the previous (older) page. ``has_more``
     tells the client whether any older pages remain, so scroll-up history
     loading knows when to stop.
+
+    Readable by the owner and by anyone who may read the session's pocket and
+    belongs to its workspace (see ``_fetch_readable_session``).
     """
     from pocketpaw_ee.cloud.models.message import Message
 
-    session = await _fetch_owned(session_id, user_id)
+    session = await _fetch_readable_session(session_id, user_id)
     active_run = await _active_run_for_session(session)
 
     if session.context_type == "session":
