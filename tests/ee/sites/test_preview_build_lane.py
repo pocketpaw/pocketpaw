@@ -2,6 +2,10 @@
 # ephemeral Daytona lane instead of shelling out to bun in the API container.
 # Created 2026-08-24.
 #
+# Updated 2026-09-24 (PP-2): the preview job result now also carries agent-only
+# diagnostics (the scaffold test asserts stderr still never appears anywhere in it),
+# and its arq timeout adds the browser step.
+#
 # WHAT BROKE, AND WHAT THIS PINS. ``get_native_artifact``'s cold miss used to call
 # ``generator.build`` → ``bun``. The deployed API container has no toolchain, so every
 # cold preview raised and reached the user as ``sites.generator_failed``. The PUBLISH
@@ -619,12 +623,15 @@ class TestThePreviewJob:
             client=client,
         )
 
-        assert settlement == {
-            "status": "failed",
-            "reason": f"{bj.RUNG_SCAFFOLD_FAILED}:generator_raised",
-        }
+        assert settlement["status"] == "failed"
+        assert settlement["reason"] == f"{bj.RUNG_SCAFFOLD_FAILED}:generator_raised"
         assert client.calls == [], "a scaffold failure must not create a sandbox"
-        assert "bun: not found" not in settlement["reason"]
+        # PP-2: the result now carries agent diagnostics, and an UNSTRUCTURED raise's
+        # text is still not known to be safe, so it travels by class name only.
+        import json as _json
+
+        assert "bun: not found" not in _json.dumps(settlement)
+        assert settlement["layers"]["build"]["status"] == "failed"
 
     async def test_an_empty_scaffold_is_caught_before_a_sandbox_exists(self) -> None:
         client = _sandbox()
@@ -692,8 +699,9 @@ class TestTheWorkerRunsThePreviewLane:
         assert bj.PREVIEW_ARQ_FUNCTION_NAME in registered
         preview = registered[bj.PREVIEW_ARQ_FUNCTION_NAME]
         assert preview.coroutine is bj.run_site_preview_build
-        # Same budget as the publish build — it IS the same build; only what happens to
-        # the artifact differs.
-        assert preview.timeout_s == bj.site_build_job_timeout_seconds()
+        # The publish build's budget PLUS the browser step (PP-2): it is the same build,
+        # followed by the harness in the same sandbox.
+        assert preview.timeout_s > bj.site_build_job_timeout_seconds()
+        assert preview.timeout_s == bj.site_preview_job_timeout_seconds()
         # A preview is billed per attempt too, so the retry decision is the caller's.
         assert preview.max_tries == 1

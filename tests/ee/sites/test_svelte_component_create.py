@@ -2,6 +2,12 @@
 # (sites_service.edit_svelte_component(..., create=True)). Created: 2026-09-11
 # (feat/sites-svelte-edit-create, SC-1).
 #
+# Updated 2026-09-24 (PP-2): the edit no longer builds locally — it runs the verify
+# pipeline. The "reaches the build" test now asserts the created file is in the source
+# the VERIFIER saw, and the rollback tests drive a verdict whose build layer FAILED
+# instead of a generator that raised SmokeGateFailed. ``_edit`` still returns
+# ``(site, unreferenced)`` for the unreferenced tests.
+#
 # WHAT WAS MISSING. ``edit_svelte_component`` shipped first of the three edit lanes
 # and could only ever REWRITE a file that already existed: both the sites service and
 # ``set_svelte_source_file`` raised NotFound on an unknown ``component_path``,
@@ -69,12 +75,11 @@ class _FakeGenerator:
         return BuildResult(project_dir="/tmp/site", ripple_version=None)
 
 
-class _SmokeFailGenerator:
-    """Stands in for a generator whose workerd smoke render fails — how
-    ``GeneratorClient.build`` signals a broken site (it raises BEFORE any deploy)."""
+async def _build_fails(**_kw):
+    """A verifier whose BUILD layer failed — the PP-2 analogue of a failed smoke gate."""
+    from tests.ee.sites.conftest import verdict_with
 
-    async def build(self, **kw):
-        raise SmokeGateFailed("workerd SSR failure: document is not defined")
+    return verdict_with(build="failed")
 
 
 class _FakeCF:
@@ -110,14 +115,12 @@ async def _make_svelte_pocket(workspace_id: str, user_id: str) -> str:
 
 
 async def _edit(pocket_id: str, **kw):
-    """Call the lane with the build seams stubbed, so no Bun / workerd / Cloudflare
-    is touched. ``_generator`` may be overridden per-test."""
-    kw.setdefault("_generator", _FakeGenerator())
-    kw.setdefault("_cloudflare", _FakeCF())
-    kw.setdefault("_local_deploy", _fake_local_deploy)
-    return await sites_service.edit_svelte_component(
+    """Call the lane; the autouse ``edit_verifier`` fixture stands in for the verify
+    pipeline unless a test passes ``_verify``. Returns ``(site, unreferenced)``."""
+    result = await sites_service.edit_svelte_component(
         workspace_id="w1", user_id="u1", pocket_id=pocket_id, **kw
     )
+    return result.site, result.unreferenced
 
 
 # ── (a) the headline case ───────────────────────────────────────────────────
@@ -153,23 +156,21 @@ async def test_create_adds_a_new_page_to_a_live_svelte_site(beanie_test_db):
 
 
 @pytest.mark.asyncio
-async def test_the_created_file_reaches_the_regenerated_build(beanie_test_db):
-    """Persisting is not enough — the new route has to be in the map the generator
-    is handed, or the page exists on the pocket and nowhere else."""
+async def test_the_created_file_reaches_the_verified_build(beanie_test_db, edit_verifier):
+    """Persisting is not enough — the new route has to be in the source the verify
+    pipeline builds, or the page exists on the pocket and nowhere else."""
     pocket_id = await _make_svelte_pocket("w1", "u1")
-    gen = _FakeGenerator()
 
     await _edit(
         pocket_id,
         component_path="src/routes/about/+page.svelte",
         new_source="<h1>About us</h1>",
         create=True,
-        _generator=gen,
     )
 
-    assert gen.built is not None
-    built_source = gen.built.get("source") or {}
-    assert built_source.get("src/routes/about/+page.svelte") == "<h1>About us</h1>"
+    assert edit_verifier.seen_sources, "the edit must run the verify pipeline"
+    verified = edit_verifier.seen_sources[-1]
+    assert verified.get("src/routes/about/+page.svelte") == "<h1>About us</h1>"
 
 
 @pytest.mark.asyncio
@@ -411,7 +412,7 @@ async def test_a_failed_create_removes_the_key_rather_than_blanking_it(beanie_te
             component_path="src/routes/about/+page.svelte",
             new_source="<h1>boom</h1>",
             create=True,
-            _generator=_SmokeFailGenerator(),
+            _verify=_build_fails,
         )
 
     pocket = await pockets_service.get(pocket_id, "u1")
@@ -431,7 +432,7 @@ async def test_a_failed_ordinary_edit_still_restores_the_prior_contents(beanie_t
             pocket_id,
             component_path="src/lib/components/Hero.svelte",
             new_source=_HERO_V2,
-            _generator=_SmokeFailGenerator(),
+            _verify=_build_fails,
         )
 
     pocket = await pockets_service.get(pocket_id, "u1")

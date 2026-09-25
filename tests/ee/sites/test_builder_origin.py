@@ -1,4 +1,6 @@
 # tests/ee/sites/test_builder_origin.py — exercises threading builderOrigin
+# Updated 2026-09-24 (PP-2): an edit no longer republishes, so the two edit tests
+#   now assert the Site row's builder_origin is untouched and nothing built on the host.
 # through the publish path so a svelte Paw Site stays editable across republish.
 # Created: 2026-06-17 (feat/sites-svelte-component-edit, SE-2b).
 #
@@ -191,22 +193,18 @@ async def test_edit_component_preserves_stored_builder_origin(beanie_test_db):
     )
     assert first.builder_origin == "https://app.paw.example"
 
-    # Now edit a component. The republish must re-apply the stored origin.
+    # Now edit a component. PP-2: the edit no longer republishes at all (it verifies
+    # the draft), so nothing can strip the origin — the Site row keeps it.
     gen = _FakeGenerator()
-    site, _unreferenced = await sites_service.edit_svelte_component(
+    result = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source=_HERO_V2,
-        _generator=gen,
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"x",
-        _local_deploy=_fake_local_deploy,
     )
-    # The edited site is STILL editable — builder_origin carried through.
-    assert gen.built["builder_origin"] == "https://app.paw.example"
-    assert site.builder_origin == "https://app.paw.example"
+    assert gen.built is None, "an edit must not rebuild on the host"
+    assert result.site.builder_origin == "https://app.paw.example"
 
 
 @pytest.mark.asyncio
@@ -223,19 +221,15 @@ async def test_edit_component_on_non_editable_site_stays_non_editable(beanie_tes
         _bundle_reader=lambda d: b"x",
     )
     gen = _FakeGenerator()
-    site, _unreferenced = await sites_service.edit_svelte_component(
+    result = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source=_HERO_V2,
-        _generator=gen,
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"x",
-        _local_deploy=_fake_local_deploy,
     )
-    assert site.builder_origin == ""
-    assert gen.built.get("builder_origin") in (None, "")
+    assert result.site.builder_origin == ""
+    assert gen.built is None
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,6 @@
 # tests/ee/sites/test_edit_draft_not_publish.py — reproduces + locks the
+# Updated 2026-09-24 (PP-2): edits verify instead of building a local preview;
+#   the arm path (make_site_editable) is unchanged and still serves a stable url.
 # Branch-primitive bug where editing a site AUTO-PUBLISHED it instead of leaving a
 # reviewable draft. Created: 2026-06-18 (fix/sites-edit-draft-not-publish).
 #
@@ -122,7 +124,9 @@ async def _make_svelte_pocket(workspace_id: str, user_id: str) -> str:
     return pocket_id
 
 
-async def test_arm_then_edit_leaves_a_reviewable_draft(beanie_test_db, instinct_store):
+async def test_arm_then_edit_leaves_a_reviewable_draft(
+    beanie_test_db, instinct_store, edit_verifier
+):
     """THE BUG: arm a svelte site editable → edit a component → the edit must leave
     a DRAFT (not promote it to published) and must NOT move the published pointer,
     so request_publish_pocket() succeeds (creates the review Action) instead of
@@ -167,22 +171,19 @@ async def test_arm_then_edit_leaves_a_reviewable_draft(beanie_test_db, instinct_
     )
 
     # 2. Edit a component — must persist a DRAFT + PREVIEW, not auto-publish.
-    edit_gen, edit_cf = _FakeGenerator(), _FakeCF()
+    edit_gen = _FakeGenerator()
     await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source=_HERO_V2,
-        _generator=edit_gen,
-        _cloudflare=edit_cf,
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_fake_local_deploy,
     )
 
-    # The preview build still ran (smoke-gate safety) and saw the edited source.
-    assert edit_gen.built is not None
-    assert edit_gen.built["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
+    # PP-2: the edit was VERIFIED (the safety net that replaced the smoke-gated local
+    # preview build) over the edited source, and nothing built on the host.
+    assert edit_gen.built is None
+    assert edit_verifier.seen_sources[-1]["src/lib/components/Hero.svelte"] == _HERO_V2
 
     # CORE ASSERTION 1 — the edit left a DRAFT (it was NOT promoted to published).
     draft = await versions.get_draft(scope_type="pocket", scope_id=pocket_id)
@@ -267,27 +268,19 @@ async def test_consecutive_previews_serve_at_a_stable_url(beanie_test_db):
         _bundle_reader=lambda d: b"export default {}",
         _local_deploy=_recording_local_deploy,
     )
-    edit, _unreferenced = await sites_service.edit_svelte_component(
+    await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source=_HERO_V2,
-        _generator=_FakeGenerator(),
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_recording_local_deploy,
     )
 
-    # Both preview builds served at the SAME stable per-pocket id (NOT a minted
-    # ObjectId per call), so the preview URL does not churn.
-    assert len(served_ids) == 2
-    assert served_ids[0] == served_ids[1], (
-        "consecutive preview builds for one pocket must serve at the SAME url"
-    )
-    # The returned preview urls match (so the iframe can frame once + reload).
-    assert arm.url == edit.url
-    # The stable id is derived from the pocket, not a random ObjectId.
+    # PP-2: an EDIT no longer serves a local preview at all (it verifies in the
+    # sandbox lane instead), so only the arm served — at the stable per-pocket id,
+    # NOT a minted ObjectId, which is what keeps the arm's url from churning.
+    assert len(served_ids) == 1
+    assert arm.url.endswith(f"/{served_ids[0]}/")
     assert pocket_id in served_ids[0]
 
 

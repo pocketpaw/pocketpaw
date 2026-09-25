@@ -1,5 +1,7 @@
 # tests/ee/sites/test_legacy_build_shell.py
 # Created 2026-09-24 (fix/sites-legacy-build-shell-migration, PP-4). Covers the
+# Updated 2026-09-24 (PP-2): author-fixable refusals other than reserved_path now map
+# to a 422 carrying the generator message; only an unknown code keeps the 500.
 # legacy build-shell migration end to end:
 #   1. the pure classifier matrix: every reserved file x SAFE_DROP / CONVERTIBLE /
 #      NEEDS_REVIEW, plus case and backslash spellings;
@@ -452,10 +454,26 @@ async def test_build_or_cloud_error_names_the_reserved_file():
 
 
 @pytest.mark.asyncio
-async def test_other_refusals_keep_the_generic_envelope():
+async def test_other_author_fixable_refusals_are_a_422_with_the_generators_message():
+    """PP-2 widened PP-4's mapping: every author-fixable code (contract §3) is the
+    author's to fix, so it is a 422 carrying paw-sites' own message, not a 500."""
+
     class _Refusing:
         async def build(self, **_kw):
-            raise gc.GeneratorRefused("dependency_policy", "x")
+            raise gc.GeneratorRefused("dependency_policy", "three@0.1 is not exact")
+
+    with pytest.raises(CloudError) as info:
+        await sites_service._build_or_cloud_error(_Refusing())
+    assert info.value.code == "sites.generator_dependency_policy"
+    assert info.value.status_code == 422
+    assert "three@0.1 is not exact" in info.value.message
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_refusal_code_keeps_the_generic_envelope():
+    class _Refusing:
+        async def build(self, **_kw):
+            raise gc.GeneratorRefused("some_future_code", "x")
 
     with pytest.raises(CloudError) as info:
         await sites_service._build_or_cloud_error(_Refusing())

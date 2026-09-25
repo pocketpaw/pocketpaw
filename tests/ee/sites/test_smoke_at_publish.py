@@ -1,4 +1,5 @@
 # tests/ee/sites/test_smoke_at_publish.py
+# Updated 2026-09-24 (PP-2): the edit rollback is driven by a failed verify build.
 # Created: 2026-06-18 (feat/sites-smoke-at-publish, PERF-4) — service-level cover
 # for "smoke-gate only at publish, not preview builds":
 #   * service.publish(preview=True) (the EDIT/arm path) tells generator.build() to
@@ -151,16 +152,14 @@ async def test_live_publish_runs_smoke(beanie_test_db):
     assert gen.builds[0]["smoke"] is True, "a live publish must RUN the smoke gate"
 
 
-async def test_live_publish_still_rolls_back_on_smoke_failure(beanie_test_db):
-    """PERF-4 guard: a LIVE publish whose build fails the smoke gate still raises
-    SmokeGateFailed, and edit_svelte_component still ROLLS BACK the persisted source
-    to its prior contents — the publish gate + rollback are unchanged.
-
-    edit_svelte_component publishes a PREVIEW (preview=True) by design, so to prove
-    the publish gate still bites we drive the rollback via a generator that always
-    fails the gate: the edit persists V2, the build fails, and the source must be
-    restored to V1.
+async def test_live_publish_still_rolls_back_on_smoke_failure(beanie_test_db, edit_verifier):
+    """PERF-4 guard, carried through PP-2: edit_svelte_component still ROLLS BACK the
+    persisted source when the edit does not build — the gate is now the verify
+    pipeline's build layer, and the exception is still a ``SmokeGateFailed``.
     """
+    from tests.ee.sites.conftest import verdict_with
+
+    edit_verifier.verdict = verdict_with(build="failed")
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
     with pytest.raises(SmokeGateFailed):
@@ -170,10 +169,6 @@ async def test_live_publish_still_rolls_back_on_smoke_failure(beanie_test_db):
             pocket_id=pocket_id,
             component_path="src/lib/components/Hero.svelte",
             new_source=_HERO_V2,
-            _generator=_SmokeFailGenerator(),
-            _cloudflare=_FakeCF(),
-            _bundle_reader=lambda d: b"export default {}",
-            _local_deploy=_fake_local_deploy,
         )
 
     # Rollback: the persisted source is back to V1, not the rejected V2.

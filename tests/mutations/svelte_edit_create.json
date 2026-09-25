@@ -105,8 +105,8 @@
   {
     "label": "the create branch of the rollback is gone, so a failed create restores nothing and the pocket keeps source the renderer rejected",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    except SmokeGateFailed:\n        if create:",
-    "replace": "    except SmokeGateFailed:\n        if False:",
+    "find": "    if edit_verdict_requires_rollback(verdict):\n        if create:",
+    "replace": "    if edit_verdict_requires_rollback(verdict):\n        if False:",
     "tests": [
       "tests/ee/sites/test_svelte_component_create.py::test_a_failed_create_removes_the_key_rather_than_blanking_it"
     ]
@@ -171,7 +171,7 @@
   {
     "label": "the orphan warning drops out of the narrated message, so the agent reads a clean success and reports a page nothing links to as added",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "        if unreferenced\n        else \"\"\n    )",
+    "find": "        if edited.unreferenced\n        else \"\"\n    )",
     "replace": "        if False\n        else \"\"\n    )",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_svelte_component.py::TestCreateLane::test_an_unreferenced_create_is_narrated_not_only_flagged"

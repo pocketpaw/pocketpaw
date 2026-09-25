@@ -1,4 +1,6 @@
 # tests/ee/sites/test_native_artifact.py — the native-artifact render path (NE-5b).
+# Updated 2026-09-24 (PP-2): a component edit warms the artifact through its
+#   verification build rather than scheduling a separate pre-warm.
 # Created 2026-07-01 (feat/native-editing-ne4b).
 # Updated 2026-08-24 (SP-2 — the cold miss QUEUES instead of building here): every test
 # in this file that drove a cache MISS used to assert on an inline ``generator.build``.
@@ -621,11 +623,14 @@ async def test_leaf_edit_rejected_schedules_no_prewarm(beanie_test_db, _captured
 
 
 @pytest.mark.asyncio
-async def test_component_edit_schedules_prewarm(beanie_test_db, _captured_prewarms):
-    """A targeted component edit (edit_svelte_component) also schedules a pre-warm after
-    its preview republish succeeds."""
+async def test_component_edit_warms_through_the_verify_build_not_a_second_prewarm(
+    beanie_test_db, _captured_prewarms, edit_verifier
+):
+    """PP-2: a component edit no longer schedules its own pre-warm. Its VERIFICATION
+    enqueues the preview build under the same content hash the view reads, so the
+    verify build IS the pre-warm — scheduling another would only re-enqueue the same
+    job id."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
-    gen = _CountingGenerator("/tmp/paw-native-artifact-unused")
 
     await sites_service.edit_svelte_component(
         workspace_id="ws1",
@@ -633,13 +638,10 @@ async def test_component_edit_schedules_prewarm(beanie_test_db, _captured_prewar
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source="<section class='hero'><h1>Edited</h1></section>",
-        _generator=gen,
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_fake_local_deploy,
     )
 
-    assert len(_captured_prewarms) == 1, "a component edit must schedule a native-artifact pre-warm"
+    assert _captured_prewarms == [], "the verify build is the pre-warm; nothing else queues"
+    assert len(edit_verifier.calls) == 1
 
 
 # ---------------------------------------------------------------------------

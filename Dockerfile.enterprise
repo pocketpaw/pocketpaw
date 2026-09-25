@@ -1,5 +1,10 @@
 # Dockerfile.enterprise — sovereign per-tenant PocketPaw Enterprise image.
 # Created: 2026-06-10 (sov/w1a-deploy).
+# Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — the paw-sites stage also
+#   ships the browser verification harness to /opt/paw-sites/harness (four files, no
+#   node_modules — the Daytona sandbox installs it). pocketpaw_ee.sites.browser_check
+#   uploads it into the preview / verify sandbox. PAW_SITES_VERIFY_IMAGE (runtime env)
+#   names a sandbox image with bun + node + Playwright 1.62.1's chromium.
 # Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — the paw-sites stage
 #   also writes /out/allowlist.json (`paw-sites-gen allowlist`), shipped to
 #   /opt/paw-sites/allowlist.json, so pocketpaw reads toolchain pins from the
@@ -226,6 +231,15 @@ RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
     cp -R /build/paw-sites/templates /out/templates && \
     cp /build/paw-sites/package.json /out/package.json && \
     test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
+# PP-2 (2026-09-24): the browser verification harness. Four files, no node_modules —
+# the sandbox installs it from the frozen lockfile. Absent (an older generator), the
+# browser layer reports unverified/harness_unavailable rather than failing the image.
+RUN if [ -f /build/paw-sites/harness/browser-check.mjs ]; then \
+      mkdir -p /out/harness && \
+      for f in browser-check.mjs package.json bun.lock bunfig.toml; do \
+        [ ! -f "/build/paw-sites/harness/$f" ] || cp "/build/paw-sites/harness/$f" /out/harness/; \
+      done ; \
+    else echo "WARN: paw-sites harness/ missing; browser verification will be unverified" ; fi
 # PP-1 (2026-09-24): the generator's own dependency pins, read by
 # pocketpaw_ee.sites.vetted_pins from /opt/paw-sites/allowlist.json. Generated here so
 # the vendor and clone paths both get it. A generator without the subcommand leaves

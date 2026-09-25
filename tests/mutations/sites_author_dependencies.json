@@ -131,12 +131,12 @@
     ]
   },
   {
-    "label": "PP-1 sandbox-only: edit_svelte_component runs its local preview build (a host bun install) for a pocket with packages",
+    "label": "PP-1 sandbox-only, as PP-2 carries it: edit_svelte_component skips the sandbox verification for a pocket with packages and reports a pass nothing checked",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if has_author_dependencies(source_map):",
-    "replace": "    if False:",
+    "find": "        verdict = await verifier(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)",
+    "replace": "        verdict = {\"status\": \"passed\", \"layers\": []}",
     "tests": [
-      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_edit_svelte_component_skips_the_local_build_for_a_pocket_with_packages"
+      "tests/ee/sites/test_author_dependencies_sandbox_only.py::test_edit_svelte_component_verifies_in_the_sandbox_for_a_pocket_with_packages"
     ]
   },
   {

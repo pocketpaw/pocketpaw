@@ -147,6 +147,20 @@
 # ``_safe_failure_message``, reached from the opposite direction: it had to throw the
 # detail away, this has a bounded vocabulary to keep instead.
 #
+# AMENDED 2026-09-24 (PP-2) — ONE READER MAY NOW SEE PARSED BUILD TEXT: the authoring
+# agent, which has to fix the code it wrote. The rule is exactly this:
+#   * ``build_reason`` / ``Site.build_reason`` / the preview result's ``reason`` / every
+#     ``/status`` and UI field stay ``"<rung>:<cause>"`` — unchanged, no stderr, ever.
+#   * The PREVIEW job result's ``diagnostics`` (and the ``sandbox-<hash>`` record in
+#     ``verify_store``) may carry file / line / col / message entries PARSED from the
+#     stderr tail and from the browser harness — but only after
+#     ``verify_diagnostics.finalize``: ``redact_output``, sandbox paths made relative,
+#     ``site_key_*`` scrubbed, capped at 2 KB with a ``truncated`` marker.
+#   * Those diagnostics are read only by ``verify.verify_site`` and returned only in
+#     agent tool results. ``verify.status_summary`` reads counts, never messages.
+#   * The PUBLISH job (``run_site_build``) is untouched: its stderr still goes to the
+#     log alone.
+#
 # ┌───────────────────────────────────────────────────────────────────────────────────┐
 # │ THE PER-SITE CAPTURE KEY IS SCRUBBED BEFORE THE INPUT LEAVES THIS PROCESS.         │
 # └───────────────────────────────────────────────────────────────────────────────────┘
@@ -176,6 +190,25 @@
 # :func:`_preview_job_outcome` status read. arq scopes a job id to a queue, so a read
 # left pointing at the default queue would find nothing, report ``building`` forever,
 # and the client would poll a job that finished minutes ago.
+#
+# Edited 2026-09-24 (PP-2, feat/sites-verify-pipeline): THE PREVIEW JOB NOW VERIFIES.
+#   * After a clean build, ``run_site_preview_build`` runs the paw-sites browser harness
+#     in the SAME sandbox (``daytona_runner.run_build``'s ``after_build`` hook →
+#     ``browser_check.run_in_sandbox``). A browser failure never un-stores the preview:
+#     the page still compiled, and the editor still wants to show it.
+#   * Its result gains ``layers`` ({build, browser}), ``diagnostics`` ({errors, warnings})
+#     and ``checked_at``, and the same report is written to ``verify_store`` under
+#     ``sandbox-<content_hash>`` so a later ``verify_site`` of unchanged source spends no
+#     sandbox. A UI pre-warm therefore warms the agent's verdict too.
+#   * NEW job :func:`run_site_html_verify` for html, which has no build: generate the
+#     raw tree locally, open a sandbox, run only the harness. Its id is deterministic over
+#     ``(pocket_id, content_hash)`` for the same single-flight reason the preview job's is.
+#   * :func:`site_preview_job_timeout_seconds` sizes the preview function's arq timeout
+#     as the build budget PLUS ``browser_check.BROWSER_CHECK_BUDGET_SECONDS``, so arq
+#     never reaps a job that is still inside its browser step.
+#   * :func:`wait_for_preview_result` is the verify pipeline's way to block on a job:
+#     ``arq.jobs.Job.result(timeout, poll_delay)`` on this lane's queue.
+# The stderr rule below was amended to say exactly where build text may now go.
 """SL-2 — the site-build arq job and its enqueue helper."""
 
 from __future__ import annotations
@@ -204,6 +237,7 @@ from pocketpaw_ee.sites.daytona_runner import (
     run_build,
 )
 from pocketpaw_ee.sites.engines import needs_node_build, normalize_engine, static_output_rel
+from pocketpaw_ee.sites.verify_diagnostics import finalize, parse_build_stderr
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +251,10 @@ ARQ_FUNCTION_NAME = "run_site_build"
 #: same reason the function is: a worker that registered one name for both would run a
 #: preview payload through the publish job's signature.
 PREVIEW_ARQ_FUNCTION_NAME = "run_site_preview_build"
+
+#: PP-2 — the html verify job's registered name. html has no build, so its browser
+#: check cannot ride the preview job; it gets its own sandbox job instead.
+HTML_VERIFY_ARQ_FUNCTION_NAME = "run_site_html_verify"
 
 #: The dedicated arq queue both site-build lanes ride (backend-perf C1).
 #:
@@ -410,6 +448,18 @@ def site_build_job_timeout_seconds() -> int:
     return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS
 
 
+def site_preview_job_timeout_seconds() -> int:
+    """The arq timeout for the preview job and the html verify job (PP-2).
+
+    The build budget plus the in-sandbox browser step's own budget, read from the same
+    knobs as :func:`site_build_job_timeout_seconds` so lengthening a slow engine's build
+    lengthens this too.
+    """
+    from pocketpaw_ee.sites.browser_check import BROWSER_CHECK_BUDGET_SECONDS
+
+    return site_build_job_timeout_seconds() + BROWSER_CHECK_BUDGET_SECONDS
+
+
 def is_buildable_engine(engine: str | None) -> bool:
     """Can this lane build ``engine`` at all?
 
@@ -557,15 +607,16 @@ async def run_site_build(
     try:
         try:
             project_dir = await _scaffold(generator_input, work_dir, runner=_runner)
-        except Exception:
+        except Exception as exc:
             # The generator's own stderr can name paths and carry the user's content, so
-            # the row gets the rung and the log gets the detail.
+            # the row gets the rung and the log gets the detail. A STRUCTURED refusal
+            # (PP-2) names its closed-set code as the cause instead of the generic one.
             logger.exception("sites.build: scaffold failed for site %s", site_id)
             await _record(
                 site,
                 _settlement(
                     RUNG_SCAFFOLD_FAILED,
-                    "generator_raised",
+                    scaffold_failure_cause(exc),
                     retryable=False,
                     attempts_left=attempts_left,
                 ),
@@ -1089,6 +1140,96 @@ def _store_preview_artifact(
     store.write(pocket_id, content_hash, body_html, css)
 
 
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
+
+
+def _layer(status: str, reason: str = "") -> dict[str, str]:
+    return {"status": status, "reason": reason} if reason else {"status": status}
+
+
+def _build_layer(result: BuildRunResult, settlement: BuildSettlement) -> dict[str, str]:
+    """The build layer's verdict from a finished ``run_build`` (PP-2).
+
+    Only a build the classifier blames on the USER (``build_failed``) is ``failed``. A
+    timeout or a lost sandbox is ours, so the build is ``unverified`` — reporting it as
+    the author's failure would send the agent to fix code that may be fine.
+    """
+    if settlement.status == "built":
+        return _layer("passed")
+    classification = result.classification
+    if classification.outcome == "build_failed" and classification.blames_user:
+        return _layer("failed", settlement.reason)
+    if classification.outcome == "timed_out":
+        return _layer("unverified", "timeout")
+    return _layer("unverified", "sandbox_unavailable")
+
+
+def _sandbox_report(
+    content_hash: str,
+    *,
+    build: dict[str, str],
+    browser: dict[str, str],
+    errors: list[dict[str, Any]],
+    warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The build + browser layers and their FINALIZED diagnostics (redacted, capped)."""
+    clean_errors, clean_warnings = finalize(errors, warnings or [])
+    return {
+        "content_hash": content_hash,
+        "layers": {"build": build, "browser": browser},
+        "diagnostics": {"errors": clean_errors, "warnings": clean_warnings},
+        "checked_at": _now_iso(),
+    }
+
+
+def _write_sandbox_report(
+    pocket_id: str, content_hash: str, report: dict[str, Any], store: Any
+) -> None:
+    """Best-effort write of the job's report to ``verify_store``."""
+    from pocketpaw_ee.sites import verify_store
+
+    try:
+        target = store if store is not None else verify_store.default_verify_store()
+        target.write(pocket_id, verify_store.sandbox_key(content_hash), report)
+    except Exception:  # noqa: BLE001 — a lost record costs a re-verify, nothing more
+        logger.warning("sites.preview: could not record the verify report for %s", pocket_id)
+
+
+def scaffold_failure_cause(exc: BaseException) -> str:
+    """The ``<cause>`` half of a ``scaffold_failed`` rung (PP-2, closing PP-4's gap).
+
+    A structured generator refusal names its code — ``reserved_path``,
+    ``dependency_policy``, ``engine_unsupported``, ``invalid_input`` — which is a closed
+    set paw-sites owns (contract §3), so it is safe on the row and in ``/status``. Any
+    other raise stays ``generator_raised``: its text is not a bounded vocabulary.
+    """
+    from pocketpaw_ee.sites.generator_client import (
+        AUTHOR_FIXABLE_GENERATOR_CODES,
+        GeneratorRefused,
+    )
+
+    if isinstance(exc, GeneratorRefused) and exc.code in AUTHOR_FIXABLE_GENERATOR_CODES:
+        return exc.code
+    return "generator_raised"
+
+
+def _scaffold_error_entry(exc: BaseException) -> dict[str, Any]:
+    """A scaffold refusal as a diagnostic.
+
+    ``GeneratorRefused`` carries paw-sites' structured ``{error, code}`` (contract §3) — a
+    deliberate refusal written for the author, so it is a STATIC-layer error. Anything
+    else is reported by class name only: its text is not known to be safe.
+    """
+    from pocketpaw_ee.sites.generator_client import GeneratorRefused
+
+    if isinstance(exc, GeneratorRefused):
+        return {"layer": "static", "code": exc.code, "message": exc.message}
+    return {"layer": "build", "code": "scaffold_failed", "message": type(exc).__name__}
+
+
 async def run_site_preview_build(
     ctx: dict[str, Any],
     pocket_id: str,
@@ -1100,15 +1241,18 @@ async def run_site_preview_build(
     _runner: Any = None,
     _client: Any = None,
     _store: Any = None,
-) -> dict[str, str]:
-    """arq job: build a pocket's ARMED draft in a sandbox and cache the native artifact.
+    _verify_store: Any = None,
+    _harness: Any = None,
+) -> dict[str, Any]:
+    """arq job: build a pocket's ARMED draft in a sandbox, browser-check it, and cache
+    the native artifact.
 
     The same five steps :func:`run_site_build` runs — scaffold, refuse an empty tree,
     build, classify, act on the verdict — with the last step writing ``{body_html, css}``
     to the native-artifact store instead of deploying. ``ctx`` is unused; everything the
     build needs rides the payload.
 
-    ``content_hash`` is carried rather than recomputed. It is the store's key AND this
+    ``content_hash`` is carried rather than recomputed. It is the store key AND this
     job's id, and it was computed in the web process from the pocket read that decided to
     enqueue. Recomputing it here from the payload would let a source that changed between
     the enqueue and the run write this build's output under the NEW hash — caching a
@@ -1119,6 +1263,14 @@ async def run_site_preview_build(
     reads (:func:`_preview_job_outcome`) to tell a poller "this render already failed"
     instead of spinning it. The returned ``reason`` is a rung and never stderr, because
     it crosses to a client.
+
+    PP-2: the result ALSO carries ``layers`` / ``diagnostics`` / ``checked_at`` — the
+    build and browser verdicts and their scrubbed, capped diagnostics (see the module
+    header's amended stderr rule) — and writes the same report to ``verify_store``. Those
+    fields are for ``verify.verify_site`` only; the UI path
+    (:func:`_preview_job_outcome`) reads ``status`` / ``reason`` and nothing else.
+    ``_harness`` substitutes the in-sandbox browser hook and ``_verify_store`` the report
+    store (tests).
 
     NEVER RAISES FOR A BUILD OUTCOME, matching the publish job: a failed build, a timeout
     and a lost sandbox are results. It DOES re-raise when the sandbox could not be reached
@@ -1138,18 +1290,34 @@ async def run_site_preview_build(
             "reason": f"{RUNG_ENGINE_NOT_BUILDABLE}:{normalize_engine(engine)}",
         }
 
+    from pocketpaw_ee.sites import browser_check
     from pocketpaw_ee.sites.generator_client import expected_static_output_rel
 
     artifact_rel = expected_static_output_rel(engine, generator_input)
     store = _store if _store is not None else sites_service._default_artifact_store()
+    harness = _harness if _harness is not None else browser_check.run_in_sandbox
+
+    async def _after_build(client: Any, sandbox_id: str, static_dir: str) -> Any:
+        return await harness(client, sandbox_id, static_dir=static_dir)
 
     work_dir = tempfile.mkdtemp(prefix=f"paw-preview-{pocket_id}-")
     try:
         try:
             project_dir = await _scaffold(generator_input, work_dir, runner=_runner)
-        except Exception:
+        except Exception as exc:
             logger.exception("sites.preview: scaffold failed for pocket %s", pocket_id)
-            return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_FAILED}:generator_raised"}
+            report = _sandbox_report(
+                content_hash,
+                build=_layer("failed", f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}"),
+                browser=_layer("skipped", "build_failed"),
+                errors=[_scaffold_error_entry(exc)],
+            )
+            _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
+            return {
+                "status": "failed",
+                "reason": f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}",
+                **report,
+            }
 
         files = read_generated_tree(project_dir)
         if not files:
@@ -1163,6 +1331,8 @@ async def run_site_preview_build(
                 timeout_seconds=timeout_seconds,
                 client=_client,
                 artifact_rel=artifact_rel,
+                image=browser_check.verify_image(),
+                after_build=_after_build,
             )
         except Exception:
             logger.exception("sites.preview: no sandbox for pocket %s", pocket_id)
@@ -1172,12 +1342,30 @@ async def run_site_preview_build(
 
     settlement = resolve_build_settlement(result)
     _log_outcome(f"preview:{pocket_id}", result, settlement)
+
+    build_layer = _build_layer(result, settlement)
+    errors: list[dict[str, Any]] = []
+    if build_layer["status"] == "failed":
+        errors = parse_build_stderr(result.classification.stderr_tail)
+        browser_layer = _layer("skipped", "build_failed")
+    elif build_layer["status"] == "unverified":
+        browser_layer = _layer("unverified", build_layer.get("reason", "sandbox_unavailable"))
+    else:
+        browser = result.post_build
+        if isinstance(browser, browser_check.BrowserCheckResult):
+            browser_layer = browser.as_dict()
+            errors = list(browser.errors)
+        else:
+            browser_layer = _layer("unverified", "harness_lost")
+    report = _sandbox_report(content_hash, build=build_layer, browser=browser_layer, errors=errors)
+    _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
+
     if settlement.status != "built":
         # ``settle`` can answer None to keep a publish attempt in flight between retries.
         # This lane has no attempt loop and no row to leave in flight, so the caller gets
         # a terminal answer — a poller with nothing coming must not be told to keep
         # waiting.
-        return {"status": settlement.status or "failed", "reason": settlement.reason}
+        return {"status": settlement.status or "failed", "reason": settlement.reason, **report}
 
     try:
         _store_preview_artifact(
@@ -1193,9 +1381,126 @@ async def run_site_preview_build(
             "sites.preview: pocket %s built cleanly and the artifact could not be read",
             pocket_id,
         )
-        return {"status": "failed", "reason": f"{RUNG_PREVIEW_UNREADABLE}:read_or_store_raised"}
+        return {
+            "status": "failed",
+            "reason": f"{RUNG_PREVIEW_UNREADABLE}:read_or_store_raised",
+            **report,
+        }
 
-    return {"status": "built", "reason": settlement.reason}
+    return {"status": "built", "reason": settlement.reason, **report}
+
+
+async def run_site_html_verify(
+    ctx: dict[str, Any],
+    pocket_id: str,
+    content_hash: str,
+    generator_input: dict[str, Any],
+    *,
+    _runner: Any = None,
+    _client: Any = None,
+    _verify_store: Any = None,
+    _harness: Any = None,
+) -> dict[str, Any]:
+    """arq job (PP-2): browser-check an html site.
+
+    html has no build, so the build layer is ``skipped`` and the job is: generate the raw
+    tree locally (the generator injects the importmap and strips
+    ``paw.dependencies.json``), upload it to a fresh sandbox, run the harness, tear the
+    sandbox down (``browser_check.run_standalone``).
+
+    Re-raises when no sandbox could be created, like the preview job, so a waiting
+    verify reads ``sandbox_unavailable`` off the failed job.
+    """
+    from pocketpaw_ee.sites import browser_check
+
+    standalone = _harness if _harness is not None else browser_check.run_standalone
+    work_dir = tempfile.mkdtemp(prefix=f"paw-verify-{pocket_id}-")
+    try:
+        try:
+            project_dir = await _scaffold(generator_input, work_dir, runner=_runner)
+        except Exception as exc:
+            logger.exception("sites.verify: html scaffold failed for pocket %s", pocket_id)
+            report = _sandbox_report(
+                content_hash,
+                build=_layer("failed", f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}"),
+                browser=_layer("skipped", "build_failed"),
+                errors=[_scaffold_error_entry(exc)],
+            )
+            _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
+            return {
+                "status": "failed",
+                "reason": f"{RUNG_SCAFFOLD_FAILED}:{scaffold_failure_cause(exc)}",
+                **report,
+            }
+        files = read_generated_tree(project_dir)
+        if not files:
+            return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_EMPTY}:no_files_generated"}
+        try:
+            browser = await standalone(files, static_rel=static_output_rel("html"), client=_client)
+        except Exception:
+            logger.exception("sites.verify: no sandbox for html pocket %s", pocket_id)
+            raise
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    report = _sandbox_report(
+        content_hash,
+        build=_layer("skipped", "no_build_step"),
+        browser=browser.as_dict(),
+        errors=list(browser.errors),
+    )
+    _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
+    return {"status": "checked", "reason": f"browser:{browser.status}", **report}
+
+
+def html_verify_job_id(pocket_id: str, content_hash: str) -> str:
+    """Deterministic, like :func:`_preview_job_id`, for the same single-flight reason."""
+    return f"site-verify-html-{pocket_id}-{content_hash}"
+
+
+async def enqueue_html_verify(
+    *,
+    pocket_id: str,
+    content_hash: str,
+    generator_input: dict[str, Any],
+    _pool_override: Any = None,
+) -> PreviewBuildEnqueue:
+    """Queue the html browser check, or report that one with this id already exists.
+
+    Raises when the queue cannot take the job, exactly like :func:`enqueue_preview_build`
+    — a silent "queued" for a job nobody will run is the failure both refuse to produce.
+    """
+    job_id = html_verify_job_id(pocket_id, content_hash)
+    pool = _pool_override or await _get_pool()
+    job = await pool.enqueue_job(
+        HTML_VERIFY_ARQ_FUNCTION_NAME,
+        pocket_id,
+        content_hash,
+        scrub_build_input(generator_input),
+        _job_id=job_id,
+        _queue_name=SITE_BUILD_QUEUE_NAME,
+    )
+    if job is None:
+        return PreviewBuildEnqueue(job_id=job_id, status="building")
+    return PreviewBuildEnqueue(job_id=job_id, status="queued")
+
+
+async def wait_for_preview_result(
+    pool: Any, job_id: str, *, timeout: float, poll_delay: float = 0.5
+) -> dict[str, Any]:
+    """Block until this lane's job ``job_id`` has a result and return it (PP-2).
+
+    ``arq.jobs.Job.result`` on :data:`SITE_BUILD_QUEUE_NAME`: raises ``TimeoutError``
+    when the job does not finish inside ``timeout`` (the job keeps running and its report
+    lands in ``verify_store`` for the next call), and re-raises the job's own exception
+    when the job failed — which for this lane means no sandbox could be created. Looked up
+    on the module by ``verify`` so a test can substitute it without faking arq's Redis.
+    """
+    job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)
+    result = await job.result(timeout=timeout, poll_delay=poll_delay)
+    if isinstance(result, dict):
+        return result
+    return {"status": "failed", "reason": "preview_result_unreadable"}
 
 
 async def enqueue_preview_build(
@@ -1260,6 +1565,7 @@ async def enqueue_preview_build(
 __all__ = [
     "ARQ_FUNCTION_NAME",
     "BUILDABLE_ENGINES",
+    "HTML_VERIFY_ARQ_FUNCTION_NAME",
     "OUT_OF_SANDBOX_MARGIN_SECONDS",
     "PREVIEW_ARQ_FUNCTION_NAME",
     "RUNG_ARTIFACT_MISSING",
@@ -1273,13 +1579,18 @@ __all__ = [
     "SKIPPED_TREE_DIRS",
     "BuildSettlement",
     "PreviewBuildEnqueue",
+    "enqueue_html_verify",
     "enqueue_preview_build",
+    "html_verify_job_id",
     "enqueue_site_build",
     "is_buildable_engine",
     "read_generated_tree",
     "resolve_build_settlement",
     "run_site_build",
+    "run_site_html_verify",
     "run_site_preview_build",
     "scrub_build_input",
     "site_build_job_timeout_seconds",
+    "site_preview_job_timeout_seconds",
+    "wait_for_preview_result",
 ]
