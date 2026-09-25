@@ -86,8 +86,9 @@ async def test_teammate_can_read_the_owners_thread_history() -> None:
     pid = await _pocket()
     sid = await _owner_thread(pid)
 
+    # Readable (no Forbidden); empty only because no messages were written.
     history = await sessions_service.get_history(sid, _TEAMMATE)
-    assert history["messages"] == []  # readable (no Forbidden); empty only because none were written
+    assert history["messages"] == []
     assert (await sessions_service.get(_ctx(_TEAMMATE), sid)).id == sid
 
 
