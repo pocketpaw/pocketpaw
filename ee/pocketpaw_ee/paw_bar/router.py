@@ -6,7 +6,10 @@
 #   new ``_public_frame_starters`` binds the widget to the key's Site
 #   (``_authenticate_widget_key``'s workspace + pocket rule) and
 #   ``_bound_agent_starters`` now also requires the agent to be in that workspace;
-#   any miss is [] and the frame still renders.
+#   any miss is [] and the frame still renders. The settings GET/PATCH also hand
+#   out ``embed_snippet`` only to a caller who can read the site's pocket
+#   (``pockets_service.can_read``), as sites.router's foreign-concierge surface
+#   does; the role gate moves into a parameter on both routes to supply the user.
 # Updated: 2026-09-26 (fix/pawbar-public-route-gates) — anonymous callers can no
 #   longer 429 a site's chat or write into its owner's queue. Ingested events use
 #   their own ``events`` rate bucket; a widget with a concierge agent needs
@@ -1827,7 +1830,7 @@ class AdminWidgetSpecResponse(BaseModel):
     spec: PawBarSpec
 
 
-async def _site_embed_snippet(site: Any, workspace_id: str) -> str:
+async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str:
     """The embed snippet this site has earned, exactly as publish builds it.
 
     Calls ``embed.concierge_snippet`` (the gates + widget lookup the publish-time
@@ -1842,17 +1845,29 @@ async def _site_embed_snippet(site: Any, workspace_id: str) -> str:
     request-derived base is fine only because that frame is same-origin with us.
     One env var, the one the injected script already uses.
 
+    POCKET READ GATE. The snippet carries the site's embed key, so it goes only to
+    a caller who can read the site's pocket (``pockets_service.can_read``), the
+    same rule ``sites.router._assert_pocket_readable`` applies before returning
+    this key and snippet. A workspace admin locked out of a private pocket gets
+    "". That surface 403s instead; here the settings page must still open so the
+    owner can use the toggle, so the refusal is an empty snippet. The site was
+    loaded workspace-scoped, which covers ``can_read``'s tenancy caveat.
+
     Failure-soft: a store or lookup error logs and yields "" so the settings page
     still opens; the snippet is a convenience, the settings are the point.
     """
     try:
         from pocketpaw_ee.cloud.auth.site_keys import concierge_available
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.service import _capture_base
 
+        pocket_id = str(getattr(site, "pocket_id", "") or "")
+        if not pocket_id or not user_id or not await pockets_service.can_read(pocket_id, user_id):
+            return ""
         return await embed.concierge_snippet(
             workspace_id=workspace_id,
-            pocket_id=str(getattr(site, "pocket_id", "") or ""),
+            pocket_id=pocket_id,
             site_key=str(getattr(site, "signed_key", "") or ""),
             api_base=_capture_base(),
             concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
@@ -1867,8 +1882,11 @@ async def _site_embed_snippet(site: Any, workspace_id: str) -> str:
         return ""
 
 
-async def _concierge_settings_response(site: Any, workspace_id: str) -> ConciergeSettingsResponse:
-    """The settings view GET and PATCH both return."""
+async def _concierge_settings_response(
+    site: Any, workspace_id: str, user_id: str
+) -> ConciergeSettingsResponse:
+    """The settings view GET and PATCH both return. ``user_id`` is the caller, for
+    the snippet's pocket read gate."""
     return ConciergeSettingsResponse(
         site_id=str(site.id),
         concierge_enabled=site.concierge_enabled,
@@ -1878,7 +1896,7 @@ async def _concierge_settings_response(site: Any, workspace_id: str) -> Concierg
         # field existed deserializes without it, and the settings page must open
         # for those rather than 500 on the owner who has not saved a theme yet.
         concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
-        embed_snippet=await _site_embed_snippet(site, workspace_id),
+        embed_snippet=await _site_embed_snippet(site, workspace_id, user_id),
     )
 
 
@@ -1909,26 +1927,29 @@ async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
 @router.get(
     "/paw-bar/admin/site/{site_id}/settings",
     response_model=ConciergeSettingsResponse,
-    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_concierge_settings(
     site_id: str,
+    # The role gate doubles as the caller lookup (``require_action`` returns the
+    # user), which the snippet's pocket read gate needs.
+    user: Any = Depends(_require_paw_bar_read),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ConciergeSettingsResponse:
     """Read a Site's concierge settings so the dashboard can render the toggle +
     greeting field. Admin-authed, workspace-scoped (cross-tenant id → 404)."""
     site = await _load_site_scoped(site_id, workspace_id)
-    return await _concierge_settings_response(site, workspace_id)
+    return await _concierge_settings_response(site, workspace_id, str(user.id))
 
 
 @router.patch(
     "/paw-bar/admin/site/{site_id}/settings",
     response_model=ConciergeSettingsResponse,
-    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_site_concierge_settings(
     site_id: str,
     req: ConciergeSettingsUpdate,
+    # Gate + caller lookup in one, as on the GET above.
+    user: Any = Depends(_require_paw_bar_manage),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ConciergeSettingsResponse:
     """Toggle the kill switch and/or set the greeting on a Site (D1 / SS-6).
@@ -1962,7 +1983,7 @@ async def update_site_concierge_settings(
 
         await provision_on_concierge_enable(site, workspace_id)
 
-    return await _concierge_settings_response(site, workspace_id)
+    return await _concierge_settings_response(site, workspace_id, str(user.id))
 
 
 @router.patch(
