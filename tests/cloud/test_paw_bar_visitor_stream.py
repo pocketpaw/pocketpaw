@@ -1,8 +1,8 @@
 # tests/cloud/test_paw_bar_visitor_stream.py — the public concierge stream only
+# carries what a website visitor is allowed to see.
 # Updated 2026-09-26 (fix/pawbar-public-route-gates): a visitor ``error``
 #   frame always carries ``agent.error`` — well-formed engine codes such as
 #   ``agent.jail_over_quota`` describe the owner's state. Test updated + one added.
-# carries what a website visitor is allowed to see.
 # Created 2026-09-26 (fix/pawbar-visitor-stream-allowlist): POST /paw-bar/chat is
 # a PUBLIC endpoint, and it used to relay every run-engine frame verbatim, so an
 # anonymous visitor could read the model's reasoning (``thinking``), tool names,

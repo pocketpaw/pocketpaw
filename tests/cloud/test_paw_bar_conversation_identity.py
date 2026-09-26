@@ -1,7 +1,7 @@
 # tests/cloud/test_paw_bar_conversation_identity.py — a Paw Bar visitor may hold
+# MORE THAN ONE conversation.
 # Updated 2026-09-26 (fix/pawbar-public-route-gates): the visitor transcript
 #   carries no author_* fields — pinned as an exact key set.
-# MORE THAN ONE conversation.
 #
 # Created 2026-08-19 as the reproduction for the reported bug: "multiple sessions
 # from paw-bar are treated as a single session by the backend." They were. The

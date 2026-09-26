@@ -4051,10 +4051,11 @@ the split is the security model:
   is an anonymous visitor holding a world-visible embed key, so every one of
   them runs the same fail-closed chain — unknown widget 404, rate limit 429,
   bad/revoked key 401, disallowed origin or a key that doesn't own the widget
-  403 — and none of them expose owner-private data. Every public route also
-  sits behind a per-client-IP limit (429; 2/s sustained, 120 burst, keyed on the
-  rightmost `X-Forwarded-For` hop, held in process memory so each replica
-  counts separately). A `customer_ref` must be 8-128 characters of
+  403 — and none of them expose owner-private data. Every public data route
+  (everything below except `widget.js` and the frame document) also sits behind
+  a per-(client IP, widget) limit (429; 10/s sustained, 300 burst, the IP taken
+  from the rightmost `X-Forwarded-For` hop, held in process memory so each
+  replica counts separately). A `customer_ref` must be 8-128 characters of
   `[A-Za-z0-9_-]` or the route answers 400 `invalid_customer_ref`.
 - **Admin** routes are called by the site's owner from the dashboard. They are
   workspace-scoped and gated on `paw_bar.read` (reads) or `paw_bar.manage`
