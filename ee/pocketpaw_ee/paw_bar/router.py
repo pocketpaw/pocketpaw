@@ -6,7 +6,8 @@
 #   new ``_public_frame_starters`` binds the widget to the key's Site
 #   (``_authenticate_widget_key``'s workspace + pocket rule) and
 #   ``_bound_agent_starters`` now also requires the agent to be in that workspace;
-#   any miss is [] and the frame still renders. The settings GET/PATCH also hand
+#   any miss is [] and the frame still renders, as is a lookup slower than
+#   ``_FRAME_STARTERS_TIMEOUT_S`` (1s). The settings GET/PATCH also hand
 #   out ``embed_snippet`` only to a caller who can read the site's pocket
 #   (``pockets_service.can_read``), as sites.router's foreign-concierge surface
 #   does; the role gate moves into a parameter on both routes to supply the user.
@@ -1246,6 +1247,12 @@ async def _bound_agent_starters(agent_id: str, *, workspace_id: str) -> list[str
     return list(starters)[:4]
 
 
+# Budget for the public frame's starters read (seconds). Starters are cosmetic
+# and the read is two lookups (widget, agent) on every visitor page view, so a slow
+# agents collection must cost the page this much at most, never the whole wait.
+_FRAME_STARTERS_TIMEOUT_S = 1.0
+
+
 async def _public_frame_starters(site: Any, widget_id: str) -> list[str]:
     """The starters the PUBLIC frame may show for ``widget_id`` (``w``) under ``site``.
 
@@ -1275,6 +1282,17 @@ async def _public_frame_starters(site: Any, widget_id: str) -> list[str]:
         return await _bound_agent_starters(widget.agent_id, workspace_id=workspace_id)
     except Exception:  # noqa: BLE001 — a starter read must never break the frame
         logger.debug("paw-bar frame: starters lookup failed for widget %s", widget_id)
+        return []
+
+
+async def _time_boxed_frame_starters(site: Any, widget_id: str) -> list[str]:
+    """``_public_frame_starters`` under ``_FRAME_STARTERS_TIMEOUT_S``; [] past it."""
+    try:
+        return await asyncio.wait_for(
+            _public_frame_starters(site, widget_id), timeout=_FRAME_STARTERS_TIMEOUT_S
+        )
+    except TimeoutError:
+        logger.warning("paw-bar frame: starters lookup timed out for widget %s", widget_id)
         return []
 
 
@@ -1393,7 +1411,7 @@ async def frame(
         api_base=api_base,
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
-        starters=await _public_frame_starters(site, w),
+        starters=await _time_boxed_frame_starters(site, w),
         # Read off the Site every request, never cached, so an owner saving a
         # colour sees it on the next reload rather than after a redeploy.
         appearance=getattr(site, "concierge_appearance", None),

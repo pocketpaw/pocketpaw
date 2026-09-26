@@ -6,6 +6,9 @@
 #   instead, and the PUBLIC frame is pinned to carry the bound agent's starters
 #   only for a widget bound to the key's own site (another site's widget, another
 #   tenant's agent, an unbound or unknown widget all give []).
+#   Also pinned: a hostile starter stays escaped in the frame HTML, a lookup past
+#   the time budget renders with [], and the owner preview refuses a cross-tenant
+#   agent too.
 # Created 2026-07-23: covers ensure_site_agent + the two triggers.
 #   * Pure helpers: slug/name/persona derivation + conversation-starter rules
 #     (catalog, gated-action labels, generic fallback, cap 4).
@@ -620,6 +623,56 @@ class TestIdentityAndFrameStarters:
             res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": w})
             assert res.status_code == 200, (w, res.text)
             assert '"starters": []' in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_escapes_a_hostile_starter(self, client) -> None:
+        """Starters are owner-editable text inlined into a <script>: a ``</script>``
+        in one must not close the tag and inject markup."""
+        c, store = client
+        await _site()
+        hostile = "</script><img src=x onerror=alert(1)>"
+        agent = await _agent_doc(config=_starters_config([hostile]))
+        widget = await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert hostile not in res.text
+        assert "<img src=x" not in res.text
+        assert "\\u003c/script>\\u003cimg src=x onerror=alert(1)>" in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_starters_lookup_is_time_boxed(self, client, monkeypatch) -> None:
+        """Starters are cosmetic: a slow agents read must not hold up the page
+        view. Past the budget the frame renders with []."""
+        import asyncio
+
+        from pocketpaw_ee.paw_bar import router as router_mod
+
+        async def _slow(agent_id: str, *, workspace_id: str) -> list[str]:
+            await asyncio.sleep(2)
+            return ["Too late?"]
+
+        monkeypatch.setattr(router_mod, "_FRAME_STARTERS_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(router_mod, "_bound_agent_starters", _slow)
+        c, store = client
+        await _site()
+        widget = await store.create_widget(_widget(agent_id="agent-slow"))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Too late?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_owner_preview_refuses_an_agent_in_another_tenant(self, client) -> None:
+        """The preview's widget is workspace-scoped, but the agent it names is
+        checked too: a cross-tenant agent id gives []."""
+        c, store = client
+        site = await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Theirs?"]))
+        await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Theirs?" not in res.text
 
     @pytest.mark.asyncio
     async def test_owner_preview_frame_carries_the_bound_agents_starters(self, client) -> None:

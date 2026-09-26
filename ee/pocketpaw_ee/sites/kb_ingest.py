@@ -707,8 +707,11 @@ async def safe_sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
     ``sync_site_knowledge`` stamps it (it means "last attempt", and the error says
     how it went), and ``_knowledge_response`` reads no stamp plus no error as
     ``never_synced``. The previous article ids are kept, since whatever the crash
-    interrupted, those articles are still in the scope for a later prune. The
-    recording is best-effort and never raises.
+    interrupted, those articles are still in the scope for a later prune. A crash
+    after ingest but inside the prune therefore records the previous ids, not the
+    fresh ones; the next sync re-ingests the same deterministic ids and records
+    them again, so nothing stays stranded. The recording is best-effort and never
+    raises.
     """
     try:
         return await sync_site_knowledge(site)
