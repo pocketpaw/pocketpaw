@@ -48,12 +48,14 @@
 #         rewrites that one dep to the 0.5.0 tarball the `ripple` stage builds before
 #         `bun install` — the generator never imports ripple (string literals only),
 #         so this just satisfies the installer.
-#       * `@ripple-ui/svelte` tarball — built+packed in a `ripple` stage (vendor
-#         prebuilt .tgz, or clone+build+pack) and COPY'd to
-#         /opt/ripple-ui-svelte-0.5.0.tgz. Baked into
-#         `PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz` so the publish
-#         path rewrites the generated site's dep to a resolvable source, plus
-#         `PAW_SITES_MOTION_DEP` in lockstep with ripple's motion pin.
+#       * `@ripple-ui/svelte` + `@ripple-ui/core` tarballs — built+packed in a
+#         `ripple` stage (vendor prebuilt .tgz, or clone+build+pack) and COPY'd to
+#         /opt. Baked into `PAW_SITES_RIPPLE_DEP` and `PAW_SITES_RIPPLE_CORE_DEP`
+#         so the publish path rewrites the generated site's dep to a resolvable
+#         source, plus `PAW_SITES_MOTION_DEP` in lockstep with ripple's motion pin.
+#         TWO tarballs since ripple's monorepo split: the svelte one declares core
+#         as `file:../core`, which bun resolves against its own cache instead of
+#         the tarball, so svelte alone installs without an engine.
 #     Both sibling repos live OUTSIDE the pocketpaw build context, so each has a
 #     vendor/clone source switch (mirrors paw-enterprise/deploy/Dockerfile):
 #       * PAW_SITES_SOURCE / RIPPLE_SOURCE = `vendor` (default) COPYs a prebuilt
@@ -110,23 +112,31 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
 FROM oven/bun:1.2-debian AS bun
 
 # ---- ripple tarball stage ----
-# Produce the @ripple-ui/svelte npm tarball a generated ripple-track site installs
-# (its dep is rewritten to file:/opt/ripple-ui-svelte-0.5.0.tgz at publish time).
+# Produce the npm tarballs a generated ripple-track site installs (its deps are
+# rewritten to these `file:` specs at publish time).
 # Defined BEFORE the paw-sites stage because that stage COPYs --from=ripple (the
 # clone path installs the generator's @ripple-ui/svelte dep from this tarball) — a
 # COPY --from must reference an earlier-defined stage.
 # ripple is also a SIBLING repo outside the context, so the same vendor/clone
 # switch applies:
-#   vendor (default) — COPY the prebuilt deploy/ripple/ripple-ui-svelte-0.5.0.tgz
+#   vendor (default) — COPY the prebuilt deploy/ripple/*.tgz
 #                      (produced by scripts/vendor-ripple-tarball.sh).
 #   clone            — git clone RIPPLE_REPO@RIPPLE_REF, build, and `bun pm pack`.
-# Either way the tarball lands at /out/ripple-ui-svelte-0.5.0.tgz.
+#
+# 2026-09-18 (chore/ripple-split-sites-dep): ripple is a bun workspace now. TWO
+# tarballs come out of it, and both are packed PER PACKAGE — packing the repo root
+# yields `ripple-iui-0.0.0.tgz`, the whole private monorepo with no dist/. The old
+# code renamed whatever `bun pm pack` produced to the svelte filename, so post-split
+# it would have shipped the monorepo tarball labelled as @ripple-ui/svelte and the
+# stage's own `test -f` would have passed. Nothing is renamed any more: an
+# unexpected filename means ripple moved, and the build fails and says so.
 FROM bun AS ripple
 ARG RIPPLE_SOURCE=vendor
 ARG RIPPLE_REPO=https://github.com/qbtrix/ripple-iui.git
 ARG RIPPLE_REF=main
-# Must match scripts/vendor-ripple-tarball.sh + @ripple-ui/svelte@0.5.0.
-ARG RIPPLE_TARBALL=ripple-ui-svelte-0.5.0.tgz
+# Must match scripts/vendor-ripple-tarball.sh + ripple's packages/{svelte,core}.
+ARG RIPPLE_TARBALL=ripple-ui-svelte-0.7.0.tgz
+ARG RIPPLE_CORE_TARBALL=ripple-ui-core-0.5.0.tgz
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates \
@@ -144,16 +154,21 @@ RUN if [ "$RIPPLE_SOURCE" = "clone" ]; then \
       ( git clone --depth=1 --branch "$RIPPLE_REF" "$RIPPLE_REPO" /build/ripple \
         || ( git clone "$RIPPLE_REPO" /build/ripple && cd /build/ripple && git checkout "$RIPPLE_REF" ) ) && \
       cd /build/ripple && bun install --frozen-lockfile && bun run build && \
-      bun pm pack --destination /out >/dev/null && \
-      packed="$(ls -1 /out/*.tgz | head -n1)" && \
-      [ "$(basename "$packed")" = "$RIPPLE_TARBALL" ] || mv "$packed" "/out/$RIPPLE_TARBALL" ; \
+      bun install --frozen-lockfile && \
+      ( cd packages/svelte && bun pm pack --destination /out >/dev/null ) && \
+      ( cd packages/core && bun pm pack --destination /out >/dev/null ) ; \
     else \
-      echo "RIPPLE_SOURCE=vendor — using prebuilt ripple tarball from build context" && \
+      echo "RIPPLE_SOURCE=vendor — using prebuilt ripple tarballs from build context" && \
       test -f "/build/ripple-vendor/$RIPPLE_TARBALL" \
         || ( echo "ERROR: deploy/ripple/$RIPPLE_TARBALL not found. Run scripts/vendor-ripple-tarball.sh first." && exit 1 ) && \
-      cp "/build/ripple-vendor/$RIPPLE_TARBALL" "/out/$RIPPLE_TARBALL" ; \
+      test -f "/build/ripple-vendor/$RIPPLE_CORE_TARBALL" \
+        || ( echo "ERROR: deploy/ripple/$RIPPLE_CORE_TARBALL not found. Run scripts/vendor-ripple-tarball.sh first." && exit 1 ) && \
+      cp "/build/ripple-vendor/$RIPPLE_TARBALL" "/out/$RIPPLE_TARBALL" && \
+      cp "/build/ripple-vendor/$RIPPLE_CORE_TARBALL" "/out/$RIPPLE_CORE_TARBALL" ; \
     fi && \
-    test -f "/out/$RIPPLE_TARBALL" || ( echo "ERROR: ripple tarball missing after stage." && exit 1 )
+    { test -f "/out/$RIPPLE_TARBALL" && test -f "/out/$RIPPLE_CORE_TARBALL" ; } \
+      || ( echo "ERROR: ripple tarballs missing after the stage. Produced:" && ls -1 /out && \
+           echo "ripple's version likely changed — bump RIPPLE_TARBALL / RIPPLE_CORE_TARBALL and the COPY + ENV lines below." && exit 1 )
 
 # ---- wrangler stage ----
 # Bake the wrangler CLI the DYNAMIC-site provision path runs
@@ -185,9 +200,10 @@ FROM bun AS paw-sites
 ARG PAW_SITES_SOURCE=vendor
 ARG PAW_SITES_REPO=https://github.com/qbtrix/paw-sites.git
 ARG PAW_SITES_REF=main
-# Must match the `ripple` stage's tarball name (the clone path installs the
-# generator's @ripple-ui/svelte dep from it).
-ARG RIPPLE_TARBALL=ripple-ui-svelte-0.5.0.tgz
+# Must match the `ripple` stage's tarball names (the clone path installs the
+# generator's @ripple-ui/svelte dep from them).
+ARG RIPPLE_TARBALL=ripple-ui-svelte-0.7.0.tgz
+ARG RIPPLE_CORE_TARBALL=ripple-ui-core-0.5.0.tgz
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates \
@@ -198,10 +214,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # that file: dep and fails. The generator only references @ripple-ui/svelte as
 # STRING LITERALS (an allowlist version const + template text it emits into
 # generated sites) — it has NO real import of it — so `tsc` does not need it
-# resolved; only `bun install` chokes. Fix: install the dep from the real 0.5.0
+# resolved; only `bun install` chokes. Fix: install the dep from the real packed
 # tarball the `ripple` stage already builds. COPY it in (a no-op cost on the vendor
-# path, which never touches it).
+# path, which never touches it). The core tarball rides along because the svelte
+# one declares `@ripple-ui/core: file:../core`, which bun cannot resolve from a
+# tarball — bun 1.4 refuses the install outright over it.
 COPY --from=ripple /out/${RIPPLE_TARBALL} /opt/${RIPPLE_TARBALL}
+COPY --from=ripple /out/${RIPPLE_CORE_TARBALL} /opt/${RIPPLE_CORE_TARBALL}
 
 WORKDIR /build
 # COPY the build-context dir unconditionally (it always exists — a tracked
@@ -215,11 +234,14 @@ RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
       ( git clone --depth=1 --branch "$PAW_SITES_REF" "$PAW_SITES_REPO" /build/paw-sites \
         || ( git clone "$PAW_SITES_REPO" /build/paw-sites && cd /build/paw-sites && git checkout "$PAW_SITES_REF" ) ) && \
       cd /build/paw-sites && \
-      # Rewrite the unresolvable file:../ripple dep to the bundled 0.5.0 tarball so
-      # `bun install` resolves. Drop --frozen-lockfile (package.json now differs from
-      # the committed lock by exactly this one key). tsc doesn't need ripple, so this
-      # only satisfies the installer.
-      bun -e 'const f="package.json";const p=JSON.parse(require("fs").readFileSync(f));p.dependencies["@ripple-ui/svelte"]="file:/opt/'"$RIPPLE_TARBALL"'";require("fs").writeFileSync(f,JSON.stringify(p,null,2));' && \
+      # Rewrite the unresolvable file:../ripple dep to the bundled tarball so
+      # `bun install` resolves, and redirect the core spec nested inside that
+      # tarball via `resolutions` (the same shape the runtime publish path uses —
+      # a direct dep on the core tarball is what bun 1.4 rejects). Drop
+      # --frozen-lockfile (package.json now differs from the committed lock by
+      # exactly these keys). tsc doesn't need ripple, so this only satisfies the
+      # installer.
+      bun -e 'const f="package.json";const p=JSON.parse(require("fs").readFileSync(f));p.dependencies["@ripple-ui/svelte"]="file:/opt/'"$RIPPLE_TARBALL"'";(p.resolutions??={})["@ripple-ui/core"]="file:/opt/'"$RIPPLE_CORE_TARBALL"'";require("fs").writeFileSync(f,JSON.stringify(p,null,2));' && \
       bun install && bun run build ; \
     else \
       echo "PAW_SITES_SOURCE=vendor — using prebuilt generator from build context" && \
@@ -361,9 +383,12 @@ RUN [ "$PAW_FX" != "1" ] || test -f /opt/paw-fx/registry/registry.json \
     || ( echo "ERROR: PAW_FX=1 but deploy/paw-fx/registry/registry.json is missing. Run scripts/vendor-paw-fx.sh first." && exit 1 )
 RUN printf '#!/bin/sh\nexec node /opt/paw-sites/dist/cli.js "$@"\n' > /usr/local/bin/paw-sites-gen && \
     chmod 0755 /usr/local/bin/paw-sites-gen
-# ripple tarball: a generated ripple-track site installs @ripple-ui/svelte from the
-# `file:` spec baked into PAW_SITES_RIPPLE_DEP below.
-COPY --from=ripple /out/ripple-ui-svelte-0.5.0.tgz /opt/ripple-ui-svelte-0.5.0.tgz
+# ripple tarballs: a generated ripple-track site installs @ripple-ui/svelte from the
+# `file:` spec baked into PAW_SITES_RIPPLE_DEP below, and pins @ripple-ui/core to the
+# second one through PAW_SITES_RIPPLE_CORE_DEP. Literal names, not the ARGs — these
+# are the runtime paths the ENVs below have to match exactly.
+COPY --from=ripple /out/ripple-ui-svelte-0.7.0.tgz /opt/ripple-ui-svelte-0.7.0.tgz
+COPY --from=ripple /out/ripple-ui-core-0.5.0.tgz /opt/ripple-ui-core-0.5.0.tgz
 # wrangler (DP0-5): the DYNAMIC-site provision path execs `wrangler d1 migrations
 # apply` (provision_site job) and workers-mode deploy execs `wrangler deploy`. Bake
 # the CLI so neither network-fetches it via `bunx` at publish time. The bin is a
@@ -422,10 +447,16 @@ ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
 # path rewrites that dep to PAW_SITES_RIPPLE_DEP before `bun install`. Point it at
 # the bundled tarball so the install resolves with no registry / private-repo
 # access. PAW_SITES_MOTION_DEP must stay in LOCKSTEP with ripple's motion pin
-# (ripple/package.json -> "motion": "^12.40.0") — ripple lazy-loads motion via a
-# client-only dynamic import, so the generated site declares it directly.
+# (post-split: ripple/packages/svelte/package.json -> "motion": "^12.40.0"; the
+# value is unchanged, the file moved) — ripple lazy-loads motion via a client-only
+# dynamic import, so the generated site declares it directly.
+# PAW_SITES_RIPPLE_CORE_DEP becomes a `resolutions` entry rather than a dependency
+# (generator_client._rewrite_ripple_dep): the svelte tarball's own
+# `@ripple-ui/core: file:../core` is unresolvable for a tarball consumer, and only
+# `resolutions` redirects it on both bun 1.3 and 1.4.
 # PAW_SITES_GEN_CMD is deliberately UNSET: the `paw-sites-gen` wrapper is on PATH.
-ENV PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz
+ENV PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.7.0.tgz
+ENV PAW_SITES_RIPPLE_CORE_DEP=file:/opt/ripple-ui-core-0.5.0.tgz
 ENV PAW_SITES_MOTION_DEP=^12.40.0
 # Point the dynamic-site provision path (and workers-mode deploy) at the baked
 # wrangler wrapper so `wrangler d1 migrations apply` / `wrangler deploy` run offline
