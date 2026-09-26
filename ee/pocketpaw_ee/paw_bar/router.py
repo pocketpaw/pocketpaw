@@ -703,8 +703,11 @@ PAWBAR_APP_MOUNT = "/pawbar-app"
 # SAME string on its <iframe sandbox> attribute; the two must match exactly.
 # Each flag is something the widget actually does:
 #   allow-scripts                   the glass app is a script bundle.
-#   allow-same-origin               keeps OUR origin, so localStorage (the visitor
-#                                   id) and same-origin fetches to the API work.
+#   allow-same-origin               keeps OUR origin: localStorage (the visitor
+#                                   id, transcript cache) needs it, and an opaque
+#                                   origin would send ``Origin: null``, which fails
+#                                   the frame branch of the chat gate
+#                                   (``_configured_frame_origin``).
 #   allow-forms                     the widget's three <form>s submit.
 #   allow-popups                    window.open for articles and checkout, and
 #                                   target=_blank links in replies.
@@ -716,6 +719,23 @@ PAWBAR_APP_MOUNT = "/pawbar-app"
 # frame redirecting the customer's own page is the attack this sandbox blocks.
 # Also absent: allow-modals, allow-pointer-lock, allow-orientation-lock,
 # allow-presentation, allow-storage-access-by-user-activation — nothing uses them.
+#
+# INVARIANT this depends on: no page that embeds the frame may share the API's
+# origin. allow-scripts + allow-same-origin under a SAME-origin parent lets the
+# frame reach into the parent's DOM, which no sandbox flag prevents. Production
+# holds it (sites run on workers.dev / custom domains, the dashboard on its own
+# host), but a single-origin local deploy does not: new sites seed
+# ``localhost,127.0.0.1`` into allowed_origins, which admits the API's own port.
+# Keep the frame on its own origin (``PAWBAR_FRAME_ORIGIN``) in any shared deploy.
+#
+# KNOWN GAP, kept on purpose (2026-09-26): with allow-popups-to-escape-sandbox, a
+# link carrying a NAMED target (target="x", not _blank) opens a tab whose opener
+# is live, and in Firefox that tab can set ``opener.top.location`` on the
+# customer's page (Chromium and WebKit refuse). Dropping the flag closes it in all
+# three engines but sandboxes every tab the widget opens, including real checkout
+# pages, which are untested under a sandbox. Until they are, the glass app's link
+# sanitizer (every reply link forced to target=_blank rel=noopener) is the guard
+# for that one link shape. paw-bar tests/sandbox pins the behaviour per engine.
 PAWBAR_FRAME_SANDBOX = (
     "allow-scripts allow-same-origin allow-forms allow-popups "
     "allow-popups-to-escape-sandbox allow-downloads"
