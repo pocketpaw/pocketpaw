@@ -1,4 +1,13 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-26 (fix/pawbar-frame-sandbox-header) — every frame document is
+#   now sandboxed by the BROWSER, whoever embeds it. The public frame, the dead
+#   shell (disabled concierge / no usable allowlist) and the owner preview all send
+#   a CSP ``sandbox`` directive built from the one ``PAWBAR_FRAME_SANDBOX`` constant
+#   through ``_frame_csp``, so no frame path can miss it. frame-ancestors is
+#   byte-identical and still leads the header; the dead shell, which never had
+#   one, gains the sandbox alone. No flag grants top navigation — steering the
+#   customer's page is the attack the sandbox exists to block. The paw-bar loader
+#   puts the same flags on its <iframe sandbox>; the two strings must match.
 # Updated: 2026-09-26 (fix/pawbar-public-starters-sync-status) — GET /paw-bar/frame
 #   carries the bound agent's conversation starters. It hard-coded ``starters=[]``
 #   on the stale belief that the Agent model had no such field, so owners saw
@@ -688,6 +697,40 @@ def _origin_allowed(widget: PawBarWidget, origin: str | None) -> bool:
 # HTML import THIS constant so the ``<script src>`` and the mount path never drift.
 PAWBAR_APP_MOUNT = "/pawbar-app"
 
+# The CSP ``sandbox`` flags EVERY frame document ships with. Sent as a header, so
+# the browser sandboxes the frame no matter who embeds it: our loader, someone
+# framing the URL directly, or someone opening it top-level. The loader puts the
+# SAME string on its <iframe sandbox> attribute; the two must match exactly.
+# Each flag is something the widget actually does:
+#   allow-scripts                   the glass app is a script bundle.
+#   allow-same-origin               keeps OUR origin, so localStorage (the visitor
+#                                   id) and same-origin fetches to the API work.
+#   allow-forms                     the widget's three <form>s submit.
+#   allow-popups                    window.open for articles and checkout, and
+#                                   target=_blank links in replies.
+#   allow-popups-to-escape-sandbox  the tab a visitor opens (a checkout page) must
+#                                   be a normal page, not born sandboxed.
+#   allow-downloads                 the Blob transcript download.
+# Deliberately ABSENT: allow-top-navigation (and its -by-user-activation /
+# -to-custom-protocols variants) — the widget never navigates the top page, and a
+# frame redirecting the customer's own page is the attack this sandbox blocks.
+# Also absent: allow-modals, allow-pointer-lock, allow-orientation-lock,
+# allow-presentation, allow-storage-access-by-user-activation — nothing uses them.
+PAWBAR_FRAME_SANDBOX = (
+    "allow-scripts allow-same-origin allow-forms allow-popups "
+    "allow-popups-to-escape-sandbox allow-downloads"
+)
+
+
+def _frame_csp(frame_ancestors: str | None = None) -> str:
+    """The ``Content-Security-Policy`` value for a frame document: the embedder gate
+    (when the path has one), then the sandbox. Every HTML response this router
+    serves into an iframe builds its header here, so no frame path ships without
+    the sandbox. ``frame_ancestors`` is passed through untouched."""
+    directives = [frame_ancestors] if frame_ancestors else []
+    directives.append(f"sandbox {PAWBAR_FRAME_SANDBOX}")
+    return "; ".join(directives)
+
 
 def pawbar_app_dir() -> Path:
     """Directory the glass app bundle is served from (PAWBAR_APP_DIR overridable).
@@ -1001,7 +1044,9 @@ def _dead_frame_response(po: str, allowed_origins: list[str]) -> HTMLResponse:
             f"</head><body>{script}</body></html>"
         ),
         status_code=403,
-        headers={"Cache-Control": "no-store"},
+        # No frame-ancestors here (the shell never had an embedder gate), but it
+        # still runs a script inside someone's page, so it is sandboxed like the rest.
+        headers={"Content-Security-Policy": _frame_csp(), "Cache-Control": "no-store"},
     )
 
 
@@ -1420,7 +1465,7 @@ async def frame(
     return HTMLResponse(
         content=html,
         headers={
-            "Content-Security-Policy": csp,
+            "Content-Security-Policy": _frame_csp(csp),
             # The embed key is baked into the loader HTML per-embedder; the frame
             # doc itself must not be cached across keys/parents by a shared proxy.
             "Cache-Control": "no-store",
@@ -3586,7 +3631,7 @@ async def get_site_preview_frame(
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, scene_url=scene)
     return HTMLResponse(
         content=html,
-        headers={"Content-Security-Policy": csp, "Cache-Control": "no-store"},
+        headers={"Content-Security-Policy": _frame_csp(csp), "Cache-Control": "no-store"},
     )
 
 

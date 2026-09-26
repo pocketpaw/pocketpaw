@@ -1,5 +1,11 @@
 # tests/cloud/test_paw_bar_frame.py — Paw Bar glass FRAME endpoint + CSP origin
 # model (A1).
+# Updated 2026-09-26 (fix/pawbar-frame-sandbox-header): every frame document now
+#   carries a CSP ``sandbox`` directive after frame-ancestors, so the exact-header
+#   assertions compare against ``_csp(...)``. New coverage: the live frame, both
+#   dead-frame paths (disabled concierge, no usable allowlist) and the dead shell
+#   itself carry the exact sandbox directive, keep frame-ancestors unchanged, and
+#   never grant top navigation.
 # Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
 #   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
 #   route (fix/pawbar-public-route-gates, 2026-09-26).
@@ -47,6 +53,21 @@ from pocketpaw.paw_bar.store import PawBarStore
 
 _VALID_KEY = "site_key_" + "a" * 24
 _FRAME_ORIGIN = "https://frame.pocketpaw.test"
+# Written out literally, NOT imported from the router: the paw-bar loader puts the
+# same flags on its <iframe sandbox>, and this is the string the two must agree on.
+_SANDBOX_DIRECTIVE = (
+    "sandbox allow-scripts allow-same-origin allow-forms allow-popups "
+    "allow-popups-to-escape-sandbox allow-downloads"
+)
+
+
+def _csp(frame_ancestors: str) -> str:
+    """The full frame CSP: the embedder gate, then the sandbox."""
+    return f"{frame_ancestors}; {_SANDBOX_DIRECTIVE}"
+
+
+def _directives(csp: str) -> list[str]:
+    return [d.strip() for d in csp.split(";") if d.strip()]
 
 
 @pytest.fixture(autouse=True)
@@ -234,8 +255,8 @@ async def test_frame_valid_key_renders_with_csp(frame_client):
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/html")
     # The embedder gate: frame-ancestors with EXACTLY the Site's allowed_origins.
-    assert (
-        res.headers["content-security-policy"] == "frame-ancestors brewco.com:* shop.example.com:*"
+    assert res.headers["content-security-policy"] == _csp(
+        "frame-ancestors brewco.com:* shop.example.com:*"
     )
     body = res.text
     # The document seeds window.__PAWBAR__ before loading the app.
@@ -259,9 +280,8 @@ async def test_frame_admits_the_dashboard_as_an_ancestor(frame_client, monkeypat
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
     assert res.status_code == 200
-    assert (
-        res.headers["content-security-policy"]
-        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    assert res.headers["content-security-policy"] == _csp(
+        "frame-ancestors brewco.com:* https://app.example.com:*"
     )
 
 
@@ -276,7 +296,7 @@ async def test_frame_admits_an_http_dashboard_against_an_https_frame(frame_clien
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
     assert res.status_code == 200
-    assert res.headers["content-security-policy"] == (
+    assert res.headers["content-security-policy"] == _csp(
         "frame-ancestors localhost:* 127.0.0.1:* site.pawsites.workers.dev:* http://localhost:5173"
     )
 
@@ -290,9 +310,8 @@ async def test_frame_falls_back_to_the_declared_cors_origins(frame_client, monke
     await _site(allowed_origins=["brewco.com"])
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
-    assert (
-        res.headers["content-security-policy"]
-        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    assert res.headers["content-security-policy"] == _csp(
+        "frame-ancestors brewco.com:* https://app.example.com:*"
     )
 
 
@@ -306,7 +325,7 @@ async def test_frame_ancestors_unchanged_when_no_dashboard_is_configured(frame_c
     await _site(allowed_origins=["brewco.com"])
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
-    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com:*"
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors brewco.com:*")
 
 
 @pytest.mark.asyncio
@@ -319,7 +338,7 @@ async def test_frame_sanitizes_the_dashboard_origin(frame_client, monkeypatch):
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
     assert res.status_code == 200
-    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com:*"
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors brewco.com:*")
 
 
 @pytest.mark.asyncio
@@ -601,3 +620,56 @@ class TestDeadFrameShell:
         # An unlisted parent gets NO script — nothing is posted anywhere.
         stranger = _dead_frame_response("https://evil.example", ["brewco.com"]).body.decode()
         assert "postMessage" not in stranger
+
+
+# --------------------------------------------------------------------------- #
+# The CSP sandbox — every frame document the server returns is sandboxed by the
+# BROWSER, whoever embeds it (our loader, a direct embed, or a top-level open).
+# --------------------------------------------------------------------------- #
+
+
+def _assert_sandboxed(res, frame_ancestors: str | None) -> None:
+    csp = res.headers["content-security-policy"]
+    directives = _directives(csp)
+    assert _SANDBOX_DIRECTIVE in directives
+    if frame_ancestors is None:
+        assert not any(d.startswith("frame-ancestors") for d in directives)
+    else:
+        assert frame_ancestors in directives
+    # The one thing the sandbox exists to stop: the frame steering the top page.
+    assert "allow-top-navigation" not in csp
+
+
+@pytest.mark.asyncio
+async def test_live_frame_is_sandboxed(frame_client):
+    await _site(allowed_origins=["brewco.com"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    _assert_sandboxed(res, "frame-ancestors brewco.com:*")
+
+
+@pytest.mark.asyncio
+async def test_dead_frame_for_disabled_concierge_is_sandboxed(frame_client):
+    await _site(concierge_enabled=False)
+    res = await frame_client.get(
+        "/paw-bar/frame", params={"key": _VALID_KEY, "po": "https://brewco.com"}
+    )
+    assert res.status_code == 403
+    assert "pawbar:dead" in res.text
+    # The dead shell never had an embedder gate; it gains the sandbox and nothing else.
+    _assert_sandboxed(res, None)
+
+
+@pytest.mark.asyncio
+async def test_dead_frame_for_empty_allowlist_is_sandboxed(frame_client):
+    await _site(allowed_origins=[])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 403
+    _assert_sandboxed(res, None)
+
+
+def test_dead_frame_shell_is_sandboxed() -> None:
+    from pocketpaw_ee.paw_bar.router import _dead_frame_response
+
+    res = _dead_frame_response("https://brewco.com", ["brewco.com"])
+    assert res.headers["content-security-policy"] == _SANDBOX_DIRECTIVE
