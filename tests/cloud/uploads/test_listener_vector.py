@@ -1,4 +1,6 @@
 # test_listener_vector.py — listener vector-path coverage.
+# Updated: 2026-08-05 — Coupling T-1. Ingest source assertions now expect the
+#   provenance-stamped form "<filename>#file:<file_id>".
 # Created: 2026-04-30 — Phase 2 of "Files as Knowledge" plan, Stage 2.D.
 # Covers the post-text-ingest hook: vectors enabled → embedder called →
 # kb subprocess invoked with --vec; cap hit → vector skipped, text still
@@ -194,7 +196,9 @@ async def test_vector_path_runs_when_enabled(monkeypatch, tmp_path):
     )
 
     # Text ingest happened first.
-    ingest.assert_awaited_once_with(scope="workspace:w1", text="caption", source="diagram.png")
+    ingest.assert_awaited_once_with(
+        scope="workspace:w1", text="caption", source="diagram.png#file:f1"
+    )
     # Embedder ran on the same path the chain saw.
     assert embedder.calls == [(direct, "image/png")]
     # Cost was recorded.
