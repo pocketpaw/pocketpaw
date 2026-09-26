@@ -3,8 +3,8 @@
 #
 # Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): comments only. The
 #   ASG-1 identity fields exist on the Agent model and create DTO, so
-#   ``_seed_identity`` does seed welcome_message + conversation_starters; the
-#   notes below that called it a no-op were stale.
+#   ``_seed_identity`` does seed welcome_message + conversation_starters (and
+#   ``_seed_tags`` the tags); the notes below that called them no-ops were stale.
 #
 # ``ensure_site_agent(site, widget)`` is the funnel, and the single place "which
 # agent is this pocket's canonical concierge?" is decided. FOUR triggers end
@@ -147,9 +147,9 @@ def _seed_identity(body: Any, site: Any, widget: Any) -> None:
 
 def _seed_tags(body: Any, site_id: str) -> None:
     """Stamp the ``["concierge", "site:<id>"]`` tags IF the create DTO supports a
-    free-form ``tags`` field. The Agent model on this branch has no such field
-    (``scopes`` is a hierarchical SCOPE-tag list with its own validator, NOT a
-    label bag), so this is a graceful no-op here."""
+    free-form ``tags`` field. The create DTO and the Agent model carry one (ASG-1;
+    not to be confused with ``scopes``, a hierarchical SCOPE-tag list with its own
+    validator), so this stamps them; a body without the field is a logged no-op."""
     if hasattr(body, "tags"):
         body.tags = ["concierge", f"site:{site_id}"]
     else:
