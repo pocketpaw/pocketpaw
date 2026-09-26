@@ -1,0 +1,311 @@
+# ee/pocketpaw_ee/terrarium/router.py
+#
+# TWO routers with DELIBERATELY different auth boundaries — the same split the
+# file share-links surface uses, and for the same reason: an ambient dependency
+# added to a shared router would silently change the public one's posture.
+#
+#   router        (prefix /terrarium)        — workspace surface. License-gated,
+#       RBAC mirroring the belt console: ``terrarium.read`` (MEMBER) on reads,
+#       ``terrarium.manage`` (ADMIN) on create / tick. Speaking and pledging are
+#       MEMBER: they cost the viewer tokens, not the workspace's safety.
+#
+#   public_router (prefix /terrarium/public) — ANONYMOUS, READ-ONLY. No auth, no
+#       license. This is a SECURITY BOUNDARY, so it is conservative on purpose:
+#         * it is dark unless ``TERRARIUM_PUBLIC_ENABLED`` is truthy. DEFAULT
+#           OFF — an operator has to turn it on deliberately. Read from the
+#           environment on EVERY request, so flipping it is live without a
+#           restart.
+#         * it serves the Journal ``TERRARIUM_PUBLIC_DELAY_EVENTS`` rows
+#           (default 20) behind the live edge; the universe wire reports the
+#           gap as ``public_lag``. Authenticated readers see everything.
+#         * a ``paused`` universe (``POST .../pause``, owner or admin) is the
+#           same flat 404 as a private one, and does not tick.
+#         * every route ALSO requires ``universe.public == true``, checked in
+#           the service at the lookup (``_public_universe``) so no handler can
+#           forget it. BOTH gates, never one.
+#         * a universe that fails either gate is a flat 404 — never a 403,
+#           which would confirm the universe exists.
+#         * it carries NO write route, and never will. Speaking and pledging
+#           move credits and enter souls' context; they require an account.
+#       Anything added here needs a security review, not just a code review.
+
+"""Terrarium routers — the workspace surface and the anonymous public one."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query
+
+from pocketpaw_ee.cloud._core.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_action_any_workspace,
+)
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.guards.deps import resolve_workspace_role
+from pocketpaw_ee.guards.rbac import WorkspaceRole
+from pocketpaw_ee.terrarium import service
+from pocketpaw_ee.terrarium.dto import CreateUniverseRequest, PledgeRequest, SpeakRequest
+
+router = APIRouter(prefix="/terrarium", tags=["Terrarium"], dependencies=[Depends(require_license)])
+
+# No dependencies. Deliberate — see the module header.
+public_router = APIRouter(prefix="/terrarium/public", tags=["Terrarium Public"])
+
+
+def public_enabled() -> bool:
+    """The server-wide kill switch for the anonymous surface. DEFAULT OFF.
+
+    Fail-closed: anything other than an explicit truthy value keeps the whole
+    public surface dark, including a malformed value.
+    """
+    return (os.environ.get("TERRARIUM_PUBLIC_ENABLED") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _require_public_surface() -> None:
+    """404 (not 403) when the public surface is off — the routes do not exist
+    as far as an anonymous caller can tell."""
+    if not public_enabled():
+        raise NotFound("universe")
+
+
+# ---------------------------------------------------------------------------
+# Workspace surface
+# ---------------------------------------------------------------------------
+
+
+@router.post("/universes")
+async def create_universe(
+    body: CreateUniverseRequest,
+    _user: Any = Depends(require_action_any_workspace("terrarium.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Create a universe from a physics file and seed its founders. Files a
+    ``world_create`` Instinct Action; returns ``{action_id, universe}``."""
+    return await service.create_universe(workspace_id, user_id, body.model_dump())
+
+
+@router.get("/universes")
+async def list_universes(
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The workspace's universes."""
+    return await service.list_universes(workspace_id)
+
+
+@router.get("/universes/{universe_id}")
+async def get_universe(
+    universe_id: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """One universe with its citizens and ledger. Another workspace's is a 404."""
+    return await service.get_universe(workspace_id, universe_id)
+
+
+@router.post("/universes/{universe_id}/tick")
+async def tick(
+    universe_id: str,
+    n: int = Query(1, ge=1, le=24),
+    _user: Any = Depends(require_action_any_workspace("terrarium.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Run N ticks. Manual trigger; a scheduler would use this same path."""
+    return await service.tick(workspace_id, user_id, universe_id, n)
+
+
+def _is_admin(user: Any, workspace_id: str) -> bool:
+    return resolve_workspace_role(user, workspace_id).level >= WorkspaceRole.ADMIN.level
+
+
+@router.post("/universes/{universe_id}/pause")
+async def pause_universe(
+    universe_id: str,
+    user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """The kill switch. Owner (creator) or workspace admin: no ticks, dark in
+    public, until ``resume``."""
+    return await service.set_paused(
+        workspace_id, user_id, universe_id, paused=True, is_admin=_is_admin(user, workspace_id)
+    )
+
+
+@router.post("/universes/{universe_id}/resume")
+async def resume_universe(
+    universe_id: str,
+    user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    return await service.set_paused(
+        workspace_id, user_id, universe_id, paused=False, is_admin=_is_admin(user, workspace_id)
+    )
+
+
+@router.get("/universes/{universe_id}/events")
+async def list_events(
+    universe_id: str,
+    since: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The Journal, paged by the monotonic ``seq``."""
+    return await service.list_events(workspace_id, universe_id, since, limit)
+
+
+@router.get("/universes/{universe_id}/citizens")
+async def list_citizens(
+    universe_id: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    return await service.list_citizens(workspace_id, universe_id)
+
+
+@router.get("/universes/{universe_id}/citizens/{cid}")
+async def get_citizen(
+    universe_id: str,
+    cid: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The profile drawer: citizen, soul memories, artifacts, bonds."""
+    return await service.get_citizen(workspace_id, universe_id, cid)
+
+
+@router.get("/universes/{universe_id}/artifacts")
+async def list_artifacts(
+    universe_id: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The Built tab."""
+    return await service.list_artifacts(workspace_id, universe_id)
+
+
+@router.get("/universes/{universe_id}/gates")
+async def list_gates(
+    universe_id: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Pending human decisions in this world — today, citizens asking for a child.
+
+    Read only. Approving is still ``POST /instinct/actions/{id}/approve``: one
+    gate, one authority. This exists so a spawn request is visible from the
+    world it happened in instead of only in the tray.
+    """
+    return await service.list_gates(workspace_id, universe_id)
+
+
+@router.post("/universes/{universe_id}/speak")
+async def speak(
+    universe_id: str,
+    body: SpeakRequest,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Say one line into the world. Lands tagged ``viewer_origin: true``."""
+    return await service.speak(workspace_id, user_id, universe_id, body.text)
+
+
+@router.get("/universes/{universe_id}/weather")
+async def get_weather(
+    universe_id: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Every god power's pledge state."""
+    return await service.get_weather(workspace_id, universe_id)
+
+
+@router.post("/universes/{universe_id}/weather/pledge")
+async def pledge_weather(
+    universe_id: str,
+    body: PledgeRequest,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Pledge tokens toward a power. Fires it when the threshold is crossed."""
+    return await service.pledge_weather(workspace_id, user_id, universe_id, body.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Public surface — anonymous, read-only, doubly gated, fail-closed.
+# ---------------------------------------------------------------------------
+
+
+@public_router.get("/universes")
+async def public_list_universes() -> dict[str, Any]:
+    _require_public_surface()
+    return await service.public_list_universes()
+
+
+@public_router.get("/universes/{universe_id}")
+async def public_get_universe(universe_id: str) -> dict[str, Any]:
+    _require_public_surface()
+    return await service.public_get_universe(universe_id)
+
+
+@public_router.get("/universes/{universe_id}/events")
+async def public_list_events(
+    universe_id: str,
+    since: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+    kind: str | None = None,
+) -> dict[str, Any]:
+    # ``kind`` is a bare string on purpose. Typed as an enum, FastAPI would 422
+    # an unknown value BEFORE the gate below runs, and a 422 where every other
+    # answer is 404 tells an anonymous caller the route is live. The service
+    # validates it after both gates instead.
+    _require_public_surface()
+    return await service.public_list_events(universe_id, since, limit, kind)
+
+
+@public_router.get("/universes/{universe_id}/moments")
+async def public_list_moments(
+    universe_id: str,
+    since: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    """The story feed: the same Journal page, moments only. A thin alias so a
+    stranger's client does not have to know the kind vocabulary."""
+    _require_public_surface()
+    return await service.public_list_events(universe_id, since, limit, kind="moment")
+
+
+@public_router.get("/universes/{universe_id}/citizens")
+async def public_list_citizens(universe_id: str) -> dict[str, Any]:
+    _require_public_surface()
+    return await service.public_list_citizens(universe_id)
+
+
+@public_router.get("/universes/{universe_id}/citizens/{cid}")
+async def public_get_citizen(universe_id: str, cid: str) -> dict[str, Any]:
+    _require_public_surface()
+    return await service.public_get_citizen(universe_id, cid)
+
+
+@public_router.get("/universes/{universe_id}/artifacts")
+async def public_list_artifacts(universe_id: str) -> dict[str, Any]:
+    _require_public_surface()
+    return await service.public_list_artifacts(universe_id)
+
+
+__all__ = ["public_enabled", "public_router", "router"]
