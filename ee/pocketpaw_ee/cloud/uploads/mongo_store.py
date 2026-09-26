@@ -1,5 +1,10 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-09-27 (fix/chat-attachment-name-backfill): added ``get_many_scoped`` —
+one ``$in`` read for a batch of file ids, pinned to a workspace and skipping
+soft-deleted rows, returned as ``{file_id: FileRecord}``. Session history uses
+it to backfill names on legacy nameless chat attachments without N+1 reads.
+
 2026-09-05 (files vault): ``set_library_metadata`` takes an optional
 ``link_names`` so the FileReady listener persists a note's wikilink targets in
 the same write as its tags. Added ``iter_link_rows`` — the one workspace-scoped
@@ -373,6 +378,25 @@ class MongoFileStore:
             FileUpload.deleted_at == None,  # noqa: E711 beanie needs literal None
         )
         return self._to_record(doc)
+
+    async def get_many_scoped(self, file_ids: list[str], workspace: str) -> dict[str, FileRecord]:
+        """Batch counterpart to :meth:`get_scoped` — one query, keyed by file_id.
+
+        Same filters as ``get_scoped`` (workspace pin, live rows only), so an id
+        that belongs to another workspace is simply absent from the result.
+        """
+        ids = list({f for f in file_ids if f})
+        if not ids or not workspace:
+            return {}
+        docs = await FileUpload.find(
+            {"file_id": {"$in": ids}, "workspace": workspace, "deleted_at": None}
+        ).to_list()
+        out: dict[str, FileRecord] = {}
+        for doc in docs:
+            rec = self._to_record(doc)
+            if rec is not None:
+                out[rec.id] = rec
+        return out
 
     async def get_unscoped(self, file_id: str) -> FileRecord | None:
         """Find a live record by file_id without workspace filter.

@@ -1,4 +1,8 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Updated: 2026-09-27 — fix/chat-attachment-name-backfill. Added module-level
+#   ``get_records_scoped(file_ids, workspace)``, a metadata-only batch lookup
+#   (no blob I/O) other entities call instead of reaching into the store, so
+#   session history can fill names on legacy nameless chat attachments.
 # Updated: 2026-08-29 — T0 "Persist the extracted text". ``delete`` now also
 #   removes the file's DERIVED extraction blob (``uploads.extracted_text``),
 #   which T0 introduced beside the uploaded bytes. Without this, every deleted
@@ -377,6 +381,15 @@ class EEUploadService:
 # ---------------------------------------------------------------------------
 # Programmatic write helper (pocketpaw#1118 P1)
 # ---------------------------------------------------------------------------
+
+
+async def get_records_scoped(file_ids: list[str], workspace: str) -> dict[str, FileRecord]:
+    """Metadata for a batch of uploads in one workspace, keyed by file_id.
+
+    One query, no storage access. Ids that are unknown, soft-deleted or owned
+    by another workspace are absent from the result.
+    """
+    return await MongoFileStore().get_many_scoped(file_ids, workspace)
 
 
 _PLANNER_EXTENSION_BY_MIME = {
