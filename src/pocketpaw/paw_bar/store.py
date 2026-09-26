@@ -5,10 +5,10 @@
 #   count_events_since and within_rate_limit take ``bucket`` and count only that
 #   bucket, so the public event-ingest route ("events") can no longer fill the
 #   budget visitor chat reads (''). New admit_event does the count and the
-#   insert in ONE ``BEGIN IMMEDIATE`` transaction behind a per-store asyncio
-#   lock, so a concurrent burst cannot all see "under the cap" and all insert.
-#   Atomic per SQLite file, which means per replica: separate replicas with
-#   separate disks each keep their own count.
+#   insert in ONE ``BEGIN IMMEDIATE`` transaction behind a PER-WIDGET asyncio
+#   lock, so a concurrent burst cannot all see "under the cap" and all insert,
+#   and one busy widget never queues another. Atomic per SQLite file, which
+#   means per replica: separate replicas with separate disks each count alone.
 # Updated: 2026-08-24 (inbox freshness) — new list_recent_owner_messages: the
 #   newest out-of-band lines for a PAGE of visitors in ONE bounded read, so the
 #   owner's conversation list can say what was said LAST instead of what the last
@@ -144,6 +144,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -534,10 +535,15 @@ class PawBarStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
-        # Serializes admit_event's count-then-insert inside this process, so
-        # concurrent coroutines queue here instead of contending for SQLite's
-        # write lock (BEGIN IMMEDIATE still covers other processes on the file).
-        self._admit_lock = asyncio.Lock()
+        # One lock PER WIDGET serializes admit_event's count-then-insert in this
+        # process, so a burst on one widget queues here instead of contending for
+        # SQLite's write lock, and never queues behind another tenant's widget
+        # (BEGIN IMMEDIATE still covers other processes on the file). Weak values:
+        # a lock lives only while some admit holds or awaits it, so the map stays
+        # the size of the widgets admitting right now.
+        self._admit_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
 
     async def _ensure_schema(self) -> None:
         if self._initialized:
@@ -1013,9 +1019,11 @@ class PawBarStore:
         which N concurrent requests all read "under the cap" and all insert. Here
         the two counts and the insert share one ``BEGIN IMMEDIATE`` transaction
         (SQLite's write lock, so another process on the same file waits too) and a
-        per-store asyncio lock (so coroutines in this process queue instead of
+        per-widget asyncio lock (so coroutines in this process queue instead of
         timing out on that write lock). Returns True when the event was admitted
-        and recorded, False when it was refused and nothing was written.
+        and recorded, False when it was refused and nothing was written. Raises
+        ``sqlite3.OperationalError`` when the write lock cannot be had within the
+        connection timeout; the caller decides whether that fails open or closed.
         """
         await self._ensure_schema()
         window_start = ((now or datetime.now()) - timedelta(minutes=1)).isoformat()
@@ -1025,7 +1033,11 @@ class PawBarStore:
             " FROM paw_bar_events"
             " WHERE widget_id = ? AND timestamp >= ? AND COALESCE(bucket, '') = ?"
         )
-        async with self._admit_lock:
+        lock = self._admit_locks.get(event.widget_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._admit_locks[event.widget_id] = lock
+        async with lock:
             async with self._conn() as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:

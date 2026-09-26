@@ -1,27 +1,13 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
-# Updated: 2026-09-26 (fix/pawbar-public-route-gates) — the anonymous routes can
-#   no longer take a site's concierge offline or write into its owner's queue.
-#   (1) POST /paw-bar/events/{id} took no key and counted against the SAME
-#   per-widget bucket as chat, so one curl loop with a forged Origin and rotating
-#   customer_refs 429'd every real visitor, and each accepted event minted a
-#   Fabric object and an Instinct proposal. Its events now count in their own
-#   ``events`` bucket, and a widget with a concierge agent refuses a key-less
-#   write (401 ``signed_key_required``); with ``signed_key`` in the body it goes
-#   through ``_authenticate_widget_key``, the key+origin+binding half of the
-#   front gate. WHY NOT KEY-ONLY: the live glass app never posts events at all;
-#   the only key-less caller is the frozen paw-bar ``src/`` widget, which has no
-#   key to send and serves unbound legacy widgets, so those keep their key-less
-#   path (origin gate, customer_ref format, own bucket). (2) A per-IP token bucket
-#   (``_PUBLIC_IP_LIMITER``, in-process, keyed on the rightmost X-Forwarded-For hop
-#   via ``_core.rate_limit._client_ip``) runs first on spec, events, decision, chat
-#   and every ``_front_gate_for_key`` route. (3) Chat and ingest record through
-#   ``store.admit_event``: check and insert are one transaction. Chat's marker is
-#   written after the key resolves, so a bad-key flood no longer fills it. (4) The
-#   decision GET format-checks customer_ref and, for a concierge widget, needs the
-#   ``signed_key`` query param the glass app already sends. (5) Chat refuses a
-#   malformed customer_ref and a message over ``_CHAT_MESSAGE_MAX`` (400, same
-#   shape as the gate). (6) The visitor transcript is ``VisitorTranscriptMessage``
-#   (no author_*), and a visitor ``error`` frame always carries ``agent.error``.
+# Updated: 2026-09-26 (fix/pawbar-public-route-gates) — anonymous callers can no
+#   longer 429 a site's chat or write into its owner's queue. Ingested events use
+#   their own ``events`` rate bucket; a widget with a concierge agent needs
+#   ``signed_key`` on events and the decision poll (the glass app never posts
+#   events and already keys the poll; only the frozen key-less ``src/`` widget,
+#   which serves unbound widgets, does). Per-(IP, widget) bucket on every public
+#   route; chat/ingest admit atomically (``store.admit_event``); chat bounds
+#   customer_ref and message; the visitor transcript drops author_* and the
+#   visitor error frame is always ``agent.error``.
 # Updated: 2026-09-26 (feat/pawbar-admin-widget-spec-route) — the owner can save
 #   the concierge's Catalog & Actions again, and gets a snippet that works. New
 #   PATCH /paw-bar/admin/site/{site_id}/widget/spec takes {spec} behind
@@ -556,6 +542,8 @@ import json
 import logging
 import os
 import re
+import sqlite3
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -617,19 +605,33 @@ def _store():
     return get_paw_bar_store()
 
 
-# Per-IP ceiling on the PUBLIC paw-bar routes (2026-09-26). The per-widget and
-# per-customer buckets live in the store and key on values the caller chooses
-# (customer_ref), so one IP rotating refs was bounded only by the widget total.
-# 2/s sustained with a 120 burst: the glass app polls one route every 7s, so an
-# office NAT with a dozen open panels stays well inside it. In-process, so each
-# replica keeps its own count (same caveat as ``_core.rate_limit``).
-_PUBLIC_IP_LIMITER = RateLimiter(rate=2.0, capacity=120)
+# Per-(client IP, widget) ceiling on the PUBLIC paw-bar routes (2026-09-26). The
+# store's buckets key on values the caller chooses (customer_ref), so one IP
+# rotating refs was bounded only by the widget total. Keyed on the widget too, so
+# a shared NAT/CGNAT address does not spend one budget across every tenant's site.
+# Sizing: an open panel polls every 7s (~0.14 req/s), so 50 panels behind one NAT
+# on one site sustain ~7 req/s before any chat turn; 10/s leaves headroom for
+# their turns. Opening a panel costs ~5 calls, so a 300 burst absorbs 50 panels
+# opening together. In-process: each replica keeps its own count.
+_PUBLIC_IP_LIMITER = RateLimiter(rate=10.0, capacity=300)
+# Buckets idle this long are dropped (a full bucket and a missing one behave the
+# same), swept at most once per interval from the request path — nothing else
+# calls RateLimiter.cleanup, so without this the map grows with every address.
+_PUBLIC_IP_BUCKET_MAX_AGE_S = 600.0
+_PUBLIC_IP_SWEEP_EVERY_S = 60.0
+_public_ip_last_sweep = 0.0
 
 
-def _public_ip_gate(request: Request) -> None:
-    """429 when this client IP has spent its public paw-bar budget. No DB, so
-    it runs before anything else on a public route."""
-    if not _PUBLIC_IP_LIMITER.check(f"paw-bar:{_client_ip(request)}").allowed:
+def _public_ip_gate(request: Request, widget_id: str) -> None:
+    """429 when this client IP has spent its budget on this widget. No DB, so it
+    runs before anything else on a public route."""
+    global _public_ip_last_sweep
+    now = time.monotonic()
+    if now - _public_ip_last_sweep >= _PUBLIC_IP_SWEEP_EVERY_S:
+        _public_ip_last_sweep = now
+        _PUBLIC_IP_LIMITER.cleanup(max_age=_PUBLIC_IP_BUCKET_MAX_AGE_S)
+    key = f"paw-bar:{_client_ip(request)}:{widget_id}"
+    if not _PUBLIC_IP_LIMITER.check(key).allowed:
         raise HTTPException(429, "Rate limit exceeded")
 
 
@@ -4571,7 +4573,7 @@ async def get_spec(
     caller is the frozen key-less ``src/`` widget, and the glass app never
     fetches it.
     """
-    _public_ip_gate(request)
+    _public_ip_gate(request, widget_id)
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
@@ -4643,7 +4645,7 @@ async def ingest_event(
     open-the-loop half; the human decides on the existing Instinct surface and
     deliver_customer_decision closes it.
     """
-    _public_ip_gate(request)
+    _public_ip_gate(request, widget_id)
     if not _CUSTOMER_REF_RE.match(body.customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
     store = _store()
@@ -4651,7 +4653,9 @@ async def ingest_event(
     if widget is None:
         raise HTTPException(404, "Widget not found")
 
-    await _authenticate_public_caller(widget, body.signed_key, body.customer_ref, request)
+    await _authenticate_public_caller(
+        widget, body.signed_key, body.customer_ref, request, allow_frame_origin=False
+    )
 
     event = PawBarEvent(
         widget_id=widget_id,
@@ -4666,12 +4670,21 @@ async def ingest_event(
     if not await _screen_event_for_injection(event):
         return EventIngestResponse(accepted=False, reason="injection_rejected")
 
-    admitted = await store.admit_event(
-        event,
-        overall_per_min=widget.rate_limit_per_min,
-        per_customer_per_min=widget.per_customer_limit_per_min,
-        bucket=_EVENTS_BUCKET,
-    )
+    # A locked store FAILS CLOSED here (503), unlike chat. The admitted row IS
+    # the event, so failing open would mean a write that is then retried against
+    # the same locked file, and this is the route whose flood a contended store
+    # most likely comes from. The only caller is the legacy widget, which already
+    # surfaces a failed post; nothing a visitor is waiting on is lost.
+    try:
+        admitted = await store.admit_event(
+            event,
+            overall_per_min=widget.rate_limit_per_min,
+            per_customer_per_min=widget.per_customer_limit_per_min,
+            bucket=_EVENTS_BUCKET,
+        )
+    except sqlite3.OperationalError:
+        logger.warning("paw-bar event admit hit a locked store; refusing", exc_info=True)
+        raise HTTPException(503, "Busy, try again") from None
     if not admitted:
         raise HTTPException(429, "Rate limit exceeded")
 
@@ -4723,7 +4736,7 @@ async def get_decision(
     only caller, already sends it. The reply is the owner's words to one
     visitor, and the ref alone was the whole credential.
     """
-    _public_ip_gate(request)
+    _public_ip_gate(request, widget_id)
     if not _CUSTOMER_REF_RE.match(customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
     store = _store()
@@ -5068,16 +5081,13 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
       1. Widget exists (404).
       2. Resolve our frame origin (dual-mode origin model — no rejection here; the
          authoritative, fail-closed origin gate is folded into step 5).
-      3. (moved to 6b, 2026-09-26)
+      3. (moved to 7d, 2026-09-26)
       4. Injection screen the free-text message; drop on HIGH (400).
       5. Authenticate the embed key + dual-mode origin gate (``resolve_site_key`` —
          401 bad key / 403 disallowed origin, fail-closed).
       6. Bind the widget to the RESOLVED key: the widget must belong to the key's
          workspace AND pocket (403) — a key for pocket A must not drive a widget
          for a sibling pocket B (finding #2).
-      6b. Rate limit, overall + per-customer (429), checked and recorded as one
-          step (``admit_event``). After the key on purpose: a marker recorded for
-          a bad-key request would let anyone fill the bucket without a key.
       7. The widget must have a concierge agent bound (409).
       7b. The pocket must expose NO connectors (409) — public-safe lockdown until
           the claude_sdk untrusted-mode GA fix (a static deny can't strip dynamic
@@ -5086,11 +5096,14 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
           allowance must not already be used up (403
           ``concierge_quota_exceeded``). Only new conversations are refused — a
           thread under way was counted when it began.
+      7d. Rate limit, overall + per-customer (429), checked and recorded as one
+          step (``_admit_chat_turn``). Last of the refusals, so no refused turn
+          (bad key, 409, quota) spends a slot.
       8. Dispatch a CONCIERGE-scoped run over the shared machinery and stream its
          frames back as SSE.
     """
     # (0) Cheap, DB-free gates.
-    _public_ip_gate(request)
+    _public_ip_gate(request, body.widget_id)
     if not _CUSTOMER_REF_RE.match(body.customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
     if len(body.message) > _CHAT_MESSAGE_MAX:
@@ -5142,22 +5155,6 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     if widget.pocket_id != ctx.pocket_id:
         raise HTTPException(403, "widget_pocket_mismatch")
 
-    # (6b) Rate limit — check and record the chat marker as ONE step, so a
-    # concurrent burst cannot all pass the check before any of them records. The
-    # marker carries no message body (the reply persists via the run).
-    admitted = await store.admit_event(
-        PawBarEvent(
-            widget_id=body.widget_id,
-            type="concierge_message",
-            payload={},
-            customer_ref=body.customer_ref,
-        ),
-        overall_per_min=widget.rate_limit_per_min,
-        per_customer_per_min=widget.per_customer_limit_per_min,
-    )
-    if not admitted:
-        raise HTTPException(429, "Rate limit exceeded")
-
     # (7) The widget must be bound to a concierge agent (T3 sets agent_id).
     if not widget.agent_id:
         raise HTTPException(409, "widget has no concierge agent")
@@ -5184,8 +5181,6 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         raise HTTPException(409, "concierge_connector_check_failed")
     if _bound_connectors:
         raise HTTPException(409, "concierge_pocket_has_connectors")
-
-    # (The chat marker the rate limiter counts is recorded at step 6b.)
 
     # Touch the conversation's state row (owner inbox, slice 1). THIS is what makes
     # the queue backfill-free: the row is minted on a visitor's first message and
@@ -5273,6 +5268,11 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
                 body.widget_id,
             )
             raise HTTPException(403, "concierge_quota_exceeded")
+
+    # (7d) Rate limit — after every refusal above, so a 409 or quota-refused turn
+    # spends no slot, and before anything the turn writes.
+    if not await _admit_chat_turn(store, widget, body.customer_ref):
+        raise HTTPException(429, "Rate limit exceeded")
 
     try:
         await store.auto_resume_bot_if_idle(body.widget_id, body.customer_ref, ctx.workspace_id)
@@ -5579,6 +5579,32 @@ _CUSTOMER_REF_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _CHAT_MESSAGE_MAX = 8000
 
 
+async def _admit_chat_turn(store: Any, widget: PawBarWidget, customer_ref: str) -> bool:
+    """Check the chat rate limit and record this turn's marker as one step.
+
+    FAILS OPEN on a locked store: the marker is bookkeeping, and before the atomic
+    admit it was a best-effort write — a busy SQLite file must not turn a
+    visitor's question into a 500. The turn goes through and the marker is tried
+    once more as a plain insert; if that fails too, this turn is simply uncounted.
+    The per-(IP, widget) bucket still bounds the caller while the store is busy."""
+    marker = PawBarEvent(
+        widget_id=widget.id, type="concierge_message", payload={}, customer_ref=customer_ref
+    )
+    try:
+        return await store.admit_event(
+            marker,
+            overall_per_min=widget.rate_limit_per_min,
+            per_customer_per_min=widget.per_customer_limit_per_min,
+        )
+    except sqlite3.OperationalError:
+        logger.warning("paw-bar chat admit hit a locked store; failing open", exc_info=True)
+    try:
+        await store.record_event(marker)
+    except Exception:
+        logger.debug("paw-bar chat marker fallback failed (non-fatal)", exc_info=True)
+    return True
+
+
 async def _authenticate_widget_key(
     widget: PawBarWidget,
     *,
@@ -5613,14 +5639,16 @@ async def _authenticate_public_caller(
     request: Request,
     *,
     origin: str | None = None,
+    allow_frame_origin: bool = True,
 ) -> None:
     """The caller check for the two legacy routes (event ingest, decision poll).
 
     A key, when sent, is always verified. Without one, a widget that has a
     concierge agent refuses (401): every legitimate caller of such a widget is the
-    glass app, which holds the key. An unbound legacy widget keeps the pre-key
-    rule — its ``allowed_domains`` origin check, plus our own frame's origin —
-    because the frozen ``src/`` widget that serves it has no key to send."""
+    glass app, which holds the key. An unbound legacy widget keeps its pre-key
+    rule unchanged — the ``allowed_domains`` origin check, plus our own frame's
+    origin only where that route already accepted it (the decision poll, not
+    ingest) — because the frozen ``src/`` widget that serves it has no key."""
     if origin is None:
         origin = request.headers.get("origin")
     if signed_key:
@@ -5634,7 +5662,9 @@ async def _authenticate_public_caller(
         return
     if widget.agent_id:
         raise HTTPException(401, "signed_key_required")
-    if origin != _configured_frame_origin(request) and not _origin_allowed(widget, origin):
+    if allow_frame_origin and origin == _configured_frame_origin(request):
+        return
+    if not _origin_allowed(widget, origin):
         raise HTTPException(403, "Origin not allowed for this widget")
 
 
@@ -5663,7 +5693,7 @@ async def _front_gate_for_key(
     the Site the gate already loaded — handed back (same pattern as
     ``resolve_site_key_with_site``) so a caller that needs an owner-set Site field
     (the articles listing reads ``url`` + ``kb_article_ids``) never re-queries."""
-    _public_ip_gate(request)
+    _public_ip_gate(request, widget_id)
     if not _CUSTOMER_REF_RE.match(customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
     store = _store()
