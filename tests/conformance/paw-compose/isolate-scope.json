@@ -1,0 +1,73 @@
+{
+  "id": "isolate-scope",
+  "asserts": "An isolated child scope resolves its own provider for the isolated key while the parent keeps its own; other keys still resolve through the parent.",
+  "semantics": "\u00a71",
+  "plugins": {
+    "p_root": {
+      "inject": {
+        "required": [
+          "svcA"
+        ]
+      },
+      "record_resolved": [
+        "svcA"
+      ]
+    },
+    "p_iso": {
+      "inject": {
+        "required": [
+          "svcA"
+        ]
+      },
+      "record_resolved": [
+        "svcA"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "provide",
+      "service": "svcA",
+      "value": "rootimpl"
+    },
+    {
+      "op": "isolate",
+      "scope": "s1",
+      "service": "svcA"
+    },
+    {
+      "op": "provide",
+      "service": "svcA",
+      "value": "isoimpl",
+      "scope": "s1"
+    },
+    {
+      "op": "mount",
+      "plugin": "p_root"
+    },
+    {
+      "op": "mount",
+      "plugin": "p_iso",
+      "scope": "s1"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "p_root": "ACTIVE",
+        "p_iso": "ACTIVE"
+      }
+    }
+  ],
+  "expect_trace": [
+    "root:provide:svcA",
+    "s1:provide:svcA",
+    "p_root:LOADING",
+    "p_root:resolved:svcA:rootimpl",
+    "p_root:ACTIVE",
+    "p_iso:LOADING",
+    "p_iso:resolved:svcA:isoimpl",
+    "p_iso:ACTIVE"
+  ]
+}
