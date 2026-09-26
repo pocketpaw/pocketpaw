@@ -1,5 +1,16 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-27 (fix/chat-attachment-name-backfill): ``get_history`` fills
+display fields on legacy nameless upload attachments at read time. Agent-chat
+sends used to carry bare ``{"url": "/api/v1/uploads/<id>"}`` and those rows
+were stored with ``name=""``, no ``meta.mime``/``meta.size`` and ``type="file"``
+even for images. ``_backfill_attachment_display`` looks every such upload id
+on the page up in ONE query (``uploads_service.get_records_scoped``, pinned to
+the session's workspace) and fills ``name``, ``meta.{mime,size,id}`` and an
+image/audio ``type``. Stored documents are never rewritten; named attachments,
+non-upload urls, unknown/foreign ids and non-file types pass through as-is,
+and any lookup failure is logged at debug and leaves the page unchanged.
+
 Updated 2026-09-25 (fix/shared-pocket-chat-visibility): a pocket's conversations
 (the Paw Site builder rail included) are now readable by everyone who may read
 the pocket, not only by the user who wrote them. ``list_for_pocket`` returns
@@ -752,6 +763,67 @@ def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
     }
 
 
+# Attachment types that are plain file chips and may be backfilled. Anything
+# else (artifact, ripple, pocket, widget, …) carries its own display contract.
+_BACKFILL_TYPES = frozenset({"", "file", "image", "audio"})
+
+
+def _needs_backfill(att: dict[str, Any]) -> str | None:
+    """Return the upload file_id when ``att`` is a nameless upload chip."""
+    from pocketpaw.uploads.resolver import parse_upload_url
+
+    if att.get("name") or (att.get("type") or "") not in _BACKFILL_TYPES:
+        return None
+    return parse_upload_url(att.get("url") or "")
+
+
+async def _backfill_attachment_display(
+    messages: list[dict[str, Any]], workspace: str | None
+) -> None:
+    """Fill name / meta / type on nameless upload attachments, in place.
+
+    Operates on the serialized wire dicts only, never on stored documents.
+    One batched lookup for every upload id on the page, scoped to
+    ``workspace`` so another tenant's filenames can't leak. Never raises.
+    """
+    if not workspace:
+        return
+    try:
+        wanted = {
+            fid
+            for m in messages
+            for a in m.get("attachments") or []
+            if (fid := _needs_backfill(a)) is not None
+        }
+        if not wanted:
+            return
+        from pocketpaw_ee.cloud.uploads import service as uploads_service
+
+        records = await uploads_service.get_records_scoped(list(wanted), workspace)
+        for m in messages:
+            for att in m.get("attachments") or []:
+                fid = _needs_backfill(att)
+                rec = records.get(fid) if fid else None
+                if rec is None:
+                    continue
+                att["name"] = rec.filename
+                meta = dict(att.get("meta") or {})
+                meta.setdefault("mime", rec.mime)
+                meta.setdefault("size", rec.size)
+                meta.setdefault("id", rec.id)
+                att["meta"] = meta
+                if (att.get("type") or "file") == "file":
+                    mime = rec.mime or ""
+                    if mime.startswith("image/"):
+                        att["type"] = "image"
+                    elif mime.startswith("audio/"):
+                        att["type"] = "audio"
+                    else:
+                        att["type"] = "file"
+    except Exception:
+        logger.debug("history attachment backfill failed (workspace=%s)", workspace, exc_info=True)
+
+
 def _wire_role(m: Any, *, group: bool) -> str:
     """Display role for a wire message.
 
@@ -849,8 +921,10 @@ async def get_history(
     is_group = session.context_type == "group" and bool(session.group)
     has_more = len(docs) > limit
     page = list(reversed(docs[:limit]))  # newest-first fetch → oldest→newest display
+    messages = [_message_to_dict(m, _wire_role(m, group=is_group)) for m in page]
+    await _backfill_attachment_display(messages, session.workspace)
     return {
-        "messages": [_message_to_dict(m, _wire_role(m, group=is_group)) for m in page],
+        "messages": messages,
         "active_run": active_run,
         "has_more": has_more,
     }
