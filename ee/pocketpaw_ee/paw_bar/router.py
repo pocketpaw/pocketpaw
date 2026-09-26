@@ -1,4 +1,12 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-26 (fix/pawbar-public-starters-sync-status) — GET /paw-bar/frame
+#   carries the bound agent's conversation starters. It hard-coded ``starters=[]``
+#   on the stale belief that the Agent model had no such field, so owners saw
+#   starters in the preview that visitors never got. ``w`` is untrusted there, so
+#   new ``_public_frame_starters`` binds the widget to the key's Site
+#   (``_authenticate_widget_key``'s workspace + pocket rule) and
+#   ``_bound_agent_starters`` now also requires the agent to be in that workspace;
+#   any miss is [] and the frame still renders.
 # Updated: 2026-09-26 (fix/pawbar-public-route-gates) — anonymous callers can no
 #   longer 429 a site's chat or write into its owner's queue. Ingested events use
 #   their own ``events`` rate bucket; a widget with a concierge agent needs
@@ -1145,9 +1153,10 @@ def _pawbar_frame_config(
 
     ``starters`` are the bound agent's conversation starters (feat/site-dedicated-
     agent, E3): additive, capped at 4, defaulting to an empty list so a frame with
-    no starters is unchanged. On this branch the Agent model carries no
-    ``conversation_starters`` field (the ASG-1 identity fields are absent), so
-    callers pass ``[]`` today — the wire is in place for when those fields land.
+    no starters is unchanged. Both callers resolve them through
+    ``_bound_agent_starters``: the owner preview from its workspace-scoped widget,
+    the public frame from its ``w`` param once ``_public_frame_starters`` has bound
+    that widget to the key's Site.
 
     ``appearance`` is the owner's white-label settings (2026-08-19). ``None``
     renders the defaults, which reproduce the look every bar had before this
@@ -1208,17 +1217,19 @@ def _pawbar_frame_config(
     }
 
 
-async def _bound_agent_starters(agent_id: str) -> list[str]:
+async def _bound_agent_starters(agent_id: str, *, workspace_id: str) -> list[str]:
     """Best-effort conversation starters for a widget's BOUND agent (E3).
 
-    Returns the bound agent's ``conversation_starters`` (capped 4) for the frame
-    config, or ``[]`` when the widget is unbound, the agent is gone, or the Agent
-    model carries no ``conversation_starters`` field. NOTE: the ASG-1 identity
-    fields are ABSENT on this branch, so ``getattr`` misses and this returns ``[]``
-    today — the read is in place so starters flow the moment the field lands. Any
-    lookup failure degrades to ``[]`` (the frame must still render).
+    Returns the bound agent's ``conversation_starters`` (capped 4; the provisioner
+    seeds them from the widget spec) for the frame config, or ``[]`` when the
+    widget is unbound, the agent is gone, or the agent is not in ``workspace_id``.
+    That last check is what keeps the public frame tenant-bound: a legacy widget
+    with an empty ``workspace_id`` passes the widget binding (as it does on the
+    chat gate), so the agent it names has to be proven to be the key's tenant's.
+    ``agents_service.get`` itself applies no visibility or tenant check. Any lookup
+    failure degrades to ``[]`` (the frame must still render).
     """
-    if not agent_id:
+    if not agent_id or not workspace_id:
         return []
     try:
         from pocketpaw_ee.cloud.agents import service as agents_service
@@ -1226,8 +1237,42 @@ async def _bound_agent_starters(agent_id: str) -> list[str]:
         agent = await agents_service.get(agent_id)
     except Exception:  # noqa: BLE001 — a starter read must never break the frame
         return []
+    if getattr(agent, "workspace_id", None) != workspace_id:
+        return []
     starters = getattr(agent.config, "conversation_starters", None) or []
     return list(starters)[:4]
+
+
+async def _public_frame_starters(site: Any, widget_id: str) -> list[str]:
+    """The starters the PUBLIC frame may show for ``widget_id`` (``w``) under ``site``.
+
+    The public frame is pre-auth: the key is world-visible and ``w`` is whatever
+    the caller typed. So the widget is bound to the key's Site with the same rule
+    the concierge routes use (``_authenticate_widget_key``): a non-empty widget
+    workspace must equal the Site's, and the widget's pocket must equal the Site's.
+    Only then is its agent read, and ``_bound_agent_starters`` also requires the
+    agent to live in the Site's workspace. Anything else (no ``w``, unknown widget,
+    another site's or tenant's widget, unbound, a failed lookup) is ``[]`` and the
+    frame renders without starters.
+    """
+    if not widget_id:
+        return []
+    try:
+        workspace_id = str(getattr(site, "workspace", "") or "")
+        pocket_id = str(getattr(site, "pocket_id", "") or "")
+        if not workspace_id or not pocket_id:
+            return []
+        widget = await _store().get_widget(widget_id)
+        if widget is None:
+            return []
+        if widget.workspace_id and widget.workspace_id != workspace_id:
+            return []
+        if widget.pocket_id != pocket_id:
+            return []
+        return await _bound_agent_starters(widget.agent_id, workspace_id=workspace_id)
+    except Exception:  # noqa: BLE001 — a starter read must never break the frame
+        logger.debug("paw-bar frame: starters lookup failed for widget %s", widget_id)
+        return []
 
 
 async def _bound_agent_name(agent_id: str) -> str:
@@ -1334,19 +1379,18 @@ async def frame(
     # validated against the allowlist. ``siteKey`` in the page is fine — it is a
     # world-visible embed key by design.
     api_base = request.url.path.rsplit("/paw-bar/frame", 1)[0]
-    # E3 — the bound agent's conversation starters ride the config. The public
-    # frame is pre-auth (keyed on the world-visible embed key, no session) and does
-    # not load the widget here, so it defaults to []; the bound-agent starters are
-    # surfaced through the owner preview frame (below), where the widget is already
-    # resolved workspace-scoped. On this branch the value is [] regardless (the
-    # Agent ``conversation_starters`` field is absent — ASG-1 not merged here).
+    # E3 — the bound agent's conversation starters ride the config, as they do in
+    # the owner preview. This frame is pre-auth, so ``w`` is untrusted:
+    # ``_public_frame_starters`` binds the widget to this key's Site (workspace AND
+    # pocket) and the agent to its tenant before reading anything, and gives []
+    # for any widget that fails that.
     config = _pawbar_frame_config(
         site_key=key,
         widget_id=w or "",
         api_base=api_base,
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
-        starters=[],
+        starters=await _public_frame_starters(site, w),
         # Read off the Site every request, never cached, so an owner saving a
         # colour sees it on the next reload rather than after a redeploy.
         appearance=getattr(site, "concierge_appearance", None),
@@ -3474,8 +3518,8 @@ async def get_site_preview_frame(
 
     api_base = request.url.path.split("/paw-bar/", 1)[0]
     # E3 — thread the BOUND agent's conversation starters (capped 4). The widget was
-    # resolved workspace-scoped above, so reading its agent's starters here is safe
-    # (no cross-tenant reach). [] on this branch until the ASG-1 identity fields land.
+    # resolved workspace-scoped above, and the agent is checked against the same
+    # workspace, so there is no cross-tenant reach.
     config = _pawbar_frame_config(
         site_key=site.signed_key,
         widget_id=widget.id,
@@ -3484,7 +3528,7 @@ async def get_site_preview_frame(
         # glass app's postMessage targetOrigin is a clean scheme://host[:port].
         parent_origin=_safe_parent_origin(dash, [dash]),
         greeting=site.concierge_greeting or "",
-        starters=await _bound_agent_starters(widget.agent_id),
+        starters=await _bound_agent_starters(widget.agent_id, workspace_id=workspace_id),
         appearance=getattr(site, "concierge_appearance", None),
         preview=True,
     )
