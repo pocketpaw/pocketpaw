@@ -15,6 +15,14 @@
 #   fetch_failed instead of unfurling the error page, collapses whitespace and
 #   caps title/description length, falls back to itemprop="image" and
 #   <link rel="image_src">, and returns ``theme_color`` + ``large_image``.
+# 2026-09-26 (fix/unfurl-any-member) — any signed-in cloud user can unfurl.
+#   The router used require_scope("files:read"), but on the cloud backend that
+#   passes only platform superusers: the EE auth bridge sets full_access for
+#   is_superuser alone, and a workspace owner/admin/member has no OSS scopes.
+#   So every chat member except the operator got 403 "Missing required scope"
+#   and saw no link previews. _require_unfurl_access now also accepts
+#   request.state.user_id, which the bridge stamps only after a JWT verifies.
+#   API keys and OAuth tokens still need files:read; anonymous callers 403.
 #
 # Wire contract (frozen — frontend built against it in parallel):
 #   GET /api/v1/unfurl?url=<urlencoded>
@@ -35,7 +43,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.unfurl import UnfurlResponse
@@ -84,9 +92,25 @@ _CACHE_MAX_ENTRIES = 500
 _cache: dict[str, tuple[float, UnfurlResponse]] = {}
 
 
-# A read endpoint serving page metadata — sits alongside files:read, the
+# Scope check for API keys / OAuth tokens / trusted sessions — files:read, the
 # scope the sibling read routers already use. No new scope system invented.
-router = APIRouter(tags=["Unfurl"], dependencies=[Depends(require_scope("files:read"))])
+_files_read = require_scope("files:read")
+
+
+async def _require_unfurl_access(request: Request) -> None:
+    """Any signed-in cloud user, or a caller holding files:read.
+
+    Link previews are shown to every chat member, so a workspace role must not
+    matter. ``user_id`` is set by the EE auth bridge only after the JWT
+    verifies (never from a header), so it proves a real signed-in user.
+    Everyone else goes through the normal fail-closed scope check.
+    """
+    if getattr(request.state, "user_id", None):
+        return
+    await _files_read(request)
+
+
+router = APIRouter(tags=["Unfurl"], dependencies=[Depends(_require_unfurl_access)])
 
 
 def _normalize_cache_key(url: str) -> str:
