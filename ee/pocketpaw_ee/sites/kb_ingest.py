@@ -1,6 +1,12 @@
 # ee/pocketpaw_ee/sites/kb_ingest.py — put a site's own content into the pocket KB
 # its concierge reads from.
 #
+# Updated 2026-09-26 (sync crash recorded): ``safe_sync_site_knowledge`` returned
+#   `sync_failed` on a crash WITHOUT writing it to the Site, and the owner's
+#   knowledge route reads status off the Site, so a crashed manual re-sync showed
+#   the previous clean state. The crash now goes through ``_record_sync`` like
+#   every other failure (reason, a fresh `kb_synced_at`, previous ids kept), and
+#   the recording itself never raises.
 # Updated 2026-09-25 (kb engine unavailable): a missing or outdated kb binary
 #   (KnowledgeEngineUnavailable) stops the page loop at the FIRST page and records
 #   `kb_unavailable`. It used to fail every page on its own — one paid agent
@@ -693,12 +699,32 @@ async def _record_sync(
 
 
 async def safe_sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
-    """``sync_site_knowledge`` that never raises — the form background callers use."""
+    """``sync_site_knowledge`` that never raises — the form background callers use.
+
+    A crash is recorded on the Site as ``sync_failed`` the way every other failure
+    is, because the owner's knowledge panel reads status off the Site, not off
+    this report. That includes stamping ``kb_synced_at``: every failure branch in
+    ``sync_site_knowledge`` stamps it (it means "last attempt", and the error says
+    how it went), and ``_knowledge_response`` reads no stamp plus no error as
+    ``never_synced``. The previous article ids are kept, since whatever the crash
+    interrupted, those articles are still in the scope for a later prune. The
+    recording is best-effort and never raises.
+    """
     try:
         return await sync_site_knowledge(site)
     except Exception:  # noqa: BLE001 — a KB sync is never a gate on publish or chat
         logger.warning("sites.kb: sync failed for site %s", getattr(site, "id", "?"), exc_info=True)
-        return SiteKnowledgeReport(error="sync_failed")
+        report = SiteKnowledgeReport(error="sync_failed")
+        try:
+            previous = list(getattr(site, "kb_article_ids", None) or [])
+            await _record_sync(site, report, previous=previous)
+        except Exception:  # noqa: BLE001 — recording the crash must not raise either
+            logger.warning(
+                "sites.kb: could not record the sync crash on site %s",
+                getattr(site, "id", "?"),
+                exc_info=True,
+            )
+        return report
 
 
 # Background-task keepalive: asyncio holds only a WEAK ref to a bare create_task, so

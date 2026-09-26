@@ -28,6 +28,10 @@
 #   knowledge endpoints — the read distinguishes "never synced" from a failure, the
 #   sync is awaited and returns its own counts, a failed sync surfaces as a status
 #   rather than a 500, and both are cross-tenant-404 and member-403.
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): a sync that CRASHES
+#   is run through the real safe path and must land on the Site as sync_failed,
+#   so the route (which reads status off the Site) stops reporting the previous
+#   clean sync.
 
 from __future__ import annotations
 
@@ -979,6 +983,37 @@ async def test_knowledge_sync_surfaces_a_failure_instead_of_500ing(client, monke
     res = await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")
     assert res.status_code == 200
     assert res.json()["status"] == "sync_failed"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_sync_crash_is_recorded_and_reported(client, monkeypatch):
+    """The real safe path, with the sync itself crashing. The fake above sets
+    kb_sync_error by hand, which is exactly why the bug hid: the real crash path
+    returned sync_failed WITHOUT touching the Site, and this route reads its
+    status off the Site, so a crashed re-sync reported the previous clean state."""
+    c, _store, _fabric = client
+    site = await _site()
+    site.kb_article_ids = ["site-home"]
+    site.kb_synced_at = datetime(2026, 1, 1, tzinfo=UTC)
+    site.kb_sync_error = ""
+    await site.save()
+
+    async def _crash(target):
+        raise RuntimeError("kb exploded")
+
+    monkeypatch.setattr("pocketpaw_ee.sites.kb_ingest.sync_site_knowledge", _crash)
+
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "sync_failed"
+    assert body["article_count"] == 1  # the previous articles are kept
+    assert body["synced_at"] and not body["synced_at"].startswith("2026-01-01")
+
+    # And the stored Site says so too, so the next GET agrees.
+    again = (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).json()
+    assert again["status"] == "sync_failed"
+    assert again["article_count"] == 1
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,9 @@
 #     must survive), and reports rather than raises on an empty or broken read.
 #   * Triggers: a live publish and an agent provision each schedule a sync; a
 #     PREVIEW publish does not.
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): a crash inside the
+#   sync is recorded on the Site (sync_failed, a fresh kb_synced_at, previous ids
+#   kept) like every other failure, and recording it never raises.
 
 from __future__ import annotations
 
@@ -364,6 +367,53 @@ async def test_safe_sync_swallows_everything(monkeypatch):
 
     monkeypatch.setattr(kb_ingest, "sync_site_knowledge", _boom)
     report = await kb_ingest.safe_sync_site_knowledge(_FakeSite())
+    assert report.error == "sync_failed"
+
+
+@pytest.mark.asyncio
+async def test_safe_sync_records_a_crash_on_the_site(monkeypatch):
+    """A crash is a failure like any other, so it lands on the Site the way the
+    others do: the reason in kb_sync_error, a fresh kb_synced_at, and the previous
+    article ids kept (they are still in the KB, so a future prune must reach them).
+    Before this, the crash returned sync_failed and wrote nothing, and the owner's
+    knowledge panel went on showing the last clean sync."""
+
+    async def _boom(site):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(kb_ingest, "sync_site_knowledge", _boom)
+    site = _FakeSite(kb_article_ids=["site-home"], kb_sync_error="")
+    report = await kb_ingest.safe_sync_site_knowledge(site)
+
+    assert report.error == "sync_failed"
+    assert len(site.set_calls) == 1
+    assert set(site.set_calls[0]) == {"kb_article_ids", "kb_synced_at", "kb_sync_error"}
+    assert site.kb_sync_error == "sync_failed"
+    assert site.kb_synced_at is not None
+    assert site.kb_article_ids == ["site-home"]
+
+
+@pytest.mark.asyncio
+async def test_safe_sync_survives_a_failure_to_record_the_crash(monkeypatch):
+    """Recording is best-effort: a Site that cannot be written still gets the
+    sync_failed report back, never an exception."""
+
+    async def _boom(site):
+        raise RuntimeError("nope")
+
+    class _Unwritable(_FakeSite):
+        async def set(self, updates: dict) -> None:
+            raise RuntimeError("mongo is down")
+
+    monkeypatch.setattr(kb_ingest, "sync_site_knowledge", _boom)
+    report = await kb_ingest.safe_sync_site_knowledge(_Unwritable())
+    assert report.error == "sync_failed"
+
+    class _Broken:
+        """No kb fields at all and no ``set``: the recording path must not raise
+        even on a Site object this malformed."""
+
+    report = await kb_ingest.safe_sync_site_knowledge(_Broken())
     assert report.error == "sync_failed"
 
 
