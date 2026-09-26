@@ -31,6 +31,11 @@
 #   built on PAW_CAPTURE_API_BASE rather than the request host.
 #   Also pinned: the admin route overwrites spec.widget_id / spec.pocket_id with
 #   the resolved widget's own values, whatever the body sends.
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): an eighth layer
+#   pins the snippet's own gates: concierge off, plan without the concierge, a
+#   raising concierge_snippet (200, ""), enabling an unbound widget (snippet after
+#   provisioning), and a private pocket the caller cannot read ("", checked with
+#   the real pockets_service.can_read against a real Pocket doc).
 
 from __future__ import annotations
 
@@ -715,11 +720,14 @@ _PUBLIC_BASE = "https://api.paw.example/api/v1"
 
 
 @pytest_asyncio.fixture
-async def owner_client(tmp_path, mongo_db, monkeypatch):
+async def real_pocket_client(tmp_path, mongo_db, monkeypatch):
     """An ADMIN client whose paw_bar store backs BOTH the router and
     ``agent_provisioning`` (the widget lookup ``embed.concierge_snippet`` runs).
     Patching only the router would leave the snippet lookup on the real store,
-    where it finds nothing and every snippet reads "". Yields ``(client, store)``."""
+    where it finds nothing and every snippet reads "". Yields ``(client, store)``.
+
+    The pocket read gate is the REAL ``pockets_service.can_read``, so a test on
+    this fixture needs a real Pocket doc (``_real_pocket``)."""
     from unittest.mock import patch
 
     monkeypatch.setenv("PAW_CAPTURE_API_BASE", _PUBLIC_BASE)
@@ -732,6 +740,20 @@ async def owner_client(tmp_path, mongo_db, monkeypatch):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
             yield c, store
+
+
+@pytest_asyncio.fixture
+async def owner_client(real_pocket_client):
+    """``real_pocket_client`` with the pocket read gate satisfied.
+
+    The settings snippet asks ``pockets_service.can_read`` first, and "pocket-1"
+    is not an ObjectId, so the real predicate would read every snippet as "".
+    The gate itself is exercised both ways on ``real_pocket_client`` (same
+    pattern as ``test_foreign_concierge_endpoints``' ``_owned_pocket``)."""
+    from unittest.mock import AsyncMock, patch
+
+    with patch("pocketpaw_ee.cloud.pockets.service.can_read", new=AsyncMock(return_value=True)):
+        yield real_pocket_client
 
 
 def _new_spec_body(widget_id: str) -> dict[str, Any]:
@@ -924,3 +946,106 @@ async def test_settings_snippet_is_empty_without_a_site_key(owner_client):
     res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
     assert res.status_code == 200, res.text
     assert res.json()["embed_snippet"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Layer 8 — the snippet's own gates (fix/pawbar-public-starters-sync-status)
+#
+# Review follow-ups on the embed_snippet above: the settings response must hand
+# out a snippet only when publish would inject one, and only to a caller who can
+# read the site's pocket (parity with sites.router's foreign-concierge surface).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_when_the_concierge_is_off(owner_client):
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_when_the_plan_lacks_the_concierge(owner_client):
+    from unittest.mock import patch
+
+    c, store = owner_client
+    site = await _site()
+    await store.create_widget(_widget())
+    with patch("pocketpaw_ee.cloud.auth.site_keys.concierge_available", return_value=False):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_failure_still_opens_the_page(owner_client):
+    from unittest.mock import AsyncMock, patch
+
+    c, store = owner_client
+    site = await _site()
+    await store.create_widget(_widget())
+    with patch(
+        "pocketpaw_ee.paw_bar.embed.concierge_snippet",
+        new=AsyncMock(side_effect=RuntimeError("store down")),
+    ):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["embed_snippet"] == ""
+    assert body["site_id"] == str(site.id)
+
+
+@pytest.mark.asyncio
+async def test_enabling_an_unbound_widget_returns_the_snippet(owner_client):
+    """PATCH {concierge_enabled: true} provisions the unbound widget's agent
+    first, so the response built after it carries the snippet."""
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    widget = await store.create_widget(_widget(agent_id=""))
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_enabled": True})
+    assert res.status_code == 200, res.text
+    assert (await store.get_widget(widget.id)).agent_id, "enable should bind an agent"
+    assert res.json()["embed_snippet"] == _expected_snippet(widget.id)
+
+
+async def _real_pocket(**ov: Any) -> str:
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    d = dict(workspace="ws-1", name="Brew & Co", owner="someone-else", visibility="private")
+    d.update(ov)
+    doc = Pocket(**d)
+    await doc.insert()
+    return str(doc.id)
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_for_a_pocket_the_caller_cannot_read(
+    real_pocket_client,
+):
+    """A workspace admin locked out of a private pocket gets no key or snippet,
+    as on sites.router's surface, but the settings page still opens."""
+    c, store = real_pocket_client
+    pocket_id = await _real_pocket()
+    site = await _site(pocket_id=pocket_id)
+    await store.create_widget(_widget(pocket_id=pocket_id, spec=_spec(pocket_id)))
+    for res in (
+        await c.get(f"/paw-bar/admin/site/{site.id}/settings"),
+        await c.patch(f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_greeting": "Hi"}),
+    ):
+        assert res.status_code == 200, res.text
+        assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_present_for_a_pocket_the_caller_owns(real_pocket_client):
+    """The same private pocket, owned by the caller: the real predicate says yes."""
+    c, store = real_pocket_client
+    pocket_id = await _real_pocket(owner="u1")
+    site = await _site(pocket_id=pocket_id)
+    widget = await store.create_widget(_widget(pocket_id=pocket_id, spec=_spec(pocket_id)))
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == _expected_snippet(widget.id)

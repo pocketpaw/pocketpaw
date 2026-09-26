@@ -1,6 +1,11 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — every Paw Site's concierge is
 # answered by an agent that exists FOR that site, never a shared/universal one.
 #
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): comments only. The
+#   ASG-1 identity fields exist on the Agent model and create DTO, so
+#   ``_seed_identity`` does seed welcome_message + conversation_starters (and
+#   ``_seed_tags`` the tags); the notes below that called them no-ops were stale.
+#
 # ``ensure_site_agent(site, widget)`` is the funnel, and the single place "which
 # agent is this pocket's canonical concierge?" is decided. FOUR triggers end
 # here, and adding a fifth means calling this, not re-deciding it:
@@ -28,11 +33,9 @@
 #   * ``widget_for_agent`` is the REVERSE lookup and reads the real binding
 #     (``widget.agent_id``), not the slug, so a hand-bound agent counts too.
 #
-# ASG-1 identity fields (welcome_message, conversation_starters) and agent
-# ``tags`` do not exist on the Agent/AgentConfig model here, so seeding them
-# degrades to a logged no-op (``_seed_identity`` / ``_seed_tags``); the
-# derivation helpers still run and are unit-tested so the wire is in place the
-# moment the fields land.
+# ASG-1 identity fields (welcome_message, conversation_starters) are seeded on
+# create by ``_seed_identity``; both it and ``_seed_tags`` guard on ``hasattr`` of
+# the create body, so a DTO without a field degrades to a logged no-op.
 
 from __future__ import annotations
 
@@ -117,11 +120,9 @@ def _seed_identity(body: Any, site: Any, widget: Any) -> None:
     """Seed the ASG-1 identity fields on a create body IF the model supports them.
 
     ``welcome_message`` ← ``Site.concierge_greeting`` (when non-empty),
-    ``conversation_starters`` ← ``derive_conversation_starters(widget)``. On this
-    branch the Agent create DTO carries NEITHER field, so this is a no-op beyond a
-    debug log — do NOT add the fields here (that is an Agent-model change, out of
-    scope). When the agent-studio identity fields land, this seeds them with no
-    other change.
+    ``conversation_starters`` ← ``derive_conversation_starters(widget)``. The
+    Agent create DTO carries both fields, so both are seeded; the ``hasattr``
+    guards only matter for a body that lacks one, which degrades to a debug log.
     """
     greeting = (getattr(site, "concierge_greeting", "") or "").strip()
     starters = derive_conversation_starters(widget)
@@ -146,9 +147,9 @@ def _seed_identity(body: Any, site: Any, widget: Any) -> None:
 
 def _seed_tags(body: Any, site_id: str) -> None:
     """Stamp the ``["concierge", "site:<id>"]`` tags IF the create DTO supports a
-    free-form ``tags`` field. The Agent model on this branch has no such field
-    (``scopes`` is a hierarchical SCOPE-tag list with its own validator, NOT a
-    label bag), so this is a graceful no-op here."""
+    free-form ``tags`` field. The create DTO and the Agent model carry one (ASG-1;
+    not to be confused with ``scopes``, a hierarchical SCOPE-tag list with its own
+    validator), so this stamps them; a body without the field is a logged no-op."""
     if hasattr(body, "tags"):
         body.tags = ["concierge", f"site:{site_id}"]
     else:

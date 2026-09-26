@@ -1,6 +1,14 @@
 # tests/cloud/test_paw_bar_agent_provisioning.py — auto-provision a DEDICATED
 # concierge agent per site (feat/site-dedicated-agent).
 #
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): the ASG-1 identity
+#   fields exist on the Agent model now, so the "absent" test asserts seeding
+#   instead, and the PUBLIC frame is pinned to carry the bound agent's starters
+#   only for a widget bound to the key's own site (another site's widget, another
+#   tenant's agent, an unbound or unknown widget all give []).
+#   Also pinned: a hostile starter stays escaped in the frame HTML, a lookup past
+#   the time budget renders with [], and the owner preview refuses a cross-tenant
+#   agent too.
 # Created 2026-07-23: covers ensure_site_agent + the two triggers.
 #   * Pure helpers: slug/name/persona derivation + conversation-starter rules
 #     (catalog, gated-action labels, generic fallback, cap 4).
@@ -12,9 +20,9 @@
 #   * Concierge-enable trigger: flipping the kill switch ON provisions an unbound
 #     site widget.
 #   * Regression: an unbound widget's chat still 409s (no fallback-to-universal).
-#   * Identity seeding: welcome_message/starters degrade gracefully because the
-#     ASG-1 identity fields are ABSENT on this branch (the created agent carries
-#     neither field); starters ride the frame config payload.
+#   * Identity seeding: the provisioned agent carries welcome_message (the site
+#     greeting) and conversation_starters (derived from the widget spec); starters
+#     ride the frame config payload.
 #   * Default booking action (2026-08-01 live regression): a widget MINTED by
 #     ensure_site_widget carries one gated booking_request action (five str
 #     args, "Book a service visit" label); an EXISTING widget's actions are
@@ -489,24 +497,35 @@ class TestUnboundChatStill409:
 
 
 # --------------------------------------------------------------------------- #
-# ASG-1 identity fields absent on this branch + starters ride the frame config
+# ASG-1 identity seeding + starters ride the frame config (owner AND public)
 # --------------------------------------------------------------------------- #
+
+
+def _starters_config(starters: list[str]):
+    from pocketpaw_ee.cloud.models.agent import AgentConfig
+
+    return AgentConfig(conversation_starters=starters)
 
 
 class TestIdentityAndFrameStarters:
     @pytest.mark.asyncio
-    async def test_asg_identity_fields_absent_agent_has_neither(self, client) -> None:
-        """welcome_message + conversation_starters are ASG-1 fields NOT present on
-        this branch's Agent model — the provisioned agent carries neither, and the
-        seeding path degraded gracefully (no crash, agent still created + bound)."""
+    async def test_provisioning_seeds_the_identity_fields(self, client) -> None:
+        """welcome_message + conversation_starters exist on the Agent model, so the
+        provisioned agent is seeded with the site greeting and the starters derived
+        from the widget spec (catalog + gated-action labels)."""
         from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
 
         c, _store = client
         await _site(concierge_greeting="Welcome to Brew & Co!")
         agent_id = (await c.post("/paw-bar/widgets", json=_create_payload())).json()["agent_id"]
         agent = await agents_service.get(agent_id)
-        assert not hasattr(agent.config, "welcome_message")
-        assert not hasattr(agent.config, "conversation_starters")
+        assert agent.config.welcome_message == "Welcome to Brew & Co!"
+        expected = ap.derive_conversation_starters(
+            _widget(spec=_spec(with_catalog=True, with_actions=True))
+        )
+        assert "What do you sell?" in expected
+        assert list(agent.config.conversation_starters) == expected
 
     def test_frame_config_carries_starters_capped_four(self) -> None:
         from pocketpaw_ee.paw_bar.router import _pawbar_frame_config
@@ -536,6 +555,135 @@ class TestIdentityAndFrameStarters:
         res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
         assert res.status_code == 200
         assert "starters" in res.text
+
+    # The public frame is pre-auth: the key is world-visible and ``w`` is whatever
+    # the caller types. Starters are read only for a widget bound to the key's own
+    # site, and only from an agent in the key's own tenant.
+
+    @pytest.mark.asyncio
+    async def test_public_frame_carries_the_bound_agents_starters(self, client) -> None:
+        """THE REPORTED BUG: the owner preview showed starters, the visitor's
+        frame hard-coded []."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(config=_starters_config(["Hours?", "Menu?"]))
+        widget = await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": ["Hours?", "Menu?"]' in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_refuses_another_tenants_widget(self, client) -> None:
+        """A ``w`` from another workspace + pocket must not leak its agent's
+        starters through this site's key."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Secret?"]))
+        foreign = await store.create_widget(
+            _widget(workspace_id="ws-2", pocket_id="pocket-2", agent_id=str(agent.id))
+        )
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": foreign.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Secret?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_refuses_a_sibling_pocket_widget(self, client) -> None:
+        """Same workspace, different pocket: a key for pocket A never reads the
+        agent behind pocket B's bar."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(config=_starters_config(["Sibling?"]))
+        sibling = await store.create_widget(_widget(pocket_id="pocket-2", agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": sibling.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Sibling?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_refuses_an_agent_in_another_tenant(self, client) -> None:
+        """A legacy widget (empty workspace) on this pocket passes the widget
+        binding, the same way it passes the chat gate, so the agent itself must
+        belong to the key's tenant."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Elsewhere?"]))
+        legacy = await store.create_widget(_widget(workspace_id="", agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": legacy.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Elsewhere?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_unbound_or_unknown_widget_is_empty(self, client) -> None:
+        c, store = client
+        await _site()
+        unbound = await store.create_widget(_widget(agent_id=""))
+        for w in (unbound.id, "pb_does_not_exist", ""):
+            res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": w})
+            assert res.status_code == 200, (w, res.text)
+            assert '"starters": []' in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_escapes_a_hostile_starter(self, client) -> None:
+        """Starters are owner-editable text inlined into a <script>: a ``</script>``
+        in one must not close the tag and inject markup."""
+        c, store = client
+        await _site()
+        hostile = "</script><img src=x onerror=alert(1)>"
+        agent = await _agent_doc(config=_starters_config([hostile]))
+        widget = await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert hostile not in res.text
+        assert "<img src=x" not in res.text
+        assert "\\u003c/script>\\u003cimg src=x onerror=alert(1)>" in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_starters_lookup_is_time_boxed(self, client, monkeypatch) -> None:
+        """Starters are cosmetic: a slow agents read must not hold up the page
+        view. Past the budget the frame renders with []."""
+        import asyncio
+
+        from pocketpaw_ee.paw_bar import router as router_mod
+
+        async def _slow(agent_id: str, *, workspace_id: str) -> list[str]:
+            await asyncio.sleep(2)
+            return ["Too late?"]
+
+        monkeypatch.setattr(router_mod, "_FRAME_STARTERS_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(router_mod, "_bound_agent_starters", _slow)
+        c, store = client
+        await _site()
+        widget = await store.create_widget(_widget(agent_id="agent-slow"))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Too late?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_owner_preview_refuses_an_agent_in_another_tenant(self, client) -> None:
+        """The preview's widget is workspace-scoped, but the agent it names is
+        checked too: a cross-tenant agent id gives []."""
+        c, store = client
+        site = await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Theirs?"]))
+        await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Theirs?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_owner_preview_frame_carries_the_bound_agents_starters(self, client) -> None:
+        """The preview path shares ``_bound_agent_starters`` and its tenant check."""
+        c, store = client
+        site = await _site()
+        agent = await _agent_doc(config=_starters_config(["Preview?"]))
+        await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+        assert res.status_code == 200, res.text
+        assert '"starters": ["Preview?"]' in res.text
 
 
 # --------------------------------------------------------------------------- #
