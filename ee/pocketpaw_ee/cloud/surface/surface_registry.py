@@ -217,6 +217,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     foresight as foresight_handler,
 )
 from pocketpaw_ee.cloud.surface.system_prompts import (
+    CODE_LOCAL_SYSTEM_PROMPT,
     CODE_SYSTEM_PROMPT,
     OTHER_HAND_SYSTEM_PROMPT,
 )
@@ -484,6 +485,31 @@ _CODE_BUILTIN_DENY: frozenset[str] = frozenset(
 # code-targeted skill is ever written, removing ``Skill`` from this set is the
 # one-line change that admits it.
 _CODE_SKILL_DENY: frozenset[str] = frozenset({"Skill"})
+
+_CODE_PROFILE = SurfaceProfile(
+    ripple_mode="off",
+    allow_mcp_tool_ids=_CODE_FILE_TOOL_IDS,
+    deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_SKILL_DENY,
+    system_message_override=CODE_SYSTEM_PROMPT,
+)
+
+# Local-folder /code: native Read / Glob / Grep replace the delegated read tools.
+_CODE_LOCAL_PROFILE = SurfaceProfile(
+    ripple_mode="off",
+    allow_mcp_tool_ids=_CODE_FILE_TOOL_IDS,
+    deny_mcp_tool_ids=(_CODE_BUILTIN_DENY - {"Read", "Glob", "Grep"})
+    | _CODE_SKILL_DENY
+    | {
+        "mcp__pocketpaw_code__readFile",
+        "mcp__pocketpaw_code__search",
+        "mcp__pocketpaw_code__listDir",
+    },
+    system_message_override=CODE_LOCAL_SYSTEM_PROMPT,
+)
+
+
+def _code_profile(meta: SurfaceMeta) -> SurfaceProfile:
+    return _CODE_LOCAL_PROFILE if code.local_code_root(meta) is not None else _CODE_PROFILE
 
 
 class _McpToolIds(NamedTuple):
@@ -1087,45 +1113,9 @@ SURFACES: list[SurfaceSpec] = [
         SurfaceKind.CODE,
         _route_for(SurfaceKind.CODE),
         code.build_preamble,
-        # Code: edit + run code, but NOT on this machine. Ripple OFF so the
-        # agent edits code instead of building a dashboard. The user's project
-        # is reachable ONLY through the file tools ``_CODE_FILE_TOOL_IDS``
-        # (allow) — readFile / search / listDir / writeFile, each delegated one
-        # call at a time to the browser that holds the file session — and the
-        # file/shell built-ins are stripped (deny) because they address the
-        # backend server's own disk, not the project — see ``_CODE_BUILTIN_DENY``.
-        # Both sets are module-level literals, so this stays a STATIC profile (no
-        # lazily-loaded ids, not meta-aware, no resolver needed).
-        #
-        # The deny set covers only BUILT-IN tools now. Restricting the MCP surface
-        # for /code is no longer this profile's job: /code routes to the dedicated
-        # ``code`` agent, whose ``tool_mode="exclusive"`` policy caps the run's
-        # ``mcp__*`` tools to exactly the four file ids at run time — so the old
-        # ``_CODE_POCKET_DENY`` MCP deny-list became dead weight and was removed
-        # (CX-4). What the exclusivity cap CANNOT reach are the built-ins, which is
-        # exactly what ``_CODE_BUILTIN_DENY`` (backend-disk tools + ``Agent``) and
-        # ``_CODE_SKILL_DENY`` (``Skill`` — the create-pocket plugin's invoker)
-        # still deny here.
-        #
-        # ``skill_names`` is deliberately EMPTY, where it used to carry the
-        # `code` skill. That skill is not incidentally about the built-ins — it
-        # is entirely about them ("you use the built-in Bash / Read / Write /
-        # Edit / Glob / Grep tools", then a five-step loop built on them), so
-        # under the deny above it would be an injected instruction to call tools
-        # the agent no longer has: the agent attempts them, takes hard errors,
-        # and burns turns before finding the path the preamble already gave it.
-        # Absence is recoverable; contradiction is not. The edit→run→verify
-        # DISCIPLINE that skill carried now lives in ``CODE_SYSTEM_PROMPT``,
-        # retargeted onto the file tools above.
-        profile=SurfaceProfile(
-            ripple_mode="off",
-            allow_mcp_tool_ids=_CODE_FILE_TOOL_IDS,
-            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_SKILL_DENY,
-            # The surface's own system prompt, replacing the pocket-shaped
-            # behavioral stack the shared builder would otherwise assemble. See
-            # ``system_prompts.py`` for why a prohibition alone did not hold.
-            system_message_override=CODE_SYSTEM_PROMPT,
-        ),
+        # Ripple off; tools and system prompt come from ``_code_profile`` —
+        # delegated file tools by default, native reads for a local folder.
+        profile_resolver=_code_profile,
     ),
     SurfaceSpec(
         SurfaceKind.BELT,
