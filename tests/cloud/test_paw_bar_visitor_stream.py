@@ -16,13 +16,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.cloud.test_paw_bar_reply_sources import (  # noqa: F401 — fixture import
+from tests.cloud import test_paw_bar_reply_sources as _sources
+from tests.cloud.test_paw_bar_reply_sources import (
     _chat,
     _site,
     _stub_kb_search,
     _widget,
-    concierge_client,
 )
+
+# The sibling suite's fixture, re-exported by assignment (an import made every
+# test that takes it an F811 redefinition).
+concierge_client = _sources.concierge_client
 
 _SECRETS = (
     "SECRET_REASONING",
