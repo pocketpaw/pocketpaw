@@ -1,8 +1,8 @@
 # tests/cloud/test_paw_bar_decision_contact.py — the async half of the Paw Bar
+# decision loop (2026-07-30).
 # Updated 2026-09-26: the poll tests send ?signed_key= — a widget with a
 #   concierge agent now refuses a key-less decision poll, and the glass app
 #   already sends the key (fix/pawbar-public-route-gates).
-# decision loop (2026-07-30).
 # Created: 2026-07-30 — a visitor who leaves the page while their request is
 # PENDING can leave an email (POST /paw-bar/decision-contact); when the owner
 # decides, deliver_customer_decision emails them the SAME customer-facing reply

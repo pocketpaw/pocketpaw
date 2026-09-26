@@ -1,8 +1,8 @@
 # tests/cloud/test_paw_bar_frame.py — Paw Bar glass FRAME endpoint + CSP origin
+# model (A1).
 # Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
 #   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
 #   route (fix/pawbar-public-route-gates, 2026-09-26).
-# model (A1).
 # Created 2026-07-15: covers GET /paw-bar/frame (the iframe document + the CSP
 # frame-ancestors embedder gate) and the CSP/parent-origin helper functions.
 # Three layers:
