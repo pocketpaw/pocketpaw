@@ -1,5 +1,10 @@
 # Dockerfile.enterprise — sovereign per-tenant PocketPaw Enterprise image.
 # Created: 2026-06-10 (sov/w1a-deploy).
+# Updated: 2026-09-27 (chore/bump-claude-agent-sdk) - the claude/codex bin shims now
+#   resolve each package.json `bin` entry (as the root Dockerfile does since 06-16)
+#   instead of a hardcoded cli.js that newer claude-code releases no longer ship, with a
+#   `claude --version` build check. POCKETPAW_CLAUDE_SDK_CLI_PATH points the Claude SDK
+#   backend at that CLI, since the one bundled in the SDK wheel rejected newer models.
 # Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — the paw-sites stage also
 #   ships the browser verification harness to /opt/paw-sites/harness (four files, no
 #   node_modules — the Daytona sandbox installs it). pocketpaw_ee.sites.browser_check
@@ -332,8 +337,9 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
-    ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && \
-    ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+    ln -sf "/usr/local/lib/node_modules/@anthropic-ai/claude-code/$(node -e "const b=require('/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json').bin;process.stdout.write(typeof b==='string'?b:b.claude)")" /usr/local/bin/claude && \
+    ln -sf "/usr/local/lib/node_modules/@openai/codex/$(node -e "const b=require('/usr/local/lib/node_modules/@openai/codex/package.json').bin;process.stdout.write(typeof b==='string'?b:b.codex)")" /usr/local/bin/codex && \
+    claude --version
 
 # --- Paw Sites publish toolchain (DEP-1 + DEP-2) ---
 # bun: the Sites publish path runs `bun install` + `bun run build` on the generated
@@ -416,6 +422,11 @@ ENV POCKETPAW_ENV=production
 ENV POCKETPAW_KB_BIN=/usr/local/bin/kb
 # Agent-created files land here — bind-mount to access them on the host
 ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
+# The Claude SDK backend runs the CLI bundled in the claude-agent-sdk wheel
+# unless told otherwise, and that CLI lags new models ("Claude Code 2.1.276 does
+# not support this model; version 2.1.280 or newer is required"). Point it at
+# the npm-installed CLI above, which each build takes at its latest release.
+ENV POCKETPAW_CLAUDE_SDK_CLI_PATH=/usr/local/bin/claude
 
 # --- Paw Sites publish toolchain config (DEP-2) ---
 # A generated ripple-track site pins an unpublished @ripple-ui/svelte; the publish
