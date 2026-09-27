@@ -9,6 +9,15 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-09-27 (fix/chat-run-heartbeat) — a run that does not complete
+now persists its partial reply as a real ``Message`` carrying ``run_status``, and
+``find_stranded_replies`` skips runs that point at such a Message. So the
+"was cut off" note moved with it: ``_message_entries`` appends
+``_STRANDED_REPLY_NOTE`` after an assistant row that has ``run_status`` set, in
+the SAME window row, exactly as ``_stranded_reply_rows`` pairs a run-doc partial
+with its note. The reply is counted once and the model is still told it stops
+early.
+
 Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images`` grew the
 provider's per-image ceiling (5MB) and a per-turn byte budget, which it had
 neither of while the surface-snapshot channel in ``run_core`` has had both since
@@ -3279,6 +3288,11 @@ def _message_entries(m: Any) -> list[dict[str, str]]:
     empty-content skip are unchanged) so that a row from the ``Message``
     collection and a row from the run collection can be windowed against each
     other as peers before either is flattened into the output list.
+
+    The one exception to "exactly one": an assistant row carrying ``run_status``
+    is the partial reply of a run that did not complete, and gets the same
+    "was cut off" system note a run-doc partial gets, in the same row so the
+    window can never keep the fragment and drop the warning.
     """
     role = getattr(m, "role", None)
     if role not in ("user", "assistant", "system"):
@@ -3286,7 +3300,13 @@ def _message_entries(m: Any) -> list[dict[str, str]]:
     content = getattr(m, "content", "") or ""
     if not content:
         return []
-    return [{"role": role, "content": content}]
+    entries = [{"role": role, "content": content}]
+    run_status = getattr(m, "run_status", None)
+    if role == "assistant" and isinstance(run_status, str) and run_status:
+        entries.append(
+            {"role": "system", "content": _STRANDED_REPLY_NOTE.format(status=run_status)}
+        )
+    return entries
 
 
 async def _stranded_reply_rows(

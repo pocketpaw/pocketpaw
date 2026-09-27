@@ -1,6 +1,13 @@
 """Beanie document for one assistant chat turn.
 
 Changes:
+- 2026-09-27 (fix/chat-run-heartbeat) — added ``last_heartbeat_at``. The worker
+  stamps it every ``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS`` while it drives a
+  ``running`` run, and the stale-run sweeper judges running runs by it instead of
+  ``createdAt``. Before this a healthy run that simply took longer than the
+  10-minute cutoff was flipped to ``interrupted`` under the worker's feet. Additive,
+  ``None`` on every existing doc (the sweeper falls back to ``started_at`` then
+  ``createdAt``), so no migration.
 - 2026-06-10 (sov/w3a-igw — per-run token metering) — added the ``usage`` field
   so each run records the actual prompt / completion / cached token counts (and
   cost / model / backend) the backend reports, instead of the counts being
@@ -80,6 +87,10 @@ class ChatRunDoc(Document):
     user_text: str = ""
     createdAt: datetime = Field(default_factory=_utcnow)
     started_at: datetime | None = None
+    # Liveness stamp from the worker driving this run. Refreshed on a timer, not
+    # per event, because one tool call can go many minutes without emitting
+    # anything. ``None`` until the run is marked running (and on legacy docs).
+    last_heartbeat_at: datetime | None = None
     ended_at: datetime | None = None
 
     class Settings:

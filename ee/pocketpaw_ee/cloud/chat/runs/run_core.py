@@ -1,6 +1,29 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-27 (fix/chat-run-heartbeat) — long runs no longer lose their reply.
+  Reported as "if the agent takes a lot of time the worker stops completely: no
+  message saved, only the user message after a refresh". Three fixes here:
+
+  1. HEARTBEAT. ``execute_run`` refreshes ``ChatRunDoc.last_heartbeat_at`` on a
+     timer (``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS``, default 30s) for as long
+     as it drives the run, and the stale-run sweeper judges running runs by that
+     stamp instead of ``createdAt``. Timer-based on purpose: one tool call can go
+     many minutes without an event. ``_mark_running`` now reports whether it won
+     the ``queued -> running`` transition, and a run the sweeper already
+     interrupted is not driven (its client was sent the terminal frame and left).
+  2. PARTIALS ARE MESSAGES. The failed, cancelled and host-interrupted paths
+     persist the text already streamed as an assistant ``Message`` flagged with
+     ``run_status``, point the run at it, and broadcast ``message.new``, the same
+     steps the completed path takes. Before, that text lived only on
+     ``partial_text``, which the chat history never reads. Empty text still
+     writes nothing, concierge runs are unchanged (their transcript IS the run
+     doc), and a partial never trains the soul (no ``pool.observe``). The frames
+     the client gets are unchanged, except ``stream_end`` on cancel now carries
+     the persisted ``assistant_message_id``.
+  3. SHUTDOWN ORDER. The shielded host-cancel cleanup is tracked in
+     ``_pending_cleanups`` and ``drain_pending_cleanups`` waits for it, so the
+     worker can finish those writes before it closes the database under them.
 - 2026-09-15 (feat/chat-image-wiring) — a turn's attached images are resolved
   to bytes here and forwarded to the pool as ``image_attachments``, alongside the
   existing ``images`` (the surface's own snapshot). Two channels, two reasons:
@@ -509,6 +532,103 @@ def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
 
 
+# How often a live run stamps ``last_heartbeat_at``. The stale-run sweeper's
+# cutoff is 10 minutes, so 30s leaves a wide margin for a slow Mongo write or a
+# busy event loop before a healthy run could look dead.
+_DEFAULT_HEARTBEAT_SECONDS = 30.0
+
+
+def _heartbeat_seconds() -> float:
+    """Resolve the heartbeat interval from ``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS``.
+
+    Fail-soft like the other run knobs: an unparseable or non-positive value
+    logs and falls back to the default instead of crashing the run or spinning
+    a zero-interval write loop against Mongo.
+    """
+    raw = os.environ.get("POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_HEARTBEAT_SECONDS
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS=%r is not a number; using %ss",
+            raw,
+            _DEFAULT_HEARTBEAT_SECONDS,
+        )
+        return _DEFAULT_HEARTBEAT_SECONDS
+    if not val > 0:  # also rejects nan
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS=%s is not positive; using %ss",
+            raw,
+            _DEFAULT_HEARTBEAT_SECONDS,
+        )
+        return _DEFAULT_HEARTBEAT_SECONDS
+    return val
+
+
+async def _heartbeat_loop(run_id: str, interval: float) -> None:
+    """Stamp the run's liveness every ``interval`` seconds until cancelled.
+
+    A failed write is logged and the loop keeps going: one missed beat is
+    harmless against a 10-minute cutoff, and killing the run over a transient
+    Mongo blip would be the very failure this exists to prevent.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await run_service.touch_heartbeat(run_id)
+        except Exception:
+            logger.warning("run heartbeat write failed for %s", run_id, exc_info=True)
+
+
+async def _stop_heartbeat(task: asyncio.Task[None]) -> None:
+    """Cancel the heartbeat and wait for it to finish, without raising.
+
+    ``asyncio.wait`` rather than ``await task``: the task ends in
+    CancelledError, and swallowing that with an ``except`` would also swallow a
+    cancel aimed at THIS task. ``wait`` returns the finished task instead of
+    raising its exception, and still propagates our own cancellation.
+    """
+    task.cancel()
+    await asyncio.wait({task})
+
+
+# Shielded host-cancel cleanups still running in the background. When arq
+# cancels a run (job_timeout, shutdown) the cleanup that writes the partial reply
+# and the terminal status outlives the cancelled task; the worker's shutdown has
+# to wait for these before it closes the database they are writing to.
+_pending_cleanups: set[asyncio.Future[Any]] = set()
+
+
+def _track_cleanup(task: asyncio.Future[Any]) -> None:
+    _pending_cleanups.add(task)
+    task.add_done_callback(_pending_cleanups.discard)
+
+
+async def drain_pending_cleanups(timeout: float) -> None:
+    """Wait up to ``timeout`` seconds for in-flight shielded cleanups. Never raises.
+
+    Called by the worker before ``close_cloud_db()``. A cleanup still running
+    after the timeout is abandoned (logged): shutdown must stay bounded, and a
+    cleanup that cannot finish in that window was not going to.
+    """
+    pending = {t for t in _pending_cleanups if not t.done()}
+    if not pending:
+        return
+    try:
+        _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    except Exception:  # noqa: BLE001 — shutdown must never fail here
+        logger.warning("drain_pending_cleanups: wait failed", exc_info=True)
+        return
+    if still_pending:
+        logger.warning(
+            "drain_pending_cleanups: %d run cleanup(s) still running after %ss",
+            len(still_pending),
+            timeout,
+        )
+
+
 def _usage_int(value: Any) -> int:
     """Coerce one usage count to a non-negative int, tolerating None / strings."""
     try:
@@ -745,10 +865,17 @@ def _timeline_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
 
 
 async def _persist_assistant_message(
-    ctx: ScopeContext, content: str, attachments: list[dict[str, Any]]
+    ctx: ScopeContext,
+    content: str,
+    attachments: list[dict[str, Any]],
+    *,
+    run_status: str | None = None,
 ) -> Any:
     from pocketpaw_ee.cloud.chat import message_service
 
+    # ``run_status`` only rides when set, so the completed path's call is
+    # byte-identical to before.
+    extra: dict[str, Any] = {"run_status": run_status} if run_status else {}
     return await message_service.persist_assistant_message_for_scope(
         kind=ctx.kind.value,
         scope_id=ctx.scope_id,
@@ -758,6 +885,7 @@ async def _persist_assistant_message(
         target_agent_id=ctx.target_agent_id,
         content=content,
         attachments=attachments,
+        **extra,
     )
 
 
@@ -767,6 +895,7 @@ async def _broadcast_message_new(
     content: str,
     attachments: list[dict[str, Any]],
     created_at: datetime,
+    run_status: str | None = None,
 ) -> None:
     # Include the caller so OS chat panels (which render off chatRoomsStore
     # via WS `message.new`) see the agent reply land without a refresh. The
@@ -784,6 +913,10 @@ async def _broadcast_message_new(
         "attachments": attachments,
         "created_at": created_at.isoformat(),
     }
+    # A cut-off reply says so on the wire, so a live client can mark it the way
+    # a history reload does. Absent on complete replies: payload unchanged.
+    if run_status:
+        data["run_status"] = run_status
     if xproc.is_worker():
         await xproc.publish_ws_envelope(
             scope_id=ctx.scope_id,
@@ -1116,8 +1249,13 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
         )
 
 
-async def _mark_running(run_id: str) -> None:
-    await run_service.mark_running(run_id)
+async def _mark_running(run_id: str) -> bool | None:
+    """Claim the run (``queued -> running``). False when it was no longer queued.
+
+    Kept as a thin seam because tests patch it; a patched no-op returns None,
+    which ``execute_run`` treats as "proceed". Only an explicit False aborts.
+    """
+    return await run_service.mark_running(run_id)
 
 
 def _new_run_id() -> str:
@@ -1267,6 +1405,37 @@ async def _persist_and_complete(
                 ctx.target_agent_id,
                 exc_info=True,
             )
+    return assistant_id
+
+
+async def _persist_partial_reply(
+    spec: RunSpec, ctx: ScopeContext, full_text: str, status: str
+) -> str | None:
+    """Persist a non-completed run's streamed text as an assistant Message.
+
+    Returns the Message id, or None when nothing was written. Best-effort end to
+    end: the caller is already on a failure path and must still reach its
+    terminal write and stream frame, so every error is logged and swallowed.
+
+    Nothing is written for blank text (the client's error row covers a run that
+    said nothing) or for a concierge run, whose transcript is the run doc itself
+    and whose ``Message`` write is a deliberate no-op. The partial is NOT fed to
+    ``pool.observe``: the soul should learn from answers, not from fragments.
+    """
+    if not full_text.strip() or _is_concierge_run(spec):
+        return None
+    try:
+        msg = await _persist_assistant_message(ctx, full_text, [], run_status=status)
+    except Exception:
+        logger.exception("persisting the %s partial reply failed for %s", status, spec.run_id)
+        return None
+    assistant_id = str(msg.id)
+    try:
+        await _broadcast_message_new(
+            ctx, assistant_id, full_text, [], created_at=msg.createdAt, run_status=status
+        )
+    except Exception:
+        logger.debug("message.new broadcast failed for partial %s", spec.run_id, exc_info=True)
     return assistant_id
 
 
@@ -2551,17 +2720,22 @@ async def _handle_interrupted_cleanup(
     cancelled. It used not to be a parameter at all, so a worker shutdown wrote
     a terminal doc with no counts and the sweeper billed the run zero — the
     third of the three terminal states that could never carry usage.
+
+    The streamed text is persisted as a cut-off assistant Message first, so a
+    run arq killed at ``job_timeout`` still shows its reply after a refresh.
     """
     try:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
+    assistant_id = await _persist_partial_reply(spec, ctx, full_text, "interrupted")
     try:
         await run_service.mark_terminal(
             spec.run_id,
             status="interrupted",
             partial_text=full_text,
             usage=usage or None,
+            assistant_message_id=assistant_id,
         )
     except Exception:
         logger.exception("mark_terminal(interrupted) failed for %s", spec.run_id)
@@ -2888,7 +3062,15 @@ async def execute_run(spec: RunSpec) -> None:
         # break this run; the task is intentionally not awaited.
         asyncio.create_task(_prewarm_session(ctx, flow_context=spec.flow_context))
 
-        await _mark_running(spec.run_id)
+        # A False here means the run is no longer queued: the stale-run sweeper
+        # interrupted it while it waited in arq, and its client already has the
+        # terminal frame. Driving it now would spend tokens on a reply nobody
+        # is listening for, and flip the doc back out of ``interrupted``.
+        if await _mark_running(spec.run_id) is False:
+            logger.info("execute_run %s: run is no longer queued; not driving it", spec.run_id)
+            return
+        # Liveness for the stale-run sweeper; stopped in the loop's finally.
+        heartbeat = asyncio.create_task(_heartbeat_loop(spec.run_id, _heartbeat_seconds()))
         await _broadcast_agent_typing(ctx, active=True)
 
         full_text = ""
@@ -2959,10 +3141,15 @@ async def execute_run(spec: RunSpec) -> None:
             # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
             # and strand the doc in ``running`` with no terminal stream frame.
             logger.info("execute_run %s cancelled by host", spec.run_id)
+            # An explicit task (not a bare coroutine to shield) so the worker's
+            # shutdown can find it: the cleanup outlives this cancelled task, and
+            # ``drain_pending_cleanups`` waits on it before the DB is closed.
+            cleanup = asyncio.ensure_future(
+                _handle_interrupted_cleanup(spec, ctx, full_text, transport, usage)
+            )
+            _track_cleanup(cleanup)
             try:
-                await asyncio.shield(
-                    _handle_interrupted_cleanup(spec, ctx, full_text, transport, usage)
-                )
+                await asyncio.shield(cleanup)
             except asyncio.CancelledError:
                 # The outer await is cancelled but the shielded inner task
                 # continues running to completion in the background. That's
@@ -2980,6 +3167,8 @@ async def execute_run(spec: RunSpec) -> None:
                 "error",
                 {"code": "agent.run_failed", "message": str(exc)},
             )
+        finally:
+            await _stop_heartbeat(heartbeat)
 
     # Check cancellation AFTER the agent loop. _drive_agent_loop now checks the
     # cancel flag internally (via _iter_agent_events -> real _is_cancelled callback
@@ -3002,6 +3191,7 @@ async def execute_run(spec: RunSpec) -> None:
 
     if error is not None or backend_error_message is not None:
         err_msg = str(error) if error is not None else (backend_error_message or "")
+        partial_id = await _persist_partial_reply(spec, ctx, full_text, "failed")
         try:
             # ``usage=`` was omitted here, so a run that crashed after the model
             # had already answered persisted no counts and swept through
@@ -3015,6 +3205,7 @@ async def execute_run(spec: RunSpec) -> None:
                 partial_text=full_text,
                 error=err_msg,
                 usage=usage or None,
+                assistant_message_id=partial_id,
             )
         except Exception:
             logger.exception("mark_terminal(failed) failed for %s", spec.run_id)
@@ -3030,7 +3221,10 @@ async def execute_run(spec: RunSpec) -> None:
         # blob storage, so it falls through to the persist path below to record
         # the ``{type:"artifact"}`` attachments + emit their SSE events (empty
         # message text is fine). A cancelled run keeps the early return regardless
-        # (no assistant message on a cancel).
+        # (a cancel persists only the text already streamed, as a cut-off reply).
+        partial_id = (
+            await _persist_partial_reply(spec, ctx, full_text, "cancelled") if cancelled else None
+        )
         try:
             if cancelled:
                 await run_service.mark_terminal(
@@ -3038,6 +3232,7 @@ async def execute_run(spec: RunSpec) -> None:
                     status="cancelled",
                     partial_text=full_text,
                     usage=usage or None,
+                    assistant_message_id=partial_id,
                 )
             else:
                 await run_service.mark_completed(
@@ -3055,7 +3250,7 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.append_event(
             spec.run_id,
             "stream_end",
-            {"assistant_message_id": None, "usage": usage, "cancelled": cancelled},
+            {"assistant_message_id": partial_id, "usage": usage, "cancelled": cancelled},
         )
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return

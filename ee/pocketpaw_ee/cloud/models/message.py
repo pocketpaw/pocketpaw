@@ -1,4 +1,13 @@
-"""Message document — unified message store for pocket agent memory and group chat."""
+"""Message document — unified message store for pocket agent memory and group chat.
+
+Updated: 2026-09-27 (fix/chat-run-heartbeat) — added ``run_status``. A run that
+ends failed / cancelled / interrupted now persists the text it had already
+streamed as a real assistant Message (before, it lived only on
+``ChatRunDoc.partial_text``, which the chat history never reads, so a refresh
+showed the user's question and no answer). ``run_status`` carries that terminal
+status so the UI can mark the reply as cut off and the agent's history reader can
+still tell the model the reply is incomplete. ``None`` on every normal message.
+"""
 
 from __future__ import annotations
 
@@ -85,6 +94,12 @@ class Message(TimestampedDocument):
     # the linked Session.workspace at write time; for group rows callers
     # populate it from the group's workspace.
     workspace_id: str | None = None
+
+    # --- Cut-off agent replies ------------------------------------------
+    # The terminal run status (``failed`` | ``cancelled`` | ``interrupted``) when
+    # this assistant row is the partial text of a run that did not complete.
+    # ``None`` for every complete reply and every human message.
+    run_status: str | None = None
 
     @model_validator(mode="after")
     def _enforce_context(self) -> Message:
