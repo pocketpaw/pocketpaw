@@ -1,6 +1,11 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-09-27 (chore/bump-claude-agent-sdk): Added ``claude_sdk_cli_path``
+    (env ``POCKETPAW_CLAUDE_SDK_CLI_PATH``). The SDK always runs the CLI bundled
+    in its wheel, so a model newer than that CLI failed with "Claude Code
+    2.1.276 does not support this model" even with a current ``claude``
+    installed. Unset keeps the bundled CLI.
   - 2026-09-01 (feat/scale-concurrency-knobs): Added ``agent_pool_max_instances``
     (default 20), ``session_warm_max_per_tenant`` (default 8) and
     ``session_warm_max_global`` (default 64) — the three agent-tier ceilings that
@@ -495,6 +500,17 @@ class Settings(BaseSettings):
     claude_sdk_max_turns: int = Field(
         default=100,
         description="Max tool-use turns per query in Claude SDK (0 = unlimited)",
+    )
+    claude_sdk_cli_path: str | None = Field(
+        default=None,
+        description=(
+            "Explicit path to the Claude Code CLI the Claude SDK backend spawns. "
+            "Unset (default) uses the CLI bundled in the claude-agent-sdk wheel, "
+            "which the SDK prefers over any `claude` on PATH. Set it when the "
+            'bundled CLI is too old for a model ("version 2.1.280 or newer is '
+            'required") and a newer `claude` is installed, e.g. the npm-installed '
+            "/usr/local/bin/claude in the Docker images."
+        ),
     )
 
     # OpenAI Agents SDK Settings

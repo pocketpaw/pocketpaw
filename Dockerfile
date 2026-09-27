@@ -1,4 +1,7 @@
 # Changes:
+# 2026-09-27: Set POCKETPAW_CLAUDE_SDK_CLI_PATH=/usr/local/bin/claude so the Claude
+#   SDK backend spawns the npm-installed CLI instead of the older one bundled in the
+#   claude-agent-sdk wheel, which rejected newer models.
 # 2026-06-16: Harden the runtime-stage CLI shims. Resolve the claude/codex bin
 #   entry from each package's package.json instead of hardcoding cli.js — newer
 #   claude-code releases ship bin/claude.exe, so the old symlink dangled and the
@@ -142,6 +145,11 @@ ENV POCKETPAW_LOCALHOST_AUTH_BYPASS=false
 ENV POCKETPAW_ENV=production
 # Agent-created files land here — bind-mount to access them on the host
 ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
+# The Claude SDK backend runs the CLI bundled in the claude-agent-sdk wheel
+# unless told otherwise, and that CLI lags new models ("Claude Code 2.1.276 does
+# not support this model; version 2.1.280 or newer is required"). Point it at
+# the npm-installed CLI above, which each build takes at its latest release.
+ENV POCKETPAW_CLAUDE_SDK_CLI_PATH=/usr/local/bin/claude
 
 EXPOSE 8888
 
