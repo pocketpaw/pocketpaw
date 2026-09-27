@@ -4,6 +4,14 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-27 (feat/concierge-v2-runner, CR-1): added ``concierge_runtime``,
+# the owner's switch between the legacy concierge (a full agent run through the
+# executor) and ``v2`` (one tool-free streamed model call grounded in the site KB,
+# ``paw_bar.concierge_runtime``). It lives on the Site, beside the other concierge
+# switches, because a site has exactly one concierge widget and the chat handler
+# already holds this document when it decides. Defaults "legacy", so every
+# existing row keeps today's behaviour with no migration.
+#
 # Updated 2026-09-23 (VS-4 -- rename a site's address): added ``slug_pending``, the
 # address an owner asked to move to, applied on the site's NEXT publish (a live build
 # cannot be redeployed without rebuilding the draft), with its own PARTIAL unique index
@@ -279,7 +287,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field, PrivateAttr
@@ -811,6 +819,13 @@ class Site(TimestampedDocument):
     # Defaults reproduce today's look exactly, so an unstyled Site is unchanged
     # and there is no migration.
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+    # Paw Bar concierge runtime (CR-1, 2026-09-27). "legacy" dispatches the
+    # concierge as a full agent run (RunSpec -> executor); "v2" answers in one
+    # streamed model call with NO tools, grounded in the site KB. Read per chat
+    # turn, so a flip takes effect on the next message. Default "legacy" until
+    # the v2 eval gate passes; a row written before the field existed reads as
+    # legacy too (callers use getattr with that default).
+    concierge_runtime: Literal["legacy", "v2"] = "legacy"
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or

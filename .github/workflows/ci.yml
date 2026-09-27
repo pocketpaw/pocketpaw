@@ -10,6 +10,8 @@
 # Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
 # sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
 # Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+# Updated: 2026-09-27 (feat/concierge-v2-runner) — the EE test job runs the v2
+# Paw Bar concierge runner tests, which otherwise sit in the tests/cloud blind spot.
 # Updated: 2026-06-10 — deploy-coolify job: pushes to dev that pass every CI
 # job now fire the Coolify deploy hook for the cloud backend stack (defined
 # in qbtrix/paw-workspace deploy/coolify/, which clones this repo's dev at
@@ -233,6 +235,17 @@ jobs:
         # spot: a dropped filter would be a silent leak between tenants that no
         # other lane runs a test for.
         run: uv run pytest tests/cloud/test_agent_activity.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run v2 concierge runner tests
+        # Same addopts escape. The v2 runner answers anonymous visitors on
+        # customers' sites in one model call, and this file is the only proof
+        # that the call carries zero tools, that every public gate still fires
+        # before it, and that legacy sites are untouched. Mutations:
+        # tests/mutations/concierge_v2_runtime.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_v2.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

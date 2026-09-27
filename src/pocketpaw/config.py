@@ -1,6 +1,12 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-09-27 (feat/concierge-v2-runner): Added ``pawbar_concierge_model`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_MODEL``, default "" = the pydantic_ai backend's
+    own model resolution) and ``pawbar_concierge_max_tokens`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS``, default 600). They fix the model
+    and output cap of the v2 Paw Bar concierge runner, which answers a site
+    visitor in one tool-free call instead of a full agent run.
   - 2026-09-27 (chore/bump-claude-agent-sdk): Added ``claude_sdk_cli_path``
     (env ``POCKETPAW_CLAUDE_SDK_CLI_PATH``). The SDK always runs the CLI bundled
     in its wheel, so a model newer than that CLI failed with "Claude Code
@@ -1441,6 +1447,23 @@ class Settings(BaseSettings):
     litellm_max_tokens: int = Field(
         default=0,
         description="Max output tokens for LiteLLM models (0 = provider default)",
+    )
+
+    # Paw Bar concierge v2 runner (``pocketpaw_ee.paw_bar.concierge_runtime``).
+    # Fixed per deployment on purpose: a public, anonymous visitor must not be
+    # able to steer model choice or reply length.
+    pawbar_concierge_model: str = Field(
+        default="",
+        description=(
+            "Model the v2 Paw Bar concierge answers with, as a pydantic_ai spec "
+            "(``litellm:<model>`` or a bare name on the configured provider). "
+            "Empty uses the pydantic_ai backend's own model resolution."
+        ),
+    )
+    pawbar_concierge_max_tokens: int = Field(
+        default=600,
+        ge=1,
+        description="Max output tokens for one v2 Paw Bar concierge reply.",
     )
 
     # LLM Configuration

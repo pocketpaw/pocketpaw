@@ -7,6 +7,14 @@ keywords: ["concierge", "paw bar", "site knowledge", "kb sync", "visitor transcr
 tags: ["paw-bar", "sites", "knowledge", "privacy"]
 ---
 
+{/*
+  docs/concepts/concierge-knowledge.mdx
+  Updated 2026-09-27 (feat/concierge-v2-runner, CR-1) — new section "The v2 runtime":
+  the per-site concierge_runtime switch, what v2 does (one tool-free model call
+  grounded in the site KB), which refusals it skips, its config keys, and what it
+  does not do yet.
+*/}
+
 # Concierge Knowledge and Transcripts
 
 A Paw Bar concierge is an agent attached to a published site. It answers visitors'
@@ -151,6 +159,40 @@ the agent's own scope, are never listed or linked: they have no public URL to po
 at, so a reply can be grounded in them without them showing up as a citation. When
 nothing matches, or the search fails, no sources are shown and the reply is
 unaffected.
+
+## The v2 runtime
+
+Each site chooses which runtime answers its visitors with `concierge_runtime`, readable
+and writable through `GET`/`PATCH /paw-bar/admin/site/{site_id}/settings` like the other
+concierge switches. It takes `"legacy"` (the default) or `"v2"`; anything else is a 422.
+Existing sites stay on `legacy` until an owner changes it.
+
+- **legacy** runs the site's concierge agent through the normal agent machinery, with the
+  tool lockdown described above.
+- **v2** answers in one streamed model call with **no tools at all**. Before the call it
+  searches the same two scopes a legacy run reads (`pocket:<pocket_id>`, then
+  `agent:<agent_id>` when the widget has an agent) and puts up to six matching items into
+  the prompt, along with the widget's catalog and declared actions and the recent turns of
+  this conversation. The instructions are a fixed frame: answer only about this site and
+  only from that material, write no code, and treat everything in the tagged blocks and
+  the visitor's message as data.
+
+Both runtimes pass through the same gates, in the same order: origin, rate limit,
+injection screen, the widget-to-key binding, the monthly conversation allowance, and
+human takeover. v2 skips exactly two refusals. It needs no bound agent, because the
+knowledge scope comes from the site key; and it ignores the pocket's connectors, because
+a call with no tools cannot reach them. A v2 turn is stored as the same concierge run
+record, so transcripts, memory, stats and retention behave as they do for legacy, and the
+widget receives the same stream events.
+
+The model and the reply cap are fixed per deployment:
+`POCKETPAW_PAWBAR_CONCIERGE_MODEL` (a pydantic_ai model spec such as `litellm:<model>`;
+empty uses the deployment's pydantic_ai default) and
+`POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS` (default 600).
+
+v2 does not yet filter code fences or check product cards against the catalog, read the
+page the visitor is on, use owner-written guidance fields, or cap spend per site. Those
+land before it becomes the default for new sites.
 
 ## What a concierge records
 

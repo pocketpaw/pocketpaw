@@ -1,0 +1,88 @@
+[
+  {
+    "label": "the v2 agent is handed a tool — the zero-tools invariant is gone",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
+    "replace": "        agent = Agent(model, tools=[lambda query: query], instructions=FRAME, output_type=str)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
+    ]
+  },
+  {
+    "label": "the v2 agent is handed a toolset — tools arrive by the other door",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
+    "replace": "        agent = Agent(model, toolsets=[__import__('pydantic_ai').FunctionToolset(tools=[lambda query: query])], instructions=FRAME, output_type=str)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
+    ]
+  },
+  {
+    "label": "per-turn data is concatenated into the frame — it stops being constant and becomes injectable",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
+    "replace": "        agent = Agent(model, instructions=FRAME + message, output_type=str)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_frame_is_the_first_and_constant_part_of_the_prompt"
+    ]
+  },
+  {
+    "label": "the fixed output cap is dropped — reply length falls back to the model default",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        \"max_tokens\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 600) or 600),",
+    "replace": "        \"max_tokenz\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 600) or 600),",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
+    ]
+  },
+  {
+    "label": "retrieve widens to the tenant-wide workspace scope — an anonymous visitor reads the whole company",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        scopes = _kb_scopes_for_context(ctx)",
+    "replace": "        scopes = _kb_scopes_for_context(ctx) + [\"workspace:ws-1\"]",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_retrieve_never_reaches_workspace_or_user_scopes",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_streams_an_answer_grounded_in_the_seeded_kb"
+    ]
+  },
+  {
+    "label": "the bound-agent 409 is skipped for legacy too — a legacy run dispatches with no agent",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if runtime != \"v2\" and not widget.agent_id:",
+    "replace": "    if False and not widget.agent_id:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_legacy_still_409s_an_unbound_widget"
+    ]
+  },
+  {
+    "label": "the connector 409 is skipped for legacy too — a legacy agent can reach a pocket's connectors",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if runtime != \"v2\":\n        from pocketpaw_ee.cloud.connectors.service import list_pocket_connectors",
+    "replace": "    if False:\n        from pocketpaw_ee.cloud.connectors.service import list_pocket_connectors",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_chat.py::test_chat_refused_when_pocket_has_connectors"
+    ]
+  },
+  {
+    "label": "the switch is ignored — a v2 site is dispatched as a full agent run",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if runtime == \"v2\":\n        from pocketpaw_ee.paw_bar import concierge_runtime",
+    "replace": "    if False:\n        from pocketpaw_ee.paw_bar import concierge_runtime",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_streams_an_answer_grounded_in_the_seeded_kb"
+    ]
+  },
+  {
+    "label": "a Site defaults to v2 — every existing site and every row without the field switches runtime unasked",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "    concierge_runtime: Literal[\"legacy\", \"v2\"] = \"legacy\"",
+    "replace": "    concierge_runtime: Literal[\"legacy\", \"v2\"] = \"v2\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_a_new_site_defaults_to_legacy",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_a_site_without_the_field_is_legacy"
+    ]
+  }
+]
