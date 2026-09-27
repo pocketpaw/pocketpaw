@@ -40,6 +40,14 @@ two retention tests. ``test_a_retained_turn_never_replays_its_page_image`` is th
 one that matters: it COUNTS the attachments on turn 2 rather than asserting none,
 because turn 2's own picture is supposed to be there and a presence assertion
 would fail on working code. Pre-fix it saw 2.
+
+Updated 2026-09-27 (fix/pydantic-ai-tool-images) — added
+``test_a_tool_returning_images_keeps_them_and_reports_text_only``: a tool whose
+return is ``[caption, BinaryContent]`` must reach the model with its image intact
+through the harness char cap, and its ``tool_result`` event must carry the
+caption plus an image count rather than a repr of the bytes.
+``test_harness_capabilities_are_wired`` now expects
+``ImageSafeOverflowingToolOutput``, the wrapper that makes the first half hold.
 """
 
 from __future__ import annotations
@@ -916,7 +924,7 @@ def test_harness_capabilities_are_wired():
         "ClearToolResults",
         "Planning",
         "StepPersistence",
-        "OverflowingToolOutput",
+        "ImageSafeOverflowingToolOutput",
     } <= names, names
 
 
@@ -3733,3 +3741,41 @@ async def test_the_run_puts_localized_tool_names_on_the_wire():
 
     assert "`pocketpaw_inspo_research_page_design`" in (seen[0] or "")
     assert "mcp__" not in (seen[0] or "")
+
+
+async def test_a_tool_returning_images_keeps_them_and_reports_text_only():
+    """The /sites preview tools return ``[caption, BinaryContent, ...]``. The
+    image must survive the harness char cap (which used to JSON-encode the list,
+    base64 and all, and replace it with a truncated string once the pictures
+    alone crossed the limit), and the UI event must show the caption and a
+    count, never the bytes."""
+    pytest.importorskip("pydantic_ai_harness", reason="harness not installed")
+    from pydantic_ai import BinaryContent
+    from pydantic_ai.messages import ToolReturnPart
+    from pydantic_ai.tools import Tool
+
+    png = b"PNG-" + b"x" * 5000
+    seen: list = []
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        if len(messages) == 1:
+            yield {0: DeltaToolCall(name="preview", json_args="{}", tool_call_id="c1")}
+            return
+        seen.extend(p for m in messages for p in m.parts if isinstance(p, ToolReturnPart))
+        yield "done"
+
+    async def preview() -> list:
+        """Render the draft."""
+        return ["Captured the draft.", BinaryContent(data=png, media_type="image/png")]
+
+    backend = _backend_with_model(
+        FunctionModel(stream_function=stream_fn), pydantic_ai_max_tool_output_chars=1000
+    )
+    backend._custom_tools = [Tool(preview, name="preview", description="Render the draft.")]
+
+    events = await _collect(backend, "show me the draft")
+
+    images = [item for item in seen[0].content if isinstance(item, BinaryContent)]
+    assert [(img.data, img.media_type) for img in images] == [(png, "image/png")]
+    result = next(e for e in events if e.type == "tool_result")
+    assert result.content == "Captured the draft. [+1 image]"

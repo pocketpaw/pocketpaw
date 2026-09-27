@@ -7,6 +7,19 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-27 (fix/pydantic-ai-tool-images): the ``tool_result`` event
+built from ``FunctionToolResultEvent`` handles a LIST tool result. In-process
+MCP tools that return images now come back as ``[text, BinaryContent, ...]``,
+and ``str()`` on that put the raw image bytes' repr into the UI event. The
+event now carries the list's text items plus a short ``[+N images]`` note.
+
+Also: the harness ``OverflowingToolOutput`` is wrapped by
+``_image_safe_overflow``. It measured a list return by JSON-encoding it, base64
+images included, so a few screenshots crossed the char cap on their own and the
+whole result was replaced by one truncated JSON string: the images were lost a
+second time. The wrapper reduces only the text of a result holding
+``BinaryContent`` and passes the images through.
+
 Changed 2026-09-24 (feat/inspo-backend-parity): the per-run ``instructions``
 now pass through ``_localize_tool_ids``, which rewrites ``mcp__srv__tool`` to
 the ``srv_tool`` names this backend bridges in-process servers under. Surface
@@ -748,6 +761,44 @@ def _user_prompt(message: str, images: tuple[tuple[bytes, str], ...]) -> Any:
     parts: list[Any] = [message]
     parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)
     return parts
+
+
+_IMAGE_SAFE_OVERFLOW: Any = None
+
+
+def _image_safe_overflow(base: Any) -> Any:
+    """``OverflowingToolOutput`` that truncates a multimodal result's TEXT only.
+
+    The harness measures a plain list return by JSON-encoding it, base64 image
+    bytes included, so a tool returning ``[caption, BinaryContent, ...]``
+    crossed the char cap on its pictures alone and came back as one truncated
+    JSON string: the images the bridge now delivers were destroyed again on
+    the way to the model. Here a list holding ``BinaryContent`` has only its
+    ``str`` items measured and reduced; every non-text item passes through.
+
+    Built lazily and cached: the harness is an optional dependency, imported
+    only inside ``_build_capabilities``.
+    """
+    global _IMAGE_SAFE_OVERFLOW
+    if _IMAGE_SAFE_OVERFLOW is not None:
+        return _IMAGE_SAFE_OVERFLOW
+    from pydantic_ai import BinaryContent
+
+    class ImageSafeOverflowingToolOutput(base):
+        async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
+            reduce = super().after_tool_execute
+            if not (isinstance(result, list) and any(isinstance(i, BinaryContent) for i in result)):
+                return await reduce(ctx, call=call, tool_def=tool_def, args=args, result=result)
+            text = "\n".join(item for item in result if isinstance(item, str))
+            if not text:
+                return result
+            reduced = await reduce(ctx, call=call, tool_def=tool_def, args=args, result=text)
+            if not isinstance(reduced, str) or reduced == text:
+                return result
+            return [reduced, *(item for item in result if not isinstance(item, str))]
+
+    _IMAGE_SAFE_OVERFLOW = ImageSafeOverflowingToolOutput
+    return _IMAGE_SAFE_OVERFLOW
 
 
 def _without_attachments(message: Any) -> Any:
@@ -1827,7 +1878,7 @@ class PydanticAIBackend:
             capabilities.append(Planning())
             if limit:
                 capabilities.append(
-                    OverflowingToolOutput(
+                    _image_safe_overflow(OverflowingToolOutput)(
                         bands=[Band(over=limit, action=Truncate(max_chars=limit))]
                     )
                 )
@@ -2922,7 +2973,18 @@ class PydanticAIBackend:
         elif isinstance(event, FunctionToolResultEvent):
             part = event.part
             content = getattr(part, "content", "")
-            text = content if isinstance(content, str) else str(content)
+            if isinstance(content, list):
+                # A multimodal tool result (text + BinaryContent images, see
+                # _make_inprocess_caller). ``str()`` on it would put the image
+                # bytes' repr into the UI event; show the text and a count.
+                from pydantic_ai import BinaryContent
+
+                text = "\n".join(item for item in content if isinstance(item, str))
+                images = sum(isinstance(item, BinaryContent) for item in content)
+                if images:
+                    text += f" [+{images} image{'s' if images != 1 else ''}]"
+            else:
+                text = content if isinstance(content, str) else str(content)
             out.append(
                 AgentEvent(
                     type="tool_result",
