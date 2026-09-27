@@ -1,4 +1,10 @@
 # tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py — the concierge gets only its own tools.
+# Updated 2026-09-27 (captain decision: the concierge runs on pydantic_ai only):
+# added the owner-backend tests. A concierge run whose bound agent is set to
+# claude_agent_sdk, deep_agents or openai_agents is served by pydantic_ai with
+# exactly the two pawbar tools; a /chat run on the same agents stays put. The
+# claude_sdk ``_build_options`` test below is now defence in depth only, since a
+# concierge run no longer reaches that backend.
 # Updated 2026-09-27 (same branch, with the fix): step 2 now goes through the
 # real ``AgentPool.run`` rather than filtering kwargs itself, so the pool's new
 # ``exclusive_tools`` forward is under test too. Added the site-pocket override

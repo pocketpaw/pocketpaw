@@ -1,5 +1,14 @@
 [
   {
+    "label": "the pool stops forcing the concierge onto pydantic_ai: it runs on the owner's backend, Read/Glob/Grep on claude_sdk, a TypeError on the rest",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if exclusive_tools:\n                # A deny-by-default run",
+    "replace": "            if False:\n                # A deny-by-default run",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py::test_concierge_runs_on_pydantic_ai_whatever_the_bound_agent_uses"
+    ]
+  },
+  {
     "label": "the concierge profile is not exclusive: an anonymous visitor gets every bridged builtin again",
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
     "find": "        exclusive_tools=True,\n",

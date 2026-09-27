@@ -3,9 +3,10 @@
 Changes:
 - 2026-09-27 (fix/concierge-web-tool-deny) — a profile with ``exclusive_tools``
   (the public concierge) forwards ``exclusive_mcp_tools=True`` and
-  ``exclusive_tools=True`` to ``AgentPool.run``, and prewarm mirrors the MCP cap
-  so the warm client matches turn 1. The run is offered only the profile's
-  allow set: no universal grant, no always-allowed servers, no bridged builtins.
+  ``exclusive_tools=True`` to ``AgentPool.run``. The run is offered only the
+  profile's allow set: no universal grant, no always-allowed servers, no bridged
+  builtins. The pool serves such a run on pydantic_ai whatever the bound agent's
+  backend is, so ``_prewarm_session`` skips it: there is no client to warm.
 - 2026-09-15 (feat/chat-image-wiring) — a turn's attached images are resolved
   to bytes here and forwarded to the pool as ``image_attachments``, alongside the
   existing ``images`` (the surface's own snapshot). Two channels, two reasons:
@@ -1372,6 +1373,12 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
         # get_settings(): a cached flag read, not a fresh parse. See above.
         if get_settings().smart_routing_enabled:
             return
+        # A deny-by-default run (the concierge) is always served by pydantic_ai
+        # (``AgentPool._deny_by_default_backend``), which has no subprocess to
+        # warm. Warming the bound agent's own backend would start a client the
+        # turn never uses.
+        if getattr(ctx.resolved_profile, "exclusive_tools", False):
+            return
 
         pool = get_agent_pool()
         instance = await pool.get(ctx.target_agent_id)
@@ -1421,10 +1428,6 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
         prewarm_exclusive, prewarm_tools = _agent_tool_policy(instance)
         if prewarm_exclusive:
             surface_allow_mcp = prewarm_tools
-        # Same mirror for a deny-by-default SURFACE (the concierge): turn 1 caps
-        # the MCP surface, so the warm client must be built capped too.
-        if getattr(ctx.resolved_profile, "exclusive_tools", False):
-            prewarm_exclusive = True
 
         # Bind this run's tenancy for the warm-up so the prewarmed subprocess
         # connects with the SAME per-tenant cwd jail the first turn will resolve
