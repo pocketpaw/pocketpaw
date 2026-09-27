@@ -1,6 +1,11 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-27 (fix/concierge-web-tool-deny) — a profile with ``exclusive_tools``
+  (the public concierge) forwards ``exclusive_mcp_tools=True`` and
+  ``exclusive_tools=True`` to ``AgentPool.run``, and prewarm mirrors the MCP cap
+  so the warm client matches turn 1. The run is offered only the profile's
+  allow set: no universal grant, no always-allowed servers, no bridged builtins.
 - 2026-09-15 (feat/chat-image-wiring) — a turn's attached images are resolved
   to bytes here and forwarded to the pool as ``image_attachments``, alongside the
   existing ``images`` (the surface's own snapshot). Two channels, two reasons:
@@ -1416,6 +1421,10 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
         prewarm_exclusive, prewarm_tools = _agent_tool_policy(instance)
         if prewarm_exclusive:
             surface_allow_mcp = prewarm_tools
+        # Same mirror for a deny-by-default SURFACE (the concierge): turn 1 caps
+        # the MCP surface, so the warm client must be built capped too.
+        if getattr(ctx.resolved_profile, "exclusive_tools", False):
+            prewarm_exclusive = True
 
         # Bind this run's tenancy for the warm-up so the prewarmed subprocess
         # connects with the SAME per-tenant cwd jail the first turn will resolve
@@ -1909,6 +1918,17 @@ async def _drive_agent_loop(
         if agent_exclusive:
             run_kwargs["exclusive_mcp_tools"] = True
             run_kwargs["allow_mcp_tool_ids"] = agent_tools
+        # A deny-by-default SURFACE (the public concierge): the run is offered
+        # ONLY its allow set. ``exclusive_mcp_tools`` caps the MCP side on both
+        # backends (no universal grant, no always-allowed servers);
+        # ``exclusive_tools`` also removes the bridged PocketPaw builtins, which
+        # only the pydantic_ai backend offers and which no MCP allow set reaches.
+        # The pool forwards ``exclusive_tools`` only to a backend that declares
+        # it. Agent-exclusive precedence above is unchanged: an exclusive bound
+        # agent's own tool list is still the allow set.
+        if getattr(ctx.resolved_profile, "exclusive_tools", False):
+            run_kwargs["exclusive_mcp_tools"] = True
+            run_kwargs["exclusive_tools"] = True
         # Forward the override only when the entity actually set one — withholding
         # keeps the prompt assembly untouched on every other run.
         if surface_sys_override is not None:

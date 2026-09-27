@@ -1,0 +1,83 @@
+[
+  {
+    "label": "the concierge profile is not exclusive: an anonymous visitor gets every bridged builtin again",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "        exclusive_tools=True,\n",
+    "replace": "        exclusive_tools=False,\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py"
+    ]
+  },
+  {
+    "label": "run_core drops the builtin half of the flag: the pydantic_ai concierge keeps connectors, memory writes and media",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            run_kwargs[\"exclusive_tools\"] = True\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py::test_concierge_on_pydantic_ai_is_offered_only_its_own_tools"
+    ]
+  },
+  {
+    "label": "run_core drops the MCP cap: the SDK concierge gets the universal grant and the always-allowed servers back",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if getattr(ctx.resolved_profile, \"exclusive_tools\", False):\n            run_kwargs[\"exclusive_mcp_tools\"] = True\n",
+    "replace": "        if getattr(ctx.resolved_profile, \"exclusive_tools\", False):\n            pass\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py::test_concierge_on_claude_sdk_gets_no_grant_and_no_always_allowed_servers"
+    ]
+  },
+  {
+    "label": "the pool never forwards exclusive_tools: the flag is set upstream and dead at the backend",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if exclusive_tools and _accepts_exclusive_tools_kwarg(run_backend.run):\n",
+    "replace": "            if False and _accepts_exclusive_tools_kwarg(run_backend.run):\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py::test_concierge_on_pydantic_ai_is_offered_only_its_own_tools"
+    ]
+  },
+  {
+    "label": "the backend ignores the flag: bridged builtins survive a deny-by-default run",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            tools = [t for t in tools if getattr(t, \"name\", \"\") in permitted]\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py::test_concierge_on_pydantic_ai_is_offered_only_its_own_tools"
+    ]
+  },
+  {
+    "label": "an entity override resets exclusivity: a site pocket with any surface_profile unlocks the concierge",
+    "file": "ee/pocketpaw_ee/cloud/surface/service.py",
+    "find": "        exclusive_tools=base.exclusive_tools or bool(override.get(\"exclusive_tools\")),\n",
+    "replace": "        exclusive_tools=bool(override.get(\"exclusive_tools\")),\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py::test_a_site_pocket_override_cannot_unlock_the_concierge"
+    ]
+  },
+  {
+    "label": "the flag is not in the agent cache key: the locked run is served the open agent",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            # of tools can match between a locked-down surface and an open one.\n            exclusive_tools,\n",
+    "replace": "            # of tools can match between a locked-down surface and an open one.\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_exclusive_tools_is_in_the_agent_cache_key"
+    ]
+  },
+  {
+    "label": "native web capability ignores exclusivity: WebSearch/WebFetch stay on the request provider-side",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            cap_deny = deny | frozenset(\n",
+    "replace": "            cap_deny = deny & frozenset(\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_exclusive_tools_registers_no_native_web_capability"
+    ]
+  },
+  {
+    "label": "skills load on a deny-by-default run: an empty skill set means every bundled skill",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                skills_enabled=not exclusive_tools,\n",
+    "replace": "                skills_enabled=True,\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_exclusive_tools_loads_no_skills"
+    ]
+  }
+]

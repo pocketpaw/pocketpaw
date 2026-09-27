@@ -15,6 +15,14 @@ the SDK's vocabulary and this backend's agent still had all three. Also:
 ``_build_web_capabilities`` takes the expanded deny set, so a denied web tool is
 no longer registered provider-side when ``pydantic_ai_native_web_tools`` is on.
 
+Then: ``run`` takes ``exclusive_tools`` (deny-by-default, sent for the public
+concierge). The MCP gate already capped toolsets to ``allow_mcp_tool_ids``, but
+the bridged builtins reached every run whatever the allow set said, so the
+concierge was offered the owner's connectors, memory writes, media APIs and
+flows. With the flag, only bridged tools the allow set names survive, skills are
+not loaded, and a native web capability is denied unless its local tool
+survived. The flag is in the agent cache key.
+
 Changed 2026-09-27 (fix/pydantic-ai-tool-images): the ``tool_result`` event
 built from ``FunctionToolResultEvent`` handles a LIST tool result. In-process
 MCP tools that return images now come back as ``[text, BinaryContent, ...]``,
@@ -1801,6 +1809,7 @@ class PydanticAIBackend:
         *,
         tools_enabled: bool = True,
         deny: frozenset[str] = frozenset(),
+        skills_enabled: bool = True,
     ) -> list:
         """Build the ``pydantic-ai-harness`` capabilities for this backend.
 
@@ -1900,7 +1909,12 @@ class PydanticAIBackend:
                     )
                 )
 
-        skills = self._build_skills_capability(skill_names) if tools_enabled else None
+        # ``skills_enabled`` is separate from ``skill_names`` on purpose: an EMPTY
+        # ``skill_names`` means "every bundled skill", so a deny-by-default run
+        # cannot turn skills off by passing no names.
+        skills = (
+            self._build_skills_capability(skill_names) if tools_enabled and skills_enabled else None
+        )
         if skills is not None:
             capabilities.append(skills)
         return capabilities
@@ -2353,6 +2367,7 @@ class PydanticAIBackend:
         system_prompt_digest: str = "",
         model_spec: str | None = None,
         tools_enabled: bool = True,
+        exclusive_tools: bool = False,
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
@@ -2432,6 +2447,9 @@ class PydanticAIBackend:
             # move with it today, but it is a count and two different surfaces
             # can share one — this says the thing itself.
             tools_enabled,
+            # Deny-by-default, for the same reason as ``tools_enabled``: a count
+            # of tools can match between a locked-down surface and an open one.
+            exclusive_tools,
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
@@ -2445,6 +2463,27 @@ class PydanticAIBackend:
                     before - len(tools),
                     sorted(deny_mcp_tool_ids),
                 )
+
+        # Deny-by-default (the public concierge). The MCP gate below already
+        # caps toolsets to the allow set; this is the half it cannot see — the
+        # bridged builtins, which reach every run whatever the allow set says.
+        # Kept only when the allow set names them. Skills are dropped too: a
+        # skill loads capabilities the surface never listed. And a native web
+        # capability is denied unless its local tool survived, since
+        # ``_build_web_capabilities`` reads the unfiltered tool list.
+        cap_deny = deny
+        if exclusive_tools:
+            permitted = _expand_tool_ids(allow_mcp_tool_ids or frozenset())
+            before = len(tools)
+            tools = [t for t in tools if getattr(t, "name", "") in permitted]
+            cap_deny = deny | frozenset(
+                n for n in self._NATIVE_WEB_EQUIVALENTS if n not in permitted
+            )
+            logger.info(
+                "Exclusive surface: withheld %d bridged tool(s); only %s offered",
+                before - len(tools),
+                sorted(allow_mcp_tool_ids or ()),
+            )
 
         mcp_toolsets = self._gate_mcp_toolsets(
             mcp_toolsets, deny, allow_mcp_tool_ids, exclusive_mcp_tools
@@ -2487,7 +2526,10 @@ class PydanticAIBackend:
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
             capabilities=self._build_capabilities(
-                skill_names, tools_enabled=tools_enabled, deny=deny
+                skill_names,
+                tools_enabled=tools_enabled,
+                deny=cap_deny,
+                skills_enabled=not exclusive_tools,
             )
             or None,
             # The agent is shared across concurrent runs; conversation state
@@ -2637,6 +2679,11 @@ class PydanticAIBackend:
         # In the agent cache key, necessarily: the cache is ONE slot, so without
         # it a tools-off turn would be served the agent built WITH tools.
         tools_enabled: bool = True,
+        # Deny-by-default surface (the public Paw Bar concierge). The run is
+        # offered ONLY what ``allow_mcp_tool_ids`` names: the bridged PocketPaw
+        # builtins below the MCP layer are dropped too, because no MCP allow set
+        # reaches them and a deny list cannot enumerate them. In the cache key.
+        exclusive_tools: bool = False,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
         #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
@@ -2786,6 +2833,7 @@ class PydanticAIBackend:
                 system_prompt_digest=system_prompt_digest,
                 model_spec=model_override,
                 tools_enabled=tools_enabled,
+                exclusive_tools=exclusive_tools,
             )
 
             kwargs: dict[str, Any] = {

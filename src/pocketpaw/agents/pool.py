@@ -3,6 +3,11 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-09-27 (fix/concierge-web-tool-deny) — ``run`` takes
+  ``exclusive_tools`` and forwards an explicit True to a backend whose ``run``
+  declares it (``_accepts_exclusive_tools_kwarg``). It is how a deny-by-default
+  surface reaches the pydantic_ai backend's bridged builtins.
+
 Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
   ``image_attachments``: the files a user attached to THIS turn, carried as bytes
   the model is shown rather than text scraped off them. It is a SECOND picture
@@ -188,6 +193,7 @@ from typing import TYPE_CHECKING, Any
 # resolve to the ONE definition.
 from pocketpaw.agents.backend import (
     ImageAttachment,
+    _accepts_exclusive_tools_kwarg,
     _accepts_image_attachments_kwarg,
     _accepts_images_kwarg,
     _accepts_prompt_digest,
@@ -695,6 +701,7 @@ class AgentPool:
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
         tools_enabled: bool = True,
+        exclusive_tools: bool = False,
         image_attachments: Sequence[ImageAttachment] = (),
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
@@ -1003,6 +1010,13 @@ class AgentPool:
             # different object.
             if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):
                 run_kwargs["tools_enabled"] = tools_enabled
+            # Deny-by-default surface (the public concierge). Same two gates:
+            # only an explicit True rides, and only to a backend that declares
+            # it. The run also carries ``exclusive_mcp_tools``, forwarded
+            # unconditionally above, so a backend that declares neither fails
+            # rather than running with its full tool set.
+            if exclusive_tools and _accepts_exclusive_tools_kwarg(run_backend.run):
+                run_kwargs["exclusive_tools"] = True
 
             async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
