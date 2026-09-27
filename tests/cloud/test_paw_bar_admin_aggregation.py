@@ -19,6 +19,10 @@
 #     status, created_at}.
 #   * Handoffs empty-but-well-shaped in v1 (no producer), and isolated by widget.
 #   * Conversations list (LISTABLE — grouped by customer_ref, unsupported=False).
+# Updated 2026-09-26 (fix/pawbar-frame-sandbox-header): the owner preview frame's
+#   CSP now ends in the same ``sandbox`` directive as the public frame, so the two
+#   exact-header assertions carry it and a new test pins the directive, the
+#   unchanged frame-ancestors, and the absence of top navigation.
 # Updated 2026-07-26 (concierge transcripts): a tenth layer covers two-sided
 #   transcripts — a run carrying ``user_text`` renders the visitor turn before the
 #   agent's, a run with no reply still shows what was asked, the question is
@@ -780,7 +784,9 @@ async def test_preview_frame_csp_is_dashboard_origin(client, monkeypatch):
     # portless host-source matches only the default port. The REAL dashboard
     # origin carries one (localhost:5173) and is emitted as written; this
     # fixture omits it, so it picks up the any-port form.
-    assert res.headers["content-security-policy"] == "frame-ancestors dash.example.com:*"
+    assert res.headers["content-security-policy"] == (
+        "frame-ancestors dash.example.com:*; " + _SANDBOX_DIRECTIVE
+    )
     # The Site's public allowlist must NOT be the framer here.
     assert "brewco.com" not in res.headers["content-security-policy"]
 
@@ -792,7 +798,33 @@ async def test_preview_frame_default_dashboard_origin(client):
     site = await _site()
     await store.create_widget(_widget())
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
-    assert res.headers["content-security-policy"] == "frame-ancestors localhost:5173"
+    assert res.headers["content-security-policy"] == (
+        "frame-ancestors localhost:5173; " + _SANDBOX_DIRECTIVE
+    )
+
+
+# Literal on purpose: the paw-bar loader sets the same flags on its <iframe sandbox>.
+_SANDBOX_DIRECTIVE = (
+    "sandbox allow-scripts allow-same-origin allow-forms allow-popups "
+    "allow-popups-to-escape-sandbox allow-downloads"
+)
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_is_sandboxed(client, monkeypatch):
+    """The owner preview is a frame document like the public one, so the browser
+    sandboxes it too — without touching its dashboard-only embedder gate."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "dash.example.com")
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 200
+    csp = res.headers["content-security-policy"]
+    directives = [d.strip() for d in csp.split(";")]
+    assert _SANDBOX_DIRECTIVE in directives
+    assert "frame-ancestors dash.example.com:*" in directives
+    assert "allow-top-navigation" not in csp
 
 
 @pytest.mark.asyncio

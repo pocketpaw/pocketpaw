@@ -3,7 +3,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:loader` in the
 // paw-bar repo (loader/dist/loader.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar loader/src/loader.ts @ bf29d76
+// Source: qbtrix/paw-bar loader/src/loader.ts @ da98d39 (fix/pawbar-frame-sandbox)
 //
 // It used to be hand-transcribed TypeScript with the annotations stripped by
 // hand. That drifts silently: this copy predated a whole session of loader
@@ -19,6 +19,10 @@
 // shipping a script tag pointing at a 404. `PAW_BAR_WIDGET_JS` overrides the
 // path when an operator wants to serve a freshly built bundle instead.
 //
+// 2026-09-26: refreshed for the frame sandbox. The iframe now carries
+// sandbox="<PAWBAR_FRAME_SANDBOX>", matching the CSP sandbox header the router
+// sends on every frame document; test_paw_bar_widget_js.py pins the two equal.
+//
 // To update: rebuild in paw-bar, copy loader/dist/loader.readable.js over this
 // file, and restore this header. tests/cloud/test_paw_bar_widget_js.py checks
 // the copy has not fallen behind the behaviours the backend depends on.
@@ -28,6 +32,7 @@
   // loader/src/loader.ts
   var LOADED_FLAG = "__pawBarLoaderLoaded";
   var FRAME_PATH = "/paw-bar/frame";
+  var FRAME_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads";
   var POS_KEY = "__pawbar_pos_v2";
   var DRAG_MIN_PX = 4;
   var BAR_W = 384;
@@ -80,6 +85,7 @@
     const iframe = doc.createElement("iframe");
     iframe.title = "Site concierge";
     iframe.setAttribute("allow", "clipboard-write");
+    iframe.setAttribute("sandbox", FRAME_SANDBOX);
     iframe.style.cssText = frameStyle();
     iframe.src = src;
     let view = "bar";
