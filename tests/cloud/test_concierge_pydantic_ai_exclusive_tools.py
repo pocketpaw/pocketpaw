@@ -65,12 +65,14 @@ _OWN = {
 }
 
 # A sample of what a public visitor must never reach: the owner's integrations,
-# memory writes, delivery, flows, paid APIs and the pocket write tools.
+# delivery, flows, paid APIs and the pocket write tools. Memory writes are left
+# out of the SAMPLE only: ``remember`` / ``forget`` are replaced by the soul_*
+# tools whenever a soul is active, which another test in the same process can
+# switch on, so the control would flake. The exact-set assertion still excludes
+# every memory tool under either name.
 _NEVER = {
     "connector_execute",
     "connector_connect",
-    "remember",
-    "forget",
     "deliver_artifact",
     "start_flow",
     "run_step_pipeline",
