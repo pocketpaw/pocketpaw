@@ -1,6 +1,13 @@
 # inspo.py — in-process MCP server exposing design research over real shipped
 # websites to the cloud chat backend.
 #
+# Changed: 2026-09-27 (feat/sites-visual-research). NEW
+# ``view_reference_screenshot``: an exemplar's captured screenshot (hero, full
+# page, or phone width) comes back as IMAGE blocks, tiled so a long page stays
+# legible. The descriptions of the two text tools no longer tell the agent to
+# research only after it has picked a direction, or to read values "not to
+# copy": research now comes first and a locked reference may set the look.
+#
 # Changed: 2026-09-24 (feat/inspo-backend-parity). The upstream call (endpoint,
 # JSON-RPC POST, result unwrapping, the ``_UPSTREAM`` map) moved to the OSS core
 # ``pocketpaw.tools.builtin.inspo`` so the non-SDK backends can reach Inspo
@@ -62,10 +69,12 @@ SERVER_NAME = "pocketpaw_inspo"
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
 RESEARCH_PAGE_DESIGN_TOOL_ID = f"mcp__{SERVER_NAME}__research_page_design"
 GET_REFERENCE_DESIGN_SYSTEM_TOOL_ID = f"mcp__{SERVER_NAME}__get_reference_design_system"
+VIEW_REFERENCE_SCREENSHOT_TOOL_ID = f"mcp__{SERVER_NAME}__view_reference_screenshot"
 
 INSPO_TOOL_IDS = (
     RESEARCH_PAGE_DESIGN_TOOL_ID,
     GET_REFERENCE_DESIGN_SYSTEM_TOOL_ID,
+    VIEW_REFERENCE_SCREENSHOT_TOOL_ID,
 )
 
 # The upstream map and endpoint live in the OSS core so the BaseTools share them.
@@ -132,6 +141,36 @@ async def _design_system_handler(args: dict) -> dict:
     return _success_response({"ok": True, "slug": slug.strip(), "design_system": body})
 
 
+async def _screenshot_handler(args: dict) -> dict:
+    """MCP handler for ``inspo__view_reference_screenshot``: slug -> image blocks."""
+    from pocketpaw.tools.builtin import reference_images
+
+    slug = args.get("slug")
+    if not isinstance(slug, str) or not slug.strip():
+        return _error_response(
+            "view_reference_screenshot requires a `slug` from a research_page_design result."
+        )
+    view = args.get("view") if args.get("view") in ("hero", "full", "mobile") else "full"
+
+    try:
+        url = await _inspo.reference_screenshot_url(slug, view)
+        data = await reference_images.fetch_image(url, _inspo.IMAGE_HOSTS)
+        # A phone-width capture is narrow and tall, so its tiles are taller too.
+        tiles = reference_images.to_tiles(data, tile_ratio=2.0 if view == "mobile" else 1.25)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("inspo: view_reference_screenshot failed", exc_info=True)
+        return _error_response(
+            f"screenshot unavailable ({exc}). Carry on from the text you already have."
+        )
+
+    note = (
+        f"{slug.strip()} ({view}): {len(tiles)} image(s), top of the page first. Read the "
+        "composition (what carries the fold, where the product visual sits, how much "
+        "colour is spent and where), not the copy."
+    )
+    return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
+
+
 def build_inspo_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server for design research, or return
     ``None`` if the Claude Agent SDK isn't installed. Matches the ``(name,
@@ -150,14 +189,14 @@ def build_inspo_server() -> tuple[str, Any] | None:
             "built, before you design one. Returns a macrostructure pick with "
             "the reasoning behind it, a shortlist of runners-up, and real "
             "exemplar sites with slugs you can pass to "
-            "`get_reference_design_system`. Use it ONCE per site, after you have "
-            "committed to an aesthetic direction and BEFORE you write tokens or "
-            "markup. Args: `brief` (required — the site in plain words, e.g. "
-            "'landing page for a family dental clinic'). These are real pages, "
-            "so take their COMPOSITION (which sections, in what order, what "
-            "carries the fold) and not their compliance — your own design system "
-            "still outranks anything here on a visual value, and copying a "
-            "returned palette is how two similar briefs end up identical. If it "
+            "`view_reference_screenshot` (LOOK at the page) and "
+            "`get_reference_design_system` (its measured tokens). Call it BEFORE "
+            "you choose the look, and again per section when a section's shape "
+            "is the open question (e.g. 'waitlist hero with product visual', "
+            "'social proof counter'). Args: `brief` (required — the site or "
+            "section in plain words, e.g. 'landing page for a family dental "
+            "clinic'). These are real pages, so take their design and not their "
+            "compliance: contrast floors and honest copy still bind. If it "
             "errors, proceed on your own inference without retrying."
         ),
         {
@@ -183,10 +222,9 @@ def build_inspo_server() -> tuple[str, Any] | None:
             "actual fonts, frequency-ranked palette with the role each colour "
             "plays, type ramp, spacing scale, CSS variables, container width. "
             "Args: `slug` (required — an exemplar slug from a "
-            "`research_page_design` result). Read it for RELATIONSHIPS — how "
-            "many type sizes a real page uses, where its accent is actually "
-            "spent, how far its scale travels — not for values to copy. One "
-            "follow-up call at most."
+            "`research_page_design` result). Use it on the reference you locked "
+            "to take real values — type ramp, radius, where the accent is "
+            "actually spent — keeping every colour in the role it plays there."
         ),
         {
             "type": "object",
@@ -204,10 +242,47 @@ def build_inspo_server() -> tuple[str, Any] | None:
     async def get_reference_design_system_tool(args):  # type: ignore[no-untyped-def]
         return await _design_system_handler(args)
 
+    @tool(
+        "view_reference_screenshot",
+        (
+            "LOOK at a real site: returns its captured screenshot as images you can "
+            "see. Args: `slug` (required — an exemplar slug from "
+            "`research_page_design`), optional `view`: `full` (whole page, default), "
+            "`hero` (the fold only), `mobile` (whole page at phone width). Text "
+            "descriptions miss what matters most, so open the 3-5 strongest "
+            "references before you decide the look: the hero composition, whether "
+            "the product is shown, how light or dark the page is, where colour is "
+            "spent. Long pages come back as several images, top first."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "An exemplar slug returned by research_page_design.",
+                },
+                "view": {
+                    "type": "string",
+                    "enum": ["full", "hero", "mobile"],
+                    "description": "Which capture to return (default full).",
+                },
+            },
+            "required": ["slug"],
+            "additionalProperties": False,
+        },
+    )
+    async def view_reference_screenshot_tool(args):  # type: ignore[no-untyped-def]
+        return await _screenshot_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[research_page_design_tool, get_reference_design_system_tool],
+        tools=[
+            research_page_design_tool,
+            get_reference_design_system_tool,
+            view_reference_screenshot_tool,
+        ],
     )
     return SERVER_NAME, server
 
@@ -217,5 +292,6 @@ __all__ = [
     "INSPO_TOOL_IDS",
     "RESEARCH_PAGE_DESIGN_TOOL_ID",
     "SERVER_NAME",
+    "VIEW_REFERENCE_SCREENSHOT_TOOL_ID",
     "build_inspo_server",
 ]

@@ -1,4 +1,5 @@
 # tests/ee/agent/test_sites_mcp_server/test_mcp_tool.py
+# Updated 2026-09-27 (feat/sites-visual-research): preview_site registered — 15 tool ids.
 # Updated 2026-09-24 (PP-2): verify_site registered — 14 tool ids.
 # Created: 2026-06-01 (Phase 4 — chat→create-site) — coverage for the in-process
 # ``pocketpaw_sites_manager`` MCP server. Mirrors the foresight/pocket_specialist
@@ -132,7 +133,13 @@ class TestSitesMcpServerRegistration:
             SET_SITE_DEPENDENCIES_TOOL_ID == "mcp__pocketpaw_sites_manager__set_site_dependencies"
         )
         assert SET_SITE_DEPENDENCIES_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 14
+        # The draft screenshot. Without it on the allow-list the agent is told to
+        # look at its page with a tool it cannot call.
+        from pocketpaw_ee.agent.mcp_servers.sites import PREVIEW_SITE_TOOL_ID
+
+        assert PREVIEW_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__preview_site"
+        assert PREVIEW_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 15
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

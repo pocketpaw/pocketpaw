@@ -9,6 +9,19 @@
 #   2. Every engine branch of ``_create_preamble`` names its own edit tool and
 #      forbids calling create a second time.
 #
+# Updated: 2026-09-27 (feat/sites-visual-research) — design research is now
+# VISUAL and comes FIRST. Reproducing a rejected site by hand showed what fixed it:
+# searching per section, OPENING the reference screenshots, taking the locked
+# reference's actual look, and rendering the draft once before showing it. The
+# preamble had ruled out all four (one research call, text only, after the family
+# was already chosen, and a reference that could never outrank the embedded
+# system on a visual value). PHASE 1b now researches before the direction is
+# fixed, opens screenshots (``view_reference`` / ``view_reference_screenshot``),
+# and lets a locked reference set palette, type and composition with colour roles
+# kept; the rotation ban still binds. ``_LOOK_RULE`` has the agent screenshot its
+# draft (``preview_site``) at desktop and phone width and fix what it sees before
+# calling it ready. Phase 2 no longer restates the removed layout rules.
+#
 # Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — the
 # preamble stops contradicting the tools: react no longer "has NOTHING else ... no
 # way to add dependencies" (packages go through ``dependencies`` /
@@ -1119,11 +1132,14 @@ def _design_skills_note(mode: str) -> str:
 # grant, nothing to configure.
 _RESEARCH_TOOL = "mcp__pocketpaw_inspo__research_page_design"
 _REFERENCE_SYSTEM_TOOL = "mcp__pocketpaw_inspo__get_reference_design_system"
+_REFERENCE_SCREENSHOT_TOOL = "mcp__pocketpaw_inspo__view_reference_screenshot"
 
 # The bundled Refero server (``ee/agent/mcp_servers/refero.py``). Primary for
 # PHASE 1b when a token is configured; see ``_design_research_step``.
 _REFERO_STYLES_TOOL = "mcp__pocketpaw_refero__search_styles"
 _REFERO_STYLE_TOOL = "mcp__pocketpaw_refero__get_style"
+_REFERO_SCREENS_TOOL = "mcp__pocketpaw_refero__search_screens"
+_REFERO_VIEW_TOOL = "mcp__pocketpaw_refero__view_reference"
 
 
 def _refero_configured() -> bool:
@@ -1138,52 +1154,38 @@ def _refero_configured() -> bool:
 
 
 def _design_research_step() -> str:
-    """The PHASE 1 grounding step. Always on.
+    """The PHASE 1b grounding step. Always on.
 
-    UNCONDITIONAL, and that is the whole point of the rewrite. This first shipped
-    (#2204) gated on ``POCKETPAW_SITES_MCP_SERVERS`` because the archive was an
-    EXTERNAL MCP server, and an external server is opt-in per deploy — naming its
-    tools unconditionally would have commanded tools the agent might not have.
-    But that meant TWO switches, install and grant, both defaulting off and
-    neither implying the other. The first deploy therefore researched nothing,
-    reported nothing, and looked identical to a deploy that had never heard of
-    the feature. Bundling the server removes the question entirely: the tools
-    ship in-process like stock, palette and icons, so the preamble can name them
-    the way it names those.
+    UNCONDITIONAL. This first shipped (#2204) gated on ``POCKETPAW_SITES_MCP_SERVERS``
+    because the archive was an EXTERNAL server, and the first deploy therefore
+    researched nothing and said nothing. Bundling the servers removed the question:
+    the tools ship in-process like stock, palette and icons, so the preamble names
+    them the way it names those. Reachability still needs the ids in the /sites
+    allow-list (``surface_registry``), held by
+    ``test_the_research_step_names_only_tools_sites_can_reach``.
 
-    Reachability is still not automatic — ``INSPO_TOOL_IDS`` has to be in the
-    /sites allow-list in ``surface_registry``, because that list is a hard
-    whitelist and an id absent from it is silently unreachable. That coupling is
-    held by ``test_the_research_step_names_only_tools_sites_can_reach``.
+    WHAT CHANGED ON 2026-09-27, AND WHY. The step used to be one text-only call,
+    made AFTER the aesthetic family was chosen, and its rails said the reference
+    could never outrank the embedded system on a visual value. A rejected site was
+    rebuilt by hand to find out what fixes this, and four things did: searching once
+    per section rather than once per page, OPENING the screenshots (the shared
+    pattern across the good references never appeared in any text description),
+    letting the locked reference set the actual look, and looking at the draft
+    before showing it. The step now asks for exactly that.
 
-    WHY IT SITS IN PHASE 1 AND NOT PHASE 2: it is evidence for the direction,
-    not a substitute for choosing one. Phase 1 commits to an aesthetic family and
-    is where a real reference can still change the answer; by Phase 2 the tokens
-    are being written and a late reference only muddies them.
+    WHAT IT STILL HOLDS:
+      * the ROTATION ban. An archive queried with the same brief returns the same
+        exemplars, so "copy what came back" makes two similar briefs identical.
+        One dominant reference plus narrow borrowings, never a clone, and a second
+        site in a conversation still changes direction.
+      * colour ROLES. A reference palette is taken with the role each colour plays
+        there (surface, ink, CTA-only), not as five hex values smeared around.
+      * the floors: contrast, honest copy, no invented facts, the user's own brand
+        and documents, which outrank every reference.
 
-    WHAT IT DELIBERATELY DOES NOT SAY: "match the reference." The two rules this
-    surface would otherwise lose to it are the ROTATION ban (two similar briefs
-    must not resolve to the same page — and an archive queried with the same
-    brief returns the same exemplars, so a naive "do what they did" makes the
-    homogenization worse, not better) and DESIGN SYSTEM PRECEDENCE (the embedded
-    system outranks every other source on a visual VALUE — the same precedence
-    ``_design_skills_note`` states for skills). So the step takes COMPOSITION —
-    which sections, in what order, at what fold — and leaves the palette,
-    typography and tokens to the system that is already in context. The server's
-    own instructions concede exactly this: "If the project's own conventions and
-    Inspo disagree, the project wins."
-
-    TEXT, NOT PICTURES: the archive holds screenshots, and they do not reach most
-    of our model backends. Both tools named here return a STRING the agent can
-    act on — a macrostructure with exemplar slugs, and a DESIGN.md. Naming an
-    image tool would promise the agent an eye it does not have on this path.
-
-    REFERO FIRST WHEN CONFIGURED: with ``refero_api_token`` set the step leads
-    with Refero's style search and keeps Inspo as a one-call fallback. The
-    fallback fires on an EMPTY result as well as an error, because Refero's
-    helpers turn network trouble into ``count: 0`` rather than raising. Without
-    a token Refero answers nothing, so the step does not name it at all. The
-    rails below apply to both archives unchanged.
+    REFERO FIRST WHEN CONFIGURED, Inspo as the fallback on an error OR an empty
+    result (Refero's helpers turn network trouble into ``count: 0``). Without a
+    token Refero answers nothing, so the step does not name it.
     """
     if _refero_configured():
         return _refero_research_intro() + _research_rails()
@@ -1193,63 +1195,71 @@ def _design_research_step() -> str:
 def _refero_research_intro() -> str:
     return (
         "\n"
-        "PHASE 1b — GROUND THE DIRECTION IN REAL SITES (one call, then move on).\n"
+        "PHASE 1b — RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
         f"You have `{_REFERO_STYLES_TOOL}` — Refero's library of real shipped "
-        "design systems, not a generator. Call it ONCE with the brief in plain "
-        "words after you have committed to a direction in Phase 1, and read what "
-        "comes back as EVIDENCE for how products like this one are actually "
-        "built. "
-        f"`{_REFERO_STYLE_TOOL}` on the strongest returned style id is worth one "
-        "follow-up call when you want to see how a real system relates its type "
-        "sizes and where its accent is actually spent — read the relationships, "
-        "not the hex values.\n"
+        "design systems, not a generator — plus "
+        f"`{_REFERO_SCREENS_TOOL}` for real screens and `{_REFERO_VIEW_TOOL}` to "
+        "SEE a screen or a style preview as images. Run it like this:\n"
+        "1. Search styles from two or three angles (the overall look, products "
+        "like this one, a named product the brief evokes) and search screens once "
+        "per section you are unsure of, describing what is ON the screen "
+        "('waitlist hero with product visual', 'social proof avatars counter').\n"
+        f"2. OPEN the 3-5 strongest with `{_REFERO_VIEW_TOOL}`. This is the step "
+        "that matters: the pattern the good references share (how the fold is "
+        "built, whether the product is shown, how light the page is, where colour "
+        "is spent) is usually visible in the pictures and missing from the text.\n"
+        f"3. `{_REFERO_STYLE_TOOL}` on the style you lock, for its real type scale, "
+        "radius and colour roles.\n"
         "FALLBACK: if a Refero call errors, or comes back empty (`count` 0, no "
         "`results`, or no `style`), call "
         f"`{_RESEARCH_TOOL}` ONCE with the same brief and use that instead — an "
-        "archive of real shipped pages that answers the same question. The "
-        "fallback call is the one exception to the budget below. Never call both "
-        "when Refero answered.\n"
+        "archive of real shipped pages that answers the same question — and open "
+        f"its exemplars with `{_REFERENCE_SCREENSHOT_TOOL}`.\n"
     )
 
 
 def _inspo_research_intro() -> str:
     return (
         "\n"
-        "PHASE 1b — GROUND THE DIRECTION IN REAL SITES (one call, then move on).\n"
+        "PHASE 1b — RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
         f"You have `{_RESEARCH_TOOL}` — an archive of real shipped pages, "
-        "not a generator. Call it ONCE with the brief in plain words after you "
-        "have committed to a direction in Phase 1, and read what comes back as "
-        "EVIDENCE for how pages like this one are actually built: which "
-        "macrostructure they use, which sections they run and in what order, what "
-        "carries the fold. Take THAT. "
-        f"`{_REFERENCE_SYSTEM_TOOL}` on a returned exemplar slug is worth one "
-        "follow-up call when you want to see how a real page relates its type "
-        "sizes and where its accent is actually spent — read the relationships, "
-        "not the hex values.\n"
+        f"not a generator — plus `{_REFERENCE_SCREENSHOT_TOOL}` to SEE an exemplar "
+        "as images. Run it like this:\n"
+        "1. Call it with the brief in plain words, then again for any section "
+        "whose shape is the open question ('waitlist hero with product visual', "
+        "'social proof counter').\n"
+        f"2. OPEN the 3-5 strongest exemplars with `{_REFERENCE_SCREENSHOT_TOOL}`. "
+        "This is the step that matters: the pattern the good references share "
+        "(how the fold is built, whether the product is shown, how light the page "
+        "is, where colour is spent) is usually visible in the pictures and missing "
+        "from the text.\n"
+        f"3. `{_REFERENCE_SYSTEM_TOOL}` on the exemplar you lock, for its real type "
+        "ramp, radius and colour roles.\n"
     )
 
 
 def _research_rails() -> str:
     return (
-        "THE LIMITS ON IT, which are the whole reason it helps rather than "
-        "flattens:\n"
-        "- It does NOT outrank the embedded DESIGN SYSTEM. On any visual VALUE — "
-        "palette, typographic pairing, ground, radius, motion — the DESIGN SYSTEM "
-        "wins and the reference loses. Never lift a palette or a font stack "
-        "wholesale off a returned site.\n"
-        "- It does NOT relax the ROTATION ban. The same brief returns the same "
-        "exemplars every time, so copying what comes back is how two similar "
-        "briefs end up identical — the exact failure Phase 1 just told you to "
-        "avoid. The reference informs the STRUCTURE; you still rotate the "
-        "identity.\n"
-        "- These are real shipped pages and plenty of them break rules a linter "
-        "would flag. Take their composition, not their compliance: the accessible "
-        "contrast floors, the em-dash ban and the craft rules in this message all "
-        "still bind.\n"
-        "- ONE round. It is a network call on someone else's service, and it is "
-        "not free latency for the user. Two calls maximum, then design. If it "
-        "errors or returns nothing, say nothing about it and proceed on your own "
-        "inference — the ROBUSTNESS rule below covers these tools too.\n"
+        "THEN LOCK ONE DIRECTION before any tokens: one line naming the primary "
+        "reference and the traits that must survive (e.g. 'light page, one calm "
+        "headline, black pill CTA, product screen in a large gradient panel'), plus "
+        "anything narrow you borrow from a second one. The locked reference SETS "
+        "the look: its palette with each colour kept in its role, its type "
+        "character, its composition. The DESIGN SYSTEM below fills whatever the "
+        "reference leaves open and supplies the craft.\n"
+        "THE LIMITS ON IT:\n"
+        "- The ROTATION ban still binds. The same brief returns the same "
+        "exemplars, so one dominant reference plus narrow borrowings, never a "
+        "clone of a single site, and a second site in this conversation locks a "
+        "different direction. Never lift a whole site wholesale.\n"
+        "- Anything the USER supplied (brand colour, logo, document, a site they "
+        "named) outranks every reference.\n"
+        "- Take their design, not their compliance: contrast floors, the em-dash "
+        "ban and honest copy still bind.\n"
+        "- Keep it proportionate: a handful of searches and 3-5 opened references "
+        "for a new site, less for a small change. If the tools error or return "
+        "nothing, say nothing about it and proceed on your own judgement — the "
+        "ROBUSTNESS rule below covers these tools too.\n"
     )
 
 
@@ -1711,11 +1721,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "is not a general instruction to avoid skills: the ones named in "
         "<design-skills> are NOT in your context and you DO invoke those): "
         "work out, for yourself, the Vision Ledger "
-        "and a one-line Visual DNA Token (the Design Read), then commit to ONE "
-        "aesthetic direction family from 2.E (clean-tech, soft-premium, "
-        "editorial-luxury, warm-minimalist, brutalist, dark-tech) and express it "
-        "in tokens top to bottom. "
-        "Then go — do NOT ask the user to pick the look. If "
+        "and a one-line Visual DNA Token (the Design Read). Hold the look itself "
+        "open until PHASE 1b has shown you real references; lock it there. When "
+        "research returns nothing, fall back to ONE family from 2.E. "
+        "Do NOT ask the user to pick the look. If "
         "the user already named a style or brand, honor it. Rotate the identity "
         "and palette so two similar briefs never look identical.\n"
         # Always present now that the research server is bundled rather than an
@@ -1728,10 +1737,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "SYSTEM throughout).\n"
         "1. LOCK THE TOKENS. There is NO design-system library to pick from: "
         "you AUTHOR the token set for THIS business out of the identity you "
-        "just committed to. Take the aesthetic direction family (2.E), the "
-        "typographic pairing (2.D), the grounding rules (2.B) and the "
-        "color calibration rules (2.G) from the embedded DESIGN SYSTEM and "
-        "write them out as concrete CSS custom properties (--bg, --ink, "
+        "just locked. Take the palette (with its roles), type character and "
+        "radius from the locked reference, fill the gaps from the embedded "
+        "DESIGN SYSTEM (2.B-2.G, or a 2.E family when research came back "
+        "empty) and write them out as concrete CSS custom properties (--bg, --ink, "
         "--accent, --radius, --shadow, the display + body faces) BEFORE you "
         "write any markup, then build every section from those variables "
         "instead of sprinkling ad-hoc hex per section. CONSTRUCT them with the "
@@ -1740,10 +1749,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "radius — not as a handful of values picked one at a time. The same "
         "rules GOVERN "
         "the build: a tuned ground (never a plain "
-        "#fff/#000 page), the ONE chosen aesthetic family, diverse section "
-        "compositions (the default AI sequence and two consecutive "
-        "same-layout sections are banned), a bold typographic pairing, Tier-0 "
-        "CSS-only motion, and ZERO em-dashes. ROTATE, because a look you "
+        "#fff/#000 page), the ONE locked direction, a bold typographic "
+        "pairing, Tier-0 CSS-only motion, and ZERO em-dashes. Compose each "
+        "section from the references you opened. ROTATE, because a look you "
         "reach for by reflex is the look every site in that industry already "
         "has: do NOT default to the warm / earthy family just because the "
         "business is a cafe, salon, or shop, pick the less-obvious fit, and "
@@ -1790,8 +1798,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "the first revision — the CTA under the fold, a sticky section bleeding "
         "into the next, headings unreadable behind the nav, a mobile horizontal "
         "scroll — and every one of them is cheaper to fix now than after the user "
-        "sees it. If a preview is not reachable, say the page was not previewed "
-        "rather than implying it was checked.\n"
+        "sees it. " + _LOOK_RULE + "\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
         "tool persists a reviewable DRAFT the user previews IN-APP (open /sites → "
         "the site's Preview tab). Publishing deploys the site to the public edge "
@@ -1846,6 +1853,19 @@ _VERIFY_RULE = (
     "most 3 rounds, then tell the user plainly which errors remain. On `unverified`, "
     "say it could not be checked and why (on a ripple site `engine_not_verifiable` "
     "only means there is no authored code to check). "
+)
+
+# Updated 2026-09-27 (feat/sites-visual-research). The half of "is it ready" that
+# _VERIFY_RULE cannot answer: a page that builds cleanly can still look wrong, and
+# nothing let the agent see it. ``preview_site`` returns the draft as images.
+_LOOK_RULE = (
+    "LOOK BEFORE YOU SHOW IT: once `verification.status` is `passed`, call "
+    "`mcp__pocketpaw_sites_manager__preview_site` (desktop, then `device: mobile`) "
+    "and look at the page the way a visitor will, next to the references you "
+    "opened. Fix what is off (a weak or empty fold, a placeholder that reads as a "
+    "blob, crowding, overlap, a section that lost the direction) and look again; "
+    "two rounds at most. If it errors, say the page was not visually checked "
+    "rather than implying it was. "
 )
 
 _REFINE_SHARED_RULES = (
@@ -2303,7 +2323,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "editing — a review request is read-only until they ask for the fixes. If "
         "they ask you to make the page calmer, quieter or more minimal, invoke "
         "`sites-restraint`. After any edit that moves layout, run "
-        "`sites-ship-fixes` over what you changed.\n"
+        "`sites-ship-fixes` over what you changed and look at it with "
+        "`mcp__pocketpaw_sites_manager__preview_site`.\n"
         f"{edit_step}"
         f"{rules}"
         f"{publish_step}"

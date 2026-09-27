@@ -1,6 +1,8 @@
 """SD-6 — the behavioural eval that gates every remaining /sites prompt cut.
 
 New package 2026-09-08 (feat/sites-design-skills).
+Updated 2026-09-27 (feat/sites-visual-research): layout scorers removed with the
+layout rules.
 
 WHAT THIS IS FOR. ``docs/design/drafts/2026-09-08-sites-system-prompt-diet.md``
 lists four slices that would take ~810 tokens out of a 14,094-token /sites create
@@ -40,8 +42,6 @@ cut that silently removes one is visible:
   no-filler            no Elevate / Seamless / Unleash / Supercharge (MODULE 4)
   no-placeholder       no John Doe / Acme / Lorem ipsum (MODULE 4)
   measure-capped       body copy carries a max-width (design-taste 2.F, craft 1)
-  not-centered-hero    the hero is not centred over a gradient (MODULE 5)
-  no-three-equal-cards no `repeat(3, 1fr)` feature row (MODULE 5)
   floor-hit-area       interactive targets reach 44px (craft 5)
   floor-focus          a visible focus style survives (craft 5)
   floor-reduced-motion motion is gated on prefers-reduced-motion (craft 5)

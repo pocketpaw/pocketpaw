@@ -2,6 +2,10 @@
 # agent backends (claude_agent_sdk). Created: 2026-06-01 (Phase 4 — chat→
 # create-site).
 #
+# Updated 2026-09-27 (feat/sites-visual-research): registers ``preview_site``
+# (``PREVIEW_SITE_TOOL_ID``, on ``SITES_TOOL_IDS``) — a screenshot of the draft the
+# agent can look at before calling the page ready. 15 tool ids now.
+#
 # Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): registers ``verify_site``
 # (``VERIFY_SITE_TOOL_ID``, on ``SITES_TOOL_IDS``) — re-runs the static / build /
 # browser verification on a site's draft. 14 tool ids now.
@@ -235,6 +239,8 @@ SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
 # PP-2 — re-run the three-layer verification on a site's draft. Must ride
 # SITES_TOOL_IDS: an absent id is filtered out of the hard /sites allow-list.
 VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
+# Screenshot the draft so the agent sees what it built. Must ride SITES_TOOL_IDS.
+PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -251,6 +257,7 @@ SITES_TOOL_IDS = (
     READ_SITE_SOURCE_TOOL_ID,
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
+    PREVIEW_SITE_TOOL_ID,
 )
 
 
@@ -682,6 +689,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_html_file_tool,
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
+        make_preview_site_tool,
         make_read_site_source_tool,
         make_set_site_dependencies_tool,
         make_verify_site_tool,
@@ -727,6 +735,8 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     set_site_dependencies = make_set_site_dependencies_tool(tool)
     # PP-2 — re-verify a draft (static, build, browser). Same server.
     verify_site = make_verify_site_tool(tool)
+    # Look at the draft (a screenshot the agent can see). Same server.
+    preview_site = make_preview_site_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -746,6 +756,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             read_site_source,
             set_site_dependencies,
             verify_site,
+            preview_site,
         ],
     )
     return SERVER_NAME, server
@@ -762,6 +773,7 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
+    "PREVIEW_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",
     "SERVER_NAME",

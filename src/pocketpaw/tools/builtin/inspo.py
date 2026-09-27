@@ -2,6 +2,12 @@
 # actually built, for grounding a generated page's composition in evidence
 # rather than model defaults.
 #
+# Updated: 2026-09-27 (feat/sites-visual-research) — ``reference_screenshot_url``
+# resolves an exemplar slug to one of its captured screenshots (hero, full page
+# or mobile) through the upstream ``get_screen`` tool, and ``IMAGE_HOSTS`` names
+# the blob host those captures live on. The EE server fetches the picture and
+# hands it to the agent, which until now only ever read the text about a page.
+#
 # Created: 2026-09-24 (feat/inspo-backend-parity). Inspo first shipped as an EE
 # in-process MCP server only (``ee/pocketpaw_ee/agent/mcp_servers/inspo.py``),
 # which only the claude_agent_sdk backend can see, so pydantic_ai and the other
@@ -59,7 +65,15 @@ _MAX_TOKENS = 1200
 _UPSTREAM = {
     "research_page_design": "recommend",
     "get_reference_design_system": "get_design_system",
+    "view_reference_screenshot": "get_screen",
 }
+
+#: Where the archive stores its captures. ``view_reference_screenshot`` fetches
+#: only from here.
+IMAGE_HOSTS = ("public.blob.vercel-storage.com",)
+
+# The capture a caller asks for -> the ``get_screen`` field that holds its URL.
+_VIEW_FIELDS = {"hero": "image", "full": "fullPage", "mobile": "mobileFull"}
 
 
 def endpoint() -> str:
@@ -131,6 +145,20 @@ async def research_page_design(brief: str) -> dict[str, Any]:
 async def get_reference_design_system(slug: str) -> dict[str, Any]:
     """The DESIGN.md for one exemplar ``slug``. Raises on any upstream failure."""
     return await call_upstream(_UPSTREAM["get_reference_design_system"], {"slug": slug.strip()})
+
+
+async def reference_screenshot_url(slug: str, view: str = "full") -> str:
+    """The URL of one captured screenshot of exemplar ``slug``.
+
+    ``view`` is ``hero`` (the fold), ``full`` (the whole page) or ``mobile`` (the
+    whole page at phone width). Raises on an upstream failure or when the capture
+    does not exist."""
+    field = _VIEW_FIELDS.get(view, _VIEW_FIELDS["full"])
+    screen = await call_upstream(_UPSTREAM["view_reference_screenshot"], {"slug": slug.strip()})
+    url = screen.get(field) if isinstance(screen, dict) else None
+    if not isinstance(url, str) or not url:
+        raise RuntimeError(f"no {view} screenshot for {slug!r}")
+    return url
 
 
 class InspoResearchTool(BaseTool):
@@ -264,6 +292,8 @@ __all__ = [
     "InspoResearchTool",
     "call_upstream",
     "endpoint",
+    "IMAGE_HOSTS",
     "get_reference_design_system",
+    "reference_screenshot_url",
     "research_page_design",
 ]

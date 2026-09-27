@@ -1,6 +1,8 @@
 # tests/ee/test_refero_mcp_server.py — the Refero design-research MCP surface.
 #
 # Created 2026-09-15 (feat/refero-design-research).
+# Updated 2026-09-27 (feat/sites-visual-research): view_reference joined the
+# server; its handler returns image blocks for a screen uuid or a style preview.
 #
 # The load-bearing test here is REACHABILITY, not registration. /sites runs a
 # hard allow-list: a tool can be built, registered on an ambient in-process
@@ -87,7 +89,7 @@ def test_tool_ids_match_the_tools_the_server_actually_builds():
     assert name == refero_mcp.SERVER_NAME
 
     declared = {tid.split("__")[-1] for tid in refero_mcp.REFERO_TOOL_IDS}
-    assert declared == {"search_styles", "get_style", "search_screens"}
+    assert declared == {"search_styles", "get_style", "search_screens", "view_reference"}
     # Every id must namespace under this server, or the filter's server check
     # and the allow-list disagree about who owns the tool.
     for tid in refero_mcp.REFERO_TOOL_IDS:
@@ -152,3 +154,55 @@ async def test_an_upstream_failure_is_reported_not_raised(monkeypatch):
 
     assert out.get("is_error") is True
     assert "refero exploded" in out["content"][0]["text"]
+
+
+# ── view_reference ──────────────────────────────────────────────────────────
+
+
+def _png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (800, 600), (250, 250, 250)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_view_reference_returns_the_screen_as_images(monkeypatch):
+    seen: list[tuple] = []
+
+    def _image(screen_id, size):
+        seen.append((screen_id, size))
+        return _png()
+
+    monkeypatch.setattr("pocketpaw.tools.builtin.refero.get_screen_image", _image)
+    out = await refero_mcp._view_reference_handler({"screen_id": "s-1"})
+
+    assert out.get("is_error") is not True
+    kinds = [part["type"] for part in out["content"]]
+    assert kinds[0] == "image" and kinds[-1] == "text"
+    assert seen == [("s-1", "full")]
+
+
+@pytest.mark.asyncio
+async def test_view_reference_refuses_a_preview_url_off_refero(monkeypatch):
+    """The URL is agent-supplied, so it must never become a fetch of anywhere."""
+    out = await refero_mcp._view_reference_handler({"preview_url": "https://evil.com/x.jpg"})
+    assert out.get("is_error") is True
+    assert "evil.com" in out["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_view_reference_needs_a_screen_or_a_preview():
+    out = await refero_mcp._view_reference_handler({})
+    assert out.get("is_error") is True
+
+
+@pytest.mark.asyncio
+async def test_a_missing_screenshot_is_an_error_that_says_carry_on(monkeypatch):
+    monkeypatch.setattr("pocketpaw.tools.builtin.refero.get_screen_image", lambda *_a: None)
+    out = await refero_mcp._view_reference_handler({"screen_id": "gone"})
+    assert out.get("is_error") is True
+    assert "carry on" in out["content"][0]["text"].lower()
