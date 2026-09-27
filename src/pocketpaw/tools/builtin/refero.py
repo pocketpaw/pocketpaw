@@ -2,6 +2,12 @@
 # from shipped websites, for grounding generated UI in evidence rather than
 # model defaults.
 #
+# Updated: 2026-09-27 (feat/sites-visual-research) — ``get_screen_image`` reads
+# a screen's screenshot through ``refero_get_screen_image`` (an MCP image block,
+# not JSON) and ``IMAGE_HOSTS`` names where style previews live, so the EE
+# server's ``view_reference`` can hand the agent the picture instead of a URL it
+# cannot open.
+#
 # Created: 2026-09-15 (feat/refero-design-research). Paw Sites' anti-slop
 # surface is built almost entirely from PROHIBITIONS — the 2026-09-12 audit
 # counted 32 of them, concentrated in one skill embedded on the create path
@@ -31,6 +37,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import Any
@@ -300,6 +307,37 @@ def search_screens(query: str, platform: str = "web", limit: int = 6) -> list[di
             }
         )
     return out
+
+
+#: Where Refero serves style previews and screen thumbnails. ``view_reference``
+#: fetches a ``preview_url`` / ``thumbnail_url`` only from here.
+IMAGE_HOSTS = ("images.refero.design",)
+
+
+def get_screen_image(screen_id: str, image_size: str = "full") -> bytes | None:
+    """The screenshot for one screen UUID as raw image bytes, or ``None``.
+
+    Refero answers ``refero_get_screen_image`` with an MCP ``image`` block rather
+    than JSON, so this reads the block instead of trusting :func:`_unwrap`'s text
+    path. ``image_size`` is ``full`` (the whole page) or ``thumbnail``.
+    """
+    if image_size not in ("full", "thumbnail"):
+        image_size = "full"
+    try:
+        result = _call_tool(
+            "refero_get_screen_image", {"screen_id": screen_id, "image_size": image_size}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("refero: screen image failed: %s", exc)
+        return None
+    parts = result.get("content") if isinstance(result, dict) else None
+    for part in parts or []:
+        if isinstance(part, dict) and part.get("type") == "image" and part.get("data"):
+            try:
+                return base64.b64decode(part["data"])
+            except (ValueError, TypeError):
+                return None
+    return None
 
 
 class ReferoStylesTool(BaseTool):

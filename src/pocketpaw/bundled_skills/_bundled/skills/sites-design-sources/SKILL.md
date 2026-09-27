@@ -14,6 +14,10 @@ description: |
   path (set_site_dependencies).
 ---
 
+<!-- Updated 2026-09-27 (feat/sites-visual-research): the colour section no
+     longer says there is no browser; preview_site shows the draft, but a
+     screenshot still cannot measure contrast, so the checker stays. -->
+
 <!-- Updated 2026-09-24 (docs/sites-packages-and-verify-guidance): fact 1 no
      longer says there is no package manager. svelte, react and html sites
      declare npm packages through set_site_dependencies; what stays out is
@@ -123,9 +127,10 @@ values rather than a page to read. These cover what it does not:
 -   **OKLCH picker** (`oklch.com`, MIT) when a ramp needs perceptually even
     steps. Lightness in OKLCH behaves the way the eye expects; HSL does not.
 -   **Colour Contrast Checker** (`colourcontrast.cc`, MIT) to confirm a pair
-    against the 4.5:1 body and 3:1 large/interface floors before shipping. You
-    have no browser on this surface, so contrast is the one number worth
-    confirming against a source rather than estimating.
+    against the 4.5:1 body and 3:1 large/interface floors before shipping. A
+    `preview_site` screenshot shows the page but cannot measure a ratio, so
+    contrast is the one number worth confirming against a source rather than
+    estimating.
 
 ## The failure this skill exists to prevent
 

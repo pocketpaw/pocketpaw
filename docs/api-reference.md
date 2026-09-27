@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-27 (feat/sites-visual-research) — added the `preview_site` agent
+  tool under "Draft verification": a full-page screenshot of the draft, returned
+  to the agent as images so it can look at the page before calling it ready.
 Updated: 2026-09-27 (feat/bulk-grants-conversations) — added "Batch reads for the
   chat sidebar": POST /uploads/grants, POST /paw-bar/admin/sites/conversations and
   POST /sessions/by-agents, the one-call forms of three per-item GETs.
@@ -3504,6 +3507,28 @@ verified build.
 Returns `{ok, pocket_id, verification}`. `ok` means the check ran and answered;
 whether the site works is `verification.status`. A missing or foreign pocket is an
 error. Use it to re-check after a fix or after an `unverified` / `timeout` result.
+
+#### `preview_site`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. |
+| `device` | `desktop` \| `mobile` | Optional, default `desktop` (1280px); `mobile` is 390px. |
+
+Returns MCP `image` blocks (a full-page JPEG screenshot of the current draft, cut
+into at most six tiles, top first) followed by one text block. `verify_site` says
+whether the draft builds and loads; this is how the agent sees whether it looks
+right. Nothing is stored.
+
+The draft document comes from `draft_markup` for html sites and any pocket already
+built on the host, otherwise from the cached preview render (`get_native_artifact`)
+for svelte and react. Errors, none of which mean the site is broken:
+
+- the render is still building: call `verify_site`, then ask again;
+- a ripple site with no built draft: no picture;
+- Cloudflare Browser Rendering is not configured (`PAW_CF_ACCOUNT_ID` /
+  `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID`): screenshots are unavailable on this
+  deployment.
 
 #### `GET /sites/by-pocket/{pocket_id}/status` — `verification`
 

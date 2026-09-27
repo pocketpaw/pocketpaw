@@ -1,6 +1,15 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-27 (feat/sites-visual-research) — NEW ``preview_site`` tool: a
+# screenshot of the site's current DRAFT, returned as image blocks the agent can
+# look at (desktop or phone width, full page, tiled). ``verify_site`` answers
+# "does it build and load"; nothing answered "does it look right", so drafts went
+# to the user unseen. The draft document comes from the same places the editor
+# and the card capture read (``draft_markup`` for html / an already-built tree,
+# the cached preview render for svelte and react), and Cloudflare Browser
+# Rendering takes the picture. Nothing is stored.
+#
 # Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — tool
 # descriptions caught up with PP-1/PP-2: the "no way to add a dependency" /
 # "react + vite and NOTHING else" claims are gone, each source-engine create/edit
@@ -352,6 +361,9 @@ SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
 # current draft. Same server again.
 VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 
+# Screenshot the current draft so the agent can see what it built. Same server.
+PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -363,6 +375,7 @@ SITES_CREATE_TOOL_IDS = (
     EDIT_HTML_FILE_TOOL_ID,
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
+    PREVIEW_SITE_TOOL_ID,
 )
 
 
@@ -3120,6 +3133,192 @@ def make_verify_site_tool(tool: Any) -> Any:
         return await _verify_site_handler(args)
 
     return verify_site
+
+
+# The two widths a draft is photographed at. Desktop matches the card capture;
+# phone width is where a marketing page most often breaks.
+_PREVIEW_VIEWPORTS = {
+    "desktop": {"width": 1280, "height": 800},
+    "mobile": {"width": 390, "height": 844},
+}
+# Six tiles covers a typical landing page at desktop width and keeps one look
+# at a bounded image cost.
+_PREVIEW_MAX_TILES = 6
+
+
+def _native_document(body_html: str, css: str) -> str:
+    """A standalone document around a cached svelte/react render, which the preview
+    store keeps as ``{body_html, css}`` for the editor's shadow-render."""
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<style>{css}</style></head><body>{body_html}</body></html>"
+    )
+
+
+async def _draft_document(
+    *, workspace_id: str, user_id: str, pocket_id: str, pocket: dict[str, Any]
+) -> tuple[str, str]:
+    """The draft as one self-contained HTML document, or ``("", reason)``.
+
+    html sites (and any pocket already built on this host) come from ``draft_markup``,
+    the card capture's source. svelte and react fall back to the cached preview
+    render: a cache miss queues that build and answers "building", so the agent
+    verifies first and asks again instead of photographing nothing.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.sites.draft_markup import build_draft_markup
+    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+
+    stub = SimpleNamespace(pocket_id=pocket_id, owner=user_id, id=pocket_id, name="")
+    markup = await build_draft_markup(stub, pocket=pocket)
+    if markup:
+        return markup, ""
+
+    if not has_native_edit_lane(normalize_engine(pocket.get("engine"))):
+        return "", "this site has no rendered draft to photograph yet."
+
+    from pocketpaw_ee.sites import service as sites_service
+
+    artifact = await sites_service.get_native_artifact(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    if artifact.get("body_html"):
+        return _native_document(artifact["body_html"], artifact.get("css") or ""), ""
+    status = artifact.get("build_status") or "building"
+    return "", (
+        f"the draft's render is not ready (build {status}). Call verify_site to wait for "
+        "the build, then call preview_site again."
+    )
+
+
+async def _preview_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__preview_site``.
+
+    Identity -> ``record_tool_call`` -> ``pocket_id`` -> plan gate -> draft document ->
+    Browser Rendering screenshot -> tiles. Returns image blocks plus one line of text,
+    or an error that says why there is no picture. Never stores the image.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "preview_site requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_preview_site",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "preview_site requires a `pocket_id` — the id of the site pocket to look at."
+        )
+    device = args.get("device") if args.get("device") in _PREVIEW_VIEWPORTS else "desktop"
+
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw.tools.builtin import reference_images
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+
+    try:
+        document, reason = await _draft_document(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
+        )
+    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
+        logger.warning("sites.preview_site: draft assembly failed", exc_info=True)
+        return _error_response(f"could not assemble the draft: {exc}")
+    if not document:
+        return _error_response(reason)
+
+    try:
+        from pocketpaw_ee.sites.service import _cf_client
+
+        image = await _cf_client().capture_screenshot(
+            html=document,
+            viewport=dict(_PREVIEW_VIEWPORTS[device]),
+            goto_options={"waitUntil": "networkidle0", "timeout": 20_000},
+            screenshot_options={"fullPage": True},
+        )
+    except CloudError as exc:
+        return _error_response(
+            f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
+            "verify_site and re-read your source against the design instead."
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sites.preview_site: capture failed", exc_info=True)
+        return _error_response(f"the screenshot failed: {exc}")
+    if not image:
+        return _error_response("the screenshot came back empty.")
+
+    try:
+        tiles = reference_images.to_tiles(
+            image,
+            max_tiles=_PREVIEW_MAX_TILES,
+            tile_ratio=2.0 if device == "mobile" else 1.25,
+        )
+    except reference_images.ReferenceImageError as exc:
+        return _error_response(str(exc))
+
+    note = (
+        f"Draft of {pocket_id} at {device} width: {len(tiles)} image(s), top of the page "
+        "first. Look at it as the visitor will: does the fold carry the offer and the "
+        "product, does anything overlap, crop or crowd, does it match the references you "
+        "locked? Fix what is off, then look again."
+    )
+    return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
+
+
+def make_preview_site_tool(tool: Any) -> Any:
+    """Build the ``preview_site`` SDK tool object. Same server as the create, edit and
+    verify tools (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "preview_site",
+        (
+            "LOOK at a Paw Site's current DRAFT: returns a full-page screenshot as "
+            "images you can see. Args: `pocket_id` (required), optional `device`: "
+            "`desktop` (default, 1280px) or `mobile` (390px). Call it after a create or "
+            "a layout-moving edit once `verification.status` is `passed`, and look "
+            "before you tell the user the page is ready: a page that builds cleanly can "
+            "still look wrong. Fix what you see and look again; one or two rounds is "
+            "normal. An error means no picture could be taken; it never means the site "
+            "is broken."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the site pocket to look at.",
+                },
+                "device": {
+                    "type": "string",
+                    "enum": ["desktop", "mobile"],
+                    "description": "Viewport width to render at (default desktop).",
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def preview_site(args):  # type: ignore[no-untyped-def]
+        return await _preview_site_handler(args)
+
+    return preview_site
 
 
 def make_read_site_source_tool(tool: Any) -> Any:

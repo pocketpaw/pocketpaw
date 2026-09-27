@@ -1,6 +1,8 @@
 """The scorers — one per behaviour the /sites prompt spends tokens producing.
 
 New file 2026-09-08 (feat/sites-design-skills), part of SD-6.
+Updated 2026-09-27 (feat/sites-visual-research): dropped the not-centered-hero and
+no-three-equal-cards scorers with the layout rules they measured.
 
 Each scorer takes the SOURCE of a generated site (HTML, or a Svelte/React
 component file — they are all markup plus CSS for these purposes) and returns a
@@ -263,45 +265,6 @@ def measure_capped(source: str) -> Verdict:
     return _fail(n, "no max-width anywhere")
 
 
-def not_centered_hero(source: str) -> Verdict:
-    """MODULE 5: the hero is not centred text over a gradient.
-
-    The single most-cited AI tell for a landing page, and cheap to detect: a rule
-    whose selector mentions the hero, carrying both `text-align: center` and a
-    gradient background.
-    """
-    n = "not-centered-hero"
-    css = style_text(source)
-    hero = [(s, b) for s, b in rules(css) if re.search(r"hero|banner|masthead", s, re.I)]
-    if not hero:
-        return _na(n, "no hero/banner selector to judge")
-    for selector, body in hero:
-        centered = re.search(r"text-align\s*:\s*center", body, re.I)
-        gradient = re.search(r"gradient\s*\(", body, re.I)
-        if centered and gradient:
-            return _fail(n, f"centred over a gradient on {selector.strip()!r}")
-    return _pass(n, f"{len(hero)} hero rule(s), none centred-over-gradient")
-
-
-_THREE_UP = re.compile(r"grid-template-columns\s*:\s*repeat\(\s*3\s*,\s*1fr\s*\)", re.I)
-
-
-def no_three_equal_cards(source: str) -> Verdict:
-    """MODULE 5: no three-equal-card feature row.
-
-    `repeat(3, 1fr)` is the literal shape the rule bans. `repeat(auto-fit, ...)`
-    and an explicitly asymmetric track list are fine and do not match.
-    """
-    n = "no-three-equal-cards"
-    css = style_text(source)
-    if not css.strip():
-        return _na(n, "no CSS to judge")
-    hits = _THREE_UP.findall(css)
-    if hits:
-        return _fail(n, f"{len(hits)} × repeat(3, 1fr)")
-    return _pass(n, "none")
-
-
 _MIN_TARGET = re.compile(r"min-(?:height|width)\s*:\s*([0-9.]+)\s*px", re.I)
 _INTERACTIVE = re.compile(r"<(button|a|input|select|textarea)\b", re.I)
 
@@ -396,8 +359,6 @@ PAGE_SCORERS: tuple[Callable[[str], Verdict], ...] = (
     no_filler,
     no_placeholder,
     measure_capped,
-    not_centered_hero,
-    no_three_equal_cards,
     floor_hit_area,
     floor_focus,
     floor_reduced_motion,

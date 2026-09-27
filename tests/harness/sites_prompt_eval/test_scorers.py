@@ -1,6 +1,8 @@
 """Prove every SD-6 scorer separates a clean page from the defect it names.
 
 New file 2026-09-08 (feat/sites-design-skills).
+Updated 2026-09-27 (feat/sites-visual-research): the centred-hero and three-card
+scorer tests went with their scorers.
 
 WHY THIS FILE EXISTS. A scorer that returns pass on a defective page is worse than
 having no eval: it certifies a regression and it does so with a number beside it.
@@ -124,27 +126,6 @@ def test_measure_capped_separates():
     broken = _mutate(CLEAN, "max-width: 62ch", "max-width: 1200px")
     v = b.measure_capped(broken)
     assert v.ok is False and "layout widths" in v.detail
-
-
-def test_not_centered_hero_separates():
-    assert b.not_centered_hero(CLEAN).ok is True
-    broken = _mutate(
-        CLEAN,
-        ".hero { display: grid; grid-template-columns: 7fr 5fr; background: var(--ground); }",
-        ".hero { text-align: center; background: linear-gradient(180deg, #eee, #fff); }",
-    )
-    assert b.not_centered_hero(broken).ok is False
-
-
-def test_not_centered_hero_is_na_without_a_hero():
-    """No hero selector means nothing was demonstrated, which is not a pass."""
-    assert b.not_centered_hero("<style>body{background:#f7f4ee}</style><p>hi</p>").ok is None
-
-
-def test_no_three_equal_cards_separates():
-    assert b.no_three_equal_cards(CLEAN).ok is True
-    broken = _mutate(CLEAN, "repeat(auto-fit, minmax(15rem, 1fr))", "repeat(3, 1fr)")
-    assert b.no_three_equal_cards(broken).ok is False
 
 
 def test_floor_hit_area_separates():

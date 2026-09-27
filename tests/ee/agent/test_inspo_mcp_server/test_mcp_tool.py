@@ -7,6 +7,9 @@
 # tests that inject an httpx.MockTransport (NO live network) and inspect the MCP
 # envelope the SDK returns — happy path, missing argument, upstream error, and
 # the fail-soft that keeps a create turn moving when the archive is down.
+# Updated 2026-09-27 (feat/sites-visual-research): view_reference_screenshot
+# resolves a slug to a capture URL, fetches it from the archive's blob host only,
+# and returns image blocks.
 """MCP server registration + handler tests for the design-research tool."""
 
 from __future__ import annotations
@@ -238,3 +241,60 @@ def test_endpoint_honours_the_self_host_override(monkeypatch):
     finally:
         monkeypatch.delenv("POCKETPAW_INSPO_MCP_URL", raising=False)
         pp_config.get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# view_reference_screenshot
+# ---------------------------------------------------------------------------
+
+
+def _png(width: int = 1280, height: int = 4000) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (250, 250, 250)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+_CAPTURE = "https://abc.public.blob.vercel-storage.com/captures/x/full.1440.webp"
+
+
+async def test_screenshot_returns_image_tiles(monkeypatch):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.method == "POST":
+            body = json.loads(request.content)
+            assert body["params"]["name"] == "get_screen"
+            return _mcp_result({"slug": "x", "fullPage": _CAPTURE, "image": "h"})
+        return httpx.Response(200, content=_png(), headers={"content-type": "image/png"})
+
+    _mock_upstream(monkeypatch, handler)
+    out = await inspo_mcp._screenshot_handler({"slug": "x"})
+
+    assert out.get("is_error") is not True
+    images = [p for p in out["content"] if p["type"] == "image"]
+    assert len(images) >= 2, "a 4000px page should come back as several tiles"
+    assert calls[-1] == _CAPTURE
+
+
+async def test_screenshot_refuses_a_capture_url_off_the_blob_host(monkeypatch):
+    """The capture URL comes from upstream; a poisoned answer must not become a
+    fetch of an arbitrary host."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return _mcp_result({"slug": "x", "fullPage": "https://evil.com/x.png"})
+        raise AssertionError("fetched a host that is not on the list")
+
+    _mock_upstream(monkeypatch, handler)
+    out = await inspo_mcp._screenshot_handler({"slug": "x"})
+    assert out.get("is_error") is True
+
+
+async def test_screenshot_needs_a_slug():
+    out = await inspo_mcp._screenshot_handler({})
+    assert out.get("is_error") is True

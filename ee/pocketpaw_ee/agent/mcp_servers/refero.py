@@ -2,6 +2,14 @@
 # visual styles + real product screens) to the claude_agent_sdk cloud chat
 # backend.
 #
+# Updated: 2026-09-27 (feat/sites-visual-research) — NEW ``view_reference``: the
+# screenshot of a screen (by uuid) or a style preview (by ``preview_url``) comes
+# back as IMAGE blocks the agent can look at. The search tools only ever returned
+# URLs the agent had no way to open, and reproducing a rejected site by hand
+# showed that opening the pictures is what changed the result. Full-page shots
+# are tiled (``pocketpaw.tools.builtin.reference_images``) so every section stays
+# legible to the model.
+#
 # Created: 2026-09-15 (feat/refero-design-research). The site-authoring skills
 # (pocketpaw-create-svelte-site, pocketpaw-create-react-site,
 # pocketpaw-design-taste) run on the claude_agent_sdk backend, which only sees
@@ -49,11 +57,13 @@ SERVER_NAME = "pocketpaw_refero"
 SEARCH_STYLES_TOOL_ID = f"mcp__{SERVER_NAME}__search_styles"
 GET_STYLE_TOOL_ID = f"mcp__{SERVER_NAME}__get_style"
 SEARCH_SCREENS_TOOL_ID = f"mcp__{SERVER_NAME}__search_screens"
+VIEW_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__view_reference"
 
 REFERO_TOOL_IDS = (
     SEARCH_STYLES_TOOL_ID,
     GET_STYLE_TOOL_ID,
     SEARCH_SCREENS_TOOL_ID,
+    VIEW_REFERENCE_TOOL_ID,
 )
 
 
@@ -137,6 +147,47 @@ async def _search_screens_handler(args: dict) -> dict:
         return _error_response(f"design screen search failed: {exc}")
 
     return _success_response({"ok": True, "count": len(results), "results": results})
+
+
+async def _view_reference_handler(args: dict) -> dict:
+    """Screen uuid -> Refero's own screenshot; style ``preview_url`` -> a fetch from
+    Refero's image host. Either way the answer is image blocks plus one line of text
+    saying what they show."""
+    from pocketpaw.tools.builtin import reference_images
+    from pocketpaw.tools.builtin.refero import IMAGE_HOSTS, get_screen_image
+
+    screen_id = args.get("screen_id")
+    preview_url = args.get("preview_url")
+    try:
+        if isinstance(screen_id, str) and screen_id.strip():
+            data = await _run(get_screen_image, screen_id.strip(), "full")
+            if not data:
+                return _error_response(
+                    "no screenshot came back for that screen — it may not exist, or Refero "
+                    "is unavailable. Carry on from the text you already have."
+                )
+            label = f"screen {screen_id.strip()}"
+        elif isinstance(preview_url, str) and preview_url.strip():
+            data = await reference_images.fetch_image(preview_url.strip(), IMAGE_HOSTS)
+            label = "style preview"
+        else:
+            return _error_response(
+                "view_reference needs a `screen_id` (from search_screens) or a "
+                "`preview_url` (from search_styles)."
+            )
+        tiles = reference_images.to_tiles(data)
+    except reference_images.ReferenceImageError as exc:
+        return _error_response(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("refero: view_reference failed", exc_info=True)
+        return _error_response(f"could not load the reference image: {exc}")
+
+    note = (
+        f"{label}: {len(tiles)} image(s), top of the page first. Read the composition "
+        "(what carries the fold, where the product visual sits, how much colour is "
+        "spent and where), not the copy."
+    )
+    return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
 
 
 def build_refero_server() -> tuple[str, Any] | None:
@@ -252,10 +303,39 @@ def build_refero_server() -> tuple[str, Any] | None:
     async def search_screens_tool(args):  # type: ignore[no-untyped-def]
         return await _search_screens_handler(args)
 
+    @tool(
+        "view_reference",
+        (
+            "LOOK at a reference: returns the actual screenshot as images you can see. "
+            "Pass `screen_id` (a uuid from `search_screens`) for the full captured page, "
+            "or `preview_url` (from a `search_styles` result) for a style's preview. "
+            "Text descriptions miss what matters most, so open the 3-5 strongest "
+            "references before you decide the look: the hero composition, whether the "
+            "product is shown, how light or dark the page is, where colour is spent. "
+            "Long pages come back as several images, top first."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "screen_id": {
+                    "type": "string",
+                    "description": "A screen uuid returned by search_screens.",
+                },
+                "preview_url": {
+                    "type": "string",
+                    "description": "A preview_url returned by search_styles.",
+                },
+            },
+            "additionalProperties": False,
+        },
+    )
+    async def view_reference_tool(args):  # type: ignore[no-untyped-def]
+        return await _view_reference_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[search_styles_tool, get_style_tool, search_screens_tool],
+        tools=[search_styles_tool, get_style_tool, search_screens_tool, view_reference_tool],
     )
     return SERVER_NAME, server
 
@@ -265,6 +345,7 @@ __all__ = [
     "REFERO_TOOL_IDS",
     "SEARCH_SCREENS_TOOL_ID",
     "SEARCH_STYLES_TOOL_ID",
+    "VIEW_REFERENCE_TOOL_ID",
     "SERVER_NAME",
     "build_refero_server",
 ]

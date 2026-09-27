@@ -1,4 +1,10 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
+# Updated: 2026-09-27 (feat/sites-visual-research) — PHASE 1b rails changed: the
+# research step now opens screenshots and lets a locked reference set the look,
+# so the precedence and one-round assertions became assertions on the new rails
+# (rotation ban, roles, user input outranks, proportionate depth). New tests pin
+# that both archive states name a screenshot tool and that the create preamble
+# tells the agent to look at its draft with preview_site.
 # Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — the react
 # and svelte refine assertions follow the preamble: packages via
 # set_site_dependencies instead of "no way to add a dependency", rolled_back
@@ -2158,32 +2164,62 @@ async def test_the_research_step_names_only_tools_sites_can_reach() -> None:
     )
 
 
-async def test_the_research_step_keeps_the_design_system_and_the_rotation_ban() -> None:
-    """The two rails that stop a reference archive from flattening every site.
+def _assert_research_rails(lower: str) -> None:
+    """The rails that stop a reference archive from flattening every site.
 
-    An archive returns the SAME exemplars for the same brief, so an unqualified
-    "build what they built" points straight at the repetition Phase 1 exists to
-    prevent — a reference that outranks the embedded system makes the
-    homogenisation worse than having no reference at all.
+    A locked reference now SETS the look, which is what made the hand-built
+    comparison work. What must survive with it: the rotation ban (the same brief
+    returns the same exemplars), no wholesale clone, colour roles kept, and the
+    user's own input outranking every reference.
+    """
+    assert "rotation ban" in lower
+    assert "wholesale" in lower
+    assert "role" in lower
+    assert "user supplied" in lower
 
-    THE MUTATION THAT BREAKS THIS: delete the precedence clause. Run: nothing
+
+async def test_the_research_step_keeps_the_rotation_ban_and_roles() -> None:
+    """THE MUTATION THAT BREAKS THIS: delete the rotation clause. Run: nothing
     fails, every dentist brief converges on the same returned exemplar, and the
     regression is invisible until a human looks at two sites side by side.
     """
-    lower = sites_handler._design_research_step().lower()
+    _assert_research_rails(sites_handler._design_research_step().lower())
 
-    assert "does not outrank the embedded design system" in lower
-    assert "wholesale" in lower  # never lift a palette/font stack off a reference
-    assert "rotation ban" in lower
-    assert "one round" in lower  # bounded: someone else's service, user is waiting
+
+async def test_the_research_step_opens_screenshots_before_the_look_is_chosen(
+    monkeypatch,
+) -> None:
+    """The change the hand-built comparison proved: open the pictures.
+
+    Text descriptions never carried the pattern the good references shared, so
+    both archive states must name their screenshot tool and put it before the
+    look is locked.
+    """
+    for token, view_tool in (
+        (None, "mcp__pocketpaw_inspo__view_reference_screenshot"),
+        ("rf_test", "mcp__pocketpaw_refero__view_reference"),
+    ):
+        _with_refero_token(monkeypatch, token)
+        step = sites_handler._design_research_step()
+        assert view_tool in step, f"token={token!r} names no screenshot tool"
+        assert step.index(view_tool) < step.index("LOCK ONE DIRECTION")
+        assert "before you choose the look" in step.lower()
+
+
+async def test_create_tells_the_agent_to_look_at_its_draft() -> None:
+    """verify_site says it builds; only a screenshot says it looks right."""
+    for engine in (None, "svelte", "react"):
+        preamble = await _preamble_for(engine)
+        assert "mcp__pocketpaw_sites_manager__preview_site" in preamble, engine
+        assert "LOOK BEFORE YOU SHOW IT" in preamble, engine
 
 
 async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
     """Phase 1b, not Phase 2.
 
-    It is evidence for the direction, not a substitute for choosing one. Phase 1
-    is the last point a real reference can still change the answer; by the time
-    Phase 2 is writing tokens a late reference only muddies them.
+    The reference decides the look, so it has to land before any token is
+    written; by the time Phase 2 is writing tokens a late reference only
+    muddies them.
     """
     preamble = await _preamble_for(None)
 
@@ -2283,12 +2319,7 @@ async def test_both_research_steps_name_only_tools_sites_can_reach(monkeypatch) 
 async def test_the_refero_step_keeps_the_same_rails(monkeypatch) -> None:
     """Switching archives must not drop the precedence clause or the rotation ban."""
     _with_refero_token(monkeypatch, "rf_test")
-    lower = sites_handler._design_research_step().lower()
-
-    assert "does not outrank the embedded design system" in lower
-    assert "wholesale" in lower
-    assert "rotation ban" in lower
-    assert "one round" in lower
+    _assert_research_rails(sites_handler._design_research_step().lower())
 
 
 async def test_a_create_preamble_carries_refero_when_configured(monkeypatch) -> None:

@@ -1,4 +1,6 @@
 ---
+# Updated 2026-09-27 (feat/sites-visual-research): dropped the pointer to
+# design-taste's removed layout rules; composition comes from the references.
 name: sites-conversion-structure
 description: |
   The STRATEGY layer for a Paw Site — what the page argues, in what order, and
@@ -136,12 +138,8 @@ table, a testimonial band, a stats row, a logo strip and a newsletter box: each
 ships where the brief asks for it or hands you the content that fills it, and
 otherwise does not exist (design-taste MODULE 0).
 
-This is the ARGUMENT, not a section-shape order. `pocketpaw-design-taste`
-MODULE 3.A / 3.B still governs how each is composed, and its section-repetition ban
-still applies: no two sections share a layout, no three-equal-card feature row,
-no eyebrow on every section. On a page of five or more sections that works out
-to four or more layout families; on a shorter page distinct shapes are the whole
-requirement and a family count is not (MODULE 0).
+This is the ARGUMENT, not a section-shape order. How each section is composed
+comes from the references opened in research (`pocketpaw-design-taste` 3.A).
 
 ## 4. Conversion rules
 

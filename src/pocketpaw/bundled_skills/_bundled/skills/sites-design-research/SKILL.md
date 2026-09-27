@@ -1,4 +1,8 @@
 ---
+# Updated 2026-09-27 (feat/sites-visual-research): the loop now OPENS the
+# screenshots (view_reference / view_reference_screenshot), researches per
+# section, lets the locked reference set the look with roles kept, and ends
+# with preview_site on the draft. Matches PHASE 1b in the /sites preamble.
 name: sites-design-research
 description: |
   Ground a page in REAL shipped design systems before designing it, using the
@@ -36,57 +40,60 @@ stays where it is.
 | What does the page SAY, and in what order? | `sites-conversion-structure` |
 | How do I hand-write this ground / shader / type choice? | `sites-design-sources` |
 
-Research first, then hand the locked direction to the design system. Never let
-a reference override the brief: if the brief did not ask for a section, no
-reference justifies adding one.
+Research first, and the locked reference sets the look; the design system
+fills what it leaves open and supplies the craft. Never let a reference
+override the brief: if the brief did not ask for a section, no reference
+justifies adding one.
 
 ## The tools
 
-Two research layers. Names differ by backend — use whichever you actually have:
+Two archives. Names differ by backend — use whichever you actually have:
 
-| Layer | MCP surface | elsewhere |
+| Job | Refero (when configured) | Inspo (always there) |
 | --- | --- | --- |
-| Visual direction | `search_styles`, `get_style` | `refero_design_styles` |
-| Concrete UI | `search_screens` | `refero_design_screens` |
+| Find a direction | `search_styles`, then `get_style` | `research_page_design` |
+| Find real screens for one section | `search_screens` | `research_page_design` with a section brief |
+| **See it** | `view_reference` (`screen_id` or a style `preview_url`) | `view_reference_screenshot` (`slug`, `view`) |
+| Real values from the locked reference | `get_style` | `get_reference_design_system` |
 
-**Styles are the layer that matters.** A search result is only a description;
-`get_style` is the call that returns something to build from — a north-star
-thesis, colours WITH THEIR ROLES, a type scale, spacing, elevation, component
-treatments, imagery guidance, and explicit do/don't rules.
-
-There is no flows layer on this surface. Do not go looking for one.
+**The picture is the layer that matters.** A search result is a description, and
+descriptions miss exactly the things that decide whether a page looks designed:
+how the fold is built, whether the product is shown, how light the page is,
+where colour is actually spent. A rejected page and an approved one were built
+from the same brief; the difference was that the second time the screenshots
+were opened, and they all shared one pattern no write-up mentioned.
 
 ### When it returns nothing
 
-Refero needs a paid plan, so an empty result is the **normal** outcome on an
-unconfigured deploy — not an error and not something to retry. Proceed on your
-own design judgement under `pocketpaw-design-taste`, and say nothing about
-Refero to the user. Never cite a reference you did not receive, and never name
-a company as your source because it sounded plausible.
+Refero needs a paid plan, so an empty Refero result is normal; fall back to
+Inspo. If both are unavailable, proceed on your own judgement under
+`pocketpaw-design-taste`, and say nothing about research to the user. Never cite a
+reference you did not receive, and never name a company as your source because
+it sounded plausible.
 
 ## The loop
 
-1. **Search several angles before choosing.** Three to five for a new page.
-   Vary the axis, do not re-word the same query: one aesthetic
-   (`editorial monochrome SaaS landing page`), one domain
-   (`warm trustworthy healthcare marketing`), one named product
-   (`Linear dark developer tool`). Stopping at the first good hit is how every
-   page ends up in the same house style.
-2. **Expand the strongest two or three** with `get_style`.
-3. **Add screens only when structure is the question** — "what goes on a
-   pricing page", "how is a testimonial wall usually built". Search by what is
-   ON the screen, not by adjective.
-4. **Lock one direction** (below) before writing any markup.
+1. **Search several angles before choosing.** Two or three for the overall look,
+   varying the axis rather than rewording: one aesthetic
+   (`modern light waitlist, bold typography`), one about products like this one
+   (`AI creator tool landing page with product visual`), one named product the
+   brief evokes.
+2. **Search per section** you are unsure about, by what is ON the screen:
+   `join the waitlist hero`, `social proof avatars counter`,
+   `bento features video editing`.
+3. **Open the 3-5 strongest** with the view tool and look for what they share.
+4. **Lock one direction** (below), then pull real values from it with
+   `get_style` / `get_reference_design_system`.
+5. **Look at your own draft** with `preview_site` once it verifies, at desktop and
+   phone width, next to the references. Fix what is off and look again.
 
-Depth follows risk. A small visual improvement earns two or three searches and
-one expanded style. A new landing page or a redesign earns three to five
-searches, three or four expanded styles, and screen research for the sections
-you are unsure about.
+Depth follows risk. A small visual change earns a search or two and one opened
+reference. A new page or a redesign earns the whole loop.
 
 ## The three rules that make research worth doing
 
-**Do not copy one reference.** A single style reproduced is a clone of someone
-else's brand wearing your client's name.
+**Do not clone one reference.** Lead with one, but a single site reproduced
+whole is someone else's brand wearing your client's name.
 
 **Do not average.** When two references disagree, blending them produces the
 safe centroid — which is exactly the generic output the research was meant to
@@ -129,11 +136,14 @@ the whole point of this skill: it converts taste into something reviewable.
 
 ## Before you hand the page over
 
+- Did I open the references, not just read about them?
 - Can I name the references that shaped this, and what came from each?
 - Did I keep one direction's sharp traits rather than averaging several?
 - Did every colour, face and surface keep the role its source gave it?
 - Does every major choice trace to a reference, the brief, or a craft rule?
 - Did I stay inside the brief — no section a reference talked me into?
+- Did I look at my own draft with `preview_site`, and does it hold up next
+  to the references?
 
 A "no" anywhere means research or cut, not ship.
 
