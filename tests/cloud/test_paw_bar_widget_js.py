@@ -16,6 +16,9 @@
 # The vendored default is also syntax-relevant: it is served raw to a foreign page,
 # so the last test asserts it stays wrapped in one IIFE and keeps its globals to
 # window.PawBar.
+# Updated 2026-09-27 (new Paw Bar): the vendored loader must speak the two
+#   additions the rebuilt bar relies on, pawbar:viewport and a corner `side` on
+#   pawbar:resize.
 # Updated 2026-09-26 (frame sandbox): the vendored loader must put the SAME
 #   sandbox flags on its iframe that the router sends as a CSP sandbox header,
 #   set before the iframe's src so the first load is already sandboxed.
@@ -241,6 +244,27 @@ def test_the_vendored_loader_speaks_the_frame_protocol_the_app_expects():
     # so the frame has to be TOLD — it owns the panel's own state and would
     # otherwise still believe it is open.
     assert "pawbar:host-close" in code
+
+
+def test_the_vendored_loader_speaks_the_new_bar_additions():
+    """The rebuilt Paw Bar (paw-bar #19) docks as a content-sized box and sizes
+    itself against the HOST page, which only the loader can see. Two additions
+    carry that, and a copy without them fails the same silent way as the ones
+    above: the app keeps working, just subtly wrong.
+
+      * ``pawbar:viewport`` tells the frame the host viewport on load and on every
+        resize. Without it the app falls back to the screen size, so a desktop
+        window narrower than the screen gets a card sized for the screen.
+      * ``side`` on ``pawbar:resize`` docks the icon launcher in its corner.
+        Without it the corner launcher sits centred at the bottom of the page.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:viewport" in code, "the app sizes against the host viewport the loader reports"
+    assert "data.side" in code, "the icon launcher's corner rides on pawbar:resize"
 
 
 def test_the_vendored_loader_is_generated_not_hand_edited():
