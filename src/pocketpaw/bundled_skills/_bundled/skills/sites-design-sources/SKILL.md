@@ -14,6 +14,9 @@ description: |
   path (set_site_dependencies).
 ---
 
+<!-- Updated 2026-09-27 (feat/sites-lean-prompt): added Fontshare, the other font
+     library that loads from a CSS URL. -->
+
 <!-- Updated 2026-09-27 (feat/sites-visual-research): the colour section no
      longer says there is no browser; preview_site shows the draft, but a
      screenshot still cannot measure contrast, so the checker stays. -->
@@ -102,6 +105,10 @@ copied without understanding is a shader you cannot cap.
 WOFF2 cannot be self-hosted here, because there is no way to get the file into
 the project. So:
 
+-   **Fontshare** (`fontshare.com`, free for commercial use) serves its whole
+    library from a CSS URL: `<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500&f[]=clash-display@600&display=swap" rel="stylesheet">`.
+    It is where Satoshi, General Sans, Clash Display, Cabinet Grotesk, Switzer and
+    the free serifs Zodiak, Sentient, Erode and Gambetta live.
 -   **Google Fonts** (`fonts.google.com`, OFL / Apache-2.0) is the practical
     library, loaded with a single `@import` or one `<link>` in the document head.
     It is far wider than its famous handful: Bricolage Grotesque, Instrument

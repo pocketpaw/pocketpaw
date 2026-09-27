@@ -9,10 +9,10 @@
     ]
   },
   {
-    "label": "PHASE 0 stops routing into the conversion skill — the strategy layer is still installed and still advertised, and the agent walks the whole procedure without ever settling the offer or the section order",
+    "label": "the create design-skills note stops naming the conversion skill - the strategy layer is installed but the agent is never told when to reach for it",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "        \"Invoke the `sites-conversion-structure` skill and follow it: the ONE \"",
-    "replace": "        \"Settle the following yourself: the ONE \"",
+    "find": "        \"sites-conversion-structure\",\r\n        \"create\",",
+    "replace": "        \"sites-conversion-structure\",\r\n        \"refine\",",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_procedure_steps_invoke_the_design_skills"
     ]
@@ -20,19 +20,19 @@
   {
     "label": "the 5b self-check stops invoking the defect list — the draft still gets shown, just without the pass that catches the first-revision defects",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "        \"5b. SELF-CHECK BEFORE YOU SHOW IT. Invoke `sites-ship-fixes` and run its \"",
-    "replace": "        \"5b. SELF-CHECK BEFORE YOU SHOW IT. Re-read the page and run its \"",
+    "find": "        \"5b. \" + _LOOK_RULE + \"`sites-ship-fixes` lists the defects that most \"",
+    "replace": "        \"5b. \" + _LOOK_RULE + \"A defect list covers the defects that most \"",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_procedure_steps_invoke_the_design_skills"
     ]
   },
   {
-    "label": "the craft mechanics stop riding the CREATE preamble — every new site is built from values picked one at a time, and the block is still installed so nothing looks missing",
+    "label": "the craft floor stops riding the CREATE preamble - contrast, hit areas, focus and honest content are no longer stated on the turn that builds the page",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "        f\"{_design_taste_system()}\"\r\n        f\"{_craft_system()}\"\r\n",
-    "replace": "        f\"{_design_taste_system()}\"\r\n",
+    "find": "        f\"{_design_skills_note('create')}\"\r\n        f\"{_CRAFT_FLOOR}\"\r\n",
+    "replace": "        f\"{_design_skills_note('create')}\"\r\n",
     "tests": [
-      "tests/cloud/surface/test_surface_registry.py::test_sites_craft_rides_every_authoring_turn_embedded_not_named"
+      "tests/cloud/surface/test_surface_registry.py::test_sites_craft_is_named_on_create_and_the_floor_is_inline"
     ]
   },
   {
@@ -65,7 +65,7 @@
   {
     "label": "the full construction method stops being reachable from refine - the floor is embedded, the symptom index names rules the agent can no longer read, and every structural edit is made without them",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "        \"sites-craft\",\r\n        \"refine\",",
+    "find": "        \"sites-craft\",\r\n        \"both\",",
     "replace": "        \"sites-craft\",\r\n        \"create\",",
     "tests": [
       "tests/cloud/surface/test_surface_registry.py::test_sites_craft_refine_carries_the_floor_and_names_the_rest"

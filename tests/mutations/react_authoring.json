@@ -11,8 +11,8 @@
   {
     "label": "react-create keeps inline ripple, so the preamble teaches a ui-spec ask the surface renders as raw JSON",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "    ripple_on = engine not in (\"svelte\", \"react\")",
-    "replace": "    ripple_on = engine != \"svelte\"",
+    "find": "    ripple_on = engine == \"ripple\"",
+    "replace": "    ripple_on = engine in (\"ripple\", \"react\")",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_react_create_uses_ask_user_tool_not_ripple"
     ]

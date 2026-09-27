@@ -1,4 +1,7 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
+# Updated: 2026-09-27 (feat/sites-lean-prompt) — the create preamble no longer
+# embeds design-taste or sites-craft; tests now pin the short art-direction step,
+# the craft floor, the size budget, and html create asking through ask_user.
 # Updated: 2026-09-27 (feat/sites-visual-research) — PHASE 1b rails changed: the
 # research step now opens screenshots and lets a locked reference set the look,
 # so the precedence and one-round assertions became assertions on the new rails
@@ -214,7 +217,7 @@ async def test_sites_handler_create_mode_when_no_pocket_id() -> None:
     # The unified create surface, tagged mode="create".
     assert 'mode="create"' in preamble
     # It always opens with the clarity gate, never blind-builds.
-    assert "phase 1" in lower
+    assert "research real sites" in lower
     # It must NOT slip into refine framing when there's no pocket to refine.
     assert 'mode="refine"' not in preamble
 
@@ -453,7 +456,7 @@ async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> N
     assert 'engine="svelte"' in preamble
     assert 'mode="create"' in preamble
     # The shared clarity gate runs on every engine.
-    assert "phase 1" in lower
+    assert "research real sites" in lower
 
     # The dedicated Svelte-track authoring skill + the merged design-taste helper.
     assert "pocketpaw-create-svelte-site" in preamble
@@ -492,7 +495,7 @@ async def test_create_engine_routing_diverges_by_engine() -> None:
     assert html != svelte != ripple != html
     for out in (html, svelte, ripple):
         assert 'mode="create"' in out
-        assert "phase 1" in out.lower()
+        assert "research real sites" in out.lower()
 
     # html default → the html tool is the PRIMARY/mandated build path (it names
     # the svelte/dynamic tools only later, in the do-not-use / exception context).
@@ -523,7 +526,7 @@ async def test_create_mode_engine_react_prefers_create_react_site_skill() -> Non
     assert '<surface kind="sites"' in preamble
     assert 'engine="react"' in preamble
     assert 'mode="create"' in preamble
-    assert "phase 1" in lower
+    assert "research real sites" in lower
 
     # The dedicated React-track authoring skill + the merged design-taste helper.
     assert "pocketpaw-create-react-site" in preamble
@@ -686,21 +689,16 @@ async def test_engine_threads_through_meta_from_request() -> None:
 # leaks into the refine branch.
 
 
-async def test_create_always_two_phase() -> None:
-    """Every create meta returns the two-phase flow: an interview/clarity front
-    (Phase 1) AND a design+build back (Phase 2) — no flag required."""
+async def test_create_runs_research_then_art_direction_then_build() -> None:
+    """Every create meta walks research -> a written art direction -> build."""
     out = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
-    lower = out.lower()
 
     assert '<surface kind="sites"' in out
     assert 'mode="create"' in out
-    # Two-phase structure: a clarity/interview front AND a build back.
-    assert "phase 1" in lower
-    assert "phase 2" in lower
-    assert "question" in lower  # the interview instruction
-    assert "build" in lower
+    assert out.index("RESEARCH REAL SITES") < out.index("ART DIRECTION") < out.index("TOKENS FIRST")
+    assert "question" in out.lower()  # the ask-for-facts instruction
 
 
 async def test_create_names_asset_tools() -> None:
@@ -744,41 +742,44 @@ async def test_create_never_names_a_bundled_design_system_tool() -> None:
 
 
 async def test_create_tells_the_agent_to_author_its_own_tokens() -> None:
-    """With no library to retrieve, Phase 2 must say where the tokens come from.
+    """The art direction becomes custom properties before any markup, and it is
+    chosen for fit, not by a rotation rule.
 
-    Deleting the retriever without replacing the instruction would leave step 1
-    saying nothing about color, type, or ground — and an absence of instruction
-    is how the model falls back to its own defaults, which is the repetition this
-    change exists to remove. So the step names the custom properties to write and
-    points at the embedded design system's own modules for the values.
+    Forced rotation ("pick the less-obvious fit", "reseed the accent") pushed pages
+    away from the right answer for the business; variety now comes from the subject.
     """
     out = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
 
-    assert "--accent" in out
-    assert "--bg" in out
     assert "custom properties" in out.lower()
-    # The anti-repetition rule is now load-bearing rather than a footnote.
-    assert "rotate" in out.lower()
-    assert "reseed the accent" in out
+    assert "4-6 colours as hex" in out
+    assert "best fits this business" in out
+    assert "less-obvious fit" not in out
+    assert "reseed the accent" not in out
 
 
 async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:
-    """On ripple-ON create surfaces (html default, ripple) the clarity question is
-    rendered as a COMPLETE UI: an `ask-user-questions` ripple widget (ui-spec
-    block) whose completeActions emit chat.send — NOT the ask_user chip tool."""
-    for engine in (None, "html", "ripple"):
+    """Only ripple create keeps inline ripple, so only it asks with an
+    `ask-user-questions` widget. html create asks through the chip tool, like the
+    component engines, because its profile dropped ripple."""
+    out = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
+        )
+    ).text
+    assert "ask-user-questions" in out
+    assert '"target": "chat.send"' in out
+    assert "mcp__pocketpaw_ask__ask_user" not in out
+
+    for engine in (None, "html"):
         out = (
             await sites_handler.build_preamble(
                 WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
             )
         ).text
-        assert "ask-user-questions" in out
-        assert "ui-spec" in out
-        assert '"target": "chat.send"' in out
-        # The ripple-widget path does NOT reach for the chip tool.
-        assert "mcp__pocketpaw_ask__ask_user" not in out
+        assert "mcp__pocketpaw_ask__ask_user" in out, engine
+        assert "ask-user-questions" not in out, engine
 
 
 async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
@@ -794,25 +795,35 @@ async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
     assert "ask-user-questions" not in out
 
 
-async def test_create_embeds_design_system_inline() -> None:
-    """PERMANENT FIX: the full pocketpaw-design-taste system is EMBEDDED in the
-    create preamble (not left to a model-driven skill invocation the agent may
-    skip). A regression that drops the embed would silently return sites to
-    generic AI output."""
-    out = (
-        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    ).text
-    # The governing block + load-bearing body markers from the skill file.
-    assert '<design-system name="pocketpaw-design-taste">' in out
-    assert "</design-system>" in out
-    assert "Vision Ledger" in out
-    # MODULE 0 is the scope contract: sections come from the brief, and no
-    # real-world fact is invented. A preamble that loses it builds padded pages.
-    assert "MODULE 0" in out
-    assert "Aesthetic direction families" in out
-    assert "PRE-FLIGHT" in out.upper()
-    # It is framed as already-loaded so the agent doesn't wait on a skill call.
-    assert "ALREADY LOADED" in out or "already in your context" in out.lower()
+async def test_create_carries_a_short_design_step_not_the_embedded_systems() -> None:
+    """The create preamble is short and positive.
+
+    It used to embed design-taste (33k chars) and sites-craft (23k) with ~100
+    prohibitions, about 77k chars in all. Anthropic's current guidance is a short
+    art direction the model commits to, with its defaults framed as things to
+    question; the two skills stay reachable by name.
+
+    THE MUTATION THAT BREAKS THIS: re-add ``_design_taste_system()`` or
+    ``_craft_system()`` to ``_create_preamble``.
+    """
+    for engine in (None, "svelte", "react", "ripple"):
+        out = (
+            await sites_handler.build_preamble(
+                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+            )
+        ).text
+        assert "<design-system" not in out, engine
+        assert '<craft-system name="sites-craft">' not in out, engine
+        assert "<craft-floor>" in out, engine
+        assert len(out) < 25_000, (engine, len(out))
+        # Defaults are named as things to question, not banned.
+        assert "Use one only when this brief calls for it" in out, engine
+        # Fonts that actually load.
+        assert "api.fontshare.com" in out and "fonts.googleapis.com" in out, engine
+
+    note = sites_handler._design_skills_note("create")
+    assert "`pocketpaw-design-taste`" in note
+    assert "`sites-craft`" in note
 
 
 async def test_create_decides_design_and_uses_taste_skill() -> None:
@@ -874,7 +885,7 @@ async def test_create_leaves_refine_untouched() -> None:
 
     assert 'mode="refine"' in out
     assert 'mode="create"' not in out
-    assert "phase 1" not in out.lower()
+    assert "research real sites" not in out.lower()
 
 
 # --- Frontend-consumes-brief (`_frontend_preamble`) — the crew baton, end to end ---
@@ -1130,7 +1141,7 @@ async def test_sites_handler_chat_mode_ignored_without_pocket_id() -> None:
     # No pocket to chat about → the create preamble is unchanged by mode.
     assert chat_no_pocket == plain_create
     assert 'mode="create"' in chat_no_pocket
-    assert "phase 1" in chat_no_pocket.lower()
+    assert "research real sites" in chat_no_pocket.lower()
 
 
 async def test_mode_threads_through_meta_from_request() -> None:
@@ -2119,7 +2130,7 @@ async def test_the_research_step_is_always_on() -> None:
     """
     for engine in (None, "ripple", "svelte", "react"):
         preamble = await _preamble_for(engine)
-        assert "PHASE 1b" in preamble, f"{engine} create lost the research step"
+        assert "RESEARCH REAL SITES" in preamble, f"{engine} create lost the research step"
         assert "mcp__pocketpaw_inspo__research_page_design" in preamble
 
 
@@ -2172,7 +2183,7 @@ def _assert_research_rails(lower: str) -> None:
     returns the same exemplars), no wholesale clone, colour roles kept, and the
     user's own input outranking every reference.
     """
-    assert "rotation ban" in lower
+    assert "clone" in lower
     assert "wholesale" in lower
     assert "role" in lower
     assert "user supplied" in lower
@@ -2215,16 +2226,12 @@ async def test_create_tells_the_agent_to_look_at_its_draft() -> None:
 
 
 async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
-    """Phase 1b, not Phase 2.
-
-    The reference decides the look, so it has to land before any token is
-    written; by the time Phase 2 is writing tokens a late reference only
-    muddies them.
-    """
+    """The reference decides the look, so research lands before the art direction
+    is written and before any token."""
     preamble = await _preamble_for(None)
 
-    assert preamble.index("PHASE 1b") < preamble.index("LOCK THE TOKENS")
-    assert preamble.index("PHASE 1 — CREATIVE DIRECTION") < preamble.index("PHASE 1b")
+    assert preamble.index("RESEARCH REAL SITES") < preamble.index("ART DIRECTION")
+    assert preamble.index("ART DIRECTION") < preamble.index("TOKENS FIRST")
 
 
 # ---------------------------------------------------------------------------

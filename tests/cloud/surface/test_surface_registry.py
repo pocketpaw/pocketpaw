@@ -1,4 +1,6 @@
 # tests/cloud/surface/test_surface_registry.py — SR-2 registry guarantees.
+# Updated: 2026-09-27 (feat/sites-lean-prompt) — html create drops ripple; the
+# create preamble names design-taste and sites-craft instead of embedding them.
 # Updated: 2026-09-06 (feat/fx-mcp-server) — the /sites toolbelt pins FX_TOOL_IDS too.
 #
 # Created: 2026-06-22 (feat/surface-registry-backend-profiles, SR-2) — guards the
@@ -155,7 +157,8 @@ def test_sites_component_engines_get_exactly_one_authoring_skill():
         # pocketpaw-create-pocket from firing on "build an app with components
         # and nice design" in the middle of a site build.
         assert "pocketpaw-create-pocket" not in profile.skill_names, f"engine={engine}"
-        assert "pocketpaw-design-taste" not in profile.skill_names, f"engine={engine}"
+        # design-taste is a named design skill now that create stops embedding it.
+        assert "pocketpaw-design-taste" in profile.skill_names, f"engine={engine}"
 
 
 def test_sites_create_skill_names_cover_the_advertised_skills():
@@ -204,24 +207,24 @@ def test_sites_refine_wins_over_react_engine():
     assert profile.skill_names == frozenset()
 
 
-def test_sites_html_create_keeps_ripple():
-    """html-create is NOT a component track: it keeps ripple (so its preamble's
-    ui-spec ask mechanism works) and surfaces no dedicated skill. Pinned because
-    the RX-2 refactor keys the component branch on a dict lookup — an entry added
-    for html would silently flip its ask mechanism."""
-    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="html"))
-    assert profile.ripple_mode == "on"
-    assert _own_deny(profile) == _SITES_BUILTIN_DENY
-    assert profile.skill_names == frozenset()
+def test_sites_html_create_drops_ripple():
+    """html-create hand-authors a static page, so it drops inline ripple (and the
+    widget catalog that rode along only to render one ask widget) and asks through
+    ``ask_user``. It surfaces no dedicated skill. The preamble's ``ripple_on`` fork
+    reads the same split."""
+    for meta in (SurfaceMeta(), SurfaceMeta(engine="html")):
+        profile = resolve_profile(SurfaceKind.SITES, meta)
+        assert profile.ripple_mode == "off", f"{meta!r}"
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"{meta!r}"
+        assert profile.skill_names == frozenset(), f"{meta!r}"
 
 
 def test_sites_ripple_create_keeps_ripple():
-    """ripple-create (engine None/"ripple", no pocket_id) → ripple ON. Denies only the
+    """ripple-create (engine "ripple", no pocket_id) -> ripple ON. Denies only the
     file/shell built-ins (no ripple-create tool deny)."""
-    for meta in (SurfaceMeta(), SurfaceMeta(engine="ripple")):
-        profile = resolve_profile(SurfaceKind.SITES, meta)
-        assert profile.ripple_mode == "on", f"{meta!r} must keep ripple"
-        assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"{meta!r}"
+    profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="ripple"))
+    assert profile.ripple_mode == "on"
+    assert _own_deny(profile) == _SITES_BUILTIN_DENY
 
 
 def test_sites_refine_keeps_ripple_and_wins_over_engine():
@@ -395,39 +398,22 @@ def test_every_surface_skill_name_resolves_to_a_real_skill():
 
 
 async def test_sites_procedure_steps_invoke_the_design_skills():
-    """The numbered procedure must ROUTE INTO the design skills, not just list them.
+    """The numbered procedure must point at the checks, not just list skills.
 
-    ``<design-skills>`` is an inventory. The numbered PHASE steps are the thing the
-    agent actually walks. Until 2026-09-08 the block sat entirely AFTER
-    ``</sites-procedure>`` and no step named a skill or the ``Skill`` tool, so the
-    agent could follow the whole procedure correctly and never load one — the same
-    shape of failure that got ``pocketpaw-design-taste`` embedded rather than
-    invoked (see ``_design_taste_system``: "the sites build agent was not reliably
-    INVOKING the design-taste skill").
-
-    Availability is necessary and not sufficient. This pins the sufficient half.
-
-    THE MUTATION THAT BREAKS THIS: delete the "PHASE 0 — THE ARGUMENT" step, or
-    drop the ``5b. SELF-CHECK`` step. Run: the skill is still advertised in the
-    block, still loadable, and this fails because no step tells the agent to use
-    it.
+    Since the lean preamble the argument and the look are written inline, so the
+    only skill a step still names is ``sites-ship-fixes`` beside the LOOK rule;
+    every other design skill lives in ``<design-skills>`` with its trigger.
     """
     from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
 
     text = (await sites_handler.build_preamble("w", "u", SurfaceMeta(engine="svelte"))).text
     procedure = text[text.index("<sites-procedure>") : text.index("</sites-procedure>")]
 
-    # The two skills with mechanical, non-judgement triggers must be named in the
-    # steps themselves. The judgement-y ones (theme-system, restraint) may live in
-    # the block alone.
-    for name in ("sites-conversion-structure", "sites-ship-fixes"):
-        assert name in procedure, f"{name} is advertised but no procedure step invokes it"
-
-    # PHASE 1 tells the agent no invocation is needed to reach the DESIGN SYSTEM.
-    # That sentence must stay scoped to the design system: read as a general
-    # "don't invoke skills" it suppresses every skill this surface just shipped.
-    assert "no invocation is needed to reach THE DESIGN SYSTEM ITSELF" in procedure
-    assert "you DO invoke those" in procedure
+    assert "sites-ship-fixes" in procedure
+    assert "preview_site" in procedure
+    note = text[text.index("<design-skills>") : text.index("</design-skills>")]
+    for name in ("sites-conversion-structure", "pocketpaw-design-taste", "sites-craft"):
+        assert f"`{name}`" in note, name
 
 
 async def test_sites_refine_routes_a_review_request_away_from_editing():
@@ -448,52 +434,34 @@ async def test_sites_refine_routes_a_review_request_away_from_editing():
     assert "INSTEAD of editing" in procedure or "INSTEAD of" in procedure
 
 
-async def test_sites_craft_rides_every_authoring_turn_embedded_not_named():
-    """``sites-craft`` must arrive IN the preamble on every authoring turn.
+async def test_sites_craft_is_named_on_create_and_the_floor_is_inline():
+    """Create carries the short craft FLOOR inline and names the full method.
 
-    It is the one design skill whose trigger is "every section of every site", so
-    it is the one that cannot be left to the ``Skill`` tool: invocation is
-    model-driven and probabilistic, and a skill that fires on four turns in five
-    leaves one site in five built from values picked one at a time — the exact
-    defect the material exists to remove. That is the same reasoning that got
-    ``pocketpaw-design-taste`` embedded in 2026-07-14, applied to the layer below
-    it (design-taste picks WHICH face and palette; craft is HOW they are built).
+    The whole skill (23k chars) used to ride every create turn; the floor is the
+    part that must hold on any public page, and the method is one Skill call away.
 
-    Both halves are asserted, because each without the other is a real bug:
-    embedded AND named would ship ~11.5 KB twice per turn, and named alone is the
-    probabilistic path this exists to avoid.
-
-    REFINE carries it too. That is not symmetry for its own sake — an edit lands
-    new markup beside a system the agent can no longer see, which is where craft
-    drift actually enters.
-
-    THE MUTATION THAT BREAKS THIS: drop ``f"{_craft_system()}"`` from
-    ``_create_preamble`` or from the refine preamble. Or re-add a ``sites-craft``
-    entry to ``_SITES_DESIGN_SKILLS``.
+    THE MUTATION THAT BREAKS THIS: drop ``_CRAFT_FLOOR`` from ``_create_preamble``,
+    or re-add ``_craft_system()`` there.
     """
     from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
 
-    for label in ("create/svelte", "create/html"):
-        meta = SurfaceMeta(engine=label.split("/")[1])
-        text = (await sites_handler.build_preamble("w", "u", meta)).text
-        assert '<craft-system name="sites-craft">' in text, label
-        # Real body, not the degraded one-line fallback: two values that only
-        # exist in the SKILL.md itself.
-        assert "concentric" in text.lower(), f"{label} carries the fallback, not the skill body"
-        assert "tabular-nums" in text, label
+    for engine in ("svelte", "html"):
+        text = (await sites_handler.build_preamble("w", "u", SurfaceMeta(engine=engine))).text
+        assert "<craft-floor>" in text, engine
+        assert '<craft-system name="sites-craft">' not in text, engine
+        for rule in ("4.5:1", "44px", "prefers-reduced-motion"):
+            assert rule in text, (engine, rule)
 
-    # Create embeds it whole, so naming it there would ship the same bytes twice.
-    assert "sites-craft" not in sites_handler.create_design_skill_names()
-    assert "`sites-craft`" not in sites_handler._design_skills_note("create")
+    assert "sites-craft" in sites_handler.create_design_skill_names()
+    assert "`sites-craft`" in sites_handler._design_skills_note("create")
 
-    # Chat is read-only Q&A about an existing site — nothing is authored, so the
-    # craft mechanics are 11.5 KB of dead weight there.
     chat = (
         await sites_handler.build_preamble(
             "w", "u", SurfaceMeta(pocket_id="pkt_1", engine="svelte", mode="chat")
         )
     ).text
     assert "<craft-system" not in chat
+    assert "<craft-floor>" not in chat
 
 
 def test_sites_embedded_blocks_degrade_when_the_bundle_is_missing():
@@ -554,9 +522,9 @@ async def test_sites_craft_refine_carries_the_floor_and_names_the_rest():
     assert "`sites-craft`" in note
     assert "sites-craft" in {n for n, scope, _ in sites_handler._SITES_DESIGN_SKILLS}
 
-    # Refine-scoped only: create embeds it whole and must not also name it.
+    # Named on both create and refine now that create stops embedding it.
     scopes = {n: scope for n, scope, _ in sites_handler._SITES_DESIGN_SKILLS}
-    assert scopes["sites-craft"] == "refine"
+    assert scopes["sites-craft"] == "both"
 
     # The floor slice must be a real cut, not the whole file with a new tag.
     floor = sites_handler._craft_system("floor")

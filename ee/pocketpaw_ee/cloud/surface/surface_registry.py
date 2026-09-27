@@ -1,4 +1,6 @@
 # surface_registry.py — The declarative surface registry (SR-1 + SR-2).
+# Updated: 2026-09-27 (feat/sites-lean-prompt) — /sites html create drops inline ripple;
+# it asks through ask_user like svelte/react and stops carrying the widget catalog.
 # Updated: 2026-09-06 (feat/fx-mcp-server) — FX_TOOL_IDS joined the /sites toolbelt allow-list.
 #
 # Created: 2026-06-22 (feat/surface-registry-backend, SR-1) — the single
@@ -973,8 +975,8 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
       * create + svelte/react (``meta.engine`` in ``_SITES_AUTHORING_SKILL``, no
         ``pocket_id``) hand-authors components → DROP ripple, deny the two
         ripple-create tools, surface that engine's authoring skill.
-      * create + ripple/html (``engine`` None/"ripple"/"html", no ``pocket_id``)
-        → KEEP ripple (sites default).
+      * create + html (``engine`` None/"html", no ``pocket_id``) → DROP ripple
+        (it asks through ``ask_user``); create + ripple → KEEP ripple.
 
     All modes scope to the sites authoring tools + general. The component-create
     modes additionally deny the two ripple-create tools (deny runs AFTER allow).
@@ -1005,6 +1007,16 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
             # create preamble's <design-skills> block naming four skills this
             # branch cannot load. The other bundled skills stay withheld.
             skill_names=frozenset({authoring_skill}) | _SITES_CREATE_DESIGN_SKILLS,
+        )
+    # html create (the default engine) hand-authors a static page, so it has no use
+    # for inline ripple: the widget catalog rode every html create only to render one
+    # ask widget. It asks through ``ask_user`` like svelte/react (2026-09-27,
+    # feat/sites-lean-prompt). Skills stay wholesale (no ``skill_names``).
+    if meta.pocket_id is None and (meta.engine or "html") == "html":
+        return SurfaceProfile(
+            ripple_mode="off",
+            allow_mcp_tool_ids=sites_allow,
+            deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
         )
     # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
     # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple

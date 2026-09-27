@@ -3,11 +3,17 @@
 # size of the one bundled skill that is embedded WHOLE into a system prompt.
 # Nothing else in the repo measures it, so every edit to that file silently
 # changed a per-turn runtime cost.
+# Updated: 2026-09-27 (feat/sites-lean-prompt): docstring notes the skill is no longer
+# inlined into the /sites preamble.
 # Updated: 2026-09-06 (feat/fx-skill-amendments): ceiling raised 34,000 ->
 # 34,500 so §2.C could teach the paw-fx effects registry instead of claiming
 # libraries never resolve. The argument is in the module docstring; the
 # mutations in tests/mutations/skill_budget.json still trip the new ceiling.
 """``pocketpaw-design-taste/SKILL.md`` stays under a stated byte ceiling.
+
+UPDATE 2026-09-27 (feat/sites-lean-prompt): the /sites create preamble no longer
+inlines this skill; it is named in <design-skills> and loaded on demand. The
+ceiling stays, because a skill the agent does load still costs its full length.
 
 WHY A SIZE TEST EXISTS FOR ONE MARKDOWN FILE. This skill is not merely
 installed for on-demand invocation. ``sites.py``'s ``_design_system_block``
