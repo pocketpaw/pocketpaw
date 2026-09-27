@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-27 (fix/sites-preview-fonts): ``_extract_css`` keeps remote
+#   stylesheets. A ``<link rel="stylesheet">`` with an absolute ``https://`` or
+#   protocol-relative ``//`` href (Google Fonts, Fontshare, ...) used to be read as a
+#   path under the build dir and silently dropped, so the native preview fell back to
+#   system fonts; it now becomes an ``@import url(...)`` in document order. After the
+#   parts are joined, every top-level ``@import`` (behind any ``@charset``) is hoisted
+#   to the start by ``_hoist_css_imports``: CSS ignores an @import that is not at the
+#   top, so one from a linked app.css joined after inline <style> rules did nothing.
+#
 # Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline):
 #   * ``edit_svelte_component`` no longer builds a local preview (publish(preview=True)
 #     → bun on the API host). It persists, then runs ``verify.verify_site`` for EVERY
@@ -1180,6 +1189,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import re
@@ -1394,6 +1404,24 @@ def _extract_body_inner(html: str) -> str:
     return (m.group(1) if m else html).strip()
 
 
+_CSS_CHARSET_RE = re.compile(r"""@charset\s+(?:"[^"]*"|'[^']*')\s*;""", re.IGNORECASE)
+_CSS_IMPORT_RE = re.compile(r"""@import\b(?:[^;"']|"[^"]*"|'[^']*')*;""", re.IGNORECASE)
+
+
+def _hoist_css_imports(css: str) -> str:
+    """Move every ``@import ...;`` statement to the top of ``css`` (order kept, moved
+    not duplicated), behind the first ``@charset`` if one is present. CSS ignores an
+    @import that follows any other rule, so a joined stylesheet must lead with them."""
+    charset = _CSS_CHARSET_RE.search(css)
+    css = _CSS_CHARSET_RE.sub("", css)
+    imports = [m.group(0) for m in _CSS_IMPORT_RE.finditer(css)]
+    if not imports and not charset:
+        return css
+    body = _CSS_IMPORT_RE.sub("", css).strip()
+    head = ([charset.group(0)] if charset else []) + imports
+    return "\n".join([*head, body] if body else head)
+
+
 def _extract_css(html: str, cloudflare_dir: Path) -> str:
     """Concatenate the built page's CSS into ONE string the native editor injects as
     a single ``<style>`` (NE-5b).
@@ -1404,7 +1432,15 @@ def _extract_css(html: str, cloudflare_dir: Path) -> str:
     prerendered index links assets with either a RELATIVE (``./_app/…``) or ABSOLUTE
     (``/_app/…``) href, so both are resolved against the build dir. Each resolved
     path is contained to the build tree (a ``../`` traversal in a hand-authored
-    component's link is refused) before it is read."""
+    component's link is refused) before it is read.
+
+    A stylesheet link with an absolute ``https://`` or protocol-relative ``//`` href
+    (a web font from Google Fonts / Fontshare in ``<head>``) is not on disk: it is
+    emitted as ``@import url("...");`` in its document position instead, since the
+    native preview drops the page ``<head>``. Plain ``http://`` and other schemes
+    are ignored. Finally every top-level ``@import`` is hoisted to the start of the
+    joined CSS (``_hoist_css_imports``), because CSS ignores an @import that is not
+    at the top of a sheet."""
     parts: list[str] = []
     for style in re.findall(r"<style[^>]*>(.*?)</style>", html, re.DOTALL | re.IGNORECASE):
         if style.strip():
@@ -1417,7 +1453,19 @@ def _extract_css(html: str, cloudflare_dir: Path) -> str:
         href_m = re.search(r"""href\s*=\s*["']([^"']+)["']""", tag, re.IGNORECASE)
         if not href_m:
             continue
-        rel = href_m.group(1).split("?", 1)[0].split("#", 1)[0]
+        href = href_m.group(1).strip()
+        if href.startswith("//"):
+            href = "https:" + href
+        if href.lower().startswith("https://"):
+            url = html_lib.unescape(href)
+            # Percent-encode anything that could close the url("...") token.
+            for ch, enc in (("\\", "%5C"), ('"', "%22"), ("\n", "%0A"), ("\r", "%0D")):
+                url = url.replace(ch, enc)
+            parts.append(f'@import url("{url}");')
+            continue
+        if re.match(r"[a-z][a-z0-9+.-]*:", href, re.IGNORECASE):
+            continue  # http:, data:, ... are neither remote-safe nor on disk
+        rel = href.split("?", 1)[0].split("#", 1)[0]
         if rel.startswith("./"):
             rel = rel[2:]
         rel = rel.lstrip("/")
@@ -1434,7 +1482,7 @@ def _extract_css(html: str, cloudflare_dir: Path) -> str:
             text = css_path.read_text(encoding="utf-8").strip()
             if text:
                 parts.append(text)
-    return "\n".join(parts)
+    return _hoist_css_imports("\n".join(parts))
 
 
 def _read_native_artifact(project_dir: str, engine: str = "svelte") -> tuple[str, str]:

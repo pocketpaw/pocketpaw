@@ -1,4 +1,6 @@
 # tests/ee/sites/test_native_artifact.py — the native-artifact render path (NE-5b).
+# Updated 2026-09-27 (fix/sites-preview-fonts): _extract_css keeps a remote font
+#   stylesheet link as an @import and hoists every @import to the top of the joined CSS.
 # Updated 2026-09-24 (PP-2): a component edit warms the artifact through its
 #   verification build rather than scheduling a separate pre-warm.
 # Created 2026-07-01 (feat/native-editing-ne4b).
@@ -820,3 +822,36 @@ def test_filesystem_store_evicts_to_keep_cap(tmp_path, monkeypatch):
     assert store.read("pocketZ", "hash3") is not None  # newest survives
     assert store.read("pocketZ", "hash2") is not None
     assert store.read("pocketZ", "hash0") is None  # oldest evicted
+
+
+def test_extract_css_keeps_remote_font_stylesheets_and_hoists_imports(tmp_path):
+    """A font linked from the page head survives, and every @import leads the CSS.
+
+    The native preview only gets ``{body_html, css}``, so a
+    ``<link rel="stylesheet" href="https://fonts.googleapis.com/...">`` in ``<head>``
+    used to be read as a file path under the build dir, not found, and dropped: the
+    preview showed system fonts. And CSS ignores an ``@import`` that is not at the
+    top of a sheet, so one from app.css joined after other rules did nothing.
+    """
+    root = tmp_path / "cloudflare"
+    (root / "_app").mkdir(parents=True)
+    (root / "_app" / "page.css").write_text(
+        '@import url("https://fonts.googleapis.com/css2?family=Zodiak&display=swap");\n'
+        ".hero{color:red}",
+        encoding="utf-8",
+    )
+    html = (
+        "<html><head><style>.crit{margin:0}</style>"
+        '<link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@400&display=swap">'
+        '<link rel="stylesheet" href="./_app/page.css">'
+        "</head><body><p>hi</p></body></html>"
+    )
+
+    css = sites_service._extract_css(html, root)
+
+    assert "api.fontshare.com/v2/css?f[]=satoshi@400&display=swap" in css
+    first_rule = css.index(".crit")
+    assert css.index("api.fontshare.com") < first_rule
+    assert css.index("fonts.googleapis.com") < first_rule
+    assert css.count("@import") == 2
+    assert ".hero{color:red}" in css
