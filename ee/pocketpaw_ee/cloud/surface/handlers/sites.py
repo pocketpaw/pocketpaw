@@ -9,6 +9,19 @@
 #   2. Every engine branch of ``_create_preamble`` names its own edit tool and
 #      forbids calling create a second time.
 #
+# Updated: 2026-09-27 (feat/sites-lean-prompt) — the create preamble no longer
+# embeds pocketpaw-design-taste (33k chars) or sites-craft (23k). It was ~76k
+# chars with ~100 prohibitions, and Anthropic's current guidance is the opposite:
+# a short, positive art direction the model commits to, bans framed as defaults to
+# question, no forced rotation, and a look at the render. The design phases are
+# now ``_ART_DIRECTION`` (a private prose brief: mood, 4-6 hex with jobs, a face
+# pair that actually loads, the fold, one signature moment, motion) plus
+# ``_CRAFT_FLOOR`` (the handful of rules that must hold on any public page).
+# Both skills stay installed and are named in <design-skills> for on-demand use.
+# html create also drops inline ripple (``_sites_profile``): it was carrying the
+# 35k-char widget catalog only to render one ask widget, and now asks through
+# ``ask_user`` like svelte and react.
+#
 # Updated: 2026-09-27 (feat/sites-visual-research) — design research is now
 # VISUAL and comes FIRST. Reproducing a rejected site by hand showed what fixed it:
 # searching per section, OPENING the reference screenshots, taking the locked
@@ -979,26 +992,25 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (
         "sites-conversion-structure",
         "create",
-        "BEFORE Phase 2 on any marketing / landing brief. Fixes the ONE offer and "
-        "ONE action, the order the page argues in, the "
-        "headline + CTA copy, and index/noindex. The DESIGN SYSTEM below owns how "
-        "the page LOOKS; this owns what it SAYS.",
+        "When the page's argument is unclear: what the one offer and one action "
+        "are, which sections it needs and in what order, headline and CTA copy.",
     ),
     (
         "sites-craft",
-        "refine",
-        "When an edit ADDS a section or restructures one, rather than changing "
-        "copy or a single value. The block above carries only the floor and the "
-        "symptom index; this is the full construction method behind them — the "
-        "type scale, how a ramp is built, the 2x grouping gap, concentric radius. "
-        "On a create turn it is already embedded in full and needs no invocation.",
+        "both",
+        "When you want the full construction method: a modular type scale, a "
+        "colour ramp where every step has a job, spacing and radius rules.",
+    ),
+    (
+        "pocketpaw-design-taste",
+        "create",
+        "When research came back empty and you want a catalogue of aesthetic "
+        "directions, type pairings and motion vocabulary to start from.",
     ),
     (
         "sites-theme-system",
         "create",
-        "Before locking tokens on your SECOND or later site in a conversation, or "
-        "whenever a page risks resembling the last one. Carries the three-axis "
-        "difference test and the nav / footer rotation the repetition ban needs.",
+        "When the user says a new site looks too much like the last one.",
     ),
     (
         "sites-restraint",
@@ -1017,22 +1029,17 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (
         "sites-design-research",
         "both",
-        "BEFORE locking a palette or type on a brief that leaves the LOOK open — "
-        "a new landing page, a redesign, or a 'make it premium / editorial / "
-        "technical' ask. Searches REAL shipped design systems and locks one "
-        "direction with a decision ledger, which is what the DESIGN SYSTEM below "
-        "then builds from. Skip it for a copy edit, a single value change, or "
-        "when the user supplied a design to match. Returns nothing when Refero "
-        "is unconfigured — that is normal, design on your own judgement and "
-        "never cite a reference you did not receive.",
+        "When you want the longer research method behind the RESEARCH step: how "
+        "to search, open and lock references. Skip it for a copy edit or when the "
+        "user supplied a design to match.",
     ),
     (
         "sites-design-sources",
         "both",
         "When you are about to hand-write a BACKGROUND, texture, canvas shader, "
         "CSS animation or text effect, when the brief NAMES an effect you want to "
-        "build well rather than by reflex, or when picking type and Inter is not "
-        "allowed. Real techniques filtered to what this surface can build: no "
+        "build well rather than by reflex, or when picking type. Real "
+        "techniques filtered to what this surface can build: no "
         "file downloads, so everything there is CSS, inline SVG or GLSL you "
         "retype (npm packages go through set_site_dependencies).",
     ),
@@ -1056,8 +1063,8 @@ def create_design_skill_names() -> frozenset[str]:
 
     Deriving both from ``_SITES_DESIGN_SKILLS`` is what keeps them in sync;
     ``test_sites_create_skill_names_cover_the_advertised_skills`` is what proves
-    it. ``pocketpaw-design-taste`` is deliberately NOT here — it arrives embedded
-    in the preamble, and naming it would ship the same bytes twice per turn.
+    it. ``pocketpaw-design-taste`` joined on 2026-09-27 when the create preamble
+    stopped embedding it.
     """
     return frozenset(name for name, scope, _ in _SITES_DESIGN_SKILLS if scope in ("create", "both"))
 
@@ -1089,16 +1096,10 @@ def _design_skills_note(mode: str) -> str:
     if not rows:
         return ""
     if mode == "create":
-        frame = (
-            "Unlike the DESIGN SYSTEM and the CRAFT SYSTEM at the end of this "
-            "message (both already in your context), you reach these with the "
-            "`Skill` tool at the moment a trigger fires, then follow the skill in "
-            "full."
-        )
+        frame = "Reach one with the `Skill` tool when its trigger fires."
         precedence = (
-            "They COMPOSE with the embedded systems and never override them: "
-            "where a skill and the DESIGN SYSTEM disagree on a visual value, the "
-            "DESIGN SYSTEM wins.\n"
+            "They are reference material. Your art direction and anything the user "
+            "supplied win over them.\n"
         )
     else:
         frame = (
@@ -1174,7 +1175,7 @@ def _design_research_step() -> str:
     before showing it. The step now asks for exactly that.
 
     WHAT IT STILL HOLDS:
-      * the ROTATION ban. An archive queried with the same brief returns the same
+      * no clone. An archive queried with the same brief returns the same
         exemplars, so "copy what came back" makes two similar briefs identical.
         One dominant reference plus narrow borrowings, never a clone, and a second
         site in a conversation still changes direction.
@@ -1195,7 +1196,7 @@ def _design_research_step() -> str:
 def _refero_research_intro() -> str:
     return (
         "\n"
-        "PHASE 1b — RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
+        "RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
         f"You have `{_REFERO_STYLES_TOOL}` — Refero's library of real shipped "
         "design systems, not a generator — plus "
         f"`{_REFERO_SCREENS_TOOL}` for real screens and `{_REFERO_VIEW_TOOL}` to "
@@ -1203,7 +1204,8 @@ def _refero_research_intro() -> str:
         "1. Search styles from two or three angles (the overall look, products "
         "like this one, a named product the brief evokes) and search screens once "
         "per section you are unsure of, describing what is ON the screen "
-        "('waitlist hero with product visual', 'social proof avatars counter').\n"
+        "(the section and the kind of business, e.g. 'pricing table for a "
+        "dental clinic').\n"
         f"2. OPEN the 3-5 strongest with `{_REFERO_VIEW_TOOL}`. This is the step "
         "that matters: the pattern the good references share (how the fold is "
         "built, whether the product is shown, how light the page is, where colour "
@@ -1221,13 +1223,12 @@ def _refero_research_intro() -> str:
 def _inspo_research_intro() -> str:
     return (
         "\n"
-        "PHASE 1b — RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
+        "RESEARCH REAL SITES, AND LOOK AT THEM (before you choose the look).\n"
         f"You have `{_RESEARCH_TOOL}` — an archive of real shipped pages, "
         f"not a generator — plus `{_REFERENCE_SCREENSHOT_TOOL}` to SEE an exemplar "
         "as images. Run it like this:\n"
         "1. Call it with the brief in plain words, then again for any section "
-        "whose shape is the open question ('waitlist hero with product visual', "
-        "'social proof counter').\n"
+        "whose shape is the open question (the section and the kind of business).\n"
         f"2. OPEN the 3-5 strongest exemplars with `{_REFERENCE_SCREENSHOT_TOOL}`. "
         "This is the step that matters: the pattern the good references share "
         "(how the fold is built, whether the product is shown, how light the page "
@@ -1241,21 +1242,19 @@ def _inspo_research_intro() -> str:
 def _research_rails() -> str:
     return (
         "THEN LOCK ONE DIRECTION before any tokens: one line naming the primary "
-        "reference and the traits that must survive (e.g. 'light page, one calm "
-        "headline, black pill CTA, product screen in a large gradient panel'), plus "
-        "anything narrow you borrow from a second one. The locked reference SETS "
-        "the look: its palette with each colour kept in its role, its type "
-        "character, its composition. The DESIGN SYSTEM below fills whatever the "
-        "reference leaves open and supplies the craft.\n"
+        "reference and the few traits that must survive, plus anything narrow you "
+        "borrow from a second one. The locked reference SETS the look: its "
+        "palette with each colour kept in its role, its type character, its "
+        "composition.\n"
         "THE LIMITS ON IT:\n"
-        "- The ROTATION ban still binds. The same brief returns the same "
-        "exemplars, so one dominant reference plus narrow borrowings, never a "
-        "clone of a single site, and a second site in this conversation locks a "
-        "different direction. Never lift a whole site wholesale.\n"
+        "- No clone: one dominant reference plus narrow borrowings, never a whole "
+        "site lifted wholesale. Similar briefs return the same exemplars, so let "
+        "this business's own specifics (its audience, its product, its place) make "
+        "the page its own.\n"
         "- Anything the USER supplied (brand colour, logo, document, a site they "
         "named) outranks every reference.\n"
-        "- Take their design, not their compliance: contrast floors, the em-dash "
-        "ban and honest copy still bind.\n"
+        "- Take their design, not their compliance: contrast floors and honest copy "
+        "still bind.\n"
         "- Keep it proportionate: a handful of searches and 3-5 opened references "
         "for a new site, less for a small change. If the tools error or return "
         "nothing, say nothing about it and proceed on your own judgement — the "
@@ -1472,11 +1471,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         build_step = (
             "BUILD via the `pocketpaw-create-svelte-site` skill — invoke it by "
             "intent (no slash command). YOU write premium hand-written SvelteKit "
-            "components at the design quality bar, "
-            "authoring them per the embedded `pocketpaw-design-taste` design "
-            "system for premium, non-generic styling on top of the design "
-            "system's tokens, "
-            "THEME them with those tokens + your asset URLs, and it persists the "
+            "components from your art direction and tokens + your asset URLs, "
+            "and it persists the "
             'source pocket `type="site"` + `pattern="landing"` + `engine="svelte"` '
             "as a reviewable DRAFT — it does NOT publish (see the DRAFT-FIRST "
             "step). There is NO rippleSpec and NO widget catalog on "
@@ -1510,10 +1506,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         build_step = (
             "BUILD via the `pocketpaw-create-react-site` skill — invoke it by "
             "intent (no slash command). YOU write premium hand-written React "
-            "components at the design quality bar, "
-            "authoring them per the embedded `pocketpaw-design-taste` design "
-            "system for premium, non-generic styling on top of the design "
-            "system's tokens, THEME them with those tokens + your asset URLs, and "
+            "components from your art direction and tokens + your asset URLs, and "
             "assemble a `source` map rooted at `src/App.tsx` (the composition "
             "root; sections under `src/components/*.tsx`). The build shell is "
             "GENERATED and reserved — your map may NOT write `index.html`, "
@@ -1559,7 +1552,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "BUILD via the `pocketpaw-create-paw-site` skill — invoke it by "
             "intent (no slash command). It composes the page by conversion role "
             'and stamps the source pocket `type="site"` + `pattern="landing"`. '
-            "THEME the page with the chosen design system's tokens + your asset "
+            "THEME the page with your art direction's tokens + your asset "
             "URLs. The lead-capture form must be FLAT native "
             '`input`/`textarea`/`button{type:"submit"}` widgets — NEVER the `form` or '
             "`newsletter` widget, which nests an invalid `<form>` on a static "
@@ -1596,7 +1589,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "vanilla JS a static page genuinely needs) at the HIGHEST design "
             "quality bar — treat HTML/CSS as first-class, not a lesser option; a "
             "hand-written static page can look every bit as premium as a "
-            "component build. THEME it with the chosen design system's tokens + "
+            "component build. THEME it with your art direction's tokens + "
             "your asset URLs, then persist it by calling "
             "`mcp__pocketpaw_sites_manager__create_html_site` with the `source` "
             'map (it stamps the source pocket `type="site"` + `pattern="landing"` '
@@ -1650,7 +1643,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     # surface is not an error, it is a fenced code block the user reads as raw
     # JSON. react joins svelte here (RX-2) because it hand-authors markup and its
     # profile drops ripple for the same reason svelte's does.
-    ripple_on = engine not in ("svelte", "react")
+    # html dropped ripple on 2026-09-27 (feat/sites-lean-prompt): the 35k-char
+    # widget catalog rode every html create only to render one ask widget.
+    ripple_on = engine == "ripple"
     if ripple_on:
         ask_mechanism = (
             "render an `ask-user-questions` ripple widget — a ```ui-spec fenced "
@@ -1687,8 +1682,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "sitemap), that material IS the spec. READ IT IN FULL before you design "
         "anything and build to what it says: the sections it names, the tokens it "
         "sets, the copy it supplies, the voice it sets. It outranks every default "
-        "and every inference in this message, including the embedded DESIGN "
-        "SYSTEM, wherever the two disagree. Anything it supplies ships VERBATIM: "
+        "and every inference in this message, wherever the two disagree. "
+        "Anything it supplies ships VERBATIM: "
         "do not rewrite a supplied headline or swap a stated brand color because "
         "the palette would be tidier. Where it is silent, you decide. "
         "Acknowledging a document and then designing past it is the worst failure "
@@ -1697,7 +1692,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "\n"
         "DECIDE THE DESIGN YOURSELF; ASK ONLY FOR REAL FACTS. Choosing the visual "
         "style, palette, layout, and typography is YOUR expertise — infer it from "
-        "the business and NEVER ask the user 'what style / theme / colors do you "
+        "the business and never ask the user 'what style / theme / colors do you "
         "want?'. The only things worth asking are real-world FACTS you genuinely "
         "cannot know and cannot sensibly placeholder (a specific offering list, "
         "real contact details, real pricing) — and even then PREFER to proceed "
@@ -1706,60 +1701,19 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "facts (invented testimonials, precise stats, prices, addresses, phone "
         "numbers) — use an obviously-generic placeholder and flag it instead.\n"
         "\n"
-        "PHASE 0 — THE ARGUMENT (settle this before any design decision).\n"
-        "Invoke the `sites-conversion-structure` skill and follow it: the ONE "
-        "offer, the ONE action, WHICH sections this page needs, and the order it argues "
-        "in. Do this FIRST. A page that looks right and argues nothing does not "
-        "convert, and the section list is the most expensive thing to change once "
-        "the markup exists.\n"
-        "\n"
-        "PHASE 1 — CREATIVE DIRECTION (infer, do NOT ask).\n"
-        "Run the Creative Direction Engine from the DESIGN SYSTEM embedded at the "
-        "end of this message (the 2026 Creative Director system is ALREADY in your "
-        "context — no invocation is needed to reach THE DESIGN SYSTEM ITSELF, nor "
-        "the CRAFT SYSTEM that follows it. That "
-        "is not a general instruction to avoid skills: the ones named in "
-        "<design-skills> are NOT in your context and you DO invoke those): "
-        "work out, for yourself, the Vision Ledger "
-        "and a one-line Visual DNA Token (the Design Read). Hold the look itself "
-        "open until PHASE 1b has shown you real references; lock it there. When "
-        "research returns nothing, fall back to ONE family from 2.E. "
-        "Do NOT ask the user to pick the look. If "
-        "the user already named a style or brand, honor it. Rotate the identity "
-        "and palette so two similar briefs never look identical.\n"
+        "THE ARGUMENT. Settle the one offer, the one action, and the sections the "
+        "brief asks for, in the order that sells. Nothing the brief did not ask for.\n"
         # Always present now that the research server is bundled rather than an
-        # opt-in external one. See `_design_research_step` for why it is Phase 1b
-        # and not Phase 2, and for the two rails that keep a reference archive
-        # from flattening every site it touches.
+        # opt-in external one. See `_design_research_step` for why research comes
+        # before the look is chosen.
         f"{_design_research_step()}"
         "\n"
-        "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM and CRAFT "
-        "SYSTEM throughout).\n"
-        "1. LOCK THE TOKENS. There is NO design-system library to pick from: "
-        "you AUTHOR the token set for THIS business out of the identity you "
-        "just locked. Take the palette (with its roles), type character and "
-        "radius from the locked reference, fill the gaps from the embedded "
-        "DESIGN SYSTEM (2.B-2.G, or a 2.E family when research came back "
-        "empty) and write them out as concrete CSS custom properties (--bg, --ink, "
-        "--accent, --radius, --shadow, the display + body faces) BEFORE you "
-        "write any markup, then build every section from those variables "
-        "instead of sprinkling ad-hoc hex per section. CONSTRUCT them with the "
-        "embedded CRAFT SYSTEM — a modular type scale with line-height by role, "
-        "a ramp whose every step has a job, the 2x grouping gap and concentric "
-        "radius — not as a handful of values picked one at a time. The same "
-        "rules GOVERN "
-        "the build: a tuned ground (never a plain "
-        "#fff/#000 page), the ONE locked direction, a bold typographic "
-        "pairing, Tier-0 CSS-only motion, and ZERO em-dashes. Compose each "
-        "section from the references you opened. ROTATE, because a look you "
-        "reach for by reflex is the look every site in that industry already "
-        "has: do NOT default to the warm / earthy family just because the "
-        "business is a cafe, salon, or shop, pick the less-obvious fit, and "
-        "reseed the accent so two similar briefs never resolve to the same "
-        "palette. If this is the SECOND or later site you have built in this "
-        "conversation, invoke `sites-theme-system` BEFORE you write the tokens "
-        "and run its three-axis difference test — 'rotate' is an instruction you "
-        "cannot check, and that skill is how you check it.\n"
+        f"{_ART_DIRECTION}"
+        "\n"
+        "BUILD.\n"
+        "1. TOKENS FIRST. Write the art direction out as CSS custom properties "
+        "(colours by job, the two faces, radius, a type scale, spacing) before any "
+        "markup, then build every section from them.\n"
         "2. CUSTOM COLORS. If the user gave a brand color, call "
         "`mcp__pocketpaw_palette__scale_from_color` with the hex to get a full "
         "scale and OVERRIDE the accent you chose with it. If they gave "
@@ -1793,12 +1747,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "'A one-page site for the studio that leads with the work and "
         "pushes to the enquiry form.' Then build.\n"
         f"5. {build_step}\n"
-        "5b. SELF-CHECK BEFORE YOU SHOW IT. Invoke `sites-ship-fixes` and run its "
-        "list against what you just built. These are the defects that come back as "
-        "the first revision — the CTA under the fold, a sticky section bleeding "
-        "into the next, headings unreadable behind the nav, a mobile horizontal "
-        "scroll — and every one of them is cheaper to fix now than after the user "
-        "sees it. " + _LOOK_RULE + "\n"
+        "5b. " + _LOOK_RULE + "`sites-ship-fixes` lists the defects that most "
+        "often come back as a first revision if you want a checklist.\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
         "tool persists a reviewable DRAFT the user previews IN-APP (open /sites → "
         "the site's Preview tab). Publishing deploys the site to the public edge "
@@ -1822,7 +1772,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "note what you fell back on. A tool failure must NEVER block "
         "the build.\n"
         "- ONE round of questions maximum. If the user already gave detail or "
-        "says 'just build it', skip straight to Phase 2 with sensible "
+        "says 'just build it', go straight to building with sensible "
         "defaults.\n"
         "- When you DO publish (the user asked), never claim a publish that "
         "didn't happen — relay the real publish error and show the real `url`. "
@@ -1832,8 +1782,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}\n"
         f"{_design_skills_note('create')}"
-        f"{_design_taste_system()}"
-        f"{_craft_system()}"
+        f"{_CRAFT_FLOOR}"
     )
 
 
@@ -1854,6 +1803,51 @@ _VERIFY_RULE = (
     "say it could not be checked and why (on a ripple site `engine_not_verifiable` "
     "only means there is no authored code to check). "
 )
+
+# Added 2026-09-27 (feat/sites-lean-prompt). The design phase of every create, in
+# place of the 56k chars of embedded design-taste + craft it replaces. Written the
+# way Anthropic's current frontend guidance says works: a concrete direction the
+# model writes and commits to, the model's own defaults named as things to question
+# rather than banned, variety from the subject rather than forced rotation, and fonts
+# that actually load (5 of the old recommended faces were commercial and silently
+# fell back to system fonts).
+_ART_DIRECTION = (
+    "ART DIRECTION (write it privately before any markup; never ship it in the "
+    "page). Ground it in who the site is for, what the page has to do, and the "
+    "references you opened. In a few sentences of prose: the mood; 4-6 colours as "
+    "hex, each with its job (ground, ink, muted ink, accent, surface); a display "
+    "face and a body face and why they suit this business; how the first screen is "
+    "composed; one signature moment the page is remembered by; how much moves and "
+    "why. Consider two or three genuinely different directions, then build the one "
+    "that best fits this business.\n"
+    "Your own defaults are recognisable and read as generated: a cream page with a "
+    "serif display and a terracotta accent; a near-black page with one neon or warm "
+    "accent; a centred hero over three icon cards; small uppercase labels above "
+    "every heading; stats and testimonials nobody supplied. Each is right for some "
+    "brief. Use one only when this brief calls for it.\n"
+    "Fonts must load from a URL: one `<link>` to Google Fonts "
+    "(`fonts.googleapis.com/css2?family=...&display=swap`) or to Fontshare "
+    "(`api.fontshare.com/v2/css?f[]=satoshi@400,500&display=swap`, which hosts "
+    "Satoshi, General Sans, Clash Display, Cabinet Grotesk, Switzer, Zodiak, "
+    "Sentient, Erode and Gambetta). A face on neither silently falls back to the "
+    "system font.\n"
+)
+
+# Added 2026-09-27 (feat/sites-lean-prompt). What must hold on any public page,
+# whatever the direction. The full construction method is the sites-craft skill.
+_CRAFT_FLOOR = (
+    "<craft-floor>\n"
+    "Whatever the direction, a public page holds these: body text at least 16px "
+    "with lines around 65 characters; text contrast of 4.5:1 (3:1 for large text "
+    "and controls); tap targets of 44px; a visible focus state; motion that "
+    "respects `prefers-reduced-motion`; one column with no horizontal scroll "
+    "below 768px; media with width and height or aspect-ratio; every section "
+    "finished in the markup, because visitors get prerendered HTML first; and real "
+    "content only, so a fact nobody supplied (a testimonial, a stat, a price, an "
+    "address) is a clearly marked placeholder.\n"
+    "</craft-floor>\n"
+)
+
 
 # Updated 2026-09-27 (feat/sites-visual-research). The half of "is it ready" that
 # _VERIFY_RULE cannot answer: a page that builds cleanly can still look wrong, and
