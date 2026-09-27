@@ -1,4 +1,14 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-27 (feat/bulk-grants-conversations) — new
+#   POST /paw-bar/admin/sites/conversations reads the conversation lists of many
+#   sites in one call ({site_ids 1..50, limit, state} → {sites, errors}), so the
+#   chat sidebar stops sending one GET per site. Same ``_require_paw_bar_read``
+#   gate as the per-site GET and the same per-site work
+#   (``_resolve_site_and_widget`` then ``_list_conversations`` from the newest
+#   page); ids are deduped and read at most ``_SITES_CONVERSATIONS_CONCURRENCY``
+#   at a time. One site's failure lands in ``errors`` and never fails the rest: a
+#   404 (absent, malformed or another workspace's site) is ``not_found``, anything
+#   else is logged and reported as ``error``.
 # Updated: 2026-09-26 (fix/pawbar-public-starters-sync-status) — GET /paw-bar/frame
 #   carries the bound agent's conversation starters. It hard-coded ``starters=[]``
 #   on the stale belief that the Agent model had no such field, so owners saw
@@ -2498,6 +2508,26 @@ class ConversationsResponse(BaseModel):
     counts: dict[str, int] = Field(default_factory=dict)
 
 
+class SitesConversationsRequest(BaseModel):
+    """POST /paw-bar/admin/sites/conversations body — the batch of the site GET."""
+
+    site_ids: list[str] = Field(min_length=1, max_length=50)
+    limit: int = Field(20, ge=1, le=100)
+    state: str | None = None
+
+
+class SitesConversationsResponse(BaseModel):
+    """Each site's first conversations page, keyed by site id.
+
+    A site that could not be read is absent from ``sites`` and present in
+    ``errors`` as ``not_found`` (absent, malformed, or another workspace's id —
+    one answer, so nothing leaks) or ``error`` (anything else).
+    """
+
+    sites: dict[str, ConversationsResponse] = Field(default_factory=dict)
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
 class AgentConversationItem(ConversationItem):
     """A conversation in the AGENT-scoped inbox — the site lens made explicit.
 
@@ -3043,6 +3073,74 @@ async def get_site_conversations(
     return await _list_conversations(
         site.pocket_id, workspace_id, limit=limit, cursor=cursor, widget=widget, state=state
     )
+
+
+#: How many sites one batch conversations read works on at once. Each site is a
+#: Site lookup, a widget lookup and a bounded run scan, so this caps the fan-out.
+_SITES_CONVERSATIONS_CONCURRENCY = 8
+
+
+@router.post(
+    "/paw-bar/admin/sites/conversations",
+    response_model=SitesConversationsResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_sites_conversations(
+    body: SitesConversationsRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> SitesConversationsResponse:
+    """The newest conversations page for many sites in one request.
+
+    Each site gets exactly what ``GET /paw-bar/admin/site/{id}/conversations``
+    would answer with no cursor. Failures are per site: a 404 from the
+    workspace-scoped resolve (which is also what a foreign site id gets) lands in
+    ``errors`` as ``not_found``, any other failure is logged and lands as
+    ``error``, and the other sites are still returned.
+    """
+    from pocketpaw_ee.cloud.shared.errors import NotFound
+
+    state = body.state
+    if state is not None and state not in {s.value for s in ConversationState}:
+        raise HTTPException(422, "invalid_state")
+
+    site_ids = list(dict.fromkeys(body.site_ids))
+    sem = asyncio.Semaphore(_SITES_CONVERSATIONS_CONCURRENCY)
+
+    async def _one(site_id: str) -> ConversationsResponse | str:
+        async with sem:
+            try:
+                site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+                return await _list_conversations(
+                    site.pocket_id,
+                    workspace_id,
+                    limit=body.limit,
+                    cursor=None,
+                    widget=widget,
+                    state=state,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    return "not_found"
+                logger.warning(
+                    "batch conversations read failed for site %s: %s", site_id, exc.detail
+                )
+                return "error"
+            except NotFound:
+                return "not_found"
+            except Exception:  # noqa: BLE001 — one site must not fail the batch
+                logger.warning(
+                    "batch conversations read failed for site %s", site_id, exc_info=True
+                )
+                return "error"
+
+    results = await asyncio.gather(*(_one(sid) for sid in site_ids))
+    out = SitesConversationsResponse()
+    for site_id, result in zip(site_ids, results, strict=True):
+        if isinstance(result, str):
+            out.errors[site_id] = result
+        else:
+            out.sites[site_id] = result
+    return out
 
 
 @router.patch(

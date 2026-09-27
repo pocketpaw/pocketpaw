@@ -1,5 +1,17 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-09-27 (feat/bulk-grants-conversations): added ``POST /uploads/grants``,
+the batch form of ``GET /uploads/{file_id}/grant``. The chat sidebar used to
+fire one grant request per attachment and thumbnail; now it sends one list of
+``{id, w, h, q, f}`` items (1..200, same bounds as the GET) and gets back
+``{"grants": [...]}`` in request order, one entry per item. Both routes mint
+through ``_mint_grant``, so a batch item is byte-for-byte what the single GET
+returns; the old ``grant()`` body moved there unchanged. Identical items are
+minted once, at most ``_GRANT_CONCURRENCY`` at a time. A missing or foreign
+file is ``{"error": "not_found"}`` for that item only, never a failed batch.
+The route sits above every ``/{file_id}`` route so no future ``POST
+/{file_id}`` can swallow the literal ``/grants`` segment.
+
 2026-09-14 (feat/uploads-multipart-endpoints): the five resumable-upload routes
 from ``docs/design/drafts/2026-09-14-multipart-upload-contract.md`` — init, the
 relay part PUT, complete, status/resume, and abort. They live on THIS router,
@@ -92,7 +104,9 @@ into it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -111,10 +125,12 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from pocketpaw.uploads.config import INLINE_MIMES, UploadSettings
 from pocketpaw.uploads.errors import NotFound
 from pocketpaw.uploads.factory import build_adapter
+from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
@@ -618,6 +634,89 @@ async def upload(
     }
 
 
+# ---------------------------------------------------------------------------
+# Grants — short-lived download URLs, single and batch
+# ---------------------------------------------------------------------------
+
+#: How many grants one batch mints at once. Each is a scoped metadata read plus
+#: (on S3) a presign, so this bounds the Mongo fan-out of one request.
+_GRANT_CONCURRENCY = 16
+
+
+async def _mint_grant(
+    file_id: str, user_id: str, workspace: str, *, w: int, h: int, q: int, f: str
+) -> dict:
+    """Mint the ``{url, expires_at}`` pair for one file. Raises ``NotFound``.
+
+    Shared by ``GET /{file_id}/grant`` and ``POST /grants`` so a batch item is
+    exactly what the single route would have answered. Workspace scope and the
+    per-file read ACL are enforced by ``EEUploadService.presigned_get``.
+
+    When ``w`` or ``h`` is set the URL points at a resized thumbnail served by
+    ``GET /uploads/{id}`` (generated on first request, server-cached after).
+    Full-size downloads get the S3 presigned URL when the adapter has one;
+    thumbnails always get the cookie-authed server URL.
+    """
+    has_thumb = w > 0 or h > 0
+    _rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
+    expires_at = int(time.time()) + DEFAULT_TTL_SECONDS
+
+    if has_thumb or presigned is None:
+        thumb_qs = f"w={w}&h={h}&q={q}&f={f}" if has_thumb else ""
+        base = f"/api/v1/uploads/{file_id}"
+        sep = "?" if thumb_qs else ""
+        return {"url": f"{base}{sep}{thumb_qs}", "expires_at": expires_at}
+
+    return {"url": presigned, "expires_at": expires_at}
+
+
+class GrantItem(BaseModel):
+    """One file to grant. Same fields and bounds as ``GET /{file_id}/grant``."""
+
+    id: str
+    w: int = Field(default=0, ge=0, le=2048)
+    h: int = Field(default=0, ge=0, le=2048)
+    q: int = Field(default=80, ge=1, le=100)
+    f: str = "webp"
+
+
+class GrantBatchRequest(BaseModel):
+    items: list[GrantItem] = Field(min_length=1, max_length=200)
+
+
+@router.post("/grants")
+async def grant_batch(
+    body: GrantBatchRequest,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Mint grants for many files in one request.
+
+    Answers ``{"grants": [...]}`` in the same order and length as
+    ``body.items``. Each entry echoes ``id, w, h, q, f`` and carries either
+    ``url`` + ``expires_at`` or ``error: "not_found"``; a file the caller cannot
+    see fails only its own entry. Identical items are minted once.
+    """
+    keys = [(i.id, i.w, i.h, i.q, i.f) for i in body.items]
+    unique = list(dict.fromkeys(keys))
+    sem = asyncio.Semaphore(_GRANT_CONCURRENCY)
+
+    async def _one(key: tuple[str, int, int, int, str]) -> dict:
+        file_id, w, h, q, f = key
+        async with sem:
+            try:
+                return await _mint_grant(file_id, user_id, workspace, w=w, h=h, q=q, f=f)
+            except NotFound:
+                return {"error": "not_found"}
+
+    minted = dict(zip(unique, await asyncio.gather(*(_one(k) for k in unique)), strict=True))
+    return {
+        "grants": [
+            {"id": k[0], "w": k[1], "h": k[2], "q": k[3], "f": k[4], **minted[k]} for k in keys
+        ]
+    }
+
+
 @router.patch("/{file_id}")
 async def patch_upload(
     file_id: str,
@@ -813,10 +912,6 @@ async def download_url(
     enforced by ``EEUploadService.presigned_get``; the alias does not
     relax any check.
     """
-    import time
-
-    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
-
     try:
         rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
     except NotFound as e:
@@ -842,38 +937,12 @@ async def grant(
 ) -> dict:
     """Mint a short-lived download URL for ``file_id``.
 
-    When ``w`` or ``h`` is provided, returns a URL to a resized thumbnail
-    served through the ``GET /uploads/{id}`` endpoint. Thumbnail generation
-    is deferred to the first request (server-cached after that).
-
-    For full-size downloads, returns the S3 presigned URL when available.
-    For thumbnails, always returns a cookie-authed server URL.
+    The body lives in ``_mint_grant``, which ``POST /grants`` shares.
     """
-    import time
-
-    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
-
-    has_thumb = w > 0 or h > 0
     try:
-        _rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
+        return await _mint_grant(file_id, user_id, workspace, w=w, h=h, q=q, f=f)
     except NotFound as e:
         raise HTTPException(status_code=404, detail="not found") from e
-
-    has_presigned = presigned is not None
-
-    if has_thumb or not has_presigned:
-        thumb_qs = f"w={w}&h={h}&q={q}&f={f}" if has_thumb else ""
-        base = f"/api/v1/uploads/{file_id}"
-        sep = "?" if thumb_qs else ""
-        return {
-            "url": f"{base}{sep}{thumb_qs}",
-            "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
-        }
-
-    return {
-        "url": presigned,
-        "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
-    }
 
 
 @router.get("/{file_id}")
