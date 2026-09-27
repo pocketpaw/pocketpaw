@@ -14,6 +14,16 @@ Backend-aware exclusion:
 - BrowserTool/DesktopTool: always excluded (need special session state)
 
 Changes:
+- 2026-09-27 (fix/pydantic-ai-tool-images): _make_inprocess_caller no longer
+  drops the MCP ``image`` blocks an in-process tool returns. It joined only each
+  block's ``.text``, so on /sites the preview tool's six screenshots never
+  reached the vision model, which then said it had seen none. When a result
+  carries images, _call now returns a list: the scanned, capped text (if any)
+  followed by one ``BinaryContent`` per image, in order (new helper
+  _mcp_image_contents; undecodable or empty blocks are skipped). pydantic-ai
+  sends a list return natively as multimodal tool-result content. The injection
+  scan and char cap still apply to the text only, error results stay text-only,
+  and a text-only result is still the plain string it always was.
 - 2026-08-15 (fix/bridged-tool-arg-types): _signature_from_json_schema now maps
   each property's JSON-schema ``type`` to the matching Python annotation and
   keeps the schema's own ``default``, instead of flattening everything to
@@ -1069,7 +1079,7 @@ def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any, se
     """
     limit = int(getattr(settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
 
-    async def _call(**kwargs: Any) -> str:
+    async def _call(**kwargs: Any) -> str | list[Any]:
         # Drop unset optionals — MCP handlers check presence, and an explicit
         # ``None`` is not the same as an omitted argument to them.
         arguments = {k: v for k, v in kwargs.items() if v is not None}
@@ -1080,9 +1090,8 @@ def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any, se
             )
         )
         root = result.root
-        text = "\n".join(
-            getattr(block, "text", "") or "" for block in (getattr(root, "content", None) or [])
-        ).strip()
+        blocks = getattr(root, "content", None) or []
+        text = "\n".join(getattr(block, "text", "") or "" for block in blocks).strip()
         if getattr(root, "isError", False):
             # Returned, not raised: the model can read the reason and correct
             # its arguments. Raising would burn a retry on an error it never saw.
@@ -1093,12 +1102,50 @@ def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any, se
             # Announced, never silent — see the same cap in
             # ``_make_pydantic_ai_tool`` for why a quiet truncation on a tool
             # asked for complete content is how the /code fabrication bug began.
-            return (
+            scanned = (
                 f"{scanned[:limit]}\n\n[truncated: {tool_name} returned "
                 f"{len(scanned)} chars, limit {limit}. This output is INCOMPLETE — "
                 f"narrow the request rather than inferring the remainder.]"
             )
-        return scanned
+
+        # MCP ``image`` blocks (the sites preview screenshots) go back to the
+        # model natively, as ``BinaryContent`` inside the tool's own return:
+        # pydantic-ai sends a list return as multimodal tool-result content.
+        # Joining ``.text`` alone used to drop them, so a vision model got the
+        # caption and never the pictures. A text-only result stays a plain str.
+        images = _mcp_image_contents(blocks, tool_name)
+        if not images:
+            return scanned
+        return ([scanned] if scanned else []) + images
 
     _call.__name__ = tool_name
     return _call
+
+
+def _mcp_image_contents(blocks: list, tool_name: str) -> list[Any]:
+    """Decode an MCP result's ``image`` blocks into pydantic-ai ``BinaryContent``.
+
+    Order is preserved. A block whose base64 fails to decode, or decodes to
+    nothing, is skipped (logged at debug) rather than failing the call: the
+    text half of the result is still worth delivering.
+    """
+    import base64
+    import binascii
+
+    from pydantic_ai import BinaryContent
+
+    images: list[Any] = []
+    for block in blocks:
+        if getattr(block, "type", None) != "image":
+            continue
+        try:
+            data = base64.b64decode(getattr(block, "data", "") or "", validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            logger.debug("%s: skipping an image block that is not valid base64", tool_name)
+            continue
+        if not data:
+            logger.debug("%s: skipping an empty image block", tool_name)
+            continue
+        media_type = getattr(block, "mimeType", None) or "application/octet-stream"
+        images.append(BinaryContent(data=data, media_type=media_type))
+    return images
