@@ -1,5 +1,10 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-27 (fix/run-stream-session-readers): added
+``can_read_session(session_id, user_id)``, the boolean form of
+``_fetch_readable_session``. The chat run stream uses it so a teammate who may
+read a pocket thread can also watch the reply stream in, not only its history.
+
 Updated 2026-09-27 (feat/bulk-grants-conversations): added
 ``list_by_agents(ctx, workspace_id, agent_ids)``, the batch form of
 ``list_by_agent`` behind ``POST /sessions/by-agents``. Same filter (workspace,
@@ -668,6 +673,17 @@ async def _fetch_readable_session(session_id: str, user_id: str) -> _SessionDoc:
         if workspace_id is not None and workspace_id == doc.workspace:
             return doc
     raise Forbidden("session.not_owner", "Not the session owner")
+
+
+async def can_read_session(session_id: str, user_id: str) -> bool:
+    """Boolean form of ``_fetch_readable_session``: may ``user_id`` read this
+    thread? Same rule, not a copy of it. A missing, deleted or unreadable
+    session is ``False``."""
+    try:
+        await _fetch_readable_session(session_id, user_id)
+    except (Forbidden, NotFound):
+        return False
+    return True
 
 
 async def get(ctx: RequestContext, session_id: str) -> DomainSession:
