@@ -1,5 +1,14 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-09-27 (feat/sites-visual-research) — ``_build_options`` now sets
+  ``max_buffer_size`` to ``_SDK_MAX_BUFFER_BYTES`` (32 MiB) on every turn. The
+  SDK reads each CLI message into a buffer that defaults to 1 MB, and the new
+  image-returning MCP tools (``preview_site``, ``view_reference``,
+  ``view_reference_screenshot``) can put 1-3 MB of base64 JPEG tiles into one
+  tool result. Past the cap the turn went quiet and then died with "JSON message
+  exceeded maximum buffer size of 1048576 bytes". A constant, so the warm-client
+  cache key is unaffected.
+
 Updated: 2026-09-15 (fix/chat-image-persistent-client) — the images now ride the
   LEGACY ``self._client`` persistent send too, not only the two leased sends in
   ``_leased_dispatch``. Those two run only when a SessionSupervisor is driving,
@@ -506,6 +515,12 @@ class _BuiltOptions(NamedTuple):
     skills_dir_adopted: bool
     plugin_digest: str
 
+
+# Per-message read buffer handed to the SDK (``ClaudeAgentOptions.max_buffer_size``).
+# The SDK default is 1 MB, and a tool result carrying screenshot tiles (the site
+# preview / reference image tools) can exceed that in one JSON message, which
+# kills the turn. 32 MiB leaves headroom without being unbounded.
+_SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
@@ -2515,6 +2530,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "hooks": hooks,
             "cwd": str(resolved_cwd),
             "max_turns": self.settings.claude_sdk_max_turns or None,
+            "max_buffer_size": _SDK_MAX_BUFFER_BYTES,
         }
         if not tools_enabled:
             options_kwargs["tools"] = []

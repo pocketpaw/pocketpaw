@@ -17,6 +17,14 @@
 # FETCHING: only from hosts the caller names. These URLs come back from third-
 # party archives, and a helper that fetched any URL it was handed would be an
 # SSRF primitive on the API host.
+#
+# Updated: 2026-09-27 (feat/sites-visual-research) — a size budget per result.
+# The Claude Agent SDK reads each CLI message into a 1 MB buffer by default, and
+# six tiles at quality 82 of a busy page came to 1-3 MB in one tool result, which
+# killed the turn ("JSON message exceeded maximum buffer size"). ``to_tiles`` now
+# encodes at quality 72 and keeps the base64 total of one result under
+# ``MAX_RESULT_BYTES``: a tile that would overflow is retried at quality 55, then
+# tiling stops (the first tile always survives, downscaled if it must be).
 
 from __future__ import annotations
 
@@ -43,6 +51,14 @@ _MAX_EDGE = 1568
 # Screenshots are normalised to this width before tiling, so text keeps roughly
 # the size it has in a desktop browser.
 _BASE_WIDTH = 1280
+
+# Budget for one result: total base64 characters across its tiles. Well under
+# the SDK's 1 MB per-message buffer, leaving room for the JSON envelope and text.
+MAX_RESULT_BYTES = 700_000
+_JPEG_QUALITY = 72
+_JPEG_FALLBACK_QUALITY = 55
+# Smallest long edge the first tile is shrunk to while fitting it in the budget.
+_MIN_EDGE = 256
 
 
 class ReferenceImageError(RuntimeError):
@@ -89,7 +105,10 @@ def to_tiles(data: bytes, *, max_tiles: int = 4, tile_ratio: float = 1.25) -> li
     into tiles ``tile_ratio`` times as tall as they are wide (a mobile capture
     passes a larger ratio). A page taller than ``max_tiles`` tiles keeps its top
     ``max_tiles`` — the fold and the first sections are where design decisions
-    live. Each tile is then capped at ``_MAX_EDGE`` on its long edge.
+    live. Each tile is then capped at ``_MAX_EDGE`` on its long edge. The base64
+    total stays under ``MAX_RESULT_BYTES``: a tile that would overflow is retried
+    at a lower quality, then dropped along with the rest (never the first tile,
+    which is downscaled instead), so a busy page can come back with fewer tiles.
     Raises ``ReferenceImageError`` when the bytes are not a readable image.
     """
     try:
@@ -110,16 +129,45 @@ def to_tiles(data: bytes, *, max_tiles: int = 4, tile_ratio: float = 1.25) -> li
 
     tile_height = max(1, round(image.width * tile_ratio))
     tiles: list[bytes] = []
+    total = 0
     top = 0
     while top < image.height and len(tiles) < max(1, max_tiles):
         tile = image.crop((0, top, image.width, min(image.height, top + tile_height)))
         if max(tile.size) > _MAX_EDGE:
             tile.thumbnail((_MAX_EDGE, _MAX_EDGE), Image.Resampling.LANCZOS)
-        buffer = io.BytesIO()
-        tile.save(buffer, format="JPEG", quality=82, optimize=True)
-        tiles.append(buffer.getvalue())
+        encoded = _encode(tile, _JPEG_QUALITY)
+        if total + _b64_len(encoded) > MAX_RESULT_BYTES:
+            encoded = _encode(tile, _JPEG_FALLBACK_QUALITY)
+        if total + _b64_len(encoded) > MAX_RESULT_BYTES:
+            if tiles:
+                break  # the budget is spent; the top of the page is what matters
+            encoded = _shrink_to_fit(tile, MAX_RESULT_BYTES)
+        tiles.append(encoded)
+        total += _b64_len(encoded)
         top += tile_height
     return tiles
+
+
+def _encode(tile: Any, quality: int) -> bytes:
+    buffer = io.BytesIO()
+    tile.save(buffer, format="JPEG", quality=quality, optimize=True)
+    return buffer.getvalue()
+
+
+def _b64_len(data: bytes) -> int:
+    return 4 * ((len(data) + 2) // 3)
+
+
+def _shrink_to_fit(tile: Any, budget: int) -> bytes:
+    """Downscale a tile at the fallback quality until its base64 fits ``budget``."""
+    from PIL import Image
+
+    encoded = _encode(tile, _JPEG_FALLBACK_QUALITY)
+    while _b64_len(encoded) > budget and max(tile.size) > _MIN_EDGE:
+        size = (max(1, round(tile.width * 0.8)), max(1, round(tile.height * 0.8)))
+        tile = tile.resize(size, Image.Resampling.LANCZOS)
+        encoded = _encode(tile, _JPEG_FALLBACK_QUALITY)
+    return encoded
 
 
 def image_blocks(tiles: list[bytes]) -> list[dict[str, Any]]:
@@ -131,6 +179,7 @@ def image_blocks(tiles: list[bytes]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "MAX_RESULT_BYTES",
     "ReferenceImageError",
     "fetch_image",
     "host_allowed",
