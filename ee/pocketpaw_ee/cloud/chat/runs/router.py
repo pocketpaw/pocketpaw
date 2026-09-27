@@ -1,6 +1,12 @@
 """Run streaming + control endpoints.
 
 Changes:
+- 2026-09-27 (fix/run-stream-session-readers) — the stream admits a reader of
+  the run's thread, not only the run's author. Pocket and Paw Site threads are
+  readable by everyone who may read the pocket (#2244), so a teammate opening a
+  thread mid-turn saw the history but 404'd on the live reply. ``_authorize``
+  keeps its author-only rule for stop; ``_authorize_read`` adds the thread
+  readers from ``sessions_service.can_read_session`` for session-scoped runs.
 - 2026-09-04 (fix/unblock-event-loop, backend-perf M7) — the stream loop has a
   maximum lifetime. It previously had none: the only exits were a terminal
   event or a failed ``yield`` (which is how a client disconnect is noticed).
@@ -54,6 +60,24 @@ async def _authorize(run_id: str, workspace_id: str, user_id: str):
     return doc
 
 
+async def _authorize_read(run_id: str, workspace_id: str, user_id: str):
+    # The author, or anyone who may read the thread the run belongs to. Only
+    # session-scoped runs have a thread to share; the rest stay author-only.
+    # Every refusal is the same NotFound as ``_authorize``.
+    from pocketpaw_ee.cloud.sessions import service as sessions_service
+
+    doc = await run_service.get_run(run_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("chat_run", run_id)
+    if doc.user_id == user_id:
+        return doc
+    if doc.context_type == "session" and await sessions_service.can_read_session(
+        doc.scope_id, user_id
+    ):
+        return doc
+    raise NotFound("chat_run", run_id)
+
+
 @router.get("/cloud/chat/runs/{run_id}/stream")
 async def get_run_stream(
     run_id: str,
@@ -61,7 +85,7 @@ async def get_run_stream(
     user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
-    doc = await _authorize(run_id, workspace_id, user_id)
+    doc = await _authorize_read(run_id, workspace_id, user_id)
     transport = get_stream_transport()
 
     async def gen() -> AsyncIterator[bytes]:
