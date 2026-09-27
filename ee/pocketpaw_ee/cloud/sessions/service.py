@@ -1,5 +1,13 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-27 (feat/bulk-grants-conversations): added
+``list_by_agents(ctx, workspace_id, agent_ids)``, the batch form of
+``list_by_agent`` behind ``POST /sessions/by-agents``. Same filter (workspace,
+caller as owner, not deleted) and the same ``-lastActivity`` sort, but ONE
+query with ``In(agent, ids)``, grouped per agent in Python so each list keeps
+the sort order. Every requested id is a key in the result, empty when it has
+no sessions.
+
 Updated 2026-09-27 (fix/chat-attachment-name-backfill): ``get_history`` fills
 display fields on legacy nameless upload attachments at read time. Agent-chat
 sends used to carry bare ``{"url": "/api/v1/uploads/<id>"}`` and those rows
@@ -43,6 +51,8 @@ Public API:
 - ``create(ctx, workspace_id, body)`` — create or upsert a session
 - ``list_for_owner(ctx, workspace_id)``
 - ``list_by_agent(ctx, workspace_id, agent_id)``
+- ``list_by_agents(ctx, workspace_id, agent_ids)`` — the same, for many agents
+  in one query
 - ``list_for_pocket(ctx, pocket_id)`` — every owner's threads for a pocket
   reader who belongs to its workspace; otherwise the caller's own
 - ``get(ctx, session_id)``
@@ -462,6 +472,35 @@ async def list_by_agent(
         .to_list()
     )
     return [_to_domain(d) for d in docs]
+
+
+async def list_by_agents(
+    ctx: RequestContext, workspace_id: str, agent_ids: list[str]
+) -> dict[str, list[DomainSession]]:
+    """``list_by_agent`` for many agents at once, in one query.
+
+    Returns a dict with every requested agent id as a key (an empty list when
+    the caller has no sessions with that agent). Each list keeps the query's
+    ``-lastActivity`` order.
+    """
+    grouped: dict[str, list[DomainSession]] = {aid: [] for aid in agent_ids}
+    if not grouped:
+        return grouped
+    docs = (
+        await _SessionDoc.find(
+            _SessionDoc.workspace == workspace_id,
+            _SessionDoc.owner == ctx.user_id,
+            In(_SessionDoc.agent, list(grouped)),
+            _SessionDoc.deleted_at == None,  # noqa: E711
+        )
+        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
+        .to_list()
+    )
+    for doc in docs:
+        bucket = grouped.get(doc.agent or "")
+        if bucket is not None:
+            bucket.append(_to_domain(doc))
+    return grouped
 
 
 async def _is_workspace_member(workspace_id: str, user_id: str) -> bool:
@@ -1296,6 +1335,7 @@ __all__ = [
     "legacy_ctx",
     "link_pocket",
     "list_by_agent",
+    "list_by_agents",
     "list_for_owner",
     "list_for_pocket",
     "list_for_user",
