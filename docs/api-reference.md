@@ -5,6 +5,9 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 Updated: 2026-09-27 (feat/sites-visual-research) — added the `preview_site` agent
   tool under "Draft verification": a full-page screenshot of the draft, returned
   to the agent as images so it can look at the page before calling it ready.
+Updated: 2026-09-26 (fix/pawbar-frame-sandbox-header) — Paw Bar: the public frame
+  and the owner preview frame send a CSP `sandbox` directive on every frame
+  document, the dead shell included.
 Updated: 2026-09-27 (feat/bulk-grants-conversations) — added "Batch reads for the
   chat sidebar": POST /uploads/grants, POST /paw-bar/admin/sites/conversations and
   POST /sessions/by-agents, the one-call forms of three per-item GETs.
@@ -4094,7 +4097,7 @@ the split is the security model:
 | Route | What it does |
 |---|---|
 | `GET /paw-bar/widget.js` | The embed loader a published page includes. |
-| `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. |
+| `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. Every frame document, the shell included, also sends CSP `sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads`, so the browser sandboxes it whoever embeds it; no flag permits top navigation. |
 | `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. |
 | `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
 | `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. A widget with a concierge agent requires `?signed_key=`. |
@@ -4124,7 +4127,7 @@ the split is the security model:
 | `GET /paw-bar/admin/site/{site_id}/decisions` | Gated actions awaiting a human. |
 | `GET /paw-bar/admin/site/{site_id}/handoffs` | Conversations a visitor asked to escalate. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. |
-| `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. |
+| `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP `sandbox` directive as the public frame. |
 
 Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the

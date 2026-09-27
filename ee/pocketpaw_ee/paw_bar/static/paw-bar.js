@@ -3,7 +3,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:loader` in the
 // paw-bar repo (loader/dist/loader.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar loader/src/loader.ts @ bf29d76
+// Source: qbtrix/paw-bar loader/src/loader.ts @ 91dc09b (main)
 //
 // It used to be hand-transcribed TypeScript with the annotations stripped by
 // hand. That drifts silently: this copy predated a whole session of loader
@@ -19,6 +19,15 @@
 // shipping a script tag pointing at a 404. `PAW_BAR_WIDGET_JS` overrides the
 // path when an operator wants to serve a freshly built bundle instead.
 //
+// 2026-09-26: refreshed for the frame sandbox. The iframe now carries
+// sandbox="<PAWBAR_FRAME_SANDBOX>", matching the CSP sandbox header the router
+// sends on every frame document; test_paw_bar_widget_js.py pins the two equal.
+//
+// 2026-09-27: refreshed for the rebuilt Paw Bar (paw-bar #19). Two additions,
+// both ignored by an older app: {pawbar:resize} may carry side 'left'|'right'
+// to dock the icon launcher in its corner, and the frame is sent
+// {pawbar:viewport,w,h} on load and on every host resize.
+//
 // To update: rebuild in paw-bar, copy loader/dist/loader.readable.js over this
 // file, and restore this header. tests/cloud/test_paw_bar_widget_js.py checks
 // the copy has not fallen behind the behaviours the backend depends on.
@@ -28,6 +37,7 @@
   // loader/src/loader.ts
   var LOADED_FLAG = "__pawBarLoaderLoaded";
   var FRAME_PATH = "/paw-bar/frame";
+  var FRAME_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads";
   var POS_KEY = "__pawbar_pos_v2";
   var DRAG_MIN_PX = 4;
   var BAR_W = 384;
@@ -80,6 +90,7 @@
     const iframe = doc.createElement("iframe");
     iframe.title = "Site concierge";
     iframe.setAttribute("allow", "clipboard-write");
+    iframe.setAttribute("sandbox", FRAME_SANDBOX);
     iframe.style.cssText = frameStyle();
     iframe.src = src;
     let view = "bar";
@@ -90,6 +101,7 @@
     let barOpen = false;
     let barMotionUntil = 0;
     let anchor = readAnchor(win);
+    let side = "";
     let dragFrom = null;
     const size = {
       bar: { w: BAR_W, h: DEFAULT_BAR_H },
@@ -109,7 +121,7 @@
       const w = Math.min(wantW, maxW);
       const wantH = view === "panel" ? PANEL_MAX_H : size[view].h;
       const h = vh ? clamp(wantH, MIN_H, vh - VIEWPORT_MARGIN) : Math.max(MIN_H, wantH);
-      const cx = anchor ? anchor.cx : (vw || w) / 2;
+      const cx = anchor ? anchor.cx : side ? side === "left" ? w / 2 + VIEWPORT_MARGIN / 2 : (vw || w) - w / 2 - VIEWPORT_MARGIN / 2 : (vw || w) / 2;
       const by = anchor ? anchor.by : vh;
       const x = clamp(Math.round(cx - w / 2), 0, Math.max(0, vw - w));
       const y = clamp(Math.round(by - h), 0, Math.max(0, vh - h));
@@ -204,6 +216,7 @@
           if (view === "panel") break;
           const h = Number(data.h);
           if (Number.isFinite(h)) size[view].h = h;
+          side = data.side === "left" || data.side === "right" ? data.side : "";
           const w = Number(data.w);
           if (view !== "bar" && Number.isFinite(w) && w > 0) size[view].w = w;
           applyDock(Date.now() < barMotionUntil ? "width" : "none");
@@ -284,8 +297,13 @@
         }
       }
     });
+    function postViewport() {
+      postToFrame({ type: "pawbar:viewport", w: win.innerWidth, h: win.innerHeight });
+    }
+    iframe.addEventListener("load", postViewport);
     win.addEventListener("resize", () => {
       if (!overlay) applyDock();
+      postViewport();
     });
     win.PawBar = {
       // Must match `pawbar:open` exactly. It used to call goFullscreen(), so a
