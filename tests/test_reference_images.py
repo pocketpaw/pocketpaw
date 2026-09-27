@@ -103,3 +103,28 @@ def test_image_blocks_are_mcp_image_content() -> None:
     blocks = ri.image_blocks(ri.to_tiles(_png(100, 100)))
     assert blocks and blocks[0]["type"] == "image"
     assert blocks[0]["mimeType"] == "image/jpeg"
+
+
+# ── size budget (fix: SDK 1 MB buffer) ──────────────────────────────────────
+# The Claude Agent SDK reads each message from the CLI into a 1 MB buffer by
+# default. A full-page screenshot of a busy page cut into six high-quality
+# tiles came to well over that in one tool result, and the turn died with
+# "JSON message exceeded maximum buffer size of 1048576 bytes".
+
+
+def _noisy_png(width: int, height: int) -> bytes:
+    """Random noise: the worst case for JPEG size, like a photo-heavy page."""
+    import os
+
+    image = Image.frombytes("RGB", (width, height), os.urandom(width * height * 3))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_one_result_stays_under_the_image_budget() -> None:
+    blocks = ri.image_blocks(ri.to_tiles(_noisy_png(1280, 9000), max_tiles=6))
+    total = sum(len(b["data"]) for b in blocks)
+    assert blocks, "a budget must never cost the whole picture"
+    assert total <= ri.MAX_RESULT_BYTES, total
+    assert ri.MAX_RESULT_BYTES <= 800_000  # far below the SDK's 1 MB message cap
