@@ -146,3 +146,12 @@ async def test_no_override_is_byte_identical_auto_select():
     sdk = _make_sdk()  # smart routing off, claude_sdk_model None → auto-select
     kwargs = await _build(sdk, model_override=None)
     assert "model" not in kwargs, "auto-select must not stamp a model when no override"
+
+
+@pytest.mark.asyncio
+async def test_options_raise_the_sdk_message_buffer():
+    """The SDK's default 1 MB per-message buffer is too small for a tool result
+    that carries images (a site screenshot), and exceeding it kills the turn with
+    "JSON message exceeded maximum buffer size of 1048576 bytes"."""
+    kwargs = await _build(_make_sdk())
+    assert kwargs.get("max_buffer_size", 0) >= 16 * 1024 * 1024
