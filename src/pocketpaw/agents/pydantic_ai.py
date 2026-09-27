@@ -2082,6 +2082,13 @@ class PydanticAIBackend:
         tools — which is exactly the group the SDK's grant unions back in
         (``POCKET_CREATION_GRANT`` / widget / atlas ids). Restricting them here
         would be stricter than the surface asks for and would break /sites.
+
+        Correction (2026-09-27): since the in-process bridge joined
+        ``_build_mcp_tools``, PocketPaw's own servers (sites, pocket, pawbar,
+        connectors) ARE MCP toolsets here too, so this gate caps them to the
+        allow set with no universal grant. What it cannot reach is the bridged
+        builtins in ``tools``; ``exclusive_tools`` in ``_get_or_create_agent``
+        is the lever for those.
         """
         # ``exclusive_mcp_tools`` must reach the gate even with nothing to
         # allow and nothing to deny: an EXCLUSIVE turn with no allow set is an
