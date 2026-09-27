@@ -1,5 +1,11 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-09-27 (chore/bump-claude-agent-sdk) - ``_build_options`` passes
+  ``settings.claude_sdk_cli_path`` through as ``ClaudeAgentOptions.cli_path``.
+  The SDK prefers its bundled CLI over PATH, so a model newer than the bundled
+  CLI (2.1.276 in SDK 0.2.156) could not be reached even with a current
+  ``claude`` installed. Unset keeps the bundled CLI. The launch log now names
+  the CLI actually used instead of whatever ``which claude`` finds.
 Updated: 2026-09-15 (fix/chat-image-persistent-client) — the images now ride the
   LEGACY ``self._client`` persistent send too, not only the two leased sends in
   ``_leased_dispatch``. Those two run only when a SessionSupervisor is driving,
@@ -2643,9 +2649,16 @@ class ClaudeSDKBackend(BaseAgentBackend):
         if is_non_anthropic:
             options_kwargs["model"] = llm.model
 
-        # ── Debug logging for troubleshooting SDK startup ──
-        import shutil as _shutil
+        # An explicit Claude Code CLI. The SDK otherwise runs the CLI bundled in
+        # its wheel and only falls back to PATH when none is bundled, so an
+        # installed newer `claude` is never picked up on its own. That is how
+        # "Claude Code 2.1.276 does not support this model" persisted with
+        # 2.1.283 on PATH. ``isinstance`` because settings are sometimes mocks.
+        cli_path = getattr(self.settings, "claude_sdk_cli_path", None)
+        if isinstance(cli_path, str) and cli_path.strip():
+            options_kwargs["cli_path"] = cli_path.strip()
 
+        # ── Debug logging for troubleshooting SDK startup ──
         logger.info(
             "SDK launch: provider=%s, has_api_key=%s, "
             "CLAUDECODE=%s, CLAUDE_CODE_ENTRYPOINT=%s, "
@@ -2657,7 +2670,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             os.environ.get("CLAUDE_CODE_ENTRYPOINT", "<unset>"),
             "set" if os.environ.get("ANTHROPIC_API_KEY") else "<unset>",
             list(sdk_env.keys()) if sdk_env else "none",
-            _shutil.which("claude") or "<not found>",
+            options_kwargs.get("cli_path") or "<bundled>",
             resolved_cwd,
         )
 
