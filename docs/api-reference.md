@@ -5,6 +5,9 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 Updated: 2026-09-26 (fix/pawbar-frame-sandbox-header) — Paw Bar: the public frame
   and the owner preview frame send a CSP `sandbox` directive on every frame
   document, the dead shell included.
+Updated: 2026-09-27 (feat/bulk-grants-conversations) — added "Batch reads for the
+  chat sidebar": POST /uploads/grants, POST /paw-bar/admin/sites/conversations and
+  POST /sessions/by-agents, the one-call forms of three per-item GETs.
 Updated: 2026-09-26 (fix/pawbar-public-route-gates) — Paw Bar public table: the
   per-IP limit, the key rule on events/decision, the chat input bounds, the
   events rate bucket, the author-less visitor transcript and the one error code.
@@ -5060,4 +5063,77 @@ when there was nothing to clear.
 
 ```json
 { "reason": "Trial ended" }
+```
+
+---
+
+## Batch reads for the chat sidebar
+
+Three endpoints that each replace a per-item GET the chat sidebar used to fan
+out. Each item in a batch gets exactly what its single GET would have answered,
+under the same auth and workspace scoping, and a failure on one item never fails
+the rest. Duplicate items are read once.
+
+### `POST /api/v1/uploads/grants`
+
+Batch form of `GET /uploads/{file_id}/grant`. Any authenticated caller in the
+active workspace; each file goes through the same scoped read as the GET.
+
+```json
+{ "items": [ { "id": "f1", "w": 64, "h": 64, "q": 80, "f": "webp" }, { "id": "f2" } ] }
+```
+
+`items` holds 1..200 entries. `w` and `h` are 0..2048 (default 0), `q` is 1..100
+(default 80), `f` defaults to `"webp"`. Anything out of range is a 422.
+
+```json
+{ "grants": [
+  { "id": "f1", "w": 64, "h": 64, "q": 80, "f": "webp",
+    "url": "/api/v1/uploads/f1?w=64&h=64&q=80&f=webp", "expires_at": 1790000000 },
+  { "id": "f2", "w": 0, "h": 0, "q": 80, "f": "webp", "error": "not_found" }
+] }
+```
+
+`grants` has the same length and order as `items`. A thumbnail (`w` or `h` > 0)
+always gets the cookie-authed server URL; a full-size file gets the storage
+presigned URL when there is one, else `/api/v1/uploads/{id}`. A missing file or
+one in another workspace is `"error": "not_found"` for that entry only.
+
+### `POST /api/v1/paw-bar/admin/sites/conversations`
+
+Batch form of `GET /paw-bar/admin/site/{site_id}/conversations`, with the same
+`paw_bar.read` gate (workspace owner/admin).
+
+```json
+{ "site_ids": ["66f1…", "66f2…"], "limit": 20, "state": null }
+```
+
+`site_ids` holds 1..50 ids, `limit` is 1..100 (default 20), `state` is one of
+`open | needs_human | snoozed | closed` or null. An unknown `state` is a 422
+`invalid_state`, as on the GET.
+
+```json
+{ "sites": { "66f1…": { "items": [], "cursor": null, "unsupported": false, "counts": {} } },
+  "errors": { "66f2…": "not_found" } }
+```
+
+Each entry in `sites` is the GET's first page (no cursor). A site that is
+absent, malformed or in another workspace is `not_found`; any other failure is
+logged and reported as `error`.
+
+### `POST /api/v1/sessions/by-agents`
+
+Batch form of `GET /sessions?agent_id=`, gated on `session.read_own`.
+
+```json
+{ "agent_ids": ["agent-a", "agent-b"] }
+```
+
+`agent_ids` holds 1..100 ids. The answer has every requested id as a key, with
+the caller's own non-deleted sessions for that agent in the active workspace,
+newest activity first, and `[]` when there are none. All of it comes from one
+query.
+
+```json
+{ "sessions": { "agent-a": [ { "id": "…", "sessionId": "…", "agent": "agent-a" } ], "agent-b": [] } }
 ```

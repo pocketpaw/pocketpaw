@@ -1,5 +1,9 @@
 """Sessions domain — Pydantic request/response schemas + domain → wire mapper.
 
+Updated 2026-09-27 (feat/bulk-grants-conversations): added
+``SessionsByAgentsRequest`` (``agent_ids``, 1..100) for
+``POST /sessions/by-agents``.
+
 Recent change: added ``foresight`` to the ``surface`` literal so Foresight
 chats are isolated server-side instead of piggybacking on ``chat`` + a
 client-side manifest. The ``surface`` field on ``CreateSessionRequest`` and
@@ -14,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.sessions.domain import Session
@@ -38,6 +42,12 @@ class CreateSessionRequest(BaseModel):
     # filter out pocket-creation / files-panel sessions. Optional; legacy
     # callers can omit it.
     surface: Surface | None = None
+
+
+class SessionsByAgentsRequest(BaseModel):
+    """Body of ``POST /sessions/by-agents`` — the agents whose DM sessions to list."""
+
+    agent_ids: list[str] = Field(min_length=1, max_length=100)
 
 
 class UpdateSessionRequest(BaseModel):

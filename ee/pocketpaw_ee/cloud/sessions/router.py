@@ -1,5 +1,12 @@
 """Sessions domain — FastAPI router.
 
+Updated 2026-09-27 (feat/bulk-grants-conversations): added
+``POST /sessions/by-agents`` so the chat sidebar can resolve every agent DM
+room in one request instead of one ``GET /sessions?agent_id=`` per agent. It
+answers ``{"sessions": {agent_id: [session, ...]}}`` with every requested id as
+a key, from one query (``sessions_service.list_by_agents``). Registered above
+the ``/{session_id}`` routes like the other literal paths.
+
 Updated 2026-08-01: the three ``runtime`` / ``touch`` routes below now resolve
 identity through the same dependencies as every other route in this router, and
 their reads and writes are scoped to that identity. They were the last routes
@@ -18,6 +25,7 @@ from pocketpaw_ee.cloud.sessions import service as sessions_service
 from pocketpaw_ee.cloud.sessions.dto import (
     CreateSessionRequest,
     SessionPage,
+    SessionsByAgentsRequest,
     Surface,
     UpdateSessionRequest,
     session_to_wire_dict,
@@ -68,6 +76,33 @@ async def list_sessions(
     else:
         items = await sessions_service.list_for_owner(ctx, workspace_id, surface=surface)
     return [session_to_wire_dict(s) for s in items]
+
+
+@router.post(
+    "/by-agents",
+    dependencies=[Depends(require_action_any_workspace("session.read_own"))],
+)
+async def list_sessions_by_agents(
+    body: SessionsByAgentsRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """The caller's DM sessions for many agents, keyed by agent id.
+
+    Same rows and order as ``GET /sessions?agent_id=`` per agent, from one
+    query. Every requested agent id is a key; an agent with no sessions maps to
+    ``[]``.
+    """
+    ctx = sessions_service.legacy_ctx(user_id, workspace_id)
+    grouped = await sessions_service.list_by_agents(
+        ctx, workspace_id, list(dict.fromkeys(body.agent_ids))
+    )
+    return {
+        "sessions": {
+            agent_id: [session_to_wire_dict(s) for s in items]
+            for agent_id, items in grouped.items()
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
