@@ -11,6 +11,8 @@
 #     and the connector 409 are skipped;
 #   * a legacy site is untouched, and the SSE frames the widget reads have the same
 #     names and fields on both paths.
+#   * a visitor turn never provisions a concierge (captain rule, 2026-09-27): no
+#     agent, no widget, no provisioning call, even for an unbound v2 widget.
 #
 # The model seam is ``concierge_runtime._build_model``: tests hand it a pydantic_ai
 # ``FunctionModel`` whose stream function records the request (messages + AgentInfo)
@@ -923,3 +925,40 @@ async def test_the_real_model_request_carries_no_tools_and_leads_with_the_frame(
     assert body["stream"] is True
     assert body["messages"][0] == {"role": "system", "content": concierge_runtime.FRAME}
     assert _SEEDED_FACT in body["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_v2_never_provisions_a_concierge_on_a_visitor_turn(
+    concierge_client, model, monkeypatch
+):
+    """Captain rule (2026-09-27): a concierge is created by its owner, never by a
+    visitor's chat. An unbound v2 widget answers without minting an agent, a
+    widget, or calling any provisioning path."""
+    from pocketpaw_ee.cloud.models.agent import Agent
+    from pocketpaw_ee.paw_bar import agent_provisioning
+
+    def _forbidden(*_a: Any, **_kw: Any):
+        raise AssertionError("a visitor turn must never provision a concierge")
+
+    for name in (
+        "ensure_site_agent",
+        "ensure_site_widget",
+        "provision_widget_on_create",
+        "provision_on_concierge_enable",
+        "provision_foreign_concierge",
+        "rebind_site_agent",
+    ):
+        monkeypatch.setattr(agent_provisioning, name, _forbidden)
+    _seed_kb(monkeypatch, _HOURS_KB)
+    client, store = concierge_client
+    await _site()
+    widget = await store.create_widget(_widget(agent_id=""))
+    widgets_before = len(await store.list_widgets())
+
+    res = await _chat(client, widget.id)
+
+    assert res.status_code == 200, res.text
+    assert await Agent.find_all().count() == 0
+    assert len(await store.list_widgets()) == widgets_before
+    stored = await store.get_widget(widget.id)
+    assert stored is not None and stored.agent_id == ""
