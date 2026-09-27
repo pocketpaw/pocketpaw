@@ -411,6 +411,12 @@ annotation_typing = false
 # value is an absolute DATE, not a rolling duration, and the two must be
 # bumped together or the two locks drift to different floors.
 exclude-newer = "2026-08-10T00:00:00Z"
+# Per-package floor for claude-agent-sdk (2026-09-27, chore/bump-claude-agent-sdk).
+# The SDK ships near-daily and bundles the Claude Code CLI, so the global date
+# above left us ~65 releases behind. This still enforces the 7-day minimum
+# release age for the SDK alone; bump it with the SDK, keep it 7+ days back.
+# Both pyproject files carry the same value so the two locks agree.
+exclude-newer-package = { claude-agent-sdk = "2026-09-20T00:00:00Z" }
 
 [tool.uv.sources]
 camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }

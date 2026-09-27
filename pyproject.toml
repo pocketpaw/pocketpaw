@@ -56,7 +56,9 @@ dependencies = [
     # own dependency list cannot silently unprice our billing.
     "genai-prices>=0.0.73",
     # Agent Backend (recommended default)
-    "claude-agent-sdk>=0.1.72",
+    # !=0.2.157: that release shipped no win_amd64 wheel, so Windows would build
+    # the sdist. 0.2.156 is the newest release with every platform wheel.
+    "claude-agent-sdk>=0.2.156,!=0.2.157",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
@@ -652,6 +654,12 @@ ee = ["pocketpaw-ee"]
 # ignore the settings fields in `[tool.uv]` entirely — verified on uv 0.10.4,
 # which warns and then drops them. One config home, no split brain.
 exclude-newer = "2026-08-10T00:00:00Z"
+# Per-package floor for claude-agent-sdk (2026-09-27, chore/bump-claude-agent-sdk).
+# The SDK ships near-daily and bundles the Claude Code CLI, so the global date
+# above left us ~65 releases behind. This still enforces the 7-day minimum
+# release age for the SDK alone; bump it with the SDK, keep it 7+ days back.
+# Both pyproject files carry the same value so the two locks agree.
+exclude-newer-package = { claude-agent-sdk = "2026-09-20T00:00:00Z" }
 
 [tool.uv.sources]
 pocketpaw-ee = { path = "ee", editable = true }
