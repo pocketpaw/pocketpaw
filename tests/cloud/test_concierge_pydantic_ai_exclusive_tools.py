@@ -324,3 +324,100 @@ async def test_concierge_on_claude_sdk_gets_no_grant_and_no_always_allowed_serve
 
     assert mcp == own_ids, f"extra {sorted(mcp - own_ids)}, missing {sorted(own_ids - mcp)}"
     assert effective - mcp <= {"Read", "Glob", "Grep"}, sorted(effective - mcp)
+
+
+# -- the concierge always runs on pydantic_ai (captain decision 2026-09-27) ---
+#
+# The bound agent may be configured for any backend. Only pydantic_ai honours
+# the whole lockdown: claude_sdk keeps Read/Glob/Grep, and every other backend
+# rejects ``exclusive_mcp_tools`` with a TypeError. So a concierge run must be
+# served by pydantic_ai whatever the owner picked, and a non-concierge run on
+# that same agent must stay on the owner's backend.
+
+
+class _OwnerBackend:
+    """Stands in for the bound agent's own backend. Records whether it ran."""
+
+    def __init__(self, name: str) -> None:
+        self.settings = Settings(
+            agent_backend=name,
+            pydantic_ai_model="litellm:test-model",
+            litellm_api_base="http://localhost:4000",
+            litellm_api_key="sk-test",
+            pydantic_ai_skills_enabled=False,
+            pydantic_ai_harness_enabled=False,
+        )
+        self.ran = False
+
+    async def run(self, message: str, **kwargs):
+        self.ran = True
+        return
+        yield  # pragma: no cover
+
+
+def _capture_every_pydantic_ai_backend(monkeypatch) -> set[str]:
+    """Make every PydanticAIBackend the pool builds record its offer.
+
+    Patched on the CLASS because the backend under test is the one the pool
+    creates itself; the test never holds a reference to it.
+    """
+    seen: set[str] = set()
+
+    async def capture(messages: list[ModelMessage], info: AgentInfo):
+        seen.update(t.name for t in info.function_tools)
+        yield "ok"
+
+    model = FunctionModel(stream_function=capture)
+
+    async def _stub_mcp(self):
+        return _inprocess_stub()
+
+    monkeypatch.setattr(PydanticAIBackend, "_build_model", lambda self, *a, **k: model)
+    monkeypatch.setattr(PydanticAIBackend, "_build_mcp_tools", _stub_mcp)
+    return seen
+
+
+async def _run_on_owner(monkeypatch, owner: _OwnerBackend, pool_kwargs: dict) -> None:
+    pool = AgentPool()
+    inst = SimpleNamespace(
+        backend=owner,
+        soul_manager=None,
+        config={"soul_persona": "P", "system_prompt": ""},
+        last_active=datetime.now(UTC),
+        active_runs=0,
+    )
+
+    async def _fake_get(agent_id):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _fake_get)
+    events = [ev async for ev in pool.run("agent-1", "hi", "session:s1", **pool_kwargs)]
+    errors = [getattr(ev, "content", ev) for ev in events if getattr(ev, "type", "") == "error"]
+    assert not errors, f"run failed: {errors}"
+
+
+@pytest.mark.parametrize("owner_backend", ["claude_agent_sdk", "deep_agents", "openai_agents"])
+async def test_concierge_runs_on_pydantic_ai_whatever_the_bound_agent_uses(
+    monkeypatch, owner_backend
+):
+    seen = _capture_every_pydantic_ai_backend(monkeypatch)
+    meta = SurfaceMeta(widget_id="widget-1", pawbar_actions=_ACTIONS)
+    kwargs = await _pool_kwargs(monkeypatch, _ctx(SurfaceKind.CONCIERGE, meta))
+
+    owner = _OwnerBackend(owner_backend)
+    await _run_on_owner(monkeypatch, owner, kwargs)
+
+    assert not owner.ran, f"the concierge ran on the owner's {owner_backend} backend"
+    assert seen == _OWN, f"extra {sorted(seen - _OWN)}, missing {sorted(_OWN - seen)}"
+
+
+@pytest.mark.parametrize("owner_backend", ["claude_agent_sdk", "deep_agents", "openai_agents"])
+async def test_a_non_concierge_run_stays_on_the_bound_agents_backend(monkeypatch, owner_backend):
+    seen = _capture_every_pydantic_ai_backend(monkeypatch)
+    kwargs = await _pool_kwargs(monkeypatch, _ctx(SurfaceKind.CHAT, SurfaceMeta()))
+
+    owner = _OwnerBackend(owner_backend)
+    await _run_on_owner(monkeypatch, owner, kwargs)
+
+    assert owner.ran, f"a /chat run left the owner's {owner_backend} backend"
+    assert not seen, "a /chat run was served by pydantic_ai"
