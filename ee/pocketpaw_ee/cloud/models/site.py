@@ -4,6 +4,10 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-28 (feat/concierge-v2-output, CR-2): added
+# ``concierge_allow_doc_code``, the owner's switch that lets a v2 concierge show
+# code blocks copied verbatim from the site's own knowledge (documentation
+# sites). Defaults False, so existing rows keep every code block replaced.
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a concierge now exists
 # only because its owner created it. Added ``concierge_created_at``, the marker
 # ``POST /paw-bar/admin/site/{id}/concierge`` stamps and ``DELETE`` clears, and
@@ -846,6 +850,12 @@ class Site(TimestampedDocument):
     # the v2 eval gate passes; a row written before the field existed reads as
     # legacy too (callers use getattr with that default).
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    # "Answer with code examples from your docs" (CR-2, 2026-09-28). Off: a v2
+    # reply never shows a code block. On: a code block passes only when it is
+    # found, verbatim, in the knowledge retrieved for that turn
+    # (``concierge_runtime.is_grounded_code``); anything else is still replaced.
+    # For documentation sites. Off by default and for rows older than the field.
+    concierge_allow_doc_code: bool = False
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or

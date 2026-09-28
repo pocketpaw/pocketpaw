@@ -1,6 +1,14 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-09-28 (feat/concierge-spend-cap, CR-5): Added
+    ``pawbar_concierge_daily_spend_cap`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_DAILY_SPEND_CAP``, default 5.0 USD, 0 = no cap):
+    what one site's v2 concierge may spend on the model per UTC day before its
+    visitors get the leave-a-message reply instead of an answer.
+  - 2026-09-28 (feat/concierge-v2-output): Added ``pawbar_concierge_doc_code_chars``
+    (env ``POCKETPAW_PAWBAR_CONCIERGE_DOC_CODE_CHARS``, default 6000), the cap on
+    documentation code one v2 concierge reply may show on a site that allows it.
   - 2026-09-27 (feat/concierge-v2-runner): Added ``pawbar_concierge_model`` (env
     ``POCKETPAW_PAWBAR_CONCIERGE_MODEL``, default "" = the pydantic_ai backend's
     own model resolution) and ``pawbar_concierge_max_tokens`` (env
@@ -1464,6 +1472,23 @@ class Settings(BaseSettings):
         default=600,
         ge=1,
         description="Max output tokens for one v2 Paw Bar concierge reply.",
+    )
+    pawbar_concierge_doc_code_chars: int = Field(
+        default=6_000,
+        ge=0,
+        description=(
+            "Most characters of documentation code one v2 Paw Bar concierge reply "
+            "may show, on sites that allow it. Code past this is replaced."
+        ),
+    )
+    pawbar_concierge_daily_spend_cap: float = Field(
+        default=5.0,
+        ge=0,
+        description=(
+            "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
+            "day, in USD at provider cost. Past it, visitors get the leave-a-message "
+            "reply and no model call is made. 0 turns the cap off."
+        ),
     )
 
     # LLM Configuration
