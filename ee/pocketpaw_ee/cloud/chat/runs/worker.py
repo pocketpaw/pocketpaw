@@ -1,5 +1,9 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot sweep's cutoff is at
+least three heartbeat intervals (``_boot_sweep_older_than_seconds``), so a booting
+replica no longer interrupts runs another replica is still beating.
+
 Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``_shutdown`` now waits (bounded,
 ``_CLEANUP_DRAIN_TIMEOUT_SECONDS``) for ``run_core.drain_pending_cleanups`` before
 ``close_cloud_db()``. arq cancels in-flight runs on shutdown, and each one's
@@ -124,7 +128,11 @@ from pocketpaw_ee.cloud.chat.runs.domain import (
     RunSpec,
     run_job_timeout_seconds,
 )
-from pocketpaw_ee.cloud.chat.runs.run_core import drain_pending_cleanups, execute_run
+from pocketpaw_ee.cloud.chat.runs.run_core import (
+    _heartbeat_seconds,
+    drain_pending_cleanups,
+    execute_run,
+)
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
 from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
 from pocketpaw_ee.cloud.jobs.worker import execute_workspace_job
@@ -151,6 +159,18 @@ logger = logging.getLogger(__name__)
 # A short cutoff because worker boot implies the previous worker just died;
 # runs created seconds ago by the web process should not be swept.
 _BOOT_SWEEP_OLDER_THAN_SECONDS = 5
+
+
+def _boot_sweep_older_than_seconds() -> int:
+    """The boot sweep's cutoff: short, but never inside the heartbeat interval.
+
+    A running run is judged by its last heartbeat, which is up to one interval
+    old on a perfectly healthy replica. A cutoff below that let a booting
+    replica interrupt runs another replica was still driving. Three intervals
+    leaves room for a missed beat.
+    """
+    return max(_BOOT_SWEEP_OLDER_THAN_SECONDS, int(3 * _heartbeat_seconds()))
+
 
 # Default off — multi-replica safety. See module docstring.
 _BOOT_SWEEP_ENV = "POCKETPAW_CLOUD_WORKER_BOOT_SWEEP"
@@ -207,7 +227,7 @@ async def _bootstrap(ctx: dict[str, Any]) -> None:
         logger.info("worker boot: stale-run sweep disabled (%s)", _BOOT_SWEEP_ENV)
         return
     try:
-        swept = await sweep_stale_runs(older_than_seconds=_BOOT_SWEEP_OLDER_THAN_SECONDS)
+        swept = await sweep_stale_runs(older_than_seconds=_boot_sweep_older_than_seconds())
         if swept:
             logger.info("worker boot: marked %d orphaned runs as interrupted", swept)
     except Exception:

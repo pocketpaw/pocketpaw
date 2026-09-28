@@ -157,9 +157,7 @@ async def test_sweeper_leaves_a_long_but_live_run_running(monkeypatch, mongo_db)
         "the sweeper wrote a terminal 'interrupted' frame onto a live run's stream, "
         "so the browser stopped listening mid-answer"
     )
-    assert [m.content for m in await _assistant_messages(ctx)] == [
-        f"{_PARTIAL} all of them pass."
-    ]
+    assert [m.content for m in await _assistant_messages(ctx)] == [f"{_PARTIAL} all of them pass."]
 
 
 async def test_sweeper_judges_running_runs_by_heartbeat(mongo_db):  # noqa: ARG001
@@ -351,3 +349,101 @@ async def test_a_run_that_emitted_no_text_writes_no_message(monkeypatch, mongo_d
 
     assert (await run_service.get_run("r1")).status == "failed"
     assert await _assistant_messages(ctx) == []
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (PR #2266)
+# ---------------------------------------------------------------------------
+
+
+def _live_heartbeats() -> list[asyncio.Task]:
+    return [
+        t
+        for t in asyncio.all_tasks()
+        if not t.done() and getattr(t.get_coro(), "__name__", "") == "_heartbeat_loop"
+    ]
+
+
+async def test_a_failed_typing_broadcast_does_not_leak_the_heartbeat(
+    monkeypatch,
+    mongo_db,  # noqa: ARG001
+):
+    """The typing broadcast rides Redis in worker mode. When it fails, the run must
+    still finish, and no heartbeat may keep beating for a run nobody drives —
+    that is a phantom ``active_run`` the sweeper can never clear."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+    ctx = _ctx()
+    await run_service.create_run(_spec())
+
+    async def agent(spec, ctx):  # noqa: ARG001
+        yield ("chunk", {"content": "Done.", "type": "text"})
+
+    _wire(monkeypatch, transport, ctx, agent, real_mark_running=True)
+
+    async def flaky_typing(_ctx, *, active):
+        if active:
+            raise ConnectionError("redis blip")
+
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", flaky_typing)
+
+    await run_core.execute_run(_spec())
+
+    assert _live_heartbeats() == []
+    assert (await run_service.get_run("r1")).status == "completed"
+
+
+async def test_the_heartbeat_loop_stops_once_the_run_is_not_running(monkeypatch):
+    async def not_running(_run_id):
+        return False
+
+    monkeypatch.setattr(run_service, "touch_heartbeat", not_running)
+
+    await asyncio.wait_for(run_core._heartbeat_loop("r1", 0.01), timeout=1)
+
+
+async def test_a_superseded_partial_sorts_before_the_next_user_message(
+    monkeypatch,
+    mongo_db,  # noqa: ARG001
+):
+    """Sending a new message cancels the running turn, and the new user message
+    is written before the worker notices. The cut-off reply belongs to the turn
+    it answered, so it must sort before that newer message."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+    ctx = _ctx()
+    await run_service.create_run(_spec())
+
+    async def agent(spec, ctx):  # noqa: ARG001
+        yield ("chunk", {"content": _PARTIAL, "type": "text"})
+        await asyncio.sleep(0.01)
+        await Message(
+            context_type="session",
+            session_key=session_key_for(ctx),
+            role="user",
+            content="actually, just the api repo",
+            workspace_id="w1",
+        ).insert()
+        await transport.request_cancel("r1")
+        yield ("chunk", {"content": " more", "type": "text"})
+
+    _wire(monkeypatch, transport, ctx, agent, real_mark_running=True)
+    await run_core.execute_run(_spec())
+
+    rows = (
+        await Message.find({"session_key": session_key_for(ctx), "workspace_id": "w1"})
+        .sort("createdAt")
+        .to_list()
+    )
+    assert [(m.role, m.run_status) for m in rows] == [
+        ("assistant", "cancelled"),
+        ("user", None),
+    ]
+
+
+async def test_the_boot_sweep_leaves_runs_alive_on_another_replica():
+    """The boot sweep's cutoff must clear a few heartbeat intervals, or a booting
+    replica interrupts runs another replica is still beating."""
+    from pocketpaw_ee.cloud.chat.runs import worker as chat_worker
+
+    assert chat_worker._boot_sweep_older_than_seconds() >= 2 * run_core._heartbeat_seconds()

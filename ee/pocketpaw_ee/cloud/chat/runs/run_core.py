@@ -21,6 +21,10 @@ Changes:
      doc), and a partial never trains the soul (no ``pool.observe``). The frames
      the client gets are unchanged, except ``stream_end`` on cancel now carries
      the persisted ``assistant_message_id``.
+  Review follow-ups: the ``active=True`` typing broadcast is best-effort (it
+  could leave the heartbeat beating for a run nobody drove), the heartbeat loop
+  ends once the run is not running, and a partial is dated to the run's start so
+  it sorts before a user message that superseded it.
   3. SHUTDOWN ORDER. The shielded host-cancel cleanup is tracked in
      ``_pending_cleanups`` and ``drain_pending_cleanups`` waits for it, so the
      worker can finish those writes before it closes the database under them.
@@ -573,11 +577,17 @@ async def _heartbeat_loop(run_id: str, interval: float) -> None:
     A failed write is logged and the loop keeps going: one missed beat is
     harmless against a 10-minute cutoff, and killing the run over a transient
     Mongo blip would be the very failure this exists to prevent.
+
+    It does stop once the run is no longer ``running``. Nothing else ends it if
+    ``execute_run`` leaves by a path that never reaches the stop in its
+    ``finally``, and a loop that outlives its run keeps nothing alive but the
+    task itself — the conditional write already refuses to revive the doc.
     """
     while True:
         await asyncio.sleep(interval)
         try:
-            await run_service.touch_heartbeat(run_id)
+            if not await run_service.touch_heartbeat(run_id):
+                return
         except Exception:
             logger.warning("run heartbeat write failed for %s", run_id, exc_info=True)
 
@@ -1429,6 +1439,24 @@ async def _persist_partial_reply(
     except Exception:
         logger.exception("persisting the %s partial reply failed for %s", status, spec.run_id)
         return None
+    # Date the partial to the turn it answered, not to the moment it was saved.
+    # Sending a new message cancels the running turn and writes that message
+    # before the worker notices (up to a cancel-poll later), so a partial dated
+    # "now" sorted AFTER the question that superseded it, in the UI and in the
+    # agent's own history. The run's start is the same instant the stranded-reply
+    # path used for these replies before they became Messages.
+    try:
+        run = await run_service.get_run(spec.run_id)
+        answered_at = run.started_at or run.createdAt
+        if answered_at is not None:
+            await (
+                type(msg)
+                .get_pymongo_collection()
+                .update_one({"_id": msg.id}, {"$set": {"createdAt": answered_at}})
+            )
+            msg.createdAt = answered_at
+    except Exception:
+        logger.warning("re-dating the partial reply failed for %s", spec.run_id, exc_info=True)
     assistant_id = str(msg.id)
     try:
         await _broadcast_message_new(
@@ -3071,7 +3099,15 @@ async def execute_run(spec: RunSpec) -> None:
             return
         # Liveness for the stale-run sweeper; stopped in the loop's finally.
         heartbeat = asyncio.create_task(_heartbeat_loop(spec.run_id, _heartbeat_seconds()))
-        await _broadcast_agent_typing(ctx, active=True)
+        # Best-effort like every other typing broadcast. It rides Redis in worker
+        # mode, and it sits between the heartbeat starting and the ``try`` whose
+        # ``finally`` stops it: letting it raise here ended the run with no
+        # terminal write while the heartbeat kept the doc looking alive, a
+        # phantom ``active_run`` the sweeper could never clear.
+        try:
+            await _broadcast_agent_typing(ctx, active=True)
+        except Exception:
+            logger.debug("agent.typing(active=True) broadcast failed", exc_info=True)
 
         full_text = ""
         cancelled = False
