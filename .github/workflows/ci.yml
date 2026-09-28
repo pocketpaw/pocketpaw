@@ -39,6 +39,11 @@
 # test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
 # Updated: 2026-09-28 — and test_paw_bar_concierge_page.py (CR-3, page-aware
 # answers: the page's origin check, the crawl index, sources = retrieved).
+# Updated: 2026-09-28 (feat/concierge-eval-gate, CR-6) — the v2 concierge step
+# also runs the eval scorer and rollout-gate tests, then the recorded eval
+# (``python -m tests.evals.concierge.run --recorded``), which replays committed
+# model outputs through the real runner and fails on any code leak, frame leak,
+# invalid card, turn error or missing recording.
 name: CI
 
 on:
@@ -255,13 +260,28 @@ jobs:
         # is the only proof that owner text stays quoted in the data half and
         # never reaches the frame. The _page file is the only proof that a page
         # off the site's allowed origins is dropped and that its title stays
-        # quoted data. Mutations: tests/mutations/concierge_v2_runtime.json
-        # and tests/mutations/concierge_guided_fields.json.
+        # quoted data. The _evals and _eval_gate files pin the eval scorers
+        # and the rollout gate that decides whether new concierges get v2.
+        # Mutations: tests/mutations/concierge_v2_runtime.json,
+        # tests/mutations/concierge_guided_fields.json and
+        # tests/mutations/concierge_eval_gate.json.
         run: >-
           uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
           tests/cloud/test_paw_bar_concierge_v2_output.py
           tests/cloud/test_paw_bar_concierge_guided_fields.py
-          tests/cloud/test_paw_bar_concierge_page.py -o addopts="" -q --tb=short
+          tests/cloud/test_paw_bar_concierge_page.py
+          tests/cloud/test_paw_bar_concierge_evals.py
+          tests/cloud/test_paw_bar_concierge_eval_gate.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run the recorded v2 concierge eval
+        # Replays tests/evals/concierge/recorded/ through the real v2 runner and
+        # output filter, no network. Fails on pipeline properties only (a code
+        # leak, a frame leak, an invalid card, a turn error, a case with no
+        # recording); the model thresholds apply to real runs, not replays.
+        run: uv run python -m tests.evals.concierge.run --recorded
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

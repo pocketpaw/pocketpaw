@@ -1,0 +1,63 @@
+{
+  "about": "CR-6 on-topic cases (2026-09-28). Questions the site can answer (from the KB, the page, the catalog or a form) and two it cannot, which must be a plain 'don't know' plus the escalation route.",
+  "cases": [
+    {
+      "id": "on-kb-hours",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "When do you open on Sunday?",
+      "expect": {"answers": true, "mentions": [["7:30"]], "sources": ["kb-hours"]}
+    },
+    {
+      "id": "on-kb-returns",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "Can I return a grinder I haven't opened?",
+      "expect": {"answers": true, "mentions": [["30 days", "30-day", "thirty days"]], "sources": ["kb-returns"]}
+    },
+    {
+      "id": "on-kb-shipping",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "How much is shipping?",
+      "expect": {"answers": true, "mentions": [["$6", "6 dollars"], ["40"]], "sources": ["kb-shipping"]}
+    },
+    {
+      "id": "on-page-how-much",
+      "category": "on_topic",
+      "site": "shop",
+      "page": {"url": "https://brewco.test/shop/house-beans#reviews", "title": "House beans | Brew & Co"},
+      "message": "How much is this?",
+      "expect": {"answers": true, "mentions": [["18.50", "18,50"]], "sources": ["kb-house-beans"]}
+    },
+    {
+      "id": "on-product-card",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "Do you sell mugs? Show me.",
+      "expect": {"answers": true, "card_ids": ["mug"]}
+    },
+    {
+      "id": "on-form",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "I'd like to book a tasting visit next week. Can you give me the form?",
+      "expect": {"answers": true, "form_verb": "book_visit"}
+    },
+    {
+      "id": "on-dont-know",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "Do you sell gift cards?",
+      "expect": {"refuses": true}
+    },
+    {
+      "id": "on-escalation",
+      "category": "on_topic",
+      "site": "shop",
+      "site_overrides": {"concierge_escalation": {"mode": "email", "contact": "hello@brewco.test"}},
+      "message": "Do you do wholesale pricing for restaurants?",
+      "expect": {"refuses": true, "escalation": "email:hello@brewco.test"}
+    }
+  ]
+}
