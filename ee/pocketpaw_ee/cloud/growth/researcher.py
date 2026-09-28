@@ -69,7 +69,7 @@ class ResearchUnavailable(RuntimeError):
 
 
 # The agent's slug. Resolved per workspace at run time — a workspace without
-# the agent seeded gets a clean "not available" rather than a crash.
+# the agent gets it seeded before the run.
 GROWTH_RESEARCHER_SLUG = "growth-researcher"
 
 # The ONLY tools this agent may hold. Pinned by a test: widening this list is a
@@ -149,8 +149,9 @@ case, not a failure. `notes` is for the run log ("three directories were \
 paywalled"), never a claim about a specific company.
 """
 
-# The agent, as data. Seed this into a workspace to make discovery available
-# there; export it to move the agent to another install.
+# The agent, as data. ``agents_service.seed_growth_researcher_agent`` writes it
+# into a workspace — for every workspace at boot, and lazily from
+# ``agent_research`` on a miss. Export it to move the agent to another install.
 #
 # ``trust_level`` 1: this agent reads public web pages and returns text. It
 # holds no credentials, touches no tenant data, and cannot write. There is
@@ -387,13 +388,43 @@ def parse_research_response(text: str, *, max_results: int) -> ResearchResult:
     )
 
 
+async def _seed_researcher(workspace_id: str) -> Any:
+    """Seed the researcher into a workspace that lacks it, owned by the workspace owner.
+
+    A failed owner lookup degrades to an empty owner rather than blocking the
+    seed. Returns ``None`` when the seed itself fails.
+    """
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    owner_id = ""
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.workspace import Workspace
+
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+        owner_id = str(getattr(ws, "owner", "") or "") if ws is not None else ""
+    except Exception:
+        logger.debug("growth researcher: workspace owner lookup failed for ws=%s", workspace_id)
+
+    try:
+        doc, _created = await agents_service.seed_growth_researcher_agent(workspace_id, owner_id)
+    except Exception:
+        logger.exception(
+            "growth researcher: seeding the '%s' agent failed for workspace %s",
+            GROWTH_RESEARCHER_SLUG,
+            workspace_id,
+        )
+        return None
+    return doc
+
+
 async def agent_research(request: ResearchRequest) -> ResearchResult:
     """The production ``ResearchFn`` — run the researcher agent for one ICP.
 
-    Returns an empty result rather than raising on any failure: the agent is
-    missing from the workspace, the run errors, the response is unreadable.
-    ``run_discovery`` already treats a zero-result pass as a normal outcome,
-    and one workspace's broken run must not end the sweep for the rest.
+    A workspace without the researcher agent gets it seeded on the spot. Raises
+    ``ResearchUnavailable`` when the agent cannot be set up or the run errors;
+    an unreadable response parses to an empty result.
     """
     # Lazy, in-function import of the OSS package — the convention every cloud
     # module reaching into ``pocketpaw.agents`` follows (see
@@ -409,15 +440,10 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
     try:
         agent = await agents_service.get_by_slug(request.workspace_id, GROWTH_RESEARCHER_SLUG)
     except Exception:
-        logger.warning(
-            "growth researcher: workspace %s has no '%s' agent seeded — discovery is idle for it",
-            request.workspace_id,
-            GROWTH_RESEARCHER_SLUG,
-        )
-        raise ResearchUnavailable("no researcher agent is seeded in this workspace")
+        agent = await _seed_researcher(request.workspace_id)
     agent_id = str(getattr(agent, "id", "") or "")
     if not agent_id:
-        raise ResearchUnavailable("no researcher agent is seeded in this workspace")
+        raise ResearchUnavailable("the researcher agent could not be set up in this workspace")
 
     prompt = build_research_prompt(request)
     # One session per RUN, not per ICP. The timestamp is the whole point: an

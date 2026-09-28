@@ -966,6 +966,101 @@ async def ensure_code_agent_all_workspaces() -> int:
     return seeded
 
 
+async def seed_growth_researcher_agent(
+    workspace_id: str, owner_id: str
+) -> tuple[_AgentDoc, bool] | tuple[None, bool]:
+    """Create the ``growth-researcher`` Agent for a workspace if missing.
+
+    The row is built from ``GROWTH_RESEARCHER_AGENT`` (the declarative
+    definition in ``growth/researcher.py``), so the persona, tool surface and
+    run settings have one source. Discovery resolves this agent by slug, and a
+    workspace without it cannot run a hunt.
+
+    Idempotent (find-by-slug short-circuit). Returns ``(agent, created)`` —
+    ``created`` is ``True`` only when this call inserted a new row.
+
+    Unlike ``seed_code_agent``, the short-circuit NARROWS an existing row rather
+    than unioning into it: a ``tool_mode`` other than ``exclusive`` or any tool
+    list other than ``GROWTH_RESEARCHER_TOOLS`` is reset to the pinned surface.
+    For this agent a wider surface is the hazard — a researcher holding
+    ``growth_upsert_prospect`` would file prospects around ``recordable_emails``.
+    """
+    from pocketpaw_ee.cloud.growth.researcher import (
+        GROWTH_RESEARCHER_AGENT,
+        GROWTH_RESEARCHER_SLUG,
+        GROWTH_RESEARCHER_TOOLS,
+    )
+
+    pinned_tools = list(GROWTH_RESEARCHER_TOOLS)
+    existing = await _AgentDoc.find_one(
+        _AgentDoc.workspace == workspace_id, _AgentDoc.slug == GROWTH_RESEARCHER_SLUG
+    )
+    if existing is not None:
+        widened = list(existing.config.tools or []) != pinned_tools
+        if widened or existing.config.tool_mode != "exclusive":
+            logger.info(
+                "Narrowed '%s' agent in workspace %s from tool_mode=%s tools=%s",
+                GROWTH_RESEARCHER_SLUG,
+                workspace_id,
+                existing.config.tool_mode,
+                existing.config.tools,
+            )
+            existing.config.tool_mode = "exclusive"
+            existing.config.tools = pinned_tools
+            await existing.save()
+        return existing, False
+
+    agent = _AgentDoc(
+        workspace=workspace_id,
+        name=GROWTH_RESEARCHER_AGENT["name"],
+        slug=GROWTH_RESEARCHER_SLUG,
+        avatar="",
+        owner=owner_id,
+        visibility="workspace",
+        config=_AgentConfigDoc(**GROWTH_RESEARCHER_AGENT["config"]),
+    )
+    await agent.insert()
+    logger.info(
+        "'%s' agent seeded in workspace %s (id: %s)",
+        GROWTH_RESEARCHER_SLUG,
+        workspace_id,
+        agent.id,
+    )
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
+    return agent, True
+
+
+async def ensure_growth_researcher_agent_all_workspaces() -> int:
+    """Back-fill the ``growth-researcher`` agent for every existing workspace.
+
+    Called on every boot beside ``ensure_code_agent_all_workspaces`` so hunts
+    run in a workspace regardless of install age. Returns the number of agents
+    actually created this run.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    seeded = 0
+    async for ws in _WorkspaceDoc.find_all():
+        try:
+            _, created = await seed_growth_researcher_agent(str(ws.id), str(ws.owner))
+            if created:
+                seeded += 1
+        except Exception as exc:
+            logger.warning("Failed to back-fill growth researcher agent for ws=%s: %s", ws.id, exc)
+    return seeded
+
+
 __all__ = [
     "can_read_agent",
     "can_use_agent",
@@ -976,6 +1071,7 @@ __all__ = [
     "ensure_can_use",
     "ensure_code_agent_all_workspaces",
     "ensure_default_agent_all_workspaces",
+    "ensure_growth_researcher_agent_all_workspaces",
     "get",
     "get_by_slug",
     "get_for_viewer",
@@ -987,6 +1083,7 @@ __all__ = [
     "list_agents",
     "seed_code_agent",
     "seed_default_agent",
+    "seed_growth_researcher_agent",
     "set_scopes",
     "suggest_for_mentions",
     "update",
