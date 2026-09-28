@@ -35,6 +35,8 @@
 # NOT here; see the job's own comment for why.
 # Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_faqs.py
 # (concierge pinned FAQs) with the same addopts escape as the v2 runner step.
+# Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_sources.py
+# (concierge knowledge uploads and links) with the same addopts escape.
 name: CI
 
 on:
@@ -258,6 +260,18 @@ jobs:
         # owner text only ever reaches the model as data. Mutations:
         # tests/mutations/concierge_pinned_faqs.json.
         run: uv run pytest tests/cloud/test_paw_bar_concierge_faqs.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge knowledge source tests
+        # Same addopts escape. Owners upload files and add links the v2 concierge
+        # answers from; this file proves links go through the SSRF-safe fetcher,
+        # the file type is sniffed from the bytes, the per-plan caps hold, removal
+        # un-indexes, and the routes are tenant-scoped and role-gated. The DOCX
+        # case skips here (python-docx ships in ee[extraction], which this job does
+        # not install). Mutations: tests/mutations/concierge_knowledge_sources.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_sources.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

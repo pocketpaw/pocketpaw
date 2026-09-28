@@ -1,0 +1,212 @@
+[
+  {
+    "label": "a link's address is not checked at add time — a loopback or metadata URL gets a row and a fetch",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "            await check_link(url)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_link_to_a_private_address_is_refused_at_add_time"
+    ]
+  },
+  {
+    "label": "refetch skips the address check",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        await check_link(row.url)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_refetch_rechecks_the_address"
+    ]
+  },
+  {
+    "label": "check_link lets a private address through",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "    except (UnsupportedSchemeError, BlockedURLError) as exc:\n        raise SourceRefused(\"blocked\") from exc\n    except FetchFailedError:\n        return",
+    "replace": "    except (UnsupportedSchemeError, BlockedURLError) as exc:\n        return\n    except FetchFailedError:\n        return",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_link_to_a_private_address_is_refused_at_add_time"
+    ]
+  },
+  {
+    "label": "a redirect to a private address reads as a generic failure instead of blocked",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "    except (UnsupportedSchemeError, BlockedURLError) as exc:\n        raise SourceRefused(\"blocked\") from exc\n    except FetchFailedError as exc:",
+    "replace": "    except (UnsupportedSchemeError, BlockedURLError) as exc:\n        raise SourceRefused(\"failed\", \"unreachable\") from exc\n    except FetchFailedError as exc:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_redirect_to_a_private_address_is_blocked_during_the_fetch"
+    ]
+  },
+  {
+    "label": "a non-2xx page is indexed as if it were content",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "    if not 200 <= result.status_code < 300:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_link_that_cannot_be_read_says_why"
+    ]
+  },
+  {
+    "label": "an oversized page body is indexed truncated instead of refused",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "    if result.truncated:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_link_that_cannot_be_read_says_why"
+    ]
+  },
+  {
+    "label": "the route trusts the client's Content-Type instead of sniffing the bytes",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "            mime = sniff_upload(data, name, max_bytes=max_bytes)",
+    "replace": "            mime = file.content_type or \"\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_disguised_or_unaccepted_file_is_415_and_writes_nothing",
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_the_client_content_type_never_decides_the_mime"
+    ]
+  },
+  {
+    "label": "the sniffed type need not agree with the extension — a PDF named .txt is accepted",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "    if actual != claimed:\n        raise SourceRefused(\"unsupported\")",
+    "replace": "    if False:\n        raise SourceRefused(\"unsupported\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_disguised_or_unaccepted_file_is_415_and_writes_nothing"
+    ]
+  },
+  {
+    "label": "text bytes are accepted under a .pdf or .docx name",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "        if ext not in _TEXT_EXTS:\n            raise SourceRefused(\"unsupported\")",
+    "replace": "        if False:\n            raise SourceRefused(\"unsupported\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_disguised_or_unaccepted_file_is_415_and_writes_nothing"
+    ]
+  },
+  {
+    "label": "any zip passes as a Word document",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "    if \"word/document.xml\" not in {info.filename for info in infos}:\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_disguised_or_unaccepted_file_is_415_and_writes_nothing"
+    ]
+  },
+  {
+    "label": "a zip bomb reaches python-docx",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_sources.py",
+    "find": "        if inflated > max_bytes * INFLATE_RATIO:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_docx_that_inflates_past_the_ceiling_is_refused_as_too_large"
+    ]
+  },
+  {
+    "label": "the byte cap is doubled",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        if total > max_bytes:",
+    "replace": "        if total > max_bytes * 2:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_an_upload_over_the_byte_cap_is_413_and_writes_nothing"
+    ]
+  },
+  {
+    "label": "the byte cap refuses a file exactly at the cap",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        if total > max_bytes:",
+    "replace": "        if total >= max_bytes:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_an_upload_exactly_at_the_byte_cap_is_accepted"
+    ]
+  },
+  {
+    "label": "the count cap in the $push filter is one too loose — racing adds pass it",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "f\"concierge_sources.{max_count - 1}\"",
+    "replace": "f\"concierge_sources.{max_count}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_the_count_cap_holds_when_two_adds_race"
+    ]
+  },
+  {
+    "label": "every site gets the top plan's count cap",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    return tier.key if tier is not None else BASE_SITE_PLAN_KEY",
+    "replace": "    return \"staff\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_the_count_cap_follows_the_site_plan",
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_an_unknown_or_legacy_plan_key_resolves_through_the_catalog"
+    ]
+  },
+  {
+    "label": "extracted text is handed to the kb uncut",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        text = text[:max_chars]",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_extracted_text_past_the_char_cap_is_cut_and_marked"
+    ]
+  },
+  {
+    "label": "a row stuck processing is shown as processing forever",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    if _is_stale(row, now):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_row_stuck_processing_reads_as_interrupted"
+    ]
+  },
+  {
+    "label": "removal deletes an article another source or the page sync still holds",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        if article_id in held:\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_removal_spares_an_article_another_source_or_the_page_sync_holds",
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_delete_sources_clears_every_row_and_un_indexes"
+    ]
+  },
+  {
+    "label": "removing a source leaves its article answering visitors",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    await _unindex(_scope(site), list(row.article_ids), site.id)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_removing_a_source_deletes_its_article"
+    ]
+  },
+  {
+    "label": "a source removed mid-ingest leaves its article orphaned in the pocket",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        await _unindex(scope, [article_id], site_id)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_source_removed_mid_ingest_leaves_no_orphan_article"
+    ]
+  },
+  {
+    "label": "the source routes load the site without the workspace scope",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    return await _load_site_scoped(site_id, workspace_id)",
+    "replace": "    return await __import__('pocketpaw_ee.cloud.models.site', fromlist=['Site']).Site.find_one({'_id': __import__('bson').ObjectId(site_id)})",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_every_verb_404s_on_another_workspaces_site"
+    ]
+  },
+  {
+    "label": "the add route drops its manage gate — a workspace member can add sources",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    status_code=202,\n    dependencies=[Depends(_require_paw_bar_manage)],\n)\nasync def add_site_source(",
+    "replace": "    status_code=202,\n)\nasync def add_site_source(",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_member_is_refused_every_verb_and_nothing_is_written"
+    ]
+  },
+  {
+    "label": "the delete route drops its manage gate",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    status_code=204,\n    dependencies=[Depends(_require_paw_bar_manage)],\n)\nasync def delete_site_source(",
+    "replace": "    status_code=204,\n)\nasync def delete_site_source(",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_member_is_refused_every_verb_and_nothing_is_written"
+    ]
+  }
+]

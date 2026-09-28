@@ -4,6 +4,14 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-28 (feat/concierge-knowledge-sources, CR-9): added
+# ``concierge_sources``, the files and single links an owner gave the concierge
+# (``ConciergeKnowledgeSource``). Each is extracted and compiled into the site pocket
+# KB by ``paw_bar.knowledge_routes``; the row keeps only metadata, the status the
+# dashboard polls and the kb article ids it produced, never the file's bytes.
+# Written with $push / $pull / positional $set so a background ingest finishing
+# never clobbers a concurrent add or delete. Empty by default, so no migration.
+#
 # Updated 2026-09-28 (feat/concierge-pinned-faqs, CR-8): added ``concierge_faqs``,
 # the owner's pinned question/answer pairs (``ConciergeFaq``). The v2 runner's
 # ``retrieve`` puts them ahead of every KB hit, and the owner edits them through
@@ -365,6 +373,36 @@ class ConciergeFaq(BaseModel):
             created_at=now,
             updated_at=now,
         )
+
+
+class ConciergeKnowledgeSource(BaseModel):
+    """One uploaded file or single link a site's concierge answers from (CR-9).
+
+    ``kind`` is ``file`` (PDF, DOCX, Markdown, text) or ``link`` (one web page,
+    fetched through the SSRF-safe fetcher). ``status`` is ``processing`` until the
+    background ingest ends, then ``ready`` or a refusal the dashboard turns into a
+    sentence: ``failed`` (``reason`` says why), ``too_large``, ``unsupported`` or
+    ``blocked``. ``mime`` is what the server sniffed, never the client's claim.
+    ``article_ids`` are the kb articles in ``pocket:<pocket_id>`` this source
+    produced; removing the source deletes them. The file itself is not stored.
+    """
+
+    id: str
+    kind: Literal["file", "link"]
+    name: str
+    url: str | None = None
+    mime: str = ""
+    size_bytes: int = 0
+    status: Literal["processing", "ready", "failed", "too_large", "unsupported", "blocked"] = (
+        "processing"
+    )
+    reason: str = ""
+    chars: int = 0
+    truncated: bool = False
+    article_ids: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    indexed_at: datetime | None = None
 
 
 class Site(TimestampedDocument):
@@ -868,6 +906,12 @@ class Site(TimestampedDocument):
     # of every KB hit. Written only through ``paw_bar.knowledge_routes`` (which
     # caps count and length from config) and cleared by its ``delete_faqs``.
     concierge_faqs: list[ConciergeFaq] = Field(default_factory=list)
+    # Paw Bar knowledge sources (CR-9, 2026-09-28): uploaded files and single links,
+    # ingested into ``pocket:<pocket_id>`` beside the site's own pages. Written only
+    # through ``paw_bar.knowledge_routes`` (count capped per plan from config) and
+    # cleared, un-indexed, by its ``delete_sources``. The page sync never prunes
+    # these articles: it only deletes ids listed in ``kb_article_ids``.
+    concierge_sources: list[ConciergeKnowledgeSource] = Field(default_factory=list)
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or
