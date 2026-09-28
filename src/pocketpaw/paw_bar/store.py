@@ -1,4 +1,8 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — new
+#   purge_widget_conversations: deleting a concierge "with its conversations"
+#   drops the widget's conversation, owner-message, decision and cart rows, after
+#   checking the widget belongs to the caller's workspace.
 # Updated: 2026-09-26 (fix/pawbar-public-route-gates) — the rate limiter grew
 #   BUCKETS and an atomic admit. paw_bar_events gains ``bucket TEXT DEFAULT ''``
 #   (additive ALTER, old rows land in the shared '' bucket). record_event,
@@ -974,6 +978,35 @@ class PawBarStore:
             cur = await db.execute(sql, params)
             await db.commit()
             return (cur.rowcount or 0) > 0
+
+    # The per-visitor tables a concierge's conversations live in. Events, spec
+    # revisions and the widget itself are the BAR's history, not a conversation.
+    _CONVERSATION_TABLES: tuple[str, ...] = (
+        "paw_bar_conversations",
+        "paw_bar_owner_messages",
+        "paw_bar_decisions",
+        "paw_bar_carts",
+    )
+
+    async def purge_widget_conversations(self, widget_id: str, workspace_id: str) -> int:
+        """Delete every visitor conversation row a widget holds. Returns the count.
+
+        The owner's "delete conversations too" on a concierge delete (CR-12):
+        inbox rows, owner/system lines, visitor decisions (the requests and the
+        contact emails attached to them) and carts. The widget must belong to
+        ``workspace_id`` or nothing is touched — the tenancy check is here, not
+        left to the caller, because the child tables are keyed on ``widget_id``
+        alone and a stray id would otherwise reach another tenant's visitors.
+        """
+        if await self.get_widget(widget_id, workspace_id=workspace_id) is None:
+            return 0
+        removed = 0
+        async with self._conn() as db:
+            for table in self._CONVERSATION_TABLES:
+                cur = await db.execute(f"DELETE FROM {table} WHERE widget_id = ?", (widget_id,))
+                removed += cur.rowcount or 0
+            await db.commit()
+        return removed
 
     # ---------------- Events ----------------
 

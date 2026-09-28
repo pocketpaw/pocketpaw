@@ -1,5 +1,12 @@
 # sites.py — /sites surface preamble.
 #
+# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — `_CONCIERGE_NOTE`
+# no longer says a published site "ships with" a concierge that is "provisioned
+# automatically" and "ON by default". None of that is true any more: the OWNER
+# creates a concierge from the site's settings in the dashboard, it starts off,
+# and the bar appears on the live page at the next publish after it is on. The
+# agent still has no tool for any of it, so the block routes the user there.
+#
 # TWO INVARIANTS a reader must not break, both of which have been broken before
 # (see the 2026-09-17 entry below for how):
 #   1. ``build_preamble`` resolves the pocket BEFORE it forks. A meta with a
@@ -571,14 +578,13 @@ logger = logging.getLogger(__name__)
 #
 # Every claim below is pinned to a code path, because a preamble that oversells
 # trades a blind agent for a confidently wrong one:
-#   * embedded on every published page — ``sites/service.py::_embed_concierge_bar``
-#     injects the snippet into the built tree between build and deploy;
-#   * provisioned at PUBLISH, not at draft — that same function is reached only on
-#     a live publish (a preview returns from ``publish_pocket`` well before it),
-#     and it funnels into ``paw_bar/agent_provisioning.py::ensure_site_widget`` →
-#     ``ensure_site_agent``, the third of the three provisioning triggers;
-#   * on by default — ``Site.concierge_enabled`` defaults True, and the embed
-#     reads an absent doc as enabled so a FIRST publish still gets its bar;
+#   * created by the OWNER, never automatically (CR-12) — only
+#     ``POST /paw-bar/admin/site/{id}/concierge`` stamps
+#     ``Site.concierge_created_at``, and it starts OFF (``concierge_enabled``
+#     defaults False);
+#   * embedded at PUBLISH — ``sites/service.py::_embed_concierge_bar`` injects the
+#     snippet between build and deploy of a live publish, and only for a site that
+#     has a concierge and has it on, so a draft never has one;
 #   * grounded in the site's own content — ``sites/kb_ingest.py``'s sync is
 #     scheduled at publish and at bind, so the concierge answers from the pages;
 #   * always able to fetch a human — ``agent/mcp_servers/pawbar.py`` registers the
@@ -593,20 +599,21 @@ logger = logging.getLogger(__name__)
 # surface and its test forbids that string.
 _CONCIERGE_NOTE = (
     "<site-concierge>\n"
-    "Every Paw Site we publish ships with a CONCIERGE: a Paw Bar chat widget "
-    "embedded on the live page, backed by a dedicated agent that belongs to that "
-    "one site. You do not build it and you do not wire it up — it is provisioned "
-    "automatically the moment the site goes live (publishing is what creates it, "
-    "so a draft does not have one yet), and it is ON by default for every site.\n"
+    "A Paw Site can have a CONCIERGE: a Paw Bar chat widget embedded on the live "
+    "page that belongs to that one site. It is never created automatically. The "
+    "site's owner adds it from the site's settings in the dashboard, where it "
+    "starts switched off; once they turn it on, the next publish puts it on the "
+    "live page. A draft never has one, and a newly published site has none until "
+    "its owner adds it.\n"
     "What it does for the business: it answers their VISITORS' questions about "
     "the site, grounded in the site's own published content, which is synced into "
     "its knowledge automatically. Every concierge can also hand a conversation to "
     "a real person when a visitor asks for one.\n"
     "KNOW THIS AND SAY IT when it is relevant — when the user asks what happens "
     "after publishing, asks about chat / support / lead handling / answering "
-    "visitors, or is deciding whether to go live. It is a real part of the "
-    "deliverable, so never tell a user their site has no chat or no way to "
-    "capture a visitor's question.\n"
+    "visitors, or is deciding whether to go live. Tell them it is one click to "
+    "add in the dashboard; never claim their site already has one, and never "
+    "claim you created one.\n"
     "WHAT YOU CANNOT DO: the greeting, the product catalog, and the concierge's "
     "actions are owner-authored — the user sets them from the site's settings in "
     "the dashboard. You have no tool for any of that, so point them at the "
