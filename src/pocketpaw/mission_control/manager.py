@@ -275,6 +275,18 @@ class MissionControlManager:
         """
         return await self._store.save_task(task)
 
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task via manager instead of accessing _store directly."""
+        return await self._store.delete_task(task_id)
+
+    async def delete_document(self, document_id: str) -> bool:
+        """Delete a document via manager"""
+        return await self._store.delete_document(document_id)
+
+    async def get_activities(self, **kwargs):
+        """Get activities via manager"""
+        return await self._store.get_activities(**kwargs)
+
     async def list_tasks(
         self,
         status: TaskStatus | None = None,
