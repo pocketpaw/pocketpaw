@@ -32,8 +32,8 @@
   {
     "label": "the owner tag is not neutralized in data — a visitor can forge an owner block",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "visitor-message|owner-settings)",
-    "replace": "visitor-message)",
+    "find": "visitor-message|owner-settings|page)",
+    "replace": "visitor-message|page)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_a_visitor_cannot_forge_the_owner_block"
     ]
@@ -41,8 +41,8 @@
   {
     "label": "the runner drops the site from the prompt — owner fields never reach the model",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        prompt = build_prompt(items, widget, history, message, site=site)",
-    "replace": "        prompt = build_prompt(items, widget, history, message)",
+    "find": "        prompt = build_prompt(items, widget, history, message, site=site, page=page_ctx)",
+    "replace": "        prompt = build_prompt(items, widget, history, message, page=page_ctx)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_fields_reach_the_data_half_and_never_the_frame"
     ]

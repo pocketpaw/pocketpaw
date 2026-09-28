@@ -1,4 +1,11 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-28 (feat/concierge-page-aware, CR-3) — ``ConciergeChatRequest``
+#   takes an optional ``page: {url, title}`` (the host page paw-bar's loader
+#   reports). Optional because cached bundles predate it, and never a 422: a page
+#   that is not an object with a string url reads as absent, so a broken bundle
+#   still gets its answer. The v2 runner validates it (``resolve_page``); the legacy
+#   path ignores it. The v2 ``sources`` event now comes from the runner itself (the
+#   knowledge it gave the model), not from ``_concierge_sources``.
 # Updated: 2026-09-28 (feat/concierge-guided-fields, CR-4) — the settings GET/PATCH
 #   carry the owner's guided fields: ``concierge_name`` (<=40),
 #   ``concierge_tone`` (friendly|professional|concise|playful),
@@ -605,7 +612,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw.paw_bar.concierge_fields import (
@@ -5219,6 +5226,12 @@ async def _concierge_sources(pocket_id: str, message: str, site: Any) -> list[di
         return []
 
 
+# Wire caps on ``ConciergeChatRequest.page``, applied before anything reads it.
+# Generous on purpose: ``resolve_page`` does the real clipping (120 for a title).
+_PAGE_URL_MAX = 2_048
+_PAGE_TITLE_MAX = 1_000
+
+
 class ConciergeChatRequest(BaseModel):
     widget_id: str
     # The public, origin-bound embed key (Site.signed_key) baked into the widget.
@@ -5241,6 +5254,24 @@ class ConciergeChatRequest(BaseModel):
     # the turn falls back to the caller's own active conversation rather than
     # erroring: the value is client-supplied, so it is a hint, never an authority.
     conversation_id: str = ""
+    # The host page the visitor is on (CR-3), as paw-bar's loader reports it:
+    # ``{"url": "https://site/path", "title": "..."}``. OPTIONAL for the same reason
+    # as ``conversation_id``, and absent means today's turn. It is visitor-controlled
+    # data, never an authority: only the v2 runner reads it, through
+    # ``concierge_runtime.resolve_page``, which drops it unless the url is on the
+    # site's allowed origins. Kept as a plain dict so no shape of it can 422 a turn.
+    page: dict[str, str] | None = None
+
+    @field_validator("page", mode="before")
+    @classmethod
+    def _page_or_nothing(cls, value: Any) -> dict[str, str] | None:
+        if not isinstance(value, dict) or not isinstance(value.get("url"), str):
+            return None
+        title = value.get("title")
+        return {
+            "url": value["url"][:_PAGE_URL_MAX],
+            "title": title[:_PAGE_TITLE_MAX] if isinstance(title, str) else "",
+        }
 
 
 def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> bytes:
@@ -5760,6 +5791,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
                 site,
                 conversation,
                 body.message,
+                body.page,
                 workspace_id=ctx.workspace_id,
                 pocket_id=ctx.pocket_id or "",
                 customer_ref=body.customer_ref,

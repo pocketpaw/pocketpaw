@@ -4,6 +4,10 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-28 (feat/concierge-page-aware, CR-3): added ``kb_page_index``,
+# the crawl index the site sync writes (``sites.kb_ingest``): which kb article
+# each page became, so the v2 concierge can find the page a visitor is on.
+#
 # Updated 2026-09-28 (feat/concierge-guided-fields, CR-4): added the owner's
 # guided concierge fields (``concierge_name``, ``concierge_tone``,
 # ``concierge_languages``, ``concierge_about``, ``concierge_avoid_topics``,
@@ -865,6 +869,12 @@ class Site(TimestampedDocument):
     # deleted page left behind WITHOUT touching the rest of the scope, which also
     # holds owner-uploaded files. Empty until the first sync, so no migration.
     kb_article_ids: list[str] = Field(default_factory=list)
+    # The crawl index (CR-3): ``{page_key: {"id": article id, "title": title}}``
+    # for each page the last sync ingested, keyed by ``kb_ingest.page_key``. The v2
+    # concierge looks the visitor's page up here (``concierge_runtime.resolve_page``);
+    # kb-go names articles by title, so this is the only page-to-article link. Empty
+    # until the site's next sync, so no migration: a page then reads as not indexed.
+    kb_page_index: dict[str, dict[str, str]] = Field(default_factory=dict)
     # When the last sync ran (success or not) and why it produced nothing, so the
     # dashboard can tell "this concierge has no knowledge yet" apart from "syncing
     # is broken". "" means the last sync was clean.

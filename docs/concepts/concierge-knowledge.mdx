@@ -9,6 +9,11 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
 
 {/*
   docs/concepts/concierge-knowledge.mdx
+  Updated 2026-09-28 (feat/concierge-page-aware, CR-3) — new subsection "The page the
+  visitor is on": the optional page field, the origin check, the crawl index the sync
+  now writes, what a hit and a miss add, and the retrieval query. "What the visitor
+  sees as sources" now says how v2 differs (sources are the knowledge the model was
+  given). The "not yet" line drops the page.
   Updated 2026-09-28 (feat/concierge-guided-fields, CR-4) — new subsection "Guided
   fields": name, tone, languages, about, topics to avoid and escalation, how each is
   rendered, and why owner text can't change the rules. The "not yet" line drops
@@ -168,6 +173,14 @@ at, so a reply can be grounded in them without them showing up as a citation. Wh
 nothing matches, or the search fails, no sources are shown and the reply is
 unaffected.
 
+On the v2 runtime the list is not a second search. It is the knowledge the model was
+actually given for that reply, item for item and in the same order, sent as
+`{"items": [{"id", "title", "url"}]}` (and the same list under `sources`, for widget
+bundles that only read that key). Every item carries its id. Only a page the site sync
+recorded gets a title and a link; an owner's upload or an agent file is listed by id
+with an empty title and url, so its name never leaves the server and the widget, which
+shows only entries with a link, shows nothing for it.
+
 ## The v2 runtime
 
 Each site chooses which runtime answers its visitors with `concierge_runtime`, readable
@@ -271,8 +284,38 @@ A site that sets none of the fields sends exactly the prompt it sent before.
 The full field contract (types, caps, PATCH rules) is in the API reference under the
 Paw Bar owner surface.
 
-v2 does not yet read the page the visitor is on or cap spend per site. Those land
-before it becomes the default for new sites.
+### The page the visitor is on
+
+The widget tells the server which page it sits on: each chat request can carry
+`page: {"url": ..., "title": ...}`. The field is optional, since widget bundles cached on
+visitors' devices predate it, and a request without it is answered exactly as before.
+It is the visitor's browser talking, so none of it is trusted:
+
+- The page is dropped unless its url is `http` or `https` and its host is on the site's
+  allowed origins, the same list the chat's own origin check uses. A forged url can
+  only point at another public page of the same site. A value that isn't an object
+  with a string url is treated as absent, never as an error.
+- The query string and fragment are thrown away before anything reads the url.
+- The path is looked up in the site's crawl index. Each knowledge sync now records which
+  article every page became (`kb_page_index` on the site, keyed by the page's path with
+  the extension and any trailing `index` removed, so `/about`, `about.html` and
+  `about/index.html` are one page). On a hit the prompt gets the indexed title, the
+  article's summary and, first in the knowledge, the article itself, which also lets a
+  documentation site quote code from the page being read.
+- On a miss, only the browser's title goes in, folded to one line, cut to 120
+  characters, quoted, and labelled as unverified.
+- A catalog item whose `url` is that page is named too, so "how much is this?" on a
+  product page has an answer.
+
+All of it lands in a `<page>` block, which the fixed instructions treat as data like the
+others. The knowledge search for the turn uses the visitor's message, their two previous
+messages in this conversation and the page title.
+
+A site synced before this change has an empty crawl index, so its pages count as misses
+(title only) until the next publish or manual re-sync rebuilds it.
+
+v2 does not yet cap spend per site. That lands before it becomes the default for new
+sites.
 
 ## What a concierge records
 

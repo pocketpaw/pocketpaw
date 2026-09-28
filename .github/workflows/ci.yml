@@ -37,6 +37,8 @@
 # NOT here; see the job's own comment for why.
 # Updated: 2026-09-28 — the v2 concierge step also runs
 # test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
+# Updated: 2026-09-28 — and test_paw_bar_concierge_page.py (CR-3, page-aware
+# answers: the page's origin check, the crawl index, sources = retrieved).
 name: CI
 
 on:
@@ -251,12 +253,15 @@ jobs:
         # the only proof that code never reaches the widget and that product
         # cards carry catalog prices, not the model's. The _guided_fields file
         # is the only proof that owner text stays quoted in the data half and
-        # never reaches the frame. Mutations: tests/mutations/concierge_v2_runtime.json
+        # never reaches the frame. The _page file is the only proof that a page
+        # off the site's allowed origins is dropped and that its title stays
+        # quoted data. Mutations: tests/mutations/concierge_v2_runtime.json
         # and tests/mutations/concierge_guided_fields.json.
         run: >-
           uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
           tests/cloud/test_paw_bar_concierge_v2_output.py
-          tests/cloud/test_paw_bar_concierge_guided_fields.py -o addopts="" -q --tb=short
+          tests/cloud/test_paw_bar_concierge_guided_fields.py
+          tests/cloud/test_paw_bar_concierge_page.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
