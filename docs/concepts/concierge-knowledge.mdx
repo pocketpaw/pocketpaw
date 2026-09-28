@@ -9,6 +9,10 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
 
 {/*
   docs/concepts/concierge-knowledge.mdx
+  Updated 2026-09-28 (feat/concierge-knowledge-sources, CR-9) — new section "Files and
+  links": owner uploads (PDF, DOCX, Markdown, text) and single web pages read into the
+  site pocket, the per-source status codes, the per-plan caps, and how removal
+  un-indexes.
   Updated 2026-09-28 (feat/concierge-eval-gate, CR-6) — new subsection "Evals and the
   rollout gate": the eval suite (cases, scorers, recorded vs real runs), the report,
   the thresholds, and default_concierge_runtime, the only thing that can give a new
@@ -165,6 +169,55 @@ A concierge embedded on a site PocketPaw does not host has no content in its poc
 so it syncs zero documents and reports `no_content`. Grounding one of those means
 crawling the customer's own origin through the SSRF-hardened import crawler, and is
 not part of this path.
+
+### Files and links
+
+Besides its own pages, an owner can give a site's concierge **files** (PDF, Word
+`.docx`, Markdown, plain text) and **single web pages**. Each one is read into the
+same `pocket:<pocket_id>` scope the page sync writes, so both runtimes find it the
+same way they find a page. The routes live under
+`/paw-bar/admin/site/{site_id}/knowledge/sources`; see the API reference for the
+exact contract.
+
+- **Reading happens in the background.** Adding a source returns at once with a row in
+  `processing`; the text is extracted and compiled into an article, and the row flips to
+  `ready`. The dashboard polls the list.
+- **A file's type comes from its bytes.** The extension has to be one of the four
+  accepted types *and* agree with what the content actually is. The browser's
+  `Content-Type` is never consulted, so a picture renamed `menu.pdf` or a PDF renamed
+  `notes.txt` is refused. A Word file that would inflate far past the upload cap is
+  refused before it is opened.
+- **The file itself is not kept.** Its text is extracted, handed to the knowledge
+  base and the bytes are dropped. There is nothing in file storage to leak or clean up;
+  to change a file, remove it and upload the new one.
+- **A link is read once**, through the same SSRF-hardened fetcher the link previews
+  use: the address has to resolve to a public host, and every redirect is checked
+  again, so a page that redirects to an internal address is refused rather than
+  fetched. HTML is reduced to its visible text. A link can be read again on demand
+  (`…/{source_id}/refetch`); the new article replaces the old one.
+- **Removing a source un-indexes it.** Its article is deleted from the pocket scope,
+  so the concierge stops quoting it on the next turn. The knowledge base names an
+  article after its compiled title, so two sources can end up sharing one; an article
+  another source or the page sync still holds is kept.
+
+Each row carries a `status`: `processing`, `ready`, `failed` (with a `reason`:
+`unreadable`, `unreachable`, `no_content`, `ingest_failed`, `kb_unavailable`, or
+`interrupted` for a row whose reading was cut short by a restart), `too_large`,
+`unsupported`, or `blocked` (an address that is not a public web page). A refusal
+decided on the spot writes no row at all and comes back as the HTTP error with the
+same code.
+
+Caps come from config and depend on the site's plan:
+
+| Setting | Default |
+|---|---|
+| `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_COUNT_FREE` / `_SITE` / `_STAFF` | 3 / 20 / 50 files and links together |
+| `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_BYTES` | 10 MiB per upload or linked page |
+| `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_CHARS` | 100,000 extracted characters per source; the rest is cut and the row is marked `truncated` |
+
+Everything in a file or a page is data. It is only ever extracted and quoted inside
+the knowledge block, never followed as an instruction. Like other owner uploads, it is
+never listed as a public "Source" under a reply, because it has no public URL.
 
 ## What the visitor sees as sources
 

@@ -14,11 +14,10 @@
 #     and unbinds the agent without deleting it. Twice → 409, cross-tenant → 404,
 #     a member without ``paw_bar.manage`` → 403.
 #
-# Updated 2026-09-28 (feat/concierge-pinned-faqs, runner merge): the CR-8 / CR-9 delete-hook
+# Updated 2026-09-28 (chore/concierge-v2-integration): the CR-8 / CR-9 delete-hook
 # tests patch the real ``knowledge_routes`` module instead of installing a
 # stand-in in ``sys.modules``, which the package attribute shadows once the real
-# module is imported (it failed only in a full-suite run). On this branch
-# CR-9 is not merged yet, so the delete_sources patch passes raising=False.
+# module is imported (it failed only in a full-suite run).
 #
 # tests/mutations/concierge_manual_create.json restores each trigger in turn and
 # names the test here that catches it.
@@ -541,8 +540,7 @@ class TestCreateAndDelete:
             cleared.append(str(site.id))
             return 0
 
-        # raising=False: until CR-9 merges, the real module has no delete_sources.
-        monkeypatch.setattr(knowledge_routes, "delete_sources", delete_sources, raising=False)
+        monkeypatch.setattr(knowledge_routes, "delete_sources", delete_sources)
         monkeypatch.delattr(knowledge_routes, "delete_faqs")
 
         site = await _site()
