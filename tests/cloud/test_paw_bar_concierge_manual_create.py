@@ -368,6 +368,71 @@ class TestCreateAndDelete:
         again = await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
         assert again.status_code == 201
 
+    @staticmethod
+    def _gate(monkeypatch, answer: str) -> list[int]:
+        """Install a stand-in for CR-6's ``concierge_gate`` (its own PR) that answers
+        ``answer`` and records each call."""
+        import sys
+        import types
+
+        calls: list[int] = []
+
+        def default_concierge_runtime(settings=None) -> str:
+            calls.append(1)
+            return answer
+
+        fake = types.ModuleType("pocketpaw_ee.paw_bar.concierge_gate")
+        fake.default_concierge_runtime = default_concierge_runtime
+        monkeypatch.setitem(sys.modules, "pocketpaw_ee.paw_bar.concierge_gate", fake)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_an_open_gate_creates_a_v2_concierge_with_no_agent(
+        self, client, store, monkeypatch
+    ) -> None:
+        calls = self._gate(monkeypatch, "v2")
+        site = await _site()
+
+        res = await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
+
+        assert res.status_code == 201, res.text
+        assert calls == [1], "the gate is asked at create time"
+        assert res.json()["concierge_runtime"] == "v2"
+        assert (await _reload(site)).concierge_runtime == "v2"
+        widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=_WS, limit=5)
+        assert [w.agent_id for w in widgets] == [""], "v2 needs no agent"
+        assert await _concierge_agents() == []
+
+    @pytest.mark.asyncio
+    async def test_a_shut_gate_creates_a_legacy_concierge(self, client, monkeypatch) -> None:
+        self._gate(monkeypatch, "legacy")
+        site = await _site()
+
+        res = await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
+
+        assert res.json()["concierge_runtime"] == "legacy"
+        assert len(await _concierge_agents()) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_gate_answer_is_legacy(self, client, monkeypatch) -> None:
+        self._gate(monkeypatch, "V2 ")
+        site = await _site()
+
+        res = await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
+
+        assert res.json()["concierge_runtime"] == "legacy"
+
+    @pytest.mark.asyncio
+    async def test_the_gate_never_touches_an_existing_concierge(self, client, monkeypatch) -> None:
+        site = await _site(concierge_created_at=datetime.now(UTC), concierge_runtime="legacy")
+        calls = self._gate(monkeypatch, "v2")
+
+        res = await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
+
+        assert res.status_code == 409
+        assert calls == []
+        assert (await _reload(site)).concierge_runtime == "legacy"
+
     @pytest.mark.asyncio
     async def test_create_keeps_an_existing_widget_and_its_actions(self, client, store) -> None:
         site = await _site()

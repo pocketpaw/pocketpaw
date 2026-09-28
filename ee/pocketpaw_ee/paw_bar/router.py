@@ -4,7 +4,8 @@
 #   ``POST /paw-bar/admin/site/{id}/concierge`` (``paw_bar.manage``, workspace-
 #   scoped, 409 when one exists) stamps ``Site.concierge_created_at``, leaves it
 #   OFF, mints the widget if missing with an empty spec and no actions, sets the
-#   runtime to ``_CONCIERGE_CREATE_RUNTIME`` ("legacy" until the v2 eval gate) and,
+#   runtime from CR-6's gate (``concierge_gate.default_concierge_runtime``, "legacy"
+#   until that PR merges and the gate passes) and,
 #   for legacy, binds its agent through ``ensure_site_agent`` explicitly. ``DELETE``
 #   clears the marker, turns it off, unbinds (never deletes) a legacy agent, and
 #   purges conversations only with ``delete_conversations=true``. Removed the
@@ -2113,10 +2114,22 @@ async def update_site_concierge_settings(
     return await _concierge_settings_response(site, workspace_id, str(user.id))
 
 
-# The runtime an owner's explicit create gives a new concierge. "legacy" until the
-# v2 eval gate passes (Global Constraint 9); a legacy concierge is answered by an
-# agent, so create binds one. Captain decision, owner-UX open question 1.
-_CONCIERGE_CREATE_RUNTIME: Literal["legacy", "v2"] = "legacy"
+def _concierge_create_runtime() -> Literal["legacy", "v2"]:
+    """The runtime an owner's explicit create gives a new concierge.
+
+    CR-6's eval gate decides (``concierge_gate.default_concierge_runtime``): "v2"
+    only when the deployment asks for it and the committed real-model report
+    passes. It ships in its own PR, so until that merges this answers "legacy",
+    as it does for anything the gate returns that is not exactly "v2". Asked at
+    create time only; existing concierges keep the runtime they have. A legacy
+    concierge is answered by an agent, so create binds one (captain decision,
+    owner-UX open question 1).
+    """
+    try:
+        from pocketpaw_ee.paw_bar.concierge_gate import default_concierge_runtime
+    except ImportError:
+        return "legacy"
+    return "v2" if default_concierge_runtime() == "v2" else "legacy"
 
 
 @router.post(
@@ -2134,9 +2147,10 @@ async def create_site_concierge(
 
     409 when one exists; a cross-tenant id is a 404 before anything is read. The
     widget is minted if missing (empty spec, no actions) and an existing one is
-    kept as it is. On the legacy runtime the agent is bound explicitly, here,
-    because the owner asked; that is the one remaining caller of
-    ``ensure_site_agent``.
+    kept as it is. The runtime comes from CR-6's eval gate. On the legacy runtime
+    the agent is bound explicitly, here, because the owner asked; that is the one
+    remaining caller of ``ensure_site_agent``. A v2 concierge needs no agent and
+    gets none.
 
     The marker is written LAST, after the widget and agent exist, so a failure
     half-way leaves the site with no concierge rather than a concierge with no
@@ -2154,13 +2168,14 @@ async def create_site_concierge(
         # No pocket, no bar: ``site_widget`` refuses to resolve one on an empty id.
         raise HTTPException(409, "site_has_no_pocket")
 
+    runtime = _concierge_create_runtime()
     widget = await ensure_site_widget_row(site, workspace_id)
-    if _CONCIERGE_CREATE_RUNTIME == "legacy":
+    if runtime == "legacy":
         await ensure_site_agent(site, widget)
 
     if req is not None and req.concierge_greeting is not None:
         site.concierge_greeting = req.concierge_greeting
-    site.concierge_runtime = _CONCIERGE_CREATE_RUNTIME
+    site.concierge_runtime = runtime
     site.concierge_enabled = False
     site.concierge_created_at = datetime.now(UTC)
     await site.save()

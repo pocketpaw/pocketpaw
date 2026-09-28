@@ -171,8 +171,10 @@ Nothing else creates one: not creating a widget, not switching the concierge on,
 publishing, and not attaching a connected site. A site without one shows visitors no
 chat bar, and every public route treats it exactly as if it were switched off.
 
-A new concierge starts off. Until the v2 runtime is the default it is a legacy
-concierge, so creating it also binds a dedicated agent. Once the owner turns it on,
+A new concierge starts off. Its runtime comes from the v2 eval gate at the moment it is
+created: `legacy` until the deployment turns v2 on and the gate report passes. A legacy
+concierge gets a dedicated agent bound; a v2 one needs none. Existing concierges keep
+the runtime they have. Once the owner turns it on,
 the bar appears on the live page at the next publish.
 
 `DELETE` on the same route removes it. The agent is unbound, never deleted, and the

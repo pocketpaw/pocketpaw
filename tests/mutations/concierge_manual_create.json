@@ -11,8 +11,8 @@
   {
     "label": "the enable PATCH provisions an agent again (trigger 2)",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    await site.save()\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\n# The runtime an owner's explicit create",
-    "replace": "    await site.save()\n    if req.concierge_enabled is True:\n        from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, site_widget as _w\n        _bar = await _w(site.pocket_id, workspace_id)\n        if _bar is not None and not _bar.agent_id:\n            await _e(site, _bar)\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\n# The runtime an owner's explicit create",
+    "find": "    await site.save()\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\ndef _concierge_create_runtime(",
+    "replace": "    await site.save()\n    if req.concierge_enabled is True:\n        from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, site_widget as _w\n        _bar = await _w(site.pocket_id, workspace_id)\n        if _bar is not None and not _bar.agent_id:\n            await _e(site, _bar)\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\ndef _concierge_create_runtime(",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoTriggerCreatesAConcierge::test_the_enable_patch_creates_no_concierge"
     ]
@@ -151,6 +151,33 @@
     "replace": "    delete_faqs = knowledge_routes.delete_faqs if knowledge_routes is not None else None\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook"
+    ]
+  },
+  {
+    "label": "create ignores the CR-6 gate and always makes a legacy concierge",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    runtime = _concierge_create_runtime()\n",
+    "replace": "    runtime = \"legacy\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_open_gate_creates_a_v2_concierge_with_no_agent"
+    ]
+  },
+  {
+    "label": "a v2 create still mints and binds an agent",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if runtime == \"legacy\":\n        await ensure_site_agent(site, widget)\n",
+    "replace": "    await ensure_site_agent(site, widget)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_open_gate_creates_a_v2_concierge_with_no_agent"
+    ]
+  },
+  {
+    "label": "an unexpected gate answer is stored as the runtime",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    return \"v2\" if default_concierge_runtime() == \"v2\" else \"legacy\"\n",
+    "replace": "    return default_concierge_runtime()\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_unexpected_gate_answer_is_legacy"
     ]
   },
   {
