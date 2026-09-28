@@ -1,5 +1,13 @@
 # tests/cloud/sites/test_foreign_concierge_bind.py — binding a foreign concierge
-# is IDEMPOTENT: one row, one agent, one charge, however many times it is called.
+# is IDEMPOTENT: one row, one charge, however many times it is called.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a bind no longer
+# creates a concierge on either arm (captain rule: the owner creates it). The
+# first-bind and repeat-bind tests now assert NO bar, NO agent and NO marker. The
+# rebind tests start from ``_bind_with_concierge``, which binds and then does what
+# the owner's ``POST .../concierge`` does, because a rebind needs a bar to act on.
+# The empty-id rebind is refused (``sites.agent_required``) and mints nothing;
+# the test that reset a live-but-wrong agent through that arm is gone with it.
 #
 # WHY THIS EXISTS. ``mint_foreign_site`` mints unconditionally and now debits $19
 # per call, so the moment it acquired a caller a repeat "connect" click became a
@@ -63,6 +71,7 @@ from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.sites import service as sites_service
 from pymongo.errors import DuplicateKeyError
 
+from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
 from pocketpaw.paw_bar.store import PawBarStore
 
 pytestmark = pytest.mark.anyio
@@ -160,6 +169,26 @@ async def _bind(workspace_id: str, **overrides: Any) -> Site:
         return await sites_service.bind_foreign_concierge(**kwargs)
 
 
+async def _create_concierge(site: Site) -> None:
+    """What ``POST /paw-bar/admin/site/{id}/concierge`` does for a legacy
+    concierge, plus switching it on, so a rebind or the resolver has a live
+    concierge to act on. The endpoint itself is covered in
+    tests/cloud/test_paw_bar_concierge_manual_create.py."""
+    from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent, ensure_site_widget_row
+
+    widget = await ensure_site_widget_row(site, site.workspace)
+    await ensure_site_agent(site, widget)
+    site.concierge_created_at = datetime.now(UTC)
+    site.concierge_enabled = True
+    await site.save()
+
+
+async def _bind_with_concierge(workspace_id: str, **overrides: Any) -> Site:
+    site = await _bind(workspace_id, **overrides)
+    await _create_concierge(site)
+    return site
+
+
 async def _foreign_rows(workspace_id: str) -> list[Site]:
     return await Site.find(
         {"workspace": workspace_id, "pocket_id": _POCKET, "foreign_origin": True}
@@ -213,11 +242,12 @@ async def _concierge_agents(workspace_id: str) -> list[Agent]:
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_first_bind_buys_a_concierge_and_provisions_its_agent(store):  # noqa: ARG001
-    """The feature: one bind leaves a PAID row with an agent actually behind it.
+async def test_a_first_bind_buys_the_connection_and_creates_no_concierge(store):  # noqa: ARG001
+    """One bind leaves a PAID row and nothing else (CR-12).
 
-    Asserted as "the bar is bound" rather than "an agent exists", because an agent
-    nothing points at answers nobody."""
+    The attach used to provision a bar and an agent on the way past. Now the
+    owner creates the concierge explicitly, so the mint arm must leave no bar, no
+    agent and no marker behind."""
     ws = "ws-bind-first"
     await _fund(ws)
     await _verify_origin(ws)
@@ -228,10 +258,10 @@ async def test_a_first_bind_buys_a_concierge_and_provisions_its_agent(store):  #
     assert site.subscription_status == "active", "the month was bought"
     assert await credits_service.balance(ws) == _FUNDED - _PRICE_CREDITS
 
-    widget = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
-    assert widget, "the bind must leave a paw-bar widget behind"
-    assert widget[0].agent_id, "and that widget must be bound to a concierge agent"
-    assert len(await _concierge_agents(ws)) == 1
+    assert await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1) == []
+    assert await _concierge_agents(ws) == []
+    stored = await Site.get(str(site.id))
+    assert stored is not None and stored.concierge_created_at is None
 
 
 async def test_two_sequential_binds_buy_one_concierge(store):
@@ -249,11 +279,13 @@ async def test_two_sequential_binds_buy_one_concierge(store):
 
     assert str(second.id) == str(first.id), "the second bind must resolve the first row"
     assert len(await _foreign_rows(ws)) == 1, "one concierge per pocket"
-    assert len(await _concierge_agents(ws)) == 1, "one agent per pocket"
     assert await credits_service.balance(ws) == _FUNDED - _PRICE_CREDITS, "charged once"
 
-    widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=10)
-    assert len(widgets) == 1, "and one bar"
+    # The resolve arm creates nothing either (CR-12).
+    assert await _concierge_agents(ws) == []
+    assert await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=10) == []
+    stored = await Site.get(str(first.id))
+    assert stored is not None and stored.concierge_created_at is None
 
 
 async def test_two_concurrent_binds_buy_one_concierge(store):  # noqa: ARG001
@@ -308,7 +340,7 @@ async def test_two_concurrent_binds_buy_one_concierge(store):  # noqa: ARG001
 
     assert str(first.id) == str(second.id), "both callers must get the SAME concierge"
     assert len(await _foreign_rows(ws)) == 1, "a race must not mint a second site"
-    assert len(await _concierge_agents(ws)) == 1
+    assert await _concierge_agents(ws) == [], "and a bind creates no concierge"
     assert await credits_service.balance(ws) == _FUNDED - _PRICE_CREDITS, (
         "a race that charges twice has taken a customer's money twice"
     )
@@ -723,7 +755,7 @@ async def test_rotating_retires_the_old_key_at_the_resolver(store):  # noqa: ARG
     await _fund(ws)
     await _verify_origin(ws)
 
-    site = await _bind(ws)
+    site = await _bind_with_concierge(ws)
     old_key = site.signed_key
     assert old_key
 
@@ -800,7 +832,7 @@ async def test_a_rebind_points_the_bar_at_a_new_agent_without_stranding_the_row(
     await _fund(ws)
     await _verify_origin(ws)
 
-    site = await _bind(ws)
+    site = await _bind_with_concierge(ws)
     original_key = site.signed_key
     widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
     provisioned_agent = widgets[0].agent_id
@@ -833,7 +865,7 @@ async def test_a_rebind_to_another_tenants_agent_is_refused(store):
     ws = "ws-bind-rebind-tenant"
     await _fund(ws)
     await _verify_origin(ws)
-    await _bind(ws)
+    await _bind_with_concierge(ws)
 
     widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
     before = widgets[0].agent_id
@@ -849,70 +881,39 @@ async def test_a_rebind_to_another_tenants_agent_is_refused(store):
     assert after[0].agent_id == before, "a refused rebind must not have written"
 
 
-async def test_a_rebind_with_no_agent_reprovisions_the_canonical_one(store):
-    """The repair path for a bar whose agent was deleted.
+async def test_a_rebind_with_no_agent_is_refused_and_mints_nothing(store):
+    """CR-12 removed the re-provision arm: a rebind that can mint an agent is a
+    way to create a concierge nobody asked for. An empty ``agent_id`` is a
+    ``sites.agent_required`` refusal, and the bar is left exactly as it was."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
 
-    ``ensure_site_agent`` refuses to replace a live bind, so without an explicit
-    re-provision a stale ``agent_id`` is permanent and the bar answers nothing."""
     ws = "ws-bind-reprovision"
     await _fund(ws)
     await _verify_origin(ws)
 
     site = await _bind(ws)
-    widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
-    original = widgets[0].agent_id
-
-    # Point the bar at an agent that no longer exists, the state a delete leaves.
-    await store.update_fields(widgets[0].id, {"agent_id": "gone-forever"}, workspace_id=ws)
-
-    bound = await sites_service.rebind_foreign_concierge(workspace_id=ws, pocket_id=_POCKET)
-
-    assert bound == original, "re-provisioning resolves the deterministic slug again"
-    after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
-    assert after[0].agent_id == original
-    assert str((await Site.get(str(site.id))).id) == str(site.id)
-
-
-async def test_a_reprovision_resets_a_bar_bound_to_a_LIVE_but_wrong_agent(store):
-    """Re-provision means RESET TO CANONICAL, not merely "repair a dead pointer".
-
-    A bar pointing at an agent that was deleted is repaired by the funnel on its
-    own — ``ensure_site_agent`` notices the id does not resolve and falls through.
-    The bind that only that case exercises is therefore not tested at all, which
-    is how the stale-bind clear escaped a mutation that deleted it.
-
-    The case that needs the clear is a bar bound to an agent that is perfectly
-    ALIVE and simply not the one the owner wants any more. ``ensure_site_agent``
-    returns a live bind untouched by design (a manual bind is somebody's
-    deliberate choice), so without clearing it first a re-provision is a no-op and
-    the owner has no way back to the site's own concierge.
-    """
-    ws = "ws-bind-reset"
-    await _fund(ws)
-    await _verify_origin(ws)
-
-    site = await _bind(ws)
-    widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
-    canonical = widgets[0].agent_id
-    assert canonical
-
-    # Point the bar at a different, LIVE agent — the state an explicit rebind
-    # leaves, and the one the funnel refuses to overwrite.
-    other = await _make_agent(ws, "some-other-live-agent")
-    await sites_service.rebind_foreign_concierge(
-        workspace_id=ws, pocket_id=_POCKET, agent_id=other, caller_is_admin=True
+    # A bar pointing at an agent that no longer exists: the state the old arm
+    # "repaired" by minting the canonical agent.
+    await store.create_widget(
+        PawBarWidget(
+            pocket_id=_POCKET,
+            owner=_OWNER,
+            name="bar",
+            workspace_id=ws,
+            agent_id="gone-forever",
+            spec=PawBarSpec(widget_id="pending", pocket_id=_POCKET, blocks=[]),
+        )
     )
-    mid = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
-    assert mid[0].agent_id == other
 
-    bound = await sites_service.rebind_foreign_concierge(workspace_id=ws, pocket_id=_POCKET)
+    with pytest.raises(ValidationError) as exc:
+        await sites_service.rebind_foreign_concierge(workspace_id=ws, pocket_id=_POCKET)
 
-    assert bound == canonical, "a re-provision must come back to the site's own concierge"
+    assert exc.value.code == "sites.agent_required"
     after = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
-    assert after[0].agent_id == canonical
-    assert len(await _concierge_agents(ws)) == 1, "and must not mint a second one"
+    assert after[0].agent_id == "gone-forever", "nothing was cleared"
+    assert await _concierge_agents(ws) == [], "and nothing was minted"
     stored = await Site.get(str(site.id))
-    assert stored is not None and stored.subscription_status == "active"
+    assert stored is not None and stored.concierge_created_at is None
 
 
 async def test_a_rebind_on_a_pocket_with_no_concierge_is_a_404(store):  # noqa: ARG001
@@ -937,11 +938,11 @@ async def test_a_rebind_on_a_pocket_with_no_concierge_is_a_404(store):  # noqa: 
 async def test_a_rebind_cannot_repoint_another_pockets_bar(store):
     """``widget_id`` must name THIS site's bar.
 
-    The damage is the re-provision arm, which takes no ``agent_id`` and was
-    therefore gated by nothing: it clears the named widget's agent and binds it
-    to this site's ``concierge-<site_id>``. So a rebind naming a colleague's bar
-    would silently repoint their published site at your concierge, grounded in
-    your pocket, with nothing in either page saying so.
+    The agent is tenancy-gated; the bar is gated only by the pocket check. A
+    rebind naming a colleague's bar would otherwise repoint their published site
+    at an agent of your choosing, with nothing in either page saying so. (The
+    re-provision arm that used to make this reachable with no ``agent_id`` is gone
+    since CR-12, so the call names one.)
 
     Asserted on the victim's widget, not the response: the call returns an agent
     id either way.
@@ -951,9 +952,11 @@ async def test_a_rebind_cannot_repoint_another_pockets_bar(store):
     await _verify_origin(ws)
     await _verify_origin(ws, host=_OTHER_HOST)
 
-    mine = await _bind(ws)
+    mine = await _bind_with_concierge(ws)
     assert mine is not None
-    theirs = await _bind(ws, pocket_id="pk-colleague", allowed_origins=[f"https://{_OTHER_HOST}"])
+    theirs = await _bind_with_concierge(
+        ws, pocket_id="pk-colleague", allowed_origins=[f"https://{_OTHER_HOST}"]
+    )
     assert theirs is not None
 
     their_bars = await store.list_widgets(pocket_id="pk-colleague", workspace_id=ws, limit=1)
@@ -962,9 +965,14 @@ async def test_a_rebind_cannot_repoint_another_pockets_bar(store):
     their_agent_before = their_bar.agent_id
     assert their_agent_before
 
+    replacement = await _make_agent(ws, "some-agent")
     with pytest.raises(Forbidden) as exc:
         await sites_service.rebind_foreign_concierge(
-            workspace_id=ws, pocket_id=_POCKET, widget_id=their_bar.id
+            workspace_id=ws,
+            pocket_id=_POCKET,
+            agent_id=replacement,
+            widget_id=their_bar.id,
+            caller_is_admin=True,
         )
 
     assert exc.value.code == "sites.widget_pocket_mismatch"
@@ -989,7 +997,7 @@ async def test_a_member_cannot_publish_an_unrelated_agents_knowledge_to_visitors
     ws = "ws-bind-agent-unpublished"
     await _fund(ws)
     await _verify_origin(ws)
-    await _bind(ws)
+    await _bind_with_concierge(ws)
 
     bars = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=1)
     before = bars[0].agent_id
@@ -1021,7 +1029,7 @@ async def test_an_admin_may_point_a_concierge_at_any_agent_they_can_read(store):
     ws = "ws-bind-agent-admin"
     await _fund(ws)
     await _verify_origin(ws)
-    await _bind(ws)
+    await _bind_with_concierge(ws)
 
     hand_built = await _make_agent(ws, "hand-built-front-desk")
 
@@ -1047,8 +1055,10 @@ async def test_a_member_may_point_one_concierge_at_another_concierges_agent(stor
     await _verify_origin(ws)
     await _verify_origin(ws, host=_OTHER_HOST)
 
-    await _bind(ws)
-    await _bind(ws, pocket_id="pk-sibling", allowed_origins=[f"https://{_OTHER_HOST}"])
+    await _bind_with_concierge(ws)
+    await _bind_with_concierge(
+        ws, pocket_id="pk-sibling", allowed_origins=[f"https://{_OTHER_HOST}"]
+    )
 
     sibling_bars = await store.list_widgets(pocket_id="pk-sibling", workspace_id=ws, limit=1)
     published_agent = sibling_bars[0].agent_id
@@ -1083,8 +1093,8 @@ async def test_an_agent_whose_bar_is_not_a_foreign_concierge_does_not_count_as_p
     await _verify_origin(ws)
     await _verify_origin(ws, host=_OTHER_HOST)
 
-    await _bind(ws)
-    cancelled = await _bind(
+    await _bind_with_concierge(ws)
+    cancelled = await _bind_with_concierge(
         ws, pocket_id="pk-cancelled", allowed_origins=[f"https://{_OTHER_HOST}"]
     )
 

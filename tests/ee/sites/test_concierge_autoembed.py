@@ -1,5 +1,12 @@
 # tests/ee/sites/test_concierge_autoembed.py — a published site grows its own
 # concierge.
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a site earns a bar
+# because its owner CREATED a concierge (``concierge_exists``), not because its
+# widget has an agent. A first publish has no Site doc and so no concierge and no
+# bar. The publish tests that expect a bar therefore publish once, stand in for
+# the owner's create (``_owner_creates_concierge``), and publish again; the tests
+# that expect none now also have a concierge, so they fail for the reason they
+# name (preview, billing, a broken injection) rather than for having none.
 # Created 2026-07-30 (feat/paw-bar-autoembed). The bug this pins shut: a site we
 # generated, with a concierge we auto-provisioned, went live with an empty <head>
 # and no script tag anywhere — the bar was embedded ONLY by a snippet the dashboard
@@ -178,6 +185,8 @@ async def _snippet_for(monkeypatch, *, widget, **ov):
         # and held constant; the billing gate has its own tree in
         # tests/cloud/test_paw_bar_concierge_entitlement.py.
         "concierge_entitled": True,
+        # CR-12: the owner created this concierge. Its own gate is pinned below.
+        "concierge_exists": True,
     }
     kwargs.update(ov)
     return await embed.concierge_snippet(**kwargs)
@@ -201,10 +210,15 @@ async def test_no_widget_means_no_bar(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_unbound_widget_means_no_bar(monkeypatch):
-    """An unbound widget's chat 409s. A bar that renders and then refuses to answer
-    is worse than no bar."""
-    assert await _snippet_for(monkeypatch, widget=_widget(agent_id="")) == ""
+async def test_no_concierge_means_no_bar_even_with_a_bound_widget(monkeypatch):
+    """CR-12: an agent on the bar is not the owner's decision to publish one."""
+    assert await _snippet_for(monkeypatch, widget=_widget(), concierge_exists=False) == ""
+
+
+@pytest.mark.asyncio
+async def test_an_unbound_widget_of_a_created_concierge_earns_a_bar(monkeypatch):
+    """The marker earns the bar, not the agent: a v2 concierge answers without one."""
+    assert 'data-widget-id="w-1"' in await _snippet_for(monkeypatch, widget=_widget(agent_id=""))
 
 
 @pytest.mark.asyncio
@@ -227,6 +241,7 @@ async def test_an_empty_pocket_never_widens_onto_a_sibling(monkeypatch):
         api_base=_API_BASE,
         concierge_enabled=True,
         concierge_entitled=True,
+        concierge_exists=True,
     )
 
     assert out == ""
@@ -275,6 +290,28 @@ async def _publish(tmp_path, *, preview: bool = False, deploy_url: str = "https:
     )
 
 
+async def _owner_creates_concierge(site) -> None:
+    """What ``POST /paw-bar/admin/site/{id}/concierge`` plus switching it on leave
+    on the row (CR-12). The endpoint is pinned in
+    tests/cloud/test_paw_bar_concierge_manual_create.py."""
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.models.site import Site
+
+    doc = await Site.get(site.id)
+    doc.concierge_created_at = datetime.now(UTC)
+    doc.concierge_enabled = True
+    await doc.save()
+
+
+async def _publish_with_concierge(tmp_path, **kw):
+    """Publish, let the owner create the concierge, publish again: the one order in
+    which a bar reaches a page now that no publish creates a concierge."""
+    site = await _publish(tmp_path, **kw)
+    await _owner_creates_concierge(site)
+    return await _publish(tmp_path, **kw)
+
+
 def _built_pages(tmp_path) -> list[str]:
     root = tmp_path / "project" / ".svelte-kit" / "cloudflare"
     return [p.read_text(encoding="utf-8") for p in sorted(root.glob("*.html"))]
@@ -287,6 +324,11 @@ async def test_a_live_publish_embeds_the_bar_into_every_built_page(
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     _fake_store(monkeypatch, _widget())
 
+    site = await _publish(tmp_path)
+    # CR-12: a first publish creates no concierge, so it carries no bar.
+    assert all("/paw-bar/widget.js" not in page for page in _built_pages(tmp_path))
+
+    await _owner_creates_concierge(site)
     await _publish(tmp_path)
 
     pages = _built_pages(tmp_path)
@@ -314,7 +356,7 @@ async def test_republishing_does_not_stack_bars_or_hosts(beanie_test_db, tmp_pat
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     _fake_store(monkeypatch, _widget())
 
-    await _publish(tmp_path)
+    await _publish_with_concierge(tmp_path)
     site = await _publish(tmp_path)
 
     assert _built_pages(tmp_path)[0].count("<script") == 1
@@ -345,6 +387,8 @@ async def test_a_broken_injection_never_costs_the_site_its_deploy(
     def _boom(root, snippet):
         raise RuntimeError("disk gone")
 
+    site = await _publish(tmp_path)
+    await _owner_creates_concierge(site)
     monkeypatch.setattr(embed, "inject_into_tree", _boom)
 
     site = await _publish(tmp_path)
@@ -381,14 +425,14 @@ def _billing(monkeypatch, *, on: bool) -> None:
 async def test_a_free_site_publishes_with_no_bar_when_billing_is_enforced(
     beanie_test_db, tmp_path, monkeypatch
 ):
-    """The publish-seam half of the billing gate. A first publish has no Site doc, so
-    no ``plan_tier``, which resolves to the free floor — the page ships bar-less
-    rather than carrying a bar that would 403 every visitor."""
+    """The publish-seam half of the billing gate. A site with no ``plan_tier``
+    resolves to the free floor — the page ships bar-less rather than carrying a bar
+    that would 403 every visitor, even with a concierge created and switched on."""
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     _billing(monkeypatch, on=True)
     _fake_store(monkeypatch, _widget())
 
-    await _publish(tmp_path)
+    await _publish_with_concierge(tmp_path)
 
     assert all("paw-bar/widget.js" not in page for page in _built_pages(tmp_path))
 
@@ -403,7 +447,7 @@ async def test_with_billing_off_a_publish_is_byte_for_byte_what_it_was(
     _billing(monkeypatch, on=False)
     _fake_store(monkeypatch, _widget())
 
-    await _publish(tmp_path)
+    await _publish_with_concierge(tmp_path)
 
     pages = _built_pages(tmp_path)
     assert len(pages) == 2
@@ -451,6 +495,7 @@ async def test_a_paying_site_mid_activation_still_gets_its_bar(
     doc.plan_tier = paid
     doc.subscription_status = "pending"
     await doc.save()
+    await _owner_creates_concierge(site)
 
     await _publish(tmp_path)
 
@@ -493,6 +538,7 @@ async def test_a_cancelled_paid_site_loses_its_bar_on_the_next_publish(
     doc.plan_tier = paid
     doc.subscription_status = "cancelled"
     await doc.save()
+    await _owner_creates_concierge(site)
 
     await _publish(tmp_path)
 
