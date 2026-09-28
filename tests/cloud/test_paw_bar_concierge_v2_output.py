@@ -312,6 +312,17 @@ def test_disallowed_actions_reject_the_card(on_click):
     assert _vh({"ui": node}) is None
 
 
+def test_an_emit_of_a_verb_the_widget_does_not_declare_rejects_the_card():
+    # The action endpoint refuses an undeclared verb: the button would do nothing.
+    node = {
+        "type": "button",
+        "props": {"label": "Checkout"},
+        "on_click": {"action": "emit", "target": "checkout"},
+    }
+    assert _vh({"ui": node}, verbs=["add_to_cart"]) is None
+    assert _vh({"ui": node}, verbs=["add_to_cart", "checkout"]) is not None
+
+
 def test_an_event_hidden_in_props_is_checked_too():
     node = {"type": "button", "props": {"label": "Go", "on_click": {"action": "navigate"}}}
     assert _vh({"ui": node}) is None

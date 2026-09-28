@@ -11,7 +11,7 @@
 #   * two rules the client leaves to render time: every node ``type`` is a widget
 #     in the vendored pawbar-manifest.json, and every event action is one the
 #     manifest lists, with ``emit`` limited to the add_to_cart / checkout host
-#     events;
+#     events the widget actually declares (the action endpoint refuses the rest);
 #   * product data comes only from the site catalog: a ``product-card``'s ``ids``
 #     become ``items`` (name, price, currency, image from the catalog), unknown ids
 #     are dropped, an empty product-card is dropped. The model never supplies a
@@ -111,24 +111,25 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
 # --------------------------------------------------------------------------- #
 
 
-def _check_actions(value: Any) -> None:
+def _check_actions(value: Any, events: list[str]) -> None:
     for action in value if isinstance(value, list) else [value]:
         if not isinstance(action, dict) or action.get("action") not in SPEC_ACTIONS:
             raise _Reject("an event runs an action the bar does not honour")
-        if action["action"] == "emit" and action.get("target") not in HOST_EVENTS:
-            raise _Reject("an emit names a host event other than add_to_cart / checkout")
+        if action["action"] == "emit" and action.get("target") not in events:
+            raise _Reject("an emit names a host event this widget does not declare")
 
 
-def _check_events(node: dict[str, Any]) -> None:
+def _check_events(node: dict[str, Any], events: list[str]) -> None:
     props = node.get("props")
     for holder in (node, props if isinstance(props, dict) else {}):
         for key, value in holder.items():
             if isinstance(key, str) and key.startswith("on_"):
-                _check_actions(value)
+                _check_actions(value, events)
 
 
-def _check_tree(root: Any) -> None:
-    """paw-bar's checkTree, plus the widget set and the event rules."""
+def _check_tree(root: Any, events: list[str]) -> None:
+    """paw-bar's checkTree, plus the widget set and the event rules. ``events``
+    are the host events this widget declares (a subset of ``HOST_EVENTS``)."""
     count = 0
 
     def walk(node: Any, depth: int) -> None:
@@ -144,7 +145,7 @@ def _check_tree(root: Any) -> None:
             raise _Reject(f"nested deeper than {MAX_SPEC_DEPTH}")
         if node["type"] not in WIDGET_TYPES:
             raise _Reject(f"unknown widget type {node['type']!r}")
-        _check_events(node)
+        _check_events(node, events)
         for key in ("children", "else_children"):
             kids = node.get(key)
             if kids is None:
@@ -192,11 +193,12 @@ def validate_and_hydrate(
             raise _Reject("not a spec")
         if len(_serialize(spec)) > MAX_SPEC_CHARS:
             raise _Reject(f"longer than {MAX_SPEC_CHARS} characters")
-        _check_tree(spec["ui"])
+        events = _card_verbs(verbs)
+        _check_tree(spec["ui"], events)
         state = spec.get("state")
         if state is not None and not isinstance(state, dict):
             raise _Reject("state is not an object")
-        ui = _hydrate(spec["ui"], _catalog_index(catalog), _card_verbs(verbs))
+        ui = _hydrate(spec["ui"], _catalog_index(catalog), events)
         if ui is None:
             return None
         out: dict[str, Any] = {"ui": ui}

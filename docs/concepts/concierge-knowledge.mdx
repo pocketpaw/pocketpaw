@@ -9,6 +9,9 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
 
 {/*
   docs/concepts/concierge-knowledge.mdx
+  Updated 2026-09-28 (feat/concierge-v2-output, CR-2) — new subsection "What a v2 reply
+  can contain": code blocks become a fixed line, cards are bounded and product data
+  comes only from the catalog; the "not yet" list drops those two items.
   Updated 2026-09-27 (feat/concierge-v2-runner, CR-1) — new section "The v2 runtime":
   the per-site concierge_runtime switch, what v2 does (one tool-free model call
   grounded in the site KB), which refusals it skips, its config keys, and what it
@@ -190,9 +193,33 @@ The model and the reply cap are fixed per deployment:
 empty uses the deployment's pydantic_ai default) and
 `POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS` (default 600).
 
-v2 does not yet filter code fences or check product cards against the catalog, read the
-page the visitor is on, use owner-written guidance fields, or cap spend per site. Those
-land before it becomes the default for new sites.
+### What a v2 reply can contain
+
+A v2 reply is checked on its way out, before the visitor sees it and before it is saved
+to the transcript. The check holds each fenced block (anything opened with three
+backticks) until it closes:
+
+- A code block of any language is replaced by the line "I can't share code here."
+- A `pawbar-card` block holding a generated layout (`{"ui": ...}`) is checked against
+  the limits the widget itself enforces: at most 32,000 characters, 80 nodes and 8
+  levels. Only the widgets the Paw Bar can draw are allowed (text, heading, badge,
+  button, flex, product-card and form), and a button can only change the card's own
+  state or trigger `add_to_cart` / `checkout` when the widget declares that action. A
+  card that breaks any rule is dropped whole.
+- A `product-card` names catalog ids only. The server fills in each product's name,
+  price, currency and image from the widget's catalog, drops ids the catalog does not
+  have, and drops the card when nothing is left. Whatever name or price the model wrote
+  is discarded.
+- An older-style `pawbar-card` (`{"kind": "product"}` or `{"kind": "form"}`) still
+  works. Product cards in that format are repriced from the catalog the same way; form
+  cards pass through unchanged.
+- A block still open when the reply ends is dropped.
+
+The model learns the card format from the Paw Bar's own widget manifest, one line per
+widget, inside the catalog section of its prompt.
+
+v2 does not yet read the page the visitor is on, use owner-written guidance fields, or
+cap spend per site. Those land before it becomes the default for new sites.
 
 ## What a concierge records
 

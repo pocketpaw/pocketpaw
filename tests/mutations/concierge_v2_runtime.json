@@ -173,13 +173,14 @@
     ]
   },
   {
-    "label": "emit may name any host event — a card can fire events the bar was never meant to act on",
+    "label": "emit may name any host event — a card can fire events the bar or the widget will not act on",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "        if action[\"action\"] == \"emit\" and action.get(\"target\") not in HOST_EVENTS:",
+    "find": "        if action[\"action\"] == \"emit\" and action.get(\"target\") not in events:",
     "replace": "        if False:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_disallowed_actions_reject_the_card",
-      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_emit_of_a_verb_the_widget_does_not_declare_rejects_the_card"
     ]
   },
   {
