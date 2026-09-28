@@ -4,6 +4,13 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-28 (feat/concierge-pinned-faqs, CR-8): added ``concierge_faqs``,
+# the owner's pinned question/answer pairs (``ConciergeFaq``). The v2 runner's
+# ``retrieve`` puts them ahead of every KB hit, and the owner edits them through
+# ``paw_bar.knowledge_routes``. Stored on the Site like every other concierge
+# setting; the count and length caps are enforced by those routes from config.
+# Empty by default, so no migration. The text is owner-written and is only ever
+# rendered as data inside the <knowledge> block, never into the frame.
 # Updated 2026-09-28 (feat/concierge-page-aware, CR-3): added ``kb_page_index``,
 # the crawl index the site sync writes (``sites.kb_ingest``): which kb article
 # each page became, so the v2 concierge can find the page a visitor is on.
@@ -311,7 +318,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from beanie import Indexed
@@ -354,6 +361,35 @@ class SiteInvoice(BaseModel):
     currency: str = "USD"
     paid: bool = True
     note: str = ""
+
+
+class ConciergeFaq(BaseModel):
+    """One pinned answer on a site's concierge (CR-8): a question the owner wants
+    answered the same way every time, and that answer.
+
+    ``id`` is minted here (hex uuid), never taken from a request body. Both texts
+    are owner-written, stripped, and capped by the knowledge routes; the runner
+    treats them as data like any KB article.
+    """
+
+    id: str
+    question: str
+    answer: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def new(cls, question: str, answer: str) -> ConciergeFaq:
+        import uuid
+
+        now = datetime.now(UTC)
+        return cls(
+            id=uuid.uuid4().hex,
+            question=question,
+            answer=answer,
+            created_at=now,
+            updated_at=now,
+        )
 
 
 class Site(TimestampedDocument):
@@ -863,6 +899,11 @@ class Site(TimestampedDocument):
     # the v2 eval gate passes; a row written before the field existed reads as
     # legacy too (callers use getattr with that default).
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    # Paw Bar pinned FAQs (CR-8, 2026-09-28). The owner's question/answer pairs,
+    # in the order they were added; the v2 runner's ``retrieve`` puts them ahead
+    # of every KB hit. Written only through ``paw_bar.knowledge_routes`` (which
+    # caps count and length from config) and cleared by its ``delete_faqs``.
+    concierge_faqs: list[ConciergeFaq] = Field(default_factory=list)
     # "Answer with code examples from your docs" (CR-2, 2026-09-28). Off: a v2
     # reply never shows a code block. On: a code block passes only when it is
     # found, verbatim, in the knowledge retrieved for that turn

@@ -1,6 +1,11 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-09-28 (feat/concierge-pinned-faqs): Added ``pawbar_concierge_faq_max_count``
+    (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT``, default 15) and
+    ``pawbar_concierge_faq_max_chars`` (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_CHARS``,
+    default 500, question and answer together). They cap the pinned FAQs an owner
+    keeps on a site, which the v2 concierge puts ahead of every KB hit.
   - 2026-09-28 (feat/concierge-eval-gate, CR-6): Added the v2 concierge rollout
     gate's settings: ``pawbar_concierge_default_runtime`` (env
     ``POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME``, default "legacy"), the runtime
@@ -1481,6 +1486,20 @@ class Settings(BaseSettings):
         default=600,
         ge=1,
         description="Max output tokens for one v2 Paw Bar concierge reply.",
+    )
+    # Pinned FAQs (``pocketpaw_ee.paw_bar.knowledge_routes``). Every pinned answer
+    # rides ahead of the KB hits in the v2 runner's ~12,000-char knowledge budget,
+    # so the defaults (15 x 500) keep them under ~7,500 and leave the rest for the
+    # site's own pages.
+    pawbar_concierge_faq_max_count: int = Field(
+        default=15,
+        ge=1,
+        description="Most pinned FAQs one site's concierge may keep.",
+    )
+    pawbar_concierge_faq_max_chars: int = Field(
+        default=500,
+        ge=20,
+        description="Longest pinned FAQ, question and answer together, in characters.",
     )
     pawbar_concierge_doc_code_chars: int = Field(
         default=6_000,

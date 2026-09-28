@@ -42,6 +42,8 @@
 # runs `mutate.py --validate`, which counts substrings and exits: no mutation
 # applied, no tests run, no dependency install. A full sweep is deliberately
 # NOT here; see the job's own comment for why.
+# Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_faqs.py
+# (concierge pinned FAQs) with the same addopts escape as the v2 runner step.
 # Updated: 2026-09-28 — the v2 concierge step also runs
 # test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
 # Updated: 2026-09-28 — and test_paw_bar_concierge_page.py (CR-3, page-aware
@@ -292,6 +294,16 @@ jobs:
         # leak, a frame leak, an invalid card, a turn error, a case with no
         # recording); the model thresholds apply to real runs, not replays.
         run: uv run python -m tests.evals.concierge.run --recorded
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge pinned FAQ tests
+        # Same addopts escape. Owners pin answers the v2 concierge reads first;
+        # this file proves the routes are tenant-scoped and role-gated, and that
+        # owner text only ever reaches the model as data. Mutations:
+        # tests/mutations/concierge_pinned_faqs.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_faqs.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
