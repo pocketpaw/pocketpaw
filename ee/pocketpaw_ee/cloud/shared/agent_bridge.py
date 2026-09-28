@@ -14,6 +14,15 @@ Responsibilities:
 4. Delegates pocket creation to ``pockets_service.create_from_ripple_spec``
 5. Persists agent messages via ``message_service.create_agent_message``
 
+Updated 2026-09-28 (feat/persist-tool-steps): ``_run_agent_response`` feeds
+the run's thinking, ``tool_use`` and ``tool_result`` events to the same
+``StepRecorder`` the SSE chat path uses (``chat/runs/steps.py``) and persists the
+result on the agent Message (``create_agent_message(steps=..., steps_omitted=...)``),
+so a group/DM reply keeps the work behind it after a refresh, like a chat reply
+does. The events are AgentEvents, not run_core frames, so ``_record_step`` adapts
+them to the frame shapes the recorder takes. Nothing emitted on the WS changes.
+The kwargs ride only when steps were recorded, so a plain reply's write is as before.
+
 User-message attachments ride the ``message.sent`` payload so channel
 agents see the same filename/mime/size context DM agents already get —
 appended to the user prompt as an ``Attached files:`` block before
@@ -84,6 +93,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
     AgentError,
@@ -579,6 +589,8 @@ async def _run_agent_response(
     # rides ``agent.stream_start`` as ``message_id``, so reusing it as
     # ``run_id`` gives the panel a join key it already holds.
     plan_tracker = PlanTracker(run_id=temp_msg_id)
+    # The thinking and tool calls behind the reply, persisted on the Message.
+    recorder = StepRecorder()
     error_summary = ""
     last_emit_ts = 0.0
     STREAM_CHUNK_THROTTLE_S = 0.2
@@ -604,6 +616,7 @@ async def _run_agent_response(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
         ):
             if event.type in {"message", "text"}:
+                _record_step(recorder, event)
                 full_text += event.content
                 now = asyncio.get_event_loop().time()
                 if now - last_emit_ts >= STREAM_CHUNK_THROTTLE_S:
@@ -678,8 +691,12 @@ async def _run_agent_response(
                 narration = narrate_tool_use(tool_name, tool_input, instance)
                 if narration:
                     payload["narration"] = narration
+                _record_step(recorder, event, tool_name, tool_input, narration)
                 await emit(AgentToolUse(data=payload))
+            elif event.type == "tool_result":
+                _record_step(recorder, event)
             elif event.type == "thinking":
+                _record_step(recorder, event)
                 await emit(
                     AgentToolUse(
                         data={
@@ -759,6 +776,7 @@ async def _run_agent_response(
         agent_id=agent_id,
         content=final_text,
         attachments=attachment_dicts or None,
+        **recorder.persist_kwargs(),
     )
 
     # Broadcast final message. ``temp_message_id`` is echoed from the
@@ -791,6 +809,45 @@ async def _run_agent_response(
         len(final_text),
     )
     return final_text
+
+
+def _record_step(
+    recorder: StepRecorder,
+    event: Any,
+    tool_name: str = "",
+    tool_input: Any = None,
+    narration: str | None = None,
+) -> None:
+    """Adapt one AgentEvent to the run_core frame the recorder takes.
+
+    ``tool_use`` arrives with its name, input and narration already resolved by
+    the caller (the same values the WS chip gets). ``tool_result`` resolves its own:
+    the bridge emits nothing for it, so there is no caller-side parsing to reuse.
+    The resolution mirrors run_core's ``_drive_agent_loop`` so both surfaces
+    record the same call the same way.
+    """
+    etype = getattr(event, "type", "")
+    content = getattr(event, "content", None)
+    meta = getattr(event, "metadata", None)
+    meta = meta if isinstance(meta, dict) else {}
+    if etype == "thinking":
+        recorder.observe("thinking", {"content": content if isinstance(content, str) else ""})
+    elif etype in {"message", "text"}:
+        recorder.observe("chunk", {})
+    elif etype == "tool_use":
+        frame: dict[str, Any] = {"tool": tool_name, "input": tool_input}
+        if narration:
+            frame["narration"] = narration
+        if meta.get("input_pending") is True:
+            frame["input_pending"] = True
+        recorder.observe("tool_start", frame)
+    elif etype == "tool_result":
+        name = meta.get("name") or meta.get("tool") or ""
+        output: Any = content
+        if isinstance(content, dict):
+            name = name or content.get("tool") or content.get("name") or ""
+            output = content.get("result", content)
+        recorder.observe("tool_result", {"tool": name, "output": output})
 
 
 def register_agent_bridge() -> None:

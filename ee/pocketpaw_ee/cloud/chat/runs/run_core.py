@@ -1,6 +1,21 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-28 (feat/persist-tool-steps) — the tool calls, tool results and
+  thinking a run streams are persisted on the assistant Message as ``steps``.
+  They used to reach only the Redis run stream (1h TTL), so a refresh showed the
+  reply without the work behind it. ``execute_run`` feeds every frame it handles
+  to a ``StepRecorder`` (``chat/runs/steps.py``) in the same loop that builds
+  ``full_text``, finalizes it, and hands ``steps`` / ``steps_omitted`` to the
+  Message write on the completed path and on every partial path (failed,
+  cancelled, host-interrupted). The event held when the cancel check breaks is
+  NOT recorded: the client never saw it (it isn't appended to the transport),
+  and a result arriving after the stop must not turn the call the user watched
+  stop into a finished one. The ``tool_start`` frame gains ``input_pending:
+  True`` when the backend flags a provisional announcement (claude_sdk sends one
+  before the real call), so the recorder can keep one step per call; the field
+  is absent otherwise, so other frames are unchanged. Whether a Message is
+  written at all is unchanged: a run with steps but no text still writes none.
 - 2026-09-27 (fix/chat-run-heartbeat) — long runs no longer lose their reply.
   Reported as "if the agent takes a lot of time the worker stops completely: no
   message saved, only the user message after a refresh". Three fixes here:
@@ -465,6 +480,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 )
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
@@ -880,12 +896,17 @@ async def _persist_assistant_message(
     attachments: list[dict[str, Any]],
     *,
     run_status: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    steps_omitted: int = 0,
 ) -> Any:
     from pocketpaw_ee.cloud.chat import message_service
 
-    # ``run_status`` only rides when set, so the completed path's call is
-    # byte-identical to before.
+    # ``run_status`` and the steps only ride when set, so a plain completed
+    # reply's call is byte-identical to before.
     extra: dict[str, Any] = {"run_status": run_status} if run_status else {}
+    if steps or steps_omitted:
+        extra["steps"] = steps or []
+        extra["steps_omitted"] = steps_omitted
     return await message_service.persist_assistant_message_for_scope(
         kind=ctx.kind.value,
         scope_id=ctx.scope_id,
@@ -1379,15 +1400,19 @@ async def _persist_and_complete(
     full_text: str,
     attachments: list[dict[str, Any]],
     usage: dict[str, Any] | None = None,
+    **step_fields: Any,
 ) -> str:
     """Persist the assistant message, mark the run completed, broadcast.
+
+    ``step_fields`` is ``StepRecorder.persist_kwargs()``: ``steps`` /
+    ``steps_omitted`` when the run recorded any, else empty.
 
     ``usage`` (W3a) is the per-run token-metering dict assembled from the
     backend's ``token_usage`` event; it is persisted onto the run doc so each
     completed run carries its real prompt / completion / cached token counts.
     ``None`` / empty leaves the stored usage untouched (legacy / no-usage runs).
     """
-    msg = await _persist_assistant_message(ctx, full_text, attachments)
+    msg = await _persist_assistant_message(ctx, full_text, attachments, **step_fields)
     assistant_id = str(msg.id)
     await run_service.mark_completed(
         spec.run_id,
@@ -1419,7 +1444,7 @@ async def _persist_and_complete(
 
 
 async def _persist_partial_reply(
-    spec: RunSpec, ctx: ScopeContext, full_text: str, status: str
+    spec: RunSpec, ctx: ScopeContext, full_text: str, status: str, **step_fields: Any
 ) -> str | None:
     """Persist a non-completed run's streamed text as an assistant Message.
 
@@ -1435,7 +1460,7 @@ async def _persist_partial_reply(
     if not full_text.strip() or _is_concierge_run(spec):
         return None
     try:
-        msg = await _persist_assistant_message(ctx, full_text, [], run_status=status)
+        msg = await _persist_assistant_message(ctx, full_text, [], run_status=status, **step_fields)
     except Exception:
         logger.exception("persisting the %s partial reply failed for %s", status, spec.run_id)
         return None
@@ -2517,6 +2542,12 @@ async def _drive_agent_loop(
                         # a tool with no phrasing emits no field and the client
                         # keeps rendering ``tool``.
                         frame: dict[str, Any] = {"tool": name, "input": tool_input}
+                        # A provisional announcement (claude_sdk names the tool
+                        # before its arguments stream; see agents/protocol.py).
+                        # Forwarded so the step recorder keeps ONE step per call;
+                        # absent when not provisional, so other frames are as before.
+                        if isinstance(meta, dict) and meta.get("input_pending") is True:
+                            frame["input_pending"] = True
                         narration = narrate_tool_use(name, tool_input, instance)
                         if narration:
                             frame["narration"] = narration
@@ -2736,6 +2767,7 @@ async def _handle_interrupted_cleanup(
     full_text: str,
     transport: Any,
     usage: dict[str, Any] | None = None,
+    recorder: StepRecorder | None = None,
 ) -> None:
     """Best-effort finalisation when ``execute_run`` is cancelled by the host.
 
@@ -2750,13 +2782,15 @@ async def _handle_interrupted_cleanup(
     third of the three terminal states that could never carry usage.
 
     The streamed text is persisted as a cut-off assistant Message first, so a
-    run arq killed at ``job_timeout`` still shows its reply after a refresh.
+    run arq killed at ``job_timeout`` still shows its reply after a refresh,
+    with the steps ``recorder`` holds (an open call becomes ``missing_result``).
     """
     try:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
-    assistant_id = await _persist_partial_reply(spec, ctx, full_text, "interrupted")
+    step_fields = recorder.persist_kwargs() if recorder is not None else {}
+    assistant_id = await _persist_partial_reply(spec, ctx, full_text, "interrupted", **step_fields)
     try:
         await run_service.mark_terminal(
             spec.run_id,
@@ -3110,6 +3144,8 @@ async def execute_run(spec: RunSpec) -> None:
             logger.debug("agent.typing(active=True) broadcast failed", exc_info=True)
 
         full_text = ""
+        # The thinking blocks and tool calls this run streams, for the Message.
+        recorder = StepRecorder()
         cancelled = False
         error: Exception | None = None
         backend_error_message: str | None = None
@@ -3160,6 +3196,7 @@ async def execute_run(spec: RunSpec) -> None:
                         # plain latest-wins rather than pinning the first.
                         if _usage_total(event_data) >= _usage_total(usage):
                             usage = event_data
+                recorder.observe(event_name, event_data)
                 await transport.append_event(spec.run_id, event_name, event_data)
                 if event_name == "error":
                     # ``_drive_agent_loop`` already broke out after yielding this.
@@ -3181,7 +3218,7 @@ async def execute_run(spec: RunSpec) -> None:
             # shutdown can find it: the cleanup outlives this cancelled task, and
             # ``drain_pending_cleanups`` waits on it before the DB is closed.
             cleanup = asyncio.ensure_future(
-                _handle_interrupted_cleanup(spec, ctx, full_text, transport, usage)
+                _handle_interrupted_cleanup(spec, ctx, full_text, transport, usage, recorder)
             )
             _track_cleanup(cleanup)
             try:
@@ -3227,7 +3264,9 @@ async def execute_run(spec: RunSpec) -> None:
 
     if error is not None or backend_error_message is not None:
         err_msg = str(error) if error is not None else (backend_error_message or "")
-        partial_id = await _persist_partial_reply(spec, ctx, full_text, "failed")
+        partial_id = await _persist_partial_reply(
+            spec, ctx, full_text, "failed", **recorder.persist_kwargs()
+        )
         try:
             # ``usage=`` was omitted here, so a run that crashed after the model
             # had already answered persisted no counts and swept through
@@ -3259,7 +3298,11 @@ async def execute_run(spec: RunSpec) -> None:
         # message text is fine). A cancelled run keeps the early return regardless
         # (a cancel persists only the text already streamed, as a cut-off reply).
         partial_id = (
-            await _persist_partial_reply(spec, ctx, full_text, "cancelled") if cancelled else None
+            await _persist_partial_reply(
+                spec, ctx, full_text, "cancelled", **recorder.persist_kwargs()
+            )
+            if cancelled
+            else None
         )
         try:
             if cancelled:
@@ -3307,7 +3350,9 @@ async def execute_run(spec: RunSpec) -> None:
         attachments.append({"type": "artifact", "meta": meta})
         await transport.append_event(spec.run_id, "artifact", meta)
 
-    assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments, usage=usage)
+    assistant_id = await _persist_and_complete(
+        spec, ctx, full_text, attachments, usage=usage, **recorder.persist_kwargs()
+    )
     await transport.append_event(
         spec.run_id,
         "stream_end",

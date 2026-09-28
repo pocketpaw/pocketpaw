@@ -29,6 +29,12 @@ cancelled / interrupted run had already streamed as an assistant Message instead
 of leaving it on the run doc only, and ``run_status`` marks that row as cut off.
 The doc -> domain mapper and ``_message_response`` carry it, and emit the wire
 key only when it is set, so a normal message's payload is unchanged.
+
+Updated 2026-09-28 (feat/persist-tool-steps): ``persist_assistant_message_for_scope``
+and ``create_agent_message`` take optional ``steps`` / ``steps_omitted`` (the
+thinking blocks and tool calls the reply streamed, from ``StepRecorder``), and the
+doc -> domain mapper and ``_message_response`` carry them. The wire keys go
+through the shared ``steps_wire_fields`` and appear only when non-empty.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from pocketpaw_ee.cloud.chat import group_service, unread_service
 from pocketpaw_ee.cloud.chat.domain import Attachment as _AttachmentDomain
 from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
 from pocketpaw_ee.cloud.chat.domain import Message as _MessageDomain
+from pocketpaw_ee.cloud.chat.domain import MessageStep as _MessageStepDomain
 from pocketpaw_ee.cloud.chat.domain import Reaction as _ReactionDomain
 from pocketpaw_ee.cloud.chat.group_service import (
     _get_group_or_404,
@@ -52,6 +59,7 @@ from pocketpaw_ee.cloud.chat.group_service import (
     _require_domain_group_admin,
     _require_group_member,
 )
+from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
 from pocketpaw_ee.cloud.chat.schemas import (
     EditMessageRequest,
     SendMessageRequest,
@@ -127,6 +135,10 @@ def _message_doc_to_domain(doc: _MessageDoc) -> _MessageDomain:
         role=doc.role,
         created_at=getattr(doc, "createdAt", None),
         run_status=getattr(doc, "run_status", None),
+        steps=tuple(
+            _MessageStepDomain(**s.model_dump()) for s in (getattr(doc, "steps", None) or [])
+        ),
+        steps_omitted=getattr(doc, "steps_omitted", 0) or 0,
     )
 
 
@@ -259,6 +271,8 @@ async def _create_group_message_doc(
     reply_to: str | None = None,
     thread_id: str | None = None,
     is_thread_parent: bool = False,
+    steps: list[dict] | None = None,
+    steps_omitted: int = 0,
 ) -> _MessageDomain:
     """Insert a new group-context message."""
     mention_docs = [_MentionDoc(**m) for m in mentions or []]
@@ -276,6 +290,8 @@ async def _create_group_message_doc(
         reply_to=reply_to,
         thread_id=thread_id,
         is_thread_parent=is_thread_parent,
+        steps=steps or [],
+        steps_omitted=steps_omitted,
     )
     await doc.insert()
     return _message_doc_to_domain(doc)
@@ -380,6 +396,9 @@ def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) ->
     # Only a cut-off agent reply carries this; normal payloads stay unchanged.
     if getattr(msg, "run_status", None):
         out["runStatus"] = msg.run_status
+    out.update(
+        steps_wire_fields(getattr(msg, "steps", None), getattr(msg, "steps_omitted", 0) or 0)
+    )
     return out
 
 
@@ -568,11 +587,14 @@ async def create_agent_message(
     agent_id: str,
     content: str,
     attachments: list[_AttachmentDoc] | None = None,
+    steps: list[dict] | None = None,
+    steps_omitted: int = 0,
 ) -> _MessageDoc:
     """Create a message from an agent in a group.
 
     Used by agent_bridge to persist agent responses. Returns the
-    persisted Beanie Message document for legacy callers.
+    persisted Beanie Message document for legacy callers. ``steps`` /
+    ``steps_omitted`` are the reply's recorded thinking and tool calls.
     """
     attachment_dicts = (
         [a.model_dump() if hasattr(a, "model_dump") else dict(a) for a in attachments or []]
@@ -586,6 +608,8 @@ async def create_agent_message(
         agent=agent_id,
         content=content,
         attachments=attachment_dicts,
+        steps=steps,
+        steps_omitted=steps_omitted,
     )
     bumped_at = domain_msg.created_at or datetime.now(UTC)
     await group_service.bump_message_stats(group_id, last_message_at=bumped_at)
@@ -1348,6 +1372,8 @@ async def persist_assistant_message_for_scope(
     content: str,
     attachments: list[dict] | None = None,
     run_status: str | None = None,
+    steps: list[dict] | None = None,
+    steps_omitted: int = 0,
 ) -> _MessageDoc:
     """Persist an agent's reply in an agent-stream context.
 
@@ -1357,6 +1383,9 @@ async def persist_assistant_message_for_scope(
     ``run_status`` is set only for the partial text of a run that did not
     complete (``failed`` | ``cancelled`` | ``interrupted``), so the history
     reader and the UI can tell a cut-off reply from a finished one.
+
+    ``steps`` / ``steps_omitted`` are the thinking blocks and tool calls the
+    reply streamed (see ``chat/runs/steps.py``); display-only.
     """
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
     if kind == "concierge":
@@ -1401,6 +1430,8 @@ async def persist_assistant_message_for_scope(
             attachments=att_models,
             workspace_id=workspace_id,
             run_status=run_status,
+            steps=steps or [],
+            steps_omitted=steps_omitted,
         )
     else:
         msg = _MessageDoc(
@@ -1413,6 +1444,8 @@ async def persist_assistant_message_for_scope(
             attachments=att_models,
             workspace_id=workspace_id,
             run_status=run_status,
+            steps=steps or [],
+            steps_omitted=steps_omitted,
         )
     await msg.insert()
     return msg

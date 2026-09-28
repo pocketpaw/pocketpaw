@@ -1,5 +1,12 @@
 """Message document — unified message store for pocket agent memory and group chat.
 
+Updated: 2026-09-28 (feat/persist-tool-steps) — added ``MessageStep`` and
+``Message.steps`` / ``steps_omitted``: the ordered thinking blocks and tool calls
+an agent reply streamed, recorded by ``chat/runs/steps.StepRecorder``. Before,
+they reached only the Redis run stream (1h TTL), so a refresh lost them.
+Display-only: the LLM history reader never reads them. Additive, so legacy rows
+load with ``[]`` / ``0`` and need no migration.
+
 Updated: 2026-09-27 (fix/chat-run-heartbeat) — added ``run_status``. A run that
 ends failed / cancelled / interrupted now persists the text it had already
 streamed as a real assistant Message (before, it lived only on
@@ -12,7 +19,7 @@ still tell the model the reply is incomplete. ``None`` on every normal message.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -39,6 +46,28 @@ class Attachment(BaseModel):
 class Reaction(BaseModel):
     emoji: str
     users: list[str] = Field(default_factory=list)
+
+
+class MessageStep(BaseModel):
+    """One thinking block or tool call of an agent reply, in stream order.
+
+    Written already bounded and scrubbed by ``StepRecorder``: ``input`` is the
+    scrubbed argument dict, or a truncated JSON string when it was too large;
+    ``output`` is redacted and capped (``output_truncated`` says so).
+    ``missing_result`` marks a call whose run ended before its result arrived.
+    """
+
+    id: str
+    kind: Literal["thinking", "tool"]
+    tool: str = ""
+    narration: str = ""
+    text: str = ""  # thinking only
+    input: Any = None
+    output: str = ""
+    output_truncated: bool = False
+    status: Literal["running", "complete", "error", "missing_result"] = "running"
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
 
 
 class Message(TimestampedDocument):
@@ -100,6 +129,12 @@ class Message(TimestampedDocument):
     # this assistant row is the partial text of a run that did not complete.
     # ``None`` for every complete reply and every human message.
     run_status: str | None = None
+
+    # --- Agent work behind a reply ----------------------------------------
+    # Thinking blocks and tool calls, in order, capped per message; the calls a
+    # cap dropped are counted in ``steps_omitted`` rather than stored.
+    steps: list[MessageStep] = Field(default_factory=list)
+    steps_omitted: int = 0
 
     @model_validator(mode="after")
     def _enforce_context(self) -> Message:
