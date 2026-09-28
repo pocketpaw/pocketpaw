@@ -20,6 +20,12 @@
 # EXPECTED STATE ON THE UNFIXED TREE: the two ``survives`` tests fail, the two
 # characterization tests pass. The characterizations are what prove the failure
 # is a reachability bug and not a data-loss bug - do not delete them with the fix.
+#
+# Updated 2026-09-27 (fix/chat-run-heartbeat): ``execute_run`` now also persists
+# a non-completed run's partial as an assistant Message (``run_status`` set) and
+# points ``assistant_message_id`` at it, so
+# ``test_the_partial_reply_is_durable_on_the_run_doc`` pins that new truth
+# instead of ``assistant_message_id is None``. The run doc still keeps the text.
 from __future__ import annotations
 
 import fakeredis.aioredis
@@ -239,9 +245,9 @@ async def test_a_mid_stream_cancel_keeps_every_chunk(monkeypatch, mongo_db):  # 
 
 
 async def test_the_partial_reply_is_durable_on_the_run_doc(monkeypatch, mongo_db):  # noqa: ARG001
-    """Passes today. The text is NOT lost - it is written, just not where the
-    history reader looks. That is what makes the fix a reachability change rather
-    than a capture change, and it is why no data has to be recovered."""
+    """The text is NOT lost - it is on the run doc. Originally this also pinned
+    ``assistant_message_id is None`` (the run doc was the only copy); since
+    2026-09-27 the partial is ALSO a Message and the run points at it."""
     await _drive(
         monkeypatch,
         [
@@ -253,8 +259,8 @@ async def test_the_partial_reply_is_durable_on_the_run_doc(monkeypatch, mongo_db
     doc = await run_service.get_run("r1")
     assert doc.status == "failed"
     assert doc.partial_text == _PARTIAL
-    assert doc.assistant_message_id is None, (
-        "no assistant Message was written - the run doc is the only copy"
+    assert doc.assistant_message_id is not None, (
+        "the failed run's partial should now be persisted as a Message the run points at"
     )
 
 
