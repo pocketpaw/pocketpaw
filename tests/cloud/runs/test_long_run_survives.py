@@ -1,28 +1,20 @@
 # tests/cloud/runs/test_long_run_survives.py
-# Created 2026-09-27 (fix/chat-run-heartbeat). Reproduces the reported bug: "if the
-# agent takes a lot of time the worker stops completely — nothing that was emitted
-# is saved, only the user message after refresh."
+# End-to-end guarantees that a long agent run keeps its reply. A run that takes
+# many minutes, or ends any way other than ``completed``, must still leave the
+# text it streamed in the chat history.
 #
-# Three causes, one test group each:
-#
-# 1. The web process's stale-run sweeper judges a run by ``createdAt``. Any run
-#    older than 10 minutes is flipped to ``interrupted`` and gets an
-#    ``interrupted`` frame on its live stream, even though the worker is still
-#    driving it. The browser's stream ends and ``active_run`` goes null, so a
-#    refresh does not re-attach. Fix: the worker heartbeats the run doc and the
-#    sweeper judges RUNNING runs by that heartbeat, with conditional writes.
-#
-# 2. A run that ends any way other than ``completed`` writes no assistant
-#    ``Message``. Its text lands on ``ChatRunDoc.partial_text``, which the chat
-#    history the UI reads never looks at. Fix: persist the partial as a real
-#    Message flagged as cut off, and do not count it a second time in the
-#    agent's own history (the stranded-reply path).
-#
-# 3. arq's ``job_timeout`` cancels the task. The CancelledError cleanup marks the
-#    doc interrupted but, like (2), never writes the Message.
-#
-# EXPECTED STATE ON THE UNFIXED TREE: every test in the "bug" sections fails; the
-# characterization at the bottom passes.
+# Groups:
+# 1. Liveness: the stale-run sweeper judges running runs by their heartbeat, so
+#    a long but live run stays ``running``, and the worker does not drive a run
+#    the sweeper already interrupted.
+# 2. Partial replies: a failed, cancelled or timed-out run persists its streamed
+#    text as a cut-off assistant Message, and that reply is counted once in the
+#    agent's own history.
+# 3. Characterization: a run that emitted no text writes no Message.
+# 4. Edge cases: a failed typing broadcast does not leak the heartbeat, the
+#    heartbeat loop stops once the run is not running, a superseded partial sorts
+#    before the next user message, and the boot sweep leaves runs another
+#    replica is still beating.
 from __future__ import annotations
 
 import asyncio

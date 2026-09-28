@@ -1,22 +1,15 @@
 """Domain value objects for the chat module.
 
-Pure-Python frozen dataclasses, no Beanie/FastAPI imports. Mirror the
+Pure-Python frozen dataclasses, no Beanie/FastAPI imports. They mirror the
 persistence sub-models in ``ee.cloud.models.message`` and
-``ee.cloud.models.group`` field-for-field so the repository can convert
-trivially without losing structure.
+``ee.cloud.models.group`` field-for-field so the repository converts without
+losing structure. Some call sites still use the Beanie docs directly; new code
+should prefer these types.
 
-Phase 10 ships only the value objects. The service+router migration to
-use these is incremental — existing call sites keep using the Beanie
-docs directly until each method is migrated. New code should prefer
-domain types.
-
-Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``Message.run_status`` mirrors the
-new persistence field: the terminal status of a run whose partial reply this
-row is (``None`` for every complete message).
-
-Updated: 2026-09-28 (feat/persist-tool-steps) — ``MessageStep`` and
-``Message.steps`` / ``steps_omitted`` mirror the new persistence fields: the
-thinking blocks and tool calls an agent reply streamed, in order.
+``Message.run_status`` is set only on the partial reply of a run that did not
+complete (``failed`` | ``cancelled`` | ``interrupted``) and is ``None`` on every
+complete message. ``MessageStep`` and ``Message.steps`` / ``steps_omitted`` carry
+the thinking blocks and tool calls an agent reply streamed, in order.
 """
 
 from __future__ import annotations

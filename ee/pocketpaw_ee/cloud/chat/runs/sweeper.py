@@ -1,34 +1,27 @@
 """Stale-run sweeper.
 
-Updated: 2026-09-27 (fix/chat-run-heartbeat) — a ``running`` run is now judged
-by its liveness stamp, ``coalesce(last_heartbeat_at, started_at, createdAt)``,
-not by ``createdAt``. The worker refreshes ``last_heartbeat_at`` on a timer while
-it drives a run, so a run is only stale once its worker has stopped beating.
-Before this, any run older than the cutoff was interrupted however healthy it
-was: the browser got a terminal ``interrupted`` frame at 10-15 minutes, stopped
-listening, and a refresh showed only the user's message. A ``queued`` run is
-still judged by ``createdAt`` (nobody has picked it up, so nothing can beat).
+If a process dies mid-run, Mongo still says ``queued`` or ``running`` while
+nobody is writing the stream. The sweeper marks those runs ``interrupted`` so
+the client can render a retry affordance instead of waiting on a dead stream.
 
-The write is now a conditional atomic update that re-checks the stale predicate,
-instead of a full-document ``save()`` of a doc read moments earlier. The old
-save could land after the worker had completed the run and overwrite
-``completed`` (and its ``assistant_message_id``) with ``interrupted``. The
-``interrupted`` stream frame is only appended for runs this sweep actually moved.
+Staleness is judged by liveness, not age. A ``running`` run is stale when
+``coalesce(last_heartbeat_at, started_at, createdAt)`` is older than the cutoff;
+the worker refreshes ``last_heartbeat_at`` on a timer while it drives the run,
+so a long but healthy run is never swept. A ``queued`` run is judged by
+``createdAt``, since nothing can beat for it yet.
 
-If the backend process dies mid-run, the executor's asyncio task is gone but
-Mongo still says ``running``. The sweeper marks anything that has stopped making
-progress past the threshold as ``interrupted`` so the client can render a retry
-affordance instead of subscribing to a stream nobody is writing to.
+The write is a conditional atomic update that re-checks the stale predicate,
+never a ``save()`` of a doc read earlier: a save could land after the worker
+completed the run and overwrite ``completed`` (and its
+``assistant_message_id``) with ``interrupted``. The ``interrupted`` stream frame
+is appended only for runs this sweep actually moved, so any live SSE subscriber
+finalises immediately.
 
-Two cadences share this:
+Two callers:
 - The web process's periodic sweep (every 5 minutes, 10-minute cutoff) catches
   runs abandoned by a web-process restart or a dead worker.
-- The Tier 2 worker's boot sweep (5-second cutoff) catches runs orphaned by
-  the previous worker that just crashed.
-
-If the run's stream buffer is still live, the sweeper appends an
-``interrupted`` terminal event so any live SSE subscriber finalises
-immediately instead of waiting for its own stream timeout.
+- The Tier 2 worker's boot sweep (short cutoff, at least three heartbeat
+  intervals) catches runs orphaned by the previous worker.
 """
 
 from __future__ import annotations

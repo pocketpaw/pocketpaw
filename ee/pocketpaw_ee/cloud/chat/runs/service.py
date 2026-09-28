@@ -1,52 +1,29 @@
-"""Chat-run service — the only module that touches ``ChatRunDoc``.
+"""Chat-run service: the only module that touches ``ChatRunDoc``.
 
-Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
+Internal seam, not an HTTP-exposed CRUD entity: the public functions take a
 ``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
+Callers outside this entity (metering, the history reader, the agent-activity
+board) never see a Beanie document: writes go through functions here
+(``mark_billed``) and reads return value objects (``RunActivityRow``,
+``StrandedReply``).
 
-Changes:
-- 2026-09-27 (fix/chat-run-heartbeat) — ``mark_running`` is now a conditional
-  atomic ``queued -> running`` transition that returns whether it won. It used to
-  load and ``save()`` the whole doc unconditionally, so a queued run the sweeper
-  had already interrupted (and whose client had already been sent the terminal
-  frame) was flipped straight back to ``running`` and driven for nobody. It also
-  seeds ``last_heartbeat_at``, and ``touch_heartbeat`` refreshes it — conditional
-  on ``running`` so a late tick can never resurrect a finished run. The sweeper
-  judges running runs by that stamp instead of ``createdAt``.
-  ``find_stranded_replies`` now skips runs whose ``assistant_message_id`` is set:
-  ``execute_run`` persists a non-completed run's partial as a real ``Message``,
-  and counting it here too would replay the same reply twice.
-- 2026-09-14 (fix/partial-reply-survives-failed-run) — added
-  ``STRANDED_REPLY_STATUSES`` + ``find_stranded_replies``. ``execute_run`` writes
-  an assistant ``Message`` from exactly one place, and the failed / cancelled /
-  interrupted branches return before it, leaving the text the model had already
-  produced on ``partial_text`` and nowhere else. ``load_history_for_scope`` reads
-  the ``Message`` collection alone, so that reply was durable and unreachable at
-  the same time: the next turn was answered cold and the user paid twice for the
-  same tokens. This read is how the history reader gets at it WITHOUT importing
-  ``ChatRunDoc`` (EE Rule 2) — it returns ``StrandedReply`` value objects, the
-  same Beanie-free shape ``find_*_for_workspace`` returns ``RunActivityRow`` in.
-- 2026-06-10 (sov/w3a-igw — per-run token metering) — ``mark_completed`` and
-  ``mark_terminal`` now accept an optional ``usage: dict[str, Any] | None`` and
-  persist it onto ``ChatRunDoc.usage`` when provided. ``run_core`` passes the
-  token-usage dict it assembles from the backend's ``token_usage`` event, so
-  each finished run carries its real prompt / completion / cached token counts.
-  ``None`` leaves the stored usage untouched (legacy callers / no-usage runs).
-- 2026-06-24 (B3 review fix — metering boundary) — added ``mark_billed(run_id)``.
-  The metering service (BC-3) previously wrote ``run_doc.billed=True`` +
-  ``run_doc.save()`` directly, a FOREIGN write across the chat.runs entity
-  boundary (EE Rule 2 — only this module touches ``ChatRunDoc``). ``bill_run`` now
-  calls ``mark_billed`` instead. Reading ``run_doc.usage`` in metering stays fine;
-  only the WRITE moves here, the owner of the document.
-- 2026-07-28 (HR-12a, feat/cockpit-agent-activity) — the ``queued``/``running``
-  pair that three functions each spelled inline is now the named
-  ``ACTIVE_RUN_STATUSES`` constant, and two workspace-scoped reads were added
-  (``find_active_runs_for_workspace`` / ``find_recent_runs_for_workspace``) for
-  the agent-activity board. They return ``RunActivityRow`` value objects, not
-  ``ChatRunDoc``, so the caller never sees a Beanie document.
-- 2026-07-26 (concierge transcripts) — ``create_run`` copies
-  ``RunSpec.persist_user_text`` onto ``ChatRunDoc.user_text``. Only the concierge
-  surface ever sets it (its anonymous visitor has no Message row to point
-  ``user_message_id`` at), so every other caller writes "" and is unchanged.
+Lifecycle invariants:
+- ``mark_running`` is a conditional atomic ``queued -> running`` transition that
+  returns whether it won, so a run the sweeper already interrupted is never
+  driven again. It seeds ``last_heartbeat_at``.
+- ``touch_heartbeat`` refreshes ``last_heartbeat_at`` only while the run is
+  ``running``, so a late tick cannot resurrect a finished run. The sweeper
+  judges running runs by that stamp.
+- ``mark_completed`` / ``mark_terminal`` persist the backend's token ``usage``
+  when given; ``None`` leaves it untouched.
+- ``create_run`` copies ``RunSpec.persist_user_text`` onto ``user_text``; only
+  the concierge surface sets it.
+
+``ACTIVE_RUN_STATUSES`` is the ``queued``/``running`` pair. ``find_stranded_replies``
+returns the partial text of ``STRANDED_REPLY_STATUSES`` runs that has no
+Message behind it, so the history reader can include it without importing
+``ChatRunDoc``. Runs whose ``assistant_message_id`` is set are skipped, because
+their partial already lives in a Message and counting it twice would replay it.
 """
 
 from __future__ import annotations

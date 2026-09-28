@@ -1,5 +1,4 @@
-<!-- Updated: 2026-09-28 (feat/persist-tool-steps) — documented tool calls and thinking persisted on the assistant message as `steps`. -->
-<!-- Updated: 2026-09-27 (fix/chat-run-heartbeat) — documented the run heartbeat, the heartbeat-based stale-run sweep, partial replies saved as messages, and POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS. -->
+<!-- Operator guide for running cloud chat runs on the Tier 2 arq worker: topology, env, sizing, the run heartbeat and heartbeat-based stale-run sweep, partial replies saved as messages, tool steps persisted on the assistant message, rollback, and the site-build lanes. -->
 # Tier 2 deploy — resumable chat runs with `arq` worker
 
 This is the operational guide for switching cloud chat runs from the

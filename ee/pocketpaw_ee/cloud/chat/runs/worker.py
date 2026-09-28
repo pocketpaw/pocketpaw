@@ -1,113 +1,36 @@
-"""arq worker entry point for Tier 2 run execution.
-
-Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot sweep's cutoff is at
-least three heartbeat intervals (``_boot_sweep_older_than_seconds``), so a booting
-replica no longer interrupts runs another replica is still beating.
-
-Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``_shutdown`` now waits (bounded,
-``_CLEANUP_DRAIN_TIMEOUT_SECONDS``) for ``run_core.drain_pending_cleanups`` before
-``close_cloud_db()``. arq cancels in-flight runs on shutdown, and each one's
-shielded cleanup, which writes the partial reply as a Message and marks the run
-``interrupted``, keeps running after the task is gone. Closing the database first
-cut those writes off, stranding the doc in ``running`` with the reply lost. The
-"10-minute heartbeat sweeper" wording below now means a real heartbeat: the web
-sweep judges a running run by ``last_heartbeat_at``, which the worker refreshes.
-
-Updated: 2026-09-24 (PP-2, feat/sites-verify-pipeline) — the preview build's arq
-timeout is now ``site_preview_job_timeout_seconds()``: the build budget plus the
-in-sandbox browser check that runs after it. The html verify job is registered on
-the sites lane only (``pocketpaw_ee.sites.build_worker``) — it never had a backlog on
-the default queue to drain.
-
-Updated: 2026-09-04 (fix/queue-lanes, backend-perf C1) — THIS IS NO LONGER THE ONLY
-LANE. Site builds now enqueue onto their own queue and are consumed by
-``pocketpaw_ee.sites.build_worker.WorkerSettings``; both lanes run in one container
-under ``pocketpaw_ee.cloud.worker_supervisor``. The two site functions stay
-registered HERE as well, and deliberately: a deploy cuts over the enqueue side
-instantly, so anything already sitting on the default queue when the old process
-stopped still needs someone willing to claim it. That backlog drains once and is
-then permanently empty.
-
-``max_jobs`` below is therefore no longer the whole cluster's ceiling — it is this
-lane's. The sites lane carries its own, and neither can consume the other's.
-
-Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``WorkerSettings.max_jobs`` is
-now set, from ``POCKETPAW_ARQ_MAX_JOBS`` (default 10, arq's own). It was previously
-unset, so arq's default applied silently and the whole cluster ran ten concurrent
-jobs across ALL SIX registered lanes. That is the ceiling a multi-user deploy hits
-first — and it is invisible, because job 11 is not rejected or retried, it just sits
-in Redis behind a ``job_timeout`` of up to 30 minutes. Raise it together with the
-worker container's memory limit: the default ``claude_agent_sdk`` backend spawns a
-Node subprocess per run, so RAM binds before CPU does.
-
-Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — registered the /ship
-deploy job ``deploy_app_job`` into ``WorkerSettings.functions``, wrapped the same
-way as ``provision_box_job``: its own long timeout (a deploy pulls an image and
-swaps containers) and ``max_tries=1`` (the job records the attempt ``failed``
-instead of raising, so an arq retry would only re-run a known-bad deploy).
-Updated: 2026-08-10 (SL-2 slice 2 — the site-build lane) — registered
-``run_site_build`` (``pocketpaw_ee.sites.build_job``) into
-``WorkerSettings.functions``, wrapped in ``arq.worker.func`` with ITS OWN timeout from
-``site_build_job_timeout_seconds()``. Same default #1 as workspace jobs: this is the one
-arq entrypoint that is actually deployed, so the build lane costs no new deploy artifact.
-
-The separate timeout is not tidiness. A site build's budget is the widest per-engine
-in-sandbox timeout plus ``run_build``'s exec slack plus the phases outside the sandbox —
-1020s at today's defaults, ALREADY over the 900s the workspace-jobs registry shares. An
-arq cancellation before the in-sandbox ``timeout(1)`` fires destroys the sentinel the
-lane classifies from, so a healthy-but-slow build would be recorded as lost
-infrastructure. Three functions now carry three budgets, and none can clip another.
-
-Updated: 2026-06-22 (feat/jobs-custom-job-entrypoints) — ``_startup`` now also
-calls ``load_entrypoint_jobs()`` right after ``register_builtins()`` so the
-worker registers WORKSPACE-CUSTOM jobs (declared under the ``pocketpaw.jobs``
-entry-point group) in its own process. Without this a custom job would resolve
-in the web process but raise ``UnknownJobError`` in the worker that runs it.
-No-op when no custom-job package is installed.
-
-Updated: 2026-06-22 (feat/jobs-worker-register-and-connector-read) — PRODUCTION
-FIX: ``_startup`` now calls ``register_builtins()`` AFTER ``init_realtime()`` so
-the worker process populates the process-wide job registry on boot. The registry
-is a module-level dict; the worker runs in a SEPARATE process from the web
-``mount_cloud`` that registered the built-ins there, so without this the
-worker's registry was EMPTY and ``execute_workspace_job`` → ``resolve_job(name)``
-raised ``UnknownJobError`` for EVERY job in a real deploy. Mirrors the ordering
-in ``ee/pocketpaw_ee/cloud/__init__.py:mount_cloud`` (register after
-init_realtime so a job's writeback emit has a bus to publish onto).
-
-Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — registered the workspace
-jobs entrypoint ``execute_workspace_job`` into ``WorkerSettings.functions``
-(default #1: SAME worker process, no new deploy artifact). It is wrapped with
-``arq.worker.func(timeout=...)`` so workspace jobs get their OWN per-function
-timeout (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s) without changing the
-chat-run timeout. The jobs share this worker's Redis pool + realtime bootstrap.
+"""arq worker entry point for Tier 2 run execution (the default lane).
 
 Deploy as a separate process alongside the web service::
 
     arq pocketpaw_ee.cloud.chat.runs.worker.WorkerSettings
 
-The worker owns the agent run; the web process just enqueues
-``execute_run_job`` via ``ArqExecutor`` and streams events back through Redis.
+The web process enqueues ``execute_run_job`` via ``ArqExecutor``; this worker owns
+the agent run and streams events back through Redis. The same worker also runs
+workspace jobs, the /ship provision and deploy jobs, and the two site-build
+functions. Site builds normally go to their own queue, consumed by
+``pocketpaw_ee.sites.build_worker``; they stay registered here so anything left on
+the default queue across a deploy still gets claimed. Both lanes run in one
+process under ``pocketpaw_ee.cloud.worker_supervisor`` and share one bootstrap
+(``worker_startup`` / ``worker_shutdown``), so ``max_jobs`` is this lane's ceiling,
+not the cluster's.
 
-On boot, if ``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true`` (single-replica only —
-multi-replica would interrupt sibling workers' in-flight runs), sweep any
-``queued``/``running`` leftovers as ``interrupted``. LLM streams can't resume
-mid-generation; the partial already streamed remains visible, the user
-retries manually. HA deploys rely on the 10-minute heartbeat sweeper instead.
+Each non-chat function carries its own arq timeout. A site build's budget is the
+widest in-sandbox timeout plus exec slack plus the phases outside the sandbox, and
+arq must never cancel it before the in-sandbox ``timeout(1)`` fires: that would
+destroy the sentinel the build lane classifies its verdict from.
 
-Updated: 2026-06-24 (integration/billing-credits, BC-3) — the boot sweep now
-also runs the compute-cost metering sweep (``sweep_unbilled_runs``) so any
-terminal runs the prior worker left unbilled are charged on restart. The
-metering sweep is idempotent (billed flag + ``run:{run_id}`` ledger key), so it
-is safe even when the boot stale-run sweep is disabled — it just bills the
-already-terminal backlog.
+Boot (``_bootstrap``): pin the xproc role, init the DB and realtime bus, register
+built-in and entry-point workspace jobs (the registry is per process), then run
+the boot sweeps, which run only when ``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true``
+(default off: safe on a single replica only). The stale-run sweep marks orphaned
+``queued``/``running`` runs ``interrupted``; its cutoff is at least three
+heartbeat intervals, so it never interrupts a run another replica is still
+beating. HA deploys rely on the web process's heartbeat sweep instead. The
+compute-cost metering sweep and the LiteLLM billing-cutover sweep follow; both
+are idempotent and each has its own try so neither can abort startup.
 
-Updated: 2026-06-26 (feat/litellm-billing-cutover, WU-F) — the boot sweep also
-runs the per-tenant LiteLLM billing-cutover sweep (``run_cutover_sweep``): a
-no-op in ``off`` mode, a read-only reconciliation compare in ``shadow``, and a
-proxy-spend debit in ``live`` (where ``sweep_unbilled_runs`` self-gates off so
-exactly one meter charges). Idempotent + its own try so a cutover-sweep failure
-can't abort worker startup.
+Shutdown waits (bounded) for cancelled runs' shielded cleanups to write their
+partial reply and terminal status before closing the database.
 """
 
 from __future__ import annotations

@@ -1,40 +1,26 @@
-"""Chat domain — message business logic (CRUD, reactions, threads, pins, search).
+"""Chat domain: message business logic (CRUD, reactions, threads, pins, search).
 
 Sole owner of writes to the ``Message`` Beanie document. Module-level
-``async def`` API. The doc → domain mapping helpers (formerly in
-``repositories.py``) live alongside the public API as private helpers.
+``async def`` API; the doc -> domain mapping helpers live here as private
+helpers.
 
-Updated 2026-07-31 (Paw Bar inbox, slice 0): a CONCIERGE turn now persists NO
-``Message`` at all. ``ContextType`` has no "concierge" value, so those turns
-used to fall through to the group branch and write
-``Message(context_type="group", group=<pocket_id>)`` — an orphan row no surface
-reads, keyed by a pocket id in a field that means "room id". Concierge
-transcripts derive from ``ChatRunDoc`` instead, so
-``persist_assistant_message_for_scope`` returns an unsaved doc for that kind and
-the caller keeps the id and timestamp it needs. Consequence for anything built
-later: a message-id-addressable feature (reactions, thumbs writeback) must key
-off the RUN doc for concierge, because that id has no row behind it.
+Invariants a reader must not break:
 
-Updated 2026-09-09: ``MessageReaction`` now carries the post-toggle
-``reactions`` array. The event used to ship only the delta (emoji + user_id),
-which is enough to know something changed but not enough to draw the chips —
-so peers in the room got the event and rendered nothing until they reloaded
-the page. The array is serialized in the same shape as
-``dto.message_to_wire_dict`` so the realtime path and the REST response patch
-a client's message row identically.
-
-Updated 2026-09-27 (fix/chat-run-heartbeat): ``persist_assistant_message_for_scope``
-takes an optional ``run_status``. ``execute_run`` now persists the text a failed /
-cancelled / interrupted run had already streamed as an assistant Message instead
-of leaving it on the run doc only, and ``run_status`` marks that row as cut off.
-The doc -> domain mapper and ``_message_response`` carry it, and emit the wire
-key only when it is set, so a normal message's payload is unchanged.
-
-Updated 2026-09-28 (feat/persist-tool-steps): ``persist_assistant_message_for_scope``
-and ``create_agent_message`` take optional ``steps`` / ``steps_omitted`` (the
-thinking blocks and tool calls the reply streamed, from ``StepRecorder``), and the
-doc -> domain mapper and ``_message_response`` carry them. The wire keys go
-through the shared ``steps_wire_fields`` and appear only when non-empty.
+- A CONCIERGE turn persists no ``Message``. Concierge transcripts derive from
+  ``ChatRunDoc``, so ``persist_assistant_message_for_scope`` returns an unsaved
+  doc for that kind. Any message-id-addressable feature (reactions, thumbs
+  writeback) must key off the run doc for concierge, because that id has no row
+  behind it.
+- The ``MessageReaction`` event carries the full post-toggle ``reactions``
+  array, serialized in the same shape as ``dto.message_to_wire_dict``, so the
+  realtime path and the REST response patch a client's message row identically.
+- ``persist_assistant_message_for_scope`` takes an optional ``run_status`` for
+  the partial reply of a run that did not complete, and it and
+  ``create_agent_message`` take optional ``steps`` / ``steps_omitted`` (the
+  thinking and tool calls recorded by ``StepRecorder``). The mapper and
+  ``_message_response`` emit these wire keys only when set or non-empty (steps
+  via the shared ``steps_wire_fields``), so a normal message's payload is
+  unchanged.
 """
 
 from __future__ import annotations
