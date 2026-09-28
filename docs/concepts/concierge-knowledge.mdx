@@ -18,10 +18,17 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
   fields": name, tone, languages, about, topics to avoid and escalation, how each is
   rendered, and why owner text can't change the rules. The "not yet" line drops
   owner-written guidance.
+  Updated 2026-09-28 (feat/concierge-spend-cap, CR-5) — new subsection "When v2 can't
+  answer": the per-site daily spend cap (POCKETPAW_PAWBAR_CONCIERGE_DAILY_SPEND_CAP),
+  the leave-a-message reply that replaces the quota 403 and the error frame on v2, and
+  the spend tags; the "not yet" list drops the spend cap.
   Updated 2026-09-28 (feat/concierge-v2-output, CR-2) — new subsection "What a v2 reply
   can contain": code blocks become a fixed line, cards are bounded and product data
   comes only from the catalog; the "not yet" list drops those two items. Plus "Code
   examples from your docs": the concierge_allow_doc_code switch and the grounding rule.
+  Updated 2026-09-28 (feat/concierge-manual-create, CR-12) — new section "Creating and
+  deleting a concierge": owners create it explicitly, nothing else does, and what
+  happened to existing sites. "auto-provisioned" wording dropped.
   Updated 2026-09-27 (feat/concierge-v2-runner, CR-1) — new section "The v2 runtime":
   the per-site concierge_runtime switch, what v2 does (one tool-free model call
   grounded in the site KB), which refusals it skips, its config keys, and what it
@@ -70,7 +77,7 @@ with no site binding reads nothing to visitors, because no visitor ever runs it.
 `GET /api/v1/agents/{agent_id}/knowledge` reports this per agent: it returns
 `visible_to_site_visitors` beside the article list, `true` when a Paw Bar widget
 binds that agent to a published site. It reads the real binding, so an agent bound
-by hand in the dashboard counts the same as an auto-provisioned one. The flag is a
+by hand in the dashboard counts the same as one bound when the concierge was created. The flag is a
 label, not a gate — it changes nothing about who may call the endpoint (still the
 agent's owner or a workspace admin) and nothing about what a visitor can reach. It
 exists so the owner is told before they attach something, rather than after a
@@ -180,6 +187,30 @@ bundles that only read that key). Every item carries its id. Only a page the sit
 recorded gets a title and a link; an owner's upload or an agent file is listed by id
 with an empty title and url, so its name never leaves the server and the widget, which
 shows only entries with a link, shows nothing for it.
+
+## Creating and deleting a concierge
+
+A site has a concierge only because its owner created one, with
+`POST /paw-bar/admin/site/{site_id}/concierge` (the dashboard's "Create concierge").
+Nothing else creates one: not creating a widget, not switching the concierge on, not
+publishing, and not attaching a connected site. A site without one shows visitors no
+chat bar, and every public route treats it exactly as if it were switched off.
+
+A new concierge starts off. Its runtime comes from the v2 eval gate at the moment it is
+created: `legacy` until the deployment turns v2 on and the gate report passes. A legacy
+concierge gets a dedicated agent bound; a v2 one needs none. Existing concierges keep
+the runtime they have. Once the owner turns it on,
+the bar appears on the live page at the next publish.
+
+`DELETE` on the same route removes it. The agent is unbound, never deleted, and the
+concierge's conversations are kept unless the owner asks for them to go too
+(`?delete_conversations=true`). The site's own pages stay in its knowledge; they
+belong to the site.
+
+Sites that already had a concierge answering visitors when this rule arrived kept it:
+a one-time backfill (`python -m pocketpaw_ee.sites.migrate_concierge_marker`, which
+also runs at server start) marked every site whose bar was bound to a live agent as an
+existing legacy concierge, still on. Every other site starts with none.
 
 ## The v2 runtime
 
@@ -314,8 +345,39 @@ messages in this conversation and the page title.
 A site synced before this change has an empty crawl index, so its pages count as misses
 (title only) until the next publish or manual re-sync rebuilds it.
 
-v2 does not yet cap spend per site. That lands before it becomes the default for new
-sites.
+### When v2 can't answer
+
+Four things stop a v2 concierge from answering a turn:
+
+- **The site's daily spend cap.** `POCKETPAW_PAWBAR_CONCIERGE_DAILY_SPEND_CAP` is the most
+  one site's concierge may spend on the model per UTC day, in US dollars at provider
+  cost (default 5, and 0 turns the cap off). The figure is this site's concierge runs
+  since midnight UTC, each priced by the same meter that bills the workspace. Once it
+  reaches the cap, no model call is made for the rest of the day. If the spend can't be
+  read, the turn is answered anyway.
+- **The monthly conversation allowance.** On a legacy site a new conversation past the
+  allowance is refused with a 403, as before. A v2 site takes the visitor's message
+  instead.
+- **A provider timeout** (30 seconds per request) or **a provider error**.
+
+In all four cases the visitor gets one fixed reply, streamed as ordinary text, so
+every widget version shows it: "I can't answer right now, so I've passed your message
+to the team." It never says why. The conversation is handed to the owner the same way
+the "Talk to a person" button does it: it moves to *needs a person* in the inbox, a
+handoff record is written and the owner is notified. A conversation that is already
+waiting on a person isn't handed off again, so a capped site doesn't notify the owner
+on every turn. If the handoff can't be recorded, the reply points the visitor at
+"Talk to a person" instead of claiming the team has it. The handoff carries the
+visitor's message only when the site keeps transcripts. A degraded turn still counts
+against the rate limit.
+
+When the model fails partway through, the text already streamed stays and the reply
+follows it. The run is stored as failed, with `concierge_v2_provider_timeout` or
+`concierge_v2_provider_error` as the reason.
+
+Each v2 model call is tagged for spend: requests through the LiteLLM proxy carry
+`pawbar_site:<site_id>` and `pawbar_widget:<widget_id>` as request tags, and the run's
+stored usage names the site and the widget.
 
 ## What a concierge records
 

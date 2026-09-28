@@ -10,6 +10,10 @@
 # Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
 # sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
 # Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+# Updated: 2026-09-28 (feat/concierge-spend-cap) — the v2 concierge step also runs
+# test_paw_bar_concierge_v2_degrade.py (spend cap and leave-a-message degrade).
+# Updated: 2026-09-28 (feat/concierge-manual-create) — the EE test job runs the
+# concierge manual-create, marker-backfill and foreign-bind tests (tests/cloud).
 # Updated: 2026-09-27 (feat/concierge-v2-runner) — the EE test job runs the v2
 # Paw Bar concierge runner tests, which otherwise sit in the tests/cloud blind spot.
 # Updated: 2026-09-28 (feat/concierge-v2-output) — the same step also runs the v2
@@ -255,13 +259,32 @@ jobs:
         # is the only proof that owner text stays quoted in the data half and
         # never reaches the frame. The _page file is the only proof that a page
         # off the site's allowed origins is dropped and that its title stays
-        # quoted data. Mutations: tests/mutations/concierge_v2_runtime.json
+        # quoted data. The _degrade file is the only proof that a capped,
+        # over-quota or failing site gets the leave-a-message reply and no
+        # model call. Mutations: tests/mutations/concierge_v2_runtime.json
         # and tests/mutations/concierge_guided_fields.json.
         run: >-
           uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
           tests/cloud/test_paw_bar_concierge_v2_output.py
+          tests/cloud/test_paw_bar_concierge_v2_degrade.py
           tests/cloud/test_paw_bar_concierge_guided_fields.py
           tests/cloud/test_paw_bar_concierge_page.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge manual-create tests
+        # Same addopts escape. A concierge exists only because its owner created
+        # one: these prove no trigger (widget create, enable PATCH, publish,
+        # foreign attach, empty-id rebind) creates one, that "none" reads as "off"
+        # to a visitor, and that the backfill keeps every bar that was live on
+        # the old model live. Mutations: tests/mutations/concierge_manual_create.json.
+        run: >-
+          uv run pytest
+          tests/cloud/test_paw_bar_concierge_manual_create.py
+          tests/cloud/sites/test_concierge_marker_backfill.py
+          tests/cloud/sites/test_foreign_concierge_bind.py
+          -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

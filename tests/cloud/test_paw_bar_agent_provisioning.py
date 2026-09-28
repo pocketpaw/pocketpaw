@@ -1,5 +1,21 @@
-# tests/cloud/test_paw_bar_agent_provisioning.py — auto-provision a DEDICATED
-# concierge agent per site (feat/site-dedicated-agent).
+# tests/cloud/test_paw_bar_agent_provisioning.py — the DEDICATED concierge agent
+# per site (feat/site-dedicated-agent), and the triggers that no longer mint one.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): nothing provisions an
+#   agent automatically any more; the owner's explicit create is the one caller of
+#   ``ensure_site_agent``. So the widget-create and enable-PATCH tests now assert
+#   the bar stays UNBOUND, the identity-seeding test provisions through
+#   ``ensure_site_agent`` directly, and three groups are gone with the code they
+#   pinned: the publish-time ``ensure_site_widget`` tests (including its default
+#   booking action), the first-publish transient-doc tests, and the widget-create
+#   idempotency / failure-soft tests. What replaced them is pinned in
+#   tests/cloud/test_paw_bar_concierge_manual_create.py.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
 #
 # Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): the ASG-1 identity
 #   fields exist on the Agent model now, so the "absent" test asserts seeding
@@ -115,6 +131,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -230,22 +252,31 @@ class TestHelpers:
 
 class TestWidgetCreateTrigger:
     @pytest.mark.asyncio
-    async def test_create_on_site_pocket_auto_provisions_and_binds(
-        self, client, recording_bus
-    ) -> None:
+    async def test_create_on_site_pocket_stays_unbound(self, client, recording_bus) -> None:
+        """CR-12: a widget on a site's pocket is a bar, not a concierge. No agent
+        is provisioned and no AgentCreated is emitted."""
         from pocketpaw_ee.cloud._core.realtime.events import AgentCreated
-        from pocketpaw_ee.cloud.agents import service as agents_service
 
         c, _store = client
-        site = await _site()
+        await _site()
 
         res = await c.post("/paw-bar/widgets", json=_create_payload())
         assert res.status_code == 201
-        body = res.json()
-        agent_id = body["agent_id"]
-        assert agent_id, "widget should be bound to an auto-provisioned agent"
+        assert res.json()["agent_id"] == ""
+        assert not [e for e in recording_bus.events if isinstance(e, AgentCreated)]
 
-        # The agent exists, is named for the site, and was created via the service.
+    @pytest.mark.asyncio
+    async def test_ensure_site_agent_names_and_owns_the_dedicated_agent(self, client) -> None:
+        """What the owner's explicit create provisions for a legacy concierge."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        site = await _site()
+        widget = await store.create_widget(_widget())
+
+        agent_id = await ap.ensure_site_agent(site, widget)
+        assert agent_id
         agent = await agents_service.get(agent_id)
         assert agent.name == "Brew & Co Concierge"
         assert agent.slug == f"concierge-{site.id}"
@@ -253,9 +284,9 @@ class TestWidgetCreateTrigger:
         assert agent.owner == _OWNER
         assert agent.config.soul_archetype == "The Site Concierge"
         assert "Brew & Co" in agent.config.soul_persona
-
-        created = [e for e in recording_bus.events if isinstance(e, AgentCreated)]
-        assert any(e.data.get("agent_id") == agent_id for e in created)
+        # Idempotent: a second call adopts the same agent.
+        again = await store.get_widget(widget.id, workspace_id=_WS)
+        assert await ap.ensure_site_agent(site, again) == agent_id
 
     @pytest.mark.asyncio
     async def test_manual_agent_id_is_respected_not_replaced(self, client) -> None:
@@ -273,141 +304,17 @@ class TestWidgetCreateTrigger:
         assert res.status_code == 201
         assert res.json()["agent_id"] == ""
 
-    @pytest.mark.asyncio
-    async def test_idempotent_second_create_adopts_same_agent(self, client) -> None:
-        c, _store = client
-        await _site()
-        first = (await c.post("/paw-bar/widgets", json=_create_payload())).json()
-        second = (await c.post("/paw-bar/widgets", json=_create_payload())).json()
-        # Deterministic slug → both widgets bind to the SAME dedicated agent.
-        assert first["agent_id"] == second["agent_id"]
-
-    @pytest.mark.asyncio
-    async def test_provisioning_failure_is_soft_returns_unbound(self, client) -> None:
-        from unittest.mock import patch
-
-        c, _store = client
-        await _site()
-        with patch(
-            "pocketpaw_ee.paw_bar.agent_provisioning.ensure_site_agent",
-            side_effect=RuntimeError("boom"),
-        ):
-            res = await c.post("/paw-bar/widgets", json=_create_payload())
-        # A provisioning error must NOT 500 the create — the widget returns unbound.
-        assert res.status_code == 201
-        assert res.json()["agent_id"] == ""
-
 
 # --------------------------------------------------------------------------- #
 # Concierge-enable trigger
 # --------------------------------------------------------------------------- #
 
 
-class TestPublishTimeTrigger:
-    """``ensure_site_widget`` — the third trigger (2026-07-30 regression).
-
-    A site created and published by the agent in ONE conversation goes through
-    neither widget-create nor a concierge-enable transition, so before this
-    trigger the publish-time embed found no widget and silently shipped the
-    site bar-less with no dedicated agent.
-    """
-
-    @pytest.mark.asyncio
-    async def test_publish_provisioning_mints_widget_and_agent(self, client) -> None:
-        from pocketpaw_ee.paw_bar import agent_provisioning as ap
-
-        _c, store = client
-        site = await _site()
-
-        # No widget exists for the pocket (the agent-created-site shape).
-        assert await ap.site_widget(_POCKET, _WS) is None
-
-        widget = await ap.ensure_site_widget(site, _WS)
-        assert widget is not None
-        assert widget.pocket_id == _POCKET
-        assert widget.workspace_id == _WS
-        assert widget.agent_id, "minted widget must be bound to a dedicated agent"
-
-        # Idempotent: a second call returns the SAME widget, not a sibling.
-        again = await ap.ensure_site_widget(site, _WS)
-        assert again is not None and again.id == widget.id
-        widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=_WS, limit=10)
-        assert len(widgets) == 1
-
-    @pytest.mark.asyncio
-    async def test_publish_provisioning_binds_existing_unbound_widget(self, client) -> None:
-        from pocketpaw_ee.paw_bar import agent_provisioning as ap
-
-        c, _store = client
-        site = await _site()
-        # An unbound widget exists (agent deleted / legacy row): reuse, don't mint.
-        res = await c.post("/paw-bar/widgets", json=_create_payload(agent_id="agent-manual"))
-        existing_id = res.json()["id"]
-
-        widget = await ap.ensure_site_widget(site, _WS)
-        assert widget is not None and widget.id == existing_id
-
-    @pytest.mark.asyncio
-    async def test_minted_widget_carries_default_booking_action(self, client) -> None:
-        """A MINTED widget must declare the default gated booking action.
-
-        Live regression (2026-08-01, hosted deploy): the minted spec shipped with
-        ``actions=[]``, the concierge preamble rendered no form-card instructions
-        (widgets with no gated-with-args actions render none), and every
-        from-scratch published site got a concierge that could answer questions
-        but declined every booking request.
-        """
-        from pocketpaw_ee.paw_bar import agent_provisioning as ap
-
-        _c, _store = client
-        site = await _site()
-
-        widget = await ap.ensure_site_widget(site, _WS)
-        assert widget is not None
-        actions = widget.spec.actions
-        assert len(actions) == 1, "a minted widget must carry exactly the default action"
-        action = actions[0]
-        assert action.verb == "booking_request"
-        assert action.policy == "gated"
-        assert action.args == {
-            "name": "str",
-            "phone": "str",
-            "address": "str",
-            "issue": "str",
-            "preferred_window": "str",
-        }
-        assert action.label == "Book a service visit"
-
-    @pytest.mark.asyncio
-    async def test_existing_widget_actions_are_never_modified(self, client) -> None:
-        """The default is mint-only: an EXISTING widget's actions stay untouched.
-
-        An owner may have deliberately removed or customized the actions, so a
-        re-publish (a second ``ensure_site_widget`` pass, bound or unbound) must
-        never re-add or reshape them.
-        """
-        from pocketpaw_ee.paw_bar import agent_provisioning as ap
-
-        _c, store = client
-        site = await _site()
-        # Owner stripped the actions (spec has none) and the widget is unbound —
-        # the pass that DOES bind an agent must still leave actions alone.
-        existing = await store.create_widget(_widget(agent_id="", spec=_spec()))
-
-        widget = await ap.ensure_site_widget(site, _WS)
-        assert widget is not None and widget.id == existing.id
-        assert widget.agent_id, "the unbound existing widget gains an agent"
-        assert widget.spec.actions == [], "but its actions are never touched"
-
-        # Second pass on the now-bound widget (the idempotent early return).
-        again = await ap.ensure_site_widget(site, _WS)
-        assert again is not None and again.id == existing.id
-        assert again.spec.actions == []
-
-
 class TestConciergeEnableTrigger:
+    """CR-12: turning the switch on is not creating a concierge."""
+
     @pytest.mark.asyncio
-    async def test_enabling_provisions_unbound_widget(self, client) -> None:
+    async def test_enabling_leaves_an_unbound_widget_unbound(self, client) -> None:
         c, store = client
         site = await _site(concierge_enabled=False)
         widget = await store.create_widget(_widget(agent_id=""))
@@ -419,7 +326,7 @@ class TestConciergeEnableTrigger:
         assert res.status_code == 200
 
         bound = await store.get_widget(widget.id, workspace_id=_WS)
-        assert bound is not None and bound.agent_id, "enabling should provision + bind an agent"
+        assert bound is not None and bound.agent_id == "", "enabling must not provision"
 
     @pytest.mark.asyncio
     async def test_enabling_leaves_manual_bind_untouched(self, client) -> None:
@@ -436,12 +343,10 @@ class TestConciergeEnableTrigger:
         assert bound is not None and bound.agent_id == "agent-manual"
 
     @pytest.mark.asyncio
-    async def test_re_patch_enabled_on_already_enabled_site_provisions_unbound(
-        self, client
-    ) -> None:
-        """The E2 one-click hook: a site that is ALREADY enabled with an UNBOUND
-        widget still provisions on a re-PATCH of concierge_enabled=true (no
-        false->true transition required)."""
+    async def test_re_patch_enabled_on_already_enabled_site_stays_unbound(self, client) -> None:
+        """The old E2 one-click hook re-PATCHed concierge_enabled=true to provision.
+        That hook is gone: the dashboard creates a concierge through its own
+        endpoint, and a re-PATCH writes the switch and nothing else."""
         c, store = client
         site = await _site(concierge_enabled=True)  # already on
         widget = await store.create_widget(_widget(agent_id=""))
@@ -452,7 +357,7 @@ class TestConciergeEnableTrigger:
         )
         assert res.status_code == 200
         bound = await store.get_widget(widget.id, workspace_id=_WS)
-        assert bound is not None and bound.agent_id, "re-enable should provision + bind"
+        assert bound is not None and bound.agent_id == ""
 
     @pytest.mark.asyncio
     async def test_re_patch_enabled_on_bound_site_is_noop(self, client) -> None:
@@ -516,9 +421,12 @@ class TestIdentityAndFrameStarters:
         from pocketpaw_ee.cloud.agents import service as agents_service
         from pocketpaw_ee.paw_bar import agent_provisioning as ap
 
-        c, _store = client
-        await _site(concierge_greeting="Welcome to Brew & Co!")
-        agent_id = (await c.post("/paw-bar/widgets", json=_create_payload())).json()["agent_id"]
+        _c, store = client
+        site = await _site(concierge_greeting="Welcome to Brew & Co!")
+        widget = await store.create_widget(
+            _widget(spec=_spec(with_catalog=True, with_actions=True))
+        )
+        agent_id = await ap.ensure_site_agent(site, widget)
         agent = await agents_service.get(agent_id)
         assert agent.config.welcome_message == "Welcome to Brew & Co!"
         expected = ap.derive_conversation_starters(
@@ -818,74 +726,3 @@ class TestSiteVisitorVisibility:
         assert public["visible_to_site_visitors"] is True
         assert public["items"] == [{"id": "a1", "title": "Hours"}]
         assert private["visible_to_site_visitors"] is False
-
-
-class TestFirstPublishProvisioning:
-    """The FIRST publish must provision too (audit finding, 2026-07-30).
-
-    ``_embed_concierge_bar`` guarded provisioning on ``doc is not None``, but on
-    a first publish the Site doc is inserted AFTER the embed step — so ``doc``
-    was None, provisioning was skipped, the four-gate snippet check returned ""
-    and the page shipped bar-less with no log line at all. A re-publish (doc now
-    present) grew a bar, which is precisely why this read as working. These
-    tests pin the transient-doc path used when no Site doc exists yet.
-    """
-
-    @pytest.mark.asyncio
-    async def test_transient_doc_provisions_widget_and_agent(self, client) -> None:
-        from bson import ObjectId
-        from pocketpaw_ee.cloud.models.site import Site
-        from pocketpaw_ee.paw_bar import agent_provisioning as ap
-
-        _c, store = client
-        # No Site doc in the DB at all — the first-publish state.
-        site_id = ObjectId()
-        transient = Site(
-            id=site_id,
-            workspace=_WS,
-            pocket_id=_POCKET,
-            owner=_OWNER,
-            name="Northwind Plumbing",
-            signed_key=_VALID_KEY,
-        )
-
-        widget = await ap.ensure_site_widget(transient, _WS)
-
-        assert widget is not None, "a first publish must still mint the widget"
-        assert widget.agent_id, "and bind it to a dedicated agent"
-        assert widget.pocket_id == _POCKET
-        # The agent is named off the transient doc, not a DB re-read.
-        from pocketpaw_ee.cloud.agents import service as agents_service
-
-        agent = await agents_service.get(widget.agent_id)
-        assert agent.name == "Northwind Plumbing Concierge"
-        assert agent.slug == f"concierge-{site_id}"
-
-    @pytest.mark.asyncio
-    async def test_second_publish_adopts_the_first_publish_widget(self, client) -> None:
-        """Idempotent across the first→second publish boundary: the real doc
-        must adopt what the transient pass created, never mint a sibling."""
-        from bson import ObjectId
-        from pocketpaw_ee.cloud.models.site import Site
-        from pocketpaw_ee.paw_bar import agent_provisioning as ap
-
-        _c, store = client
-        site_id = ObjectId()
-        transient = Site(
-            id=site_id,
-            workspace=_WS,
-            pocket_id=_POCKET,
-            owner=_OWNER,
-            name="Northwind Plumbing",
-            signed_key=_VALID_KEY,
-        )
-        first = await ap.ensure_site_widget(transient, _WS)
-
-        # Now the doc really exists (the publish inserted it) and we publish again.
-        await transient.insert()
-        second = await ap.ensure_site_widget(transient, _WS)
-
-        assert second is not None and first is not None
-        assert second.id == first.id
-        widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=_WS, limit=10)
-        assert len(widgets) == 1, "a second publish must not mint a sibling widget"

@@ -1,5 +1,16 @@
 # tests/cloud/test_paw_bar_concierge_v2.py — the v2 concierge runtime (CR-1).
 #
+# Updated: 2026-09-28 (feat/concierge-spend-cap, CR-5) — two v2 outcomes changed on
+# purpose: a used-up monthly allowance and a failed model call no longer end in a
+# 403 / generic ``error`` frame but in the leave-a-message degrade reply
+# (``chunk`` + ``stream_end``). The two tests below say so; the rest of CR-5 lives
+# in test_paw_bar_concierge_v2_degrade.py.
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Created: 2026-09-27 (feat/concierge-v2-runner) — a site switched to
 # ``concierge_runtime="v2"`` answers through ONE streamed pydantic_ai call with no
 # tools, grounded in the site KB, instead of dispatching a full agent run. These
@@ -92,6 +103,12 @@ async def _site(**ov: Any):
         concierge_runtime="v2",
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -533,7 +550,10 @@ async def test_v2_sibling_pocket_binding_is_403_before_the_runner(concierge_clie
 
 
 @pytest.mark.asyncio
-async def test_v2_quota_is_403_before_the_runner(concierge_client, model, monkeypatch):
+async def test_v2_quota_degrades_before_the_runner(concierge_client, model, monkeypatch):
+    """CR-5: a used-up allowance on v2 is the degrade reply, still with no model call."""
+    from pocketpaw_ee.paw_bar.concierge_runtime import DEGRADE_HANDED_OFF
+
     client, store = concierge_client
     await _site()
     widget = await store.create_widget(_widget())
@@ -546,8 +566,9 @@ async def test_v2_quota_is_403_before_the_runner(concierge_client, model, monkey
         _exceeded,
     )
     res = await _chat(client, widget.id)
-    assert res.status_code == 403
-    assert res.json()["detail"] == "concierge_quota_exceeded"
+    assert res.status_code == 200
+    assert [e for e, _d in _frames(res.text)] == ["chunk", "stream_end"]
+    assert _frames(res.text)[0][1]["content"] == DEGRADE_HANDED_OFF
     assert model.calls == []
 
 
@@ -710,7 +731,8 @@ async def test_v2_sse_shape_matches_legacy_for_text_and_done(concierge_client, m
 
 
 @pytest.mark.asyncio
-async def test_v2_model_failure_is_the_generic_visitor_error(concierge_client, monkeypatch):
+async def test_v2_model_failure_is_the_degrade_reply(concierge_client, monkeypatch):
+    """CR-5: a provider failure is the leave-a-message reply, never an error frame."""
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
     from pocketpaw_ee.paw_bar import concierge_runtime
 
@@ -724,11 +746,10 @@ async def test_v2_model_failure_is_the_generic_visitor_error(concierge_client, m
     res = await _chat(client, widget.id)
     assert res.status_code == 200
     frames = _frames(res.text)
-    assert frames[-1][0] == "error"
-    assert frames[-1][1] == {
-        "code": "agent.error",
-        "message": "Sorry, something went wrong. Please try again.",
-    }
+    assert frames[-1][0] == "stream_end"
+    assert "error" not in [e for e, _d in frames]
+    text = "".join(d["content"] for e, d in frames if e == "chunk")
+    assert text == concierge_runtime.DEGRADE_HANDED_OFF
     assert "sk-secret" not in res.text
     run = (await ChatRunDoc.find(ChatRunDoc.context_type == "concierge").to_list())[0]
     assert run.status == "failed"
@@ -940,12 +961,11 @@ async def test_v2_never_provisions_a_concierge_on_a_visitor_turn(
     def _forbidden(*_a: Any, **_kw: Any):
         raise AssertionError("a visitor turn must never provision a concierge")
 
+    # CR-12 deleted the four auto-provisioning triggers; what remains is only
+    # reachable from the owner's explicit create and the rebind.
     for name in (
         "ensure_site_agent",
-        "ensure_site_widget",
-        "provision_widget_on_create",
-        "provision_on_concierge_enable",
-        "provision_foreign_concierge",
+        "ensure_site_widget_row",
         "rebind_site_agent",
     ):
         monkeypatch.setattr(agent_provisioning, name, _forbidden)
