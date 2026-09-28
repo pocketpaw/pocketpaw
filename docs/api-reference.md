@@ -2,6 +2,8 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-28 (feat/concierge-pinned-faqs) — Paw Bar admin table: added
+  the pinned-FAQ routes under /paw-bar/admin/site/{site_id}/knowledge/faqs.
 Updated: 2026-09-27 (feat/sites-visual-research) — added the `preview_site` agent
   tool under "Draft verification": a full-page screenshot of the draft, returned
   to the agent as images so it can look at the page before calling it ready.
@@ -4127,6 +4129,7 @@ the split is the security model:
 | `GET /paw-bar/admin/site/{site_id}/decisions` | Gated actions awaiting a human. |
 | `GET /paw-bar/admin/site/{site_id}/handoffs` | Conversations a visitor asked to escalate. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. |
+| `GET/POST /paw-bar/admin/site/{site_id}/knowledge/faqs`, `PATCH/DELETE …/knowledge/faqs/{faq_id}` | Pinned answers: question/answer pairs a v2 concierge reads ahead of every KB hit, on every turn. GET returns `{site_id, faqs, max_count, max_chars}`; POST takes `{question, answer}` and returns the new FAQ (201); PATCH takes either field; DELETE is a 204. Both texts are stripped and must not be blank. Caps come from config (`POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT`, default 15, and `…_FAQ_MAX_CHARS`, default 500 for question and answer together): 409 `faq_limit_reached`, 422 `faq_too_long`. GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `faq_id`, is a 404. The text is treated as data, never as instructions to the model. |
 | `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP `sandbox` directive as the public frame. |
 
 Owner replies are stored in their own table rather than as chat runs, because

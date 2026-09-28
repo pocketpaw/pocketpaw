@@ -22,6 +22,13 @@
 # the concierge. What this deliberately does NOT do yet: filter code fences or
 # hydrate product cards (CR-2), read page context (CR-3), render owner guided
 # fields (CR-4) or cap spend (CR-5).
+#
+# Updated: 2026-09-28 (feat/concierge-pinned-faqs, CR-8) — ``retrieve`` now puts the
+# site's pinned FAQs (``Site.concierge_faqs``, edited through
+# ``paw_bar.knowledge_routes``) ahead of the KB hits, as ``source="faq"`` items.
+# They are always included, whatever the message, and they survive an empty
+# query, an empty KB and a failing KB search; ``k`` still bounds the KB hits only.
+# ``_knowledge_block``'s character budget applies to FAQs and KB alike, FAQs first.
 
 from __future__ import annotations
 
@@ -88,8 +95,9 @@ _BACKEND = "pawbar_concierge_v2"
 class KnowledgeItem:
     """One retrieved piece of site knowledge.
 
-    ``id`` — the kb-go article id. ``source`` — the scope it came from
-    (``pocket:<id>`` or ``agent:<id>``). ``text`` — the article's title line plus
+    ``id`` — the kb-go article id, or the pinned FAQ's id. ``source`` — the scope
+    it came from (``pocket:<id>`` or ``agent:<id>``), or ``faq`` for an answer the
+    owner pinned (score 1.0; those always lead the list). ``text`` — the article's title line plus
     its body (the summary when kb-go returned no body). ``score`` — RANK-derived,
     not a relevance measure: kb-go returns hits already ranked by BM25 but does not
     emit the number, so this is ``1 / (rank + 1)`` within the scope. Higher is
@@ -122,10 +130,17 @@ async def retrieve(
     ``user:``. The search is ``KnowledgeService``, the same service, per scope under
     the same timeout. Items keep scope order (the site pocket first), then rank.
 
+    Pinned FAQs (CR-8): a ``site`` carrying ``concierge_faqs`` contributes every
+    one of them FIRST, in the owner's order, as ``source="faq"``. They are not
+    searched and do not count toward ``k``; the prompt's knowledge budget is what
+    bounds them (and the routes cap their count and length). A ``ScopeContext``
+    carries none.
+
     Fail-soft: a scope that errors or times out contributes nothing, and any other
-    failure returns ``[]``. A visitor still gets an answer (one that says it does
-    not know), never a 500.
+    failure returns just the pinned FAQs. A visitor still gets an answer (one that
+    says it does not know), never a 500.
     """
+    pinned = _pinned_faqs(site)
     try:
         from pocketpaw_ee.cloud.chat.agent_service import (
             _KB_SEARCH_TIMEOUT_SECONDS,
@@ -155,16 +170,41 @@ async def retrieve(
         query = (query or "").strip()
         scopes = _kb_scopes_for_context(ctx)
         if not query or not scopes or k <= 0:
-            return []
+            return pinned
 
         results = await asyncio.gather(
             *(_search_scope(scope, query, k, _KB_SEARCH_TIMEOUT_SECONDS) for scope in scopes)
         )
         items = [item for scope_items in results for item in scope_items]
-        return items[:k]
+        return pinned + items[:k]
     except Exception:  # noqa: BLE001 — knowledge is best-effort, the reply is not
         logger.warning("concierge retrieve failed; answering without knowledge", exc_info=True)
+        return pinned
+
+
+def _pinned_faqs(site: Any) -> list[KnowledgeItem]:
+    """The site's pinned FAQs as knowledge items, in the owner's order. Owner text
+    is data: it is only ever rendered inside the <knowledge> block, through
+    ``_data``, like any KB article. Never raises."""
+    try:
+        faqs = list(getattr(site, "concierge_faqs", None) or [])
+    except Exception:  # noqa: BLE001 — a malformed row costs the FAQs, not the reply
         return []
+    items: list[KnowledgeItem] = []
+    for faq in faqs:
+        question = str(getattr(faq, "question", "") or "").strip()
+        answer = str(getattr(faq, "answer", "") or "").strip()
+        if not question or not answer:
+            continue
+        items.append(
+            KnowledgeItem(
+                id=str(getattr(faq, "id", "") or ""),
+                source="faq",
+                text=f"Q: {question}\nA: {answer}"[:_ITEM_CHARS],
+                score=1.0,
+            )
+        )
+    return items
 
 
 async def _search_scope(scope: str, query: str, k: int, timeout: float) -> list[KnowledgeItem]:
