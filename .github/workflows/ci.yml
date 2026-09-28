@@ -1,6 +1,9 @@
 # CI — runs tests and lint on every PR targeting dev/main or an
 # RFC integration branch (pattern: feat/*-integration).
 # Created: 2026-02-26
+# Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the EE test job runs the two
+# public concierge tool-lockdown files, which otherwise sit in the tests/cloud
+# blind spot.
 # Updated: 2026-03-11 — Added Python version matrix (3.11, 3.12, 3.13) for
 # the test job. Lint job pinned to 3.12 only.
 # Updated: 2026-05-21 — OSS-EE split (Phase 4). `pocketpaw` (OSS core) and
@@ -326,6 +329,22 @@ jobs:
           tests/cloud/runs/test_run_core_plan_surface.py
           tests/cloud/shared/test_agent_bridge_plan.py
           tests/cloud/shared/test_agent_bridge_narration.py
+          -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run public concierge tool-lockdown tests
+        # Same addopts escape. The Paw Bar concierge answers anonymous visitors
+        # on customers' sites, and these two files are the only end-to-end proof
+        # that it is offered nothing but its own pawbar tools on both backends
+        # (run_core -> AgentPool -> real backend). In the tests/cloud blind spot
+        # a regression here would merge green. Mutations:
+        # tests/mutations/concierge_web_deny.json, concierge_exclusive_tools.json.
+        run: >-
+          uv run pytest
+          tests/cloud/test_concierge_pydantic_ai_web_deny.py
+          tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py
           -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
