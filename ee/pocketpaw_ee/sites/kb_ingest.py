@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/sites/kb_ingest.py — put a site's own content into the pocket KB
 # its concierge reads from.
 #
+# Updated 2026-09-28 (feat/concierge-page-aware, CR-3) — the crawl index. A sync now
+#   records which page each article came from, as ``Site.kb_page_index``
+#   (``{page_key: {"id", "title"}}``), written by ``_record_sync`` beside
+#   ``kb_article_ids`` under the same rules: a full sync replaces it, a partial
+#   foreign crawl merges into it, a failed sync leaves it alone. kb-go names an
+#   article after its compiled TITLE, not its ``site-<slug>`` source, and
+#   ``kb list`` does not report the source, so the ingest receipt is the only place
+#   the page-to-article link exists. ``page_key`` folds every spelling of a page
+#   ("about.html", "about/index.html", "src/routes/about/+page.svelte", "/about")
+#   to one key; the v2 concierge's ``resolve_page`` looks the visitor's page up by
+#   the same function. A site synced before this change has an empty index until
+#   its next publish or re-sync, and its pages read as "not indexed" until then.
 # Updated 2026-09-26 (sync crash recorded): ``safe_sync_site_knowledge`` returned
 #   `sync_failed` on a crash WITHOUT writing it to the Site, and the owner's
 #   knowledge route reads status off the Site, so a crashed manual re-sync showed
@@ -163,6 +175,8 @@ class SiteKnowledgeReport:
     removed: int = 0
     skipped: int = 0
     article_ids: list[str] = field(default_factory=list)
+    # ``{page_key: {"id": article id, "title": article title}}`` for this run's pages.
+    page_index: dict[str, dict[str, str]] = field(default_factory=dict)
     error: str = ""
 
 
@@ -336,6 +350,26 @@ def _path_slug(path: str) -> str:
     return f"site-{cleaned}"[:120]
 
 
+def page_key(path: str) -> str:
+    """The crawl-index key for a page: its path with the file extension, SvelteKit
+    route scaffolding, a trailing ``index`` and the outer slashes removed, lowercased.
+
+    The sync keys a document by it and the v2 concierge keys the visitor's URL path
+    by it, so "about.html", "about/index.html" (the foreign crawler's spelling),
+    "src/routes/about/+page.svelte" and "/about/" are one page, and every spelling of
+    the homepage is "". Unlike ``_path_slug`` it keeps slashes, so "blog/post" and
+    "blog-post" stay two pages. ``_path_slug`` itself is left alone: it is the
+    article SOURCE, and changing it would re-mint every page's article.
+    """
+    key = path.strip().lower().lstrip("/")
+    key = re.sub(r"^src/routes/", "", key)
+    key = re.sub(r"\.(html?|svelte|md|svx)$", "", key)
+    key = re.sub(r"(^|/)\+(page|layout)$", "", key)
+    key = key.rstrip("/")
+    key = re.sub(r"(^|/)index$", "", key)
+    return key.strip("/")
+
+
 def _page_text(path: str, body: str, engine: str) -> str:
     if engine == "html":
         return html_to_text(body)
@@ -470,6 +504,11 @@ async def _ingest_documents(
             continue
         report.ingested += 1
         report.article_ids.append(article_id)
+        # Two spellings of one page (about.html and about/index.html): the first wins.
+        report.page_index.setdefault(
+            page_key(doc.path),
+            {"id": article_id, "title": str((result or {}).get("title") or "").strip()},
+        )
 
 
 async def _prune_stale(scope: str, previous: list[str], report: SiteKnowledgeReport) -> None:
@@ -496,8 +535,9 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
     so a removed page stops being quotable. Only ids recorded on THIS Site are ever
     deleted — the pocket scope also holds owner-uploaded files and must survive.
 
-    Records ``kb_article_ids`` / ``kb_synced_at`` / ``kb_sync_error`` on the Site so
-    the dashboard can show whether the concierge actually has anything to work with.
+    Records ``kb_article_ids`` / ``kb_page_index`` / ``kb_synced_at`` /
+    ``kb_sync_error`` on the Site so the dashboard can show whether the concierge
+    actually has anything to work with, and the concierge can find the visitor's page.
 
     A FOREIGN site forks first, into ``_sync_foreign_site_knowledge``: its pocket
     holds no pages, so the content comes off its own verified origin instead.
@@ -660,12 +700,12 @@ async def _record_sync(
 ) -> None:
     """Persist the sync bookkeeping on the Site.
 
-    Writes ONLY the three kb_* fields, via ``$set`` rather than a whole-document
-    save. This runs in the background, minutes after the publish that scheduled it,
-    holding a Site instance snapshotted at that moment — so a full save would
-    silently roll back anything written to the same Site in between (a domain
-    connected, a subscription stamped). A targeted set touches nothing it does not
-    own.
+    Writes ONLY the kb_* fields (``kb_page_index`` only after a sync that ingested),
+    via ``$set`` rather than a whole-document save. This runs in the background,
+    minutes after the publish that scheduled it, holding a Site instance snapshotted
+    at that moment — so a full save would silently roll back anything written to the
+    same Site in between (a domain connected, a subscription stamped). A targeted set
+    touches nothing it does not own.
 
     A failed or empty sync keeps the PREVIOUS article ids: they are still in the KB,
     so forgetting them would strand them beyond the reach of any future prune. The
@@ -683,11 +723,18 @@ async def _record_sync(
         ids = report.article_ids + [a for a in previous if a not in fresh]
     else:
         ids = report.article_ids if report.ingested else previous
-    updates = {
+    updates: dict[str, Any] = {
         "kb_article_ids": ids,
         "kb_synced_at": datetime.now(UTC),
         "kb_sync_error": report.error,
     }
+    # The crawl index follows the ids: replaced by a sync that ingested, merged by
+    # one that may not prune, and untouched (not even written) by one that failed.
+    if report.ingested:
+        index = dict(report.page_index)
+        if keep_previous:
+            index = {**(getattr(site, "kb_page_index", None) or {}), **index}
+        updates["kb_page_index"] = index
     try:
         await site.set(updates)
     except Exception:  # noqa: BLE001 — bookkeeping must not fail the caller

@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-28 (feat/concierge-page-aware, CR-3) — POST /paw-bar/chat takes an
+  optional `page: {url, title}` (validated server-side, read by v2 only), and the
+  v2 `sources` frame is `{items: [{id, title, url}]}` (mirrored under `sources`),
+  equal to the knowledge the model was given.
 Updated: 2026-09-28 (feat/concierge-guided-fields, CR-4) — Paw Bar admin table:
   the settings GET/PATCH carry the owner's guided concierge fields, with their
   caps and PATCH rules, in a table under "Admin — the owner surface".
@@ -4110,7 +4114,7 @@ the split is the security model:
 | `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. |
 | `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
 | `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. A widget with a concierge agent requires `?signed_key=`. |
-| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. |
+| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. Takes an optional `page: {"url", "title"}`, the host page the widget sits on; omit it and the turn is answered as before. A v2 site uses it only when the url is http(s) on the site's allowed origins (query and fragment dropped): an indexed page adds its title, summary and article, any other page only its title, cut to 120 characters and marked unverified. A `page` that isn't an object with a string `url` is ignored, never a 422; legacy sites ignore the field. On v2 the one `sources` frame is `{"items": [{"id", "title", "url"}], "sources": <same list>}`: exactly the knowledge the model was given, in order, with a title and url only for pages the site sync indexed. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. |
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
 | `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |

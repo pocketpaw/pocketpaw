@@ -325,6 +325,101 @@
     ]
   },
   {
+    "label": "CR-3: a page on any origin is accepted (the allowed-origins check is gone)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if not origin_allowed(list(getattr(site, \"allowed_origins\", None) or []), host):",
+    "replace": "    if not host:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_page_off_the_allowed_origins_is_dropped",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_page_from_a_foreign_origin_is_dropped",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_an_empty_allowlist_drops_every_page"
+    ]
+  },
+  {
+    "label": "CR-3: a page url of any scheme is accepted (the http(s) check is gone)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if parts.scheme not in (\"http\", \"https\") or not host:",
+    "replace": "    if not host:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_page_off_the_allowed_origins_is_dropped"
+    ]
+  },
+  {
+    "label": "CR-3: the browser's page title is no longer clipped to 120 characters",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    title = one_line(raw_title if isinstance(raw_title, str) else \"\")[:_PAGE_TITLE_CHARS]",
+    "replace": "    title = one_line(raw_title if isinstance(raw_title, str) else \"\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_an_over_long_title_is_clipped_to_120_characters"
+    ]
+  },
+  {
+    "label": "CR-3: the indexed page's own article no longer joins the knowledge",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    ordered = [chunk] if chunk is not None else []",
+    "replace": "    ordered = []",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_an_indexed_page_brings_its_title_summary_and_article",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_the_page_article_grounds_documentation_code"
+    ]
+  },
+  {
+    "label": "CR-3: sources are the raw search hits, not the knowledge the model was given",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        sources = _source_items(items, site, page_ctx)",
+    "replace": "        sources = _source_items(retrieved, site, page_ctx)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sources_are_exactly_the_knowledge_the_model_was_given",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sources_drop_what_the_budget_cut"
+    ]
+  },
+  {
+    "label": "CR-3: an owner's upload is named in the sources event (the index-only rule is gone)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if hit is None or not base:",
+    "replace": "        if not base:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sources_are_exactly_the_knowledge_the_model_was_given"
+    ]
+  },
+  {
+    "label": "CR-3: knowledge can open or close the <page> block (page left the neutralized tags)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "|visitor-message|owner-settings|page)\\b\",",
+    "replace": "|visitor-message|owner-settings)\\b\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_knowledge_cannot_close_the_page_block"
+    ]
+  },
+  {
+    "label": "CR-3: a malformed page field 422s or crashes the turn instead of reading as absent",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        if not isinstance(value, dict) or not isinstance(value.get(\"url\"), str):",
+    "replace": "        if value is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_malformed_page_never_fails_the_turn"
+    ]
+  },
+  {
+    "label": "CR-3: the site sync stops writing the crawl index",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "        updates[\"kb_page_index\"] = index",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sync_records_the_page_index"
+    ]
+  },
+  {
+    "label": "CR-3: page_key stops folding about/index.html into about",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    key = re.sub(r\"(^|/)index$\", \"\", key)",
+    "replace": "    key = key",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_page_key_folds_every_spelling_of_one_page",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_page_key_folds_every_spelling_of_the_home_page"
+    ]
+  },
+  {
     "label": "CR-5 cap: the comparison becomes strict — a site exactly at its cap keeps spending",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
     "find": "    return spent >= cap\n",
