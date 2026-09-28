@@ -1,5 +1,12 @@
 # ee/pocketpaw_ee/paw_bar/concierge_runtime.py — the v2 Paw Bar concierge runner.
 #
+# Updated: 2026-09-28 (chore/concierge-v2-integration) — CR-3 and CR-8 combined.
+# ``select_knowledge`` orders the turn's knowledge as the owner's pinned FAQs
+# (authoritative), then the visitor's page article, then the KB hits, all inside
+# the one character budget. CR-3 alone put the page article first; CR-8 alone put
+# the FAQs first. The degrade path (CR-5) and page reads (CR-3) now share the
+# runner, so it keeps both ``page`` and ``conversation``.
+#
 # Updated: 2026-09-28 (feat/concierge-page-aware, CR-3) — page-aware answers. The
 # request's optional ``page: {url, title}`` goes through ``resolve_page``: dropped
 # unless it is http(s) on one of ``Site.allowed_origins`` (host-only, the chat
@@ -87,8 +94,15 @@
 #
 # The model is built exactly as the pydantic_ai backend builds it
 # (``PydanticAIBackend._build_model``), per the captain's pydantic_ai-only rule for
-# the concierge. Page context (CR-3) and guided fields (CR-4) have since landed
-# (see the Updated notes above); spend caps (CR-5) are still to come.
+# the concierge. Page context (CR-3), guided fields (CR-4) and spend caps (CR-5)
+# have since landed (see the Updated notes above).
+#
+# Updated: 2026-09-28 (feat/concierge-pinned-faqs, CR-8) — ``retrieve`` now puts the
+# site's pinned FAQs (``Site.concierge_faqs``, edited through
+# ``paw_bar.knowledge_routes``) ahead of the KB hits, as ``source="faq"`` items.
+# They are always included, whatever the message, and they survive an empty
+# query, an empty KB and a failing KB search; ``k`` still bounds the KB hits only.
+# ``_knowledge_block``'s character budget applies to FAQs and KB alike, FAQs first.
 
 from __future__ import annotations
 
@@ -190,8 +204,9 @@ _PROVIDER_TIMEOUT_S = 30.0
 class KnowledgeItem:
     """One retrieved piece of site knowledge.
 
-    ``id`` — the kb-go article id. ``source`` — the scope it came from
-    (``pocket:<id>`` or ``agent:<id>``). ``text`` — the article's title line plus
+    ``id`` — the kb-go article id, or the pinned FAQ's id. ``source`` — the scope
+    it came from (``pocket:<id>`` or ``agent:<id>``), or ``faq`` for an answer the
+    owner pinned (score 1.0; those always lead the list). ``text`` — the article's title line plus
     its body (the summary when kb-go returned no body). ``score`` — RANK-derived,
     not a relevance measure: kb-go returns hits already ranked by BM25 but does not
     emit the number, so this is ``1 / (rank + 1)`` within the scope. Higher is
@@ -224,10 +239,17 @@ async def retrieve(
     ``user:``. The search is ``KnowledgeService``, the same service, per scope under
     the same timeout. Items keep scope order (the site pocket first), then rank.
 
+    Pinned FAQs (CR-8): a ``site`` carrying ``concierge_faqs`` contributes every
+    one of them FIRST, in the owner's order, as ``source="faq"``. They are not
+    searched and do not count toward ``k``; the prompt's knowledge budget is what
+    bounds them (and the routes cap their count and length). A ``ScopeContext``
+    carries none.
+
     Fail-soft: a scope that errors or times out contributes nothing, and any other
-    failure returns ``[]``. A visitor still gets an answer (one that says it does
-    not know), never a 500.
+    failure returns just the pinned FAQs. A visitor still gets an answer (one that
+    says it does not know), never a 500.
     """
+    pinned = _pinned_faqs(site)
     try:
         from pocketpaw_ee.cloud.chat.agent_service import (
             _KB_SEARCH_TIMEOUT_SECONDS,
@@ -257,16 +279,41 @@ async def retrieve(
         query = (query or "").strip()
         scopes = _kb_scopes_for_context(ctx)
         if not query or not scopes or k <= 0:
-            return []
+            return pinned
 
         results = await asyncio.gather(
             *(_search_scope(scope, query, k, _KB_SEARCH_TIMEOUT_SECONDS) for scope in scopes)
         )
         items = [item for scope_items in results for item in scope_items]
-        return items[:k]
+        return pinned + items[:k]
     except Exception:  # noqa: BLE001 — knowledge is best-effort, the reply is not
         logger.warning("concierge retrieve failed; answering without knowledge", exc_info=True)
+        return pinned
+
+
+def _pinned_faqs(site: Any) -> list[KnowledgeItem]:
+    """The site's pinned FAQs as knowledge items, in the owner's order. Owner text
+    is data: it is only ever rendered inside the <knowledge> block, through
+    ``_data``, like any KB article. Never raises."""
+    try:
+        faqs = list(getattr(site, "concierge_faqs", None) or [])
+    except Exception:  # noqa: BLE001 — a malformed row costs the FAQs, not the reply
         return []
+    items: list[KnowledgeItem] = []
+    for faq in faqs:
+        question = str(getattr(faq, "question", "") or "").strip()
+        answer = str(getattr(faq, "answer", "") or "").strip()
+        if not question or not answer:
+            continue
+        items.append(
+            KnowledgeItem(
+                id=str(getattr(faq, "id", "") or ""),
+                source="faq",
+                text=f"Q: {question}\nA: {answer}"[:_ITEM_CHARS],
+                score=1.0,
+            )
+        )
+    return items
 
 
 async def _search_scope(scope: str, query: str, k: int, timeout: float) -> list[KnowledgeItem]:
@@ -540,13 +587,19 @@ def _within_budget(items: Sequence[KnowledgeItem]) -> list[KnowledgeItem]:
 def select_knowledge(
     items: Sequence[KnowledgeItem], page: PageContext | None = None
 ) -> list[KnowledgeItem]:
-    """The knowledge a turn is given: the visitor's page's own article first (when
-    the page is indexed and its article was read), then the retrieved items without
-    it, cut to the budget. The prompt, the code-grounding check and the ``sources``
-    event all read this one list, so a source is always something the model saw."""
+    """The knowledge a turn is given, cut to the budget: the owner's pinned FAQs
+    first (they are authoritative), then the visitor's page's own article (when
+    the page is indexed and its article was read), then the retrieved KB hits
+    without it. The prompt, the code-grounding check and the ``sources`` event all
+    read this one list, so a source is always something the model saw."""
     chunk = page.chunk if page is not None else None
-    ordered = [chunk] if chunk is not None else []
-    ordered += [i for i in items if chunk is None or (i.id, i.source) != (chunk.id, chunk.source)]
+    faqs = [i for i in items if i.source == "faq"]
+    ordered = faqs + ([chunk] if chunk is not None else [])
+    ordered += [
+        i
+        for i in items
+        if i.source != "faq" and (chunk is None or (i.id, i.source) != (chunk.id, chunk.source))
+    ]
     return _within_budget(ordered)
 
 

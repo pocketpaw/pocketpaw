@@ -18,6 +18,17 @@ Changes:
   - 2026-09-28 (feat/concierge-v2-output): Added ``pawbar_concierge_doc_code_chars``
     (env ``POCKETPAW_PAWBAR_CONCIERGE_DOC_CODE_CHARS``, default 6000), the cap on
     documentation code one v2 concierge reply may show on a site that allows it.
+  - 2026-09-28 (feat/concierge-knowledge-sources): Added the knowledge-source caps
+    for the v2 concierge: ``pawbar_concierge_source_max_count_free`` / ``_site`` /
+    ``_staff`` (defaults 3 / 20 / 50 files and links together, per site plan),
+    ``pawbar_concierge_source_max_bytes`` (default 10 MiB per upload or linked page)
+    and ``pawbar_concierge_source_max_chars`` (default 100,000 extracted characters
+    per source). Env ``POCKETPAW_PAWBAR_CONCIERGE_SOURCE_*``.
+  - 2026-09-28 (feat/concierge-pinned-faqs): Added ``pawbar_concierge_faq_max_count``
+    (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT``, default 15) and
+    ``pawbar_concierge_faq_max_chars`` (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_CHARS``,
+    default 500, question and answer together). They cap the pinned FAQs an owner
+    keeps on a site, which the v2 concierge puts ahead of every KB hit.
   - 2026-09-27 (feat/concierge-v2-runner): Added ``pawbar_concierge_model`` (env
     ``POCKETPAW_PAWBAR_CONCIERGE_MODEL``, default "" = the pydantic_ai backend's
     own model resolution) and ``pawbar_concierge_max_tokens`` (env
@@ -1532,6 +1543,50 @@ class Settings(BaseSettings):
             "day, in USD at provider cost. Past it, visitors get the leave-a-message "
             "reply and no model call is made. 0 turns the cap off."
         ),
+    )
+    # Pinned FAQs (``pocketpaw_ee.paw_bar.knowledge_routes``). Every pinned answer
+    # rides ahead of the KB hits in the v2 runner's ~12,000-char knowledge budget,
+    # so the defaults (15 x 500) keep them under ~7,500 and leave the rest for the
+    # site's own pages.
+    pawbar_concierge_faq_max_count: int = Field(
+        default=15,
+        ge=1,
+        description="Most pinned FAQs one site's concierge may keep.",
+    )
+    pawbar_concierge_faq_max_chars: int = Field(
+        default=500,
+        ge=20,
+        description="Longest pinned FAQ, question and answer together, in characters.",
+    )
+    # Knowledge sources: uploaded files and single links
+    # (``pocketpaw_ee.paw_bar.knowledge_routes``). Each ready source costs one
+    # compiled kb article in the site pocket, so the count is capped per site plan
+    # (files and links together). The byte cap bounds an upload and a link's body;
+    # the char cap bounds the text handed to the kb engine, which stores it whole.
+    pawbar_concierge_source_max_count_free: int = Field(
+        default=3,
+        ge=0,
+        description="Most knowledge files and links on a free-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_count_site: int = Field(
+        default=20,
+        ge=0,
+        description="Most knowledge files and links on a Site-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_count_staff: int = Field(
+        default=50,
+        ge=0,
+        description="Most knowledge files and links on a Staff-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1024,
+        description="Largest knowledge upload, or linked page body, in bytes.",
+    )
+    pawbar_concierge_source_max_chars: int = Field(
+        default=100_000,
+        ge=1_000,
+        description="Most extracted characters one knowledge source hands the kb; the rest is cut.",
     )
 
     # LLM Configuration

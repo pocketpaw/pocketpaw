@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-09-28 (feat/concierge-pinned-faqs, CR-8) — Mounts the Paw Bar
+    knowledge router (``paw_bar/knowledge_routes.py``) beside ``paw_bar_router``
+    at /api/v1: the owner's pinned FAQs at
+    ``/paw-bar/admin/site/{id}/knowledge/faqs``, a separate module so the
+    knowledge-source routes grow there instead of in the 7,000-line router.
 Modified: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — Mounts the
     Otherhand snapshot router (``other_hand/router.py``) at /api/v1: the single
     POST that persists a notebook page's PNG to a workspace-scoped scratch path
@@ -550,6 +555,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
+    from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
     from pocketpaw_ee.sites.router import router as sites_router
 
@@ -791,6 +797,7 @@ def mount_cloud(app: FastAPI) -> None:
     # routers so the admin UI (paw-enterprise /pockets/<id> Paw Bar tab) can
     # reach /api/v1/paw-bar/* without a second app setup entry point.
     app.include_router(paw_bar_router, prefix="/api/v1")
+    app.include_router(paw_bar_knowledge_router, prefix="/api/v1")
 
     # Fabric / Fleet / Instinct also live outside ee/cloud/ (pocketpaw_ee.
     # {fabric,fleet,instinct}). Their logic split into the OSS core in Phase 2,

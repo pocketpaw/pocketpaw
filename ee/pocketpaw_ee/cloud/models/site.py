@@ -20,6 +20,21 @@
 # ``concierge_allow_doc_code``, the owner's switch that lets a v2 concierge show
 # code blocks copied verbatim from the site's own knowledge (documentation
 # sites). Defaults False, so existing rows keep every code block replaced.
+# Updated 2026-09-28 (feat/concierge-knowledge-sources, CR-9): added
+# ``concierge_sources``, the files and single links an owner gave the concierge
+# (``ConciergeKnowledgeSource``). Each is extracted and compiled into the site pocket
+# KB by ``paw_bar.knowledge_routes``; the row keeps only metadata, the status the
+# dashboard polls and the kb article ids it produced, never the file's bytes.
+# Written with $push / $pull / positional $set so a background ingest finishing
+# never clobbers a concurrent add or delete. Empty by default, so no migration.
+#
+# Updated 2026-09-28 (feat/concierge-pinned-faqs, CR-8): added ``concierge_faqs``,
+# the owner's pinned question/answer pairs (``ConciergeFaq``). The v2 runner's
+# ``retrieve`` puts them ahead of every KB hit, and the owner edits them through
+# ``paw_bar.knowledge_routes``. Stored on the Site like every other concierge
+# setting; the count and length caps are enforced by those routes from config.
+# Empty by default, so no migration. The text is owner-written and is only ever
+# rendered as data inside the <knowledge> block, never into the frame.
 #
 # Updated 2026-09-27 (feat/concierge-v2-runner, CR-1): added ``concierge_runtime``,
 # the owner's switch between the legacy concierge (a full agent run through the
@@ -303,7 +318,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from beanie import Indexed
@@ -346,6 +361,65 @@ class SiteInvoice(BaseModel):
     currency: str = "USD"
     paid: bool = True
     note: str = ""
+
+
+class ConciergeFaq(BaseModel):
+    """One pinned answer on a site's concierge (CR-8): a question the owner wants
+    answered the same way every time, and that answer.
+
+    ``id`` is minted here (hex uuid), never taken from a request body. Both texts
+    are owner-written, stripped, and capped by the knowledge routes; the runner
+    treats them as data like any KB article.
+    """
+
+    id: str
+    question: str
+    answer: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def new(cls, question: str, answer: str) -> ConciergeFaq:
+        import uuid
+
+        now = datetime.now(UTC)
+        return cls(
+            id=uuid.uuid4().hex,
+            question=question,
+            answer=answer,
+            created_at=now,
+            updated_at=now,
+        )
+
+
+class ConciergeKnowledgeSource(BaseModel):
+    """One uploaded file or single link a site's concierge answers from (CR-9).
+
+    ``kind`` is ``file`` (PDF, DOCX, Markdown, text) or ``link`` (one web page,
+    fetched through the SSRF-safe fetcher). ``status`` is ``processing`` until the
+    background ingest ends, then ``ready`` or a refusal the dashboard turns into a
+    sentence: ``failed`` (``reason`` says why), ``too_large``, ``unsupported`` or
+    ``blocked``. ``mime`` is what the server sniffed, never the client's claim.
+    ``article_ids`` are the kb articles in ``pocket:<pocket_id>`` this source
+    produced; removing the source deletes them. The file itself is not stored.
+    """
+
+    id: str
+    kind: Literal["file", "link"]
+    name: str
+    url: str | None = None
+    mime: str = ""
+    size_bytes: int = 0
+    status: Literal["processing", "ready", "failed", "too_large", "unsupported", "blocked"] = (
+        "processing"
+    )
+    reason: str = ""
+    chars: int = 0
+    truncated: bool = False
+    article_ids: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    indexed_at: datetime | None = None
 
 
 class Site(TimestampedDocument):
@@ -863,6 +937,17 @@ class Site(TimestampedDocument):
     concierge_avoid_topics: list[str] = Field(default_factory=list)
     # None: the frame's own "say you don't know" applies, with no route offered.
     concierge_escalation: ConciergeEscalation | None = None
+    # Paw Bar pinned FAQs (CR-8, 2026-09-28). The owner's question/answer pairs,
+    # in the order they were added; the v2 runner's ``retrieve`` puts them ahead
+    # of every KB hit. Written only through ``paw_bar.knowledge_routes`` (which
+    # caps count and length from config) and cleared by its ``delete_faqs``.
+    concierge_faqs: list[ConciergeFaq] = Field(default_factory=list)
+    # Paw Bar knowledge sources (CR-9, 2026-09-28): uploaded files and single links,
+    # ingested into ``pocket:<pocket_id>`` beside the site's own pages. Written only
+    # through ``paw_bar.knowledge_routes`` (count capped per plan from config) and
+    # cleared, un-indexed, by its ``delete_sources``. The page sync never prunes
+    # these articles: it only deletes ids listed in ``kb_article_ids``.
+    concierge_sources: list[ConciergeKnowledgeSource] = Field(default_factory=list)
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or

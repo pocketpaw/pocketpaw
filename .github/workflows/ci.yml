@@ -46,6 +46,10 @@
 # (``python -m tests.evals.concierge.run --recorded``), which replays committed
 # model outputs through the real runner and fails on any code leak, frame leak,
 # invalid card, turn error or missing recording.
+# Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_faqs.py
+# (concierge pinned FAQs) with the same addopts escape as the v2 runner step.
+# Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_sources.py
+# (concierge knowledge uploads and links) with the same addopts escape.
 name: CI
 
 on:
@@ -287,6 +291,28 @@ jobs:
         # leak, a frame leak, an invalid card, a turn error, a case with no
         # recording); the model thresholds apply to real runs, not replays.
         run: uv run python -m tests.evals.concierge.run --recorded
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge pinned FAQ tests
+        # Same addopts escape. Owners pin answers the v2 concierge reads first;
+        # this file proves the routes are tenant-scoped and role-gated, and that
+        # owner text only ever reaches the model as data. Mutations:
+        # tests/mutations/concierge_pinned_faqs.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_faqs.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge knowledge source tests
+        # Same addopts escape. Owners upload files and add links the v2 concierge
+        # answers from; this file proves links go through the SSRF-safe fetcher,
+        # the file type is sniffed from the bytes, the per-plan caps hold, removal
+        # un-indexes, and the routes are tenant-scoped and role-gated. The DOCX
+        # case skips here (python-docx ships in ee[extraction], which this job does
+        # not install). Mutations: tests/mutations/concierge_knowledge_sources.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_sources.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
