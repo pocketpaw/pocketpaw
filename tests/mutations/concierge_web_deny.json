@@ -1,0 +1,29 @@
+[
+  {
+    "label": "WebSearch row dropped: the concierge deny stops matching web_search and research on pydantic_ai",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    \"WebSearch\": frozenset({\"web_search\", \"research\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_web_deny.py::test_concierge_run_on_pydantic_ai_is_offered_no_web_tools"
+    ]
+  },
+  {
+    "label": "WebFetch row dropped: the concierge can fetch any URL again on pydantic_ai",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    \"WebFetch\": frozenset({\"url_extract\", \"research\"}),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_web_deny.py::test_concierge_run_on_pydantic_ai_is_offered_no_web_tools"
+    ]
+  },
+  {
+    "label": "native web capability ignores the surface deny: WebSearch/WebFetch re-granted provider-side",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if tool_name in deny:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/test_concierge_pydantic_ai_web_deny.py::test_concierge_run_gets_no_native_web_capability"
+    ]
+  }
+]

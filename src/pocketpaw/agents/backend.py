@@ -3,6 +3,10 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-09-27 (fix/concierge-web-tool-deny) — adds
+``_accepts_exclusive_tools_kwarg``, the signature guard for the deny-by-default
+``exclusive_tools`` flag the public concierge sends.
+
 Updated: 2026-09-15 (feat/chat-image-wiring) — adds
 ``_accepts_image_attachments_kwarg``, the fourth signature guard in this file and
 the third to be written because withholding-when-empty was not enough on its own.
@@ -211,6 +215,22 @@ def _accepts_tools_enabled_kwarg(func: Any) -> bool:
     """
     try:
         return "tools_enabled" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def _accepts_exclusive_tools_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``exclusive_tools`` in its signature?
+
+    ``exclusive_tools`` (2026-09-27) asks a backend to offer ONLY the MCP tools
+    in ``allow_mcp_tool_ids``, dropping the PocketPaw builtins it bundles. Only
+    ``pydantic_ai`` bundles any outside MCP, so only it declares the parameter.
+    ``claude_sdk`` is covered by ``exclusive_mcp_tools``, which the same run
+    carries and which it DOES declare; a backend that declares neither fails on
+    that one, so a deny-by-default run never silently proceeds unrestricted.
+    """
+    try:
+        return "exclusive_tools" in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
 
