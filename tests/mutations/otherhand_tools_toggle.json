@@ -11,8 +11,8 @@
   {
     "label": "the switch leaves the agent cache key \u2014 a tools-off turn is served the agent built WITH tools",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
-    "find": "            tools_enabled,\n        )\n        if self._cached_agent is not None",
-    "replace": "        )\n        if self._cached_agent is not None",
+    "find": "            tools_enabled,\n            # Deny-by-default, for the same reason",
+    "replace": "            # Deny-by-default, for the same reason",
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_tools_off_and_tools_on_do_not_share_a_cached_agent"
     ]
@@ -20,8 +20,8 @@
   {
     "label": "tools default to OFF \u2014 every existing turn in the product silently loses its tools",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
-    "find": "        tools_enabled: bool = True,\n        # Accepted and deliberately unused",
-    "replace": "        tools_enabled: bool = False,\n        # Accepted and deliberately unused",
+    "find": "        tools_enabled: bool = True,\n        # Deny-by-default surface (the public Paw Bar concierge).",
+    "replace": "        tools_enabled: bool = False,\n        # Deny-by-default surface (the public Paw Bar concierge).",
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_tools_default_to_on"
     ]
@@ -74,8 +74,8 @@
   {
     "label": "skills ignore the switch \u2014 load_capability rides a tools-off request",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
-    "find": "        skills = self._build_skills_capability(skill_names) if tools_enabled else None",
-    "replace": "        skills = self._build_skills_capability(skill_names)",
+    "find": " if tools_enabled and skills_enabled else None\n",
+    "replace": " if skills_enabled else None\n",
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
     ]
@@ -83,8 +83,8 @@
   {
     "label": "the capability call site drops the switch \u2014 every gated capability comes back",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
-    "find": "            capabilities=self._build_capabilities(skill_names, tools_enabled=tools_enabled) or None,",
-    "replace": "            capabilities=self._build_capabilities(skill_names) or None,",
+    "find": "                tools_enabled=tools_enabled,\n                deny=cap_deny,\n",
+    "replace": "                deny=cap_deny,\n",
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
     ]

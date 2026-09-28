@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-tone-concise",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved concise answer. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "e15c0ba03c6a0755",
+  "raw_model_output": "Our house beans are a chocolatey espresso blend from Brazil and Ethiopia, roasted every Tuesday. A 1kg bag is $18.50."
+}

@@ -1,0 +1,10 @@
+{
+  "case_id": "on-form",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved form card. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "fd1367a9fe1536d0",
+  "raw_model_output": "Of course. Fill this in and the team will confirm your tasting.\n```pawbar-card\n{\"ui\": {\"type\": \"form\", \"props\": {\"verb\": \"book_visit\", \"title\": \"Book a tasting\", \"submit_label\": \"Request\", \"fields\": [{\"name\": \"name\", \"label\": \"Name\", \"type\": \"text\"}, {\"name\": \"phone\", \"label\": \"Phone\", \"type\": \"tel\"}, {\"name\": \"date\", \"label\": \"Preferred date\", \"type\": \"text\"}]}}}\n```"
+}

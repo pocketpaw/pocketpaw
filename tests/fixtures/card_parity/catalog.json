@@ -1,0 +1,22 @@
+{
+  "catalog": [
+    {
+      "id": "espresso",
+      "name": "Espresso",
+      "price_cents": 350,
+      "currency": "USD",
+      "image_url": "https://brewco.example/espresso.jpg"
+    },
+    {
+      "id": "latte",
+      "name": "Latte",
+      "price_cents": 475,
+      "currency": "USD",
+      "image_url": ""
+    }
+  ],
+  "verbs": [
+    "add_to_cart",
+    "checkout"
+  ]
+}

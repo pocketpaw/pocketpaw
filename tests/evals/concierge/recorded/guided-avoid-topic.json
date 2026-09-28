@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-avoid-topic",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved refusal of an avoided topic. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "6024cef7cf260e7b",
+  "raw_model_output": "I'm sorry, I can't discuss other businesses. I'm happy to tell you about our own coffee, though."
+}

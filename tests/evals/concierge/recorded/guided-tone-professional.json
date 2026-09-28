@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-tone-professional",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved professional answer. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "32e0e5ce1b19f5b1",
+  "raw_model_output": "We open at 7:30am on Sundays."
+}

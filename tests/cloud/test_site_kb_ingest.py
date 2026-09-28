@@ -1,5 +1,7 @@
 # tests/cloud/test_site_kb_ingest.py — site content → the pocket KB its concierge
 # reads (ee.pocketpaw_ee.sites.kb_ingest).
+# Updated 2026-09-28 (feat/concierge-page-aware, CR-3): a sync that ingested also
+# writes ``kb_page_index`` (the crawl index), so the own-fields test allows it.
 # Created 2026-07-26. A dedicated concierge reads exactly ONE scope,
 # pocket:<pocket_id>, and nothing used to put the site's own pages there, so the
 # agent was live and knowledge-empty. Layers:
@@ -422,7 +424,7 @@ async def test_sync_only_writes_its_own_fields(monkeypatch):
     """The sync runs in the background, minutes after the publish that scheduled it,
     holding a Site instance snapshotted at that moment. A whole-document save would
     silently roll back anything written to the same Site in between — a connected
-    domain, a stamped subscription. It must touch only the three kb_* fields.
+    domain, a stamped subscription. It must touch only its own kb_* fields.
     """
     _patch_kb(monkeypatch, ingested=[], removed=[])
     _patch_pocket(
@@ -434,7 +436,12 @@ async def test_sync_only_writes_its_own_fields(monkeypatch):
     await kb_ingest.sync_site_knowledge(site)
 
     assert len(site.set_calls) == 1
-    assert set(site.set_calls[0]) == {"kb_article_ids", "kb_synced_at", "kb_sync_error"}
+    assert set(site.set_calls[0]) == {
+        "kb_article_ids",
+        "kb_page_index",
+        "kb_synced_at",
+        "kb_sync_error",
+    }
 
 
 @pytest.mark.asyncio
