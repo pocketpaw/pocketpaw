@@ -2,8 +2,8 @@
   {
     "label": "the v2 agent is handed a tool — the zero-tools invariant is gone",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
-    "replace": "        agent = Agent(model, tools=[lambda query: query], instructions=FRAME, output_type=str)",
+    "find": "        agent = Agent(model, instructions=frame, output_type=str)",
+    "replace": "        agent = Agent(model, tools=[lambda query: query], instructions=frame, output_type=str)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -12,8 +12,8 @@
   {
     "label": "the v2 agent is handed a toolset — tools arrive by the other door",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
-    "replace": "        agent = Agent(model, toolsets=[__import__('pydantic_ai').FunctionToolset(tools=[lambda query: query])], instructions=FRAME, output_type=str)",
+    "find": "        agent = Agent(model, instructions=frame, output_type=str)",
+    "replace": "        agent = Agent(model, toolsets=[__import__('pydantic_ai').FunctionToolset(tools=[lambda query: query])], instructions=frame, output_type=str)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -22,8 +22,8 @@
   {
     "label": "per-turn data is concatenated into the frame — it stops being constant and becomes injectable",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
-    "replace": "        agent = Agent(model, instructions=FRAME + message, output_type=str)",
+    "find": "        agent = Agent(model, instructions=frame, output_type=str)",
+    "replace": "        agent = Agent(model, instructions=frame + message, output_type=str)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_frame_is_the_first_and_constant_part_of_the_prompt"
     ]
@@ -98,8 +98,8 @@
   {
     "label": "any non-card fence passes through verbatim — the model's code renders in the widget",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        if self._tag != _CARD_LANG:\n            return CODE_REPLACEMENT",
-    "replace": "        if self._tag != _CARD_LANG:\n            return _TICKS + self._tag + \"\\n\" + body + _TICKS",
+    "find": "        return CODE_REPLACEMENT\n",
+    "replace": "        return _TICKS + self._tag + \"\\n\" + body + _TICKS\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_code_fence_becomes_the_fixed_line",
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code"
@@ -227,6 +227,100 @@
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"
+    ]
+  },
+  {
+    "label": "grounding accepts half-copied code — an adapted snippet reads as the site's docs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return found * 100 >= _GROUNDED_PERCENT * len(lines)",
+    "replace": "    return found * 100 >= 50 * len(lines)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_one_changed_line_in_three_is_not_grounded",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_nine_of_ten_lines_is_grounded"
+    ]
+  },
+  {
+    "label": "grounding needs more than 90% — exactly nine lines in ten no longer counts",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return found * 100 >= _GROUNDED_PERCENT * len(lines)",
+    "replace": "    return found * 100 > _GROUNDED_PERCENT * len(lines)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_nine_of_ten_lines_is_grounded"
+    ]
+  },
+  {
+    "label": "trivial lines count as evidence — a fence of braces is 'found' in any code page",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    lines = [line for line in lines if len(line.replace(\" \", \"\")) > _TRIVIAL_LINE_CHARS]",
+    "replace": "    lines = [line for line in lines if len(line.replace(\" \", \"\")) > 0]",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_fence_of_only_trivial_lines_is_not_grounded",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_flag_on_a_trivial_only_fence_is_replaced"
+    ]
+  },
+  {
+    "label": "the site flag is ignored by the runner — every site shows documentation code",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return getattr(site, \"concierge_allow_doc_code\", False) is True",
+    "replace": "    return True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter"
+    ]
+  },
+  {
+    "label": "the filter ignores its flag — grounded code passes on a site that never allowed it",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            self._allow_doc_code\n            and len(body) <= self._doc_code_left",
+    "replace": "            True\n            and len(body) <= self._doc_code_left",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_flag_off_grounded_code_is_still_replaced"
+    ]
+  },
+  {
+    "label": "the doc-code frame is used for every site — the model is told it may quote code everywhere",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        frame = FRAME_DOC_CODE if allow_doc_code else FRAME",
+    "replace": "        frame = FRAME_DOC_CODE",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_frame_is_the_first_and_constant_part_of_the_prompt"
+    ]
+  },
+  {
+    "label": "the per-reply code budget is not checked — a reply can farm unlimited doc code",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            and len(body) <= self._doc_code_left\n",
+    "replace": "            and True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_flag_on_code_over_the_reply_cap_is_replaced",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_cap_comes_from_config"
+    ]
+  },
+  {
+    "label": "the budget is per block, not per reply — many blocks each under the cap all pass",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            self._doc_code_left -= len(body)",
+    "replace": "            self._doc_code_left -= 0",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_the_cap_is_for_the_whole_reply_not_each_block"
+    ]
+  },
+  {
+    "label": "the runner grounds against nothing — documentation code never passes even when allowed",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            knowledge=items,",
+    "replace": "            knowledge=(),",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter"
+    ]
+  },
+  {
+    "label": "a new Site allows documentation code — every existing site starts showing code unasked",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "    concierge_allow_doc_code: bool = False",
+    "replace": "    concierge_allow_doc_code: bool = True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_new_site_does_not_allow_doc_code"
     ]
   }
 ]

@@ -1,4 +1,7 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-28 (feat/concierge-v2-output, CR-2) — the settings GET/PATCH
+#   carry ``concierge_allow_doc_code`` (partial PATCH, default False): with it on,
+#   a v2 reply may show code copied verbatim from the site's knowledge.
 # Updated: 2026-09-27 (feat/concierge-v2-runner, CR-1) — POST /paw-bar/chat can
 #   answer through the v2 runner (``paw_bar.concierge_runtime.run_concierge_v2``):
 #   one streamed pydantic_ai call with no tools, grounded in the site KB, written
@@ -1883,6 +1886,9 @@ class ConciergeSettingsUpdate(BaseModel):
     # full agent run; "v2" is one tool-free model call grounded in the site KB.
     # A value outside the two is a 422, never stored.
     concierge_runtime: Literal["legacy", "v2"] | None = None
+    # CR-2 (2026-09-28): "Answer with code examples from your docs". On, a v2
+    # reply may show a code block found verbatim in the site's knowledge.
+    concierge_allow_doc_code: bool | None = None
 
 
 class ConciergePreviewTokensRequest(BaseModel):
@@ -1914,6 +1920,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_store_transcripts: bool
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    concierge_allow_doc_code: bool = False
     # The snippet the published site itself carries (``embed.concierge_snippet``),
     # so the owner copies the same tag the publish path injects. "" whenever the
     # site has not earned a bar: no widget, no embed key, no bound agent, the
@@ -2016,6 +2023,7 @@ async def _concierge_settings_response(
         concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
         # getattr for the same reason: a row older than the switch reads legacy.
         concierge_runtime=_site_concierge_runtime(site),
+        concierge_allow_doc_code=getattr(site, "concierge_allow_doc_code", False) is True,
         embed_snippet=await _site_embed_snippet(site, workspace_id, user_id),
     )
 

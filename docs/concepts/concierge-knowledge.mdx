@@ -11,7 +11,8 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
   docs/concepts/concierge-knowledge.mdx
   Updated 2026-09-28 (feat/concierge-v2-output, CR-2) — new subsection "What a v2 reply
   can contain": code blocks become a fixed line, cards are bounded and product data
-  comes only from the catalog; the "not yet" list drops those two items.
+  comes only from the catalog; the "not yet" list drops those two items. Plus "Code
+  examples from your docs": the concierge_allow_doc_code switch and the grounding rule.
   Updated 2026-09-27 (feat/concierge-v2-runner, CR-1) — new section "The v2 runtime":
   the per-site concierge_runtime switch, what v2 does (one tool-free model call
   grounded in the site KB), which refusals it skips, its config keys, and what it
@@ -199,7 +200,8 @@ A v2 reply is checked on its way out, before the visitor sees it and before it i
 to the transcript. The check holds each fenced block (anything opened with three
 backticks) until it closes:
 
-- A code block of any language is replaced by the line "I can't share code here."
+- A code block of any language is replaced by the line "I can't share code here.",
+  unless the owner has turned on "Answer with code examples from your docs" (see below).
 - A `pawbar-card` block holding a generated layout (`{"ui": ...}`) is checked against
   the limits the widget itself enforces: at most 32,000 characters, 80 nodes and 8
   levels. Only the widgets the Paw Bar can draw are allowed (text, heading, badge,
@@ -217,6 +219,27 @@ backticks) until it closes:
 
 The model learns the card format from the Paw Bar's own widget manifest, one line per
 widget, inside the catalog section of its prompt.
+
+### Code examples from your docs
+
+A documentation site usually wants its concierge to show the site's own examples. The
+`concierge_allow_doc_code` setting ("Answer with code examples from your docs", off by
+default, on the same settings endpoint) allows that, narrowly. With it on, the model is
+told it may quote code from the retrieved knowledge word for word and must never write
+or change code. The server then checks every code block before the visitor sees it:
+
+- It compares the block, line by line, with the knowledge retrieved for that message.
+  Indentation and spacing don't matter. Lines of three characters or fewer (a lone `}`)
+  are ignored.
+- At least 90% of the remaining lines have to appear in that knowledge exactly, and
+  there has to be at least one such line. A block cut down from an example passes. A
+  block adapted from one, with a renamed variable or a changed argument, does not, and
+  neither does code the model wrote itself. Both are replaced with the fixed line.
+- One reply can show at most `POCKETPAW_PAWBAR_CONCIERGE_DOC_CODE_CHARS` characters of
+  code (default 6,000). A block past that is replaced too.
+
+Text in a knowledge page cannot switch this check off: a page can only make code pass
+by containing it.
 
 v2 does not yet read the page the visitor is on, use owner-written guidance fields, or
 cap spend per site. Those land before it becomes the default for new sites.

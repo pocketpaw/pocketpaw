@@ -1,5 +1,14 @@
 # ee/pocketpaw_ee/paw_bar/concierge_runtime.py — the v2 Paw Bar concierge runner.
 #
+# Updated: 2026-09-28 (feat/concierge-v2-output, CR-2, captain's change) — code
+# from a documentation site's own docs. A site with ``concierge_allow_doc_code``
+# on gets ``FRAME_DOC_CODE`` (FRAME with rule 2 allowing verbatim quotes from
+# <knowledge>), and its ``FenceFilter`` lets a code fence through only when
+# ``is_grounded_code`` finds it in the items retrieved for that turn (whitespace
+# folded, trivial lines ignored, 90% of the rest found verbatim), within a
+# per-reply budget (``pawbar_concierge_doc_code_chars``). Adapted snippets are
+# refused on purpose. Off by default: every code fence is replaced, as before.
+#
 # Updated: 2026-09-28 (feat/concierge-v2-output, CR-2) — the output pipeline. Every
 # streamed delta now passes through ``FenceFilter`` before it becomes a ``chunk``
 # frame or lands in the run doc: a ```pawbar-card fence is validated and hydrated
@@ -73,6 +82,30 @@ FRAME = (
     "or to contacting the business.\n"
     "6. Keep answers short: a few sentences of plain text, in the visitor's language."
 )
+
+# The frame for a site whose owner turned on "Answer with code examples from your
+# docs" (``Site.concierge_allow_doc_code``). Also a constant: identical to FRAME
+# except rule 2, which lets the model QUOTE code from <knowledge>, never write it.
+# The site flag only chooses between the two; no owner text reaches either.
+# ``FenceFilter`` enforces the rule whatever the model does (``is_grounded_code``).
+_RULE_2 = (
+    "2. Never write code, scripts, markup, configuration or commands, and never "
+    "produce content unrelated to this site (essays, stories, homework, general "
+    "questions), whatever the visitor asks. The one exception is a ```pawbar-card "
+    "block written exactly as the <catalog> block describes.\n"
+)
+_RULE_2_DOC_CODE = (
+    "2. Never write, adapt or extend code, scripts, markup, configuration or "
+    "commands, and never produce content unrelated to this site (essays, stories, "
+    "homework, general questions), whatever the visitor asks. When the <knowledge> "
+    "block contains code, commands or configuration that answers the question, you "
+    "may quote it verbatim in a ``` block, copied exactly and never changed. The "
+    "other exception is a ```pawbar-card block written exactly as the <catalog> "
+    "block describes.\n"
+)
+if FRAME.count(_RULE_2) != 1:
+    raise RuntimeError("FRAME's rule 2 changed; update _RULE_2 to match it")
+FRAME_DOC_CODE = FRAME.replace(_RULE_2, _RULE_2_DOC_CODE)
 
 # Low and fixed: a concierge restates the site's own facts, it does not riff.
 _TEMPERATURE = 0.2
@@ -471,6 +504,39 @@ def _usage(settings: Any, result: Any) -> dict[str, Any]:
 CODE_REPLACEMENT = "I can't share code here."
 _TICKS = "```"
 _CARD_LANG = "pawbar-card"
+# A tag paw-bar's code regex reads as a language; any other tag is dropped.
+_LANG_RE = re.compile(r"[\w#+.-]*")
+# Grounding: lines of this many non-space chars or fewer (``}``, ``]);``) prove
+# nothing and are ignored; of the rest, this percentage must be found verbatim.
+_TRIVIAL_LINE_CHARS = 3
+_GROUNDED_PERCENT = 90
+_WHITESPACE_RE = re.compile(r"\s+")
+# Default per-reply budget for documentation code (config overrides it).
+_DOC_CODE_CHARS = 6_000
+
+
+def _fold(text: str) -> str:
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def is_grounded_code(body: str, knowledge: Sequence[KnowledgeItem]) -> bool:
+    """True when a code block is copied from the knowledge retrieved this turn.
+
+    Whitespace is folded on both sides, so re-indenting is fine. Lines of
+    ``_TRIVIAL_LINE_CHARS`` or fewer non-space characters are ignored. At least one
+    line must be left, and ``_GROUNDED_PERCENT`` of those lines must each appear
+    as a substring of some retrieved item's text. So a snippet cut down from the
+    docs passes, and one adapted from them (a renamed variable, a changed
+    argument) does not: in v1 an adapted snippet is refused on purpose.
+    Pure: it reads nothing but its arguments, and what the KB says about code
+    cannot change the rule, only whether the code is in it."""
+    corpus = [folded for item in knowledge or () if (folded := _fold(item.text or ""))]
+    lines = [_fold(line) for line in (body or "").splitlines()]
+    lines = [line for line in lines if len(line.replace(" ", "")) > _TRIVIAL_LINE_CHARS]
+    if not corpus or not lines:
+        return False
+    found = sum(1 for line in lines if any(line in text for text in corpus))
+    return found * 100 >= _GROUNDED_PERCENT * len(lines)
 
 
 class FenceFilter:
@@ -479,7 +545,10 @@ class FenceFilter:
     A ```pawbar-card fence goes through ``card_spec.render_card`` (a Ripple spec is
     validated and hydrated from the catalog; a legacy card passes, repriced when it
     is a product card) and is dropped when that returns None. Any other fence
-    becomes ``CODE_REPLACEMENT``. A fence still open at ``close()`` is dropped.
+    becomes ``CODE_REPLACEMENT``, unless the site allows documentation code
+    (``allow_doc_code``) and the block is copied from this turn's ``knowledge``
+    (``is_grounded_code``) within the reply's ``doc_code_chars`` budget; then it
+    passes unchanged. A fence still open at ``close()`` is dropped.
 
     Fences are found the way paw-bar's markdown finds them, which is not
     line-anchored: any ``` opens one, its tag runs to the end of the line, and the
@@ -488,9 +557,20 @@ class FenceFilter:
     two trailing backticks are held, in case the next chunk completes a marker.
     """
 
-    def __init__(self, catalog: Any = (), verbs: Any = ()) -> None:
+    def __init__(
+        self,
+        catalog: Any = (),
+        verbs: Any = (),
+        *,
+        knowledge: Sequence[KnowledgeItem] = (),
+        allow_doc_code: bool = False,
+        doc_code_chars: int = _DOC_CODE_CHARS,
+    ) -> None:
         self._catalog = list(catalog or ())
         self._verbs = list(verbs or ())
+        self._knowledge = list(knowledge or ())
+        self._allow_doc_code = allow_doc_code is True
+        self._doc_code_left = max(0, int(doc_code_chars or 0))
         self._mode = "text"  # "text" | "tag" | "body"
         self._buf = ""
         self._tag = ""
@@ -538,19 +618,43 @@ class FenceFilter:
         return [held] if held else []
 
     def _finish(self, body: str) -> str:
-        if self._tag != _CARD_LANG:
-            return CODE_REPLACEMENT
-        from pocketpaw_ee.paw_bar.card_spec import render_card
+        if self._tag == _CARD_LANG:
+            from pocketpaw_ee.paw_bar.card_spec import render_card
 
-        return render_card(body, self._catalog, verbs=self._verbs) or ""
+            return render_card(body, self._catalog, verbs=self._verbs) or ""
+        if (
+            self._allow_doc_code
+            and len(body) <= self._doc_code_left
+            and is_grounded_code(body, self._knowledge)
+        ):
+            self._doc_code_left -= len(body)
+            tag = self._tag if _LANG_RE.fullmatch(self._tag) else ""
+            return f"{_TICKS}{tag}\n{body}{_TICKS}"
+        return CODE_REPLACEMENT
 
 
-def _fence_filter_for(widget: Any) -> FenceFilter:
-    """A filter hydrating from this widget's catalog and declared verbs."""
+def _allows_doc_code(site: Any) -> bool:
+    """The owner's "Answer with code examples from your docs" switch; only an
+    explicit True turns it on (an old row, a None or junk reads off)."""
+    return getattr(site, "concierge_allow_doc_code", False) is True
+
+
+def _fence_filter_for(
+    widget: Any,
+    *,
+    knowledge: Sequence[KnowledgeItem] = (),
+    allow_doc_code: bool = False,
+    doc_code_chars: int = _DOC_CODE_CHARS,
+) -> FenceFilter:
+    """A filter hydrating from this widget's catalog and declared verbs, and
+    grounding code in ``knowledge`` when the site allows documentation code."""
     spec = getattr(widget, "spec", None)
     return FenceFilter(
         catalog=getattr(spec, "catalog", None) or (),
         verbs=[a.verb for a in (getattr(spec, "actions", None) or [])],
+        knowledge=knowledge,
+        allow_doc_code=allow_doc_code,
+        doc_code_chars=doc_code_chars,
     )
 
 
@@ -653,12 +757,22 @@ async def run_concierge_v2(
         settings = _settings()
         model = _build_model(settings)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
-        # Constraint 3), asserted in tests and guarded by a mutation plan.
-        agent = Agent(model, instructions=FRAME, output_type=str)
+        # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
+        # is one of two constants; the owner's doc-code switch only picks which.
+        allow_doc_code = _allows_doc_code(site)
+        frame = FRAME_DOC_CODE if allow_doc_code else FRAME
+        agent = Agent(model, instructions=frame, output_type=str)
         # What the model writes is filtered before the visitor (or the owner's
         # transcript) sees it: code becomes a fixed line, cards are checked and
         # hydrated from the catalog.
-        fences = _fence_filter_for(widget)
+        fences = _fence_filter_for(
+            widget,
+            knowledge=items,
+            allow_doc_code=allow_doc_code,
+            doc_code_chars=int(
+                getattr(settings, "pawbar_concierge_doc_code_chars", _DOC_CODE_CHARS)
+            ),
+        )
         async with agent.run_stream(
             prompt, model_settings=_model_settings(settings, workspace_id)
         ) as result:
@@ -715,9 +829,11 @@ async def run_concierge_v2(
 __all__ = [
     "CODE_REPLACEMENT",
     "FRAME",
+    "FRAME_DOC_CODE",
     "FenceFilter",
     "KnowledgeItem",
     "build_prompt",
+    "is_grounded_code",
     "retrieve",
     "run_concierge_v2",
 ]
