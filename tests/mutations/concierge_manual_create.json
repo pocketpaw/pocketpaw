@@ -136,6 +136,24 @@
     ]
   },
   {
+    "label": "delete leaves the uploaded files and links behind (CR-9 hook dropped)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if delete_sources is not None:\n        await delete_sources(site)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook"
+    ]
+  },
+  {
+    "label": "the hooks are imported together, so a module with only one of them clears neither",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    delete_faqs = getattr(knowledge_routes, \"delete_faqs\", None)\n",
+    "replace": "    delete_faqs = knowledge_routes.delete_faqs if knowledge_routes is not None else None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook"
+    ]
+  },
+  {
     "label": "the backfill marks every site as a live concierge",
     "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
     "find": "        if live:\n",

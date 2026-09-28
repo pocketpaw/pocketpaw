@@ -456,6 +456,34 @@ class TestCreateAndDelete:
         assert cleared == [str(site.id)]
 
     @pytest.mark.asyncio
+    async def test_delete_clears_uploaded_sources_through_the_cr9_hook(
+        self, client, monkeypatch
+    ) -> None:
+        """CR-9 owns uploaded files and links and exposes ``delete_sources(site)``
+        in the same module as CR-8's hook. The stand-in carries ONLY that name, so
+        this also pins that each hook is looked up on its own: a module without
+        ``delete_faqs`` must not stop the sources from being cleared."""
+        import sys
+        import types
+
+        cleared: list[str] = []
+
+        async def delete_sources(site) -> int:
+            cleared.append(str(site.id))
+            return 0
+
+        fake = types.ModuleType("pocketpaw_ee.paw_bar.knowledge_routes")
+        fake.delete_sources = delete_sources
+        monkeypatch.setitem(sys.modules, "pocketpaw_ee.paw_bar.knowledge_routes", fake)
+
+        site = await _site()
+        await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
+        res = await client.delete(f"/paw-bar/admin/site/{site.id}/concierge")
+
+        assert res.status_code == 200
+        assert cleared == [str(site.id)]
+
+    @pytest.mark.asyncio
     async def test_delete_keeps_conversations_unless_asked(self, client, store) -> None:
         site = await _site()
         await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
