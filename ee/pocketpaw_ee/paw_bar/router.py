@@ -11,6 +11,8 @@
 #   auto-provisioning in ``create_widget`` and the enable PATCH. The settings and
 #   overview responses carry ``concierge_exists`` (and overview ``concierge_runtime``),
 #   and the settings snippet asks the marker, not the agent.
+#   DELETE also clears CR-8's pinned answers through ``knowledge_routes.delete_faqs``
+#   when that module is present (it ships in its own PR).
 # Updated: 2026-09-27 (feat/concierge-v2-runner, CR-1) — POST /paw-bar/chat can
 #   answer through the v2 runner (``paw_bar.concierge_runtime.run_concierge_v2``):
 #   one streamed pydantic_ai call with no tools, grounded in the site KB, written
@@ -2181,8 +2183,9 @@ async def delete_site_concierge(
     a workspace agent with its own history, and the owner may point a bar at it
     again. Conversations (runs, inbox rows, visitor decisions, carts) are purged
     only when ``delete_conversations`` is true. Site-page knowledge stays; it is
-    the site's, not the concierge's. Guided fields and custom knowledge are
-    cleared by their own tasks (CR-8 / CR-9) once they exist.
+    the site's, not the concierge's. Pinned answers are cleared through CR-8's
+    ``knowledge_routes.delete_faqs`` when that module is present; guided fields
+    and CR-9's custom sources join here when they land.
     """
     site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if getattr(site, "concierge_created_at", None) is None:
@@ -2191,6 +2194,16 @@ async def delete_site_concierge(
     site.concierge_created_at = None
     site.concierge_enabled = False
     await site.save()
+
+    # CR-8 ships in its own PR, so the hook is optional until both have merged.
+    # ``site`` came from the workspace-scoped load above, which is the tenancy
+    # check ``delete_faqs`` expects its caller to have made.
+    try:
+        from pocketpaw_ee.paw_bar.knowledge_routes import delete_faqs
+    except ImportError:
+        delete_faqs = None
+    if delete_faqs is not None:
+        await delete_faqs(site)
 
     if widget is not None:
         if widget.agent_id:

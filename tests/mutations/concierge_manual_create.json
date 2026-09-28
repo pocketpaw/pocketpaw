@@ -127,6 +127,15 @@
     ]
   },
   {
+    "label": "delete leaves the pinned answers behind (CR-8 hook dropped)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if delete_faqs is not None:\n        await delete_faqs(site)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_pinned_answers_through_the_cr8_hook"
+    ]
+  },
+  {
     "label": "the backfill marks every site as a live concierge",
     "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
     "find": "        if live:\n",

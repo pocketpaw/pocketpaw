@@ -429,6 +429,33 @@ class TestCreateAndDelete:
         assert (await _reload(site)).concierge_created_at is None
 
     @pytest.mark.asyncio
+    async def test_delete_clears_pinned_answers_through_the_cr8_hook(
+        self, client, monkeypatch
+    ) -> None:
+        """CR-8 owns the FAQ store and exposes ``delete_faqs(site)``. It ships in
+        its own PR, so a stand-in module is installed here; once CR-8 merges the
+        real one is imported by the same line."""
+        import sys
+        import types
+
+        cleared: list[str] = []
+
+        async def delete_faqs(site) -> int:
+            cleared.append(str(site.id))
+            return 0
+
+        fake = types.ModuleType("pocketpaw_ee.paw_bar.knowledge_routes")
+        fake.delete_faqs = delete_faqs
+        monkeypatch.setitem(sys.modules, "pocketpaw_ee.paw_bar.knowledge_routes", fake)
+
+        site = await _site()
+        await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
+        res = await client.delete(f"/paw-bar/admin/site/{site.id}/concierge")
+
+        assert res.status_code == 200
+        assert cleared == [str(site.id)]
+
+    @pytest.mark.asyncio
     async def test_delete_keeps_conversations_unless_asked(self, client, store) -> None:
         site = await _site()
         await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
