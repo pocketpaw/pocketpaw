@@ -803,7 +803,9 @@ async def degrade_reply(
                 workspace_id=workspace_id,
                 customer_ref=customer_ref,
                 question=question,
-                source="agent",
+                # Not "agent" or "visitor": neither asked. The handoff ledger row
+                # keeps a capped site's turns apart from real escalations.
+                source=f"degrade:{reason}",
                 store=store,
             )
             handed_off = outcome.ok

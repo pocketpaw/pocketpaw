@@ -510,14 +510,9 @@ async def test_the_degrade_reply_never_names_its_reason(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retention_off_keeps_the_visitor_line_off_the_handoff(
-    concierge_client, model, monkeypatch
-):
+def _spy_handoffs(monkeypatch) -> list[dict[str, Any]]:
     from pocketpaw_ee.paw_bar import handoff
 
-    client, store = concierge_client
-    _pin_cap(monkeypatch, 0.5)
-    await _seed_spend(1.0)
     seen: list[dict[str, Any]] = []
     real = handoff.raise_handoff
 
@@ -526,6 +521,22 @@ async def test_retention_off_keeps_the_visitor_line_off_the_handoff(
         return await real(**kw)
 
     monkeypatch.setattr(handoff, "raise_handoff", _spy)
+    return seen
+
+
+# One test per arm that hands the visitor line on: each passes it separately, so
+# each can leak it separately.
+
+
+@pytest.mark.asyncio
+async def test_retention_off_keeps_the_visitor_line_off_the_handoff(
+    concierge_client, model, monkeypatch
+):
+    """The cap arm."""
+    client, store = concierge_client
+    _pin_cap(monkeypatch, 0.5)
+    await _seed_spend(1.0)
+    seen = _spy_handoffs(monkeypatch)
     await _site(concierge_store_transcripts=False)
     widget = await store.create_widget(_widget())
 
@@ -534,3 +545,63 @@ async def test_retention_off_keeps_the_visitor_line_off_the_handoff(
     assert len(seen) == 1
     assert seen[0]["question"] == ""
     assert seen[0]["store"] is store
+    # Told apart from the visitor's own button and the agent's escalation.
+    assert seen[0]["source"] == "degrade:spend_cap"
+
+
+@pytest.mark.asyncio
+async def test_retention_off_keeps_the_visitor_line_off_a_provider_error_handoff(
+    concierge_client, model, monkeypatch
+):
+    """The failed-model arm."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    client, store = concierge_client
+    rec = _FailingModel(RuntimeError("boom"))
+    monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
+    _seed_kb(monkeypatch, _HOURS_KB)
+    seen = _spy_handoffs(monkeypatch)
+    await _site(concierge_store_transcripts=False)
+    widget = await store.create_widget(_widget())
+
+    await _chat(client, widget.id)
+
+    assert len(seen) == 1
+    assert seen[0]["question"] == ""
+    assert seen[0]["store"] is store
+    assert seen[0]["source"] == "degrade:provider_error"
+
+
+@pytest.mark.asyncio
+async def test_retention_off_keeps_the_visitor_line_off_a_quota_handoff(
+    concierge_client, model, monkeypatch
+):
+    """The quota arm, which the router builds on its own."""
+    client, store = concierge_client
+    _quota_used_up(monkeypatch)
+    seen = _spy_handoffs(monkeypatch)
+    await _site(concierge_store_transcripts=False)
+    widget = await store.create_widget(_widget())
+
+    await _chat(client, widget.id)
+
+    assert len(seen) == 1
+    assert seen[0]["question"] == ""
+    assert seen[0]["store"] is store
+    assert seen[0]["source"] == "degrade:quota"
+
+
+@pytest.mark.asyncio
+async def test_retention_on_puts_the_visitor_line_on_the_handoff(
+    concierge_client, model, monkeypatch
+):
+    """The owner who keeps transcripts gets the question on the handoff record."""
+    client, store = concierge_client
+    _quota_used_up(monkeypatch)
+    seen = _spy_handoffs(monkeypatch)
+    await _site()
+    widget = await store.create_widget(_widget())
+
+    await _chat(client, widget.id)
+
+    assert seen[0]["question"] == "When do you open on Sunday?"

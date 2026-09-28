@@ -493,5 +493,41 @@
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_the_metered_call_is_tagged_with_the_site_and_widget"
     ]
+  },
+  {
+    "label": "CR-5 error arm: the handoff carries the raw message — retention-off sites leak the visitor line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            reason,\n            workspace_id=workspace_id,\n            customer_ref=customer_ref,\n            question=stored_user_text,\n",
+    "replace": "            reason,\n            workspace_id=workspace_id,\n            customer_ref=customer_ref,\n            question=message,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_a_provider_error_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 quota arm: the handoff carries the raw message — retention-off sites leak the visitor line",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "                question=(\n                    body.message[:_STORED_USER_TEXT_CHARS]\n                    if site.concierge_store_transcripts\n                    else \"\"\n                ),\n",
+    "replace": "                question=body.message[:_STORED_USER_TEXT_CHARS],\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_a_quota_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 quota arm: the handoff drops the visitor line even when the site keeps transcripts",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "                question=(\n                    body.message[:_STORED_USER_TEXT_CHARS]\n                    if site.concierge_store_transcripts\n                    else \"\"\n                ),\n",
+    "replace": "                question=\"\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_on_puts_the_visitor_line_on_the_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 degrade: the handoff is filed as the agent escalating itself — capped turns pollute the escalation metric",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                source=f\"degrade:{reason}\",\n",
+    "replace": "                source=\"agent\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
+    ]
   }
 ]
