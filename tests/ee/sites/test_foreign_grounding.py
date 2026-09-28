@@ -1,4 +1,8 @@
 # tests/ee/sites/test_foreign_grounding.py — the FOREIGN grounding lane
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the bind no longer
+# provisions (``provision_foreign_concierge`` is gone). The row-handoff test now
+# drives ``ensure_site_agent``, which the owner's explicit create calls on the
+# foreign row, and still pins that the FOREIGN row is what reaches the sync.
 # (ee.pocketpaw_ee.sites.foreign_grounding): a concierge on a site we do not host,
 # grounded by crawling that site's own verified origin.
 #
@@ -663,9 +667,10 @@ async def test_grounding_fetches_no_assets_and_that_is_most_of_the_traffic(beani
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_foreign_bind_hands_the_foreign_row_to_the_sync(monkeypatch):
+async def test_creating_a_foreign_concierge_hands_the_foreign_row_to_the_sync(monkeypatch):
     """A pocket can hold BOTH a published Worker site and a foreign concierge. The
-    bind must pass the foreign row through, because the published one would take a
+    create (``ensure_site_agent``, called by the owner's explicit create since
+    CR-12) must pass the foreign row through, because the published one would take a
     pocket lane and sync nothing about the customer's real pages — so the object
     that reaches the sync is asserted to be this one, not merely to exist."""
     from pocketpaw_ee.paw_bar import agent_provisioning
@@ -699,7 +704,7 @@ async def test_the_foreign_bind_hands_the_foreign_row_to_the_sync(monkeypatch):
         "pocketpaw_ee.cloud.agents.service.legacy_ctx", lambda *a, **k: object(), raising=False
     )
 
-    bound = await agent_provisioning.provision_foreign_concierge(site, _WS)
+    bound = await agent_provisioning.ensure_site_agent(site, widget)
 
     assert bound == "agent-1"
     assert seen == [site]

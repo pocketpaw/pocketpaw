@@ -1,6 +1,10 @@
 # tests/cloud/sites/test_sites_billing_flag.py — the Paw Sites paywall gets its
 # own switch.
 #
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the stand-in sites carry
+# ``concierge_created_at``. ``concierge_available`` now requires a concierge the
+# owner created, so a site without the marker answers False before any flag is read.
+#
 # Created 2026-08-21 (feat/sites-billing-flag, PW-2). Until now every sites seam
 # read ``billing_enforced``, the workspace-wide switch. Turning it on to start
 # charging for custom domains also starts 402ing chat runs, seat invites, pocket
@@ -25,6 +29,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -187,6 +192,7 @@ def test_the_sites_flag_alone_makes_the_concierge_gate_bite(monkeypatch):
         id="6512c1f0e4b0a1b2c3d4e5f6",
         workspace="ws_1",
         concierge_enabled=True,
+        concierge_created_at=datetime.now(UTC),
         plan_tier=site_plans.BASE_SITE_PLAN_KEY,
         subscription_status="none",
     )
@@ -295,6 +301,7 @@ def test_with_both_flags_off_only_the_owners_switch_decides_the_concierge(monkey
         id="6512c1f0e4b0a1b2c3d4e5f6",
         workspace="ws_1",
         concierge_enabled=True,
+        concierge_created_at=datetime.now(UTC),
         plan_tier=site_plans.BASE_SITE_PLAN_KEY,
         subscription_status="none",
     )
