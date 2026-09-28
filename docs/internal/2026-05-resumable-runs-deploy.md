@@ -1,3 +1,4 @@
+<!-- Updated: 2026-09-28 (feat/persist-tool-steps) — documented tool calls and thinking persisted on the assistant message as `steps`. -->
 <!-- Updated: 2026-09-27 (fix/chat-run-heartbeat) — documented the run heartbeat, the heartbeat-based stale-run sweep, partial replies saved as messages, and POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS. -->
 # Tier 2 deploy — resumable chat runs with `arq` worker
 
@@ -179,6 +180,16 @@ emitting a partial duplicate. The user decides via Retry.
   message with `run_status` set, and the run's `assistant_message_id` points
   at it. `partial_text` on the run doc keeps a copy. Worker shutdown waits up to
   10s for those cancelled-run writes before it closes the database.
+- The tool calls, tool results and thinking a run streams are also saved on
+  that assistant message as `steps` (ordered; one entry per thinking block or
+  tool call), on the completed path and on every partial path above. A call
+  still open when the run ends is stored as `missing_result`. Tool input is
+  scrubbed, output and thinking are redacted, and everything is capped (4 KB
+  output, 2 KB input, 8 KB thinking, 50 steps and ~64 KB per message; dropped
+  steps are counted in `steps_omitted`). The history APIs return them as
+  `steps` / `stepsOmitted` (camelCase inner keys) only when non-empty, so plain
+  messages are unchanged. They are display data: the agent's LLM history never
+  includes them. The group/DM agent bridge records its replies the same way.
 - Multiple worker replicas are safe: arq uses a single Redis-backed queue, so
   each job goes to exactly one worker.
 

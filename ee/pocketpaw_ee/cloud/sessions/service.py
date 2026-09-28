@@ -1,5 +1,10 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-28 (feat/persist-tool-steps): ``_message_to_dict`` emits
+``steps`` / ``stepsOmitted`` (an agent reply's recorded thinking and tool calls)
+through the shared ``steps_wire_fields``, only when non-empty, so the chat can
+show the work behind a reply after a refresh. Plain rows are unchanged.
+
 Updated 2026-09-27 (fix/chat-run-heartbeat): ``_message_to_dict`` emits
 ``runStatus`` on an agent reply persisted from a run that did not complete
 (failed / cancelled / interrupted), so the chat can mark it as cut off after a
@@ -824,6 +829,11 @@ def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
     run_status = getattr(m, "run_status", None)
     if run_status:
         out["runStatus"] = run_status
+    # Imported here like the other chat imports in this module: sessions must
+    # not pull the chat package in at import time.
+    from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
+
+    out.update(steps_wire_fields(getattr(m, "steps", None), getattr(m, "steps_omitted", 0) or 0))
     return out
 
 
