@@ -1,5 +1,7 @@
 # tests/evals/concierge/harness.py — runs one eval case through the REAL v2 runner.
 #
+# Updated: 2026-09-28 (chore/concierge-v2-integration) — stub CR-5's daily spend
+# read, which reached Mongo on every case and fell open with a traceback.
 # Created: 2026-09-28 (feat/concierge-eval-gate, CR-6). ``run_case`` drives
 # ``concierge_runtime.run_concierge_v2`` itself, not a copy of it, so the eval
 # scores exactly what a visitor would get: the real page resolution, retrieval,
@@ -7,7 +9,9 @@
 # replaced, the same seams tests/cloud/test_paw_bar_concierge_v2.py uses:
 #
 #   * ``KnowledgeService`` search/context/article reads -> ``seed.FakeKnowledge``;
-#   * the run store (``create_run`` / ``mark_*``) -> no-ops (no Mongo);
+#   * the run store (``create_run`` / ``mark_*``) -> no-ops (no Mongo), and
+#     ``find_run_usage_since`` (CR-5's daily spend read) -> no spend, so every
+#     case runs under the cap instead of through its failed-read fallback;
 #   * ``_settings`` -> the settings the run was given;
 #   * ``_build_model`` -> a replay ``FunctionModel`` in recorded mode, and left
 #     alone in real mode (the deployment's configured pydantic_ai model).
@@ -95,6 +99,9 @@ def _seams(settings: Any, replay: str | None, seen: dict[str, Any]) -> Iterator[
     async def _noop(*_a: Any, **_kw: Any) -> None:
         return None
 
+    async def _no_usage(**_kw: Any) -> list[Any]:
+        return []
+
     async def _create_run(spec: Any) -> Any:
         from types import SimpleNamespace
 
@@ -111,6 +118,7 @@ def _seams(settings: Any, replay: str | None, seen: dict[str, Any]) -> Iterator[
         stack.enter_context(patch(f"{runs}.create_run", _create_run))
         for name in ("mark_running", "mark_completed", "mark_terminal"):
             stack.enter_context(patch(f"{runs}.{name}", _noop))
+        stack.enter_context(patch(f"{runs}.find_run_usage_since", _no_usage))
         stack.enter_context(patch.object(concierge_runtime, "_settings", lambda: settings))
         stack.enter_context(patch.object(concierge_runtime, "build_prompt", _build_prompt))
         stack.enter_context(patch.object(concierge_runtime, "FenceFilter", _RecordingFilter))
