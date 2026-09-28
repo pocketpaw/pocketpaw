@@ -1,0 +1,347 @@
+{
+  "schema": "ripple.manifest.slim/v1",
+  "spec": {
+    "uiField": "ui",
+    "stateField": "state",
+    "version": "1.0",
+    "aliasesNotAllowed": [
+      "root",
+      "tree",
+      "view",
+      "body",
+      "content"
+    ],
+    "description": "A Ripple spec is a JSON object with two top-level fields that matter for rendering: `ui` (the node tree the renderer mounts — REQUIRED) and `state` (the StateManager seed — required when any node uses `bind` or reads `{state.*}`). The renderable tree field is named `ui` exactly — never `root`, `tree`, `view`, `body`, or `content`. Specs that use those aliases will not render.",
+    "example": {
+      "version": "1.0",
+      "state": {
+        "draft": "",
+        "items": []
+      },
+      "ui": {
+        "type": "flex",
+        "props": {
+          "direction": "column",
+          "gap": "12px"
+        },
+        "children": [
+          {
+            "type": "input",
+            "bind": "draft",
+            "props": {
+              "placeholder": "Add an item"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "actions": {
+    "set": {
+      "description": "Assign `value` to the state path `target`. The most common action — use it to update any state field.",
+      "shape": {
+        "action": "\"set\"",
+        "target": "string — state path, e.g. \"modalOpen\" or \"user.name\"",
+        "value?": "any — value to assign. Supports {state.x} expressions."
+      },
+      "example": {
+        "action": "set",
+        "target": "modalOpen",
+        "value": false
+      }
+    },
+    "toggle": {
+      "description": "Flip a boolean target, or toggle membership of `value` in an array target.",
+      "shape": {
+        "action": "\"toggle\"",
+        "target": "string — state path. If boolean, value is inverted; if array, `value` is added or removed.",
+        "value?": "any — when target is an array, the membership toggle key."
+      },
+      "example": {
+        "action": "toggle",
+        "target": "expanded"
+      }
+    },
+    "push": {
+      "description": "Append `value` to the array at `target`. Creates the array if undefined.",
+      "shape": {
+        "action": "\"push\"",
+        "target": "string — state path to an array.",
+        "value?": "any — item to append."
+      },
+      "example": {
+        "action": "push",
+        "target": "todos",
+        "value": {
+          "id": 1,
+          "text": "New task",
+          "done": false
+        }
+      }
+    },
+    "remove": {
+      "description": "Remove an item from the array at `target` — by `value` (equality match) or by `index`.",
+      "shape": {
+        "action": "\"remove\"",
+        "target": "string — state path to an array.",
+        "value?": "any — first matching item is removed.",
+        "index?": "number — remove by position instead."
+      },
+      "example": {
+        "action": "remove",
+        "target": "todos",
+        "index": 0
+      }
+    },
+    "open": {
+      "description": "Set the target state path to `true`. Idiomatic shortcut for opening a modal or dialog whose `value` is bound to that path.",
+      "shape": {
+        "action": "\"open\"",
+        "target": "string — state path that controls the modal/dialog open state."
+      },
+      "example": {
+        "action": "open",
+        "target": "confirmDeleteOpen"
+      }
+    },
+    "emit": {
+      "description": "Emit a custom event up to the host. Use to hand control back to the host pipeline (e.g. \"submit complete, take it from here\").",
+      "shape": {
+        "action": "\"emit\"",
+        "target?": "string — event name.",
+        "value?": "any — event payload."
+      },
+      "example": {
+        "action": "emit",
+        "target": "submitted",
+        "value": "{state.formData}"
+      }
+    }
+  },
+  "widgets": [
+    {
+      "type": "text",
+      "category": "display",
+      "description": "A run of plain text. No markdown.",
+      "props": {
+        "text": {
+          "type": "string",
+          "required": true,
+          "description": "The text."
+        }
+      },
+      "example": {
+        "type": "text",
+        "props": {
+          "text": "Ships in 2 working days."
+        }
+      }
+    },
+    {
+      "type": "heading",
+      "category": "display",
+      "description": "A short title for a block.",
+      "props": {
+        "text": {
+          "type": "string",
+          "required": true,
+          "description": "The title."
+        },
+        "level": {
+          "type": "2 | 3 | 4",
+          "required": false,
+          "description": "Heading level. Default 3."
+        }
+      },
+      "example": {
+        "type": "heading",
+        "props": {
+          "text": "Your options",
+          "level": 3
+        }
+      }
+    },
+    {
+      "type": "badge",
+      "category": "display",
+      "description": "A short status label, such as stock or delivery time.",
+      "props": {
+        "text": {
+          "type": "string",
+          "required": true,
+          "description": "The label."
+        },
+        "variant": {
+          "type": "\"default\" | \"success\" | \"warning\" | \"destructive\"",
+          "required": false,
+          "description": "Default \"default\"."
+        }
+      },
+      "example": {
+        "type": "badge",
+        "props": {
+          "text": "In stock",
+          "variant": "success"
+        }
+      }
+    },
+    {
+      "type": "button",
+      "category": "input",
+      "description": "A button. on_click runs actions: local state, or an emit the host acts on.",
+      "props": {
+        "label": {
+          "type": "string",
+          "required": true,
+          "description": "Button text."
+        },
+        "variant": {
+          "type": "\"default\" | \"secondary\" | \"outline\"",
+          "required": false,
+          "description": "\"default\" for the one main action."
+        },
+        "disabled": {
+          "type": "boolean",
+          "required": false,
+          "description": "Disable the button."
+        }
+      },
+      "events": {
+        "on_click": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Action run on click."
+        }
+      },
+      "example": {
+        "type": "button",
+        "props": {
+          "label": "Show details",
+          "variant": "secondary"
+        },
+        "on_click": {
+          "action": "toggle",
+          "target": "details"
+        }
+      }
+    },
+    {
+      "type": "flex",
+      "category": "layout",
+      "description": "Lays its children out in a row or a column. The only layout atom.",
+      "props": {
+        "direction": {
+          "type": "\"row\" | \"column\"",
+          "required": false,
+          "description": "Default \"column\"."
+        },
+        "gap": {
+          "type": "number",
+          "required": false,
+          "description": "Space between children in px (0-24)."
+        },
+        "align": {
+          "type": "\"start\" | \"center\" | \"end\"",
+          "required": false,
+          "description": "Cross-axis alignment."
+        },
+        "wrap": {
+          "type": "boolean",
+          "required": false,
+          "description": "Wrap a row onto more lines."
+        }
+      },
+      "example": {
+        "type": "flex",
+        "props": {
+          "direction": "row",
+          "gap": 8,
+          "align": "center"
+        },
+        "children": [
+          {
+            "type": "badge",
+            "props": {
+              "text": "In stock",
+              "variant": "success"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Ships tomorrow"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "product-card",
+      "category": "commerce",
+      "description": "Products from the site's catalog with add-to-cart and checkout buttons. Give catalog ids only; the server fills in name, price and image.",
+      "props": {
+        "ids": {
+          "type": "string[]",
+          "required": true,
+          "description": "Catalog product ids, most relevant first."
+        }
+      },
+      "example": {
+        "type": "product-card",
+        "props": {
+          "ids": [
+            "wetsuit-43",
+            "booties-5mm"
+          ]
+        }
+      }
+    },
+    {
+      "type": "form",
+      "category": "input",
+      "description": "Collects the details a gated action needs, then submits it for the business to approve. verb must be a declared gated action and every field name one of its args.",
+      "props": {
+        "verb": {
+          "type": "string",
+          "required": true,
+          "description": "The gated action, e.g. \"book_visit\"."
+        },
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Short title."
+        },
+        "submit_label": {
+          "type": "string",
+          "required": false,
+          "description": "Button text."
+        },
+        "fields": {
+          "type": "Array<{ name: string; label: string; type: \"text\" | \"tel\" | \"email\" | \"number\" | \"textarea\" }>",
+          "required": true,
+          "description": "At most 8 fields, names unique."
+        }
+      },
+      "example": {
+        "type": "form",
+        "props": {
+          "verb": "book_visit",
+          "title": "Book a fitting",
+          "submit_label": "Request",
+          "fields": [
+            {
+              "name": "name",
+              "label": "Name",
+              "type": "text"
+            },
+            {
+              "name": "phone",
+              "label": "Phone",
+              "type": "tel"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

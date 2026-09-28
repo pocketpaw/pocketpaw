@@ -12,6 +12,8 @@
 # Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
 # Updated: 2026-09-27 (feat/concierge-v2-runner) — the EE test job runs the v2
 # Paw Bar concierge runner tests, which otherwise sit in the tests/cloud blind spot.
+# Updated: 2026-09-28 (feat/concierge-v2-output) — the same step also runs the v2
+# output pipeline tests (code-fence filter, card hydration, paw-bar parity).
 # Updated: 2026-06-10 — deploy-coolify job: pushes to dev that pass every CI
 # job now fire the Coolify deploy hook for the cloud backend stack (defined
 # in qbtrix/paw-workspace deploy/coolify/, which clones this repo's dev at
@@ -243,9 +245,13 @@ jobs:
         # Same addopts escape. The v2 runner answers anonymous visitors on
         # customers' sites in one model call, and this file is the only proof
         # that the call carries zero tools, that every public gate still fires
-        # before it, and that legacy sites are untouched. Mutations:
+        # before it, and that legacy sites are untouched. The _output file is
+        # the only proof that code never reaches the widget and that product
+        # cards carry catalog prices, not the model's. Mutations:
         # tests/mutations/concierge_v2_runtime.json.
-        run: uv run pytest tests/cloud/test_paw_bar_concierge_v2.py -o addopts="" -q --tb=short
+        run: >-
+          uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
+          tests/cloud/test_paw_bar_concierge_v2_output.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

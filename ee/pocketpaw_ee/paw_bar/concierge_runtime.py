@@ -1,5 +1,16 @@
 # ee/pocketpaw_ee/paw_bar/concierge_runtime.py — the v2 Paw Bar concierge runner.
 #
+# Updated: 2026-09-28 (feat/concierge-v2-output, CR-2) — the output pipeline. Every
+# streamed delta now passes through ``FenceFilter`` before it becomes a ``chunk``
+# frame or lands in the run doc: a ```pawbar-card fence is validated and hydrated
+# from the widget's catalog (``card_spec.render_card``: product name, price and
+# image come only from the catalog), any other ``` fence becomes the fixed line
+# ``CODE_REPLACEMENT``, and a fence left open at the end is dropped. Fences are
+# found the way paw-bar's markdown finds them (not line-anchored). The <catalog>
+# block now teaches cards from the vendored paw-bar manifest (``_cards_paragraph``,
+# one line per widget) instead of the legacy ``_form_block``, which described the
+# old form card and told the model to call an action tool it does not have.
+#
 # Created: 2026-09-27 (feat/concierge-v2-runner, CR-1). A site whose
 # ``Site.concierge_runtime`` is "v2" answers its visitors here instead of through
 # a full agent run. POST /paw-bar/chat runs every public gate first (origin, rate
@@ -19,9 +30,8 @@
 #
 # The model is built exactly as the pydantic_ai backend builds it
 # (``PydanticAIBackend._build_model``), per the captain's pydantic_ai-only rule for
-# the concierge. What this deliberately does NOT do yet: filter code fences or
-# hydrate product cards (CR-2), read page context (CR-3), render owner guided
-# fields (CR-4) or cap spend (CR-5).
+# the concierge. Still not done here: page context (CR-3), owner guided fields
+# (CR-4) and spend caps (CR-5).
 
 from __future__ import annotations
 
@@ -254,13 +264,13 @@ def _knowledge_block(items: Sequence[KnowledgeItem]) -> str:
 def _catalog_and_actions_block(widget: Any) -> str:
     """The widget's catalog and declared actions, as data.
 
-    Reuses the legacy preamble's ``_catalog_block`` (ids, names, formatted prices)
-    and ``_form_block`` (the form-card format for gated actions with args). It does
-    NOT reuse ``_actions_paragraph``'s declared-actions text: that tells the model
-    to call ``pawbar_<verb>`` tools, and v2 has none. The actions are listed as
-    plain data instead; the widget's own buttons and forms trigger them.
+    Reuses the legacy preamble's ``_catalog_block`` (ids, names, formatted prices).
+    It does NOT reuse ``_actions_paragraph``'s declared-actions text: that tells the
+    model to call ``pawbar_<verb>`` tools, and v2 has none. The actions are listed
+    as plain data instead; the widget's own buttons and forms trigger them. Cards
+    are taught by ``_cards_paragraph`` (the vendored paw-bar manifest).
     """
-    from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block, _form_block
+    from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
     from pocketpaw_ee.paw_bar.router import _MAX_PREAMBLE_CATALOG
 
     spec = getattr(widget, "spec", None)
@@ -291,11 +301,48 @@ def _catalog_and_actions_block(widget: Any) -> str:
                 else "sent to the business for a person to approve"
             )
             parts.append(f"   - {a['verb']} ({label}): {behavior}.")
-        forms = _form_block(declared)
-        if forms:
-            parts.append(forms.rstrip("\n"))
+    parts.append(_cards_paragraph(declared))
     parts.append("</catalog>")
     return _data_block(parts)
+
+
+def _cards_paragraph(declared: Sequence[dict[str, Any]]) -> str:
+    """How to write a ```pawbar-card: the compact manifest (one line per widget),
+    the host events a button may emit, and each gated verb's form fields.
+
+    This replaces the legacy ``_form_block``, which teaches the old
+    ``{"kind": "form"}`` card and tells the model to call an action tool."""
+    from pocketpaw_ee.paw_bar.card_spec import (
+        MAX_SPEC_DEPTH,
+        MAX_SPEC_NODES,
+        compact_manifest,
+    )
+
+    lines = [
+        "   Cards: to show products, a form or a short layout, write ONE ```pawbar-card "
+        'block holding {"ui": <node>}. A node is {"type": ..., "props": {...}, '
+        f'"children": [...]}}, at most {MAX_SPEC_NODES} nodes and {MAX_SPEC_DEPTH} '
+        "levels deep, built only from these widgets:",
+        *(f"   {line}" for line in compact_manifest().splitlines()),
+        "   A product-card takes catalog ids only; the server fills in each name, price "
+        "and image. A button's on_click may set, toggle, push, remove or open local "
+        'state, or emit add_to_cart (value {"product_id": "<id>"}) or checkout, '
+        "nothing else.",
+    ]
+    gated = [
+        a
+        for a in declared
+        if a.get("policy") != "auto" and isinstance(a.get("args"), dict) and a["args"]
+    ]
+    if gated:
+        lines.append(
+            "   A form's verb must be one of these gated actions, and each field name "
+            "one of its args (type text, tel, email, number or textarea):"
+        )
+        for a in gated:
+            args = ", ".join(f"{name} ({typ})" for name, typ in a["args"].items())
+            lines.append(f"     - {a['verb']}: {args}")
+    return "\n".join(lines)
 
 
 def _data_block(parts: list[str]) -> str:
@@ -417,6 +464,97 @@ def _usage(settings: Any, result: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# The output filter
+# --------------------------------------------------------------------------- #
+
+# What a visitor sees in place of any code block the model wrote anyway.
+CODE_REPLACEMENT = "I can't share code here."
+_TICKS = "```"
+_CARD_LANG = "pawbar-card"
+
+
+class FenceFilter:
+    """Holds every ``` fence in a streamed reply until it closes, then decides.
+
+    A ```pawbar-card fence goes through ``card_spec.render_card`` (a Ripple spec is
+    validated and hydrated from the catalog; a legacy card passes, repriced when it
+    is a product card) and is dropped when that returns None. Any other fence
+    becomes ``CODE_REPLACEMENT``. A fence still open at ``close()`` is dropped.
+
+    Fences are found the way paw-bar's markdown finds them, which is not
+    line-anchored: any ``` opens one, its tag runs to the end of the line, and the
+    next ``` closes it. A ``` that closes on its own line is a code span and gets
+    the fixed line too. Text outside fences streams straight through; only up to
+    two trailing backticks are held, in case the next chunk completes a marker.
+    """
+
+    def __init__(self, catalog: Any = (), verbs: Any = ()) -> None:
+        self._catalog = list(catalog or ())
+        self._verbs = list(verbs or ())
+        self._mode = "text"  # "text" | "tag" | "body"
+        self._buf = ""
+        self._tag = ""
+
+    def feed(self, chunk: str) -> list[str]:
+        out: list[str] = []
+        data = chunk or ""
+        while True:
+            # Everything before the old buffer's last two chars was already scanned.
+            start = max(0, len(self._buf) - 2)
+            text, self._buf = self._buf + data, ""
+            data = ""
+            if self._mode == "text":
+                i = text.find(_TICKS)
+                if i == -1:
+                    held = len(text) - len(text.rstrip("`"))
+                    out.append(text[: len(text) - held])
+                    self._buf = text[len(text) - held :]
+                    break
+                out.append(text[:i])
+                self._mode, data = "tag", text[i + len(_TICKS) :]
+            elif self._mode == "tag":
+                newline, ticks = text.find("\n", start), text.find(_TICKS, start)
+                if ticks != -1 and (newline == -1 or ticks < newline):
+                    out.append(CODE_REPLACEMENT)
+                    self._mode, data = "text", text[ticks + len(_TICKS) :]
+                elif newline == -1:
+                    self._buf = text
+                    break
+                else:
+                    self._tag = text[:newline].strip()
+                    self._mode, data = "body", text[newline + 1 :]
+            else:
+                j = text.find(_TICKS, start)
+                if j == -1:
+                    self._buf = text
+                    break
+                out.append(self._finish(text[:j]))
+                self._mode, data = "text", text[j + len(_TICKS) :]
+        return [piece for piece in out if piece]
+
+    def close(self) -> list[str]:
+        held = self._buf if self._mode == "text" else ""
+        self._mode, self._buf, self._tag = "text", "", ""
+        return [held] if held else []
+
+    def _finish(self, body: str) -> str:
+        if self._tag != _CARD_LANG:
+            return CODE_REPLACEMENT
+        from pocketpaw_ee.paw_bar.card_spec import render_card
+
+        return render_card(body, self._catalog, verbs=self._verbs) or ""
+
+
+def _fence_filter_for(widget: Any) -> FenceFilter:
+    """A filter hydrating from this widget's catalog and declared verbs."""
+    spec = getattr(widget, "spec", None)
+    return FenceFilter(
+        catalog=getattr(spec, "catalog", None) or (),
+        verbs=[a.verb for a in (getattr(spec, "actions", None) or [])],
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The runner
 # --------------------------------------------------------------------------- #
 
@@ -517,15 +655,21 @@ async def run_concierge_v2(
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan.
         agent = Agent(model, instructions=FRAME, output_type=str)
+        # What the model writes is filtered before the visitor (or the owner's
+        # transcript) sees it: code becomes a fixed line, cards are checked and
+        # hydrated from the catalog.
+        fences = _fence_filter_for(widget)
         async with agent.run_stream(
             prompt, model_settings=_model_settings(settings, workspace_id)
         ) as result:
             async for delta in result.stream_text(delta=True, debounce_by=None):
-                if not delta:
-                    continue
-                full_text += delta
-                yield _sse("chunk", {"content": delta, "type": "text"})
+                for piece in fences.feed(delta or ""):
+                    full_text += piece
+                    yield _sse("chunk", {"content": piece, "type": "text"})
             usage = _usage(settings, result)
+        for piece in fences.close():
+            full_text += piece
+            yield _sse("chunk", {"content": piece, "type": "text"})
 
         try:
             sources = await asyncio.wait_for(asyncio.shield(sources_task), timeout=_SOURCES_WAIT_S)
@@ -568,4 +712,12 @@ async def run_concierge_v2(
             )
 
 
-__all__ = ["FRAME", "KnowledgeItem", "build_prompt", "retrieve", "run_concierge_v2"]
+__all__ = [
+    "CODE_REPLACEMENT",
+    "FRAME",
+    "FenceFilter",
+    "KnowledgeItem",
+    "build_prompt",
+    "retrieve",
+    "run_concierge_v2",
+]
