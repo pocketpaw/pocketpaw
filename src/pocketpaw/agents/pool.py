@@ -3,6 +3,16 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-09-27 (fix/concierge-web-tool-deny) — ``run`` takes
+  ``exclusive_tools`` and forwards an explicit True to a backend whose ``run``
+  declares it (``_accepts_exclusive_tools_kwarg``). It is how a deny-by-default
+  surface reaches the pydantic_ai backend's bridged builtins.
+  Then: a run with ``exclusive_tools`` is always SERVED by pydantic_ai
+  (``_deny_by_default_backend``), whatever backend the agent is configured for.
+  The owner's backend is never the fallback; if pydantic_ai cannot be built the
+  turn fails. ``AgentInstance.deny_by_default_backend`` caches the forced
+  backend and ``_teardown`` stops it.
+
 Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
   ``image_attachments``: the files a user attached to THIS turn, carried as bytes
   the model is shown rather than text scraped off them. It is a SECOND picture
@@ -188,6 +198,7 @@ from typing import TYPE_CHECKING, Any
 # resolve to the ONE definition.
 from pocketpaw.agents.backend import (
     ImageAttachment,
+    _accepts_exclusive_tools_kwarg,
     _accepts_image_attachments_kwarg,
     _accepts_images_kwarg,
     _accepts_prompt_digest,
@@ -325,6 +336,10 @@ class AgentInstance:
     # authoritative "this instance is busy" signal; ``last_active`` is just
     # for ranking idle eviction candidates.
     active_runs: int = 0
+    # The pydantic_ai backend deny-by-default runs (the public concierge) are
+    # forced onto when ``backend`` is something else. Built on first use by
+    # ``AgentPool._deny_by_default_backend``; stopped in ``_teardown``.
+    deny_by_default_backend: Any = None
 
 
 def _accepts_policy(backend_cls: type) -> bool:
@@ -695,6 +710,7 @@ class AgentPool:
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
         tools_enabled: bool = True,
+        exclusive_tools: bool = False,
         image_attachments: Sequence[ImageAttachment] = (),
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
@@ -948,7 +964,26 @@ class AgentPool:
             # failing the turn — the user's key is then unused for this turn,
             # which is a billing surprise for US and never for them.
             run_backend = instance.backend
-            if byok_api_key:
+            if exclusive_tools:
+                # A deny-by-default run (the public Paw Bar concierge) ALWAYS runs
+                # on pydantic_ai, whatever backend the bound agent is configured
+                # for (captain decision 2026-09-27). pydantic_ai is the one backend
+                # that honours the whole lockdown: claude_sdk keeps its Read, Glob
+                # and Grep built-ins, and every other backend rejects
+                # ``exclusive_mcp_tools``. Fails closed: if no pydantic_ai backend
+                # can be built the turn errors rather than falling back to the
+                # owner's backend.
+                run_backend = self._deny_by_default_backend(
+                    instance,
+                    (byok_settings_override or {"byok_provider_api_key": byok_api_key})
+                    if byok_api_key
+                    else None,
+                )
+                # A per-send model id was picked for the owner's backend; on a
+                # different backend it is not a model we know to be valid.
+                if run_backend is not instance.backend:
+                    run_kwargs.pop("model_override", None)
+            elif byok_api_key:
                 try:
                     from pocketpaw.agents.registry import _LEGACY_BACKENDS
                     from pocketpaw.agents.router import AgentRouter
@@ -1003,6 +1038,13 @@ class AgentPool:
             # different object.
             if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):
                 run_kwargs["tools_enabled"] = tools_enabled
+            # Deny-by-default surface (the public concierge). Same two gates:
+            # only an explicit True rides, and only to a backend that declares
+            # it. The run also carries ``exclusive_mcp_tools``, forwarded
+            # unconditionally above, so a backend that declares neither fails
+            # rather than running with its full tool set.
+            if exclusive_tools and _accepts_exclusive_tools_kwarg(run_backend.run):
+                run_kwargs["exclusive_tools"] = True
 
             async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
@@ -1180,12 +1222,70 @@ class AgentPool:
         await manager.initialize()
         return manager
 
+    @staticmethod
+    def _deny_by_default_backend(instance: Any, byok_override: dict[str, Any] | None) -> Any:
+        """The pydantic_ai backend a deny-by-default run is served by.
+
+        The agent's own backend when it already IS pydantic_ai, so its model and
+        its cached agent carry over. Otherwise a pydantic_ai backend built from
+        the agent's settings with ``agent_backend`` switched, so its model is the
+        deployment's ``pydantic_ai_model``: the owner's model id was chosen for a
+        different backend and is not assumed to be valid here. That backend is
+        cached on the instance (and stopped in ``_teardown``) so a concierge
+        does not rebuild its tool bridge every turn.
+
+        With BYOK the backend is built fresh for this run, like the BYOK path
+        below, and the platform one is the fallback if that build fails. Raises
+        when no pydantic_ai backend can be built: the caller must not fall back
+        to the owner's backend, which would drop the lockdown.
+        """
+        from pocketpaw.agents.registry import get_backend_class
+        from pocketpaw.agents.router import AgentRouter
+
+        pai_cls = get_backend_class("pydantic_ai")
+        if pai_cls is None:
+            raise RuntimeError(
+                "A deny-by-default run needs the pydantic_ai backend, which is not installed"
+            )
+        own = instance.backend
+        if isinstance(own, pai_cls) and byok_override is None:
+            return own
+        override = {"agent_backend": "pydantic_ai"}
+        if byok_override is not None:
+            try:
+                return AgentRouter.create_isolated_backend(
+                    "pydantic_ai", own.settings, settings_override={**override, **byok_override}
+                )
+            except Exception:
+                logger.warning(
+                    "BYOK: could not build an isolated pydantic_ai backend for %s; "
+                    "running on platform credentials this turn",
+                    getattr(instance, "agent_id", "?"),
+                    exc_info=True,
+                )
+            if isinstance(own, pai_cls):
+                return own
+        cached = getattr(instance, "deny_by_default_backend", None)
+        if cached is None:
+            cached = AgentRouter.create_isolated_backend(
+                "pydantic_ai", own.settings, settings_override=override
+            )
+            instance.deny_by_default_backend = cached
+        return cached
+
     async def _teardown(self, instance: AgentInstance) -> None:
         """Gracefully shutdown an agent instance."""
         try:
             await instance.backend.stop()
         except Exception:
             pass
+        # The pydantic_ai backend a deny-by-default run was forced onto holds
+        # its own MCP exit stack, which only ``stop()`` releases.
+        if instance.deny_by_default_backend is not None:
+            try:
+                await instance.deny_by_default_backend.stop()
+            except Exception:
+                pass
         if instance.soul_manager:
             try:
                 await instance.soul_manager.shutdown()

@@ -41,6 +41,13 @@ one that matters: it COUNTS the attachments on turn 2 rather than asserting none
 because turn 2's own picture is supposed to be there and a presence assertion
 would fail on working code. Pre-fix it saw 2.
 
+Updated 2026-09-27 (fix/concierge-web-tool-deny) — added the ``exclusive_tools``
+section: the flag is in the agent cache key, it registers no native web
+capability, and it loads no skills. Each has a control run first, and none sets
+a deny set, because the concierge's own deny of WebSearch/WebFetch would hide the
+native-web gap. The otherhand_tools_toggle mutation anchor on the capabilities
+call moved with it.
+
 Updated 2026-09-27 (fix/pydantic-ai-tool-images) — added
 ``test_a_tool_returning_images_keeps_them_and_reports_text_only``: a tool whose
 return is ``[caption, BinaryContent]`` must reach the model with its image intact
@@ -3124,6 +3131,77 @@ def test_a_withheld_web_tool_is_not_granted_back_by_the_native_capability():
     caps = {type(c).__name__ for c in backend._build_capabilities()}
     assert "WebFetch" in caps
     assert "WebSearch" not in caps
+
+
+# --------------------------------------------------------------------------
+# exclusive_tools — deny-by-default surfaces (the public Paw Bar concierge)
+#
+# The end-to-end concierge test lives in
+# tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py. These pin the
+# three parts of the backend change that the concierge's own deny set hides:
+# the cache key, native web capabilities and skills.
+# --------------------------------------------------------------------------
+
+_OWN_ACTION = "mcp__pawbar_actions__pawbar_add_to_cart"
+
+
+def _exclusive_backend(**overrides):
+    seen: dict[str, set[str]] = {"function": set(), "native": set()}
+
+    async def capture(messages: list[ModelMessage], info: AgentInfo):
+        seen["function"] = {t.name for t in info.function_tools}
+        seen["native"] = {
+            type(t).__name__ for t in info.model_request_parameters.native_tools or []
+        }
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=capture), **overrides)
+    backend._custom_tools = _bridged("web_search", "url_extract", "remember")
+    backend._mcp_tools = [_mcp_toolset("pawbar_actions", "pawbar_add_to_cart")]
+    return backend, seen
+
+
+async def test_exclusive_tools_is_in_the_agent_cache_key():
+    """Same deny, same allow, only the flag differs. The agent cache is ONE
+    slot, so a key without the flag serves the open agent to the locked run."""
+    backend, seen = _exclusive_backend()
+    allow = frozenset({_OWN_ACTION})
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=allow)
+    assert "remember" in seen["function"], "control: an open run keeps the builtins"
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=allow, exclusive_tools=True)
+    # The harness's own two tools stay: they plan and re-read a truncated result,
+    # and touch nothing outside the run.
+    offered = seen["function"] - {"write_plan", "read_tool_result"}
+    assert offered == {"pawbar_actions_pawbar_add_to_cart"}, seen["function"]
+
+
+async def test_exclusive_tools_registers_no_native_web_capability():
+    """``_build_web_capabilities`` reads the unfiltered tool list, so dropping
+    web_search from ``tools`` alone would leave it on the request provider-side.
+    No deny set here: the concierge's own deny of WebSearch would hide this."""
+    backend, seen = _exclusive_backend(pydantic_ai_native_web_tools=True)
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}))
+    assert {"WebSearchTool", "WebFetchTool"} <= seen["native"], "control"
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}), exclusive_tools=True)
+    assert not seen["native"], seen["native"]
+
+
+async def test_exclusive_tools_loads_no_skills(monkeypatch):
+    """An EMPTY skill set means every bundled skill, so exclusivity has to
+    switch skills off outright rather than pass no names."""
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+    _fake_skills(monkeypatch, "demo")
+    backend, seen = _exclusive_backend(pydantic_ai_skills_enabled=True)
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}))
+    assert "load_skill" in seen["function"], "control: skills load on an open run"
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}), exclusive_tools=True)
+    assert not {"list_skills", "load_skill"} & seen["function"], seen["function"]
 
 
 def test_instrumentation_is_off_by_default_and_configures_logfire_once():

@@ -1,4 +1,7 @@
 # surface_registry.py — The declarative surface registry (SR-1 + SR-2).
+# Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the concierge profile sets
+# ``exclusive_tools=True``: it is offered only its allow-listed pawbar tools. This
+# closes the RESIDUAL GAP recorded above ``_CONCIERGE_DENY`` for both backends.
 # Updated: 2026-09-27 (feat/sites-lean-prompt) — /sites html create drops inline ripple;
 # it asks through ask_user like svelte/react and stops carrying the widget catalog.
 # Updated: 2026-09-06 (feat/fx-mcp-server) — FX_TOOL_IDS joined the /sites toolbelt allow-list.
@@ -842,12 +845,12 @@ def _ship_profile(_meta: SurfaceMeta) -> SurfaceProfile:
 #   * skill loading (pulls arbitrary capabilities);
 #   * the pocket write/create MCP tools that otherwise survive the universal
 #     grant + always-allowed ``pocketpaw_pocket*`` servers.
-# RESIDUAL GAP: composio CONNECTOR tool ids are dynamic/per-workspace and can't
-# be enumerated in a static deny set, and they survive the always-allowed
-# ``composio`` server — a concierge pocket with connectors bound could still
-# reach them. A concierge pocket must therefore have NO connectors bound until
-# the OSS backend grows a true "public/untrusted" lockdown mode (drop the
-# universal grants). Tracked as the T2 follow-up.
+# The deny set alone could not close the MCP side: composio CONNECTOR tool ids
+# are dynamic/per-workspace, survive the always-allowed ``composio`` server, and
+# the pydantic_ai backend bridges ~60 PocketPaw builtins no deny set named. Since
+# 2026-09-27 the profile is ``exclusive_tools=True`` (deny-by-default), which is
+# the "public/untrusted" lockdown this note used to ask for; the deny set below
+# now does the one job exclusivity cannot, removing base SDK built-ins.
 _CONCIERGE_DENY: frozenset[str] = frozenset(
     {
         # Web (the explicit T2 requirement).
@@ -928,6 +931,11 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
         ripple_mode="off",
         deny_mcp_tool_ids=_CONCIERGE_DENY,
         allow_mcp_tool_ids=allow,
+        # Deny-by-default: ONLY ``allow`` above. The deny set covers the base SDK
+        # built-ins; this is what removes everything else — the universal
+        # pocket grant and always-allowed servers on claude_sdk, and every
+        # bridged PocketPaw builtin on pydantic_ai.
+        exclusive_tools=True,
     )
 
 

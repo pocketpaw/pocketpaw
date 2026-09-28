@@ -1,5 +1,9 @@
 # service.py — Surface context resolver and handler dispatch.
 #
+# Changes: 2026-09-27 (fix/concierge-web-tool-deny) — ``compose_entity_profile``
+# carries ``exclusive_tools`` through, ORed with the entity's, so a concierge
+# whose site pocket has a ``surface_profile`` override stays deny-by-default.
+#
 # Created: 2026-05-24 — ``resolve_surface_context(workspace_id, user_id,
 # body)`` validates the client's ``{surface, meta}`` hint, maps the
 # string to a ``SurfaceKind``, and dispatches to a per-kind handler that
@@ -255,6 +259,7 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
         (no surface restriction); an empty frozenset would wrongly deny all.
       * ``skill_names`` — UNION (the entity adds its skills to the base set).
       * ``system_message_override`` — entity wins WHEN SET, else base.
+      * ``exclusive_tools`` — OR. Like deny, a cap that can only tighten.
 
     ``override`` of ``None`` (no per-entity profile) returns ``base`` unchanged —
     the no-pocket / legacy path, byte-identical to today's behavior.
@@ -300,6 +305,10 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
         deny_mcp_tool_ids=deny,
         skill_names=skills,
         system_message_override=sys_override,
+        # A hard cap, like deny: OR, so an entity can lock a surface down but
+        # never unlock one. Dropping it here would hand a concierge whose site
+        # pocket carries any override every builtin back.
+        exclusive_tools=base.exclusive_tools or bool(override.get("exclusive_tools")),
     )
 
 
