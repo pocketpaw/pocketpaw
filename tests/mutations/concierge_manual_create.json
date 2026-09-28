@@ -1,0 +1,228 @@
+[
+  {
+    "label": "widget create provisions an agent again (trigger 1)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    return await _store().create_widget(widget)\n",
+    "replace": "    created = await _store().create_widget(widget)\n    from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _ensure\n    from pocketpaw_ee.sites.service import canonical_site_for_pocket as _canon\n    _site = await _canon(workspace_id, created.pocket_id)\n    if _site is not None and not created.agent_id:\n        await _ensure(_site, created)\n    return created\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoTriggerCreatesAConcierge::test_widget_create_on_a_site_pocket_creates_no_concierge"
+    ]
+  },
+  {
+    "label": "the enable PATCH provisions an agent again (trigger 2)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    await site.save()\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\ndef _concierge_create_runtime(",
+    "replace": "    await site.save()\n    if req.concierge_enabled is True:\n        from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, site_widget as _w\n        _bar = await _w(site.pocket_id, workspace_id)\n        if _bar is not None and not _bar.agent_id:\n            await _e(site, _bar)\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\ndef _concierge_create_runtime(",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoTriggerCreatesAConcierge::test_the_enable_patch_creates_no_concierge"
+    ]
+  },
+  {
+    "label": "publish mints the bar's agent again (trigger 3)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        has_concierge = doc is not None and concierge_exists(doc)\n",
+    "replace": "        has_concierge = doc is not None and concierge_exists(doc)\n        if doc is not None:\n            from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, ensure_site_widget_row as _r\n            await _e(doc, await _r(doc, workspace_id))\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoTriggerCreatesAConcierge::test_a_second_publish_creates_no_concierge"
+    ]
+  },
+  {
+    "label": "publish embeds a bar for a site whose owner never created a concierge",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        has_concierge = doc is not None and concierge_exists(doc)\n",
+    "replace": "        has_concierge = doc is not None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoTriggerCreatesAConcierge::test_a_second_publish_creates_no_concierge"
+    ]
+  },
+  {
+    "label": "a repeat foreign bind provisions again (trigger 4, resolve arm)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                str(existing.id),\n            )\n            return existing\n",
+    "replace": "                str(existing.id),\n            )\n            from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, ensure_site_widget_row as _r\n            await _e(existing, await _r(existing, workspace_id))\n            return existing\n",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_two_sequential_binds_buy_one_concierge"
+    ]
+  },
+  {
+    "label": "a first foreign bind provisions again (trigger 4, mint arm)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return site\n\n\nasync def rotate_foreign_concierge_key(",
+    "replace": "    from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, ensure_site_widget_row as _r\n    await _e(site, await _r(site, workspace_id))\n    return site\n\n\nasync def rotate_foreign_concierge_key(",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_first_bind_buys_the_connection_and_creates_no_concierge"
+    ]
+  },
+  {
+    "label": "an empty-id rebind re-provisions again (trigger 5)",
+    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
+    "find": "    if not agent_id:\n        raise ValidationError(\n",
+    "replace": "    if not agent_id:\n        _bar = await site_widget(site.pocket_id, workspace_id)\n        if _bar is not None:\n            await _store().update_fields(_bar.id, {'agent_id': ''}, workspace_id=workspace_id)\n            _bar = await _store().get_widget(_bar.id, workspace_id=workspace_id)\n            return await ensure_site_agent(site, _bar)\n    if False:\n        raise ValidationError(\n",
+    "tests": [
+      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_with_no_agent_is_refused_and_mints_nothing"
+    ]
+  },
+  {
+    "label": "concierge_enabled defaults back to True (trigger 6)",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "    concierge_enabled: bool = False\r\n",
+    "replace": "    concierge_enabled: bool = True\r\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoConciergeIsOff::test_a_new_site_defaults_to_off_with_no_concierge"
+    ]
+  },
+  {
+    "label": "concierge_available stops asking for the marker",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "    if not concierge_exists(site) or not site.concierge_enabled:\n        return False\n",
+    "replace": "    if not site.concierge_enabled:\n        return False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoConciergeIsOff::test_concierge_available_requires_the_marker",
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoConciergeIsOff::test_the_frame_is_the_dead_shell"
+    ]
+  },
+  {
+    "label": "the key resolver's kill switch stops asking for the marker",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "    if not concierge_exists(site) or not site.concierge_enabled:\n        raise HTTPException(status_code=403, detail=\"concierge_disabled\")\n",
+    "replace": "    if not site.concierge_enabled:\n        raise HTTPException(status_code=403, detail=\"concierge_disabled\")\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoConciergeIsOff::test_chat_is_refused_as_disabled"
+    ]
+  },
+  {
+    "label": "the snippet stops asking whether a concierge exists",
+    "file": "ee/pocketpaw_ee/paw_bar/embed.py",
+    "find": "    if not concierge_exists:\n        return \"\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoConciergeIsOff::test_the_snippet_is_empty"
+    ]
+  },
+  {
+    "label": "create forgets to stamp the marker",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    site.concierge_created_at = datetime.now(UTC)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_create_then_delete_round_trips"
+    ]
+  },
+  {
+    "label": "delete leaves the legacy agent bound to the bar",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            await _store().update_fields(widget.id, {\"agent_id\": \"\"}, workspace_id=workspace_id)\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_create_then_delete_round_trips"
+    ]
+  },
+  {
+    "label": "create mints a second concierge over an existing one",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        raise HTTPException(409, \"concierge_exists\")\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_creating_twice_is_a_409"
+    ]
+  },
+  {
+    "label": "delete leaves the pinned answers behind (CR-8 hook dropped)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if delete_faqs is not None:\n        await delete_faqs(site)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_pinned_answers_through_the_cr8_hook"
+    ]
+  },
+  {
+    "label": "delete leaves the uploaded files and links behind (CR-9 hook dropped)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if delete_sources is not None:\n        await delete_sources(site)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook"
+    ]
+  },
+  {
+    "label": "the hooks are imported together, so a module with only one of them clears neither",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    delete_faqs = getattr(knowledge_routes, \"delete_faqs\", None)\n",
+    "replace": "    delete_faqs = knowledge_routes.delete_faqs if knowledge_routes is not None else None\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook"
+    ]
+  },
+  {
+    "label": "create ignores the CR-6 gate and always makes a legacy concierge",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    runtime = _concierge_create_runtime()\n",
+    "replace": "    runtime = \"legacy\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_open_gate_creates_a_v2_concierge_with_no_agent"
+    ]
+  },
+  {
+    "label": "a v2 create still mints and binds an agent",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if runtime == \"legacy\":\n        await ensure_site_agent(site, widget)\n",
+    "replace": "    await ensure_site_agent(site, widget)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_open_gate_creates_a_v2_concierge_with_no_agent"
+    ]
+  },
+  {
+    "label": "an unexpected gate answer is stored as the runtime",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    return \"v2\" if default_concierge_runtime() == \"v2\" else \"legacy\"\n",
+    "replace": "    return default_concierge_runtime()\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_unexpected_gate_answer_is_legacy"
+    ]
+  },
+  {
+    "label": "the backfill marks every site as a live concierge",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
+    "find": "        if live:\n",
+    "replace": "        if True:\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_marker_backfill.py::test_an_unbound_site_is_left_at_none_with_its_switch_written"
+    ]
+  },
+  {
+    "label": "the backfill re-selects rows it already classified",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
+    "find": "_UNMARKED: dict[str, Any] = {\"concierge_created_at\": {\"$exists\": False}}\n",
+    "replace": "_UNMARKED: dict[str, Any] = {\"concierge_created_at\": {\"$in\": [None]}}\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_marker_backfill.py::test_a_second_run_changes_nothing_and_never_marks_a_later_bind"
+    ]
+  },
+  {
+    "label": "the backfill classifies blind when the bar store is missing",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
+    "find": "    if db_path is not None and not db_path.exists():\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_marker_backfill.py::test_an_unreachable_bar_store_writes_nothing"
+    ]
+  },
+  {
+    "label": "the backfill leaves an old row's switch to the new default",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
+    "find": "                # switch was on, and it stays exactly what it was.\n                \"concierge_enabled\": bool(site.get(\"concierge_enabled\", True)),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_concierge_marker_backfill.py::test_an_unbound_site_is_left_at_none_with_its_switch_written"
+    ]
+  },
+  {
+    "label": "the backfill switches a bound bar its owner had turned off back on",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
+    "find": "                \"concierge_enabled\": bool(site.get(\"concierge_enabled\", True)),\n            }\n            if site.get(",
+    "replace": "                \"concierge_enabled\": True,\n            }\n            if site.get(",
+    "tests": [
+      "tests/cloud/sites/test_concierge_marker_backfill.py::test_an_owner_who_had_switched_it_off_keeps_it_off"
+    ]
+  }
+]

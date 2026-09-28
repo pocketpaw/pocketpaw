@@ -1,5 +1,13 @@
 """MongoDB connection and Beanie ODM initialization.
 
+2026-09-28 (feat/concierge-manual-create, CR-12): ``init_cloud_db`` runs the
+concierge-marker backfill (``sites.migrate_concierge_marker.migrate_on_boot``)
+right after the studio import. CR-12 makes ``Site.concierge_created_at`` a
+requirement for serving a concierge and flips ``concierge_enabled`` to default
+False, so the rows written before it must be classified before the first request
+or every live bar goes dark. Running it at boot ties it to the model by
+construction, whatever the deploy config does. Best-effort like its neighbours.
+
 2026-09-04 (fix/pool-and-body-ceilings, backend-perf H6): the client is built
 with explicit timeouts. It had none, so it ran on PyMongo's defaults, and two of
 those are the wrong shape for a request-serving process. ``serverSelectionTimeoutMS``
@@ -340,6 +348,15 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     from pocketpaw_ee.cloud.studio.migrate_generations_jsonl import migrate_on_boot
 
     await migrate_on_boot()
+
+    # CR-12: classify pre-CR-12 Sites as an existing concierge (bar bound to a
+    # live agent) or none, writing the fields the new defaults would otherwise
+    # decide. Idempotent (selects rows with no marker field) and never raises.
+    from pocketpaw_ee.sites.migrate_concierge_marker import (
+        migrate_on_boot as migrate_concierge_marker_on_boot,
+    )
+
+    await migrate_concierge_marker_on_boot()
 
     # Flip the memory backend AFTER Beanie is initialized so the
     # MongoMemoryStore's first .insert()/.find() call can never race a

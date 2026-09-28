@@ -1,4 +1,11 @@
 # tests/cloud/test_paw_bar_concierge_settings.py — Paw Bar concierge settings +
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # kill switch (D1 / SS-6).
 # Created 2026-07-16: covers the owner's on/off toggle + greeting. Layers:
 #   * The shared resolver (resolve_site_key) — a disabled Site raises 403
@@ -66,6 +73,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -999,15 +1012,16 @@ async def test_settings_snippet_failure_still_opens_the_page(owner_client):
 
 
 @pytest.mark.asyncio
-async def test_enabling_an_unbound_widget_returns_the_snippet(owner_client):
-    """PATCH {concierge_enabled: true} provisions the unbound widget's agent
-    first, so the response built after it carries the snippet."""
+async def test_enabling_a_created_concierge_returns_the_snippet_without_binding(owner_client):
+    """PATCH {concierge_enabled: true} on a concierge the owner created returns
+    its snippet. It no longer provisions an agent on the way (CR-12): the marker
+    earns the bar, not a bound agent, so the widget stays exactly as it was."""
     c, store = owner_client
     site = await _site(concierge_enabled=False)
     widget = await store.create_widget(_widget(agent_id=""))
     res = await c.patch(f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_enabled": True})
     assert res.status_code == 200, res.text
-    assert (await store.get_widget(widget.id)).agent_id, "enable should bind an agent"
+    assert (await store.get_widget(widget.id)).agent_id == "", "enable must not bind an agent"
     assert res.json()["embed_snippet"] == _expected_snippet(widget.id)
 
 

@@ -1,4 +1,11 @@
 # tests/cloud/test_paw_bar_actions.py — Paw Bar action registry (C1), end to end.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
 #   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
 #   route (fix/pawbar-public-route-gates, 2026-09-26).
@@ -318,6 +325,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s

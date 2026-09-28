@@ -6,6 +6,12 @@
 # (``chunk`` + ``stream_end``). The two tests below say so; the rest of CR-5 lives
 # in test_paw_bar_concierge_v2_degrade.py.
 #
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Created: 2026-09-27 (feat/concierge-v2-runner) — a site switched to
 # ``concierge_runtime="v2"`` answers through ONE streamed pydantic_ai call with no
 # tools, grounded in the site KB, instead of dispatching a full agent run. These
@@ -98,6 +104,12 @@ async def _site(**ov: Any):
         concierge_runtime="v2",
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -950,12 +962,11 @@ async def test_v2_never_provisions_a_concierge_on_a_visitor_turn(
     def _forbidden(*_a: Any, **_kw: Any):
         raise AssertionError("a visitor turn must never provision a concierge")
 
+    # CR-12 deleted the four auto-provisioning triggers; what remains is only
+    # reachable from the owner's explicit create and the rebind.
     for name in (
         "ensure_site_agent",
-        "ensure_site_widget",
-        "provision_widget_on_create",
-        "provision_on_concierge_enable",
-        "provision_foreign_concierge",
+        "ensure_site_widget_row",
         "rebind_site_agent",
     ):
         monkeypatch.setattr(agent_provisioning, name, _forbidden)

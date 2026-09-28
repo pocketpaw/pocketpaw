@@ -86,8 +86,8 @@
   {
     "label": "the rebind tenancy gate is deleted - a bar is bound to another workspace's agent",
     "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
-    "find": "        await agents_service.get_for_viewer(agent_id, workspace_id, None)\n        updated = await _store().update_fields(",
-    "replace": "        updated = await _store().update_fields(",
+    "find": "    await agents_service.get_for_viewer(agent_id, workspace_id, None)\n    updated = await _store().update_fields(",
+    "replace": "    updated = await _store().update_fields(",
     "tests": [
       "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_to_another_tenants_agent_is_refused"
     ]
@@ -95,29 +95,10 @@
   {
     "label": "the rebind gate is workspace-blind - a cross-tenant agent id passes the check",
     "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
-    "find": "        await agents_service.get_for_viewer(agent_id, workspace_id, None)",
-    "replace": "        await agents_service.get(agent_id)",
+    "find": "    await agents_service.get_for_viewer(agent_id, workspace_id, None)",
+    "replace": "    await agents_service.get(agent_id)",
     "tests": [
       "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_to_another_tenants_agent_is_refused"
-    ]
-  },
-  {
-    "label": "a re-provision no longer clears the old bind - the bar can never be reset to its own concierge",
-    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
-    "find": "    cleared = await _store().update_fields(widget.id, {\"agent_id\": \"\"}, workspace_id=workspace_id)\n    return await ensure_site_agent(site, cleared or widget)",
-    "replace": "    return await ensure_site_agent(site, widget)",
-    "tests": [
-      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_reprovision_resets_a_bar_bound_to_a_LIVE_but_wrong_agent"
-    ]
-  },
-  {
-    "label": "the foreign bind stops funnelling into ensure_site_agent - a paid concierge with no agent",
-    "file": "ee/pocketpaw_ee/paw_bar/agent_provisioning.py",
-    "find": "    widget = await ensure_site_widget(site, workspace_id)\n    if widget is None:\n        return None\n    return str(getattr(widget, \"agent_id\", \"\") or \"\") or None",
-    "replace": "    return None",
-    "tests": [
-      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_first_bind_buys_a_concierge_and_provisions_its_agent",
-      "tests/cloud/sites/test_foreign_concierge_bind.py::test_a_rebind_points_the_bar_at_a_new_agent_without_stranding_the_row"
     ]
   },
   {
