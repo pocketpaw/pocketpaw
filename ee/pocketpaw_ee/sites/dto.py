@@ -1613,10 +1613,12 @@ class ForeignConciergeBindRequest(BaseModel):
 class ForeignConciergeRebindRequest(BaseModel):
     """Point an existing concierge's bar at a different agent.
 
-    Both fields optional, and an empty ``agent_id`` is not a no-op: it means
-    RE-PROVISION — clear the stale bind and let the funnel resolve-or-mint the
-    canonical agent again, which is the repair for a bar whose agent was deleted.
-    ``widget_id`` picks the bar when a pocket carries more than one.
+    ``agent_id`` is required in practice: an empty one is a 422
+    (``sites.agent_required``). It used to mean RE-PROVISION, minting the
+    canonical agent, and CR-12 removed that because a rebind must not be a way to
+    create a concierge. The field keeps its default so the error is the service's
+    domain code rather than a bare schema 422. ``widget_id`` picks the bar when a
+    pocket carries more than one.
     """
 
     agent_id: str = Field(default="", max_length=64)

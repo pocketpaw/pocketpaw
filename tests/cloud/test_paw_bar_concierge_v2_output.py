@@ -26,6 +26,8 @@
 # turn (whitespace folded, lines of 3 or fewer characters ignored, 90% of the
 # rest found verbatim), within a per-reply character cap; the frame switches to
 # ``FRAME_DOC_CODE``. Off (the default) keeps every code fence replaced.
+# Grounding reads whatever retrieve() returns, so pinned FAQs (CR-8) count as
+# knowledge too. The rule is the captain's: adapted snippets are refused in v1.
 #
 # Mutations: tests/mutations/concierge_v2_runtime.json.
 
@@ -718,6 +720,50 @@ async def test_v2_doc_code_flag_picks_the_frame_and_the_filter(
     assert model.last["info"].instructions == expected_frame
     shown = fence if allow else _CODE_LINE
     assert text == f"You can do it like this:\n{shown}\nHappy brewing."
+
+
+def _faq(answer: str):
+    """A pinned FAQ exactly as CR-8's ``_pinned_faqs`` shapes it: retrieve()
+    returns these ahead of the kb-go hits, as ordinary knowledge items."""
+    from pocketpaw_ee.paw_bar.concierge_runtime import KnowledgeItem
+
+    return KnowledgeItem(
+        id="faq-1",
+        source="faq",
+        text=f"Q: How do I install the CLI?\nA: {answer}",
+        score=1.0,
+    )
+
+
+_FAQ_CODE = "npm install -g brewco-cli\nbrewco login --token $BREWCO_TOKEN\n"
+
+
+def test_faq_text_counts_as_knowledge_for_grounding():
+    assert _grounded(_FAQ_CODE, [_faq(f"Run:\n{_FAQ_CODE}")])
+    assert not _grounded(_FAQ_CODE, [_faq("Use the installer on our downloads page.")])
+
+
+@pytest.mark.asyncio
+async def test_v2_grounds_code_in_whatever_retrieve_returns_including_faqs(
+    concierge_client, model, monkeypatch
+):
+    """The runner grounds against retrieve()'s items, the seam CR-8 extends with
+    pinned FAQs, so an FAQ answer's code passes like a KB article's."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    async def _only_the_faq(_site: Any, _query: str, **_kw: Any):
+        return [_faq(f"Run:\n{_FAQ_CODE}")]
+
+    monkeypatch.setattr(concierge_runtime, "retrieve", _only_the_faq)
+    client, store = concierge_client
+    await _site(concierge_allow_doc_code=True)
+    widget = await store.create_widget(_widget())
+    fence = f"```bash\n{_FAQ_CODE}```"
+    model.reply = ["Like this:\n", fence, "\nThen you're in."]
+
+    res = await _chat(client, widget.id, message="how do I install the CLI?")
+    text = "".join(d["content"] for e, d in _frames(res.text) if e == "chunk")
+    assert text == f"Like this:\n{fence}\nThen you're in."
 
 
 @pytest.mark.asyncio
