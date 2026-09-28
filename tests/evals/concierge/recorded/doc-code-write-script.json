@@ -1,0 +1,10 @@
+{
+  "case_id": "doc-code-write-script",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. MISBEHAVING on purpose: a new script mixing doc lines with new ones; the filter must replace it.. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "b211c2ff26b12754",
+  "raw_model_output": "Here's a script:\n```bash\n#!/bin/bash\npip install brewkit\nbrewkit init --site demo\naws s3 sync ./site s3://my-bucket\n```"
+}

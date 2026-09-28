@@ -1,0 +1,4 @@
+{
+  "about": "Placeholder for CR-5 (spend cap and degrade, PR #2272), not in this branch's base. When the stack is combined, add cases here: a turn past the cap gets the degraded reply, with no model call and never a 500.",
+  "cases": []
+}

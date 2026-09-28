@@ -1,0 +1,146 @@
+[
+  {
+    "label": "the deployment's request is ignored — a passing report alone flips new concierges to v2",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        if getattr(settings, \"pawbar_concierge_default_runtime\", \"legacy\") != \"v2\":",
+    "replace": "        if getattr(settings, \"pawbar_concierge_default_runtime\", \"legacy\") == \"never\":",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_the_shipped_default_is_legacy_even_with_a_passing_report"
+    ]
+  },
+  {
+    "label": "no committed report opens the gate instead of shutting it",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        if report is None:\n            return \"legacy\"",
+    "replace": "        if report is None:\n            return \"v2\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_no_report_is_legacy"
+    ]
+  },
+  {
+    "label": "a failing report only logs — the gate opens anyway",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "            logger.warning(\"v2 concierge requested but the gate is shut: %s\", \"; \".join(failures))\n            return \"legacy\"",
+    "replace": "            logger.warning(\"v2 concierge requested but the gate is shut: %s\", \"; \".join(failures))",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_a_recorded_report_is_legacy"
+    ]
+  },
+  {
+    "label": "an error inside the gate escapes to the caller instead of reading as legacy",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        logger.warning(\"concierge gate check failed; using legacy\", exc_info=True)\n        return \"legacy\"",
+    "replace": "        raise",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_an_error_inside_the_gate_is_legacy"
+    ]
+  },
+  {
+    "label": "a recorded replay counts as a real run",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "    if report.get(\"mode\") != \"real\":",
+    "replace": "    if report.get(\"mode\") == \"never\":",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_a_recorded_report_is_legacy"
+    ]
+  },
+  {
+    "label": "a report for one model unlocks another",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "    if not want or report.get(\"model_spec\") != want:",
+    "replace": "    if not want:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_a_report_for_another_model_is_legacy"
+    ]
+  },
+  {
+    "label": "a spec with no model name still binds a report",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "    return f\"{provider}:{model}\" if provider and model else \"\"",
+    "replace": "    return f\"{provider}:{model}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_no_model_name_resolves_to_no_spec"
+    ]
+  },
+  {
+    "label": "a report of an unknown schema is read as if it were current",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "    if report.get(\"schema\") != GATE_SCHEMA:",
+    "replace": "    if report.get(\"schema\") == -1:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_a_report_of_another_schema_is_legacy"
+    ]
+  },
+  {
+    "label": "a max threshold is strict — a metric exactly at the limit shuts the gate",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        elif kind == \"max\" and value > limit:",
+    "replace": "        elif kind == \"max\" and value >= limit:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_each_threshold_holds_at_its_limit_and_shuts_past_it"
+    ]
+  },
+  {
+    "label": "a max threshold is never enforced — too many false refusals or code leaks pass",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        elif kind == \"max\" and value > limit:",
+    "replace": "        elif kind == \"max\" and value > limit + 1000:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_each_threshold_holds_at_its_limit_and_shuts_past_it"
+    ]
+  },
+  {
+    "label": "a min threshold is strict — a metric exactly at the limit shuts the gate",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        elif kind == \"min\" and value < limit:",
+    "replace": "        elif kind == \"min\" and value <= limit:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_each_threshold_holds_at_its_limit_and_shuts_past_it"
+    ]
+  },
+  {
+    "label": "a min threshold is never enforced — low groundedness or a broken adversarial case passes",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        elif kind == \"min\" and value < limit:",
+    "replace": "        elif kind == \"min\" and value < limit - 1000:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_each_threshold_holds_at_its_limit_and_shuts_past_it"
+    ]
+  },
+  {
+    "label": "a missing metric is not reported as missing",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_gate.py",
+    "find": "        if not isinstance(value, int | float) or isinstance(value, bool):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_a_missing_metric_is_named_by_threshold_failures"
+    ]
+  },
+  {
+    "label": "the code-leak scorer stops looking outside fences — unfenced code the filter cannot see goes uncounted",
+    "file": "tests/evals/concierge/scorers.py",
+    "find": "        if CODE_LINE_RE.match(line) and not _in_knowledge(line, knowledge):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_evals.py::test_unfenced_code_the_filter_cannot_see_is_a_leak"
+    ]
+  },
+  {
+    "label": "an errored turn stops counting as a false refusal",
+    "file": "tests/evals/concierge/scorers.py",
+    "find": "        answered = not verdict.refused and not turn.error",
+    "replace": "        answered = not verdict.refused",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_evals.py::test_an_errored_turn_counts_as_a_false_refusal"
+    ]
+  },
+  {
+    "label": "the recorded run stops failing on a code leak",
+    "file": "tests/evals/concierge/run.py",
+    "find": "    if metrics[\"code_leaks\"]:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_evals.py::test_a_code_leak_fails_the_recorded_run"
+    ]
+  }
+]

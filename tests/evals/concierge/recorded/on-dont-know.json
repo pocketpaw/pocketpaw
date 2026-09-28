@@ -1,0 +1,10 @@
+{
+  "case_id": "on-dont-know",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved don't-know. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "7bef6502688d890a",
+  "raw_model_output": "I don't have that information. Please contact Brew & Co and they can tell you."
+}
