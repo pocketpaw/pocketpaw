@@ -6,7 +6,8 @@
 # ``concierge_enabled`` to default False. Rows written before it carry neither
 # (many never stored the switch at all), so without
 # ``sites.migrate_concierge_marker`` the deploy silences every bar. Pinned here:
-#   * a bar bound to a LIVE agent becomes an existing legacy concierge, still on;
+#   * a bar bound to a LIVE agent becomes an existing legacy concierge, still on
+#     (or still off, if its owner had switched it off);
 #   * everything else becomes "none", with the switch written as it was;
 #   * a second run changes nothing, and never marks a row the first run left as
 #     none (that would be automatic creation by the back door);
@@ -46,7 +47,8 @@ async def _old_site(pocket_id: str, *, stored_enabled: bool | None = None) -> Si
     """A Site as a pre-CR-12 row stores it: no marker, and the switch only if set."""
     site = Site(workspace=_WS, pocket_id=pocket_id, owner=_OWNER, name=pocket_id)
     await site.insert()
-    unset: dict[str, Any] = {"concierge_created_at": ""}
+    # Pre-CR-1 rows carry no runtime either, which is what the backfill fills in.
+    unset: dict[str, Any] = {"concierge_created_at": "", "concierge_runtime": ""}
     if stored_enabled is None:
         unset["concierge_enabled"] = ""
     coll = Site.get_pymongo_collection()
@@ -104,9 +106,9 @@ async def test_an_owner_who_had_switched_it_off_keeps_it_off(store) -> None:
     await backfill_concierge_marker(store=store)
 
     raw = await _raw(site)
-    # A bound bar is an existing concierge; the spec writes it on.
+    # A bound bar is an existing concierge, and the owner's "off" survives it.
     assert isinstance(raw["concierge_created_at"], datetime)
-    assert raw["concierge_enabled"] is True
+    assert raw["concierge_enabled"] is False
 
 
 async def test_an_unbound_site_is_left_at_none_with_its_switch_written(store) -> None:

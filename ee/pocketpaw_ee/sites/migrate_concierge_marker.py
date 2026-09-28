@@ -13,8 +13,11 @@ backfill, the moment the model deploys every bar answering visitors goes dark.
 WHAT IT WRITES, per Site row that has no ``concierge_created_at`` field yet:
 
   * the site's bar is bound to a LIVE agent → it is an existing classic concierge:
-    ``concierge_created_at = now``, ``concierge_enabled = True`` explicitly, and
-    ``concierge_runtime = "legacy"`` unless the row already names one;
+    ``concierge_created_at = now``, ``concierge_enabled`` written explicitly as the
+    value it effectively had (True unless the owner stored False), and
+    ``concierge_runtime = "legacy"`` unless the row already names one. An owner who
+    had switched a bound bar off keeps it off: the backfill exists so nothing a
+    visitor sees changes, in either direction;
   * anything else → it has no concierge: ``concierge_created_at = null`` and
     ``concierge_enabled`` = the value it effectively had (the stored one, or the
     old True default), written explicitly so nothing hinges on a default again.
@@ -159,7 +162,7 @@ async def backfill_concierge_marker(*, store: Any, dry_run: bool = False) -> Bac
         if live:
             update: dict[str, Any] = {
                 "concierge_created_at": now,
-                "concierge_enabled": True,
+                "concierge_enabled": bool(site.get("concierge_enabled", True)),
             }
             if site.get("concierge_runtime") not in ("legacy", "v2"):
                 update["concierge_runtime"] = "legacy"

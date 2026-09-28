@@ -156,10 +156,19 @@
   {
     "label": "the backfill leaves an old row's switch to the new default",
     "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
-    "find": "                \"concierge_enabled\": bool(site.get(\"concierge_enabled\", True)),\n",
+    "find": "                # switch was on, and it stays exactly what it was.\n                \"concierge_enabled\": bool(site.get(\"concierge_enabled\", True)),\n",
     "replace": "",
     "tests": [
       "tests/cloud/sites/test_concierge_marker_backfill.py::test_an_unbound_site_is_left_at_none_with_its_switch_written"
+    ]
+  },
+  {
+    "label": "the backfill switches a bound bar its owner had turned off back on",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_marker.py",
+    "find": "                \"concierge_enabled\": bool(site.get(\"concierge_enabled\", True)),\n            }\n            if site.get(",
+    "replace": "                \"concierge_enabled\": True,\n            }\n            if site.get(",
+    "tests": [
+      "tests/cloud/sites/test_concierge_marker_backfill.py::test_an_owner_who_had_switched_it_off_keeps_it_off"
     ]
   }
 ]
