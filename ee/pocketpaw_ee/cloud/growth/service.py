@@ -104,6 +104,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from datetime import UTC, datetime
@@ -677,11 +678,15 @@ async def prospect_facets(
 
     pipeline: list[dict[str, Any]] = [{"$match": outer}, {"$facet": branches}]
     # Straight to the driver collection rather than Beanie's
-    # ``Document.aggregate``: that wrapper returns a latent command cursor that
-    # cannot be awaited under mongomock-motor (the reference_mongomock_quirks
-    # caveat — aggregation CURSORS, not aggregation itself). The driver's own
-    # cursor round-trips $facet with nested $match/$group there and in Mongo.
-    rows = await _ProspectDoc.get_pymongo_collection().aggregate(pipeline).to_list(None)
+    # ``Document.aggregate``, whose internal ``await`` breaks under the
+    # mongomock-motor harness. The async PyMongo driver's ``aggregate()`` is a
+    # coroutine resolving to the cursor while mongomock returns the cursor
+    # directly, so ``inspect.isawaitable`` discriminates (the same idiom as
+    # ``storage/service.py``); ``to_list`` then works on either cursor.
+    cursor = _ProspectDoc.get_pymongo_collection().aggregate(pipeline)
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    rows = await cursor.to_list(None)
     raw: dict[str, Any] = rows[0] if rows else {}
 
     counted: dict[str, dict[str, int]] = {}
