@@ -1,86 +1,40 @@
-"""Sessions service — CRUD + history + activity tracking.
-
-Updated 2026-09-28 (feat/persist-tool-steps): ``_message_to_dict`` emits
-``steps`` / ``stepsOmitted`` (an agent reply's recorded thinking and tool calls)
-through the shared ``steps_wire_fields``, only when non-empty, so the chat can
-show the work behind a reply after a refresh. Plain rows are unchanged.
-
-Updated 2026-09-27 (fix/chat-run-heartbeat): ``_message_to_dict`` emits
-``runStatus`` on an agent reply persisted from a run that did not complete
-(failed / cancelled / interrupted), so the chat can mark it as cut off after a
-refresh. Absent on every other row, so existing payloads are unchanged.
-
-Updated 2026-09-27 (fix/run-stream-session-readers): added
-``can_read_session(session_id, user_id)``, the boolean form of
-``_fetch_readable_session``. The chat run stream uses it so a teammate who may
-read a pocket thread can also watch the reply stream in, not only its history.
-
-Updated 2026-09-27 (feat/bulk-grants-conversations): added
-``list_by_agents(ctx, workspace_id, agent_ids)``, the batch form of
-``list_by_agent`` behind ``POST /sessions/by-agents``. Same filter (workspace,
-caller as owner, not deleted) and the same ``-lastActivity`` sort, but ONE
-query with ``In(agent, ids)``, grouped per agent in Python so each list keeps
-the sort order. Every requested id is a key in the result, empty when it has
-no sessions.
-
-Updated 2026-09-27 (fix/chat-attachment-name-backfill): ``get_history`` fills
-display fields on legacy nameless upload attachments at read time. Agent-chat
-sends used to carry bare ``{"url": "/api/v1/uploads/<id>"}`` and those rows
-were stored with ``name=""``, no ``meta.mime``/``meta.size`` and ``type="file"``
-even for images. ``_backfill_attachment_display`` looks every such upload id
-on the page up in ONE query (``uploads_service.get_records_scoped``, pinned to
-the session's workspace) and fills ``name``, ``meta.{mime,size,id}`` and an
-image/audio ``type``. Stored documents are never rewritten; named attachments,
-non-upload urls, unknown/foreign ids and non-file types pass through as-is,
-and any lookup failure is logged at debug and leaves the page unchanged.
-
-Updated 2026-09-25 (fix/shared-pocket-chat-visibility): a pocket's conversations
-(the Paw Site builder rail included) are now readable by everyone who may read
-the pocket, not only by the user who wrote them. ``list_for_pocket`` returns
-every owner's threads to a caller who passes the pocket read rule
-(``pockets_service.can_read``) AND belongs to the pocket's workspace
-(``_is_workspace_member``); anyone else keeps the old owner-only list. ``get``
-and ``get_history`` go through ``_fetch_readable_session``, which admits the
-owner or such a reader of the session's pocket. Group-context rows stay with
-their owner, since their history is the group's transcript. Writes (``update``, ``delete``,
-``touch``, sending a turn) stay owner-only through ``_fetch_owned``.
-
-Updated 2026-09-01 (feat/byok-guest-backend): ``create`` enforces the guest
-session cap on its NEW-ROW branch only (upsert/re-link of an existing session
-stays uncapped — it creates nothing), via ``auth.guest_gates``. Added
-``count_owned(user_id)`` so the guest budget can count sessions without
-touching this entity's Beanie document (cloud rule 2).
+"""Sessions service: CRUD, history and activity tracking for ``Session``.
 
 Sole owner of writes to the ``Session`` Beanie document. Module-level
 ``async def`` API, no class wrapper, no Protocol-based repository.
 
-Recent change: ``auto_create_pocket_session`` now stamps the workspace's
-default ``pocketpaw`` agent (and the pocket id when known) onto the
-``Session`` it creates. The OSS chat path (home page + widget "Ask agent")
-persists through this helper; without the agent stamp those sessions had
-``agent=None`` and never surfaced in the PocketPaw DM room (which lists via
-``list_by_agent`` keyed on ``Session.agent``). Agent/pocket resolution
-degrades gracefully to the prior behaviour when no default agent exists.
+Access rules:
+- Reads (``get``, ``get_history``, ``can_read_session``) go through
+  ``_fetch_readable_session``: the owner, or anyone who may read the session's
+  pocket (``pockets_service.can_read``) and belongs to its workspace. Group
+  rows stay owner-only, since their history is the group's transcript.
+- ``list_for_pocket`` returns every owner's threads to such a pocket reader and
+  only the caller's own threads to anyone else.
+- Writes (``update``, ``delete``, ``touch``, sending a turn) stay owner-only
+  through ``_fetch_owned``.
+- ``create`` enforces the guest session cap (``auth.guest_gates``) on its
+  new-row branch only; an upsert of an existing session creates nothing.
 
-Public API:
-- ``create(ctx, workspace_id, body)`` — create or upsert a session
-- ``list_for_owner(ctx, workspace_id)``
-- ``list_by_agent(ctx, workspace_id, agent_id)``
-- ``list_by_agents(ctx, workspace_id, agent_ids)`` — the same, for many agents
-  in one query
-- ``list_for_pocket(ctx, pocket_id)`` — every owner's threads for a pocket
-  reader who belongs to its workspace; otherwise the caller's own
-- ``get(ctx, session_id)``
-- ``update(ctx, session_id, body)``
-- ``delete(ctx, session_id)`` — soft delete
-- ``link_pocket(workspace_id, session_id_str, pocket_id)`` — used by
-  ``pockets/service.py`` when a pocket is created with a session_id
-- ``get_history(session_id, user_id, limit)`` — kept on Beanie because it
-  spans three context types and reads the unified Message collection
-- ``touch(session_id)`` — kept on Beanie; called by chat persistence
-  bridges on the hot path
-- ``legacy_ctx(user_id, workspace_id)`` — helper for routers that haven't
-  yet migrated to ``Depends(request_context)``
+History (``get_history``) reads the unified Message collection across three
+context types. ``_message_to_dict`` emits ``runStatus`` only on an agent reply
+persisted from a run that did not complete, so the chat can mark it cut off,
+and ``steps`` / ``stepsOmitted`` (via ``steps_wire_fields``) only when the reply
+recorded any, so the work behind a reply survives a refresh.
+Legacy nameless upload attachments get display fields (name, mime, size,
+image/audio type) filled at read time from one scoped uploads lookup per page;
+stored documents are never rewritten and any lookup failure leaves the page
+unchanged.
+
+``auto_create_pocket_session`` stamps the workspace's default ``pocketpaw``
+agent (and the pocket id when known) onto the session it creates, so OSS chat
+sessions surface in the PocketPaw DM room, which lists by ``Session.agent``.
+
+Main public API: ``create``, ``list_for_owner`` / ``list_for_owner_page``,
+``list_by_agent`` / ``list_by_agents`` (one query for many agents, every
+requested id a key), ``list_for_pocket``, ``get``, ``can_read_session``,
+``update``, ``delete`` (soft), ``link_pocket``, ``get_history``, ``touch``,
+``count_owned``, and ``legacy_ctx`` for routers not yet on
+``Depends(request_context)``.
 """
 
 from __future__ import annotations

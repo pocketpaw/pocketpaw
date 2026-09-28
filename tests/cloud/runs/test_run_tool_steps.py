@@ -1,26 +1,22 @@
 # tests/cloud/runs/test_run_tool_steps.py
-# Created 2026-09-28 (feat/persist-tool-steps). Reproduces: tool calls, tool
-# results and thinking a cloud chat run streams are gone after a refresh. They
-# only ever reach the Redis run stream (1h TTL); the assistant Message stores the
-# text and ripple/artifact attachments, and nothing else.
+# End-to-end coverage that the tool calls, tool results and thinking a cloud
+# chat run streams are persisted on the assistant Message, so they survive a
+# refresh after the Redis run stream expires.
 #
-# The contract these tests pin (the implementation must match it):
-#   * ``Message.steps: list[MessageStep]`` — ordered, one entry per thinking block
+# The contract these tests pin:
+#   * ``Message.steps: list[MessageStep]``, ordered, one entry per thinking block
 #     or tool call, plus ``Message.steps_omitted: int`` when caps drop some.
 #   * ``MessageStep`` fields: ``id``, ``kind`` ("thinking" | "tool"), ``tool``,
 #     ``narration``, ``input``, ``output``, ``output_truncated``, ``status``
 #     ("running" | "complete" | "error" | "missing_result"), ``started_at``,
 #     ``ended_at``, and ``text`` for thinking.
-#   * Written with the Message on EVERY path that writes one: completed, and the
-#     partial (failed / cancelled / interrupted) paths from fix/chat-run-heartbeat.
+#   * Written with the Message on every path that writes one: completed, and the
+#     partial (failed / cancelled / interrupted) paths.
 #   * Tool input is scrubbed, tool output and thinking are redacted and capped.
 #   * The provisional ``input_pending`` announcement the claude_sdk backend makes
 #     before the real one is ONE step, not two.
 #   * The UI history wire dict carries ``steps`` (camelCase inner keys); the LLM
 #     history does not.
-#
-# EXPECTED STATE ON THE UNFIXED TREE: every test fails except the last
-# characterization.
 from __future__ import annotations
 
 import fakeredis.aioredis

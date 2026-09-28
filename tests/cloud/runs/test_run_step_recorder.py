@@ -1,9 +1,9 @@
 # tests/cloud/runs/test_run_step_recorder.py
-# Created 2026-09-28 (feat/persist-tool-steps). Unit coverage around the step
-# recorder that test_run_tool_steps.py drives end to end: the ``input_pending``
-# plumbing in ``_drive_agent_loop`` (production's only source of the flag), the
-# caps the end-to-end tests don't reach (byte budget, input size, thinking
-# redaction), and the wire keys on the two group-message mappers.
+# Unit coverage around the step recorder that test_run_tool_steps.py drives end
+# to end: the ``input_pending`` plumbing in ``_drive_agent_loop`` (production's
+# only source of the flag), the caps the end-to-end tests don't reach (byte
+# budget, input size, thinking redaction), and the wire keys on the two
+# group-message mappers.
 from __future__ import annotations
 
 from datetime import UTC, datetime

@@ -1,11 +1,11 @@
 # tests/cloud/shared/test_agent_bridge_steps.py
-# Created 2026-09-28 (feat/persist-tool-steps). The group/DM bridge streams the
-# same backend events the chat run does, so its replies persist the same
-# ``steps``: thinking merged into one block, the claude_sdk provisional
-# announcement folded into its real call, results paired by tool name. The
-# first test drives ``_run_agent_response`` with the harness the other bridge
-# tests use and checks what reaches ``create_agent_message``; the second checks
-# ``create_agent_message`` stores the steps and the group wire mapper returns them.
+# The group/DM bridge streams the same backend events the chat run does, so its
+# replies persist the same ``steps``: thinking merged into one block, the
+# claude_sdk provisional announcement folded into its real call, results paired
+# by tool name. The first test drives ``_run_agent_response`` with the harness
+# the other bridge tests use and checks what reaches ``create_agent_message``;
+# the second checks ``create_agent_message`` stores the steps and the group wire
+# mapper returns them.
 from __future__ import annotations
 
 from types import SimpleNamespace
