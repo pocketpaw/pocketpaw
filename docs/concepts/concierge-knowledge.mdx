@@ -9,6 +9,9 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
 
 {/*
   docs/concepts/concierge-knowledge.mdx
+  Updated 2026-09-28 (feat/concierge-manual-create, CR-12) — new section "Creating and
+  deleting a concierge": owners create it explicitly, nothing else does, and what
+  happened to existing sites. "auto-provisioned" wording dropped.
   Updated 2026-09-27 (feat/concierge-v2-runner, CR-1) — new section "The v2 runtime":
   the per-site concierge_runtime switch, what v2 does (one tool-free model call
   grounded in the site KB), which refusals it skips, its config keys, and what it
@@ -57,7 +60,7 @@ with no site binding reads nothing to visitors, because no visitor ever runs it.
 `GET /api/v1/agents/{agent_id}/knowledge` reports this per agent: it returns
 `visible_to_site_visitors` beside the article list, `true` when a Paw Bar widget
 binds that agent to a published site. It reads the real binding, so an agent bound
-by hand in the dashboard counts the same as an auto-provisioned one. The flag is a
+by hand in the dashboard counts the same as one bound when the concierge was created. The flag is a
 label, not a gate — it changes nothing about who may call the endpoint (still the
 agent's owner or a workspace admin) and nothing about what a visitor can reach. It
 exists so the owner is told before they attach something, rather than after a
@@ -159,6 +162,30 @@ the agent's own scope, are never listed or linked: they have no public URL to po
 at, so a reply can be grounded in them without them showing up as a citation. When
 nothing matches, or the search fails, no sources are shown and the reply is
 unaffected.
+
+## Creating and deleting a concierge
+
+A site has a concierge only because its owner created one, with
+`POST /paw-bar/admin/site/{site_id}/concierge` (the dashboard's "Create concierge").
+Nothing else creates one: not creating a widget, not switching the concierge on, not
+publishing, and not attaching a connected site. A site without one shows visitors no
+chat bar, and every public route treats it exactly as if it were switched off.
+
+A new concierge starts off. Its runtime comes from the v2 eval gate at the moment it is
+created: `legacy` until the deployment turns v2 on and the gate report passes. A legacy
+concierge gets a dedicated agent bound; a v2 one needs none. Existing concierges keep
+the runtime they have. Once the owner turns it on,
+the bar appears on the live page at the next publish.
+
+`DELETE` on the same route removes it. The agent is unbound, never deleted, and the
+concierge's conversations are kept unless the owner asks for them to go too
+(`?delete_conversations=true`). The site's own pages stay in its knowledge; they
+belong to the site.
+
+Sites that already had a concierge answering visitors when this rule arrived kept it:
+a one-time backfill (`python -m pocketpaw_ee.sites.migrate_concierge_marker`, which
+also runs at server start) marked every site whose bar was bound to a live agent as an
+existing legacy concierge, still on. Every other site starts with none.
 
 ## The v2 runtime
 
