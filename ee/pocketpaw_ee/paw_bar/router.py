@@ -1,4 +1,11 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-28 (feat/concierge-guided-fields, CR-4) — the settings GET/PATCH
+#   carry the owner's guided fields: ``concierge_name`` (<=40),
+#   ``concierge_tone`` (friendly|professional|concise|playful),
+#   ``concierge_languages`` (1-10 BCP-47 codes), ``concierge_about`` (<=600),
+#   ``concierge_avoid_topics`` (<=10 x 80) and ``concierge_escalation``
+#   ({mode: handoff|email|none, contact <=120}, sent whole). Partial PATCH as
+#   before; a cap or enum miss is a 422 (``pocketpaw.paw_bar.concierge_fields``).
 # Updated: 2026-09-28 (feat/concierge-spend-cap, CR-5) — on a v2 site, a used-up
 #   monthly conversation allowance no longer refuses the visitor with a 403: after
 #   the rate limit (the reply writes a handoff, so it must spend a slot), POST
@@ -624,6 +631,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.concierge_fields import (
+    ConciergeAbout,
+    ConciergeAvoidTopics,
+    ConciergeEscalation,
+    ConciergeLanguages,
+    ConciergeName,
+    ConciergeTone,
+)
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
     ConversationState,
@@ -1904,6 +1919,17 @@ class ConciergeSettingsUpdate(BaseModel):
     # CR-2 (2026-09-28): "Answer with code examples from your docs". On, a v2
     # reply may show a code block found verbatim in the site's knowledge.
     concierge_allow_doc_code: bool | None = None
+    # CR-4 (2026-09-28): the guided fields. Caps and shapes are in
+    # ``pocketpaw.paw_bar.concierge_fields``; each value is normalized (one line,
+    # no control characters) and refused with a 422 past its cap. Clear a text
+    # field with "" and the topics with []; null means "not sent", as above.
+    # Languages can't be emptied (at least one). Escalation is sent WHOLE.
+    concierge_name: ConciergeName | None = None
+    concierge_tone: ConciergeTone | None = None
+    concierge_languages: ConciergeLanguages | None = None
+    concierge_about: ConciergeAbout | None = None
+    concierge_avoid_topics: ConciergeAvoidTopics | None = None
+    concierge_escalation: ConciergeEscalation | None = None
 
 
 class ConciergePreviewTokensRequest(BaseModel):
@@ -1936,6 +1962,13 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
     concierge_allow_doc_code: bool = False
+    # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
+    concierge_name: str = ""
+    concierge_tone: ConciergeTone | None = None
+    concierge_languages: list[str] = Field(default_factory=list)
+    concierge_about: str = ""
+    concierge_avoid_topics: list[str] = Field(default_factory=list)
+    concierge_escalation: ConciergeEscalation | None = None
     # CR-12: whether the owner has created this site's concierge
     # (``Site.concierge_created_at``). False means "none": the dashboard shows the
     # create empty state, and every public seam treats the site as off.
@@ -2052,6 +2085,13 @@ async def _concierge_settings_response(
         # getattr for the same reason: a row older than the switch reads legacy.
         concierge_runtime=_site_concierge_runtime(site),
         concierge_allow_doc_code=getattr(site, "concierge_allow_doc_code", False) is True,
+        # getattr again: rows older than the guided fields read as unset.
+        concierge_name=getattr(site, "concierge_name", "") or "",
+        concierge_tone=getattr(site, "concierge_tone", None),
+        concierge_languages=list(getattr(site, "concierge_languages", None) or []),
+        concierge_about=getattr(site, "concierge_about", "") or "",
+        concierge_avoid_topics=list(getattr(site, "concierge_avoid_topics", None) or []),
+        concierge_escalation=getattr(site, "concierge_escalation", None),
         concierge_exists=getattr(site, "concierge_created_at", None) is not None,
         embed_snippet=await _site_embed_snippet(site, workspace_id, user_id),
     )

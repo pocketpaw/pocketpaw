@@ -39,6 +39,8 @@
 # runs `mutate.py --validate`, which counts substrings and exits: no mutation
 # applied, no tests run, no dependency install. A full sweep is deliberately
 # NOT here; see the job's own comment for why.
+# Updated: 2026-09-28 — the v2 concierge step also runs
+# test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
 name: CI
 
 on:
@@ -251,14 +253,17 @@ jobs:
         # that the call carries zero tools, that every public gate still fires
         # before it, and that legacy sites are untouched. The _output file is
         # the only proof that code never reaches the widget and that product
-        # cards carry catalog prices, not the model's. The _degrade file is the
-        # only proof that a capped, over-quota or failing site gets the
-        # leave-a-message reply and no model call. Mutations:
-        # tests/mutations/concierge_v2_runtime.json.
+        # cards carry catalog prices, not the model's. The _guided_fields file
+        # is the only proof that owner text stays quoted in the data half and
+        # never reaches the frame. The _degrade file is the only proof that a
+        # capped, over-quota or failing site gets the leave-a-message reply and
+        # no model call. Mutations: tests/mutations/concierge_v2_runtime.json
+        # and tests/mutations/concierge_guided_fields.json.
         run: >-
           uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
           tests/cloud/test_paw_bar_concierge_v2_output.py
-          tests/cloud/test_paw_bar_concierge_v2_degrade.py -o addopts="" -q --tb=short
+          tests/cloud/test_paw_bar_concierge_v2_degrade.py
+          tests/cloud/test_paw_bar_concierge_guided_fields.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

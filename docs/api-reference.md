@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-28 (feat/concierge-guided-fields, CR-4) — Paw Bar admin table:
+  the settings GET/PATCH carry the owner's guided concierge fields, with their
+  caps and PATCH rules, in a table under "Admin — the owner surface".
 Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — Paw Bar admin table:
   added POST/DELETE /paw-bar/admin/site/{site_id}/concierge, the only way a
   concierge is created or removed; `concierge_exists` on the settings and overview
@@ -4125,7 +4128,7 @@ the split is the security model:
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
-| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. |
+| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code` and the guided fields below. |
 | `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Catalog & Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec. |
 | `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. One row per CONVERSATION, not per visitor — a visitor who asked four separate questions is four rows, each carrying its own `conversation_id` and its own last sentence. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
 | `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. Pass `conversation_id` to read ONE thread; without it the visitor's whole history is merged into a single transcript. Both sources narrow together — narrowing only the runs would interleave one thread's questions with every reply a human ever sent that visitor. Narrowing reads each turn's own session-key token rather than rebuilding a key from the conversation id and the widget's current agent, so a conversation that predates conversation identity — or one answered before its widget was bound to a dedicated agent — opens instead of 404-ing. A conversation the visitor really holds returns an empty transcript rather than a 404 when it has nothing in it yet. |
@@ -4136,6 +4139,28 @@ the split is the security model:
 | `GET /paw-bar/admin/site/{site_id}/handoffs` | Conversations a visitor asked to escalate. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. |
 | `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP `sandbox` directive as the public frame. |
+
+#### Guided concierge fields (v2)
+
+The settings GET and PATCH carry six fields that shape a v2 concierge. Unset reads as
+`""`, `null` or `[]`, and an unset field adds nothing to the prompt. A PATCH writes only
+the fields it sends; `null` means "not sent", so clear a text field with `""` and the
+topics with `[]`. A value past its cap, outside its enum, or not a language code is a
+422 and nothing is written.
+
+| Field | Type | Rules |
+|---|---|---|
+| `concierge_name` | string | At most 40 characters after whitespace is folded to single spaces. |
+| `concierge_tone` | `"friendly" \| "professional" \| "concise" \| "playful"` or `null` | Picks one fixed sentence. Can't be reset to `null`. |
+| `concierge_languages` | string[] | 1 to 10 BCP-47 codes, case-normalized (`en-us` becomes `en-US`) and de-duplicated. The first is the fallback language. `[]` is a 422. |
+| `concierge_about` | string | At most 600 characters. Paragraph breaks are kept; other whitespace folds. |
+| `concierge_avoid_topics` | string[] | At most 10 topics of 80 characters each. Blank entries and case-insensitive duplicates are dropped. |
+| `concierge_escalation` | `{"mode": "handoff" \| "email" \| "none", "contact": string}` or `null` | Sent whole. `contact` is at most 120 characters and must be an email address when `mode` is `"email"`. It is kept for the other modes but not used. |
+
+Control and invisible formatting characters are stripped from every text value. None
+of these fields reaches the model's instructions: they are rendered into fixed
+sentences, with owner text quoted, in the data part of the request. See
+`docs/concepts/concierge-knowledge.mdx`.
 
 Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the

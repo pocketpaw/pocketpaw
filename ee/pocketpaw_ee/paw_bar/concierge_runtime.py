@@ -1,5 +1,12 @@
 # ee/pocketpaw_ee/paw_bar/concierge_runtime.py — the v2 Paw Bar concierge runner.
 #
+# Updated: 2026-09-28 (feat/concierge-guided-fields, CR-4) — the owner's guided
+# fields reach the model. ``build_prompt`` takes the site (keyword-only) and puts
+# ``concierge_prompt.render_owner_block(site)`` first in the DATA half, ahead of
+# <knowledge>; a site with no guided field set renders nothing, so its prompt is
+# unchanged. The frame is untouched: FRAME and FRAME_DOC_CODE stay constants.
+# ``owner-settings`` joins the neutralized block tags, so knowledge, history or
+# the visitor can't forge or close the owner block.
 # Updated: 2026-09-28 (feat/concierge-spend-cap, CR-5) — spend cap and graceful
 # degrade. A turn the concierge cannot answer gets ONE fixed leave-a-message reply
 # (``degrade_reply``: a ``chunk`` + ``stream_end``, the frames the widget already
@@ -294,7 +301,8 @@ def _context_bodies(context: str) -> dict[str, str]:
 # Opening or closing any of our block tags, in data. Neutralized so a KB article,
 # a catalog name or the visitor cannot close a block early and write "outside" it.
 _BLOCK_TAG_RE = re.compile(
-    r"<\s*/?\s*(knowledge|item|catalog|history|visitor-message)\b", re.IGNORECASE
+    r"<\s*/?\s*(knowledge|item|catalog|history|visitor-message|owner-settings)\b",
+    re.IGNORECASE,
 )
 
 
@@ -431,11 +439,18 @@ def build_prompt(
     widget: Any,
     history: Sequence[dict[str, str]],
     message: str,
+    *,
+    site: Any = None,
 ) -> str:
-    """The user half of the request: tagged data blocks in the PRD's fixed order
-    (knowledge, catalog and actions, history), then the visitor's message. The
-    frame is NOT here; it rides as the run's instructions, ahead of all of this."""
-    blocks = [_knowledge_block(items)]
+    """The user half of the request: the owner's guided fields (when any are set),
+    then tagged data blocks in the PRD's fixed order (knowledge, catalog and
+    actions, history), then the visitor's message. The frame is NOT here; it rides
+    as the run's instructions, ahead of all of this."""
+    from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
+
+    owner = render_owner_block(site) if site is not None else ""
+    blocks = [owner] if owner else []
+    blocks.append(_knowledge_block(items))
     catalog = _catalog_and_actions_block(widget)
     if catalog:
         blocks.append(catalog)
@@ -932,7 +947,7 @@ async def run_concierge_v2(
     try:
         await _bookkeep(run_service.mark_running, run_id)
         items = await retrieve(site, message, agent_id=agent_id or None)
-        prompt = build_prompt(items, widget, history, message)
+        prompt = build_prompt(items, widget, history, message, site=site)
         model = _build_model(settings)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
