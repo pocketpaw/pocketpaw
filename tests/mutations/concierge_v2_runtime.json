@@ -311,7 +311,8 @@
     "find": "            knowledge=items,",
     "replace": "            knowledge=(),",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter"
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_grounds_code_in_whatever_retrieve_returns_including_faqs"
     ]
   },
   {
