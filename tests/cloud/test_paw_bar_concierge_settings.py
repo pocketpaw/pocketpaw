@@ -421,6 +421,51 @@ async def test_preview_tokens_renders_without_writing(client):
 
 
 @pytest.mark.asyncio
+async def test_preview_tokens_carries_the_dark_palette(client):
+    """The editor previews both palettes, so the dark one comes back too."""
+    c, _store = client
+    site = await _site()
+
+    res = await c.post(
+        f"/paw-bar/admin/site/{site.id}/appearance/preview-tokens",
+        json={"concierge_appearance": {"accent": "#ff5a36", "accent_dark": "#88aaff"}},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["tokens"]["--pawbar-accent"] == "#ff5a36"
+    assert body["tokens_dark"]["--pawbar-accent"] == "#88aaff"
+    assert body["concierge_appearance"]["accent_dark"] == "#88aaff"
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_round_trips_the_look_fields(client):
+    """Launcher style, logo and the dark palette save and read back."""
+    c, _store = client
+    site = await _site()
+    look = {
+        "logo_url": "https://cdn.example.test/logo.png",
+        "accent_dark": "#88aaff",
+        "launcher": {"style": "icon", "position": "bottom-left"},
+        "colors_dark": {"surface": "#101018"},
+    }
+
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_appearance": look}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["concierge_appearance"]["launcher"]["style"] == "icon"
+
+    got = (await c.get(f"/paw-bar/admin/site/{site.id}/settings")).json()
+    saved = got["concierge_appearance"]
+    assert saved["logo_url"] == "https://cdn.example.test/logo.png"
+    assert saved["accent_dark"] == "#88aaff"
+    assert saved["launcher"]["style"] == "icon"
+    assert saved["launcher"]["position"] == "bottom-left"
+    assert saved["colors_dark"]["surface"] == "#101018"
+
+
+@pytest.mark.asyncio
 async def test_preview_tokens_returns_the_clamped_value_not_the_typed_one(client):
     """The preview must not promise a look a save would not store.
 
