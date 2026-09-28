@@ -1,6 +1,10 @@
 """Tier 2 arq worker: ``execute_run_job`` rehydrates a ``RunSpec`` and
 delegates to ``execute_run``; ``_startup`` sweeps runs orphaned by the
-previous worker."""
+previous worker.
+
+Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot-sweep orphan is aged past
+``_boot_sweep_older_than_seconds()`` instead of a fixed 30s, now that the cutoff
+is three heartbeat intervals rather than 5 seconds."""
 
 from __future__ import annotations
 
@@ -88,7 +92,10 @@ async def test_startup_runs_short_cutoff_sweep(mongo_db, monkeypatch):  # noqa: 
         client_message_id="c-orphan",
         user_message_id="um1",
         status="running",  # type: ignore[arg-type]
-        createdAt=datetime.now(UTC) - timedelta(seconds=30),
+        # Just past the boot cutoff, which is three heartbeat intervals (so a
+        # booting replica leaves runs another replica is still beating alone).
+        createdAt=datetime.now(UTC)
+        - timedelta(seconds=worker._boot_sweep_older_than_seconds() + 30),
     )
     await orphan.insert()
 

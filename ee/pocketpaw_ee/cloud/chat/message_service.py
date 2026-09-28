@@ -22,6 +22,13 @@ so peers in the room got the event and rendered nothing until they reloaded
 the page. The array is serialized in the same shape as
 ``dto.message_to_wire_dict`` so the realtime path and the REST response patch
 a client's message row identically.
+
+Updated 2026-09-27 (fix/chat-run-heartbeat): ``persist_assistant_message_for_scope``
+takes an optional ``run_status``. ``execute_run`` now persists the text a failed /
+cancelled / interrupted run had already streamed as an assistant Message instead
+of leaving it on the run doc only, and ``run_status`` marks that row as cut off.
+The doc -> domain mapper and ``_message_response`` carry it, and emit the wire
+key only when it is set, so a normal message's payload is unchanged.
 """
 
 from __future__ import annotations
@@ -119,6 +126,7 @@ def _message_doc_to_domain(doc: _MessageDoc) -> _MessageDomain:
         session_key=doc.session_key,
         role=doc.role,
         created_at=getattr(doc, "createdAt", None),
+        run_status=getattr(doc, "run_status", None),
     )
 
 
@@ -349,7 +357,7 @@ def _reply_preview(parent: _MessageDoc | None) -> dict | None:
 
 def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) -> dict:
     """Convert a Message Beanie document to a frontend-compatible dict."""
-    return {
+    out = {
         "_id": str(msg.id),
         "group": msg.group,
         "sender": msg.sender,
@@ -369,6 +377,10 @@ def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) ->
         "deleted": msg.deleted,
         "createdAt": iso_utc(msg.createdAt),
     }
+    # Only a cut-off agent reply carries this; normal payloads stay unchanged.
+    if getattr(msg, "run_status", None):
+        out["runStatus"] = msg.run_status
+    return out
 
 
 async def _get_group_message_or_404(message_id: str) -> _MessageDoc:
@@ -1335,11 +1347,16 @@ async def persist_assistant_message_for_scope(
     target_agent_id: str,
     content: str,
     attachments: list[dict] | None = None,
+    run_status: str | None = None,
 ) -> _MessageDoc:
     """Persist an agent's reply in an agent-stream context.
 
     A CONCIERGE reply is the one context with NO Message home — see the branch
     below; it returns an unsaved doc rather than writing an orphan row.
+
+    ``run_status`` is set only for the partial text of a run that did not
+    complete (``failed`` | ``cancelled`` | ``interrupted``), so the history
+    reader and the UI can tell a cut-off reply from a finished one.
     """
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
     if kind == "concierge":
@@ -1383,6 +1400,7 @@ async def persist_assistant_message_for_scope(
             content=content,
             attachments=att_models,
             workspace_id=workspace_id,
+            run_status=run_status,
         )
     else:
         msg = _MessageDoc(
@@ -1394,6 +1412,7 @@ async def persist_assistant_message_for_scope(
             content=content,
             attachments=att_models,
             workspace_id=workspace_id,
+            run_status=run_status,
         )
     await msg.insert()
     return msg

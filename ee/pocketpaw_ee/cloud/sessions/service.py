@@ -1,5 +1,10 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-27 (fix/chat-run-heartbeat): ``_message_to_dict`` emits
+``runStatus`` on an agent reply persisted from a run that did not complete
+(failed / cancelled / interrupted), so the chat can mark it as cut off after a
+refresh. Absent on every other row, so existing payloads are unchanged.
+
 Updated 2026-09-27 (fix/run-stream-session-readers): added
 ``can_read_session(session_id, user_id)``, the boolean form of
 ``_fetch_readable_session``. The chat run stream uses it so a teammate who may
@@ -807,7 +812,7 @@ def _decode_history_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
 
 def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
     """Serialize a Message row the way the client expects (display path)."""
-    return {
+    out = {
         "_id": str(m.id),
         "role": role,
         "content": m.content,
@@ -816,6 +821,10 @@ def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
         "createdAt": iso_utc(m.createdAt),
         "attachments": [a.model_dump() for a in (m.attachments or [])],
     }
+    run_status = getattr(m, "run_status", None)
+    if run_status:
+        out["runStatus"] = run_status
+    return out
 
 
 # Attachment types that are plain file chips and may be backfilled. Anything

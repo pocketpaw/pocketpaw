@@ -12,6 +12,11 @@ import from this module:
 
 A future cleanup pass can flip the canonical home if/when the
 chat-unify references are migrated.
+
+Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``message_to_wire_dict`` emits
+``runStatus`` for an agent reply persisted from a run that did not complete, so
+the client can mark it as cut off. The key is absent on every other message,
+keeping those payloads byte-identical.
 """
 
 from __future__ import annotations
@@ -51,7 +56,7 @@ def message_to_wire_dict(m: Message, *, parent: Message | None = None) -> dict[s
     supplied, ``replyPreview`` is populated so the FE can render the
     inline quote without a second fetch.
     """
-    return {
+    wire: dict[str, Any] = {
         "_id": m.id,
         "group": m.group,
         "sender": m.sender,
@@ -77,6 +82,9 @@ def message_to_wire_dict(m: Message, *, parent: Message | None = None) -> dict[s
         "deleted": m.deleted,
         "createdAt": iso_utc(m.created_at),
     }
+    if m.run_status:
+        wire["runStatus"] = m.run_status
+    return wire
 
 
 _REPLY_PREVIEW_CHARS = 140

@@ -9,6 +9,10 @@ Phase 10 ships only the value objects. The service+router migration to
 use these is incremental — existing call sites keep using the Beanie
 docs directly until each method is migrated. New code should prefer
 domain types.
+
+Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``Message.run_status`` mirrors the
+new persistence field: the terminal status of a run whose partial reply this
+row is (``None`` for every complete message).
 """
 
 from __future__ import annotations
@@ -120,6 +124,8 @@ class Message:
     role: str | None = None  # PocketRole
     # Timestamps
     created_at: datetime | None = None
+    # Set only on a cut-off agent reply (the run's terminal status).
+    run_status: str | None = None
 
 
 __all__ = [
