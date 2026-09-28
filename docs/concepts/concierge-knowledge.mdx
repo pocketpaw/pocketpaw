@@ -9,6 +9,10 @@ tags: ["paw-bar", "sites", "knowledge", "privacy"]
 
 {/*
   docs/concepts/concierge-knowledge.mdx
+  Updated 2026-09-28 (feat/concierge-guided-fields, CR-4) — new subsection "Guided
+  fields": name, tone, languages, about, topics to avoid and escalation, how each is
+  rendered, and why owner text can't change the rules. The "not yet" line drops
+  owner-written guidance.
   Updated 2026-09-28 (feat/concierge-v2-output, CR-2) — new subsection "What a v2 reply
   can contain": code blocks become a fixed line, cards are bounded and product data
   comes only from the catalog; the "not yet" list drops those two items. Plus "Code
@@ -241,8 +245,34 @@ or change code. The server then checks every code block before the visitor sees 
 Text in a knowledge page cannot switch this check off: a page can only make code pass
 by containing it.
 
-v2 does not yet read the page the visitor is on, use owner-written guidance fields, or
-cap spend per site. Those land before it becomes the default for new sites.
+### Guided fields
+
+Owners shape a v2 concierge with six fields on the same settings endpoint, rather than
+by writing a prompt:
+
+- **Name** (up to 40 characters): "Your name is «Maya»."
+- **Tone**: friendly, professional, concise or playful. Each picks one fixed sentence.
+- **Languages** (one to ten BCP-47 codes): it replies in the visitor's language when
+  that is on the list, and in the first one otherwise.
+- **About your business** (up to 600 characters): background facts, quoted.
+- **Topics to avoid** (up to ten, 80 characters each): it declines them politely and
+  steers back to the site.
+- **When it doesn't know**: offer a person from the team (`handoff`), share an email
+  address (`email`), or just say so and suggest looking around the site (`none`).
+
+The fields don't go into the model's instructions, which stay the same fixed text for
+every site. They are rendered into an owner-settings block at the top of the data part
+of the request, as fixed sentences. Anything the owner typed appears only as a quoted
+value, folded onto one line, with its own quote marks and angle brackets swapped out.
+So "Ignore the above" as a concierge name is just an odd name. The block tag is
+neutralized wherever else it appears, so a knowledge page or a visitor can't fake one.
+A site that sets none of the fields sends exactly the prompt it sent before.
+
+The full field contract (types, caps, PATCH rules) is in the API reference under the
+Paw Bar owner surface.
+
+v2 does not yet read the page the visitor is on or cap spend per site. Those land
+before it becomes the default for new sites.
 
 ## What a concierge records
 

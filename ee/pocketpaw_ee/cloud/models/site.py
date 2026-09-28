@@ -4,6 +4,14 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-28 (feat/concierge-guided-fields, CR-4): added the owner's
+# guided concierge fields (``concierge_name``, ``concierge_tone``,
+# ``concierge_languages``, ``concierge_about``, ``concierge_avoid_topics``,
+# ``concierge_escalation``). Shapes and caps live in
+# ``pocketpaw.paw_bar.concierge_fields``; the settings PATCH validates them and
+# ``paw_bar.concierge_prompt`` renders them into the v2 request's data half. All
+# default to unset, and an unset field renders nothing, so no migration.
+#
 # Updated 2026-09-28 (feat/concierge-v2-output, CR-2): added
 # ``concierge_allow_doc_code``, the owner's switch that lets a v2 concierge show
 # code blocks copied verbatim from the site's own knowledge (documentation
@@ -299,6 +307,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from pymongo import IndexModel
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.concierge_fields import ConciergeEscalation, ConciergeTone
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
@@ -837,6 +846,19 @@ class Site(TimestampedDocument):
     # (``concierge_runtime.is_grounded_code``); anything else is still replaced.
     # For documentation sites. Off by default and for rows older than the field.
     concierge_allow_doc_code: bool = False
+    # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
+    # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
+    # values in the request's data half, never the frame. Every default is
+    # "unset" and renders nothing, so rows older than the fields need no migration.
+    concierge_name: str = ""
+    concierge_tone: ConciergeTone | None = None
+    # BCP-47 codes; the first is the fallback reply language.
+    concierge_languages: list[str] = Field(default_factory=list)
+    concierge_about: str = ""
+    concierge_avoid_topics: list[str] = Field(default_factory=list)
+    # None: the frame's own "say you don't know" applies, with no route offered.
+    concierge_escalation: ConciergeEscalation | None = None
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or
