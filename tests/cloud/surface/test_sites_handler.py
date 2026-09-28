@@ -1,4 +1,10 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
+#
+# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — the concierge block
+# no longer says a site "ships with" a concierge that is created automatically and
+# on by default; the owner creates it in the dashboard. A new test pins that the
+# block never claims automatic creation, and the publish-tie test's docstring
+# drops the ``ensure_site_widget`` trigger it named.
 # Updated: 2026-09-27 (feat/sites-lean-prompt) — the create preamble no longer
 # embeds design-taste or sites-craft; tests now pin the short art-direction step,
 # the craft floor, the size budget, and html create asking through ask_user.
@@ -1260,14 +1266,13 @@ async def test_concierge_block_never_promises_a_configuration_tool(
 
 
 async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
-    """A DRAFT has no concierge — provisioning is live-publish-only.
+    """A DRAFT has no concierge — the bar reaches a page only at a live publish.
 
-    `sites/service.py::_embed_concierge_bar` (and the `ensure_site_widget`
-    trigger inside it) runs between the build and the deploy of a LIVE publish;
-    a preview returns from `publish_pocket` long before it. Since the create
-    flow is draft-first, an agent that told the user "your site has a concierge"
-    right after a create would be wrong. The create block must tie the concierge
-    to publishing.
+    `sites/service.py::_embed_concierge_bar` runs between the build and the
+    deploy of a LIVE publish; a preview returns from `publish_pocket` long before
+    it. Since the create flow is draft-first, an agent that told the user "your
+    site has a concierge" right after a create would be wrong. The create block
+    must tie the concierge to publishing.
     """
     for engine in (None, "svelte", "ripple"):
         meta = SurfaceMeta(route_path="/sites", engine=engine)
@@ -1279,6 +1284,23 @@ async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
         assert "publish" in window, (
             f"engine={engine}: the concierge block does not tie provisioning to publish"
         )
+
+
+@pytest.mark.parametrize("label,meta", _CONCIERGE_MODES, ids=[m[0] for m in _CONCIERGE_MODES])
+async def test_concierge_block_never_claims_one_is_created_automatically(
+    label: str, meta: SurfaceMeta
+) -> None:
+    """CR-12: the owner creates a concierge in the dashboard; nothing makes one.
+
+    The block used to promise that every published site "ships with" a concierge
+    "provisioned automatically" and "ON by default". An agent repeating that would
+    tell a user their live site has a chat bar it does not have.
+    """
+    lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
+
+    for claim in ("ships with a concierge", "provisioned automatically", "on by default"):
+        assert claim not in lower, f"{label}: preamble still claims {claim!r}"
+    assert "never created automatically" in lower, f"{label}: the owner-creates rule is missing"
 
 
 async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -> None:

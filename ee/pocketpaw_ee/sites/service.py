@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): no path here creates
+#   a concierge any more (captain rule). Publish no longer mints a widget + agent
+#   in ``_embed_concierge_bar`` (the transient first-publish doc is gone with it),
+#   and ``bind_foreign_concierge`` no longer runs the funnel on either its resolve
+#   or its mint arm; ``_provision_foreign_concierge`` is deleted. The embed asks
+#   ``Site.concierge_created_at`` (via ``concierge_snippet``'s required
+#   ``concierge_exists``): a first publish has no doc and so no concierge and no
+#   bar. ``rebind_foreign_concierge`` requires an ``agent_id``; an empty one is a
+#   422 instead of a re-provision.
+#
 # Updated 2026-09-27 (fix/sites-preview-fonts): ``_extract_css`` keeps remote
 #   stylesheets. A ``<link rel="stylesheet">`` with an absolute ``https://`` or
 #   protocol-relative ``//`` href (Google Fonts, Fontshare, ...) used to be read as a
@@ -2857,8 +2867,9 @@ async def mint_foreign_site(
 
     IT ALWAYS TRIES TO MINT, AND CALLERS MUST NOT USE IT DIRECTLY. It has no
     resolve step: it buys a month every time it runs to completion.
-    ``bind_foreign_concierge`` is the resolve-or-buy layer over this, it is the
-    entry point, and it is also where the concierge agent gets provisioned.
+    ``bind_foreign_concierge`` is the resolve-or-buy layer over this, and it is
+    the entry point. Neither creates a concierge: that is the owner's explicit
+    ``POST /paw-bar/admin/site/{id}/concierge`` (CR-12).
 
     A SECOND CALL FOR THE SAME POCKET NOW FAILS RATHER THAN CHARGING. The id is
     derived (``_foreign_object_id``), so the insert below hits the primary key and
@@ -3202,10 +3213,11 @@ async def bind_foreign_concierge(
     callers want — the mint is a primitive that buys a month unconditionally, so
     a UI that called it on every "connect" click would bill per click.
 
-    Both paths then run the concierge funnel
-    (``paw_bar.agent_provisioning.provision_foreign_concierge``), so a row minted
-    before it had a funnel, or one whose agent was deleted, gets its agent on the
-    next bind instead of staying a paid bar that cannot answer.
+    NEITHER PATH CREATES A CONCIERGE (CR-12, captain rule). Both used to run the
+    provisioning funnel and mint an agent; now a bought connection is just that,
+    and its owner creates the concierge explicitly afterwards
+    (``POST /paw-bar/admin/site/{id}/concierge``). Until then the row carries no
+    ``concierge_created_at`` and every public seam treats it as off.
 
     The gates are INHERITED, not re-implemented: a pocket the caller cannot
     access, a pocket belonging to another workspace, and an origin the workspace
@@ -3259,7 +3271,6 @@ async def bind_foreign_concierge(
                 workspace_id,
                 str(existing.id),
             )
-            await _provision_foreign_concierge(existing, workspace_id)
             return existing
 
         try:
@@ -3305,40 +3316,7 @@ async def bind_foreign_concierge(
                     str(site.id),
                 )
 
-    # Outside the lock: the row is committed, so every later bind resolves it and
-    # holding the mutex through a network-bound agent mint would only serialise
-    # unrelated callers behind it. The funnel is idempotent, so a bind that races
-    # in here converges on the same agent.
-    await _provision_foreign_concierge(site, workspace_id)
     return site
-
-
-async def _provision_foreign_concierge(site: _SiteDoc, workspace_id: str) -> None:
-    """Run the concierge funnel for a foreign site, swallowing everything.
-
-    Lazily imported for the same reason every other paw_bar reach-in here is: the
-    sites service must load in a deployment that does not carry the bar.
-
-    Never raises. The month is ALREADY PAID by the time this runs, so a failure
-    to mint the agent must not unwind the purchase — the customer keeps their row
-    and their key, the next bind retries the funnel, and the failure is logged
-    rather than turned into a refund problem.
-    """
-    try:
-        from pocketpaw_ee.paw_bar.agent_provisioning import provision_foreign_concierge
-
-        agent_id = await provision_foreign_concierge(site, workspace_id)
-        if not agent_id:
-            logger.warning(
-                "sites.bind_foreign: site %s is paid but has no concierge agent bound",
-                str(site.id),
-            )
-    except Exception:  # noqa: BLE001 - a paid row must survive a provisioning failure
-        logger.warning(
-            "sites.bind_foreign: concierge provisioning failed for site %s",
-            str(site.id),
-            exc_info=True,
-        )
 
 
 async def rotate_foreign_concierge_key(*, workspace_id: str, pocket_id: str) -> _SiteDoc:
@@ -3383,9 +3361,10 @@ async def rebind_foreign_concierge(
     """Point this concierge's bar at a different agent, leaving the row alone.
 
     ``agent_id`` names the replacement, and is tenancy-checked inside the funnel
-    module before anything is written. Omitted, the bar is RE-PROVISIONED: the
-    stale bind is cleared and the funnel resolve-or-mints the canonical agent
-    again, which is the repair for a bar whose agent was deleted.
+    module before anything is written. It is REQUIRED: an empty one used to
+    re-provision (clear the bind, mint the canonical agent), and a rebind that can
+    mint an agent is a way to create a concierge nobody asked for (CR-12). The
+    funnel module raises ``ValidationError`` for it.
 
     ``widget_id`` picks the bar explicitly when a pocket carries more than one;
     omitted, the pocket resolves it. The bar must belong to this site's pocket —
@@ -3409,6 +3388,7 @@ async def rebind_foreign_concierge(
     Raises:
         NotFound: ``site`` when the pocket has no foreign concierge; ``agent``
             when ``agent_id`` is not readable in this workspace.
+        ValidationError: ``sites.agent_required`` when ``agent_id`` is empty.
         Forbidden: ``sites.agent_not_published`` when a non-admin names an agent
             that does not already front a foreign concierge here;
             ``sites.widget_pocket_mismatch`` when ``widget_id`` is another
@@ -3880,10 +3860,6 @@ async def _deploy_site_doc(
         signed_key=signed_key,
         project_dir=build.project_dir,
         engine=engine,
-        # A FIRST publish has no Site doc yet — it is inserted further down — so
-        # pass the two fields provisioning needs to stand one up in memory.
-        user_id=user_id,
-        site_name=site_name,
     )
 
     # Stamp the free-tier attribution badge onto the same built tree, also before
@@ -4191,8 +4167,6 @@ async def _embed_concierge_bar(
     signed_key: str,
     project_dir: str,
     engine: str,
-    user_id: str = "",
-    site_name: str = "",
 ) -> None:
     """Write the concierge embed snippet into the built pages, before they deploy.
 
@@ -4202,11 +4176,10 @@ async def _embed_concierge_bar(
     step. It runs between the build and the deploy, so the artifact that goes live
     already carries the bar — no second deploy, no post-publish patch.
 
-    ``concierge_enabled`` is read off the site's EXISTING doc, defaulting to True
-    when there is none: this is a first publish, and the doc about to be inserted
-    below carries the model's ``concierge_enabled=True`` default, so reading the
-    absent doc as "on" is what makes a brand-new site behave like the one it is
-    about to become rather than silently skipping its own first bar.
+    Whether the site HAS a concierge is read off its EXISTING doc
+    (``concierge_created_at``, CR-12). A first publish has no doc, and so no
+    concierge and no bar: nothing here creates one. The owner creates it
+    explicitly, and the next publish embeds it.
 
     FAILURE-SOFT, and that is the whole point of the try/except: this sits in the
     middle of a live publish. A site going live matters more than its bar, so an
@@ -4214,11 +4187,13 @@ async def _embed_concierge_bar(
     here logs and lets the publish continue to deploy.
     """
     try:
+        from pocketpaw_ee.cloud.auth.site_keys import concierge_exists
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
-        concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
+        concierge_enabled = False if doc is None else bool(doc.concierge_enabled)
+        has_concierge = doc is not None and concierge_exists(doc)
 
         # Does this site's PLAN sell a concierge (feat/sites-concierge-entitlement)?
         # Resolved here rather than inside ``concierge_snippet`` because this is the
@@ -4274,39 +4249,6 @@ async def _embed_concierge_bar(
                 concierge_enabled=True,  # asking the PLAN; the switch is read above
             ).concierge_entitled
 
-        # Publish-time provisioning (the third trigger): an agent-created site
-        # published in the same conversation has passed through NEITHER
-        # widget-create NOR a concierge-enable transition, so it reaches this
-        # embed with no widget and no dedicated agent — and the four-gate
-        # snippet check below would silently skip the bar. Mint the widget +
-        # agent here so the first publish ships with its concierge. Idempotent
-        # and failure-soft inside; requires the site doc (draft flows have one).
-        if concierge_enabled:
-            from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_widget
-
-            # A FIRST publish reaches here BEFORE the Site doc is inserted, so
-            # ``doc`` is None and the old ``doc is not None`` guard skipped
-            # provisioning entirely: no widget, no dedicated agent, the
-            # four-gate snippet check returned "" and the page shipped bar-less
-            # — with no log line, because the empty snippet returns early. Only
-            # a SECOND publish (doc now present) grew a bar, which is exactly
-            # why this looked fixed. Stand up a transient doc for that first
-            # pass: ``ensure_site_widget``/``ensure_site_agent`` only read
-            # ``.workspace``/``.owner``/``.id``/``.name``/``.pocket_id`` off the
-            # object, never re-reading the DB, and the real insert below carries
-            # the same values.
-            provisioning_doc = doc
-            if provisioning_doc is None:
-                provisioning_doc = _SiteDoc(
-                    id=ObjectId(site_id),
-                    workspace=workspace_id,
-                    pocket_id=pocket_id,
-                    owner=user_id,
-                    name=site_name,
-                    signed_key=signed_key,
-                )
-            await ensure_site_widget(provisioning_doc, workspace_id)
-
         snippet = await embed.concierge_snippet(
             workspace_id=workspace_id,
             pocket_id=pocket_id,
@@ -4318,6 +4260,7 @@ async def _embed_concierge_bar(
             api_base=_capture_base(),
             concierge_enabled=concierge_enabled,
             concierge_entitled=concierge_entitled,
+            concierge_exists=has_concierge,
         )
         if not snippet:
             # Say WHY when the reason is billing. This early return is the exact

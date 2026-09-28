@@ -13,6 +13,14 @@
 # Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
 # sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
 # Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+# Updated: 2026-09-28 (feat/concierge-spend-cap) — the v2 concierge step also runs
+# test_paw_bar_concierge_v2_degrade.py (spend cap and leave-a-message degrade).
+# Updated: 2026-09-28 (feat/concierge-manual-create) — the EE test job runs the
+# concierge manual-create, marker-backfill and foreign-bind tests (tests/cloud).
+# Updated: 2026-09-27 (feat/concierge-v2-runner) — the EE test job runs the v2
+# Paw Bar concierge runner tests, which otherwise sit in the tests/cloud blind spot.
+# Updated: 2026-09-28 (feat/concierge-v2-output) — the same step also runs the v2
+# output pipeline tests (code-fence filter, card hydration, paw-bar parity).
 # Updated: 2026-06-10 — deploy-coolify job: pushes to dev that pass every CI
 # job now fire the Coolify deploy hook for the cloud backend stack (defined
 # in qbtrix/paw-workspace deploy/coolify/, which clones this repo's dev at
@@ -34,6 +42,15 @@
 # runs `mutate.py --validate`, which counts substrings and exits: no mutation
 # applied, no tests run, no dependency install. A full sweep is deliberately
 # NOT here; see the job's own comment for why.
+# Updated: 2026-09-28 — the v2 concierge step also runs
+# test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
+# Updated: 2026-09-28 — and test_paw_bar_concierge_page.py (CR-3, page-aware
+# answers: the page's origin check, the crawl index, sources = retrieved).
+# Updated: 2026-09-28 (feat/concierge-eval-gate, CR-6) — the v2 concierge step
+# also runs the eval scorer and rollout-gate tests, then the recorded eval
+# (``python -m tests.evals.concierge.run --recorded``), which replays committed
+# model outputs through the real runner and fails on any code leak, frame leak,
+# invalid card, turn error or missing recording.
 name: CI
 
 on:
@@ -236,6 +253,61 @@ jobs:
         # spot: a dropped filter would be a silent leak between tenants that no
         # other lane runs a test for.
         run: uv run pytest tests/cloud/test_agent_activity.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run v2 concierge runner tests
+        # Same addopts escape. The v2 runner answers anonymous visitors on
+        # customers' sites in one model call, and this file is the only proof
+        # that the call carries zero tools, that every public gate still fires
+        # before it, and that legacy sites are untouched. The _output file is
+        # the only proof that code never reaches the widget and that product
+        # cards carry catalog prices, not the model's. The _guided_fields file
+        # is the only proof that owner text stays quoted in the data half and
+        # never reaches the frame. The _page file is the only proof that a page
+        # off the site's allowed origins is dropped and that its title stays
+        # quoted data. The _degrade file is the only proof that a capped,
+        # over-quota or failing site gets the leave-a-message reply and no
+        # model call. The _evals and _eval_gate files pin the eval scorers
+        # and the rollout gate that decides whether new concierges get v2.
+        # Mutations: tests/mutations/concierge_v2_runtime.json,
+        # tests/mutations/concierge_guided_fields.json and
+        # tests/mutations/concierge_eval_gate.json.
+        run: >-
+          uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
+          tests/cloud/test_paw_bar_concierge_v2_output.py
+          tests/cloud/test_paw_bar_concierge_v2_degrade.py
+          tests/cloud/test_paw_bar_concierge_guided_fields.py
+          tests/cloud/test_paw_bar_concierge_page.py
+          tests/cloud/test_paw_bar_concierge_evals.py
+          tests/cloud/test_paw_bar_concierge_eval_gate.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run the recorded v2 concierge eval
+        # Replays tests/evals/concierge/recorded/ through the real v2 runner and
+        # output filter, no network. Fails on pipeline properties only (a code
+        # leak, a frame leak, an invalid card, a turn error, a case with no
+        # recording); the model thresholds apply to real runs, not replays.
+        run: uv run python -m tests.evals.concierge.run --recorded
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge manual-create tests
+        # Same addopts escape. A concierge exists only because its owner created
+        # one: these prove no trigger (widget create, enable PATCH, publish,
+        # foreign attach, empty-id rebind) creates one, that "none" reads as "off"
+        # to a visitor, and that the backfill keeps every bar that was live on
+        # the old model live. Mutations: tests/mutations/concierge_manual_create.json.
+        run: >-
+          uv run pytest
+          tests/cloud/test_paw_bar_concierge_manual_create.py
+          tests/cloud/sites/test_concierge_marker_backfill.py
+          tests/cloud/sites/test_foreign_concierge_bind.py
+          -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

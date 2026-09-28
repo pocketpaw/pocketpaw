@@ -15,6 +15,11 @@ Changes:
   ``find_stranded_replies`` now skips runs whose ``assistant_message_id`` is set:
   ``execute_run`` persists a non-completed run's partial as a real ``Message``,
   and counting it here too would replay the same reply twice.
+- 2026-09-28 (feat/concierge-spend-cap, CR-5) — added ``find_run_usage_since``,
+  the per-site daily spend read behind the v2 Paw Bar concierge's spend cap. It
+  returns ``(usage, createdAt)`` pairs for one scope's runs, projected to those two
+  fields, so the caller prices them with the meter (``metering.resolve_cost``)
+  without importing ``ChatRunDoc`` (EE Rule 2).
 - 2026-09-14 (fix/partial-reply-survives-failed-run) — added
   ``STRANDED_REPLY_STATUSES`` + ``find_stranded_replies``. ``execute_run`` writes
   an assistant ``Message`` from exactly one place, and the failed / cancelled /
@@ -454,3 +459,37 @@ async def find_stranded_replies(
     return [
         StrandedReply(status=d.status, text=d.partial_text, created_at=d.createdAt) for d in docs
     ]
+
+
+class _RunUsageProjection(BaseModel):
+    """The two fields a spend read prices: never the answer text or history."""
+
+    usage: dict[str, Any] = {}
+    createdAt: datetime
+
+
+async def find_run_usage_since(
+    *,
+    workspace_id: str,
+    context_type: str,
+    scope_id: str,
+    since: datetime,
+) -> list[tuple[dict[str, Any], datetime]]:
+    """``(usage, createdAt)`` for every run of one scope created at or after ``since``.
+
+    Served by the ``(workspace, context_type, scope_id, createdAt)`` index and
+    projected to the two fields, so a busy scope's answers never cross the wire.
+    The caller prices each pair with ``metering.resolve_cost`` (at its own
+    ``createdAt``), the same meter that writes the ``compute_spend`` debits.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == context_type,
+            ChatRunDoc.scope_id == scope_id,
+            ChatRunDoc.createdAt >= since,
+        )
+        .project(_RunUsageProjection)
+        .to_list()
+    )
+    return [(dict(d.usage or {}), d.createdAt) for d in docs]

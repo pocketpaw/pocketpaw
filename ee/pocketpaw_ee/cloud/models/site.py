@@ -4,6 +4,39 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-28 (feat/concierge-page-aware, CR-3): added ``kb_page_index``,
+# the crawl index the site sync writes (``sites.kb_ingest``): which kb article
+# each page became, so the v2 concierge can find the page a visitor is on.
+#
+# Updated 2026-09-28 (feat/concierge-guided-fields, CR-4): added the owner's
+# guided concierge fields (``concierge_name``, ``concierge_tone``,
+# ``concierge_languages``, ``concierge_about``, ``concierge_avoid_topics``,
+# ``concierge_escalation``). Shapes and caps live in
+# ``pocketpaw.paw_bar.concierge_fields``; the settings PATCH validates them and
+# ``paw_bar.concierge_prompt`` renders them into the v2 request's data half. All
+# default to unset, and an unset field renders nothing, so no migration.
+#
+# Updated 2026-09-28 (feat/concierge-v2-output, CR-2): added
+# ``concierge_allow_doc_code``, the owner's switch that lets a v2 concierge show
+# code blocks copied verbatim from the site's own knowledge (documentation
+# sites). Defaults False, so existing rows keep every code block replaced.
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a concierge now exists
+# only because its owner created it. Added ``concierge_created_at``, the marker
+# ``POST /paw-bar/admin/site/{id}/concierge`` stamps and ``DELETE`` clears, and
+# flipped ``concierge_enabled`` to default False (matching ``sites/dto.py``). Rows
+# written before this never stored ``concierge_enabled`` and read the old True
+# default, so ``sites.migrate_concierge_marker`` writes both fields explicitly in
+# the same release (it runs at boot and as a deploy step) or every live bar goes
+# dark the moment this model ships.
+#
+# Updated 2026-09-27 (feat/concierge-v2-runner, CR-1): added ``concierge_runtime``,
+# the owner's switch between the legacy concierge (a full agent run through the
+# executor) and ``v2`` (one tool-free streamed model call grounded in the site KB,
+# ``paw_bar.concierge_runtime``). It lives on the Site, beside the other concierge
+# switches, because a site has exactly one concierge widget and the chat handler
+# already holds this document when it decides. Defaults "legacy", so every
+# existing row keeps today's behaviour with no migration.
+#
 # Updated 2026-09-23 (VS-4 -- rename a site's address): added ``slug_pending``, the
 # address an owner asked to move to, applied on the site's NEXT publish (a live build
 # cannot be redeployed without rebuilding the draft), with its own PARTIAL unique index
@@ -279,13 +312,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field, PrivateAttr
 from pymongo import IndexModel
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.concierge_fields import ConciergeEscalation, ConciergeTone
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
@@ -774,9 +808,20 @@ class Site(TimestampedDocument):
     # three public entry points (frame / chat / action) refuse with a 403, so the
     # owner can silence the bar instantly without deleting the Site or rotating the
     # key. Re-read on EVERY request (never cached on a warm client) so a toggle
-    # takes effect immediately. Defaults True (every existing site stays live), so
-    # no migration.
-    concierge_enabled: bool = True
+    # takes effect immediately. Defaults False since CR-12: a concierge is created
+    # off and turned on by its owner. Rows that predate CR-12 never stored this
+    # field; ``sites.migrate_concierge_marker`` writes their old effective value
+    # (True) explicitly so the flip does not silence them.
+    concierge_enabled: bool = False
+    # Paw Bar concierge (CR-12, 2026-09-28): WHEN the owner created this site's
+    # concierge, or None when it has none. Existence is this stored marker, never
+    # "the widget has an agent" — v2 answers without one. Stamped only by
+    # ``POST /paw-bar/admin/site/{id}/concierge`` (and the one-shot backfill for
+    # bars that were already live), cleared by ``DELETE``. Nothing else writes it,
+    # which is the captain's rule: no concierge is ever created automatically.
+    # ``site_keys.concierge_available`` requires it, so "none" reads as "off" at
+    # every public seam.
+    concierge_created_at: datetime | None = None
     # VS-3: the owner's "hide the PocketPaw badge" preference. Only half of the
     # rule: ``sites.service._stamp_free_badge`` drops the badge when the site is
     # ENTITLED to remove it (``SiteEntitlements.badge_required`` is False) AND this is
@@ -811,12 +856,44 @@ class Site(TimestampedDocument):
     # Defaults reproduce today's look exactly, so an unstyled Site is unchanged
     # and there is no migration.
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+    # Paw Bar concierge runtime (CR-1, 2026-09-27). "legacy" dispatches the
+    # concierge as a full agent run (RunSpec -> executor); "v2" answers in one
+    # streamed model call with NO tools, grounded in the site KB. Read per chat
+    # turn, so a flip takes effect on the next message. Default "legacy" until
+    # the v2 eval gate passes; a row written before the field existed reads as
+    # legacy too (callers use getattr with that default).
+    concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    # "Answer with code examples from your docs" (CR-2, 2026-09-28). Off: a v2
+    # reply never shows a code block. On: a code block passes only when it is
+    # found, verbatim, in the knowledge retrieved for that turn
+    # (``concierge_runtime.is_grounded_code``); anything else is still replaced.
+    # For documentation sites. Off by default and for rows older than the field.
+    concierge_allow_doc_code: bool = False
+    # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
+    # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
+    # values in the request's data half, never the frame. Every default is
+    # "unset" and renders nothing, so rows older than the fields need no migration.
+    concierge_name: str = ""
+    concierge_tone: ConciergeTone | None = None
+    # BCP-47 codes; the first is the fallback reply language.
+    concierge_languages: list[str] = Field(default_factory=list)
+    concierge_about: str = ""
+    concierge_avoid_topics: list[str] = Field(default_factory=list)
+    # None: the frame's own "say you don't know" applies, with no route offered.
+    concierge_escalation: ConciergeEscalation | None = None
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or
     # deleted page left behind WITHOUT touching the rest of the scope, which also
     # holds owner-uploaded files. Empty until the first sync, so no migration.
     kb_article_ids: list[str] = Field(default_factory=list)
+    # The crawl index (CR-3): ``{page_key: {"id": article id, "title": title}}``
+    # for each page the last sync ingested, keyed by ``kb_ingest.page_key``. The v2
+    # concierge looks the visitor's page up here (``concierge_runtime.resolve_page``);
+    # kb-go names articles by title, so this is the only page-to-article link. Empty
+    # until the site's next sync, so no migration: a page then reads as not indexed.
+    kb_page_index: dict[str, dict[str, str]] = Field(default_factory=dict)
     # When the last sync ran (success or not) and why it produced nothing, so the
     # dashboard can tell "this concierge has no knowledge yet" apart from "syncing
     # is broken". "" means the last sync was clean.

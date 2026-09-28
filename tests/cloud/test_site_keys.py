@@ -1,4 +1,11 @@
 # tests/cloud/test_site_keys.py — Paw Bar concierge key resolver (T1).
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Created 2026-07-14: covers auth.site_keys.resolve_site_key end-to-end against a
 # live Beanie Site (the mongo_db fixture), plus the sites.service.mint_foreign_site
 # → resolve round-trip that proves the credential works for a FOREIGN site whose
@@ -48,6 +55,12 @@ async def _site(**overrides) -> Site:
         allowed_origins=["brewco.com"],
     )
     defaults.update(overrides)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    defaults.setdefault("concierge_created_at", _dt.now(_UTC))
+    defaults.setdefault("concierge_enabled", True)
     site = Site(**defaults)
     await site.insert()
     return site
@@ -241,6 +254,17 @@ async def _buyable(workspace_id: str, host: str) -> None:
 
 
 @pytest.mark.asyncio
+async def _owner_creates_concierge(site) -> None:
+    """What the owner's ``POST /paw-bar/admin/site/{id}/concierge`` plus turning it
+    on leave on the row (CR-12). The endpoint is covered in
+    tests/cloud/test_paw_bar_concierge_manual_create.py."""
+    from datetime import UTC, datetime
+
+    site.concierge_created_at = datetime.now(UTC)
+    site.concierge_enabled = True
+    await site.save()
+
+
 async def test_mint_foreign_site_then_resolve(mongo_db):
     """A foreign site (script_name="") minted by the service resolves by its
     signed_key — proving the lookup does NOT depend on script_name."""
@@ -266,6 +290,13 @@ async def test_mint_foreign_site_then_resolve(mongo_db):
     assert site.signed_key.startswith("site_key_")
     assert site.allowed_origins == ["shop.example.com"]
 
+    # CR-12: a bought connection has no concierge until its owner creates one,
+    # so the key is refused as "off" until then.
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-9")
+    assert exc.value.detail == "concierge_disabled"
+    await _owner_creates_concierge(site)
+
     ctx = await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-9")
     assert ctx.scope is ScopeKind.CONCIERGE
     assert ctx.workspace_id == "ws-2"
@@ -290,6 +321,7 @@ async def test_mint_foreign_site_scope_override(mongo_db):
             allowed_origins=["shop.example.com"],
             scopes=["chat"],
         )
+    await _owner_creates_concierge(site)
     ctx = await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-1")
     assert ctx.scopes == ["chat"]
 

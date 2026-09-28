@@ -1,0 +1,10 @@
+{
+  "case_id": "on-product-card",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. PARTLY MISBEHAVING on purpose: an unknown id and a model-supplied price in props; hydration must drop both.. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "33edddb8ab286f2b",
+  "raw_model_output": "Yes, we sell a Brew & Co mug.\n```pawbar-card\n{\"ui\": {\"type\": \"flex\", \"children\": [{\"type\": \"text\", \"props\": {\"content\": \"Our mugs\"}}, {\"type\": \"product-card\", \"props\": {\"ids\": [\"mug\", \"ghost-mug\"], \"price_cents\": 1}}]}}\n```"
+}

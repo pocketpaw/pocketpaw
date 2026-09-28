@@ -1,0 +1,104 @@
+[
+  {
+    "label": "owner text keeps its own guillemets and angle brackets — it can close the quote and forge a block",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_prompt.py",
+    "find": "    value = value.replace(\"«\", \"‹\").replace(\"»\", \"›\").replace(\"<\", \"‹\").replace(\">\", \"›\")",
+    "replace": "    value = value",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_text_never_lands_outside_a_quoted_value",
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_fields_reach_the_data_half_and_never_the_frame",
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_quote_is_one_line_with_no_quote_or_tag_characters_of_its_own"
+    ]
+  },
+  {
+    "label": "owner text is not folded to one line — a newline starts an unquoted sentence",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_prompt.py",
+    "find": "    value = one_line(text)[:cap]",
+    "replace": "    value = (text or \"\")[:cap]",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_text_never_lands_outside_a_quoted_value",
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_quote_is_one_line_with_no_quote_or_tag_characters_of_its_own"
+    ]
+  },
+  {
+    "label": "owner text is not capped at render — an oversized stored value reaches the model whole",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_prompt.py",
+    "find": "    value = one_line(text)[:cap]",
+    "replace": "    value = one_line(text)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_text_is_capped_at_render_even_if_stored_longer"
+    ]
+  },
+  {
+    "label": "the owner tag is not neutralized in data — a visitor can forge an owner block",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "visitor-message|owner-settings|page)",
+    "replace": "visitor-message|page)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_a_visitor_cannot_forge_the_owner_block"
+    ]
+  },
+  {
+    "label": "the runner drops the site from the prompt — owner fields never reach the model",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        prompt = build_prompt(items, widget, history, message, site=site, page=page_ctx)",
+    "replace": "        prompt = build_prompt(items, widget, history, message, page=page_ctx)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_fields_reach_the_data_half_and_never_the_frame"
+    ]
+  },
+  {
+    "label": "the email line ignores the mode — a handoff or none site shares a stale contact",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_prompt.py",
+    "find": "    if mode == \"email\" and contact:",
+    "replace": "    if contact:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_the_escalation_mode_drives_the_dont_know_line"
+    ]
+  },
+  {
+    "label": "the settings PATCH writes every field, sent or not — a one-field save wipes the rest",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    for name in req.model_fields_set:\n        value = getattr(req, name)\n        if value is not None:\n            setattr(site, name, value)",
+    "replace": "    for name in type(req).model_fields:\n        value = getattr(req, name)\n        if True:\n            setattr(site, name, value)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_guided_fields_patch_is_partial"
+    ]
+  },
+  {
+    "label": "the name cap is dropped — a 41-character name is stored",
+    "file": "src/pocketpaw/paw_bar/concierge_fields.py",
+    "find": "    return _capped(one_line(value), NAME_MAX_CHARS, \"concierge_name\")",
+    "replace": "    return one_line(value)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_settings_patch_rejects_out_of_bounds_guided_fields"
+    ]
+  },
+  {
+    "label": "an empty language list is accepted — the concierge has no language to answer in",
+    "file": "src/pocketpaw/paw_bar/concierge_fields.py",
+    "find": "    if not out:\n        raise ValueError(\"pick at least one language\")",
+    "replace": "    if False:\n        raise ValueError(\"pick at least one language\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_settings_patch_rejects_out_of_bounds_guided_fields"
+    ]
+  },
+  {
+    "label": "a malformed language code is accepted",
+    "file": "src/pocketpaw/paw_bar/concierge_fields.py",
+    "find": "        if norm is None:\n            raise ValueError(",
+    "replace": "        if norm is None:\n            continue\n            raise ValueError(",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_settings_patch_rejects_out_of_bounds_guided_fields"
+    ]
+  },
+  {
+    "label": "email escalation is saved with no address",
+    "file": "src/pocketpaw/paw_bar/concierge_fields.py",
+    "find": "        if self.mode == \"email\" and not _EMAIL_RE.match(self.contact):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_settings_patch_rejects_out_of_bounds_guided_fields"
+    ]
+  }
+]

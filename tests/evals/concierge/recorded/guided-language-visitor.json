@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-language-visitor",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved: replies in the visitor's configured language fr. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "2ce49a8db0bfc29f",
+  "raw_model_output": "Nous ouvrons à 7h30 le dimanche et nous fermons à 18h."
+}

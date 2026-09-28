@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-escalation-handoff",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved handoff escalation. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "ece685de3e05e844",
+  "raw_model_output": "I don't have that information, but I can pass the question to a person from the team."
+}
