@@ -14,6 +14,11 @@
 #     and unbinds the agent without deleting it. Twice → 409, cross-tenant → 404,
 #     a member without ``paw_bar.manage`` → 403.
 #
+# Updated 2026-09-28 (chore/concierge-v2-integration): the CR-8 / CR-9 delete-hook
+# tests patch the real ``knowledge_routes`` module instead of installing a
+# stand-in in ``sys.modules``, which the package attribute shadows once the real
+# module is imported (it failed only in a full-suite run).
+#
 # tests/mutations/concierge_manual_create.json restores each trigger in turn and
 # names the test here that catches it.
 
@@ -497,11 +502,12 @@ class TestCreateAndDelete:
     async def test_delete_clears_pinned_answers_through_the_cr8_hook(
         self, client, monkeypatch
     ) -> None:
-        """CR-8 owns the FAQ store and exposes ``delete_faqs(site)``. It ships in
-        its own PR, so a stand-in module is installed here; once CR-8 merges the
-        real one is imported by the same line."""
-        import sys
-        import types
+        """CR-8 owns the FAQ store and exposes ``delete_faqs(site)`` on the real
+        ``knowledge_routes`` module. The hook is patched on that module: a stand-in
+        in ``sys.modules`` is invisible once any test has imported the real one,
+        because the package attribute wins. The end-to-end proof, with the real
+        hooks and real rows, is test_paw_bar_concierge_v2_integration.py."""
+        from pocketpaw_ee.paw_bar import knowledge_routes
 
         cleared: list[str] = []
 
@@ -509,9 +515,7 @@ class TestCreateAndDelete:
             cleared.append(str(site.id))
             return 0
 
-        fake = types.ModuleType("pocketpaw_ee.paw_bar.knowledge_routes")
-        fake.delete_faqs = delete_faqs
-        monkeypatch.setitem(sys.modules, "pocketpaw_ee.paw_bar.knowledge_routes", fake)
+        monkeypatch.setattr(knowledge_routes, "delete_faqs", delete_faqs)
 
         site = await _site()
         await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
@@ -525,11 +529,10 @@ class TestCreateAndDelete:
         self, client, monkeypatch
     ) -> None:
         """CR-9 owns uploaded files and links and exposes ``delete_sources(site)``
-        in the same module as CR-8's hook. The stand-in carries ONLY that name, so
-        this also pins that each hook is looked up on its own: a module without
-        ``delete_faqs`` must not stop the sources from being cleared."""
-        import sys
-        import types
+        in the same module as CR-8's hook. ``delete_faqs`` is removed from the real
+        module here, so this also pins that each hook is looked up on its own: a
+        module without ``delete_faqs`` must not stop the sources from being cleared."""
+        from pocketpaw_ee.paw_bar import knowledge_routes
 
         cleared: list[str] = []
 
@@ -537,9 +540,8 @@ class TestCreateAndDelete:
             cleared.append(str(site.id))
             return 0
 
-        fake = types.ModuleType("pocketpaw_ee.paw_bar.knowledge_routes")
-        fake.delete_sources = delete_sources
-        monkeypatch.setitem(sys.modules, "pocketpaw_ee.paw_bar.knowledge_routes", fake)
+        monkeypatch.setattr(knowledge_routes, "delete_sources", delete_sources)
+        monkeypatch.delattr(knowledge_routes, "delete_faqs")
 
         site = await _site()
         await client.post(f"/paw-bar/admin/site/{site.id}/concierge", json={})
