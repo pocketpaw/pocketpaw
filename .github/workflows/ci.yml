@@ -35,6 +35,8 @@
 # runs `mutate.py --validate`, which counts substrings and exits: no mutation
 # applied, no tests run, no dependency install. A full sweep is deliberately
 # NOT here; see the job's own comment for why.
+# Updated: 2026-09-28 — the v2 concierge step also runs
+# test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
 name: CI
 
 on:
