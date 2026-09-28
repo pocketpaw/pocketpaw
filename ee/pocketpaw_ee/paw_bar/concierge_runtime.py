@@ -1,5 +1,26 @@
 # ee/pocketpaw_ee/paw_bar/concierge_runtime.py — the v2 Paw Bar concierge runner.
 #
+# Updated: 2026-09-28 (feat/concierge-spend-cap, CR-5) — spend cap and graceful
+# degrade. A turn the concierge cannot answer gets ONE fixed leave-a-message reply
+# (``degrade_reply``: a ``chunk`` + ``stream_end``, the frames the widget already
+# renders) and the conversation is handed to the owner through
+# ``handoff.raise_handoff``, instead of an error. Four triggers, one function:
+#   * ``spend_cap`` — the site has spent ``pawbar_concierge_daily_spend_cap`` USD
+#     or more today (UTC). Checked before the run doc and the model call, so no
+#     model call is made. The figure is ``site_spend_today_usd``: the site's
+#     concierge run docs since UTC midnight, each priced by
+#     ``metering.resolve_cost`` (the meter behind the ``compute_spend`` debits).
+#     The credit ledger itself is per workspace and names no site, so it cannot
+#     answer "what did this site spend"; a failed read serves the visitor.
+#   * ``quota`` — the router's monthly-allowance gate, on a v2 site (router.py).
+#   * ``provider_timeout`` / ``provider_error`` — the model call failed. Whatever
+#     already streamed stays, the degrade line follows it, and the run is marked
+#     failed with ``concierge_v2_<reason>``.
+# The metered call now carries LiteLLM request tags (``pawbar_site:<id>``,
+# ``pawbar_widget:<id>``) on proxy providers only and a per-request ``timeout``,
+# and the run doc's ``usage`` (what the meter prices) names ``site_id`` and
+# ``widget_id``.
+#
 # Updated: 2026-09-28 (feat/concierge-v2-output, CR-2, captain's change) — code
 # from a documentation site's own docs. A site with ``concierge_allow_doc_code``
 # on gets ``FRAME_DOC_CODE`` (FRAME with rule 2 allowing verbatim quotes from
@@ -51,6 +72,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -120,6 +142,9 @@ _HISTORY_CHARS = 4_000
 _HISTORY_LINE_CHARS = 800
 # The run doc's usage.backend, so the meter and the stats can tell v2 apart.
 _BACKEND = "pawbar_concierge_v2"
+# The provider's per-request timeout (ModelSettings ``timeout``). A stalled
+# provider becomes the degrade reply instead of a widget spinning forever.
+_PROVIDER_TIMEOUT_S = 30.0
 
 
 # --------------------------------------------------------------------------- #
@@ -459,17 +484,24 @@ def _build_model(settings: Any) -> Any:
     return _builder(settings)._build_model(_model_spec(settings))
 
 
-def _model_settings(settings: Any, workspace_id: str) -> dict[str, Any]:
-    """Fixed output cap and temperature, plus the paying workspace on the proxy.
+def _model_settings(
+    settings: Any, workspace_id: str, *, tags: Sequence[str] = ()
+) -> dict[str, Any]:
+    """Fixed output cap, temperature and timeout, plus spend attribution on the proxy.
 
     ``openai_user`` is set here, not through ``end_user_id_for``: that reads a
     ContextVar only the agent run loop binds, and this call is not in that loop,
-    so it would come back empty and the proxy would log the spend untagged."""
+    so it would come back empty and the proxy would log the spend untagged.
+
+    ``tags`` (the site and the widget) ride LiteLLM's ``metadata.tags``, which the
+    proxy stores on the spend row as ``request_tags``. Proxy providers only: a
+    direct provider rejects a body field it does not know."""
     from pocketpaw.agents.spend_attribution import is_proxy_provider
 
     out: dict[str, Any] = {
         "max_tokens": int(getattr(settings, "pawbar_concierge_max_tokens", 600) or 600),
         "temperature": _TEMPERATURE,
+        "timeout": _PROVIDER_TIMEOUT_S,
     }
     try:
         provider, _model = _builder(settings)._parse_provider_model(_model_spec(settings))
@@ -477,6 +509,8 @@ def _model_settings(settings: Any, workspace_id: str) -> dict[str, Any]:
         provider = ""
     if workspace_id and is_proxy_provider(provider):
         out["openai_user"] = workspace_id
+    if tags and is_proxy_provider(provider):
+        out["extra_body"] = {"metadata": {"tags": list(tags)}}
     return out
 
 
@@ -659,6 +693,136 @@ def _fence_filter_for(
 
 
 # --------------------------------------------------------------------------- #
+# Spend cap and graceful degrade (CR-5)
+# --------------------------------------------------------------------------- #
+
+# Why a turn was not answered. Logged and written to the run doc; never shown to
+# the visitor (the reply is the same for all four).
+DEGRADE_REASONS = ("spend_cap", "quota", "provider_timeout", "provider_error")
+
+# The reply when the owner has the conversation (the handoff landed, or it was
+# already waiting on a person).
+DEGRADE_HANDED_OFF = (
+    "I can't answer right now, so I've passed your message to the team. "
+    'Tap "Talk to a person" to leave your email and they\'ll get back to you.'
+)
+# The reply when the handoff could not be recorded: it must not claim otherwise.
+DEGRADE_LEAVE_MESSAGE = (
+    'I can\'t answer right now. Tap "Talk to a person" to leave a message for the '
+    "team and they'll get back to you."
+)
+
+
+def _utc_day_start(now: datetime) -> datetime:
+    return datetime(now.year, now.month, now.day, tzinfo=UTC)
+
+
+async def site_spend_today_usd(
+    workspace_id: str, pocket_id: str, *, now: datetime | None = None
+) -> float:
+    """What one site's concierge has spent on the model since UTC midnight, in USD.
+
+    A site is its ``(workspace, pocket)``: every concierge run doc on that scope
+    created today, legacy and v2 alike, each priced by ``metering.resolve_cost`` at
+    its own moment, the meter that writes the ``compute_spend`` ledger debits
+    (reported cost when the provider gave one, else the dated token price, which
+    works out inclusive input tokens itself). Raises on a failed read; the caller
+    decides which way that fails."""
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+    from pocketpaw_ee.cloud.metering.service import resolve_cost
+
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    rows = await run_service.find_run_usage_since(
+        workspace_id=workspace_id,
+        context_type="concierge",
+        scope_id=pocket_id,
+        since=_utc_day_start(now),
+    )
+    return sum(resolve_cost(usage, at=at).cost_usd for usage, at in rows)
+
+
+async def _over_spend_cap(settings: Any, workspace_id: str, pocket_id: str) -> bool:
+    """Whether the site is at or past today's cap. 0 means no cap.
+
+    Fails OPEN, as the conversation quota does: a lost read must not silence a
+    site that has paid for its concierge. The next turn reads again."""
+    cap = float(settings.pawbar_concierge_daily_spend_cap)
+    if cap <= 0:
+        return False
+    try:
+        spent = await site_spend_today_usd(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("concierge v2: daily spend read failed; answering", exc_info=True)
+        return False
+    return spent >= cap
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """A timeout, however the SDK spells it. ``openai.APITimeoutError`` is not a
+    ``TimeoutError``, so the class name counts too, on the error or its cause."""
+    for err in (exc, exc.__cause__):
+        if err is not None and (isinstance(err, TimeoutError) or "Timeout" in type(err).__name__):
+            return True
+    return False
+
+
+async def degrade_reply(
+    widget: Any,
+    reason: str,
+    *,
+    workspace_id: str,
+    customer_ref: str,
+    question: str = "",
+    conversation: Any = None,
+    store: Any = None,
+) -> AsyncIterator[bytes]:
+    """The SSE frames for a turn the concierge cannot answer: one ``chunk`` with a
+    fixed line, then ``stream_end``. The same frames an answer ends with, so every
+    widget bundle already renders it.
+
+    The conversation goes to the owner through ``handoff.raise_handoff`` (queue
+    flip to ``needs_human``, the handoff record, one owner notification), unless it
+    is already waiting on a person: while a cap holds, every turn lands here, and
+    one notification per visitor turn would train the owner to ignore them.
+
+    ``question`` is what the handoff record carries: pass the retention-gated
+    visitor line (empty when the site keeps no transcripts). ``reason`` is one of
+    ``DEGRADE_REASONS``; it is logged and never reaches the visitor. ``store`` is
+    the Paw Bar store the caller already holds, so the handoff writes where the
+    turn reads."""
+    from pocketpaw.paw_bar.models import ConversationState
+    from pocketpaw_ee.paw_bar import handoff
+    from pocketpaw_ee.paw_bar.router import _sse
+
+    widget_id = str(getattr(widget, "id", "") or "")
+    handed_off = getattr(conversation, "state", None) == ConversationState.NEEDS_HUMAN
+    if not handed_off:
+        try:
+            outcome = await handoff.raise_handoff(
+                widget=widget,
+                workspace_id=workspace_id,
+                customer_ref=customer_ref,
+                question=question,
+                # Not "agent" or "visitor": neither asked. The handoff ledger row
+                # keeps a capped site's turns apart from real escalations.
+                source=f"degrade:{reason}",
+                store=store,
+            )
+            handed_off = outcome.ok
+        except Exception:  # noqa: BLE001 — the visitor still gets a reply
+            logger.warning("concierge degrade: handoff failed for %s", widget_id, exc_info=True)
+    logger.info(
+        "paw_bar.concierge.degraded widget=%s reason=%s handed_off=%s",
+        widget_id,
+        reason,
+        handed_off,
+    )
+    text = DEGRADE_HANDED_OFF if handed_off else DEGRADE_LEAVE_MESSAGE
+    yield _sse("chunk", {"content": text, "type": "text"})
+    yield _sse("stream_end", {"assistant_message_id": None, "cancelled": False})
+
+
+# --------------------------------------------------------------------------- #
 # The runner
 # --------------------------------------------------------------------------- #
 
@@ -676,6 +840,7 @@ async def run_concierge_v2(
     session_key: str,
     history: Sequence[dict[str, str]] = (),
     stored_user_text: str = "",
+    store: Any = None,
 ) -> AsyncIterator[bytes]:
     """Answer one visitor turn and yield its SSE frames.
 
@@ -690,25 +855,37 @@ async def run_concierge_v2(
     Frames, in order: ``message.persisted`` {run_id, client_message_id}; one
     ``chunk`` {content, type:"text"} per streamed delta; at most one ``sources``;
     then ``stream_end`` {assistant_message_id: None, cancelled: False}. A failure
-    ends with the one generic visitor ``error`` frame instead — the exception
-    text never reaches the visitor.
+    ends with ``degrade_reply`` instead (CR-5): the exception text never reaches
+    the visitor. A site at its daily spend cap gets ``degrade_reply`` alone, with
+    no run doc and no model call. ``conversation`` and ``store`` are for the
+    handoff a degrade raises (the key already names the conversation).
     """
-    del page, conversation  # CR-3 reads the page; the key already names the conversation
+    del page  # CR-3 reads the page
     from pydantic_ai import Agent
 
     from pocketpaw_ee.cloud.chat.runs import service as run_service
     from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
-    from pocketpaw_ee.paw_bar.router import (
-        _SOURCES_WAIT_S,
-        _VISITOR_ERROR_CODE,
-        _VISITOR_ERROR_MESSAGE,
-        _concierge_sources,
-        _sse,
-    )
+    from pocketpaw_ee.paw_bar.router import _SOURCES_WAIT_S, _concierge_sources, _sse
+
+    settings = _settings()
+    if await _over_spend_cap(settings, workspace_id, pocket_id):
+        async for frame in degrade_reply(
+            widget,
+            "spend_cap",
+            workspace_id=workspace_id,
+            customer_ref=customer_ref,
+            question=stored_user_text,
+            conversation=conversation,
+            store=store,
+        ):
+            yield frame
+        return
 
     run_id = uuid.uuid4().hex
     client_message_id = uuid.uuid4().hex
     agent_id = str(getattr(widget, "agent_id", "") or "")
+    widget_id = str(getattr(widget, "id", "") or "")
+    site_id = str(getattr(site, "id", "") or "")
     spec = RunSpec(
         run_id=run_id,
         workspace_id=workspace_id,
@@ -728,7 +905,7 @@ async def run_concierge_v2(
         surface_meta={
             "pocket_id": pocket_id,
             "route_path": "/paw-bar",
-            "widget_id": str(getattr(widget, "id", "") or ""),
+            "widget_id": widget_id,
             "concierge_runtime": "v2",
         },
     )
@@ -748,13 +925,14 @@ async def run_concierge_v2(
 
     sources_task = asyncio.create_task(_concierge_sources(pocket_id, message, site))
     full_text = ""
-    usage: dict[str, Any] = {"backend": _BACKEND}
+    # The site and widget ride the usage the meter prices, whatever the outcome.
+    spend_tags = {"site_id": site_id, "widget_id": widget_id}
+    usage: dict[str, Any] = {"backend": _BACKEND, **spend_tags}
     finished = False
     try:
         await _bookkeep(run_service.mark_running, run_id)
         items = await retrieve(site, message, agent_id=agent_id or None)
         prompt = build_prompt(items, widget, history, message)
-        settings = _settings()
         model = _build_model(settings)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
@@ -773,14 +951,16 @@ async def run_concierge_v2(
                 getattr(settings, "pawbar_concierge_doc_code_chars", _DOC_CODE_CHARS)
             ),
         )
+        # Spend attribution: the proxy's spend row names the site and the widget.
+        tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
         async with agent.run_stream(
-            prompt, model_settings=_model_settings(settings, workspace_id)
+            prompt, model_settings=_model_settings(settings, workspace_id, tags=tags)
         ) as result:
             async for delta in result.stream_text(delta=True, debounce_by=None):
                 for piece in fences.feed(delta or ""):
                     full_text += piece
                     yield _sse("chunk", {"content": piece, "type": "text"})
-            usage = _usage(settings, result)
+            usage = {**_usage(settings, result), **spend_tags}
         for piece in fences.close():
             full_text += piece
             yield _sse("chunk", {"content": piece, "type": "text"})
@@ -800,18 +980,32 @@ async def run_concierge_v2(
         )
         finished = True
         yield _sse("stream_end", {"assistant_message_id": None, "cancelled": False})
-    except Exception:
+    except Exception as exc:
         logger.exception("concierge v2 turn failed for run %s", run_id)
         finished = True
+        reason = "provider_timeout" if _is_timeout(exc) else "provider_error"
         await _bookkeep(
             run_service.mark_terminal,
             run_id,
             status="failed",
             partial_text=full_text,
-            error="concierge_v2_failed",
+            error=f"concierge_v2_{reason}",
             usage=usage,
         )
-        yield _sse("error", {"code": _VISITOR_ERROR_CODE, "message": _VISITOR_ERROR_MESSAGE})
+        # CR-5: the leave-a-message reply, never an error frame. What already
+        # streamed stays on screen; the degrade line follows it.
+        if full_text:
+            yield _sse("chunk", {"content": "\n\n", "type": "text"})
+        async for frame in degrade_reply(
+            widget,
+            reason,
+            workspace_id=workspace_id,
+            customer_ref=customer_ref,
+            question=stored_user_text,
+            conversation=conversation,
+            store=store,
+        ):
+            yield frame
     finally:
         sources_task.cancel()
         if not finished:
@@ -828,12 +1022,17 @@ async def run_concierge_v2(
 
 __all__ = [
     "CODE_REPLACEMENT",
+    "DEGRADE_HANDED_OFF",
+    "DEGRADE_LEAVE_MESSAGE",
+    "DEGRADE_REASONS",
     "FRAME",
     "FRAME_DOC_CODE",
     "FenceFilter",
     "KnowledgeItem",
     "build_prompt",
+    "degrade_reply",
     "is_grounded_code",
     "retrieve",
     "run_concierge_v2",
+    "site_spend_today_usd",
 ]
