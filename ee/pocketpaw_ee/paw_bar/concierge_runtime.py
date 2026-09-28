@@ -67,8 +67,8 @@
 #
 # The model is built exactly as the pydantic_ai backend builds it
 # (``PydanticAIBackend._build_model``), per the captain's pydantic_ai-only rule for
-# the concierge. Still not done here: page context (CR-3), owner guided fields
-# (CR-4) and spend caps (CR-5).
+# the concierge. Page context (CR-3) and guided fields (CR-4) have since landed
+# (see the Updated notes above); spend caps (CR-5) are still to come.
 
 from __future__ import annotations
 
