@@ -1,12 +1,10 @@
 """Record the tool calls and thinking an agent run streams, for the Message.
 
-Created: 2026-09-28 (feat/persist-tool-steps) — tool calls, tool results and
-thinking a chat run streams used to reach only the Redis run stream (1h TTL), so
-a refresh showed the reply and none of the work behind it. ``StepRecorder`` is
-fed the same ``(event_name, event_data)`` frames the run loop writes to that
-stream and folds them into the ordered ``steps`` list stored on the assistant
-``Message``. The group/DM bridge feeds it the same frame shapes, so both surfaces
-persist steps one way.
+The Redis run stream expires after an hour, so the assistant ``Message`` is
+where the work behind a reply survives a refresh. ``StepRecorder`` is fed the
+same ``(event_name, event_data)`` frames the run loop writes to that stream and
+folds them into the ordered ``steps`` list stored on the Message. The group/DM
+bridge feeds it the same frame shapes, so both surfaces persist steps one way.
 
 Why a recorder and not the raw frames: the frames are a live-UI protocol, not a
 record. A claude_sdk call is announced twice (a provisional ``input_pending``

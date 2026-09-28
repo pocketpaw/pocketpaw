@@ -1,87 +1,35 @@
-"""Bridge between cloud chat events and the PocketPaw agent pool.
+"""Bridge between cloud chat events and the PocketPaw agent pool (group/DM path).
 
 Pure cross-domain orchestrator: subscribes to the legacy ``message.sent``
-``event_bus`` event and delegates every Beanie touch to the owning
-entity service (``chat.group_service`` for group lookup,
-``agents.service`` for persona, ``chat.message_service`` for history
-rehydration + reply persistence, ``pockets.service`` for ripple-spec
-auto-pocket creation).
+``event_bus`` event and delegates every Beanie touch to the owning entity
+service (``chat.group_service`` for group lookup, ``agents.service`` for
+persona, ``chat.message_service`` for history rehydration and reply
+persistence, ``pockets.service`` for ripple-spec auto-pocket creation).
 
-Responsibilities:
-1. Checks each agent's respond_mode (silent, auto, mention_only, smart)
-2. Triggers agents that should respond and streams responses via WebSocket
-3. Parses ripple specs from agent responses
-4. Delegates pocket creation to ``pockets_service.create_from_ripple_spec``
-5. Persists agent messages via ``message_service.create_agent_message``
-
-Updated 2026-09-28 (feat/persist-tool-steps): ``_run_agent_response`` feeds
-the run's thinking, ``tool_use`` and ``tool_result`` events to the same
-``StepRecorder`` the SSE chat path uses (``chat/runs/steps.py``) and persists the
-result on the agent Message (``create_agent_message(steps=..., steps_omitted=...)``),
-so a group/DM reply keeps the work behind it after a refresh, like a chat reply
-does. The events are AgentEvents, not run_core frames, so ``_record_step`` adapts
-them to the frame shapes the recorder takes. Nothing emitted on the WS changes.
-The kwargs ride only when steps were recorded, so a plain reply's write is as before.
-
-User-message attachments ride the ``message.sent`` payload so channel
-agents see the same filename/mime/size context DM agents already get —
-appended to the user prompt as an ``Attached files:`` block before
-``pool.run`` (matching ``src/pocketpaw/agents/loop.py``'s DM shape).
-
-Updated 2026-06-12: ``_run_agent_response`` now binds the agent's
-workspace/user identity (``attach_agent_identity``) around ``pool.run`` so
-in-process MCP tools that resolve scope from ContextVars (fabric, instinct,
-decisions, connectors) work on the group/DM bridge path. The SSE chat path
-already did this in ``run_core``; the bridge path skipped it, so every
-scoped tool returned "requires workspace context".
-
-Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): ``_run_agent_response``
-catches ``AgentDisabled`` from ``pool.get`` explicitly and SKIPS the agent
-(returns None, no error to the channel) — a soft-disabled agent simply stops
-responding in groups/DMs until re-enabled.
-
-Updated 2026-07-08 (feat/billing-enforce-gate): ``_dispatch_agent_responses``
-now runs the shared run-start billing gate (``credits.guards.over_billing_limit``)
-ABOVE the respond-mode evaluation — before ``_smart_relevance_check``'s Haiku
-pre-classifier call and before ``pool.run`` — so an over-budget tenant triggers
-NO model call on the group/DM auto-response path. On rejection it emits one
-``agent.error`` to the group and returns.
-Updated 2026-07-11 (ART-1): ``_run_agent_response`` binds a per-run
-delivered-artifact collector around ``pool.run`` and drains it into a
-``{type:"artifact", meta}`` attachment per successful ``deliver_artifact`` call,
-so a group/DM agent that delivers a file persists the structured signal too.
-This path has no run-transport SSE stream, so it emits no ``artifact`` event —
-that applies only to the streaming ``run_core`` path.
-
-Updated 2026-08-15 (HTN-11): the phrasing function moved to
-``shared/tool_narration.py`` as ``narrate_tool_use`` and this module imports it.
-It was private here while exactly one surface narrated; the streaming
-``run_core`` path now calls the same function, and a second copy is how the two
-surfaces would drift apart. Same arrangement as ``plan_normalizer``.
-
-Updated 2026-08-15 (HTN-2): ``narrate_tool_use`` takes the running agent and
-resolves that agent's OWN ``ToolRegistry`` (``tool_bridge.narration_registry_for``),
-so a tool's declared phrase is read off the live instance the registry holds
-rather than from a hardcoded name->class map that constructed the tool. Tools
-that declare nothing now derive a phrase from their name, so an unannotated
-tool reaches the wire as "Publishing the site" instead of no narration at all.
-
-Updated 2026-08-15 (HTN-1): the ``tool_use`` branch reads ``event.metadata``
-(name + input) with ``event.content`` as fallback — the precedence ``run_core``
-already uses — and adds an additive ``narration`` field to ``agent.tool_use``
-carrying the tool's plain-language phrase ("Searching the web for quarterly
-filings"). ``tool`` still carries the tool name, so clients keyed on it are
-unaffected; a tool with no ``Narration`` emits no ``narration`` field.
-
-Updated 2026-08-15 (HTN-5): the ``tool_use`` branch routes a recognized plan tool
-(``write_plan`` today) through ``shared/plan_normalizer.py`` and emits
-``agent.plan_updated`` INSTEAD of ``agent.tool_use`` — the panel is the narration,
-so "Using write_plan..." alongside it is bookkeeping noise. The substitution is
-fail-open: a plan call whose arguments cannot be read falls back to the ordinary
-``agent.tool_use``, so the surface degrades to today's behaviour rather than
-going silent. A per-run ``PlanTracker`` supplies the monotonic ``seq`` and
-suppresses re-emits of an unchanged plan (``write_plan`` fires at both the start
-and the end of every step and resends the whole list each time).
+Per message it:
+1. Runs the shared billing gate (``credits.guards.over_billing_limit``) before
+   anything else, so an over-budget tenant triggers no model call, not even the
+   smart-mode relevance check. A rejection emits one ``agent.error``.
+2. Checks each agent's respond_mode (silent, auto, mention_only, smart) and
+   triggers the agents that should respond. A soft-disabled agent is skipped
+   silently.
+3. Runs each reply through ``pool.run`` with the agent's workspace/user identity
+   bound, so ContextVar-scoped MCP tools work here as on the SSE path. The user
+   message's attachments are appended to the prompt as an ``Attached files:``
+   block.
+4. Streams the reply over WebSocket. ``agent.tool_use`` carries an additive
+   ``narration`` from ``shared/tool_narration.py`` (the same function
+   ``run_core`` uses). A recognized plan tool emits ``agent.plan_updated``
+   instead, via ``shared/plan_normalizer.py``, falling back to the ordinary
+   tool event when its arguments cannot be read.
+5. Parses ripple specs and delegates pocket creation to
+   ``pockets_service.create_from_ripple_spec``.
+6. Persists the reply via ``message_service.create_agent_message``, with an
+   artifact attachment per successful ``deliver_artifact`` call (no ``artifact``
+   event: this path has no run stream) and the reply's thinking and tool calls
+   as ``steps``. ``_record_step`` adapts AgentEvents to the frame shapes the
+   shared ``StepRecorder`` takes; the step kwargs ride only when steps were
+   recorded, and nothing emitted on the WS changes.
 """
 
 from __future__ import annotations
