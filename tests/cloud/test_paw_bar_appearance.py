@@ -464,3 +464,141 @@ def test_colours_ride_through_the_full_appearance():
     not merely present on the class."""
     look = ConciergeAppearance(colors=ColorAppearance(user_bubble="#e2662a"))
     assert look.tokens()["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"
+
+
+# --------------------------------------------------------------------------- #
+# Launcher style, logo, and the dark palette
+# --------------------------------------------------------------------------- #
+
+_PNG_DATA = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg=="
+)
+
+
+def test_a_doc_that_never_set_the_new_fields_is_unchanged():
+    """A Site saved before these fields existed loads without them and renders
+    the same bar: docked, no logo, and a dark palette identical to the light."""
+    stored = {"accent": "#ff0055", "colors": {"surface": "#f7f7fb", "line_strength": 14}}
+    look = ConciergeAppearance.model_validate(stored)
+
+    assert look.launcher.style == "bar"
+    assert look.logo_url == ""
+    assert look.accent_dark == ""
+    assert look.colors_dark == ColorAppearance()
+    assert look.tokens_dark() == look.tokens()
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"), [("icon", "icon"), ("bar", "bar"), ("pill", "bar"), ("", "bar")]
+)
+def test_the_launcher_style_falls_back_to_bar(given, expected):
+    assert LauncherAppearance(style=given).style == expected
+
+
+def test_a_raster_data_url_survives():
+    for kind in ("png", "jpeg", "webp", "gif"):
+        url = _PNG_DATA.replace("image/png", f"image/{kind}")
+        assert ConciergeAppearance(logo_url=url).logo_url == url
+        assert ConciergeAppearance(agent_avatar_url=url).agent_avatar_url == url
+        assert LauncherAppearance(icon_url=url).icon_url == url
+
+
+def test_an_oversized_data_url_is_dropped():
+    """Inline images live on the Site doc and in the frame HTML, so they are
+    capped at 200k characters. At the cap it survives; one over it does not."""
+    head = "data:image/png;base64,"
+    at_cap = head + "A" * (200_000 - len(head))
+    assert ConciergeAppearance(logo_url=at_cap).logo_url == at_cap
+    assert ConciergeAppearance(logo_url=at_cap + "A").logo_url == ""
+    assert HeroAppearance(image_url=at_cap + "A").image_url == ""
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+",
+        "data:image/svg+xml,<svg onload=alert(1)>",
+        "data:image/png,rawbytes",
+        "data:image/png;base64,abc)def",
+        'data:image/png;base64,abc");x:url("https://evil.test/',
+        "data:image/bmp;base64,Qk0=",
+        "data:text/html;base64,PHNjcmlwdD4=",
+    ],
+)
+def test_an_svg_or_non_base64_data_url_is_dropped(hostile: str):
+    """SVG is a document that can run script, and anything outside the base64
+    alphabet could close the url() token."""
+    assert ConciergeAppearance(logo_url=hostile).logo_url == ""
+    assert ConciergeAppearance(agent_avatar_url=hostile).agent_avatar_url == ""
+
+
+def test_https_urls_are_unchanged_by_the_data_url_rules():
+    url = "https://cdn.example.test/logo.png"
+    assert ConciergeAppearance(logo_url=url).logo_url == url
+    assert ConciergeAppearance(logo_url="http://x.test/l.png").logo_url == ""
+
+
+def test_the_dark_accent_is_hex_only():
+    assert ConciergeAppearance(accent_dark="red; x: y").accent_dark == ""
+    assert ConciergeAppearance(accent_dark="#abc").accent_dark == "#abc"
+
+
+def test_dark_fields_that_are_set_reach_tokens_dark():
+    look = ConciergeAppearance(
+        accent="#3b6fe0",
+        accent_dark="#88aaff",
+        colors=ColorAppearance(surface="#f7f7fb"),
+        colors_dark=ColorAppearance(surface="#101018", line_strength=20),
+    )
+    light, dark = look.tokens(), look.tokens_dark()
+
+    assert light["--pawbar-accent"] == "#3b6fe0"
+    assert dark["--pawbar-accent"] == "#88aaff"
+    expected_surface = ColorAppearance(surface="#101018").tokens()["--pawbar-surface"]
+    assert dark["--pawbar-surface"] == expected_surface != light["--pawbar-surface"]
+    assert dark["--pawbar-line-strength"] == "20%"
+    # Everything that is not a colour is the same map.
+    assert dark["--pawbar-radius"] == light["--pawbar-radius"]
+    assert dark["--pawbar-duration"] == light["--pawbar-duration"]
+
+
+def test_tokens_dark_falls_back_to_the_light_value():
+    """A dark field left unset takes the light value, so an owner who customised
+    one set does not get a half-default bar on a dark page."""
+    look = ConciergeAppearance(
+        accent="#ff0055",
+        colors=ColorAppearance(user_bubble="#e2662a", ring="#123456", wash_strength=9),
+        colors_dark=ColorAppearance(ring="#654321"),
+    )
+    dark = look.tokens_dark()
+
+    assert dark["--pawbar-accent"] == "#ff0055"
+    assert dark["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"
+    assert dark["--pawbar-ring"] == "rgba(101, 67, 33, 1)"
+    assert dark["--pawbar-wash-strength"] == "9%"
+
+
+def test_the_launcher_style_side_and_logo_reach_the_frame():
+    look = ConciergeAppearance(
+        logo_url="https://cdn.example.test/logo.png",
+        launcher=LauncherAppearance(style="icon", position="bottom-left"),
+        accent_dark="#88aaff",
+    )
+    config = _config(appearance=look)
+
+    assert config["launcher"] == "icon"
+    assert config["side"] == "left"
+    assert config["logo"] == "https://cdn.example.test/logo.png"
+    assert config["tokensDark"]["--pawbar-accent"] == "#88aaff"
+    # ``tokens`` keeps its meaning: the light (or pinned) palette.
+    assert config["tokens"]["--pawbar-accent"] == "#3b6fe0"
+
+
+def test_a_site_with_no_appearance_boots_docked_on_the_right():
+    config = _config(appearance=None)
+
+    assert config["launcher"] == "bar"
+    assert config["side"] == "right"
+    assert config["logo"] == ""
+    assert config["tokensDark"] == config["tokens"]

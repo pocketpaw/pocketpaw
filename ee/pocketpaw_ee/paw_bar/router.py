@@ -1352,6 +1352,15 @@ def _pawbar_frame_config(
         # slab. "" means the widget falls back to its own generic wording, so an
         # owner who never set one still gets a finished sentence.
         "launcherLabel": look.launcher.label,
+        # How the closed bar sits ('bar' | 'icon'), which corner it docks to,
+        # and the owner's logo. The widget has read all three; "" logo = none.
+        "launcher": look.launcher.style,
+        "side": "left" if look.launcher.position == "bottom-left" else "right",
+        "logo": look.logo_url,
+        # The palette for when the bar resolves dark (auto on a dark host, or
+        # pinned dark). The widget applies it over ``tokens``; unset dark fields
+        # fall back to the light ones, so an untouched dark set equals ``tokens``.
+        "tokensDark": look.tokens_dark(),
     }
 
 
@@ -1956,6 +1965,8 @@ class ConciergePreviewTokensResponse(BaseModel):
     """
 
     tokens: dict[str, str]
+    # The dark palette, rendered the same way (``ConciergeAppearance.tokens_dark``).
+    tokens_dark: dict[str, str] = Field(default_factory=dict)
     concierge_appearance: ConciergeAppearance
 
 
@@ -2380,7 +2391,9 @@ async def render_preview_tokens(
     """
     await _load_site_scoped(site_id, workspace_id)
     look = req.concierge_appearance
-    return ConciergePreviewTokensResponse(tokens=look.tokens(), concierge_appearance=look)
+    return ConciergePreviewTokensResponse(
+        tokens=look.tokens(), tokens_dark=look.tokens_dark(), concierge_appearance=look
+    )
 
 
 # ---------------------------------------------------------------------------

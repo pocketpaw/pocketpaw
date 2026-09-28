@@ -15,8 +15,13 @@
 # through. Colors are re-emitted from parsed components rather than echoed,
 # lengths are clamped integers formatted by us, fonts are chosen from a fixed
 # roster rather than accepting a family string, and URLs must be https (or a
-# data: image). A field that cannot be validated into a safe literal does not
-# get to exist.
+# small base64 raster data: image; SVG is refused because it can carry script).
+# A field that cannot be validated into a safe literal does not get to exist.
+#
+# Two colour sets: ``accent`` + ``colors`` are the light (or pinned) palette,
+# ``accent_dark`` + ``colors_dark`` are used when the bar resolves dark. A dark
+# field left "" falls back to its light value, so ``tokens_dark()`` of an
+# appearance that never touched the dark set equals ``tokens()``.
 #
 # Everything is optional with a working default, so a Site that has never been
 # styled serializes exactly as it does today and needs no migration.
@@ -63,6 +68,9 @@ FONT_STACKS: dict[str, str] = {
 }
 
 LAUNCHER_POSITIONS = frozenset({"bottom-right", "bottom-left"})
+# How the closed bar sits on the page: the docked bar, or a round icon in the
+# corner ``position`` names.
+LAUNCHER_STYLES = frozenset({"bar", "icon"})
 # "auto" (2026-08-22) means FOLLOW THE CUSTOMER'S OWN SITE, and it is the new
 # default for a reason that is really a bug report: this field never reached the
 # widget at all. The frame emitted it as ``theme``, and the widget stopped
@@ -108,13 +116,21 @@ def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(int(value), high))
 
 
+# Inline images are stored on the Site doc and written into the frame HTML, so
+# they are capped. Raster only: an SVG data URL is a document that can run script.
+_DATA_URL_MAX_CHARS = 200_000
+_DATA_IMAGE_RE = re.compile(r"^data:image/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$")
+
+
 def _safe_image_url(value: str) -> str:
-    """An https:// or data:image/ URL, or "".
+    """An https:// URL or a small raster data:image/ URL, or "".
 
     http:// is refused rather than upgraded: the bar renders on the owner's own
     https site, so a plain-http asset is a mixed-content block in every browser
-    — accepting it would store a value that can only ever fail. Everything else
-    (javascript:, vbscript:, file:, //host) is refused outright.
+    — accepting it would store a value that can only ever fail. A data: URL must
+    be base64 png, jpeg, webp or gif and at most ``_DATA_URL_MAX_CHARS`` long.
+    Everything else (javascript:, vbscript:, file:, //host, data:image/svg+xml)
+    is refused outright.
     """
     v = (value or "").strip()
     if not v:
@@ -124,7 +140,11 @@ def _safe_image_url(value: str) -> str:
         # Nothing may terminate the url() token and start a new declaration.
         return "" if any(c in v for c in "()\"'\\ \n\r\t;") else v
     if lowered.startswith("data:image/"):
-        return "" if any(c in v for c in "()\"'\\ \n\r\t;") else v
+        # The whole value must be a raster base64 payload. That grammar has no
+        # quote, paren, backslash or whitespace, so it cannot leave url().
+        if len(v) > _DATA_URL_MAX_CHARS:
+            return ""
+        return v if _DATA_IMAGE_RE.match(v) else ""
     return ""
 
 
@@ -212,9 +232,16 @@ def _surface_scale(base_hex: str, opacity: int) -> dict[str, str]:
 
 
 class LauncherAppearance(BaseModel):
+    # "bar" or "icon". See LAUNCHER_STYLES.
+    style: str = "bar"
     position: str = "bottom-right"
     label: str = ""
     icon_url: str = ""
+
+    @field_validator("style")
+    @classmethod
+    def _known_style(cls, v: str) -> str:
+        return v if v in LAUNCHER_STYLES else "bar"
 
     @field_validator("position")
     @classmethod
@@ -355,6 +382,20 @@ class ColorAppearance(BaseModel):
     def _bounded_wash(cls, v: int) -> int:
         return _clamp(v, *_WASH_STRENGTH_RANGE)
 
+    def over(self, light: ColorAppearance) -> ColorAppearance:
+        """This set with every field it leaves unset taken from ``light``.
+
+        Hex fields are unset when "". The numbers have no "unset" value, so one
+        still at its default counts as unset: a dark palette nobody touched then
+        inherits the light numbers instead of quietly resetting them.
+        """
+        merged: dict[str, object] = {}
+        for name, field in type(self).model_fields.items():
+            value = getattr(self, name)
+            unset = value == "" if isinstance(value, str) else value == field.default
+            merged[name] = getattr(light, name) if unset else value
+        return type(self)(**merged)
+
     def tokens(self) -> dict[str, str]:
         """Render to ``--pawbar-*``. Only what the owner actually named."""
         out: dict[str, str] = {}
@@ -405,13 +446,20 @@ class ConciergeAppearance(BaseModel):
     agent_avatar_url: str = ""
     # Team faces on the Home card. Capped at 3 — the card shows three.
     team_avatar_urls: list[str] = Field(default_factory=list)
+    # The owner's logo, shown by the widget where it brands the bar. https or a
+    # small raster data: URL (see _safe_image_url); "" means none.
+    logo_url: str = ""
+    # The dark palette. "" / untouched fields fall back to ``accent`` and
+    # ``colors``; see ``tokens_dark``.
+    accent_dark: str = ""
 
     launcher: LauncherAppearance = Field(default_factory=LauncherAppearance)
     hero: HeroAppearance = Field(default_factory=HeroAppearance)
     motion: MotionAppearance = Field(default_factory=MotionAppearance)
     colors: ColorAppearance = Field(default_factory=ColorAppearance)
+    colors_dark: ColorAppearance = Field(default_factory=ColorAppearance)
 
-    @field_validator("accent")
+    @field_validator("accent", "accent_dark")
     @classmethod
     def _hex_accent(cls, v: str) -> str:
         v = (v or "").strip()
@@ -447,7 +495,7 @@ class ConciergeAppearance(BaseModel):
     def _bounded_text(cls, v: str) -> str:
         return (v or "").strip()[:60]
 
-    @field_validator("agent_avatar_url")
+    @field_validator("agent_avatar_url", "logo_url")
     @classmethod
     def _safe_avatar(cls, v: str) -> str:
         return _safe_image_url(v)
@@ -471,9 +519,21 @@ class ConciergeAppearance(BaseModel):
         re-emitted from the validated hex, lengths are formatted from clamped
         ints, and the font is looked up in a fixed table by key.
         """
+        return self._render(self.accent, self.colors)
+
+    def tokens_dark(self) -> dict[str, str]:
+        """The same map as ``tokens()``, rendered with the dark palette.
+
+        The widget applies it over ``tokens`` whenever the bar resolves dark. Any
+        dark field left unset falls back to its light value, so an appearance
+        that never touched the dark set renders exactly ``tokens()``.
+        """
+        return self._render(self.accent_dark or self.accent, self.colors_dark.over(self.colors))
+
+    def _render(self, accent: str, colors: ColorAppearance) -> dict[str, str]:
         out: dict[str, str] = {}
-        if self.accent:
-            out["--pawbar-accent"] = self.accent
+        if accent:
+            out["--pawbar-accent"] = accent
         out["--pawbar-radius"] = f"{self.radius}px"
         out["--pawbar-blur"] = f"{self.blur}px"
         out["--pawbar-font"] = FONT_STACKS.get(self.font, FONT_STACKS["system"])
@@ -495,7 +555,7 @@ class ConciergeAppearance(BaseModel):
 
         # The owner's named colours. Last, so an explicitly-named token wins over
         # anything derived above it.
-        out.update(self.colors.tokens())
+        out.update(colors.tokens())
 
         duration, easing, travel = _MOTION.get(self.motion.preset, _MOTION["lively"])
         out["--pawbar-duration"] = f"{duration}ms"
