@@ -4,11 +4,17 @@ Includes the RFC 13 M0 inline-spec contract coverage: ``_extract_ripple_attachme
 must pull a canonical ``ui-spec`` + ``{version, ui}`` block AND a transitional
 legacy ``json`` + ``{widgets, lifecycle}`` block, both into a ripple attachment and
 the ``ripple`` SSE event, while leaving a truncated / non-spec fence inline.
+
+Updated 2026-09-27 (fix/chat-run-heartbeat): the cancel test now pins that a
+cancelled run's streamed text is saved as a cut-off partial Message and named by
+``stream_end``, instead of ``assistant_message_id is None``.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import fakeredis.aioredis
@@ -135,20 +141,33 @@ async def test_execute_run_marks_cloud_chat_run_for_jail_fail_closed(monkeypatch
 
 
 async def test_execute_run_cancelled_does_not_persist(monkeypatch):
+    """A cancel never runs the COMPLETED persist. Since 2026-09-27
+    (fix/chat-run-heartbeat) the text already streamed is saved as a cut-off
+    partial (``run_status="cancelled"``) and ``stream_end`` names it; this test
+    used to pin ``assistant_message_id is None``. The partial writer is faked so
+    the result no longer depends on whether an earlier test left Beanie
+    initialised."""
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     transport = RedisStreamTransport(redis)
     await transport.request_cancel("r1")  # cancel BEFORE the run starts
 
     persisted: list[str] = []
+    partials: list[tuple[str, str | None]] = []
 
     async def _track_persist(*a, **k):
         persisted.append("called")
         return "should-not-happen"
 
+    async def _fake_partial(ctx, content, attachments, *, run_status=None):
+        partials.append((content, run_status))
+        return SimpleNamespace(id="partial-1", createdAt=datetime.now(UTC))
+
     monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
     monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
     monkeypatch.setattr(run_core, "_mark_running", _noop)
     monkeypatch.setattr(run_core, "_persist_and_complete", _track_persist)
+    monkeypatch.setattr(run_core, "_persist_assistant_message", _fake_partial)
+    monkeypatch.setattr(run_core, "_broadcast_message_new", _noop)
     monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
     monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
     # cancel + mark_terminal path also touches run_service.mark_terminal
@@ -159,8 +178,9 @@ async def test_execute_run_cancelled_does_not_persist(monkeypatch):
     events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
     assert events[-1].event == "stream_end"
     assert events[-1].data["cancelled"] is True
-    assert events[-1].data["assistant_message_id"] is None
+    assert events[-1].data["assistant_message_id"] == "partial-1"
     assert persisted == []
+    assert partials == [("Hello", "cancelled")]
 
 
 async def fake_agent_events_empty(spec, ctx):

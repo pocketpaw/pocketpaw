@@ -9,13 +9,21 @@ Phase 10 ships only the value objects. The service+router migration to
 use these is incremental — existing call sites keep using the Beanie
 docs directly until each method is migrated. New code should prefer
 domain types.
+
+Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``Message.run_status`` mirrors the
+new persistence field: the terminal status of a run whose partial reply this
+row is (``None`` for every complete message).
+
+Updated: 2026-09-28 (feat/persist-tool-steps) — ``MessageStep`` and
+``Message.steps`` / ``steps_omitted`` mirror the new persistence fields: the
+thinking blocks and tool calls an agent reply streamed, in order.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 # Mirror persistence-layer literals
 ContextType = Literal["pocket", "group", "session"]
@@ -87,6 +95,23 @@ class Group:
 
 
 @dataclass(frozen=True)
+class MessageStep:
+    """One thinking block or tool call behind an agent reply (see models.message)."""
+
+    id: str
+    kind: str  # thinking | tool
+    tool: str = ""
+    narration: str = ""
+    text: str = ""
+    input: Any = None
+    output: str = ""
+    output_truncated: bool = False
+    status: str = "running"  # running | complete | error | missing_result
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Message:
     """A message — group, pocket, or session shape.
 
@@ -120,6 +145,11 @@ class Message:
     role: str | None = None  # PocketRole
     # Timestamps
     created_at: datetime | None = None
+    # Set only on a cut-off agent reply (the run's terminal status).
+    run_status: str | None = None
+    # The agent's thinking blocks and tool calls, in order (display only).
+    steps: tuple[MessageStep, ...] = field(default_factory=tuple)
+    steps_omitted: int = 0
 
 
 __all__ = [
@@ -131,6 +161,7 @@ __all__ = [
     "MemberRole",
     "Mention",
     "Message",
+    "MessageStep",
     "PocketRole",
     "Reaction",
 ]

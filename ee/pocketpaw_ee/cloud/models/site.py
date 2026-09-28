@@ -19,6 +19,22 @@
 # setting; the count and length caps are enforced by those routes from config.
 # Empty by default, so no migration. The text is owner-written and is only ever
 # rendered as data inside the <knowledge> block, never into the frame.
+# Updated 2026-09-28 (feat/concierge-page-aware, CR-3): added ``kb_page_index``,
+# the crawl index the site sync writes (``sites.kb_ingest``): which kb article
+# each page became, so the v2 concierge can find the page a visitor is on.
+#
+# Updated 2026-09-28 (feat/concierge-guided-fields, CR-4): added the owner's
+# guided concierge fields (``concierge_name``, ``concierge_tone``,
+# ``concierge_languages``, ``concierge_about``, ``concierge_avoid_topics``,
+# ``concierge_escalation``). Shapes and caps live in
+# ``pocketpaw.paw_bar.concierge_fields``; the settings PATCH validates them and
+# ``paw_bar.concierge_prompt`` renders them into the v2 request's data half. All
+# default to unset, and an unset field renders nothing, so no migration.
+#
+# Updated 2026-09-28 (feat/concierge-v2-output, CR-2): added
+# ``concierge_allow_doc_code``, the owner's switch that lets a v2 concierge show
+# code blocks copied verbatim from the site's own knowledge (documentation
+# sites). Defaults False, so existing rows keep every code block replaced.
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a concierge now exists
 # only because its owner created it. Added ``concierge_created_at``, the marker
 # ``POST /paw-bar/admin/site/{id}/concierge`` stamps and ``DELETE`` clears, and
@@ -318,6 +334,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from pymongo import IndexModel
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.concierge_fields import ConciergeEscalation, ConciergeTone
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
@@ -931,12 +948,37 @@ class Site(TimestampedDocument):
     # cleared, un-indexed, by its ``delete_sources``. The page sync never prunes
     # these articles: it only deletes ids listed in ``kb_article_ids``.
     concierge_sources: list[ConciergeKnowledgeSource] = Field(default_factory=list)
+    # "Answer with code examples from your docs" (CR-2, 2026-09-28). Off: a v2
+    # reply never shows a code block. On: a code block passes only when it is
+    # found, verbatim, in the knowledge retrieved for that turn
+    # (``concierge_runtime.is_grounded_code``); anything else is still replaced.
+    # For documentation sites. Off by default and for rows older than the field.
+    concierge_allow_doc_code: bool = False
+    # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
+    # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
+    # values in the request's data half, never the frame. Every default is
+    # "unset" and renders nothing, so rows older than the fields need no migration.
+    concierge_name: str = ""
+    concierge_tone: ConciergeTone | None = None
+    # BCP-47 codes; the first is the fallback reply language.
+    concierge_languages: list[str] = Field(default_factory=list)
+    concierge_about: str = ""
+    concierge_avoid_topics: list[str] = Field(default_factory=list)
+    # None: the frame's own "say you don't know" applies, with no route offered.
+    concierge_escalation: ConciergeEscalation | None = None
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or
     # deleted page left behind WITHOUT touching the rest of the scope, which also
     # holds owner-uploaded files. Empty until the first sync, so no migration.
     kb_article_ids: list[str] = Field(default_factory=list)
+    # The crawl index (CR-3): ``{page_key: {"id": article id, "title": title}}``
+    # for each page the last sync ingested, keyed by ``kb_ingest.page_key``. The v2
+    # concierge looks the visitor's page up here (``concierge_runtime.resolve_page``);
+    # kb-go names articles by title, so this is the only page-to-article link. Empty
+    # until the site's next sync, so no migration: a page then reads as not indexed.
+    kb_page_index: dict[str, dict[str, str]] = Field(default_factory=dict)
     # When the last sync ran (success or not) and why it produced nothing, so the
     # dashboard can tell "this concierge has no knowledge yet" apart from "syncing
     # is broken". "" means the last sync was clean.

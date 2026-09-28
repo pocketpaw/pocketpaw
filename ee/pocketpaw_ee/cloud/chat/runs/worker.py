@@ -1,5 +1,18 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot sweep's cutoff is at
+least three heartbeat intervals (``_boot_sweep_older_than_seconds``), so a booting
+replica no longer interrupts runs another replica is still beating.
+
+Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``_shutdown`` now waits (bounded,
+``_CLEANUP_DRAIN_TIMEOUT_SECONDS``) for ``run_core.drain_pending_cleanups`` before
+``close_cloud_db()``. arq cancels in-flight runs on shutdown, and each one's
+shielded cleanup, which writes the partial reply as a Message and marks the run
+``interrupted``, keeps running after the task is gone. Closing the database first
+cut those writes off, stranding the doc in ``running`` with the reply lost. The
+"10-minute heartbeat sweeper" wording below now means a real heartbeat: the web
+sweep judges a running run by ``last_heartbeat_at``, which the worker refreshes.
+
 Updated: 2026-09-24 (PP-2, feat/sites-verify-pipeline) — the preview build's arq
 timeout is now ``site_preview_job_timeout_seconds()``: the build budget plus the
 in-sandbox browser check that runs after it. The html verify job is registered on
@@ -115,7 +128,11 @@ from pocketpaw_ee.cloud.chat.runs.domain import (
     RunSpec,
     run_job_timeout_seconds,
 )
-from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
+from pocketpaw_ee.cloud.chat.runs.run_core import (
+    _heartbeat_seconds,
+    drain_pending_cleanups,
+    execute_run,
+)
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
 from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
 from pocketpaw_ee.cloud.jobs.worker import execute_workspace_job
@@ -142,6 +159,18 @@ logger = logging.getLogger(__name__)
 # A short cutoff because worker boot implies the previous worker just died;
 # runs created seconds ago by the web process should not be swept.
 _BOOT_SWEEP_OLDER_THAN_SECONDS = 5
+
+
+def _boot_sweep_older_than_seconds() -> int:
+    """The boot sweep's cutoff: short, but never inside the heartbeat interval.
+
+    A running run is judged by its last heartbeat, which is up to one interval
+    old on a perfectly healthy replica. A cutoff below that let a booting
+    replica interrupt runs another replica was still driving. Three intervals
+    leaves room for a missed beat.
+    """
+    return max(_BOOT_SWEEP_OLDER_THAN_SECONDS, int(3 * _heartbeat_seconds()))
+
 
 # Default off — multi-replica safety. See module docstring.
 _BOOT_SWEEP_ENV = "POCKETPAW_CLOUD_WORKER_BOOT_SWEEP"
@@ -198,7 +227,7 @@ async def _bootstrap(ctx: dict[str, Any]) -> None:
         logger.info("worker boot: stale-run sweep disabled (%s)", _BOOT_SWEEP_ENV)
         return
     try:
-        swept = await sweep_stale_runs(older_than_seconds=_BOOT_SWEEP_OLDER_THAN_SECONDS)
+        swept = await sweep_stale_runs(older_than_seconds=_boot_sweep_older_than_seconds())
         if swept:
             logger.info("worker boot: marked %d orphaned runs as interrupted", swept)
     except Exception:
@@ -242,6 +271,11 @@ async def _bootstrap(ctx: dict[str, Any]) -> None:
 _bootstrap_lock = asyncio.Lock()
 _bootstrap_lanes = 0
 
+# How long shutdown waits for cancelled runs' cleanups (partial Message, terminal
+# status, ``interrupted`` frame) before closing the database under them. Bounded
+# so a wedged write cannot hold a deploy; each cleanup is a handful of writes.
+_CLEANUP_DRAIN_TIMEOUT_SECONDS = 10.0
+
 
 async def _startup(ctx: dict[str, Any]) -> None:
     """Run :func:`_bootstrap` for the FIRST lane in this process only."""
@@ -268,6 +302,9 @@ async def _shutdown(ctx: dict[str, Any]) -> None:
         # on_startup raised still gets its on_shutdown called) would otherwise drive
         # this negative and leave the NEXT bootstrap thinking a lane is still up.
         _bootstrap_lanes = 0
+        # Let cancelled runs finish writing their partial reply and terminal
+        # status first; closing the DB under them loses both.
+        await drain_pending_cleanups(timeout=_CLEANUP_DRAIN_TIMEOUT_SECONDS)
         await close_cloud_db()
 
 

@@ -120,10 +120,19 @@
   {
     "label": "the lane counter loses its clamp, so an unbalanced shutdown drives it negative and the guard under-counts on the way back up - the second lane bootstraps too, re-running init_cloud_db and both boot sweeps",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
-    "find": "        _bootstrap_lanes = 0\n        await close_cloud_db()",
-    "replace": "        await close_cloud_db()",
+    "find": "        _bootstrap_lanes = 0\n        # Let cancelled runs finish writing",
+    "replace": "        # Let cancelled runs finish writing",
     "tests": [
       "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "shutdown closes the database without waiting for cancelled runs' cleanup, so a run arq killed at job_timeout loses its partial reply and stays 'running' forever",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "        await drain_pending_cleanups(timeout=_CLEANUP_DRAIN_TIMEOUT_SECONDS)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_heartbeat.py"
     ]
   },
   {

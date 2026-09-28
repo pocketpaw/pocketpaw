@@ -1,0 +1,10 @@
+{
+  "case_id": "doc-code-shown",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved verbatim quote from the docs. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "1481c4b950724921",
+  "raw_model_output": "Install it with pip, then create a site:\n```bash\npip install brewkit\nbrewkit init --site demo\n```\nbrewkit needs Python 3.10 or newer."
+}

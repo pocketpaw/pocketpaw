@@ -2,8 +2,8 @@
   {
     "label": "the v2 agent is handed a tool — the zero-tools invariant is gone",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
-    "replace": "        agent = Agent(model, tools=[lambda query: query], instructions=FRAME, output_type=str)",
+    "find": "        agent = Agent(model, instructions=frame, output_type=str)",
+    "replace": "        agent = Agent(model, tools=[lambda query: query], instructions=frame, output_type=str)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -12,8 +12,8 @@
   {
     "label": "the v2 agent is handed a toolset — tools arrive by the other door",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
-    "replace": "        agent = Agent(model, toolsets=[__import__('pydantic_ai').FunctionToolset(tools=[lambda query: query])], instructions=FRAME, output_type=str)",
+    "find": "        agent = Agent(model, instructions=frame, output_type=str)",
+    "replace": "        agent = Agent(model, toolsets=[__import__('pydantic_ai').FunctionToolset(tools=[lambda query: query])], instructions=frame, output_type=str)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -22,8 +22,8 @@
   {
     "label": "per-turn data is concatenated into the frame — it stops being constant and becomes injectable",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        agent = Agent(model, instructions=FRAME, output_type=str)",
-    "replace": "        agent = Agent(model, instructions=FRAME + message, output_type=str)",
+    "find": "        agent = Agent(model, instructions=frame, output_type=str)",
+    "replace": "        agent = Agent(model, instructions=frame + message, output_type=str)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_frame_is_the_first_and_constant_part_of_the_prompt"
     ]
@@ -83,6 +83,547 @@
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_a_new_site_defaults_to_legacy",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_a_site_without_the_field_is_legacy"
+    ]
+  },
+  {
+    "label": "the output filter is bypassed — raw deltas, code and all, reach the visitor",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                for piece in fences.feed(delta or \"\"):",
+    "replace": "                for piece in [delta] if delta else []:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_hydrates_a_product_card_from_the_widget_catalog"
+    ]
+  },
+  {
+    "label": "any non-card fence passes through verbatim — the model's code renders in the widget",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        return CODE_REPLACEMENT\n",
+    "replace": "        return _TICKS + self._tag + \"\\n\" + body + _TICKS\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_code_fence_becomes_the_fixed_line",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code"
+    ]
+  },
+  {
+    "label": "a fence still open at the end is flushed instead of dropped",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        held = self._buf if self._mode == \"text\" else \"\"",
+    "replace": "        held = self._buf",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_unclosed_fence_at_the_end_is_dropped",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_unclosed_card_fence_at_the_end_is_dropped"
+    ]
+  },
+  {
+    "label": "trailing backticks are not held — a marker split across chunks slips through",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                    held = len(text) - len(text.rstrip(\"`\"))",
+    "replace": "                    held = 0",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_code_fence_becomes_the_fixed_line",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code"
+    ]
+  },
+  {
+    "label": "fences are found only at the start of a chunk — a mid-line opener renders as code on the client",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                i = text.find(_TICKS)",
+    "replace": "                i = 0 if text.startswith(_TICKS) else -1",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_fence_opened_mid_line_is_still_a_fence"
+    ]
+  },
+  {
+    "label": "the model's product-card props ride along with the hydrated items — its name and price reach the card",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        out[\"props\"] = {\"items\": items}",
+    "replace": "        out[\"props\"] = {**props, \"items\": items}",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_spec_is_hydrated_with_the_catalog_price_not_the_models"
+    ]
+  },
+  {
+    "label": "an id missing from the catalog is kept — the card shows a product the site does not sell",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if product is None or pid in seen:",
+    "replace": "        if pid in seen:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_hydration_keeps_catalog_order_of_the_models_ids_and_drops_unknown_and_repeats",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_legacy_product_card_is_repriced_from_the_catalog"
+    ]
+  },
+  {
+    "label": "an empty product-card is kept — the visitor sees a card with nothing in it",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if not items:\n            return None\n        # Replaced whole",
+    "replace": "        if False:\n            return None\n        # Replaced whole",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_empty_product_card_is_dropped_from_its_parent",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_empty_product_card_at_the_root_drops_the_card"
+    ]
+  },
+  {
+    "label": "a legacy product card passes through unpriced — the model's own prices reach the visitor",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    if isinstance(raw, dict) and (not isinstance(kind, str) or kind in (\"\", \"product\")):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_legacy_product_card_is_repriced_from_the_catalog"
+    ]
+  },
+  {
+    "label": "emit may name any host event — a card can fire events the bar or the widget will not act on",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if action[\"action\"] == \"emit\" and action.get(\"target\") not in events:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_disallowed_actions_reject_the_card",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_emit_of_a_verb_the_widget_does_not_declare_rejects_the_card"
+    ]
+  },
+  {
+    "label": "any widget type is accepted — the server stops matching the manifest",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if node[\"type\"] not in WIDGET_TYPES:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_an_unknown_widget_type_rejects_the_card",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
+    ]
+  },
+  {
+    "label": "the node bound drifts by one from paw-bar's",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if count > MAX_SPEC_NODES:",
+    "replace": "        if count > MAX_SPEC_NODES + 1:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
+    ]
+  },
+  {
+    "label": "the depth bound drifts by one from paw-bar's",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if depth > MAX_SPEC_DEPTH:",
+    "replace": "        if depth > MAX_SPEC_DEPTH + 1:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_card_parity_fixtures_reach_the_committed_server_verdicts"
+    ]
+  },
+  {
+    "label": "the card is not re-measured after hydration — the client refuses a card the server sent",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        if len(body) > MAX_SPEC_CHARS or _FENCE in body:",
+    "replace": "        if _FENCE in body:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_card_that_hydrates_past_the_char_bound_is_dropped"
+    ]
+  },
+  {
+    "label": "the compact manifest leaves the prompt — the model is never told how to write a card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    parts.append(_cards_paragraph(declared))",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"
+    ]
+  },
+  {
+    "label": "grounding accepts half-copied code — an adapted snippet reads as the site's docs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return found * 100 >= _GROUNDED_PERCENT * len(lines)",
+    "replace": "    return found * 100 >= 50 * len(lines)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_one_changed_line_in_three_is_not_grounded",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_nine_of_ten_lines_is_grounded"
+    ]
+  },
+  {
+    "label": "grounding needs more than 90% — exactly nine lines in ten no longer counts",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return found * 100 >= _GROUNDED_PERCENT * len(lines)",
+    "replace": "    return found * 100 > _GROUNDED_PERCENT * len(lines)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_nine_of_ten_lines_is_grounded"
+    ]
+  },
+  {
+    "label": "trivial lines count as evidence — a fence of braces is 'found' in any code page",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    lines = [line for line in lines if len(line.replace(\" \", \"\")) > _TRIVIAL_LINE_CHARS]",
+    "replace": "    lines = [line for line in lines if len(line.replace(\" \", \"\")) > 0]",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_fence_of_only_trivial_lines_is_not_grounded",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_flag_on_a_trivial_only_fence_is_replaced"
+    ]
+  },
+  {
+    "label": "the site flag is ignored by the runner — every site shows documentation code",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return getattr(site, \"concierge_allow_doc_code\", False) is True",
+    "replace": "    return True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter"
+    ]
+  },
+  {
+    "label": "the filter ignores its flag — grounded code passes on a site that never allowed it",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            self._allow_doc_code\n            and len(body) <= self._doc_code_left",
+    "replace": "            True\n            and len(body) <= self._doc_code_left",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_flag_off_grounded_code_is_still_replaced"
+    ]
+  },
+  {
+    "label": "the doc-code frame is used for every site — the model is told it may quote code everywhere",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        frame = FRAME_DOC_CODE if allow_doc_code else FRAME",
+    "replace": "        frame = FRAME_DOC_CODE",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter",
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_frame_is_the_first_and_constant_part_of_the_prompt"
+    ]
+  },
+  {
+    "label": "the per-reply code budget is not checked — a reply can farm unlimited doc code",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            and len(body) <= self._doc_code_left\n",
+    "replace": "            and True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_flag_on_code_over_the_reply_cap_is_replaced",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_cap_comes_from_config"
+    ]
+  },
+  {
+    "label": "the budget is per block, not per reply — many blocks each under the cap all pass",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            self._doc_code_left -= len(body)",
+    "replace": "            self._doc_code_left -= 0",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_the_cap_is_for_the_whole_reply_not_each_block"
+    ]
+  },
+  {
+    "label": "the runner grounds against nothing — documentation code never passes even when allowed",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            knowledge=items,",
+    "replace": "            knowledge=(),",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter",
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_grounds_code_in_whatever_retrieve_returns_including_faqs"
+    ]
+  },
+  {
+    "label": "a new Site allows documentation code — every existing site starts showing code unasked",
+    "file": "ee/pocketpaw_ee/cloud/models/site.py",
+    "find": "    concierge_allow_doc_code: bool = False",
+    "replace": "    concierge_allow_doc_code: bool = True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_output.py::test_a_new_site_does_not_allow_doc_code"
+    ]
+  },
+  {
+    "label": "CR-3: a page on any origin is accepted (the allowed-origins check is gone)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if not origin_allowed(list(getattr(site, \"allowed_origins\", None) or []), host):",
+    "replace": "    if not host:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_page_off_the_allowed_origins_is_dropped",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_page_from_a_foreign_origin_is_dropped",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_an_empty_allowlist_drops_every_page"
+    ]
+  },
+  {
+    "label": "CR-3: a page url of any scheme is accepted (the http(s) check is gone)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if parts.scheme not in (\"http\", \"https\") or not host:",
+    "replace": "    if not host:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_page_off_the_allowed_origins_is_dropped"
+    ]
+  },
+  {
+    "label": "CR-3: the browser's page title is no longer clipped to 120 characters",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    title = one_line(raw_title if isinstance(raw_title, str) else \"\")[:_PAGE_TITLE_CHARS]",
+    "replace": "    title = one_line(raw_title if isinstance(raw_title, str) else \"\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_an_over_long_title_is_clipped_to_120_characters"
+    ]
+  },
+  {
+    "label": "CR-3: the indexed page's own article no longer joins the knowledge",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    ordered = faqs + ([chunk] if chunk is not None else [])",
+    "replace": "    ordered = faqs",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_an_indexed_page_brings_its_title_summary_and_article",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_the_page_article_grounds_documentation_code"
+    ]
+  },
+  {
+    "label": "CR-3: sources are the raw search hits, not the knowledge the model was given",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        sources = _source_items(items, site, page_ctx)",
+    "replace": "        sources = _source_items(retrieved, site, page_ctx)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sources_are_exactly_the_knowledge_the_model_was_given",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sources_drop_what_the_budget_cut"
+    ]
+  },
+  {
+    "label": "CR-3: an owner's upload is named in the sources event (the index-only rule is gone)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if hit is None or not base:",
+    "replace": "        if not base:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sources_are_exactly_the_knowledge_the_model_was_given"
+    ]
+  },
+  {
+    "label": "CR-3: knowledge can open or close the <page> block (page left the neutralized tags)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "|visitor-message|owner-settings|page)\\b\",",
+    "replace": "|visitor-message|owner-settings)\\b\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_knowledge_cannot_close_the_page_block"
+    ]
+  },
+  {
+    "label": "CR-3: a malformed page field 422s or crashes the turn instead of reading as absent",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        if not isinstance(value, dict) or not isinstance(value.get(\"url\"), str):",
+    "replace": "        if value is None:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_a_malformed_page_never_fails_the_turn"
+    ]
+  },
+  {
+    "label": "CR-3: the site sync stops writing the crawl index",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "        updates[\"kb_page_index\"] = index",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_sync_records_the_page_index"
+    ]
+  },
+  {
+    "label": "CR-3: page_key stops folding about/index.html into about",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    key = re.sub(r\"(^|/)index$\", \"\", key)",
+    "replace": "    key = key",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_page.py::test_page_key_folds_every_spelling_of_one_page",
+      "tests/cloud/test_paw_bar_concierge_page.py::test_page_key_folds_every_spelling_of_the_home_page"
+    ]
+  },
+  {
+    "label": "CR-5 cap: the comparison becomes strict — a site exactly at its cap keeps spending",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return spent >= cap\n",
+    "replace": "    return spent > cap\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_gets_the_degrade_reply_and_no_model_call"
+    ]
+  },
+  {
+    "label": "CR-5 cap arm: the spend cap is never checked — an over-cap site keeps calling the model",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if await _over_spend_cap(settings, workspace_id, pocket_id):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_gets_the_degrade_reply_and_no_model_call"
+    ]
+  },
+  {
+    "label": "CR-5 cap: a 0 cap is read as a real cap of $0 — every site is silenced",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if cap <= 0:\n        return False\n",
+    "replace": "    if cap < 0:\n        return False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_zero_cap_is_no_cap"
+    ]
+  },
+  {
+    "label": "CR-5 cap: the window reaches into yesterday — the cap stops being per UTC day",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        since=_utc_day_start(now),\n",
+    "replace": "        since=_utc_day_start(now) - __import__('datetime').timedelta(seconds=1),\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_spend_is_counted_per_site_per_utc_day"
+    ]
+  },
+  {
+    "label": "CR-5 cap: the spend read drops the scope — one site's spend caps its siblings",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "            ChatRunDoc.scope_id == scope_id,\n            ChatRunDoc.createdAt >= since,\n",
+    "replace": "            ChatRunDoc.createdAt >= since,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_spend_is_counted_per_site_per_utc_day"
+    ]
+  },
+  {
+    "label": "CR-5 cap: a failed spend read fails closed — a Mongo hiccup silences every site",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"concierge v2: daily spend read failed; answering\", exc_info=True)\n        return False\n",
+    "replace": "\"concierge v2: daily spend read failed; answering\", exc_info=True)\n        return True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_failed_spend_read_serves_the_visitor"
+    ]
+  },
+  {
+    "label": "CR-5 quota arm: v2 is refused with a 403 again — the lead is lost",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            if runtime != \"v2\":\n                raise HTTPException(403, \"concierge_quota_exceeded\")\n",
+    "replace": "            if True:\n                raise HTTPException(403, \"concierge_quota_exceeded\")\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_v2_quota_hit_is_the_degrade_reply_with_no_model_call"
+    ]
+  },
+  {
+    "label": "CR-5 quota: legacy sites degrade too — the legacy runtime is no longer unaffected",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            if runtime != \"v2\":\n                raise HTTPException(403, \"concierge_quota_exceeded\")\n",
+    "replace": "            if False:\n                raise HTTPException(403, \"concierge_quota_exceeded\")\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_legacy_quota_hit_is_still_403"
+    ]
+  },
+  {
+    "label": "CR-5 quota: the degrade reply skips the rate limit — an unmetered handoff writer",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if not await _admit_chat_turn(store, widget, body.customer_ref):\n        raise HTTPException(429, \"Rate limit exceeded\")\n\n    # (7c, v2)",
+    "replace": "    if not quota_exhausted and not await _admit_chat_turn(store, widget, body.customer_ref):\n        raise HTTPException(429, \"Rate limit exceeded\")\n\n    # (7c, v2)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_v2_quota_degrade_still_spends_a_rate_limit_slot"
+    ]
+  },
+  {
+    "label": "CR-5 timeout arm: every failure is filed as a provider error — timeouts vanish from the run doc",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        reason = \"provider_timeout\" if _is_timeout(exc) else \"provider_error\"\n",
+    "replace": "        reason = \"provider_error\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_provider_timeout_is_the_degrade_reply"
+    ]
+  },
+  {
+    "label": "CR-5 timeout arm: an SDK timeout that is not a TimeoutError is filed as an error",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "isinstance(err, TimeoutError) or \"Timeout\" in type(err).__name__",
+    "replace": "isinstance(err, TimeoutError)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_timeout_named_by_the_sdk_is_a_timeout"
+    ]
+  },
+  {
+    "label": "CR-5 error arm: a provider failure is the generic error frame again, no degrade",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        async for frame in degrade_reply(\n            widget,\n            reason,\n",
+    "replace": "        for frame in [_sse(\"error\", {\"code\": \"agent.error\", \"message\": \"x\"})] or degrade_reply(\n            widget,\n            reason,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_provider_error_is_the_degrade_reply"
+    ]
+  },
+  {
+    "label": "CR-5 cap arm: the handoff carries the raw message — retention-off sites leak the visitor line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            question=stored_user_text,\n            conversation=conversation,\n            store=store,\n        ):\n            yield frame\n        return\n",
+    "replace": "            question=message,\n            conversation=conversation,\n            store=store,\n        ):\n            yield frame\n        return\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
+    ]
+  },
+  {
+    "label": "CR-5: the router stops handing its store to the runner — handoffs write to another store",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "                stored_user_text=stored_user_text,\n                store=store,\n",
+    "replace": "                stored_user_text=stored_user_text,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 degrade: a conversation already waiting on a person is handed off (and notified) again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    handed_off = getattr(conversation, \"state\", None) == ConversationState.NEEDS_HUMAN\n",
+    "replace": "    handed_off = False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_conversation_already_waiting_on_a_person_is_not_handed_off_again"
+    ]
+  },
+  {
+    "label": "CR-5 degrade: the reply claims the team has the message when the handoff failed",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    text = DEGRADE_HANDED_OFF if handed_off else DEGRADE_LEAVE_MESSAGE\n",
+    "replace": "    text = DEGRADE_HANDED_OFF\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_handoff_that_did_not_land_says_leave_a_message"
+    ]
+  },
+  {
+    "label": "CR-5 tags: the metered call carries no site or widget tag",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        out[\"extra_body\"] = {\"metadata\": {\"tags\": list(tags)}}\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_the_metered_call_is_tagged_with_the_site_and_widget"
+    ]
+  },
+  {
+    "label": "CR-5 tags: LiteLLM metadata goes to a direct provider too, which rejects it",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if tags and is_proxy_provider(provider):\n",
+    "replace": "    if tags:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_tags_are_not_sent_to_a_provider_that_is_not_our_proxy"
+    ]
+  },
+  {
+    "label": "CR-5 tags: the run's usage (what the meter prices) no longer names the site and widget",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            usage = {**_usage(settings, result), **spend_tags}\n",
+    "replace": "            usage = _usage(settings, result)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_the_metered_call_is_tagged_with_the_site_and_widget"
+    ]
+  },
+  {
+    "label": "CR-5 error arm: the handoff carries the raw message — retention-off sites leak the visitor line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            reason,\n            workspace_id=workspace_id,\n            customer_ref=customer_ref,\n            question=stored_user_text,\n",
+    "replace": "            reason,\n            workspace_id=workspace_id,\n            customer_ref=customer_ref,\n            question=message,\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_a_provider_error_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 quota arm: the handoff carries the raw message — retention-off sites leak the visitor line",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "                question=(\n                    body.message[:_STORED_USER_TEXT_CHARS]\n                    if site.concierge_store_transcripts\n                    else \"\"\n                ),\n",
+    "replace": "                question=body.message[:_STORED_USER_TEXT_CHARS],\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_a_quota_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 quota arm: the handoff drops the visitor line even when the site keeps transcripts",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "                question=(\n                    body.message[:_STORED_USER_TEXT_CHARS]\n                    if site.concierge_store_transcripts\n                    else \"\"\n                ),\n",
+    "replace": "                question=\"\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_on_puts_the_visitor_line_on_the_handoff"
+    ]
+  },
+  {
+    "label": "CR-5 degrade: the handoff is filed as the agent escalating itself — capped turns pollute the escalation metric",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                source=f\"degrade:{reason}\",\n",
+    "replace": "                source=\"agent\",\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
     ]
   }
 ]

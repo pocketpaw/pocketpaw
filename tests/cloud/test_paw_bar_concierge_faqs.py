@@ -17,6 +17,10 @@
 #     inside the <knowledge> block, with its block tags neutralized, and the frame
 #     stays the module constant.
 #
+# Updated: 2026-09-28 (merge with CR-3) — ``select_knowledge`` keeps the pinned
+# FAQs ahead of the visitor's page article once page-aware answers (CR-3) and
+# pinned FAQs meet; a git merge of the two silently put the page first.
+
 # Guarded by tests/mutations/concierge_pinned_faqs.json (FAQ-first ordering, the
 # tenant check, the caps).
 
@@ -485,3 +489,33 @@ def test_mount_cloud_serves_the_faq_routes():
         ("PATCH", base + "/{faq_id}"),
         ("DELETE", base + "/{faq_id}"),
     } <= served
+
+
+def test_pinned_faqs_lead_the_page_article_and_the_kb_hits():
+    # CR-3 x CR-8: the owner's pinned answers are authoritative, so they stay first
+    # even when the visitor is on an indexed page, and the page article is not
+    # repeated from the search hits.
+    from pocketpaw_ee.paw_bar.concierge_runtime import (
+        KnowledgeItem,
+        PageContext,
+        select_knowledge,
+    )
+
+    faq = KnowledgeItem(id="faq1", source="faq", text="Q: Returns? A: 30 days.", score=1.0)
+    page_article = KnowledgeItem(id="menu", source="pocket:p1", text="Menu. Soup", score=1.0)
+    hit = KnowledgeItem(id="hours", source="pocket:p1", text="Hours: 9 to 5", score=0.5)
+    page = PageContext(
+        url="https://shop.example/menu",
+        title="Menu",
+        indexed=True,
+        article_id="menu",
+        chunk=page_article,
+    )
+
+    got = select_knowledge([faq, page_article, hit], page)
+
+    assert [(i.id, i.source) for i in got] == [
+        ("faq1", "faq"),
+        ("menu", "pocket:p1"),
+        ("hours", "pocket:p1"),
+    ]

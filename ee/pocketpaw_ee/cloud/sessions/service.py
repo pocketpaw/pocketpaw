@@ -1,5 +1,15 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-28 (feat/persist-tool-steps): ``_message_to_dict`` emits
+``steps`` / ``stepsOmitted`` (an agent reply's recorded thinking and tool calls)
+through the shared ``steps_wire_fields``, only when non-empty, so the chat can
+show the work behind a reply after a refresh. Plain rows are unchanged.
+
+Updated 2026-09-27 (fix/chat-run-heartbeat): ``_message_to_dict`` emits
+``runStatus`` on an agent reply persisted from a run that did not complete
+(failed / cancelled / interrupted), so the chat can mark it as cut off after a
+refresh. Absent on every other row, so existing payloads are unchanged.
+
 Updated 2026-09-27 (fix/run-stream-session-readers): added
 ``can_read_session(session_id, user_id)``, the boolean form of
 ``_fetch_readable_session``. The chat run stream uses it so a teammate who may
@@ -807,7 +817,7 @@ def _decode_history_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
 
 def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
     """Serialize a Message row the way the client expects (display path)."""
-    return {
+    out = {
         "_id": str(m.id),
         "role": role,
         "content": m.content,
@@ -816,6 +826,15 @@ def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
         "createdAt": iso_utc(m.createdAt),
         "attachments": [a.model_dump() for a in (m.attachments or [])],
     }
+    run_status = getattr(m, "run_status", None)
+    if run_status:
+        out["runStatus"] = run_status
+    # Imported here like the other chat imports in this module: sessions must
+    # not pull the chat package in at import time.
+    from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
+
+    out.update(steps_wire_fields(getattr(m, "steps", None), getattr(m, "steps_omitted", 0) or 0))
+    return out
 
 
 # Attachment types that are plain file chips and may be backfilled. Anything
