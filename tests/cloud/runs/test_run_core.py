@@ -1,13 +1,11 @@
 """Tests for ``execute_run``.
 
-Includes the RFC 13 M0 inline-spec contract coverage: ``_extract_ripple_attachment``
-must pull a canonical ``ui-spec`` + ``{version, ui}`` block AND a transitional
-legacy ``json`` + ``{widgets, lifecycle}`` block, both into a ripple attachment and
-the ``ripple`` SSE event, while leaving a truncated / non-spec fence inline.
-
-Updated 2026-09-27 (fix/chat-run-heartbeat): the cancel test now pins that a
-cancelled run's streamed text is saved as a cut-off partial Message and named by
-``stream_end``, instead of ``assistant_message_id is None``.
+Includes the inline-spec contract coverage: ``_extract_ripple_attachment`` must
+pull a canonical ``ui-spec`` + ``{version, ui}`` block AND a transitional legacy
+``json`` + ``{widgets, lifecycle}`` block, both into a ripple attachment and the
+``ripple`` SSE event, while leaving a truncated / non-spec fence inline. The
+cancel test pins that a cancelled run's streamed text is saved as a cut-off
+partial Message and named by ``stream_end``.
 """
 
 from __future__ import annotations

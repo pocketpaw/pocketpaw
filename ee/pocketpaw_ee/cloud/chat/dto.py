@@ -1,22 +1,17 @@
-"""Wire DTOs for the chat module — re-exports from ``schemas.py`` plus
-domain → wire mappers that convert ``chat.domain`` value objects to the
-legacy wire-format dicts.
+"""Wire DTOs for the chat module: re-exports from ``schemas.py`` plus
+domain -> wire mappers that convert ``chat.domain`` value objects to the
+wire-format dicts.
 
-Phase 10 keeps ``schemas.py`` as the canonical home for chat-domain
-Pydantic models (because chat-unify added many references to it across
-agent_router/agent_service/router) and exposes them under ``dto`` for
-naming consistency with the rest of the cloud modules. New code should
-import from this module:
+``schemas.py`` is still the canonical home for chat-domain Pydantic models
+(agent_router, agent_service and router reference it widely); this module
+exposes them under ``dto`` for naming consistency with the other cloud
+modules. New code should import from here:
 
     from pocketpaw_ee.cloud.chat.dto import SendMessageRequest, MessageResponse
 
-A future cleanup pass can flip the canonical home if/when the
-chat-unify references are migrated.
-
-Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``message_to_wire_dict`` emits
-``runStatus`` for an agent reply persisted from a run that did not complete, so
-the client can mark it as cut off. The key is absent on every other message,
-keeping those payloads byte-identical.
+``message_to_wire_dict`` emits ``runStatus`` only for an agent reply persisted
+from a run that did not complete, so the client can mark it as cut off. The key
+is absent on every other message, keeping those payloads unchanged.
 """
 
 from __future__ import annotations

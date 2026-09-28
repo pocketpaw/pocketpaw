@@ -1,10 +1,8 @@
 """Tier 2 arq worker: ``execute_run_job`` rehydrates a ``RunSpec`` and
 delegates to ``execute_run``; ``_startup`` sweeps runs orphaned by the
-previous worker.
-
-Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot-sweep orphan is aged past
-``_boot_sweep_older_than_seconds()`` instead of a fixed 30s, now that the cutoff
-is three heartbeat intervals rather than 5 seconds."""
+previous worker. The boot-sweep orphan is aged past
+``_boot_sweep_older_than_seconds()``, since that cutoff scales with the
+heartbeat interval."""
 
 from __future__ import annotations
 

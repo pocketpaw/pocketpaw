@@ -1,36 +1,22 @@
-"""Beanie document for one assistant chat turn.
+"""Beanie document for one assistant chat turn (``ChatRunDoc``).
 
-Changes:
-- 2026-09-27 (fix/chat-run-heartbeat) — added ``last_heartbeat_at``. The worker
-  stamps it every ``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS`` while it drives a
-  ``running`` run, and the stale-run sweeper judges running runs by it instead of
-  ``createdAt``. Before this a healthy run that simply took longer than the
-  10-minute cutoff was flipped to ``interrupted`` under the worker's feet. Additive,
-  ``None`` on every existing doc (the sweeper falls back to ``started_at`` then
-  ``createdAt``), so no migration.
-- 2026-06-10 (sov/w3a-igw — per-run token metering) — added the ``usage`` field
-  so each run records the actual prompt / completion / cached token counts (and
-  cost / model / backend) the backend reports, instead of the counts being
-  dropped. ``run_core`` captures the backend's ``token_usage`` event and persists
-  the assembled dict here via ``mark_completed`` / ``mark_terminal``. ``{}`` when
-  the backend reported no usage (legacy / empty-text / pre-metering runs), so the
-  field is a precondition for outcome-based (token-metered) pricing without
-  changing any existing run lifecycle.
-- 2026-06-24 (integration/billing-credits, BC-3 — compute-cost metering) — added
-  the ``billed`` flag. The metering sweeper (``ee.cloud.metering.sweeper``) bills
-  every terminal run's compute cost to the workspace wallet EXACTLY ONCE and
-  flips ``billed`` True so the run is never re-swept. ``False`` for every run
-  until its cost is metered (the durable backlog the sweeper drains). The
-  exactly-once guarantee is doubly held — the ledger's ``run:{run_id}``
-  idempotency key is the real guard, this flag is the cheap "already done" filter.
-- 2026-07-26 (concierge transcripts) — added ``user_text``. Every authed surface
-  persists the user's turn as its own Message document and points
-  ``user_message_id`` at it; the CONCIERGE surface has an anonymous visitor with
-  no thread and no Message row, so the visitor half of the conversation was never
-  written down and the owner's "transcript" read as the agent talking to itself.
-  This field is that missing half, written only for concierge runs whose site has
-  ``concierge_store_transcripts`` on. It is PERSONAL DATA — a visitor types free
-  text — so it is opt-outable per site and length-capped by the writer.
+Fields a reader should know about:
+
+- ``last_heartbeat_at``: stamped every ``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS``
+  by the worker while it drives a ``running`` run. The stale-run sweeper judges
+  running runs by it, falling back to ``started_at`` then ``createdAt`` when it
+  is ``None``, so older docs need no migration.
+- ``usage``: the prompt / completion / cached token counts (plus cost, model,
+  backend) the backend reported, captured by ``run_core`` and written via
+  ``mark_completed`` / ``mark_terminal``. ``{}`` when the backend reported none.
+- ``billed``: flipped True once the metering sweeper
+  (``ee.cloud.metering.sweeper``) has charged the run's compute cost to the
+  workspace wallet. The ledger's ``run:{run_id}`` idempotency key is the real
+  exactly-once guard; this flag is the cheap "already done" filter.
+- ``user_text``: the visitor's turn for CONCIERGE runs, which have no Message
+  row for the user side. Written only when the site has
+  ``concierge_store_transcripts`` on. It is personal data, so it is opt-outable
+  per site and length-capped by the writer.
 """
 
 from __future__ import annotations

@@ -1,31 +1,16 @@
 # tests/cloud/runs/test_run_core_partial_reply_survives.py
-# Created 2026-09-14 (fix/partial-reply-survives-failed-run). Reproduces the
-# reported bug: when a turn fails or is cancelled mid-stream, the assistant text
-# the model had ALREADY produced never reaches the agent's context again, so the
-# next turn is answered as if the exchange never happened and the user pays to
-# regenerate what was already generated.
+# A turn that fails or is cancelled mid-stream must stay in the agent's context:
+# the text the model already produced reaches the next turn's history, so the
+# user does not pay to regenerate it.
 #
-# Where it goes: ``execute_run`` writes an assistant ``Message`` from exactly one
-# place - ``_persist_and_complete``. The failed / cancelled / empty-text branches
-# return before it, handing ``full_text`` to ``mark_terminal(partial_text=...)``
-# instead. That lands on ``ChatRunDoc.partial_text``, which is durable but which
-# ``load_history_for_scope`` does not read: it queries the ``Message`` collection
-# and nothing else. The reply is stored and unreachable at the same time.
+# ``execute_run`` writes the partial both to ``ChatRunDoc.partial_text`` and, as
+# a cut-off assistant Message (``run_status`` set), to the Message collection
+# that ``load_history_for_scope`` reads. The mid-stream cancel test pins that
+# every chunk streamed before the stop is kept.
 #
-# The concierge surface already solved this - ``paw_bar/router.py``'s
-# ``_load_concierge_history`` reads ``user_text`` + ``partial_text`` off the run
-# docs precisely because anonymous visitors have no ``Message`` rows. Authed chat
-# never inherited it.
-#
-# EXPECTED STATE ON THE UNFIXED TREE: the two ``survives`` tests fail, the two
-# characterization tests pass. The characterizations are what prove the failure
-# is a reachability bug and not a data-loss bug - do not delete them with the fix.
-#
-# Updated 2026-09-27 (fix/chat-run-heartbeat): ``execute_run`` now also persists
-# a non-completed run's partial as an assistant Message (``run_status`` set) and
-# points ``assistant_message_id`` at it, so
-# ``test_the_partial_reply_is_durable_on_the_run_doc`` pins that new truth
-# instead of ``assistant_message_id is None``. The run doc still keeps the text.
+# The characterization tests (the partial is durable on the run doc; a
+# successful run reaches history) separate a reachability failure from a
+# data-loss failure. Keep them.
 from __future__ import annotations
 
 import fakeredis.aioredis

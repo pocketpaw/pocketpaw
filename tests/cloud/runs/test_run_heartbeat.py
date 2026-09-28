@@ -1,9 +1,9 @@
 # tests/cloud/runs/test_run_heartbeat.py
-# Created 2026-09-27 (fix/chat-run-heartbeat). Unit coverage for the pieces behind
-# test_long_run_survives.py: the conditional queued -> running claim, the
-# heartbeat write and its interval knob, the sweeper's conditional write losing a
-# race to the worker cleanly, the worker draining shielded run cleanups before it
-# closes the database, and the cut-off marker on the history / wire mappers.
+# Unit coverage for the pieces behind test_long_run_survives.py: the conditional
+# queued -> running claim, the heartbeat write and its interval knob, the
+# sweeper's conditional write losing a race to the worker cleanly, the worker
+# draining shielded run cleanups before it closes the database, and the cut-off
+# marker on the history / wire mappers.
 from __future__ import annotations
 
 import asyncio

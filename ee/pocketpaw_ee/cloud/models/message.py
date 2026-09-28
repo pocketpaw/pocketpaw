@@ -1,12 +1,10 @@
-"""Message document — unified message store for pocket agent memory and group chat.
+"""Message document: unified message store for pocket agent memory and group chat.
 
-Updated: 2026-09-27 (fix/chat-run-heartbeat) — added ``run_status``. A run that
-ends failed / cancelled / interrupted now persists the text it had already
-streamed as a real assistant Message (before, it lived only on
-``ChatRunDoc.partial_text``, which the chat history never reads, so a refresh
-showed the user's question and no answer). ``run_status`` carries that terminal
-status so the UI can mark the reply as cut off and the agent's history reader can
-still tell the model the reply is incomplete. ``None`` on every normal message.
+``run_status`` is set only on an assistant Message persisted from a run that
+ended ``failed`` / ``cancelled`` / ``interrupted``: the text it had already
+streamed. The UI uses it to mark the reply as cut off, and the agent's history
+reader uses it to tell the model the reply is incomplete. ``None`` on every
+normal message.
 """
 
 from __future__ import annotations

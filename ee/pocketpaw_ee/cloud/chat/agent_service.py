@@ -1,301 +1,40 @@
-"""Cloud agent chat service — scope resolution, toolset assembly, context.
+"""Cloud agent chat service: scope resolution, toolset assembly, context.
 
 Keeps the router thin: the router handles HTTP + SSE plumbing; this module
-handles *what the agent sees*:
+decides *what the agent sees*.
 
 * ``resolve_scope_context`` turns (scope, scope_id, user_id) into a
-  ``ScopeContext`` including the target agent id, members, and
-  pocket-scoped tool specs where applicable.
-* ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
-  agent carries context across backend restarts and pool evictions.
+  ``ScopeContext``: target agent, members, pocket-scoped tool specs, and
+  pre-resolved prompt material (pocket summary, home backend summary, the
+  about-member block, the entity-aware ``resolved_profile``). On the CODE
+  surface an unhinted turn resolves to the dedicated ``code`` agent.
+* ``build_behavior_instructions`` / ``build_dynamic_context`` /
+  ``build_knowledge_context`` render that context into the prompt. The surface
+  preamble is its own prompt layer elsewhere, not part of the dynamic context.
+* ``load_history_for_scope`` rehydrates prior turns from Mongo, workspace-scoped,
+  and folds in the partial replies of runs that did not complete, each followed
+  by a "was cut off" system note in the same window row.
+* ``resolve_user_content`` / ``resolve_turn_images`` shape the user's turn:
+  files-only sends, inline attachment text, and images shrunk to fit the model.
+* Per-stream ContextVars carry identity (workspace, user, session, pocket) for
+  MCP tools, the SSE sink, the delivered-artifact collector, and the
+  cloud-chat-run marker; a session-keyed sink registry serves callers that run
+  outside the stream's context.
 
-Changes: 2026-09-27 (fix/chat-run-heartbeat) — a run that does not complete
-now persists its partial reply as a real ``Message`` carrying ``run_status``, and
-``find_stranded_replies`` skips runs that point at such a Message. So the
-"was cut off" note moved with it: ``_message_entries`` appends
-``_STRANDED_REPLY_NOTE`` after an assistant row that has ``run_status`` set, in
-the SAME window row, exactly as ``_stranded_reply_rows`` pairs a run-doc partial
-with its note. The reply is counted once and the model is still told it stops
-early.
+Tenant and privacy invariants (details in the named helpers):
 
-Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images`` grew the
-provider's per-image ceiling (5MB) and a per-turn byte budget, which it had
-neither of while the surface-snapshot channel in ``run_core`` has had both since
-2026-09-11. A cap alone would have made the common case worse, so ``_fit_for_model``
-SHRINKS an oversized picture instead of dropping it: a 4K PNG screenshot is what
-people actually attach, and a transcoded HEIC or AVIF balloons because PNG is
-lossless. An image that already fits is returned byte-identical.
-
-Changes: 2026-09-15 (feat/chat-image-wiring) — ``resolve_turn_images``
-resolves a turn's uploads to bytes (transcoding HEIC/HEIF/TIFF/BMP to PNG, since
-HEIC is what an iPhone shoots and is not on the API's media-type list), and
-``_build_attachments_block`` stops OCRing anything the model is being SHOWN,
-emitting a one-line note naming the file instead. Failures are per-file and
-quiet: an unreadable image is simply absent from the tuple while the text block
-still names it, so the turn says a file arrived rather than pretending none did.
-
-Changes: 2026-09-14 (fix/partial-reply-survives-failed-run) —
-``load_history_for_scope`` is no longer a read of the ``Message`` collection
-alone. ``execute_run`` writes an assistant ``Message`` from exactly one place
-(``_persist_and_complete``); the failed, cancelled and interrupted branches
-return before it and hand the text the model had ALREADY produced to
-``mark_terminal(partial_text=...)``. That is durable, and nothing read it back —
-so a turn that died mid-stream was erased from the agent's memory, the next turn
-was answered cold, and the user paid a second time for tokens already spent. The
-reader now folds those replies in through ``run_service.find_stranded_replies``
-and marks each one AT READ TIME with ``_STRANDED_REPLY_NOTE``: a truncated reply
-replayed as an ordinary completed turn is worse than absence, because the model
-reads its own half-finished sentence as a finished thought and builds on a claim
-it never made. The marker is a separate ``system`` entry, never concatenated into
-the content, so the stored text stays verbatim and the wording can change with no
-migration. Same shape as ``paw_bar.router._load_concierge_history``, which solved
-this for anonymous visitors in 2026-07 and which authed chat never inherited.
-
-Changes: 2026-09-08 (fix/attachment-only-turns) — added
-``resolve_user_content`` / ``visible_message_text``: the model's copy of a turn
-that carried attachments and no typed text. The composer sends a zero-width
-space as the body so the row persists and renders blank, and that sentinel was
-being handed to the model as the user's whole message — a pasted brief reached
-the prompt but read as reference material, so the agent asked for a brief it
-already had. The inline-attachment caps moved with it (per-file 8000 -> 40000,
-total 30000 -> 100000): a bulky paste IS an attachment on this path, and the
-old per-file bound cut a normal landing-page brief in half.
-
-Changes: 2026-08-07 (fix/code-delegate-pooled-context) — added the session-keyed
-stream registry (``register_stream_sink`` / ``unregister_stream_sink`` /
-``stream_sink_for_session``) alongside the ``_sse_event_sink`` ContextVar. The
-ContextVar answers "is there a sink in MY context", which is right for an
-observability frame and wrong for a caller that WAITS on one: Code Mode's file
-tools run in a pooled SDK client's task created during prewarm, so they see
-identity and never the sink. The registry lets such a caller find the stream by
-session id instead. ``push_sse_event`` is unchanged and still a deliberate
-no-op outside a stream.
-
-Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
-and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
-its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget
-agent) WITHOUT the member-auth path — the caller authed at the HTTP edge with an
-origin-bound Site key. ``_kb_scopes_for_context`` locks a concierge run to
-``[pocket:<pocket_id>]`` alone (never ``agent:`` / ``workspace:`` / ``user:``) so
-a public caller can't reach a sibling pocket or the whole tenant KB (finding #2);
-``session_key_for`` folds the anonymous ``customer_ref`` into the key so visitors
-don't collide on the shared Site pocket; ``load_history_for_scope`` treats
-CONCIERGE like pocket/session (customer-isolated). ``_resolve_concierge``
-reconciles the pocket's workspace against the key's (cross-tenant guard) and
-verifies the widget's agent belongs to that workspace (``_agent_in_workspace``).
-
-Changes: 2026-05-22 — ``ScopeContext`` carries the anchored pocket's
-``pocket_type``; ``build_behavior_instructions`` appends ``HOME_POCKET_PROMPT``
-when that type is ``"home"`` so the agent behaves correctly on the home page
-(call ``add_widget`` for an explicit widget request, answer directly
-otherwise). ``_resolve_pocket`` / ``_resolve_session`` populate the field.
-Changes: 2026-05-22 (#1174) — ``build_behavior_instructions`` no longer emits
-``POCKET_DELEGATION_RULE`` (nor the heavy interaction prompt) for a
-``type="home"`` scope. The delegation rule ("never call add_widget, delegate
-to the specialist") contradicts ``HOME_POCKET_PROMPT`` ("call add_widget");
-the home agent now gets exactly one consistent widget-creation instruction.
-Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``build_behavior_instructions``
-fills the interaction prompt's current-pocket block via ``fill_current_pocket``
-(both the pocket-id and backend-summary tokens) instead of a bare
-``POCKET_ID_TOKEN`` replace, so the new ``__BACKEND_SUMMARY__`` token never
-leaks as literal text.
-Changes: 2026-05-22 (Increment 3) — added ``push_pocket_execution``, the
-SSE-sink push for the execution router's per-request ``pocket_execution``
-observability frame.
-Changes: 2026-05-24 — ``ScopeContext`` carries an optional
-``surface_context`` (the resolved {surface_kind, meta, preamble} tuple
-from ``surface_context.resolve_surface_context``). ``build_dynamic_context``
-prepends its preamble before the legacy scope/participants/current-pocket
-tags so the chat agent sees the surface snapshot first. Clients that
-don't stamp a surface hint keep the old three-line shape unchanged —
-``surface_context is None`` is the legacy path.
-Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — that prepend is GONE.
-The preamble is a prompt layer now (``pocketpaw.prompt.surface``), assembled
-under the agent's identity and above the per-turn material instead of inside
-the "Your Knowledge Base" wrapper this block lands in, and it carries the
-handler's cache key so the assembled prompt's digest moves when the user
-navigates or the pocket they are looking at is edited. ``run_core`` threads
-both halves into ``pool.run``; leaving the prepend here would double the text.
-``build_dynamic_context`` is back to exactly its three legacy tags, for every
-client, surface-stamping or not.
-Changes: 2026-05-31 (feat/home-agent-source-authoring) — ``ScopeContext``
-carries an optional ``backend_summary`` (the non-secret {base_url,
-auth_type, configured} dict from ``pockets.service.get_pocket_backend``,
-never the token). The resolvers populate it ONLY for a ``type="home"``
-pocket (via the new ``_home_backend_summary`` helper);
-``build_behavior_instructions`` fills it into ``HOME_POCKET_PROMPT``'s
-``__BACKEND_SUMMARY__`` token via ``fill_current_pocket`` so the home agent
-SEES whether a backend is configured (and its base_url) before authoring a
-``sources`` block — fixing the smoke-test finding where the agent claimed
-"no integration wired up" despite a configured backend. Non-home scopes
-keep ``backend_summary=None`` and pay no extra read.
-Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①)
-— ``ScopeContext`` carries an optional ``resolved_profile`` (the ENTITY-AWARE
-``SurfaceProfile`` resolved ONCE per run by ``run_core.execute_run``, which
-folds a pocket-entity's ``surface_profile`` override over the surface base).
-``build_behavior_instructions`` now gates the ripple block on
-``ctx.resolved_profile.ripple_mode`` (pre-resolved, stays sync) instead of
-calling ``resolve_profile`` itself — so a pocket bound to a room can flip
-ripple off/on for that room. ``resolved_profile is None`` is the legacy /
-non-entity path → ripple ON, byte-identical to today.
-Changes: 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
-identity now carries the room's ``pocket_id`` too. ``attach_agent_identity``
-gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
-``current_workspace_id`` / ``current_user_id``; both are set in
-``run_core`` and read by the connector-execution MCP server
-(``mcp_servers/connectors.py``) so its tools scope to the current pocket.
-The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
-unaffected (``pocket_id`` defaults to ``None``).
-
-Changes: 2026-08-03 (feat/about-member-id) — the ``<about-member>`` block
-carries the member's ``user_id``. It described people by ``name · role · team``
-and nothing else, so two members called the same thing rendered byte-identical
-blocks and the agent had no way to tell which one it was addressing. That is not
-an edge case here: ``_resolve_about_member`` runs from every scope resolver and
-is NOT gated on room type, unlike the member-private ``user:`` KB scope, so it
-is live in shared rooms. The id is ``person.user_id`` — the same opaque cloud id
-the KB scope keys on — and not ``person.id``, which is
-``person-{workspace}-{user}`` and would put a tenant id in the prompt for no
-gain. An id-less Person still renders its block, minus the line.
-
-Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — ``ScopeContext`` carries
-an optional ``about_member_block``: a concise, token-capped "about this member"
-string (name · role · team · one-line focus) rendered from the member's Fabric
-``Person`` (``people.service.get_person``). The resolvers pre-resolve it (async)
-via ``_resolve_about_member`` and stash it; ``build_behavior_instructions``
-APPENDS it to the base system message (additive — NOT a persona override) so the
-agent greets the member by name from the first turn. A member with no Person
-(pre-existing / non-invited user) → ``None`` → no block, behavior unchanged. The
-render is HARD-capped (``_ABOUT_MEMBER_CHAR_CAP``) to kill the prompt-bloat
-failure mode. Stays sync in ``build_behavior_instructions`` — the async read
-happens once in the resolver, mirroring ``backend_summary``.
-
-Changes: 2026-06-08 (VIP Onboarding Phase B — session-user isolation gate) —
-``_kb_scopes_for_context`` now prepends a member-private ``user:{member_id}``
-KB scope, GATED by the new ``_member_private_user_scope`` helper. The gate
-emits the scope ONLY when ``ctx.members == [ctx.user_id]`` (the member's own
-solo session) and suppresses it in every shared / multi-member room, so one
-member's private Gmail/calendar KB is never injected into another member's
-agent context. ``ctx.user_id`` (an opaque cloud user id) is the scope id —
-no email, so kb-go's on-disk ``:``→``_`` sanitize can't alias two members.
-Mirrors the OSS ``KbContext.user_id`` / ``_resolve_kb_scopes`` priority.
-Changes: 2026-06-08 (VIP Onboarding Phase B chunk 5 — the "your day" briefing)
-— ``_member_briefing_block`` builds a concise, capped (``_BRIEFING_MAX_CHARS``
-≈ 400 tokens) "your day" block from the structured ``MemberDayDigest`` (the
-per-member live mail/calendar pull) and ``build_knowledge_context`` PREPENDS
-it. It is GATED by the SAME ``_member_private_user_scope`` decision as the
-private ``user:`` KB scope — present ONLY in the member's solo session,
-ABSENT (and the digest never even pulled) in every shared / multi-member
-room. Graceful: an empty digest (no connected accounts) or a digest that
-raises → ``""``, so unconnected and non-solo sessions are byte-identical to
-before.
-Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``ScopeContext``
-carries an optional ``pocket_summary``: the anchored pocket's orientation
-data ({name, description, type, template_slug, pattern, ripple}) where
-``ripple`` is ``spec_ops.summarize_ripple_spec`` over the pocket's
-rippleSpec (top-level ui node count/types, capped state keys, source
-summaries, action keys, legacy widgets count). Populated by
-``_pocket_summary_data`` in ``_resolve_pocket`` AND ``_resolve_session``
-(when the session is pocket-anchored) for ALL pocket types, from the
-Pocket doc those resolvers already fetched — zero extra DB reads.
-``build_behavior_instructions`` renders it as a ``<pocket-summary>``
-block (description clamped, whole block hard-capped — the about-member
-precedent) appended after the per-scope pocket prompts and gated off for
-``intent="pocket_create"`` (mirrors the ``<current-pocket>`` tag gate).
-Fixes the context-starvation bug where a chat anchored to a fully
-composed template pocket had NO pocket content in its prompt, so the
-agent read the empty legacy ``widgets[]`` via get_pocket and answered
-"an empty shell". HOME pockets keep HOME_POCKET_PROMPT + backend_summary
-byte-identical — the new block is purely additive.
-Changes: 2026-06-12 (fix/pocket-anchored-chat-context, review pass) —
-``<pocket-summary>`` hardening. EVERY field the renderer interpolates —
-not just name/description — now passes through
-``_sanitize_pocket_summary_field`` (whitespace collapse, angle brackets
-swapped for lookalikes, per-item clamp), killing the prompt-injection
-where a member-authored state key / node type / template slug containing
-``"</pocket-summary>\\nIGNORE PREVIOUS INSTRUCTIONS"`` forged the block's
-closing tag and escaped into instruction space. Numeric counts are
-type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
-now sanitizes at the source (the get_pocket ``_summary`` path) — it never
-trusts a hand-built dict. Capped lists render honest "+N more" markers
-from the summarizer's new ``*_omitted`` counters.
-Changes: 2026-06-18 (fix/session-history-workspace-scope) —
-``load_history_for_scope``'s pocket/session query now also filters by
-``workspace_id`` (from ``ctx.workspace_id``). Defense-in-depth: pocket/session
-ObjectIds are globally unique so ``session_key`` alone never collides today,
-but the query no longer RELIES on id-uniqueness for tenant isolation — the
-workspace boundary is now an explicit predicate, and the query lands on the
-``(workspace_id, session_key, createdAt)`` compound index. Mirrors the
-existing ``MongoMemoryStore.get_session_in_workspace`` pattern. Normal-path
-behavior (ordering, limit, ``session_key_for`` formula) is unchanged.
-
-Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
-and the three resolvers gained ``expected_workspace_id``: the authenticated,
-route-validated workspace the run worker threads from ``spec.workspace_id``.
-The new ``_reconcile_workspace_id`` helper makes it tenant-safe: a NON-EMPTY
-doc ``workspace`` stays authoritative AND a disagreeing ``expected_workspace_id``
-raises ``Forbidden`` (the cross-tenant guard — the ``_get_pocket`` / ``_get_session``
-finders look up by ``_id`` alone, not tenant-scoped, so a spec for workspace B
-can load workspace A's doc); an EMPTY/missing doc workspace FALLS BACK to the
-trusted ``expected_workspace_id``. This fixes the worker throwing away the
-authenticated ``spec.workspace_id`` and re-deriving tenancy from a doc that can
-be empty — which blanked the identity contextvar and made the sites-create MCP
-tool raise "requires workspace and user context (call from a cloud chat
-session)". ``expected_workspace_id is None`` (legacy / non-worker callers)
-preserves today's doc-only behavior. Defense-in-depth: ``attach_agent_identity``
-now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
-instead of binding ``""``, so any future caller that loses tenancy fails loudly
-at the seam, not deep inside an MCP tool.
-
-Changes: 2026-07-11 (ART-1) — added the per-run ``_delivered_artifacts``
-collector ContextVar beside the identity ContextVars (+ ``record_delivered_artifact``
-and the ``attach_/detach_delivered_artifacts_collector`` primitives and the
-``collect_delivered_artifacts`` context manager). The ``deliver_artifact`` MCP
-tool appends one meta dict per SUCCESSFUL delivery; ``run_core`` binds a fresh
-list at run start and drains it at persist time into ``{type:"artifact", meta}``
-attachments plus one ``artifact`` SSE event apiece (in delivery order). It holds
-a MUTABLE list so the tool's append (never a rebind) is visible to the run task
-that bound it across the SDK task boundary — the same shared-object propagation
-``_sse_event_sink`` relies on.
-Changes: 2026-06-27 (fix/cloud-artifacts-reland) — added the per-run
-``_active_cloud_chat_run`` marker ContextVar (+ ``current_cloud_chat_run`` and
-the ``mark_cloud_chat_run`` context manager) beside the identity ContextVars.
-It distinguishes an actual cloud CHAT dispatch (the path that MUST bind
-workspace identity) from any other workspace-less run in a cloud-connected
-process. The agent cwd jail's fail-closed (``agent_jail.resolve_agent_cwd``) was
-gated on ``is_multi_tenant_cloud()`` alone — a PROCESS-GLOBAL, true whenever the
-cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
-(direct backend tests, CLI, background jobs), not just a mis-tenanted chat run.
-``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
-and the jail fails closed only when this marker is set; otherwise it falls back
-to ``settings.file_jail_path`` (pre-ART-2 behavior).
-
-Changes: 2026-07-30 (Paw Bar inbox D5) — ``_kb_scopes_for_context`` now grants a
-CONCIERGE run ``agent:<target_agent_id>`` ALONGSIDE ``pocket:<pocket_id>``.
-Before this, an owner who opened their site's concierge in ``/agents`` and
-attached knowledge to the AGENT got nothing on the site — only the site→pocket
-page sync reached the visitor, and the failure was silent. Each site concierge is
-a dedicated, bijective agent (``paw_bar.agent_provisioning.ensure_site_agent``),
-so its ``agent:`` scope is that one site's knowledge, not a cross-tenant pool.
-``workspace:`` and ``user:`` stay DROPPED — those are the tenant-wide and
-member-private tiers a public, anonymous visitor must never reach.
-
-Changes: 2026-07-22 (CD-1, feat/code-delegate-channel) — added
-``has_sse_event_sink()`` beside ``push_sse_event``. Read-only introspection of
-the same ContextVar, added for Code Mode's browser-delegate channel: that caller
-pushes a frame and then PARKS waiting for the browser's reply, so a push into no
-stream has to be a fast, distinct failure rather than a silent no-op followed by
-a full-length timeout. No behaviour change to any existing push path.
-
-Changes: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
-``resolve_scope_context`` (and ``_resolve_session`` / ``_resolve_pocket``)
-gained a ``surface`` param, and ``_get_code_agent_id`` was added. On the CODE
-surface, an unhinted turn resolves to the dedicated ``code`` agent (slug
-``code``), lazy-seeded via ``agents.service.seed_code_agent`` on miss, instead
-of the default ``pocketpaw`` agent — so the exclusive file-tool policy is
-applied backend-authoritatively (the frontend need not pass the id). Guarded
-narrowly on CODE + no explicit ``agent_id_hint``; every other surface's
-resolution is byte-identical.
+- ``_reconcile_workspace_id``: a non-empty doc workspace is authoritative and a
+  disagreeing caller workspace raises ``Forbidden``; an empty one falls back to
+  the caller's. ``attach_agent_identity`` refuses empty workspace or user ids.
+- ``_member_private_user_scope``: the member-private ``user:`` KB scope and the
+  "your day" briefing appear only when ``ctx.members == [ctx.user_id]``.
+- CONCIERGE runs are public and anonymous. They resolve from the
+  server-authoritative spec, get KB scopes ``pocket:`` and ``agent:`` only
+  (never ``workspace:`` or ``user:``), and fold the visitor's ``customer_ref``
+  into the session key.
+- Every field interpolated into ``<pocket-summary>`` is sanitized, because
+  member-authored names and keys could otherwise forge the closing tag.
+- The cwd jail fails closed only for runs wrapped in ``mark_cloud_chat_run``.
 """
 
 from __future__ import annotations
