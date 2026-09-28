@@ -1,4 +1,11 @@
 # tests/cloud/test_paw_bar_escape_hatch.py — "talk to a human" (owner inbox, slice 3).
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Created 2026-07-31: the handoffs endpoint has existed since D2 and has always
 # returned []. These tests are the proof that it doesn't anymore, and that the
 # escape hatch behind it holds in the states where support products usually lose
@@ -82,6 +89,12 @@ async def _site(workspace_id: str, **ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s

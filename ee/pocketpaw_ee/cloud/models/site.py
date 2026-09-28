@@ -8,6 +8,14 @@
 # ``concierge_allow_doc_code``, the owner's switch that lets a v2 concierge show
 # code blocks copied verbatim from the site's own knowledge (documentation
 # sites). Defaults False, so existing rows keep every code block replaced.
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a concierge now exists
+# only because its owner created it. Added ``concierge_created_at``, the marker
+# ``POST /paw-bar/admin/site/{id}/concierge`` stamps and ``DELETE`` clears, and
+# flipped ``concierge_enabled`` to default False (matching ``sites/dto.py``). Rows
+# written before this never stored ``concierge_enabled`` and read the old True
+# default, so ``sites.migrate_concierge_marker`` writes both fields explicitly in
+# the same release (it runs at boot and as a deploy step) or every live bar goes
+# dark the moment this model ships.
 #
 # Updated 2026-09-27 (feat/concierge-v2-runner, CR-1): added ``concierge_runtime``,
 # the owner's switch between the legacy concierge (a full agent run through the
@@ -787,9 +795,20 @@ class Site(TimestampedDocument):
     # three public entry points (frame / chat / action) refuse with a 403, so the
     # owner can silence the bar instantly without deleting the Site or rotating the
     # key. Re-read on EVERY request (never cached on a warm client) so a toggle
-    # takes effect immediately. Defaults True (every existing site stays live), so
-    # no migration.
-    concierge_enabled: bool = True
+    # takes effect immediately. Defaults False since CR-12: a concierge is created
+    # off and turned on by its owner. Rows that predate CR-12 never stored this
+    # field; ``sites.migrate_concierge_marker`` writes their old effective value
+    # (True) explicitly so the flip does not silence them.
+    concierge_enabled: bool = False
+    # Paw Bar concierge (CR-12, 2026-09-28): WHEN the owner created this site's
+    # concierge, or None when it has none. Existence is this stored marker, never
+    # "the widget has an agent" — v2 answers without one. Stamped only by
+    # ``POST /paw-bar/admin/site/{id}/concierge`` (and the one-shot backfill for
+    # bars that were already live), cleared by ``DELETE``. Nothing else writes it,
+    # which is the captain's rule: no concierge is ever created automatically.
+    # ``site_keys.concierge_available`` requires it, so "none" reads as "off" at
+    # every public seam.
+    concierge_created_at: datetime | None = None
     # VS-3: the owner's "hide the PocketPaw badge" preference. Only half of the
     # rule: ``sites.service._stamp_free_badge`` drops the badge when the site is
     # ENTITLED to remove it (``SiteEntitlements.badge_required`` is False) AND this is

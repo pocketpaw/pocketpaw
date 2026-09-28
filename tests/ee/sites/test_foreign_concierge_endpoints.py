@@ -1,6 +1,15 @@
 # tests/ee/sites/test_foreign_concierge_endpoints.py — the HTTP surface of the
 # foreign concierge: bind, read, rotate, rebind.
 #
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a bind buys the
+# connection and nothing else; the owner creates the concierge afterwards. The
+# first-bind test now asserts an EMPTY snippet and no agent, then creates the
+# concierge (``_owner_creates_concierge``, standing in for
+# ``POST /paw-bar/admin/site/{id}/concierge``) and asserts the snippet appears.
+# Tests that need a live bar or a resolving key create one first. The empty-body
+# rebind is a 422 (``sites.agent_required``) that leaves the bar alone, instead
+# of a re-provision.
+#
 # WHY THIS EXISTS. Four slices built the feature and none of them reached the
 # wire: ``bind_foreign_concierge`` lived only in the service, no ``@router``
 # decorator reached it, and a frontend building the setup panel had nothing real
@@ -241,6 +250,24 @@ async def _rebind(
         return await client.post(_url(pocket_id, "/rebind"), json=body)
 
 
+async def _owner_creates_concierge(workspace_id: str, pocket_id: str = _POCKET) -> None:
+    """What the owner's ``POST /paw-bar/admin/site/{id}/concierge`` does for a
+    legacy concierge, plus switching it on (CR-12). The endpoint itself is pinned
+    in tests/cloud/test_paw_bar_concierge_manual_create.py."""
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent, ensure_site_widget_row
+    from pocketpaw_ee.sites import service as sites_service
+
+    site = await sites_service.foreign_site_for_pocket(workspace_id, pocket_id)
+    assert site is not None, "bind first"
+    widget = await ensure_site_widget_row(site, workspace_id)
+    await ensure_site_agent(site, widget)
+    site.concierge_created_at = datetime.now(UTC)
+    site.concierge_enabled = True
+    await site.save()
+
+
 async def _arm_the_trap(client: AsyncClient, workspace_id: str) -> int:
     """Bind a CONTROL pocket and prove the two assertions below can move.
 
@@ -265,12 +292,12 @@ async def _arm_the_trap(client: AsyncClient, workspace_id: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_bind_through_the_route_charges_once_and_returns_the_snippet(store):
-    """The feature: one POST leaves a paid concierge and the snippet to paste.
+async def test_a_bind_through_the_route_charges_once_and_creates_no_concierge(store):
+    """One POST leaves a paid connection, and no concierge until the owner makes one.
 
-    The snippet rather than the key, because the snippet is what the owner does
-    something with — and it is empty unless the bind also provisioned a bar with
-    an agent behind it, so asserting on it covers the funnel the route triggers.
+    CR-12: the bind used to provision a bar and an agent on the way past. Now the
+    snippet is EMPTY and nothing is bound until the owner's explicit create, after
+    which the same read carries the snippet to paste.
     """
     ws = "ws-ep-first"
     await _fund(ws)
@@ -287,9 +314,9 @@ async def test_a_bind_through_the_route_charges_once_and_returns_the_snippet(sto
     assert body["subscription_status"] == "active", "the month was bought"
     assert body["plan_tier"] == _STAFF.key
     assert body["site_key"].startswith("site_key_")
-    assert body["site_key"] in body["embed_snippet"], "the snippet must carry this site's key"
-    assert "data-paw-bar-embed" in body["embed_snippet"]
-    assert body["agent_id"], "the bind must leave the bar bound to a concierge agent"
+    assert body["embed_snippet"] == "", "no concierge yet, so no bar"
+    assert body["agent_id"] == "", "and nothing was provisioned"
+    assert await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=10) == []
     assert len(body["origins"]) == 1
     assert body["origins"][0]["host"] == _HOST
     assert body["origins"][0]["verified"] is True
@@ -297,6 +324,12 @@ async def test_a_bind_through_the_route_charges_once_and_returns_the_snippet(sto
     assert body["origins"][0]["verified_at"], "the panel needs the date to say 'expires in N days'"
     assert await credits_service.balance(ws) == _FUNDED - _PRICE_CREDITS
 
+    await _owner_creates_concierge(ws)
+    async with _client(app) as c:
+        created = (await _read(c, ws)).json()
+    assert created["site_key"] in created["embed_snippet"], "the snippet must carry this site's key"
+    assert "data-paw-bar-embed" in created["embed_snippet"]
+    assert created["agent_id"], "a legacy create binds its agent"
     widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=ws, limit=10)
     assert len(widgets) == 1
 
@@ -516,6 +549,7 @@ async def test_rotating_through_the_route_retires_the_old_key_at_the_resolver(st
         bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
         old_key = bound.json()["site_key"]
+        await _owner_creates_concierge(ws)
 
         resp = await _rotate(c, ws)
 
@@ -545,13 +579,11 @@ async def test_rotating_a_pocket_with_no_concierge_is_a_404(store):  # noqa: ARG
     assert resp.json()["error"]["code"] == "site.not_found"
 
 
-async def test_rebinding_through_the_route_reprovisions_the_bar(store):
-    """An empty ``agent_id`` is the repair path, not a no-op.
-
-    It clears the stale bind and lets the funnel resolve-or-mint the canonical
-    agent again, which is what an owner needs after deleting the agent their bar
-    pointed at. The credential is untouched either way — a rebind that re-minted
-    the key would silently 403 every visitor on the buyer's live page.
+async def test_rebinding_through_the_route_with_no_agent_is_a_422(store):
+    """An empty ``agent_id`` used to re-provision: clear the bind and mint the
+    canonical agent. CR-12 removed that, because a rebind that can mint an agent
+    is a way to create a concierge. It is now a ``sites.agent_required`` 422 and
+    the bar is left exactly as it was.
 
     A rebind to ANOTHER TENANT's agent is refused inside the funnel and is
     covered at that level (tests/cloud/sites/test_foreign_concierge_bind.py).
@@ -565,7 +597,8 @@ async def test_rebinding_through_the_route_reprovisions_the_bar(store):
         bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
         key_before = bound.json()["site_key"]
-        widget_id = bound.json()["widget_id"]
+        await _owner_creates_concierge(ws)
+        widget_id = (await _read(c, ws)).json()["widget_id"]
         assert widget_id
 
         await store.update_fields(widget_id, {"agent_id": ""}, workspace_id=ws)
@@ -573,11 +606,13 @@ async def test_rebinding_through_the_route_reprovisions_the_bar(store):
         assert cleared.json()["agent_id"] == "", "the trap is armed: the bar has no agent"
 
         resp = await _rebind(c, ws, {})
+        after = await _read(c, ws)
 
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["agent_id"], "the rebind must leave the bar bound again"
-    assert body["site_key"] == key_before, "and must not touch the credential"
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "sites.agent_required"
+    body = after.json()
+    assert body["agent_id"] == "", "nothing was minted"
+    assert body["site_key"] == key_before, "and the credential was not touched"
 
 
 async def test_the_read_reports_no_concierge_before_a_bind(store):  # noqa: ARG001
@@ -753,6 +788,7 @@ async def test_rotate_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_key
         bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
         key = bound.json()["site_key"]
+        await _owner_creates_concierge(ws)
 
         with _denied_pocket():
             resp = await c.post(_url(_POCKET, "/rotate-key"))
@@ -774,6 +810,8 @@ async def test_rebind_refuses_a_pocket_the_caller_cannot_open_and_leaves_the_bar
     async with _client(app) as c:
         bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
+        await _owner_creates_concierge(ws)
+        bound = await _read(c, ws)
         widget_id = bound.json()["widget_id"]
         assert widget_id
         agent_before = bound.json()["agent_id"]
@@ -842,6 +880,7 @@ async def test_the_route_passes_the_CALLERS_role_to_the_rebind_rule(store):
     async with _client(admin_app) as c:
         bound = await _bind(c, ws)
         assert bound.status_code == 200, bound.text
+    await _owner_creates_concierge(ws)
 
     agent = await agents_service.create(
         agents_service.legacy_ctx(_OWNER, ws),

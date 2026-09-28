@@ -9,6 +9,22 @@
 # Updated: 2026-09-28 (feat/concierge-v2-output, CR-2) — the settings GET/PATCH
 #   carry ``concierge_allow_doc_code`` (partial PATCH, default False): with it on,
 #   a v2 reply may show code copied verbatim from the site's knowledge.
+# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — owners create and
+#   delete the concierge; nothing creates one automatically. New
+#   ``POST /paw-bar/admin/site/{id}/concierge`` (``paw_bar.manage``, workspace-
+#   scoped, 409 when one exists) stamps ``Site.concierge_created_at``, leaves it
+#   OFF, mints the widget if missing with an empty spec and no actions, sets the
+#   runtime from CR-6's gate (``concierge_gate.default_concierge_runtime``, "legacy"
+#   until that PR merges and the gate passes) and,
+#   for legacy, binds its agent through ``ensure_site_agent`` explicitly. ``DELETE``
+#   clears the marker, turns it off, unbinds (never deletes) a legacy agent, and
+#   purges conversations only with ``delete_conversations=true``. Removed the
+#   auto-provisioning in ``create_widget`` and the enable PATCH. The settings and
+#   overview responses carry ``concierge_exists`` (and overview ``concierge_runtime``),
+#   and the settings snippet asks the marker, not the agent.
+#   DELETE also clears CR-8's pinned answers (``knowledge_routes.delete_faqs``) and
+#   CR-9's uploaded files and links (``knowledge_routes.delete_sources``), each
+#   when present, since both ship in their own PRs.
 # Updated: 2026-09-27 (feat/concierge-v2-runner, CR-1) — POST /paw-bar/chat can
 #   answer through the v2 runner (``paw_bar.concierge_runtime.run_concierge_v2``):
 #   one streamed pydantic_ai call with no tools, grounded in the site KB, written
@@ -1647,18 +1663,10 @@ async def create_widget(
         per_customer_limit_per_min=req.per_customer_limit_per_min,
         event_mapping=req.event_mapping,
     )
-    created = await _store().create_widget(widget)
-    # Auto-provision a DEDICATED concierge agent (feat/site-dedicated-agent). Only
-    # when the caller bound NO agent_id and the pocket resolves to a published Site
-    # — a plain (non-site) widget stays unbound. Failure-soft: a provisioning error
-    # logs and returns the widget UNBOUND rather than 500-ing the create (chat then
-    # 409s and the dashboard offers a manual create). A manual agent_id is honored
-    # and never replaced (the trigger returns early on a bound widget).
-    if not req.agent_id:
-        from pocketpaw_ee.paw_bar.agent_provisioning import provision_widget_on_create
-
-        created = await provision_widget_on_create(created, workspace_id)
-    return created
+    # No agent is provisioned here, even on a site's pocket (CR-12): a concierge
+    # exists only once its owner creates one via POST .../concierge. A widget is
+    # a bar, not a decision to publish an assistant.
+    return await _store().create_widget(widget)
 
 
 @router.get(
@@ -1928,11 +1936,23 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
     concierge_allow_doc_code: bool = False
+    # CR-12: whether the owner has created this site's concierge
+    # (``Site.concierge_created_at``). False means "none": the dashboard shows the
+    # create empty state, and every public seam treats the site as off.
+    concierge_exists: bool = False
     # The snippet the published site itself carries (``embed.concierge_snippet``),
     # so the owner copies the same tag the publish path injects. "" whenever the
-    # site has not earned a bar: no widget, no embed key, no bound agent, the
-    # concierge switched off, or a plan that does not sell it.
+    # site has not earned a bar: no concierge created, no widget, no embed key,
+    # the concierge switched off, or a plan that does not sell it.
     embed_snippet: str = ""
+
+
+class ConciergeCreateRequest(BaseModel):
+    """Body of POST /paw-bar/admin/site/{id}/concierge (CR-12). Every field is
+    optional. The guided fields the v2 setup collects land with their own task;
+    until then the one owner text a new concierge takes is its greeting."""
+
+    concierge_greeting: str | None = None
 
 
 class AdminWidgetSpecUpdate(BaseModel):
@@ -1980,7 +2000,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
     still opens; the snippet is a convenience, the settings are the point.
     """
     try:
-        from pocketpaw_ee.cloud.auth.site_keys import concierge_available
+        from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_exists
         from pocketpaw_ee.cloud.pockets import service as pockets_service
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.service import _capture_base
@@ -1995,6 +2015,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
             api_base=_capture_base(),
             concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
             concierge_entitled=bool(concierge_available(site)),
+            concierge_exists=concierge_exists(site),
         )
     except Exception:  # noqa: BLE001 — the settings response must not 500 on the bar
         logger.warning(
@@ -2031,6 +2052,7 @@ async def _concierge_settings_response(
         # getattr for the same reason: a row older than the switch reads legacy.
         concierge_runtime=_site_concierge_runtime(site),
         concierge_allow_doc_code=getattr(site, "concierge_allow_doc_code", False) is True,
+        concierge_exists=getattr(site, "concierge_created_at", None) is not None,
         embed_snippet=await _site_embed_snippet(site, workspace_id, user_id),
     )
 
@@ -2095,30 +2117,154 @@ async def update_site_concierge_settings(
     every time), so toggling ``concierge_enabled`` off silences the bar immediately.
     """
     site = await _load_site_scoped(site_id, workspace_id)
-    # Track whether this PATCH SETS the concierge on, so we can auto-provision the
-    # dedicated agent for a site whose widget is still unbound (the owner enabling
-    # the concierge is a natural provision point, alongside widget-create). We fire
-    # on ANY PATCH that sets concierge_enabled=true, NOT only a false->true
-    # transition: the E2 dashboard's one-click "create dedicated agent" re-PATCHes
-    # {concierge_enabled: true} on an already-enabled site as its provision hook, so
-    # a transition guard would leave that path no way in. It stays cheap + correct
-    # because provision_on_concierge_enable only acts on an UNBOUND widget and
-    # ensure_site_agent is idempotent, so a re-PATCH on a bound site is a no-op.
-    enabling = "concierge_enabled" in req.model_fields_set and req.concierge_enabled is True
+    # Writes the switch and nothing else (CR-12). This PATCH used to provision an
+    # agent whenever it set concierge_enabled=true; turning a switch on is not
+    # creating a concierge, and on a site with none the switch stays inert
+    # (``concierge_available`` also requires the create marker).
     for name in req.model_fields_set:
         value = getattr(req, name)
         if value is not None:
             setattr(site, name, value)
     await site.save()
-
-    # Concierge-enable provisioning trigger (feat/site-dedicated-agent). Failure-
-    # soft: a provisioning error logs and never fails this settings PATCH.
-    if enabling:
-        from pocketpaw_ee.paw_bar.agent_provisioning import provision_on_concierge_enable
-
-        await provision_on_concierge_enable(site, workspace_id)
-
     return await _concierge_settings_response(site, workspace_id, str(user.id))
+
+
+def _concierge_create_runtime() -> Literal["legacy", "v2"]:
+    """The runtime an owner's explicit create gives a new concierge.
+
+    CR-6's eval gate decides (``concierge_gate.default_concierge_runtime``): "v2"
+    only when the deployment asks for it and the committed real-model report
+    passes. It ships in its own PR, so until that merges this answers "legacy",
+    as it does for anything the gate returns that is not exactly "v2". Asked at
+    create time only; existing concierges keep the runtime they have. A legacy
+    concierge is answered by an agent, so create binds one (captain decision,
+    owner-UX open question 1).
+    """
+    try:
+        from pocketpaw_ee.paw_bar.concierge_gate import default_concierge_runtime
+    except ImportError:
+        return "legacy"
+    return "v2" if default_concierge_runtime() == "v2" else "legacy"
+
+
+@router.post(
+    "/paw-bar/admin/site/{site_id}/concierge",
+    response_model=ConciergeSettingsResponse,
+    status_code=201,
+)
+async def create_site_concierge(
+    site_id: str,
+    req: ConciergeCreateRequest | None = None,
+    user: Any = Depends(_require_paw_bar_manage),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeSettingsResponse:
+    """Create this site's concierge, OFF (CR-12). The ONLY path that creates one.
+
+    409 when one exists; a cross-tenant id is a 404 before anything is read. The
+    widget is minted if missing (empty spec, no actions) and an existing one is
+    kept as it is. The runtime comes from CR-6's eval gate. On the legacy runtime
+    the agent is bound explicitly, here, because the owner asked; that is the one
+    remaining caller of ``ensure_site_agent``. A v2 concierge needs no agent and
+    gets none.
+
+    The marker is written LAST, after the widget and agent exist, so a failure
+    half-way leaves the site with no concierge rather than a concierge with no
+    bar, and a retry is clean (the widget and the agent's slug are both
+    resolve-or-mint).
+    """
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent, ensure_site_widget_row
+
+    site = await _load_site_scoped(site_id, workspace_id)
+    if getattr(site, "concierge_created_at", None) is not None:
+        raise HTTPException(409, "concierge_exists")
+    if not site.pocket_id:
+        # No pocket, no bar: ``site_widget`` refuses to resolve one on an empty id.
+        raise HTTPException(409, "site_has_no_pocket")
+
+    runtime = _concierge_create_runtime()
+    widget = await ensure_site_widget_row(site, workspace_id)
+    if runtime == "legacy":
+        await ensure_site_agent(site, widget)
+
+    if req is not None and req.concierge_greeting is not None:
+        site.concierge_greeting = req.concierge_greeting
+    site.concierge_runtime = runtime
+    site.concierge_enabled = False
+    site.concierge_created_at = datetime.now(UTC)
+    await site.save()
+    return await _concierge_settings_response(site, workspace_id, str(user.id))
+
+
+@router.delete(
+    "/paw-bar/admin/site/{site_id}/concierge",
+    response_model=ConciergeSettingsResponse,
+)
+async def delete_site_concierge(
+    site_id: str,
+    delete_conversations: bool = Query(False),
+    user: Any = Depends(_require_paw_bar_manage),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeSettingsResponse:
+    """Delete this site's concierge (CR-12). 404 when it has none.
+
+    Clears the marker and switches it off, so every public seam reads "none" on
+    the next request. A legacy agent is UNBOUND from the bar, never deleted: it is
+    a workspace agent with its own history, and the owner may point a bar at it
+    again. Conversations (runs, inbox rows, visitor decisions, carts) are purged
+    only when ``delete_conversations`` is true. Site-page knowledge stays; it is
+    the site's, not the concierge's. Pinned answers (CR-8's ``delete_faqs``) and
+    uploaded files and links (CR-9's ``delete_sources``) are cleared through
+    ``knowledge_routes`` when present; guided fields join here when they land.
+    """
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if getattr(site, "concierge_created_at", None) is None:
+        raise HTTPException(404, "concierge_not_found")
+
+    site.concierge_created_at = None
+    site.concierge_enabled = False
+    await site.save()
+
+    # CR-8 (pinned answers) and CR-9 (uploaded files and links) ship in their own
+    # PRs, so each hook is optional until its PR has merged, and each is looked up
+    # on its own so one landing first does not wait on the other. ``site`` came
+    # from the workspace-scoped load above, which is the tenancy check both hooks
+    # expect their caller to have made.
+    try:
+        from pocketpaw_ee.paw_bar import knowledge_routes
+    except ImportError:
+        knowledge_routes = None
+    delete_faqs = getattr(knowledge_routes, "delete_faqs", None)
+    if delete_faqs is not None:
+        await delete_faqs(site)
+    delete_sources = getattr(knowledge_routes, "delete_sources", None)
+    if delete_sources is not None:
+        await delete_sources(site)
+
+    if widget is not None:
+        if widget.agent_id:
+            await _store().update_fields(widget.id, {"agent_id": ""}, workspace_id=workspace_id)
+        if delete_conversations:
+            await _store().purge_widget_conversations(widget.id, workspace_id=workspace_id)
+    if delete_conversations:
+        await _purge_concierge_runs(site.pocket_id, workspace_id)
+    return await _concierge_settings_response(site, workspace_id, str(user.id))
+
+
+async def _purge_concierge_runs(pocket_id: str, workspace_id: str) -> None:
+    """Delete a site's concierge run records: the transcript half that lives on
+    ``ChatRunDoc`` (keyed on the pocket, context type concierge). Workspace AND
+    pocket are in the query, so it can never reach another site's runs."""
+    if not pocket_id:
+        return
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    await ChatRunDoc.find(
+        ChatRunDoc.workspace == workspace_id,
+        ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+        ChatRunDoc.scope_id == pocket_id,
+    ).delete()
 
 
 @router.patch(
@@ -2502,6 +2648,10 @@ class SiteOverviewResponse(BaseModel):
     widget: AdminWidgetView | None = None
     enabled: bool
     greeting: str
+    # CR-12: whether the owner has created a concierge, and which runtime it runs.
+    # The dashboard picks the create empty state off ``concierge_exists``.
+    concierge_exists: bool = False
+    concierge_runtime: Literal["legacy", "v2"] = "legacy"
     # The third owner setting, alongside ``enabled`` and ``greeting``: whether the
     # visitor's own messages are stored. Carried here so the dashboard renders all
     # three from the one call it already makes rather than a second round trip for
@@ -2986,6 +3136,8 @@ async def get_site_overview(
         widget=widget_view,
         enabled=site.concierge_enabled,
         greeting=site.concierge_greeting,
+        concierge_exists=getattr(site, "concierge_created_at", None) is not None,
+        concierge_runtime=_site_concierge_runtime(site),
         store_transcripts=site.concierge_store_transcripts,
         counts=counts,
     )

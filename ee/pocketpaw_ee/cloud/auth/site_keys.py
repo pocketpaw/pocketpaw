@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/cloud/auth/site_keys.py — resolve a public Paw Bar embed key
 # (Site.signed_key) into a scoped RequestContext.
 #
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a site with no
+# concierge (``Site.concierge_created_at`` unset) is OFF at every public seam.
+# ``concierge_exists`` is the new predicate; ``concierge_available`` is now
+# created AND enabled AND entitled, and the key resolver's kill-switch branch
+# refuses a site with none as ``concierge_disabled``, the same answer as a
+# switched-off one, so nothing new reaches a visitor.
+#
 # Created 2026-07-14 (Paw Bar concierge seam, T1): the sibling of ``api_keys.py``
 # for a DIFFERENT credential model. ``api_keys`` holds an argon2-HASHED SECRET
 # bearer token (``paw_...``) — never world-visible. This module resolves the Site
@@ -159,8 +166,18 @@ async def lookup_site_by_key(key: str) -> _SiteDoc:
     return site
 
 
+def concierge_exists(site: _SiteDoc) -> bool:
+    """Has the owner created this site's concierge (CR-12)?
+
+    The stored marker, never "its widget has an agent": v2 answers without one,
+    and an agent bound by some other path is not the owner's decision to publish a
+    concierge. ``getattr`` so a transient or partial doc reads as "none".
+    """
+    return getattr(site, "concierge_created_at", None) is not None
+
+
 def concierge_available(site: _SiteDoc) -> bool:
-    """May this site serve its concierge right now — owner's switch AND its plan?
+    """May this site serve its concierge right now — created, switched on, and sold?
 
     The ONE question every public paw-bar seam asks, so the rule lives here instead
     of being re-expressed at each of them. Before this existed, the seams read
@@ -182,11 +199,15 @@ def concierge_available(site: _SiteDoc) -> bool:
     failure than stamping a badge, so the safer of the two defaults is the one taken
     here. Flipping it is a product decision, not a refactor.
 
+    CREATED FIRST (CR-12). A site with no concierge answers False here, whatever
+    its switch says, so "none" is exactly "off" at the frame, chat, action, cart
+    and request-human seams with no new visitor-facing code.
+
     Synchronous and passed the loaded doc: the gate already holds the Site, and
     ``resolve_site_entitlements`` is pure and may not import ``models.site``
     (EE cloud rule 2). No extra query on a path that runs for every visitor message.
     """
-    if not site.concierge_enabled:
+    if not concierge_exists(site) or not site.concierge_enabled:
         return False
 
     from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
@@ -322,7 +343,9 @@ async def resolve_site_key_with_site(
     # toggling it off silences chat/action/cart immediately. Distinct from ``revoked``
     # (which cuts the KEY at 401): a disabled concierge is a 403 on a valid key. Placed
     # before the origin gate so "this concierge is off" is the authoritative refusal.
-    if not site.concierge_enabled:
+    # A site whose owner never created a concierge (CR-12) refuses the same way:
+    # to a visitor, "none" and "off" are one state.
+    if not concierge_exists(site) or not site.concierge_enabled:
         raise HTTPException(status_code=403, detail="concierge_disabled")
 
     # Billing gate (feat/sites-concierge-entitlement): the site's PLAN, asked right
@@ -347,6 +370,7 @@ async def resolve_site_key_with_site(
 
 __all__ = [
     "concierge_available",
+    "concierge_exists",
     "lookup_site_by_key",
     "resolve_site_key",
     "resolve_site_key_with_site",
