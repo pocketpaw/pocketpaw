@@ -353,6 +353,15 @@
     ]
   },
   {
+    "label": "integration: the page article outranks the owner's pinned FAQs (CR-3 order wins over CR-8)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    ordered = faqs + ([chunk] if chunk is not None else [])",
+    "replace": "    ordered = ([chunk] if chunk is not None else []) + faqs",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_integration.py::test_a_v2_turn_orders_faqs_then_the_page_then_kb_and_shows_faq_code"
+    ]
+  },
+  {
     "label": "CR-3: the indexed page's own article no longer joins the knowledge",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
     "find": "    ordered = faqs + ([chunk] if chunk is not None else [])",

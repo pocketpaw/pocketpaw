@@ -132,7 +132,8 @@
     "find": "    if delete_faqs is not None:\n        await delete_faqs(site)\n",
     "replace": "",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_pinned_answers_through_the_cr8_hook"
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_pinned_answers_through_the_cr8_hook",
+      "tests/cloud/test_paw_bar_concierge_v2_integration.py::test_delete_clears_real_faqs_and_sources_and_the_bar_goes_dead"
     ]
   },
   {
@@ -141,7 +142,8 @@
     "find": "    if delete_sources is not None:\n        await delete_sources(site)\n",
     "replace": "",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook"
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_delete_clears_uploaded_sources_through_the_cr9_hook",
+      "tests/cloud/test_paw_bar_concierge_v2_integration.py::test_delete_clears_real_faqs_and_sources_and_the_bar_goes_dead"
     ]
   },
   {
@@ -159,7 +161,8 @@
     "find": "    runtime = _concierge_create_runtime()\n",
     "replace": "    runtime = \"legacy\"\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_open_gate_creates_a_v2_concierge_with_no_agent"
+      "tests/cloud/test_paw_bar_concierge_manual_create.py::TestCreateAndDelete::test_an_open_gate_creates_a_v2_concierge_with_no_agent",
+      "tests/cloud/test_paw_bar_concierge_v2_integration.py::test_create_is_v2_once_the_gate_is_open_and_binds_no_agent"
     ]
   },
   {
