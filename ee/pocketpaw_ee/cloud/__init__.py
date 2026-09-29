@@ -935,14 +935,15 @@ def mount_cloud(app: FastAPI) -> None:
     # binds (an empty dir just 404s the asset until the real bundle is copied in).
     # PAWBAR_APP_MOUNT and the dir resolver are imported from the router so the
     # mount path, the frame HTML's <script src>, and the ?v= cache-buster all read
-    # the same config and can never drift.
-    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT, pawbar_app_dir
+    # the same config and can never drift. PawBarAssets adds the Cache-Control
+    # policy (immutable only for the current ?v=).
+    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT, PawBarAssets, pawbar_app_dir
 
     pawbar_dir = pawbar_app_dir()
     pawbar_dir.mkdir(parents=True, exist_ok=True)
     app.mount(
         PAWBAR_APP_MOUNT,
-        StaticFiles(directory=str(pawbar_dir)),
+        PawBarAssets(directory=str(pawbar_dir)),
         name="pawbar-app",
     )
 
