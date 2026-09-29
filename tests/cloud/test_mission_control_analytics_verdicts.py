@@ -38,7 +38,9 @@ def _ctx(workspace_id: str = _WS) -> SimpleNamespace:
 
 
 def _no_pockets():
-    return patch.object(mc_service.pockets_service, "list_pockets", new=AsyncMock(return_value=[]))
+    return patch.object(
+        mc_service.pockets_service, "visible_pocket_refs", new=AsyncMock(return_value=[])
+    )
 
 
 async def test_solved_rate_excludes_unknown(mongo_db):  # noqa: ARG001 — Beanie init

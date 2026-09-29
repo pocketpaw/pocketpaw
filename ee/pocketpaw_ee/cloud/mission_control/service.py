@@ -176,7 +176,7 @@ Tenancy:
          before anything reaches Python. This closes the cross-tenant
          leak on shared infra; it is the load-bearing isolation.
       2. Pocket-level: a Nudge additionally only surfaces if its pocket
-         is visible to the caller's workspace. ``pockets_service.list_pockets``
+         is visible to the caller's workspace. ``pockets_service.visible_pocket_refs``
          enforces this as the chokepoint. This stays as a second filter
          (owner / shared_with / visibility within the tenant), layered on
          top of the store scope, not in place of it. Workspace-scoped
@@ -302,9 +302,9 @@ async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = N
 
     Drives the workspace filter on Instinct reads: a Nudge surfaces in
     Mission Control only if its ``pocket_id`` is in this set. We rely on
-    ``pockets_service.list_pockets`` as the chokepoint — it already
-    enforces ``workspace + (owner | shared_with | visibility)`` per
-    pocket. If a pocket isn't visible at the pocket layer, its Nudges
+    ``pockets_service.visible_pocket_refs`` as the chokepoint — it applies
+    ``list_pockets``' filter, ``workspace + (owner | team | shared_with |
+    visibility)``, per pocket. If a pocket isn't visible at the pocket layer, its Nudges
     aren't visible at the Mission Control layer either.
 
     ``project_id`` narrows the set to pockets in a single project (or to
@@ -313,15 +313,20 @@ async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = N
     from their parent pocket — Instinct itself doesn't know about
     projects, but it knows about pockets.
     """
-    workspace_id = _require_workspace(ctx)
-    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
-    return {p["_id"] for p in pockets if p.get("_id")}
+    return set(await _pocket_name_map(ctx, project_id=project_id))
 
 
 async def _pocket_name_map(ctx: RequestContext, *, project_id: str | None = None) -> dict[str, str]:
-    """Build pocket_id → pocket_name mapping for visible pockets."""
+    """pocket_id → pocket_name for the pockets the caller can see.
+
+    Reads ``visible_pocket_refs``: ``list_pockets``' exact visibility filter as
+    one projected query, without resolving every pocket's rippleSpec. Its keys
+    are also the visible-id set, so a caller needing both reads this once.
+    """
     workspace_id = _require_workspace(ctx)
-    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
+    pockets = await pockets_service.visible_pocket_refs(
+        workspace_id, ctx.user_id, project_id=project_id
+    )
     return {p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")}
 
 
@@ -601,8 +606,8 @@ async def agent_list_work_items(
     """
     body = ListWorkItemsRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx, project_id=body.project_id)
     name_map = await _pocket_name_map(ctx, project_id=body.project_id)
+    visible = set(name_map)
 
     items: list[WorkItem] = []
 
@@ -1894,7 +1899,7 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
     ]
 
     # By pocket — resolve pocket names via the pockets service
-    pockets = await pockets_service.list_pockets(ctx.workspace_id, ctx.user_id)
+    pockets = await pockets_service.visible_pocket_refs(ctx.workspace_id, ctx.user_id)
     pocket_name_map: dict[str, str] = {
         p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")
     }

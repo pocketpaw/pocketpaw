@@ -214,7 +214,7 @@ async def _candidate_scopes(workspace_id: str, user_id: str) -> list[str]:
     try:
         from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-        pockets = await pockets_service.list_pockets(workspace_id, user_id)
+        pockets = await pockets_service.visible_pocket_refs(workspace_id, user_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("pocket listing failed for workspace=%s: %s", workspace_id, exc)
         pockets = []
