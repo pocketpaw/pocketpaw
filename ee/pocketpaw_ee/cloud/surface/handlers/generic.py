@@ -17,7 +17,6 @@ from __future__ import annotations
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 
-
 _OPEN_SURFACE_HINT = (
     "<open-surface>If you have the open_surface tool, open an app surface when the "
     "user needs to SEE or CHOOSE something: /files to upload or pick files; to edit "
