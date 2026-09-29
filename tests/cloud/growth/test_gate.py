@@ -171,6 +171,13 @@ def authorized(monkeypatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _growth_worker_deployed(monkeypatch):
+    """These tests model a deployment that runs a growth worker; without one the
+    executor refuses to enqueue (see the refusal test below)."""
+    monkeypatch.setenv(growth_executor.GROWTH_WORKER_ENV, "true")
+
+
+@pytest.fixture(autouse=True)
 def _clear_locks():
     """The executor's per-action locks are module state — reset between tests."""
     growth_executor._LOCKS.clear()
@@ -529,6 +536,32 @@ async def test_enqueue_failure_marks_action_failed(
     assert "enqueue failed" in (action.error or "")
     # The approval stands on the draft; the failure is recorded on the Action.
     assert await _draft_status(w1, draft["id"]) == "approved"
+
+
+@pytest.mark.asyncio
+async def test_no_growth_worker_refuses_to_enqueue(
+    w1, tray_w1, gate_store, pool, authorized, monkeypatch
+):
+    """The deployed worker container runs no growth lane, so an enqueued send
+    would sit in Redis forever while the Action read "executed". Without the
+    opt-in env the approve fails the Action with a clear reason, enqueues
+    nothing, and leaves the draft ``proposed`` rather than approved-and-stuck.
+
+    Mutation: delete the ``_growth_worker_enabled`` guard and this fails on
+    ``pool.calls``."""
+    monkeypatch.delenv(growth_executor.GROWTH_WORKER_ENV, raising=False)
+
+    _, draft = await _drafted_prospect(w1)
+    body = await _propose(w1, draft["id"])
+
+    resp = await tray_w1.post(f"/instinct/actions/{body['proposal_id']}/approve")
+    assert resp.status_code == 200, resp.text
+
+    assert pool.calls == []
+    action = await gate_store.get_action(body["proposal_id"])
+    assert str(getattr(action.status, "value", action.status)) == "failed"
+    assert "no growth worker" in (action.error or "")
+    assert await _draft_status(w1, draft["id"]) == "proposed"
 
 
 @pytest.mark.asyncio
