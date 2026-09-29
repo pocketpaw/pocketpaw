@@ -257,10 +257,23 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   job timeout — arq's own default is 300s, which cancels a long agent run
   mid-generation, so a big coding task halts after ~5 min; lift it for long
   runs, the 10-minute stale-run sweeper is the backstop). See `docs/plans/2026-05-22-resumable-chat-runs-design.md`.
-  A background sweeper runs on cloud startup and every 5 minutes (hardcoded, not
-  env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
-  `interrupted` so runs abandoned by a backend restart surface a retry affordance
-  instead of leaving clients subscribed forever.
+  A run enqueued on the arq executor gets a `queued` frame on its stream at once,
+  so a client can show "waiting for a free slot" while every worker slot is busy.
+  A background sweeper runs on cloud startup and every 5 minutes, marking running
+  `ChatRunDoc`s whose heartbeat is older than 10 minutes, and queued ones older than
+  `POCKETPAW_CLOUD_RUN_QUEUED_TIMEOUT_MINUTES` (default `10`, floor `1`), as
+  `interrupted`. A queued run it interrupts always gets a terminal `interrupted`
+  frame (reason `queue_timeout`, code `run.queue_timeout`, a "too busy" message),
+  even when it never started and had no stream, so the client ends within one sweep
+  instead of waiting out the job timeout.
+  Provider rate-limit / overloaded errors (429, 529) reach the client as
+  `agent.provider_busy` with a plain message; the raw provider text stays in logs.
+- **Growth worker (`POCKETPAW_GROWTH_WORKER_ENABLED`)**: default OFF. When on, the
+  worker supervisor also runs the growth arq lane (live email/WhatsApp sends plus
+  the daily follow-up cron), and the web process may enqueue approved growth sends.
+  When off, approving a send fails the action with a clear reason instead of
+  queueing work nothing consumes. Set it on BOTH the backend and the worker, and
+  set `GROWTH_SENDING_DOMAIN` (below), or nothing goes out.
 - **Abuse ceilings (always on, NOT gated on billing)**: four knobs that bound what
   one account can do in a day, regardless of whether billing is configured. They
   exist because the priced ceilings — the per-plan storage cap in
@@ -507,6 +520,17 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   broadcast group, `presence:*` keys and `lease:*` keys appear; only then raise
   `uvicorn --workers` or the replica count. Rolling back is the reverse: drop
   to one process first. Design: workspace `docs/design/plans/pocketpaw/2026-09-04-redis-utilization-audit.md` §1-2.
+- **Paw Bar rate limits across processes**: Paw Bar data lives in one local
+  SQLite file (`src/pocketpaw/paw_bar/store.py`, WAL mode). With
+  `POCKETPAW_REDIS_URL` set, the per-widget event and chat rate check runs in
+  Redis (`ee/pocketpaw_ee/paw_bar/admit.py`: a Lua sliding 60s window per widget
+  and bucket, overall and per visitor) and SQLite only takes a plain insert for
+  admitted events. Without Redis, or for 30s after a Redis error, it falls back
+  to `store.admit_event`, which holds SQLite's exclusive write lock for every
+  event, admitted or not; that lock is what serializes several web processes.
+  Admitted events are still SQLite rows either way, because the read gates and
+  the gated-action cap count rows. SQLite is still one file per container, so
+  several containers need the store moved off SQLite first.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
