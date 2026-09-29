@@ -1,0 +1,100 @@
+[
+  {
+    "label": "unreads: the per-group count loses its cap",
+    "file": "ee/pocketpaw_ee/cloud/chat/unread_service.py",
+    "find": "    if cap is not None:\n        query = query.limit(cap)\n",
+    "replace": "",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_unread_counts_are_capped"]
+  },
+  {
+    "label": "unreads: the never-read fallback returns the raw message_count",
+    "file": "ee/pocketpaw_ee/cloud/chat/unread_service.py",
+    "find": "            unread = min(group.message_count, UNREAD_CAP)",
+    "replace": "            unread = group.message_count",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_unread_counts_are_capped"]
+  },
+  {
+    "label": "unreads: ReadStates read one group at a time again",
+    "file": "ee/pocketpaw_ee/cloud/chat/unread_service.py",
+    "find": "        state = states.get(str(group.id))",
+    "replace": "        state = await _get_read_state(user_id, str(group.id))",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_read_states_are_read_in_one_query"]
+  },
+  {
+    "label": "unreads: deleted rows count as unread",
+    "file": "ee/pocketpaw_ee/cloud/chat/unread_service.py",
+    "find": "            \"_id\": {\"$gt\": after},\n            \"deleted\": False,\n",
+    "replace": "            \"_id\": {\"$gt\": after},\n",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_unread_counts_keep_old_semantics"]
+  },
+  {
+    "label": "room list: user lookup loses its projection",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "{\"_id\": {\"$in\": user_oids}}, {\"full_name\": 1, \"email\": 1, \"avatar\": 1}",
+    "replace": "{\"_id\": {\"$in\": user_oids}}, None",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_room_list_payload_and_one_projected_user_query"]
+  },
+  {
+    "label": "room list: one user query per group instead of one for all",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    users_by_id, agents_by_id = await _populate_lookups_for_domain_groups(groups)\n    return [\n        group_to_wire_dict(g, users_by_id=users_by_id, agents_by_id=agents_by_id) for g in groups\n    ]",
+    "replace": "    out = []\n    for g in groups:\n        users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([g])\n        out.append(group_to_wire_dict(g, users_by_id=users_by_id, agents_by_id=agents_by_id))\n    return out",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_room_list_payload_and_one_projected_user_query"]
+  },
+  {
+    "label": "mention suggest: member query takes the raw regex",
+    "file": "ee/pocketpaw_ee/cloud/auth/service.py",
+    "find": "        pattern = re.escape(q)  # literal substring: no injection, no ReDoS\n        query[\"$or\"]",
+    "replace": "        pattern = q\n        query[\"$or\"]",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_mention_inputs_are_literal"]
+  },
+  {
+    "label": "mention suggest: agent query takes the raw regex",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "        pattern = re.escape(q)  # literal substring: no injection, no ReDoS\n        aquery[\"$or\"]",
+    "replace": "        pattern = q\n        aquery[\"$or\"]",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_mention_inputs_are_literal"]
+  },
+  {
+    "label": "mention suggest: channel query takes the raw regex",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "        pattern = re.escape(q)  # literal substring: no injection, no ReDoS\n        cquery[\"$or\"]",
+    "replace": "        pattern = q\n        cquery[\"$or\"]",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_mention_inputs_are_literal"]
+  },
+  {
+    "label": "mention suggest: an anchored prefix drops last-name matches",
+    "file": "ee/pocketpaw_ee/cloud/auth/service.py",
+    "find": "        pattern = re.escape(q)  # literal substring: no injection, no ReDoS\n        query[\"$or\"]",
+    "replace": "        pattern = \"^\" + re.escape(q)\n        query[\"$or\"]",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_mention_suggest_matches_normal_input"]
+  },
+  {
+    "label": "mention suggest: the three lookups run one after another",
+    "file": "ee/pocketpaw_ee/cloud/chat/router.py",
+    "find": "    results: list[dict] = [row for rows in await asyncio.gather(*lookups) for row in rows]",
+    "replace": "    results: list[dict] = [row for lookup in lookups for row in await lookup]",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_mention_suggest_runs_the_three_lookups_concurrently"]
+  },
+  {
+    "label": "reply list: no limit",
+    "file": "ee/pocketpaw_ee/cloud/chat/message_service.py",
+    "find": "        .sort([(\"createdAt\", 1), (\"_id\", 1)])  # type: ignore[list-item]\n        .limit(limit)\n    )\n    return [_message_doc_to_domain(d) async for d in cursor]",
+    "replace": "        .sort([(\"createdAt\", 1), (\"_id\", 1)])  # type: ignore[list-item]\n    )\n    return [_message_doc_to_domain(d) async for d in cursor]",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_reply_list_is_bounded_with_an_after_cursor"]
+  },
+  {
+    "label": "reply list: the after cursor is ignored",
+    "file": "ee/pocketpaw_ee/cloud/chat/message_service.py",
+    "find": "    after_time, after_oid = _parse_cursor(after)\n    if after_time is not None:",
+    "replace": "    after_time, after_oid = _parse_cursor(after)\n    if False:",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_reply_list_is_bounded_with_an_after_cursor"]
+  },
+  {
+    "label": "indexes: the (group, _id) unread index is dropped",
+    "file": "ee/pocketpaw_ee/cloud/models/message.py",
+    "find": "            [(\"group\", 1), (\"_id\", 1)],\n",
+    "replace": "",
+    "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_indexes_cover_thread_reply_unread_and_membership_queries"]
+  }
+]
