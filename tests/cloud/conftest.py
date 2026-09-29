@@ -422,3 +422,18 @@ async def make_plan_session(mongo_db):  # noqa: ARG001 — fixture forces Beanie
         return str(doc.id), resolved_project_id
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _clear_paw_bar_frame_site_memo():
+    """The public Paw Bar frame memoises key -> Site for 30 s in-process. Many test
+    files reuse one embed key with a different Site each time, so a memo left over
+    from the previous test would serve that test's Site."""
+    try:
+        from pocketpaw_ee.paw_bar import router as paw_bar_router
+    except Exception:  # noqa: BLE001 — OSS-only installs have no pocketpaw_ee
+        yield
+        return
+    paw_bar_router._frame_site_memo.clear()
+    yield
+    paw_bar_router._frame_site_memo.clear()

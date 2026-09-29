@@ -368,16 +368,16 @@ async def test_frame_dashboard_origin_does_not_revive_an_empty_allowlist(frame_c
 
 @pytest.mark.asyncio
 async def test_frame_assets_carry_cache_busting_version(frame_client, tmp_path, monkeypatch):
-    """The asset URLs must carry ?v=<newest bundle mtime> so a deploy busts every
-    embedder's browser cache (StaticFiles sends no Cache-Control; heuristic
-    caching pinned the first live demo to a stale bundle)."""
+    """The asset URLs must carry ?v=<content hash of the bundle> so a deploy busts
+    every embedder's browser cache, and so the year-long immutable header the asset
+    mount sends for the current v can never cover different bytes."""
+    from pocketpaw_ee.paw_bar.router import _asset_version
+
     (tmp_path / "pawbar.js").write_text("// bundle")
     (tmp_path / "pawbar.css").write_text("/* styles */")
     monkeypatch.setenv("PAWBAR_APP_DIR", str(tmp_path))
-    expected = max(
-        int((tmp_path / "pawbar.js").stat().st_mtime),
-        int((tmp_path / "pawbar.css").stat().st_mtime),
-    )
+    expected = _asset_version()
+    assert expected != "0"
 
     await _site()
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
