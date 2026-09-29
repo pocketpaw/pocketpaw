@@ -58,7 +58,6 @@ async def test_a_client_that_served_a_turn_is_reused_despite_more_history():
     assert len(sdk._client.queries) == 2
 
 
-
 def test_prewarm_takes_no_history():
     from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
     from pocketpaw.agents.pool import AgentPool

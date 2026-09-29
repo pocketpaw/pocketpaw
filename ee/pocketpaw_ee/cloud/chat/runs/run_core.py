@@ -2843,9 +2843,7 @@ async def execute_run(spec: RunSpec) -> None:
         # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
         # forget: _prewarm_session swallows every error, so it can never delay or
         # break this run; the task is intentionally not awaited.
-        asyncio.create_task(
-            _prewarm_session(ctx, flow_context=spec.flow_context)
-        )
+        asyncio.create_task(_prewarm_session(ctx, flow_context=spec.flow_context))
 
         # A False here means the run is no longer queued: the stale-run sweeper
         # interrupted it while it waited in arq, and its client already has the
