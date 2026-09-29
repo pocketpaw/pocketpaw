@@ -1123,16 +1123,21 @@ def mount_cloud(app: FastAPI) -> None:
     # Cross-process socket broadcast (POCKETPAW_REALTIME_BUS=redis-streams).
     # Joins this process's own consumer group at startup and destroys it on a
     # clean shutdown; a crashed process's group is reaped by its siblings.
+    # The presence registry heartbeats this process's sockets into Redis so
+    # the other processes can see them (``_core/realtime/presence.py``).
     from pocketpaw_ee.cloud._core.realtime import broadcast as _realtime_broadcast
+    from pocketpaw_ee.cloud._core.realtime import presence as _realtime_presence
 
     if _realtime_broadcast.is_enabled():
 
         @on_startup
         async def _start_realtime_broadcast() -> None:
             await _realtime_broadcast.start()
+            await _realtime_presence.start()
 
         @on_shutdown
         async def _stop_realtime_broadcast() -> None:
+            await _realtime_presence.stop()
             await _realtime_broadcast.stop()
 
     # Decision-graph reconciler + abandon-path sweeper (RFC 09 Slice 4).

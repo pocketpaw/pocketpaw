@@ -1,50 +1,26 @@
 """Chat domain — REST endpoints + WebSocket handler.
 
-REST routes live under ``/chat`` and require an enterprise license.
-The WebSocket endpoint at ``/ws/cloud`` authenticates via JWT query param.
+REST routes live under ``/chat`` and require an enterprise license. The
+WebSocket endpoint ``/ws/cloud`` has three auth paths: a single-use URL
+ticket, the ``paw_auth`` cookie or a JWT in ``?token=`` (both verified with
+``auth.core.SECRET``, never a re-read default), and, when neither is present, a
+first ``{"type":"auth"}`` frame read under a 5s timeout after ``accept()`` so
+the secret stays out of the URL. ``accept()`` runs exactly once per socket
+(the ``accepted`` flag); an unauthenticated socket closes 4001 before the
+message loop.
 
-Updated 2026-08-11 (fix/notif-liveness-dispatch): the receive loop stamps each
-socket's liveness window via ``manager.touch`` on every inbound frame, so a
-socket that is genuinely talking to us can never be mistaken for a zombie by
-``is_online``. The ping branch additionally calls ``manager.mark_ping_capable``
-— only clients that prove they heartbeat are held to a staleness deadline. See
-chat/ws.py's module docstring for what that verdict drives.
+Presence goes through ``_core/realtime/presence.py``, which answers across
+every web process when ``POCKETPAW_REALTIME_BUS=redis-streams`` and from this
+process's ``ConnectionManager`` otherwise. ``presence.online`` fires when a
+user's first socket anywhere connects; ``presence.offline`` fires after the
+30s grace window once their last socket anywhere closes, and is skipped if
+they are online again by then. A new socket gets a one-shot snapshot of its
+online workspace peers. The receive loop stamps liveness on every inbound
+frame (``manager.touch``) and marks ping-speaking clients capable, which is
+what holds them to ws.py's staleness deadline.
 
-Updated 2026-04-19 (Task 19, Cluster A sub-PR 4): presence events are now
-emitted on WS connect and disconnect. PresenceOnline fires immediately when
-a user's first socket accepts; PresenceOffline fires after the existing
-30s grace window so quick reloads don't flap the online indicator.
-
-Updated 2026-04-20: on connect, also send the new socket a snapshot of
-currently-online workspace peers. Without this, a user who joins after
-their peers are already online never learns they're there — the server
-only broadcasts presence deltas, not the current set.
-
-2026-04-19 (Cluster E sub-PR 2): added ``GET /chat/messages/search`` — a
-workspace-wide message search that delegates to
-``message_service.search_workspace_messages`` and inherits its per-group
-scope filter.
-
-2026-06-10 (security W0e): the WS JWT handler now verifies tokens with the
-single resolved signing secret (``auth.core.SECRET``) instead of re-reading
-``AUTH_SECRET`` with the insecure public default. core.SECRET fail-fasts in
-prod and is an ephemeral random value in dev, so re-reading the default here
-would (a) reintroduce the forgeable-token hole and (b) fail to verify
-dev-signed cookies.
-
-2026-06-10 (REVIEW-4): the WS handler gained a third auth path — a
-first-message ``{"type":"auth","ticket"|"token":"..."}`` frame. It runs ONLY
-when the client supplied no ``?token=`` and no ``paw_auth`` cookie. The point
-is to keep the auth secret out of the URL (URL query strings leak into access
-logs, browser history, and proxies). Because a frame can only be received
-after the handshake completes, Path 3 calls ``websocket.accept()`` *before*
-authenticating, then reads the first frame under a 5s timeout
-(``asyncio.wait_for``); on timeout, a malformed frame, a non-auth frame, or a
-failed credential it closes 4001 and an unauthenticated socket never reaches
-the message loop. The existing URL-ticket and cookie paths (Paths 1 & 2) are
-unchanged and still accept *after* auth — ``accept()`` is called exactly once
-on every path, tracked by the ``accepted`` flag. The handshake auth frame is
-consumed during the handshake and never reaches the ``WsInbound`` loop.
+``GET /chat/messages/search`` is a workspace-wide search delegating to
+``message_service.search_workspace_messages`` and its per-group scope filter.
 """
 
 from __future__ import annotations
@@ -56,6 +32,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
+from pocketpaw_ee.cloud._core.realtime import presence
 from pocketpaw_ee.cloud.chat import group_service, message_service, unread_service
 from pocketpaw_ee.cloud.chat.agent_router import router as agent_router
 from pocketpaw_ee.cloud.chat.schemas import (
@@ -658,13 +635,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
             return
 
     # Accept and register connection. If this was the user's first active
-    # socket, announce them as online so every workspace peer's UI flips
-    # the presence dot immediately. Path 3 already accepted above; the
-    # ``accepted`` flag keeps accept() exactly-once.
+    # socket on ANY web process, announce them as online so every workspace
+    # peer's UI flips the presence dot immediately. Path 3 already accepted
+    # above; the ``accepted`` flag keeps accept() exactly-once.
     if not accepted:
         await websocket.accept()
-    was_offline_before = not manager.is_online(user_id)
-    await manager.connect(websocket, user_id)
+    was_offline_before = await presence.connect(manager, websocket, user_id)
     if was_offline_before:
         await emit(PresenceOnline(data={"user_id": user_id}))
 
@@ -675,8 +651,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
     # someone else flaps online/offline.
     try:
         peer_ids = await workspace_service.list_peer_ids(user_id)
+        online = await presence.online_among(manager, list(peer_ids))
         for peer_id in peer_ids:
-            if manager.is_online(peer_id):
+            if peer_id in online:
                 await websocket.send_json({"type": "presence.online", "data": {"user_id": peer_id}})
     except Exception:
         logger.exception("Failed to send presence snapshot to user=%s", user_id)
@@ -726,7 +703,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
     except Exception:
         logger.exception("WebSocket error for user=%s", user_id)
     finally:
-        last_user = await manager.disconnect(websocket)
+        last_user = await presence.disconnect(manager, websocket)
         if last_user:
             # Kick off the grace-period offline broadcast. We delay a fixed
             # window (`PRESENCE_GRACE_SECONDS`) so quick page reloads don't
@@ -774,7 +751,7 @@ async def _schedule_presence_offline(user_id: str) -> None:
             # If the user reconnected while we were asleep the manager would
             # have cancelled this task; double-check before emitting so races
             # on shutdown don't ship a stale offline event.
-            if manager.is_online(user_id):
+            if await presence.is_online(manager, user_id):
                 return
             await emit(PresenceOffline(data={"user_id": user_id}))
         except asyncio.CancelledError:
