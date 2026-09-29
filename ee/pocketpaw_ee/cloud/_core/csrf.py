@@ -1,10 +1,9 @@
-"""CSRF middleware + token-mint endpoint for cookie-based auth.
+"""CSRF middleware (pure ASGI) + token-mint endpoint for cookie-based auth.
 
-Created: 2026-05-17 (security #1117 P1) — Hardening the web auth chain
-    so an HttpOnly ``paw_auth`` cookie can carry the JWT without exposing
-    the surface area of a CSRF attack. Bearer-authenticated callers (the
-    Tauri client, automation scripts, MCP tools) skip this check entirely
-    because browsers never auto-attach an ``Authorization`` header.
+Lets an HttpOnly ``paw_auth`` cookie carry the JWT without opening a CSRF
+hole. Bearer-authenticated callers (the Tauri client, automation scripts,
+MCP tools) skip this check entirely because browsers never auto-attach an
+``Authorization`` header.
 
 How it fits together:
 
@@ -36,8 +35,8 @@ import secrets
 from typing import Final
 
 from fastapi import APIRouter, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from pocketpaw_ee.cloud.auth.core import _COOKIE_SECURE, TOKEN_LIFETIME
 
@@ -131,34 +130,41 @@ def _request_uses_cookie_auth(request: Request) -> bool:
     return AUTH_COOKIE_NAME in request.cookies
 
 
-class CSRFMiddleware(BaseHTTPMiddleware):
+class CSRFMiddleware:
     """Double-submit CSRF for cookie-authenticated state-changing requests.
 
-    The check is intentionally narrow: only fires when the request both
-    uses cookie auth AND targets a non-exempt mutating verb. That keeps
-    the existing Bearer-based clients (Tauri, MCP, scripts) on their
-    current code path with zero changes.
+    Pure ASGI; websockets and lifespan pass through untouched. The check is
+    intentionally narrow: only fires when the request both uses cookie auth
+    AND targets a non-exempt mutating verb. That keeps the existing
+    Bearer-based clients (Tauri, MCP, scripts) on their current code path.
     """
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
         method = request.method.upper()
 
         # Safe methods: never check. Same for the bootstrap path list.
-        if method not in _PROTECTED_METHODS or _path_is_exempt(request.url.path):
-            response = await call_next(request)
-            self._maybe_clear_csrf_on_logout(request, response)
-            return response
-
         # Bearer caller — browsers won't auto-attach, so no CSRF surface.
-        if _request_uses_bearer_auth(request):
-            response = await call_next(request)
-            self._maybe_clear_csrf_on_logout(request, response)
-            return response
+        if (
+            method not in _PROTECTED_METHODS
+            or _path_is_exempt(request.url.path)
+            or _request_uses_bearer_auth(request)
+        ):
+            await self.app(scope, receive, _clear_csrf_on_logout(request, send))
+            return
 
         # No cookie auth either? Let the route's own auth dep return 401
         # rather than masking it with a confusing 403.
         if not _request_uses_cookie_auth(request):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         cookie_value = request.cookies.get(CSRF_COOKIE_NAME, "")
         header_value = request.headers.get(CSRF_HEADER_NAME, "")
@@ -173,39 +179,51 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 bool(header_value),
                 request.url.path,
             )
-            return JSONResponse({"detail": "csrf_invalid"}, status_code=403)
+            await _csrf_invalid(scope, receive, send)
+            return
 
         if not secrets.compare_digest(cookie_value, header_value):
             logger.debug("csrf reject: mismatch path=%s", request.url.path)
-            return JSONResponse({"detail": "csrf_invalid"}, status_code=403)
-
-        response = await call_next(request)
-        self._maybe_clear_csrf_on_logout(request, response)
-        return response
-
-    def _maybe_clear_csrf_on_logout(self, request: Request, response) -> None:
-        """If this request hit a logout endpoint, expire the paw_csrf
-        cookie alongside the auth cookie fastapi-users just cleared.
-
-        Without this, paw_csrf lives for its 7-day max-age after logout —
-        JS can still read it (it's intentionally NOT HttpOnly) and submit
-        it on the next login. Clearing here keeps the two cookies'
-        lifecycles paired without forking the fastapi-users logout route.
-        """
-        path = request.url.path
-        is_logout = path in {
-            "/api/v1/auth/logout",
-            "/api/v1/auth/cookie/logout",
-            "/api/v1/auth/bearer/logout",
-        }
-        if not is_logout:
+            await _csrf_invalid(scope, receive, send)
             return
-        # Only clear on a successful logout — leave the cookie alone if
-        # fastapi-users rejected the request.
-        if 200 <= response.status_code < 300:
-            response.delete_cookie(
-                CSRF_COOKIE_NAME, path="/", samesite="lax", secure=_COOKIE_SECURE
-            )
+
+        await self.app(scope, receive, _clear_csrf_on_logout(request, send))
+
+
+async def _csrf_invalid(scope: Scope, receive: Receive, send: Send) -> None:
+    await JSONResponse({"detail": "csrf_invalid"}, status_code=403)(scope, receive, send)
+
+
+_LOGOUT_PATHS: Final = frozenset(
+    {
+        "/api/v1/auth/logout",
+        "/api/v1/auth/cookie/logout",
+        "/api/v1/auth/bearer/logout",
+    }
+)
+
+
+def _clear_csrf_on_logout(request: Request, send: Send) -> Send:
+    """On a successful logout, also expire the paw_csrf cookie.
+
+    Without this, paw_csrf lives for its 7-day max-age after logout — JS can
+    still read it (it's intentionally NOT HttpOnly) and submit it on the next
+    login. Pairs the two cookies' lifecycles without forking the fastapi-users
+    logout route. The Set-Cookie is appended last to the response headers and
+    only on a 2xx, so a rejected logout leaves the cookie alone.
+    """
+    if request.url.path not in _LOGOUT_PATHS:
+        return send
+
+    async def _send(message: Message) -> None:
+        if message["type"] == "http.response.start" and 200 <= message["status"] < 300:
+            expire = Response()
+            expire.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=_COOKIE_SECURE)
+            set_cookie = [h for h in expire.raw_headers if h[0] == b"set-cookie"]
+            message = {**message, "headers": [*message.get("headers", []), *set_cookie]}
+        await send(message)
+
+    return _send
 
 
 # ---------------------------------------------------------------------------

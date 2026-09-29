@@ -1,12 +1,9 @@
 # gemini_flash.py — Gemini Flash extraction adapter.
-# Created: 2026-04-30 — Phase 1 of "Files as Knowledge" plan, Stage 1.A.
-# Updated: 2026-07-03 (FL-15) — implement the deferred image-heavy PDF path:
-#   sparse pages (pypdf text < _SPARSE_PAGE_THRESHOLD) are now RENDERED to a
-#   PNG via PyMuPDF (fitz, lazy-imported like the genai client) and captioned
-#   through the same Gemini call the image path uses. A per-PDF cost cap
-#   (_MAX_SPARSE_PAGES_CAPTIONED) bounds render+caption calls. Text-heavy
-#   pages stay pypdf-only (no Gemini call); the genai call was factored into a
-#   shared _caption_image_bytes helper reused by both the image and PDF paths.
+# Captions images and image-heavy PDF pages through one shared Gemini call;
+# text-heavy PDF pages keep their pypdf text. Every blocking step (file read,
+# pypdf page-text pass, PyMuPDF render, the genai call) runs in a worker thread
+# so the adapter never stalls the event loop. `_MAX_SPARSE_PAGES_CAPTIONED`
+# bounds render+caption spend per PDF.
 """GeminiFlashExtractor — google-genai SDK adapter.
 
 Captions images with `gemini-2.5-flash` (or whatever model is configured).
@@ -121,7 +118,8 @@ class GeminiFlashExtractor:
         return (response.text or "").strip()
 
     async def _extract_image(self, path: Path, mime: str) -> ExtractionResult:
-        caption = await self._caption_image_bytes(path.read_bytes(), mime)
+        data = await asyncio.to_thread(path.read_bytes)
+        caption = await self._caption_image_bytes(data, mime)
         return ExtractionResult(
             text=caption,
             captions=[caption],
@@ -135,14 +133,16 @@ class GeminiFlashExtractor:
         except ImportError as exc:
             raise RuntimeError("pypdf not installed — run: pip install pypdf") from exc
 
-        reader = PdfReader(str(path))
+        def _page_texts() -> list[str]:
+            return [(page.extract_text() or "").strip() for page in PdfReader(str(path)).pages]
+
+        page_texts = await asyncio.to_thread(_page_texts)
         sections: list[str] = []
         captions: list[str] = []
         sparse_pages: list[int] = []
         captioned_pages: list[int] = []
 
-        for idx, page in enumerate(reader.pages, start=1):
-            page_text = (page.extract_text() or "").strip()
+        for idx, page_text in enumerate(page_texts, start=1):
             if len(page_text) >= _SPARSE_PAGE_THRESHOLD:
                 # Text-heavy page: keep pypdf text verbatim, no Gemini call.
                 sections.append(f"[page {idx}]\n{page_text}")
@@ -177,7 +177,7 @@ class GeminiFlashExtractor:
                 "path": str(path),
                 "mime": "application/pdf",
                 "model": self._model,
-                "page_count": len(reader.pages),
+                "page_count": len(page_texts),
                 "sparse_pages": sparse_pages,
                 "captioned_pages": captioned_pages,
                 "max_captioned_pages": _MAX_SPARSE_PAGES_CAPTIONED,

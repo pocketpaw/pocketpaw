@@ -201,12 +201,13 @@ _COMPOSIO_OVERLAPPING_TOOL_NAMES = frozenset(
 
 
 def _is_composio_enabled() -> bool:
-    """True when Composio is configured. Read lazily so OSS-local runs
-    don't pay the ``Settings.load`` cost up front."""
+    """True when Composio is configured. Reads the cached ``get_settings()``:
+    this runs on every tool-surface build, and ``Settings.load()`` re-parses
+    config + env each call. Settings writes clear that cache."""
     try:
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
-        s = Settings.load()
+        s = get_settings()
         return bool(s.composio_api_key and s.composio_enterprise_id)
     except Exception:  # noqa: BLE001
         return False

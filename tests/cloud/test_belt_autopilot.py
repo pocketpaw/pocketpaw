@@ -288,6 +288,35 @@ async def test_autopilot_background_task_lifecycle(tmp_path, mongo_db, store, mo
     await autopilot_mod.stop_autopilot(mandate_id)
 
 
+async def test_autopilot_start_runs_the_loop_only_on_the_lease_holder(
+    tmp_path, mongo_db, store, monkeypatch
+):
+    """With several web processes only the ``mandate_autopilot`` lease holder
+    runs loops. A start handled elsewhere saves the flag and announces the
+    change (the holder picks it up, see test_multiworker_leases) instead of
+    starting a second loop here; a stop is announced too."""
+    repo = _seed_repo(tmp_path, "holder-repo")
+    created = await mandate_service.create_mandate(
+        WS, USER, {"name": "m", "surface": {"repo_id": str(repo)}, "charter": _charter()}
+    )
+    mandate_id = created["mandate"]["id"]
+    announced: list[str] = []
+    monkeypatch.setattr(autopilot_mod, "announce_change", announced.append)
+
+    monkeypatch.setattr(autopilot_mod, "runs_here", lambda: False)
+    await mandate_service.set_autopilot(WS, USER, mandate_id, {"action": "start", "users": 2})
+    assert not autopilot_mod.is_running(mandate_id)
+    assert announced == [mandate_id]
+
+    monkeypatch.setattr(autopilot_mod, "runs_here", lambda: True)
+    await mandate_service.set_autopilot(WS, USER, mandate_id, {"action": "start", "users": 2})
+    assert autopilot_mod.is_running(mandate_id)
+
+    await mandate_service.set_autopilot(WS, USER, mandate_id, {"action": "stop"})
+    assert not autopilot_mod.is_running(mandate_id)
+    assert announced == [mandate_id] * 3
+
+
 async def test_reconciler_restarts_only_active_autopilot_on_mandates(
     tmp_path, mongo_db, store, monkeypatch
 ):

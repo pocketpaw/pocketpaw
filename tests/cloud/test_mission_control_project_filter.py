@@ -70,7 +70,7 @@ async def test_project_id_filter_narrows_visible_pockets(monkeypatch, store: Ins
         # Unfiltered call returns both
         return [{"_id": "p1"}, {"_id": "p2"}]
 
-    monkeypatch.setattr(mc_service.pockets_service, "list_pockets", _list_pockets)
+    monkeypatch.setattr(mc_service.pockets_service, "visible_pocket_refs", _list_pockets)
 
     await store.propose("p1", "in-A", "", "", _trigger())
     await store.propose("p2", "in-B", "", "", _trigger())
@@ -102,7 +102,7 @@ async def test_project_id_empty_string_filters_for_unassigned(
             return [{"_id": "p-unassigned"}]
         return []
 
-    monkeypatch.setattr(mc_service.pockets_service, "list_pockets", _list_pockets)
+    monkeypatch.setattr(mc_service.pockets_service, "visible_pocket_refs", _list_pockets)
     await store.propose("p-unassigned", "loose", "", "", _trigger())
 
     items = await mc_service.agent_list_work_items(_ctx(), ListWorkItemsRequest(project_id=""))
@@ -120,7 +120,7 @@ async def test_returns_empty_when_no_pockets_in_project(monkeypatch, store: Inst
 
     monkeypatch.setattr(
         mc_service.pockets_service,
-        "list_pockets",
+        "visible_pocket_refs",
         AsyncMock(side_effect=_list_pockets),
     )
     await store.propose("p1", "should not surface", "", "", _trigger())

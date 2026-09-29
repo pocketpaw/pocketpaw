@@ -5,8 +5,8 @@
 # is a container that grows until it is restarted, and the only recovery in the
 # current deploy is `restart: unless-stopped`.
 #
-#   H3  TimingMiddleware keyed on the raw URL when no route matched, so every
-#       distinct 404 minted a permanent 10k-slot deque.
+#   H3  The request timer keyed on the raw URL when no route matched, so every
+#       distinct 404 minted a permanent 10k-slot deque (now timing.record()).
 #   M4  The realtime audience cache and the /tree cache both checked a TTL on
 #       read and never removed anything, so entries accumulated for the life of
 #       the process. The audience cache also had no single-flight, so N
@@ -57,23 +57,9 @@ class TestTimingKeySpace:
     @pytest.mark.asyncio
     async def test_unmatched_paths_share_one_bucket(self):
         """A scanner walking distinct URLs must not grow the buffer map."""
-        mw = timing.TimingMiddleware.__new__(timing.TimingMiddleware)
-        mw.capacity = 16
-
-        async def _call_next(_request):
-            return type("R", (), {"status_code": 404})()
-
-        for i in range(500):
-            req = type(
-                "Rq",
-                (),
-                {
-                    "scope": {},  # no matched route
-                    "url": type("U", (), {"path": f"/nope/{i}"})(),
-                    "method": "GET",
-                },
-            )()
-            await timing.TimingMiddleware.dispatch(mw, req, _call_next)
+        # RequestLogMiddleware passes scope.get("route"): None when unmatched.
+        for _ in range(500):
+            timing.record("GET", None, 1.0, capacity=16)
 
         assert len(timing._buffers) == 1, (
             f"500 distinct unmatched paths produced {len(timing._buffers)} buffers"
@@ -83,23 +69,8 @@ class TestTimingKeySpace:
     @pytest.mark.asyncio
     async def test_matched_routes_still_key_on_the_template(self):
         """The bound must not cost the signal: real routes stay separable."""
-        mw = timing.TimingMiddleware.__new__(timing.TimingMiddleware)
-        mw.capacity = 16
-
-        async def _call_next(_request):
-            return type("R", (), {"status_code": 200})()
-
         for path in ("/workspaces/{id}", "/pockets", "/pockets/{id}"):
-            req = type(
-                "Rq",
-                (),
-                {
-                    "scope": {"route": type("Rt", (), {"path": path})()},
-                    "url": type("U", (), {"path": "/irrelevant"})(),
-                    "method": "GET",
-                },
-            )()
-            await timing.TimingMiddleware.dispatch(mw, req, _call_next)
+            timing.record("GET", type("Rt", (), {"path": path})(), 1.0, capacity=16)
 
         assert len(timing._buffers) == 3
         assert ("GET", timing.UNMATCHED_PATH) not in timing._buffers

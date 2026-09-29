@@ -2,7 +2,7 @@
 #
 # Created: 2026-05-24 — Summarises the user's pocket list with counts
 # and a top-N listing so the agent can answer "what pockets do I
-# have?" without an extra round-trip. Uses ``pockets_service.list_pockets``
+# have?" without an extra round-trip. Uses ``pockets_service.visible_pocket_refs``
 # (tenancy enforced).
 #
 # Changes: 2026-08-03 (feat/prompt-entity-ids) — rows carry the pocket id.
@@ -46,9 +46,9 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     try:
         from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-        pockets = await pockets_service.list_pockets(workspace_id, user_id)
+        pockets = await pockets_service.visible_pocket_refs(workspace_id, user_id)
     except Exception:
-        logger.debug("pockets_list_handler: list_pockets failed", exc_info=True)
+        logger.debug("pockets_list_handler: visible_pocket_refs failed", exc_info=True)
         return SurfacePreamble(
             text=(
                 '<surface kind="pockets" route="/pockets" />'
@@ -67,8 +67,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     else:
         rows = []
         for p in pockets[:LIST_LIMIT]:
-            widget_count = len(p.get("widgets", []) or [])
-            agent_count = len(p.get("agents", []) or [])
+            widget_count = p.get("widget_count", 0)
+            agent_count = p.get("agent_count", 0)
             rows.append(
                 entity_line(
                     p.get("name"),

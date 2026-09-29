@@ -1,33 +1,38 @@
 """Boot the cloud stack against a chosen agent backend and seed a workspace, so
-``chat_loadtest.py`` has something to hammer.
+``chat_loadtest.py`` and ``api_loadtest.py`` have something to hammer.
 
-Created 2026-07-29 — the load-test rig's server half. It:
+The load-test rig's server half. It:
 
   1. Mints a local license + auth secret and points Beanie at a SCRATCH Mongo
      database (dropped on exit unless ``--keep-db``). The drop runs in a
-     ``finally``, so a hard kill leaves the database behind — clean up with
+     ``finally``, so a hard kill leaves the database behind. Stop the server
+     with ``POST /__loadtest/shutdown`` instead (a graceful exit, so the drop
+     runs), or clean up with
      ``db.getMongo().getDBNames().filter(n => n.startsWith('loadtest_'))``.
   2. Selects the backend under test. Default ``--backend sim`` registers
      ``sim_backend.SimBackend``, so no provider key is needed and no tokens are
-     spent. Any other value selects a backend already in the registry
-     (``deep_agents``, ``claude_agent_sdk``, …) and then the run is real: it
-     needs a working provider key in the environment and it spends money.
-  3. Mounts the real cloud FastAPI app — real router, real run executor, real
-     Redis stream transport, real Mongo writes, real SSE.
-  4. Seeds user → workspace → agent → pocket over the real HTTP API.
-  5. Serves it with uvicorn and prints the exact ``chat_loadtest.py`` command,
-     with token / workspace / scope id already filled in.
+     spent. Any other registered backend makes the run real: it needs a
+     provider key and it spends money.
+  3. Mounts the real cloud FastAPI app. ``--prod-middleware`` also installs the
+     OSS ``AuthMiddleware`` + body-size ceiling in the order
+     ``pocketpaw/api/serve.py`` uses, so the per-IP ``api_limiter`` that a
+     deployed ``pocketpaw serve`` applies is in the path.
+  4. Seeds user → workspace → agent → pockets → one Paw Bar widget over the
+     real HTTP API, and writes the ids to ``--seed-out``.
+  5. Serves it with uvicorn and exposes ``/__loadtest/metrics``: event-loop lag
+     sampled INSIDE this process plus its RSS. A client-side measurement sees
+     the network and the driver's own loop instead, and would flatter the
+     server.
 
-Updated 2026-07-29 (same day) for the baseline measurement: added ``--backend``
-and ``--model`` so a registered backend can be measured instead of the
-simulator, and added the ``/__loadtest/metrics`` probe. The probe reports event
-loop lag sampled from INSIDE this process, which is the number that decides the
-in-process ceiling — a client-side measurement sees the network and the
-driver's own loop instead, and would flatter the server.
+Uploads are forced onto local disk and signup's breached-password (HIBP) call
+is off unless ``--hibp``: a load test must not push bytes to a real bucket or
+fire hundreds of requests a second at a third-party API. Run the server with
+HOME/USERPROFILE pointed at a scratch dir so uploads and the Paw Bar SQLite
+store land there, not in your real ``~/.pocketpaw``.
 
-What this measures: YOUR stack's concurrency ceiling. With ``--backend sim`` it
-does NOT measure provider rate limits or the memory cost of a real Claude Code
-CLI subprocess per run (set ``PAW_SIM_SUBPROC=1`` / ``PAW_SIM_RSS_MB`` to
+What this measures: YOUR stack's per-process ceiling. With ``--backend sim``
+it does NOT measure provider rate limits or the memory cost of a real Claude
+Code CLI subprocess per run (``PAW_SIM_SUBPROC=1`` / ``PAW_SIM_RSS_MB``
 approximate the latter).
 
 Usage:
@@ -72,6 +77,27 @@ for _stream in (sys.stdout, sys.stderr):
 # it on every poll anyway.
 _LAG_SAMPLES: deque[float] = deque(maxlen=20_000)
 
+# The running uvicorn server, so ``POST /__loadtest/shutdown`` can ask it to
+# exit gracefully and the scratch-db drop in ``main_async``'s finally runs.
+_SERVER: dict[str, object] = {}
+
+
+# Provider credentials blanked for a sim run (see _configure_env).
+_PROVIDER_ENV = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "POCKETPAW_ANTHROPIC_API_KEY",
+    "POCKETPAW_OPENAI_API_KEY",
+    "POCKETPAW_OPENROUTER_API_KEY",
+    "POCKETPAW_OPENAI_COMPATIBLE_API_KEY",
+    "POCKETPAW_LITELLM_API_BASE",
+    "POCKETPAW_LITELLM_API_KEY",
+    "POCKETPAW_CHAT_TITLE_MODEL",
+    "POCKETPAW_COMPOSIO_API_KEY",
+    "LOGFIRE_TOKEN",
+)
+
 
 def _license_key(secret: str) -> str:
     payload = {
@@ -100,8 +126,35 @@ def _configure_env(args: argparse.Namespace, db_name: str) -> str:
             # 402 credit gate at run start.
             "POCKETPAW_BILLING_ENFORCED": "0",
             "POCKETPAW_CLOUD_RUN_EXECUTOR": args.executor,
+            # Local disk, whatever a .env says: load_dotenv() in the upload
+            # factory walks up to the checkout's .env, which may name a real
+            # bucket. It does not override a var that is already set.
+            "POCKETPAW_UPLOAD_ADAPTER": "local",
+            # 0 = no cap. The 2000-files/day abuse ceiling would otherwise read
+            # as a capacity wall a few stages into an upload ramp.
+            "POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY": "0",
+            "POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY": "0",
         }
     )
+    if not args.hibp:
+        os.environ["POCKETPAW_HIBP_ENABLED"] = "false"
+    # Upload listeners run comprehension (an LLM call) on every file; the
+    # daily cap at 0 turns it off.
+    os.environ["POCKETPAW_FILE_COMPREHENSION_DAILY"] = "0"
+    if args.backend == "sim":
+        # A sim run must not be able to spend. Chat titling, KB compile and the
+        # concierge all reach a provider through these, and load_dotenv() walks
+        # up from a worktree to the main checkout's .env. An empty value set
+        # here wins: load_dotenv never overrides a var that is already present.
+        for name in _PROVIDER_ENV:
+            os.environ[name] = ""
+        # Workspace creation mints a LiteLLM tenant key inline. With no proxy
+        # listening, Windows spends ~2s per refused localhost connect, which
+        # would read as a 2.3s workspace-create. Point it at the stub below,
+        # which answers like a healthy proxy.
+        os.environ["POCKETPAW_LITELLM_API_BASE"] = (
+            f"http://127.0.0.1:{args.port}/__loadtest/litellm"
+        )
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
     if args.redis_url:
         os.environ["POCKETPAW_REDIS_URL"] = args.redis_url
@@ -155,10 +208,23 @@ def _install_probe(app) -> None:
         return {
             "loop_lag_p50_ms": pct(50),
             "loop_lag_p95_ms": pct(95),
+            "loop_lag_p99_ms": pct(99),
             "loop_lag_max_ms": round(samples[-1], 2) if samples else None,
             "loop_lag_n": len(samples),
             "srv_rss_mb": rss_mb,
+            "pid": os.getpid(),
         }
+
+    @app.post("/__loadtest/litellm/key/generate")
+    async def _loadtest_litellm_key() -> dict:  # pyright: ignore[reportUnusedFunction]
+        return {"key": f"sk-loadtest-{uuid.uuid4().hex}"}
+
+    @app.post("/__loadtest/shutdown")
+    async def _loadtest_shutdown() -> dict:  # pyright: ignore[reportUnusedFunction]
+        server = _SERVER.get("server")
+        if server is not None:
+            server.should_exit = True  # type: ignore[attr-defined]
+        return {"ok": True}
 
 
 async def _seed(app, base_url: str, n_pockets: int, backend: str) -> dict[str, str]:
@@ -246,8 +312,30 @@ async def _seed(app, base_url: str, n_pockets: int, backend: str) -> dict[str, s
                         file=sys.stderr,
                     )
 
+        # One Paw Bar widget for the public-route scenarios. Limits set far above
+        # anything a ramp reaches, so the per-widget buckets (default 60/min)
+        # cannot pass for a capacity wall; allowed_domains empty = any origin.
+        widget_id = ""
+        r = await http.post(
+            "/api/v1/paw-bar/widgets",
+            json={
+                "pocket_id": pocket_ids[0],
+                "owner": email,
+                "name": "Load Test Widget",
+                "spec": {"widget_id": "loadtest", "pocket_id": pocket_ids[0]},
+                "rate_limit_per_min": 10_000_000,
+                "per_customer_limit_per_min": 10_000_000,
+            },
+            headers=headers,
+        )
+        if r.status_code in (200, 201):
+            widget_id = str(r.json().get("id") or r.json().get("_id") or "")
+        else:
+            print(f"[seed] WARN widget create {r.status_code}: {r.text[:200]}", file=sys.stderr)
+
         return {
             "token": token,
+            "widget_id": widget_id,
             "workspace_id": workspace_id,
             "agent_id": agent_id,
             "pocket_id": pocket_ids[0],
@@ -263,7 +351,6 @@ async def main_async(args: argparse.Namespace) -> int:
     import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from fastapi import FastAPI
-    from motor.motor_asyncio import AsyncIOMotorClient
     from pocketpaw_ee.cloud import mount_cloud
     from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
     from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
@@ -293,6 +380,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
     app = FastAPI(title="pocketpaw loadtest rig")
     _install_probe(app)
+    if args.prod_middleware:
+        # Same order as pocketpaw/api/serve.py: AuthMiddleware innermost, the
+        # body ceiling outside it, then mount_cloud's layers outside both.
+        from pocketpaw.dashboard_auth import AuthMiddleware
+        from pocketpaw.security.body_limit import BodySizeLimitMiddleware
+
+        app.add_middleware(AuthMiddleware)
+        app.add_middleware(BodySizeLimitMiddleware)
+        print("[serve] prod middleware: OSS AuthMiddleware + BodySizeLimitMiddleware")
     mount_cloud(app)
 
     print("[serve] seeding workspace…", flush=True)
@@ -340,6 +436,7 @@ async def main_async(args: argparse.Namespace) -> int:
         app, host="127.0.0.1", port=args.port, log_level=args.log_level, access_log=False
     )
     server = uvicorn.Server(config)
+    _SERVER["server"] = server
     probe = asyncio.create_task(_loop_lag_probe())
     try:
         await server.serve()
@@ -349,9 +446,15 @@ async def main_async(args: argparse.Namespace) -> int:
             await probe
         if not args.keep_db:
             print(f"\n[serve] dropping scratch db {db_name}")
-            client = AsyncIOMotorClient(args.mongo_url)
-            with contextlib.suppress(Exception):
-                await client.drop_database(db_name)
+            # A synchronous client, and a loud failure: an async Motor drop here,
+            # after uvicorn has shut down, was observed to fail inside a
+            # suppress() and leave the scratch db behind on every clean exit.
+            from pymongo import MongoClient
+
+            try:
+                MongoClient(args.mongo_url, serverSelectionTimeoutMS=5000).drop_database(db_name)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[serve] WARN could not drop {db_name}: {exc}", file=sys.stderr)
     return 0
 
 
@@ -385,6 +488,16 @@ def main() -> int:
         type=int,
         default=32,
         help="distinct pockets to seed — one per concurrent virtual user",
+    )
+    p.add_argument(
+        "--prod-middleware",
+        action="store_true",
+        help="also mount the OSS AuthMiddleware (per-IP api_limiter) like `pocketpaw serve`",
+    )
+    p.add_argument(
+        "--hibp",
+        action="store_true",
+        help="keep the breached-password check on signup (one external call per new password)",
     )
     p.add_argument("--log-level", default="warning")
     args = p.parse_args()

@@ -1,325 +1,32 @@
 """Configuration management for PocketPaw.
 
-Changes:
-  - 2026-09-28 (feat/concierge-knowledge-sources): Added the knowledge-source caps
-    for the v2 concierge: ``pawbar_concierge_source_max_count_free`` / ``_site`` /
-    ``_staff`` (defaults 3 / 20 / 50 files and links together, per site plan),
-    ``pawbar_concierge_source_max_bytes`` (default 10 MiB per upload or linked page)
-    and ``pawbar_concierge_source_max_chars`` (default 100,000 extracted characters
-    per source). Env ``POCKETPAW_PAWBAR_CONCIERGE_SOURCE_*``.
-  - 2026-09-28 (feat/concierge-pinned-faqs): Added ``pawbar_concierge_faq_max_count``
-    (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT``, default 15) and
-    ``pawbar_concierge_faq_max_chars`` (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_CHARS``,
-    default 500, question and answer together). They cap the pinned FAQs an owner
-    keeps on a site, which the v2 concierge puts ahead of every KB hit.
-  - 2026-09-28 (feat/concierge-eval-gate, CR-6): Added the v2 concierge rollout
-    gate's settings: ``pawbar_concierge_default_runtime`` (env
-    ``POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME``, default "legacy"), the runtime
-    a newly created concierge asks for, plus the four eval thresholds it must
-    clear (``pawbar_concierge_eval_max_false_refusal_pct`` 5,
-    ``..._min_groundedness_pct`` 90, ``..._min_adversarial_held_pct`` 100,
-    ``..._max_code_leaks`` 0). Asking for "v2" is not enough on its own:
-    ``pocketpaw_ee.paw_bar.concierge_gate.default_concierge_runtime`` also needs a
-    committed, passing real-model report for the configured model.
-  - 2026-09-28 (feat/concierge-spend-cap, CR-5): Added
-    ``pawbar_concierge_daily_spend_cap`` (env
-    ``POCKETPAW_PAWBAR_CONCIERGE_DAILY_SPEND_CAP``, default 5.0 USD, 0 = no cap):
-    what one site's v2 concierge may spend on the model per UTC day before its
-    visitors get the leave-a-message reply instead of an answer.
-  - 2026-09-28 (feat/concierge-v2-output): Added ``pawbar_concierge_doc_code_chars``
-    (env ``POCKETPAW_PAWBAR_CONCIERGE_DOC_CODE_CHARS``, default 6000), the cap on
-    documentation code one v2 concierge reply may show on a site that allows it.
-  - 2026-09-27 (feat/concierge-v2-runner): Added ``pawbar_concierge_model`` (env
-    ``POCKETPAW_PAWBAR_CONCIERGE_MODEL``, default "" = the pydantic_ai backend's
-    own model resolution) and ``pawbar_concierge_max_tokens`` (env
-    ``POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS``, default 600). They fix the model
-    and output cap of the v2 Paw Bar concierge runner, which answers a site
-    visitor in one tool-free call instead of a full agent run.
-  - 2026-09-27 (chore/bump-claude-agent-sdk): Added ``claude_sdk_cli_path``
-    (env ``POCKETPAW_CLAUDE_SDK_CLI_PATH``). The SDK always runs the CLI bundled
-    in its wheel, so a model newer than that CLI failed with "Claude Code
-    2.1.276 does not support this model" even with a current ``claude``
-    installed. Unset keeps the bundled CLI.
-  - 2026-09-01 (feat/scale-concurrency-knobs): Added ``agent_pool_max_instances``
-    (default 20), ``session_warm_max_per_tenant`` (default 8) and
-    ``session_warm_max_global`` (default 64) — the three agent-tier ceilings that
-    were previously HARDCODED constructor defaults reachable only by editing
-    ``pool.py`` / ``session_supervisor.py``, because both singletons are built with
-    no arguments (``AgentPool()``, ``SessionSupervisor()``). Every default is the
-    literal that was already in force, so no existing deploy changes behaviour;
-    they exist so a multi-user deploy can raise them from env. Note these are
-    PER-PROCESS ceilings — they bound one web or worker process, and replicas
-    multiply them. Distinct from ``max_concurrent_conversations`` below, which
-    gates only the OSS channel-adapter loop, and from ``POCKETPAW_ARQ_MAX_JOBS``,
-    which is the cluster-wide arq ceiling.
-  - 2026-08-03 (PA-9): Re-measured ``prompt_pocket_summary_only``'s payoff against
-    the live layer and corrected its description. The flag saves ~1,631 chars/turn
-    (3,240 -> 1,609 on a 300-widget pocket), not the ~39.6k the old note implied —
-    PA-8a's ``_WIDGET_SUMMARY_MAX_CHARS`` had already bounded the block, so the
-    dramatic figure described behaviour that no longer exists. Default is
-    unchanged; only the docstring was wrong.
-  - 2026-08-03 (PA-8a): Added ``prompt_pocket_summary_only`` (default False, env
-    POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY) — takes the bulk widget dump out of
-    the channel prompt's ``<current-pocket>`` block, leaving the pocket id, the
-    name, the widget COUNT, a snapshot stamp and the standing order to call
-    ``get_pocket``. Default False is byte-for-byte today's block, so no deploy
-    is changed by shipping it; flipping it is a config/env change, not a code
-    change. Read by ``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``.
-  - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
-    env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
-    engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
-    POST /fabric/query). Off (default): an aggregation query is rejected
-    fail-loud with FabricAnalystDisabledError -> HTTP 422
-    fabric.analyst_disabled; plain queries are unaffected either way.
-  - 2026-08-08 (feat/sites-js-by-default): Added
-    ``sites_keep_client_bundle_default`` (default True) — a published Paw Site
-    now ships its own client JavaScript UNLESS it declares otherwise. The
-    per-site ``keepsClientBundle`` declaration became tri-state (``None`` =
-    undeclared → this default; ``True``/``False`` = the author's explicit
-    choice, honoured in both directions), resolved at exactly one place,
-    ``sites/service.py:publish_pocket``. Note the default silences the
-    build-time resting-visibility smoke gate for undeclared sites — see the
-    Field description for the full tradeoff.
-  - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
-    (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
-    always-on automation switch. When on (default), the background
-    AutomationEvaluator starts at dashboard boot so threshold rules fire without
-    a manual POST /automations/evaluator/start. A new default-ON flag is safe: a
-    fresh install with no enabled rules just sleeps.
-  - 2026-07-11 (FST-8 — divergence report + docs): Refreshed the
-    ``fabric_source_truth_mode`` Field description — shadow/enforce semantics
-    SHIPPED in FST-3..7 (the FST-1 "RESERVED / INERT" wording was stale):
-    shadow records statements + divergence lines while the cache stays LWW,
-    enforce hands the cache to the trust-ladder resolver, and the flip to
-    enforce is gated by ``python -m pocketpaw.fabric.divergence_report``.
-    Description text only — no behavioral change.
-  - 2026-07-10 (FST-1 — Fabric source-truth schema): Added
-    ``fabric_source_truth_mode`` (Literal off|shadow|enforce, default 'off';
-    POCKETPAW_FABRIC_SOURCE_TRUTH_MODE) — the three-position rollout switch for
-    the Fabric source-truth chain, mirroring the ``litellm_spend_mode``
-    pattern. INERT in FST-1: no code path reads it yet; only the
-    fabric_statements/fabric_sources schema + append-only store CRUD exist.
-    'off' is byte-for-byte today's behavior (the flat properties dict is the
-    only read path); shadow/enforce semantics land in later FST slices.
-  - 2026-07-10 (feat/verify-mode-shadow): Added the three-position verify
-    rollout modes — ``deep_work_verify_mode`` and ``cloud_plan_verify_mode``
-    (Literal off|shadow|enforce, default 'off'; env
-    POCKETPAW_DEEP_WORK_VERIFY_MODE / POCKETPAW_CLOUD_PLAN_VERIFY_MODE) —
-    superseding the boolean kill-switches so a real tenant can run a SAFE
-    observe-only SHADOW phase (verdict + judge stamps + a
-    ``would_have=<done|requeued|escalated>`` telemetry line; task status
-    NEVER touched) before anyone risks ENFORCE. Resolved by
-    ``effective_deep_work_verify_mode()`` /
-    ``effective_cloud_plan_verify_mode()`` (mirrors
-    ``effective_spend_mode()``): a non-'off' mode wins outright; mode 'off'
-    + legacy bool True resolves to 'enforce' — NOT shadow — because the
-    bools' SHIPPED meaning is the full acting loop, and mapping them to
-    shadow would silently strip requeue/escalate from any deployment that
-    already set them. The legacy bools stay for back-compat.
-  - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
-    (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
-    False; when True AND deep_work_verify_loop_enabled is on, every completing
-    deep_work task is ALSO scored by the LlmJudgeVerdictProvider and the
-    verdict stamped observe-only on ``metadata["verify_judge_verdict"]`` — it
-    NEVER drives requeue/escalate; the deterministic verdict alone acts),
-    ``deep_work_verify_judge_model`` (default "haiku" — the ``claude`` CLI
-    ``--model`` alias for the cheap judge tier),
-    ``deep_work_verify_judge_timeout_seconds`` (default 60 — the CLI
-    subprocess timeout) and ``deep_work_verify_judge_confidence_floor``
-    (default 0.75 — below it the judge abstains to UNKNOWN). Env:
-    POCKETPAW_DEEP_WORK_VERIFY_JUDGE_* .
-  - 2026-07-02 (feat/svl-5-cloud-verify): Added the CLOUD planner-terminal
-    Self-Verifying Loop flags (SVL-5) — ``cloud_plan_verify_loop_enabled``
-    (default False; kill-switch — when False cloud plan tasks auto-complete
-    exactly as before) and ``cloud_plan_verify_max_requeues`` (default 2; the
-    verify-requeue bound, SEPARATE from any error-retry budget). Mirrors the
-    deep_work_verify_* pair at the ee/cloud planner terminal
-    (``_execute_ready_plan_tasks`` → ``_run_one``). Env:
-    POCKETPAW_CLOUD_PLAN_VERIFY_* .
-  - 2026-06-30 (feat/billing-quota-enforcement, chunk 4): Expanded the
-    ``billing_enforced`` field docstring — when the flag is on the run-start 402
-    hard-block now covers TWO conditions (was: balance <= 0 only): balance <= 0
-    (credits.insufficient) AND month-to-date spend >= the per-plan monthly credit
-    ceiling (credits.quota_exceeded), enforced at run start across both the chat
-    HTTP path and the worker/executor. No logic change — the gate was wired in
-    chunk 3; this only documents it. Kept the "default False -> OSS/self-host
-    unaffected" note.
-  - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
-    ``instinct_template_default_deny`` (default False, env
-    POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
-    TEMPLATE-level deny-by-default. When a template is BOUND to a pocket but
-    declares NO rule matching a MUTATING action, the template gate previously
-    returned EXECUTE (proceed). With this flag ON, that no-rule-match case
-    parks the write for human approval (PENDING_APPROVAL) instead; READS
-    (read_only / GET / HEAD actions) still proceed ungated. OFF by default so
-    day-one behavior is unchanged. A per-workspace override field
-    (``instinct_template_default_deny`` on the workspace document; null = use
-    this global default) is resolved exactly like
-    ``instinct_approval_level``.
-  - 2026-06-28 (AW-1 connector egress guard): Added
-    ``connector_egress_guard`` (default False; env
-    POCKETPAW_CONNECTOR_EGRESS_GUARD) — the kill-switch for routing
-    DirectREST connector HTTP through the SSRF egress guard
-    (``assert_egress_allowed`` + the pinned-IP transport). OFF by default so
-    flipping it on per-deployment closes the connector SSRF bypass without
-    risking live connectors in the same change. The existing
-    ``POCKETPAW_ALLOW_INTERNAL_URLS`` flag stays the dev escape that permits
-    internal/loopback hosts when the guard is on.
-  - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
-    (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
-    Dodo subscription checkout session returns the buyer to after pay / cancel when
-    the /billing/subscribe request carries no Origin (or usable Referer) header.
-    Return urls become ``{base}/settings/billing?checkout=success|cancel``; empty
-    default omits the redirect when no origin is available.
-  - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
-    (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
-    three-position billing-cutover switch that supersedes the
-    ``litellm_spend_ingest_enabled`` bool. 'off' keeps BC-3 per-run metering as
-    today; 'shadow' runs a read-only per-tenant compare (litellm spend vs BC-3
-    ledger, ZERO debits) that records a reconciliation row; 'live' makes LiteLLM
-    the sole meter (proxy-spend sweep debits + BC-3 sweep gated off). The legacy
-    bool is kept for back-compat and resolved by ``effective_spend_mode()`` — an
-    existing ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` maps to 'shadow' (NOT
-    'live') while the new mode is left at 'off', so deploying WU-F can never
-    auto-flip an old bool-setter into live billing; 'live' requires an explicit
-    POCKETPAW_LITELLM_SPEND_MODE=live.
-  - 2026-06-26: Added the L2 cross-backend harness-failover settings (MCG-10) —
-    ``backend_failover_enabled`` (default False; kill-switch — when False the
-    new ``AgentRouter.run_with_failover`` behaves exactly like ``run`` and no
-    harness switch ever happens) and ``backend_failover_chain`` (default
-    ["claude_agent_sdk", "codex_cli", "opencode"]; the ordered list of agent
-    HARNESSES to try when the whole primary lane is down — distinct from L1's
-    LiteLLM model/account failover, which cannot escape a provider-wide
-    outage). Only a lane-level failure (overload/unavailable/auth that
-    persists after the backend's own retries) before any token is streamed
-    triggers a switch; each harness is tried at most once. Env:
-    POCKETPAW_BACKEND_FAILOVER_ENABLED / POCKETPAW_BACKEND_FAILOVER_CHAIN
-    (JSON list). The EE cloud run path wiring is a follow-up — this ships the
-    mechanism + the OSS hook only.
-  - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
-    POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
-    tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
-    recurring checkout; the subscription webhook reverses it (product_id ->
-    plan key) to know which tier renewed. A before-validator degrades a
-    malformed env string to {} so a typo can't crash settings load.
-  - 2026-09-05: REMOVED ``dodo_site_products`` and ``dodo_site_addons`` (envs
-    POCKETPAW_DODO_SITE_PRODUCTS / POCKETPAW_DODO_SITE_ADDONS). Paw Sites plans
-    are paid from the workspace CREDIT BALANCE — the publish debits the tier's
-    monthly price and a monthly sweep debits it again each period — so neither
-    map had a reader left. Both are deleted rather than kept unread: a setting
-    nothing consumes is one a future change quietly depends on again. Setting
-    either env var is now inert. ``dodo_plan_products`` and the credit product id
-    are UNTOUCHED — workspace plans and credit top-ups still bill through Dodo.
-  - 2026-09-02: Added ``billing_dunning_grace_days`` (default 7, env
-    ``POCKETPAW_BILLING_DUNNING_GRACE_DAYS``) — how long a workspace keeps its
-    paid plan after a renewal payment fails. A ``subscription.on_hold`` webhook
-    stamps the deadline; the grace sweep revokes the plan once it passes, and a
-    successful retry clears it. Configurable because the right number depends on
-    the gateway's own retry schedule, and suspending a customer while the charge
-    is still being recovered is worse than a few extra days of service.
-  - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
-    ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
-    Paw Sites seams (custom-domain capability + count caps, concierge
-    entitlement) can be turned on without also 402ing chat runs, seats, pockets,
-    connectors, calls or uploads. Every sites seam reads ``billing_enforced OR
-    sites_billing_enforced``, so the global flag keeps working exactly as
-    documented and this is additive for existing tenants.
-  - 2026-06-24: Added ``billing_enforced`` (default False, env
-    POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
-    True the cloud rejects STARTING a new chat run on a zero-or-negative
-    credit balance with HTTP 402; in-flight runs are untouched. Off by
-    default so OSS / self-host stay unaffected.
-  - 2026-06-23: Added the deep_work Self-Verifying Loop flags (SVL-1) —
-    ``deep_work_verify_loop_enabled`` (default False; kill-switch — when
-    False deep_work tasks complete exactly as before) and
-    ``deep_work_verify_max_requeues`` (default 2; the requeue bound read by
-    SVL-2, landed here so later slices don't touch config). SVL-1 only reads
-    the enable flag to stamp an observe-only OutcomeVerdict on a completing
-    task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
-  - 2026-06-22: Added ``discovery_sovereign_model`` (default True) — the model-lane
-    sovereignty posture for discovery's categorize (F2) / refine (F3) passes.
-    True (default, unchanged behavior): hard-pin the model to the on-box Ollama
-    so tenant data never leaves the box. False: use the workspace's configured
-    provider via ``resolve_llm_client`` — a CLOUD model is allowed (explicit
-    tenant opt-in). The kb ingest/build tripwire holds regardless. Env:
-    POCKETPAW_DISCOVERY_SOVEREIGN_MODEL.
-  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
-    when true, approved workspace-discovered Instinct rules are merged with
-    template rules at the live gate and govern actions. Off by default; the
-    discovered branch is dead code on the default path. A separate, narrower
-    flag than ``instinct_approval_level``. Env:
-    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
-  - 2026-06-18: Added the four layered/learning Instinct gate defaults —
-    ``instinct_approval_level`` (default "ASK", dormant),
-    ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
-    (False), ``instinct_optimistic_ttl_seconds`` (300). Global host-wide
-    defaults for the 4-lane triage router; per-workspace overrides land
-    with the gate integration layer. Dormant on ship (ASK escalates
-    everything). Env: POCKETPAW_INSTINCT_* .
-  - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
-    Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
-    repo path must resolve inside one of these roots; empty defaults to the
-    cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
-  - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
-    the same-box shield daemon's control-API UNIX socket + Bearer token. The
-    cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
-    is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
-  - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
-    orientation (loom) MCP server settings. ``loom_model_path`` defaults
-    to None, which disables the loom MCP server; set it to a built
-    world-model JSON to enable orient / locate / why / what_depends_on /
-    boundaries for the cloud chat agent (BS-1, Belt & Pulley stations).
-  - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
-    ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
-    still auto-installs; this flag toggles the chat-surface affordance
-    only. Read by the agent prompt assembler and the paw-enterprise
-    feature-flag echo. RFC 08 v1.0 wave 4.
-  - 2026-05-22: Added ``source_refresh_min_interval_seconds`` (interval
-    floor) and ``source_refresh_max_per_hour`` (per-pocket auto-refresh
-    budget) — cost controls for pocket data-source interval / webhook
-    refresh (RFC 04 M3).
-  - 2026-05-22: Added ``ripple_embed_allowed_hosts`` — host allow-list
-    for the Ripple ``embed`` widget's ``mode:"url"`` form (Increment 5,
-    escape-hatch node + embed URL policy).
-  - 2026-05-22: Added ``pocket_router_enabled`` (kill-switch) and
-    ``pocket_router_min_confidence`` (cheap-tier confidence floor) for
-    the pocket execution router (Increment 3).
-  - 2026-07-06: Added ``sites_crew_enabled`` — when true, the /sites
-    CREATE surface runs the guided authoring-crew flow (clarity gate →
-    interview → design-system + assets → build) instead of the single-shot
-    create preamble; default off (feat/sites-crew-create-flow, SC-crew).
-  - 2026-07-18: Added ``herdr_runtime_enabled`` (kill-switch, default off),
-    ``herdr_cli_path`` and ``herdr_cli_timeout_ms`` for the flagged,
-    fail-open HerdrRuntime adapter over the external ``herdr`` terminal
-    multiplexer (feat/herdr-runtime-adapter, HR-1).
-  - 2026-05-22: Added ``auto_install_bundled_templates`` — toggles the
-    boot-time mirror of built-in pocket templates into
-    ``~/.pocketpaw/templates/`` (feat/bundled-templates, Increment 2a).
-  - 2026-07-12: Removed ``auto_install_bundled_kb_scopes`` along with the
-    bundled ``ripple-recipes`` scope — the hand-authored pattern recipes
-    biased the agent's design toward fixed layouts.
-  - 2026-05-21: Added ``auto_install_bundled_skills`` — toggles the
-    boot-time mirror of bundled SKILL.md files.
-  - 2026-04-30: Added pluggable embedding adapter settings — ``kb_vectors_enabled``,
-    ``embedding_adapter``, ``embedding_dim``, ``embedding_monthly_cap_usd``,
-    ``vertex_project_id``, ``vertex_location``. Stage 2.D of "Files as Knowledge".
-  - 2026-04-30: Added ``kb_scopes`` (list[str]) for multi-scope KB queries.
-    ``kb_scope`` (single string) is now a deprecation shim — when set and
-    ``kb_scopes`` is empty, it copies forward and emits DeprecationWarning.
-    Stage 1.B of "Files as Knowledge".
-  - 2026-04-16: SSRF guard on URL config fields — opencode_base_url,
-    litellm_api_base, openai_compatible_base_url, mem0_ollama_base_url,
-    embedding_base_url, signal_api_url, mcp_client_metadata_url are now
-    validated by security.url_validators.validate_external_url. Closes #703.
-  - 2026-04-10: Removed old pocketclaw migration warning — fully shifted to pocketpaw.
-  - 2026-04-04: Added soul_cognitive_model setting for cheaper cognitive processing.
-  - 2026-03-16: Use Literal types for whatsapp_mode, tts_provider, stt_provider (#638).
-  - 2026-02-17: Added health_check_on_startup field for Health Engine.
-  - 2026-02-06: Secrets stored encrypted via CredentialStore; auto-migrate plaintext keys.
-  - 2026-02-06: Harden file/directory permissions (700 dir, 600 files).
-  - 2026-02-02: Added claude_agent_sdk to agent_backend options.
-  - 2026-02-02: Simplified backends - removed 2-layer mode.
-  - 2026-02-02: claude_agent_sdk is now RECOMMENDED (uses official SDK).
+``Settings`` is the single pydantic-settings model for the whole runtime: agent
+backend and model choice, channel adapters, memory and KB, security, sites, the
+Paw Bar concierge and the cloud capacity/abuse knobs. Every field can be set by
+env var with the ``POCKETPAW_`` prefix; see each field's ``description`` and
+``docs/`` for what it does.
+
+Sources, highest priority first: environment, then ``~/.pocketpaw/config.json``
+(skipped when ``POCKETPAW_IGNORE_CONFIG_JSON`` is truthy), then field defaults.
+Secret fields never live in config.json: ``Settings.save()`` writes them to the
+encrypted ``CredentialStore`` and ``Settings.load()`` merges them back in, and
+plaintext keys found in an old config.json are migrated once. The config dir is
+0700 and the files it holds are 0600.
+
+``Settings.load()`` reads the disk every call (a few ms). ``get_settings()`` is
+the ``lru_cache``'d accessor; in-process settings writers call
+``get_settings.cache_clear()``, but an edit made by another process is only seen
+by ``Settings.load()``. URL fields are SSRF-validated on construction.
+
+``get_access_token()`` returns the dashboard master token from
+``~/.pocketpaw/access_token``, generating one if it is missing. It caches the
+token keyed on the file's path, mtime, size and inode, so a per-request call
+costs a ``stat``. ``regenerate_token()`` (the only writer) writes a 0600 temp
+file and ``os.replace``s it in, so a rotation always changes the inode (and the
+cache key) and readers never see a partial file; it also refreshes the cache
+directly so the rotation is honoured on the next request.
+
+History lives in git (``git log -p src/pocketpaw/config.py``), not here.
 """
 
 from __future__ import annotations
@@ -3476,15 +3183,38 @@ def get_settings(force_reload: bool = False) -> Settings:
     return Settings.load()
 
 
+# (path, st_mtime_ns, st_size, st_ino) -> token. The auth middleware reads the
+# token on every request; this turns the per-request read into a stat.
+# regenerate_token() refreshes it directly, so in-process rotation never waits
+# on mtime granularity.
+_token_cache: tuple[tuple, str] | None = None
+
+
+def _token_cache_key(token_path: Path) -> tuple | None:
+    try:
+        st = token_path.stat()
+    except OSError:
+        return None
+    return (str(token_path), st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def get_access_token() -> str:
     """
     Get the current access token.
     If it doesn't exist, generate a new one.
+
+    The file is re-read whenever its path, mtime, size or inode changes, so a
+    rotation by another process is honoured on the next call.
     """
+    global _token_cache  # noqa: PLW0603
     token_path = get_token_path()
-    if token_path.exists():
+    key = _token_cache_key(token_path)
+    if key is not None:
+        if _token_cache is not None and _token_cache[0] == key:
+            return _token_cache[1]
         token = token_path.read_text().strip()
         if token:
+            _token_cache = (key, token)
             return token
 
     return regenerate_token()
@@ -3495,12 +3225,27 @@ def regenerate_token() -> str:
     Generate a new secure access token and save it.
     Invalidates previous tokens.
     """
+    import tempfile
     import uuid
 
     token = str(uuid.uuid4())
     token_path = get_token_path()
-    token_path.write_text(token)
+    # Write a 0600 temp file (mkstemp's mode) and swap it in: the new file has
+    # a new inode, so every get_access_token() cache key changes even when a
+    # rotation lands inside one mtime tick with the same size, and no reader
+    # ever sees a half-written or empty file.
+    fd, tmp = tempfile.mkstemp(dir=token_path.parent, prefix=".access_token.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        os.replace(tmp, token_path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     _chmod_safe(token_path, 0o600)
+    global _token_cache  # noqa: PLW0603
+    key = _token_cache_key(token_path)
+    _token_cache = (key, token) if key is not None else None
     return token
 
 

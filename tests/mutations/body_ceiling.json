@@ -92,8 +92,8 @@
   {
     "label": "socket_timeout is added to Redis, severing the blocking stream read",
     "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
-    "find": "            socket_connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,",
-    "replace": "            socket_connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,\n            socket_timeout=5.0,",
+    "find": "            socket_connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,\n            health_check_interval=_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,\n            retry_on_timeout=True,",
+    "replace": "            socket_connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,\n            socket_timeout=5.0,\n            health_check_interval=_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,\n            retry_on_timeout=True,",
     "tests": [
       "tests/cloud/test_client_pool_ceilings.py::TestRedisClientOptions::test_no_read_timeout_is_set"
     ]
@@ -110,8 +110,8 @@
   {
     "label": "idle Redis connections stop being health-checked",
     "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
-    "find": "            health_check_interval=_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,",
-    "replace": "",
+    "find": "            health_check_interval=_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,\n            retry_on_timeout=True,",
+    "replace": "            retry_on_timeout=True,",
     "tests": [
       "tests/cloud/test_client_pool_ceilings.py::TestRedisClientOptions::test_idle_connections_are_health_checked"
     ]

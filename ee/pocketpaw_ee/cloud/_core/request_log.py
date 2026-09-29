@@ -1,68 +1,24 @@
-"""Middleware that logs every API request/response to the dedicated request_logs collection.
+"""Pure-ASGI middleware that times every HTTP request and logs it to ``request_logs``.
 
-Every HTTP request that reaches a route handler is recorded as a
-document in the ``request_logs`` MongoDB collection with:
-  - HTTP method + path template (e.g. ``GET /workspaces/{id}/audit``)
-  - Response status code
-  - Duration in milliseconds
-  - Authenticated actor (if any)
+Each request is timed to its response headers (so a streamed response counts
+its time to first byte, not its stream length) and that sample goes to
+``_core.timing`` for ``GET /api/v1/_admin/perf``. Every request not on the
+skip list below is also recorded in the dedicated ``request_logs`` collection
+(method + route template, status, duration, actor, workspace, ``is_error`` for
+4xx/5xx), which powers the /audit page. It is NOT the workspace audit, so API
+traffic stays out of the Activity feed. Websockets and lifespan pass through.
 
-This powers the /audit page so workspace admins can see which endpoints
-are being called, which are failing, and how long they take — without
-needing a separate observability stack.
+Skipped from the log (still timed): health probes, the CSRF token fetch and
+static assets. They carry no audit value and were the bulk of the volume.
 
-Uses a dedicated collection (NOT the workspace audit) so API traffic
-doesn't pollute the Activity feed.
-
-Failures (4xx/5xx) are flagged as ``is_error=True`` so they can be
-filtered separately.
-
-Updated 2026-09-04 — two production-shaped problems, both in the write path:
-
-  1. ``asyncio.ensure_future`` returned a task nobody held a reference to.
-     CPython's loop keeps only a WEAK reference, so a pending log write can be
-     garbage-collected mid-await; the write simply vanishes, and non-
-     deterministically. This module now holds strong references until each
-     task completes — the same guard the codebase already applies in
-     chat/ws.py and shared/agent_bridge.py.
-  2. Nothing bounded how many of those could accumulate. If Mongo slows down,
-     pending inserts pile up in the web process without limit, converting a
-     database stall into unbounded memory growth instead of backpressure.
-     There is now a ceiling; past it, telemetry is dropped and the drop is
-     counted. Losing request telemetry is the correct thing to sacrifice when
-     the database is already struggling.
-
-Also: the highest-volume paths are now skipped rather than recorded. Request
-volume and telemetry write volume were 1:1, which made ``request_logs`` a
-strong candidate for the busiest write target in the database. Health probes,
-the CSRF token fetch and static assets carry no audit value and are the bulk
-of that traffic.
-
-Updated 2026-09-04 - the writes are batched.
-
-Skipping the no-audit-value paths reduced the volume; it did not change the
-shape. Every remaining request still opened its own insert, so at 100 req/s
-this collection was still issuing 100 writes a second against the same
-connection pool and the same WiredTiger cache as the traffic it was describing.
-
-Entries now go onto a bounded queue that ONE consumer task drains into
-``insert_many``. Three consequences worth knowing:
-
-  * A burst becomes one round trip instead of hundreds. The consumer takes
-    everything already queued, waits ``_LINGER_SECONDS`` for a trickle to
-    become a batch too, and writes the lot.
-  * Telemetry is visible on /audit up to that linger later than it was. It is
-    telemetry about requests that have already been answered; the delay costs
-    nothing and the batching is the point.
-  * The queue is the backpressure. Past ``_QUEUE_MAX`` queued entries the
-    entry is dropped and counted, exactly as the old in-flight ceiling did:
-    when the database is not keeping up, shedding telemetry is the correct
-    thing to give up, and queueing it without bound is how a Mongo stall
-    became an OOM.
-
-The queue and its consumer are bound to the loop that created them and rebuilt
-if that loop changes, so a test that makes and tears down loops does not
-inherit a consumer parked on a dead one.
+Writes are batched and bounded. Entries go onto a queue of ``_QUEUE_MAX``;
+ONE consumer task drains it into ``insert_many`` (up to ``_BATCH_MAX``,
+lingering ``_LINGER_SECONDS`` so a trickle still batches). Past the ceiling an
+entry is dropped and counted: when Mongo is not keeping up, shedding telemetry
+is the right thing to give up, and an unbounded backlog is how a Mongo stall
+becomes an OOM. The consumer is strongly referenced (the loop keeps only a weak
+one), bound to the loop that created it and rebuilt if the loop changes, and
+``shutdown_request_log`` flushes the tail on shutdown.
 """
 
 from __future__ import annotations
@@ -71,8 +27,10 @@ import asyncio
 import logging
 import time
 
-from fastapi import FastAPI, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from pocketpaw_ee.cloud._core import timing
 
 logger = logging.getLogger(__name__)
 
@@ -117,57 +75,64 @@ def _is_skipped(path: str) -> bool:
     return path in _SKIP_EXACT or path.startswith(_SKIP_PREFIXES)
 
 
-class RequestLogMiddleware(BaseHTTPMiddleware):
-    """Logs every API request/response to the workspace audit store."""
+class RequestLogMiddleware:
+    """Times every HTTP request and logs the non-skipped ones to ``request_logs``."""
 
-    def __init__(self, app: FastAPI) -> None:
-        super().__init__(app)
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        # Skip the high-volume, no-audit-value paths before doing any work.
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
         # Checked against the raw path because the route template is only
         # known after the response, and this saves the actor resolution too.
-        if _is_skipped(request.url.path):
-            return await call_next(request)
-
+        skipped = _is_skipped(request.url.path)
         start = time.perf_counter()
 
         # Read auth info before the response (the user may be resolved
         # by downstream middleware during request processing).
-        actor_id = _resolve_actor(request)
+        actor_id = "" if skipped else _resolve_actor(request)
 
-        response: Response = await call_next(request)
+        async def _send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                _on_response_start(request, skipped, actor_id, start, message["status"])
+            await send(message)
 
-        duration_ms = (time.perf_counter() - start) * 1000.0
+        await self.app(scope, receive, _send)
 
-        # Prefer the matched route template so we don't get one entry
-        # per dynamic id (e.g. /workspaces/{id} vs /workspaces/abc).
-        scope_route = request.scope.get("route")
-        path = (
-            scope_route.path
-            if scope_route is not None and hasattr(scope_route, "path")
-            else request.url.path
-        )
 
-        method = request.method
-        status_code = response.status_code
-        is_error = status_code >= 400
+def _on_response_start(
+    request: Request, skipped: bool, actor_id: str, start: float, status_code: int
+) -> None:
+    duration_ms = (time.perf_counter() - start) * 1000.0
+    scope_route = request.scope.get("route")
+    timing.record(request.method, scope_route, duration_ms)
+    if skipped:
+        return
 
-        # Fire-and-forget write to the workspace audit.  This runs after
-        # the response has been sent so it never blocks the caller.
-        _log_request(
-            method=method,
-            path=path,
-            status_code=status_code,
-            duration_ms=duration_ms,
-            actor_id=actor_id,
-            workspace_id=_resolve_workspace(request),
-            is_error=is_error,
-            user_agent=request.headers.get("user-agent", ""),
-            ip=request.client.host if request.client else None,
-        )
+    # Prefer the matched route template so we don't get one entry
+    # per dynamic id (e.g. /workspaces/{id} vs /workspaces/abc).
+    path = (
+        scope_route.path
+        if scope_route is not None and hasattr(scope_route, "path")
+        else request.url.path
+    )
 
-        return response
+    # Queued for the batching consumer; never blocks the response.
+    _log_request(
+        method=request.method,
+        path=path,
+        status_code=status_code,
+        duration_ms=duration_ms,
+        actor_id=actor_id,
+        workspace_id=_resolve_workspace(request),
+        is_error=status_code >= 400,
+        user_agent=request.headers.get("user-agent", ""),
+        ip=request.client.host if request.client else None,
+    )
 
 
 def _resolve_actor(request: Request) -> str:

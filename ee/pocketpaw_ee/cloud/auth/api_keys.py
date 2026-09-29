@@ -21,9 +21,13 @@ lag, so the cache is built so the lag applies to as little as possible:
   * Expiry is NOT lagged either. ``expires_at`` is re-checked against the
     clock on every cache hit, not just when the entry was stored, so a key
     that expires part-way through a cached window dies on time.
+  * A revoke on another web process reaches this cache through the realtime
+    broadcast (``broadcast_invalidate``) when ``POCKETPAW_REALTIME_BUS=
+    redis-streams``, within one stream read. Without it the cache is
+    per-process and that revoke waits out the TTL like an out-of-band one.
   * What IS lagged is a revocation performed OUT OF BAND - flipping
-    ``revoked`` straight in the database, or in another process, since this
-    cache is per-process. That window is ``_DEFAULT_VERIFY_TTL_SECONDS``, and
+    ``revoked`` straight in the database. That window is
+    ``_DEFAULT_VERIFY_TTL_SECONDS``, and
     ``POCKETPAW_API_KEY_VERIFY_TTL_SECONDS=0`` turns the cache off entirely
     for a deployment that will not accept it.
 
@@ -49,6 +53,7 @@ from beanie import PydanticObjectId
 from pwdlib import PasswordHash
 
 from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud._core.realtime.broadcast import broadcast_invalidate, register_invalidator
 from pocketpaw_ee.cloud.models.api_key import APIKey
 
 logger = logging.getLogger(__name__)
@@ -165,7 +170,9 @@ async def revoke_api_key(key_id: str, workspace_id: str) -> APIKey:
     # still have a live cache entry if the flag was flipped out of band, and a
     # revoke that leaves the key working for another 30 seconds is not a
     # revoke. This is what keeps the cache's staleness window off the path
-    # that actually matters.
+    # that actually matters. Every other web process holds its own cache, so
+    # the eviction is broadcast to them too.
+    await broadcast_invalidate(_API_KEY_CACHE, str(doc.id), local=False)
     _invalidate_cached_key(str(doc.id))
     return doc
 
@@ -185,6 +192,7 @@ async def revoke_keys_for_user_in_workspace(user_id: str, workspace_id: str) -> 
     for doc in rows:
         doc.revoked = True
         await doc.save()
+        await broadcast_invalidate(_API_KEY_CACHE, str(doc.id), local=False)
         _invalidate_cached_key(str(doc.id))
         count += 1
     return count
@@ -292,6 +300,11 @@ def _invalidate_cached_key(key_id: str) -> int:
     for digest in stale:
         _verify_cache.pop(digest, None)
     return len(stale)
+
+
+# Remote processes run the eviction when a revoke on any process broadcasts it.
+_API_KEY_CACHE = "api_key"
+register_invalidator(_API_KEY_CACHE, _invalidate_cached_key)
 
 
 def _reset_caches_for_tests() -> None:

@@ -1,129 +1,30 @@
 """Entry-point provider classes for the OSS-EE extension surfaces.
 
-Updated: 2026-09-06 (feat/fx-mcp-server) — added ``CloudFxMcpProvider`` (``pocketpaw_fx``).
+Core (`pocketpaw`) defines the Protocols in `pocketpaw.extensions` and discovers
+implementations via `importlib.metadata.entry_points`; the entry-points that
+point at these classes are declared in `pyproject.toml`. This module collects
+every `pocketpaw_ee` provider in one place: the cloud event bus, embeddings,
+Mongo memory backend, capabilities, auth, routes (`mount_cloud`), the
+lifecycle hook, storage, models, the pocket writer, the connector state store,
+Composio tools, the per-workspace store bridge (delegating to the OSS
+`build_workspace_store` so the path allowlist stays in OSS), the agent extension
+(including the per-tenant agent cwd jail, which fails closed in cloud), and one
+`pocketpaw.mcp_servers` provider per in-process MCP server the
+claude_agent_sdk cloud backend gets (each class docstring says what it exposes
+and whether it is ambient or opt-in).
 
-Core (`pocketpaw`) defines the Protocols in `pocketpaw.extensions` and
-discovers implementations via `importlib.metadata.entry_points`. This module
-collects every `pocketpaw_ee` provider in one place; the entry-points that
-point at these classes are declared in `pyproject.toml` (and will migrate to
-`ee/pyproject.toml` in Phase 4).
+Heavy `pocketpaw_ee` imports happen lazily inside methods, so loading this
+module (which the registry does on first access) stays cheap and cycle-free.
 
-Each provider does its heavy `pocketpaw_ee` imports lazily inside methods so
-that merely loading this module — which the registry does on first access —
-stays cheap and free of import cycles.
-
-Updated: 2026-05-22 (RFC 04 M3) — ``CloudLifecycleHook`` now starts the
-pocket interval-refresh scheduler in ``on_startup`` and cancels it in
-``on_shutdown``. The scheduler is a single asyncio task owned at module
-scope inside ``cloud.pockets.refresh_scheduler``; it is self-gated on
-``POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED`` so the start call is a
-no-op unless a deployment opts in.
-
-Updated: 2026-05-28 (feat/wave-3d-temporal-scheduler) — ``CloudLifecycleHook``
-also starts the RFC 03 v2 temporal trigger sweep scheduler in
-``on_startup`` and cancels it in ``on_shutdown``. The scheduler lives at
-``cloud._core.temporal_scheduler`` and is self-gated on
-``POCKETPAW_TEMPORAL_SWEEP_ENABLED`` (default OFF) so pytest runs and
-multi-replica deployments don't double-fire. Cadence is configurable via
-``POCKETPAW_TEMPORAL_SWEEP_INTERVAL_SECONDS`` (default 3600, floor 60).
-
-Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added
-``CloudBrowserMcpProvider`` (``pocketpaw.mcp_servers`` entry ``browser``)
-exposing the /browser surface's agentic browser in-process server
-(``pocketpaw_browser``; navigate / snapshot / click / type / scroll /
-screenshot / close) to the claude_agent_sdk cloud chat backend, mirroring
-``CloudMediaMcpProvider``. Ambient — scoping is per-SURFACE (the BROWSER
-profile allows the ids; every other surface denies them), not per-agent.
-
-Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvider``
-(``pocketpaw.mcp_servers`` entry ``media``) exposing the STUDIO image +
-video generation in-process server (``pocketpaw_media``) to the
-claude_agent_sdk cloud chat backend, mirroring ``CloudSitesMcpProvider``.
-
-Updated: 2026-06-10 (feat/belt-loom-mcp, BS-1) — added ``CloudLoomMcpProvider``
-(``pocketpaw.mcp_servers`` entry ``loom``) registering the external loom
-codebase-orientation binary as a STDIO MCP server (server name ``loom``;
-5 read tools: orient / locate / why / what_depends_on / boundaries) on the
-claude_agent_sdk cloud chat backend. Unlike the sibling providers this one
-returns a stdio config DICT (Path A), not an in-process SDK server object —
-the registration loop passes it through untouched. Ambient (not opt-in); the
-/belt surface scopes access via its profile allowlist. Returns None — and the
-loop skips it — when ``loom_model_path`` is unset or the binary is missing,
-so chat never breaks.
-
-Updated: 2026-06-10 (feat/belt-gate, BS-3) — added ``CloudBeltMcpProvider``
-(``pocketpaw.mcp_servers`` entry ``belt``) exposing the Belt & Pulley
-code-change gate in-process server (``pocketpaw_belt``; one tool
-``belt_propose_change``) to the claude_agent_sdk cloud chat backend, mirroring
-``CloudMediaMcpProvider``. The develop station proposes a diff through Instinct;
-the ee instinct router fires ``ee.cloud.belt.executor.execute_approved_change``
-on approval. Ambient (not opt-in).
-
-Updated: 2026-06-11 (feat/external-action-mcp-tool) — added
-``CloudExternalActionsMcpProvider`` (``pocketpaw.mcp_servers`` entry
-``external_actions``) exposing the gated external-action proposal server
-(``pocketpaw_external_actions``; one tool ``propose_external_action``) to the
-claude_agent_sdk cloud chat backend, mirroring ``CloudBeltMcpProvider``. A chat
-agent proposes a connector call through Instinct; the ee instinct router fires
-``ee.cloud.external_actions.executor.execute_approved_external_action`` on
-approval. Propose-only — the tool never fires the connector itself. Ambient
-(not opt-in).
-
-Updated: 2026-06-12 (connector-store-unification CS-3) — added
-``CloudConnectorStateStoreProvider`` (``pocketpaw.connector_state_stores``)
-supplying the ``WorkspaceConnector``-backed ``CloudConnectorStateStore`` as the
-ConnectorRegistry's default durable state store, so cloud connector config
-rehydrates from the tenant DB after a process restart (no /connect needed).
-
-Updated: 2026-06-26 (ART-2) — ``CloudAgentExtension`` gained ``agent_cwd``: a
-per-tenant agent working-directory jail. It delegates to
-``pocketpaw_ee.cloud.agent_jail.resolve_agent_cwd``, which returns a
-per-workspace/session dir (``~/.pocketpaw/workspaces/<ws>/agent/<session>/``) so
-a cloud tenant's file ops never co-mingle in the shared home dir, and FAILS
-CLOSED when a cloud run has no resolvable workspace. OSS / dedicated installs
-return ``None`` and keep ``settings.file_jail_path``.
-
-Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added
-``CloudFabricMcpProvider`` (entry ``fabric``; server ``pocketpaw_fabric``,
-tools ``fabric_query`` / ``fabric_stats``) and ``CloudInstinctMcpProvider``
-(entry ``instinct``; server ``pocketpaw_instinct``, tools ``instinct_pending``
-/ ``instinct_audit``), both mirroring ``CloudExternalActionsMcpProvider``. On
-the claude_agent_sdk backend, registry tools (BaseTool) never reach the agent —
-only MCP servers do — so without these the cloud chat agent had no path to the
-Fabric ontology or Instinct gate visibility. Both are READ-ONLY and
-workspace-scoped via the chat ContextVars. Gated proposing stays on
-``pocketpaw_external_actions``. Ambient (not opt-in).
-
-Updated: 2026-06-26 (ISO-3 — workspace store bridge) — added ``CloudStoreProvider``
-(``pocketpaw.stores`` entry-point) so the dormant ``StoreProvider`` seam ISO-1 lit
-up is now live under EE. It returns the standard per-workspace SQLite file store
-(Fabric / Instinct at ``~/.pocketpaw/workspaces/<id>/<name>.db``) by delegating to
-the OSS helper ``pocketpaw.stores.build_workspace_store`` — so the path + the
-path-traversal allowlist stay authoritative in OSS and the provider can never drift
-from or weaken them. It returns ``None`` for the legacy (no-workspace) path, leaving
-the OSS factory's shared singleton in place. This activates the entry-point end to
-end and gives EE the single hook to later swap in a cloud-backed store without
-touching core.
-
-Updated: 2026-07-11 (feat/paw-cli, C2) — ``CloudFabricMcpProvider`` is no longer
-read-only: the ``pocketpaw_fabric`` server grew three ontology modification
-tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
-``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
-routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
-
-Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
-``CloudLifecycleHook.on_startup`` now also back-fills the dedicated ``code``
-agent (``ensure_code_agent_all_workspaces``) beside the default ``pocketpaw``
-one, so existing workspaces resolve ``/code`` turns to the exclusive-file-tool
-agent without waiting for the first-turn lazy seed.
-
-Updated: 2026-09-02 (fix/billing-reversals-and-dunning, M5) — the sweeper
-heartbeat gained ``billing.service.sweep_subscription_grace``, at boot and on
-every tick. A ``subscription.on_hold`` webhook only stamps a grace deadline and
-nothing arrives from the gateway when it passes, so this pass is the thing that
-actually ends the grace period and revokes the plan. It is idempotent (an
-already-suspended row is skipped) and never touches credits, so a five-minute
-cadence against a deadline measured in days is deliberate rather than lax.
+`CloudLifecycleHook.on_startup` opens the cloud DB, seeds admin/workspace and
+the default + code agents, then starts the loops that cannot wait for
+`mount_cloud`'s lifespan: meeting-job recovery, the pocket interval-refresh
+scheduler (`POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED`), the temporal trigger
+sweep (`POCKETPAW_TEMPORAL_SWEEP_ENABLED`), the 5-minute sweeper (see
+`_sweeps`), the xproc consumer, local-site re-serve and the dev-server reaper.
+With several web processes (`POCKETPAW_REALTIME_BUS=redis-streams`) the
+scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
+cluster, and the jail GC once per host. `on_shutdown` stops what it started.
 """
 
 from __future__ import annotations
@@ -181,129 +82,111 @@ def _sweep_interval_seconds() -> int:
 
 _sweeper_task: asyncio.Task[None] | None = None
 _xproc_consumer_task: asyncio.Task[None] | None = None
+# With several web processes (POCKETPAW_REALTIME_BUS=redis-streams) the sweeps
+# run on one process per cluster, and the jail GC on one process per HOST since
+# it reclaims local disk. ``None`` means no lease: this process runs them all.
+_sweep_lease: Any = None
+_jail_lease: Any = None
 
 
-async def _sweeper_loop() -> None:
-    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
-    from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
-    from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
-    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
-    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
-    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
-    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+def _sweeps() -> tuple[list[Any], list[Any]]:
+    """(cluster-wide sweeps, per-host sweeps), in run order.
 
-    interval = _sweep_interval_seconds()
-    _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
-
-    while True:
-        try:
-            await asyncio.sleep(interval)
-            await sweep_stale_runs()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _run_sweeper_logger.exception("sweep_stale_runs tick failed")
-        # ART-3 jail lifecycle: TTL-GC idle agent jails + LRU-evict under the
-        # disk watermark, so scratch disk scales with active concurrency not user
-        # count. Own try so a jail-GC failure can't suppress the other sweeps (or
-        # vice versa); never evicts a jail backing a queued/running run.
-        try:
-            await sweep_agent_jails()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_agent_jails tick failed")
-        # BC-3 metering: bill every newly-terminal run's compute cost on the same
-        # heartbeat. Kept in its own try so a metering failure can't suppress the
-        # stale-run sweep (or vice versa) on the next tick. Self-gated OFF in the
-        # WU-F ``live`` cutover mode (LiteLLM is then the sole meter).
-        try:
-            await sweep_unbilled_runs()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_unbilled_runs tick failed")
-        # WU-F billing cutover: per-tenant LiteLLM spend sweep. No-op in ``off``;
-        # a read-only reconciliation compare in ``shadow``; debits proxy spend in
-        # ``live``. Own try so a cutover-sweep failure can't suppress the other
-        # sweeps (or vice versa) on the next tick.
-        try:
-            await run_cutover_sweep()
-        except Exception:
-            _run_sweeper_logger.exception("run_cutover_sweep tick failed")
-        # Charge-first (review fix C): surface PAID sites stuck pending past the
-        # threshold (a lost/delayed subscription.active webhook). VISIBILITY ONLY —
-        # logs at WARNING, never auto-deploys or auto-cancels. Its own try so a
-        # failure here can't suppress the other sweeps (or vice versa).
-        try:
-            await sweep_pending_sites()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_pending_sites tick failed")
-        # Credits site plans: charge the next month for every wallet-paid site
-        # whose renewal has come due. This is what makes a MONTHLY site plan
-        # actually recur — the gateway subscription used to do it, and a paid
-        # site no longer has one. Without this pass a customer pays once and
-        # keeps every paid capability for good. A site that cannot afford its
-        # renewal drops to the free floor and STAYS LIVE; nothing is ever taken
-        # down here. Own try so a failure cannot suppress the other sweeps.
-        try:
-            await sweep_site_renewals()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_site_renewals tick failed")
-        # M5 dunning: revoke the plan of any subscription still on hold past its
-        # grace deadline. The webhook only stamps the deadline — nothing arrives
-        # from the gateway when it passes, so this pass is what actually ends the
-        # grace period. Own try so a failure here can't suppress the other sweeps
-        # (or vice versa). Never touches credits.
-        try:
-            await sweep_subscription_grace()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_subscription_grace tick failed")
-
-
-async def start_run_sweeper() -> None:
-    """Sweep once on boot, then tick every 5 minutes until shutdown.
-
-    Boot runs the stale-run sweep (interrupt orphaned runs), the BC-3 compute-cost
-    metering sweep (bill any terminal runs left unbilled by the prior process), the
-    WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
-    cutover mode), the charge-first pending-site reconciliation sweep (surface paid
-    sites stuck pending), the credits site-plan renewal sweep (charge the month for
-    every wallet-paid site that came due while this process was down — the pass
-    that makes a monthly site plan recur at all), the M5 dunning grace sweep
-    (revoke the plan of a subscription left on hold past its deadline while this
-    process was down), and the ART-3 agent-jail GC (reclaim scratch left by a
-    prior process's idle runs); the 5-minute loop then ticks all of them.
+    Each runs in its own try, so one failing cannot suppress the rest:
+    - ``sweep_stale_runs``: interrupt queued/running runs that stopped beating.
+    - ``sweep_unbilled_runs``: BC-3 metering of newly-terminal runs (self-gated
+      off in the WU-F ``live`` cutover mode).
+    - ``run_cutover_sweep``: WU-F per-tenant LiteLLM spend (off/shadow/live).
+    - ``sweep_pending_sites``: log paid sites stuck pending (visibility only).
+    - ``sweep_site_renewals``: charge wallet-paid site plans that came due; an
+      unaffordable site drops to the free floor and stays live.
+    - ``sweep_subscription_grace``: M5 dunning, revoke plans held past grace.
+    - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
+      live workspaces with none, since workspace create never retries a failed
+      mint. Skipped on the boot pass, where a down proxy would hold startup.
+    - ``sweep_agent_jails`` (per host): ART-3 TTL/LRU GC of idle agent jails,
+      never one backing a queued/running run.
     """
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
+    from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
-    global _sweeper_task
-    with suppress(Exception):
-        await sweep_stale_runs()
-    with suppress(Exception):
-        await sweep_unbilled_runs()
-    with suppress(Exception):
-        await run_cutover_sweep()
-    with suppress(Exception):
-        await sweep_pending_sites()
-    with suppress(Exception):
-        await sweep_site_renewals()
-    with suppress(Exception):
-        await sweep_subscription_grace()
-    with suppress(Exception):
-        await sweep_agent_jails()
+    cluster = [
+        sweep_stale_runs,
+        sweep_unbilled_runs,
+        run_cutover_sweep,
+        sweep_pending_sites,
+        sweep_site_renewals,
+        sweep_subscription_grace,
+        backfill_tenant_keys,
+    ]
+    return cluster, [sweep_agent_jails]
+
+
+# Sweeps that only run on the interval, never on the boot pass.
+_TICK_ONLY_SWEEPS = frozenset({"backfill_tenant_keys"})
+
+
+async def _run_sweeps(*, boot: bool = False) -> None:
+    from pocketpaw_ee.cloud._core.lease import may_run
+
+    cluster, per_host = _sweeps()
+    for lease, fns in ((_sweep_lease, cluster), (_jail_lease, per_host)):
+        if not may_run(lease):
+            continue
+        for fn in fns:
+            if boot and fn.__name__ in _TICK_ONLY_SWEEPS:
+                continue
+            try:
+                await fn()
+            except Exception:
+                _run_sweeper_logger.exception("%s tick failed", fn.__name__)
+
+
+async def _sweeper_loop() -> None:
+    interval = _sweep_interval_seconds()
+    _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
+    while True:
+        await asyncio.sleep(interval)
+        await _run_sweeps()
+
+
+async def start_run_sweeper() -> None:
+    """Sweep once on boot (catching what the prior process left: orphaned runs,
+    unbilled runs, renewals and grace deadlines that came due while it was down,
+    idle jails), then tick every ``_sweep_interval_seconds``. See ``_sweeps``.
+
+    With the multi-worker switch the leases are taken before the boot pass, so
+    the boot pass (billing writes included) also runs on one process only.
+    """
+    global _sweeper_task, _sweep_lease, _jail_lease
+    from pocketpaw_ee.cloud._core.lease import gate
+
+    _sweep_lease = gate("run_sweeper")
+    _jail_lease = gate("agent_jail_gc", per_host=True)
+    for lease in (_sweep_lease, _jail_lease):
+        if lease is not None:
+            await lease.start()
+    await _run_sweeps(boot=True)
     _sweeper_task = asyncio.create_task(_sweeper_loop())
 
 
 async def stop_run_sweeper() -> None:
-    global _sweeper_task
+    global _sweeper_task, _sweep_lease, _jail_lease
     if _sweeper_task is not None:
         _sweeper_task.cancel()
         with suppress(asyncio.CancelledError):
             await _sweeper_task
         _sweeper_task = None
+    for lease in (_sweep_lease, _jail_lease):
+        if lease is not None:
+            await lease.stop()
+    _sweep_lease = _jail_lease = None
 
 
 async def start_xproc_consumer() -> None:
@@ -388,6 +271,16 @@ class CloudRouteProvider:
         mount_cloud(app)
 
 
+# Lease-wrapped loops CloudLifecycleHook started, by name (see ``_core/lease.py``).
+_LEASED: dict[str, Any] = {}
+
+
+async def _stop_leased(name: str) -> None:
+    item = _LEASED.pop(name, None)
+    if item is not None:
+        await item.stop()
+
+
 class CloudLifecycleHook:
     """`pocketpaw.lifecycle` — cloud DB init + admin/workspace seeding +
     chat-title listener registration, run on dashboard startup."""
@@ -429,11 +322,27 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cloud chat-title listener registration failed: %s", exc)
 
-        # Start meeting reminder + auto-start background loop.
+        # Every loop this hook starts below runs on one process when the web
+        # tier is several (POCKETPAW_REALTIME_BUS=redis-streams): see _LEASED.
+        from pocketpaw_ee.cloud._core.lease import leased
+
+        # Meeting reminders: re-schedule the APScheduler jobs of future meetings
+        # from Mongo. Leased, so N processes do not each recover every job and
+        # send N reminders. The lease's stop is a no-op: the scheduler also holds
+        # jobs scheduled by requests on this process, which must keep firing.
         try:
             from pocketpaw_ee.cloud.meetings.scheduling.reminders import start_reminder_loop
 
-            start_reminder_loop()
+            async def _recover_meeting_jobs() -> None:
+                start_reminder_loop()
+
+            async def _keep_meeting_jobs() -> None:
+                return None
+
+            _LEASED["meeting_reminders"] = leased(
+                "meeting_reminders", _recover_meeting_jobs, _keep_meeting_jobs
+            )
+            await _LEASED["meeting_reminders"].start()
             logger.info("Meeting reminder + auto-start loop started")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to start meeting reminder loop: %s", exc)
@@ -469,9 +378,13 @@ class CloudLifecycleHook:
         # scheduler so this no-`app` lifecycle hook can still own it.
         try:
             from pocketpaw_ee.cloud._core import sweep_runtime
-            from pocketpaw_ee.cloud.pockets.refresh_scheduler import start_scheduler
+            from pocketpaw_ee.cloud.pockets.refresh_scheduler import (
+                start_scheduler,
+                stop_scheduler,
+            )
 
-            await start_scheduler()
+            _LEASED["pocket_refresh"] = leased("pocket_refresh", start_scheduler, stop_scheduler)
+            await _LEASED["pocket_refresh"].start()
             # These two sweeps start HERE, not in mount_cloud, so the lifespan
             # that records the rest never sees them. Marked by hand under the
             # name /api/v1/automations/status looks them up by, so that endpoint
@@ -494,8 +407,14 @@ class CloudLifecycleHook:
             from pocketpaw_ee.cloud._core.temporal_scheduler import (
                 start_scheduler as start_temporal_scheduler,
             )
+            from pocketpaw_ee.cloud._core.temporal_scheduler import (
+                stop_scheduler as stop_temporal_scheduler,
+            )
 
-            await start_temporal_scheduler()
+            _LEASED["temporal_sweeps"] = leased(
+                "temporal_sweeps", start_temporal_scheduler, stop_temporal_scheduler
+            )
+            await _LEASED["temporal_sweeps"].start()
             sweep_runtime.mark_started("_start_temporal_sweeps")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Temporal sweep scheduler start failed: %s", exc)
@@ -559,10 +478,12 @@ class CloudLifecycleHook:
         import logging
 
         logger = logging.getLogger(__name__)
-        # Shut down the meeting APScheduler if it was started.
+        # Shut down the meeting APScheduler if it was started, and hand the
+        # recovery lease to a sibling.
         try:
             from pocketpaw_ee.cloud.meetings.scheduling.reminders import shutdown_scheduler
 
+            await _stop_leased("meeting_reminders")
             await shutdown_scheduler()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Meeting scheduler shutdown error: %s", exc)
@@ -583,19 +504,14 @@ class CloudLifecycleHook:
         logger = logging.getLogger(__name__)
         try:
             from pocketpaw_ee.cloud._core import sweep_runtime
-            from pocketpaw_ee.cloud.pockets.refresh_scheduler import stop_scheduler
 
-            await stop_scheduler()
+            await _stop_leased("pocket_refresh")
             sweep_runtime.mark_stopped("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
 
         try:
-            from pocketpaw_ee.cloud._core.temporal_scheduler import (
-                stop_scheduler as stop_temporal_scheduler,
-            )
-
-            await stop_temporal_scheduler()
+            await _stop_leased("temporal_sweeps")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Temporal sweep scheduler stop failed: %s", exc)
 

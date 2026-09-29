@@ -554,12 +554,14 @@ async def test_settings_malformed_id_is_404(client):
 
 
 @pytest.mark.asyncio
-async def test_toggle_off_silences_frame_immediately(client):
-    """The frame renders while enabled, then 403s right after the owner PATCHes the
-    switch off — the gate re-reads the Site every request (no warm-client caching)."""
+async def test_toggle_off_silences_frame_within_its_ttl(client):
+    """The frame renders while enabled, keeps rendering from the memoised Site for
+    at most ``_FRAME_SITE_TTL_S`` after the owner PATCHes the switch off, then 403s
+    with the dead shell once the memo expires."""
+    from pocketpaw_ee.paw_bar import router as paw_bar_router
+
     c, _store = client
     site = await _site()
-
     ok = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert ok.status_code == 200
 
@@ -569,6 +571,12 @@ async def test_toggle_off_silences_frame_immediately(client):
     )
     assert off.status_code == 200
 
+    within = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert within.status_code == 200
+
+    # Age the memo entry past its TTL (not the global clock: asyncio reads it too).
+    _expiry, memo_site = paw_bar_router._frame_site_memo[_VALID_KEY]
+    paw_bar_router._frame_site_memo[_VALID_KEY] = (0.0, memo_site)
     after = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert after.status_code == 403
     # Blank shell, not an error payload — the body renders on the site.

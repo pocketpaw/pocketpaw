@@ -169,7 +169,6 @@ class TestInstallSkill:
         async def _fake_create_subprocess(*args, **kwargs):
             return mock_proc
 
-        mock_loader = MagicMock()
         mock_audit_logger = MagicMock()
 
         # Build the fake skill directory before applying patches.
@@ -184,10 +183,8 @@ class TestInstallSkill:
 
             with (
                 patch("asyncio.create_subprocess_exec", side_effect=_fake_create_subprocess),
-                patch(
-                    "pocketpaw.skills.installer.get_skill_loader",
-                    return_value=mock_loader,
-                ),
+                # The installer reloads through cache_invalidation.reload_skills.
+                patch("pocketpaw.skills.installer.reload_skills"),
                 patch(
                     "pocketpaw.skills.installer.get_audit_logger",
                     return_value=mock_audit_logger,
@@ -218,7 +215,6 @@ class TestInstallSkill:
         async def _fake_create_subprocess(*args, **kwargs):
             return mock_proc
 
-        mock_loader = MagicMock()
         mock_audit_logger = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -242,10 +238,8 @@ class TestInstallSkill:
 
             with (
                 patch("asyncio.create_subprocess_exec", side_effect=_fake_create_subprocess),
-                patch(
-                    "pocketpaw.skills.installer.get_skill_loader",
-                    return_value=mock_loader,
-                ),
+                # The installer reloads through cache_invalidation.reload_skills.
+                patch("pocketpaw.skills.installer.reload_skills"),
                 patch(
                     "pocketpaw.skills.installer.get_audit_logger",
                     return_value=mock_audit_logger,

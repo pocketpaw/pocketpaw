@@ -1,35 +1,18 @@
 # service.py — Workspace-level KB scope listing.
 #
-# Updated: 2026-06-08 (VIP Onboarding Phase B) — added the REST-door scope
-# allowlist validator ``validate_scope_override``. The ``/api/v1/kb/*`` router
-# accepted a free-form client ``scope`` override with no scope-to-caller
-# binding, so any authenticated member could read or poison another member's
-# private ``user:{victim}`` KB. The validator reuses ``_candidate_scopes``
-# (workspace + visible pockets + workspace agents) plus the caller's OWN
-# ``user:{caller}`` entry as the allowlist, mirroring the chat-path gate's
-# boundary — both doors now enforce the SAME set. Any ``user:``-prefixed
-# override that isn't the caller's own is hard-denied as defense-in-depth.
+# ``list_scopes(workspace_id, user_id)`` enumerates the candidate KB scopes for
+# a workspace (the workspace, every pocket the caller can see, every workspace
+# agent) and probes each with ``kb list`` so the /knowledge surface renders the
+# scopes that actually hold articles. ``validate_scope_override`` is the REST
+# door's allowlist for a client ``scope`` override: the same candidate set plus
+# the caller's own ``user:{caller}``; any other ``user:`` scope is hard-denied.
 #
-# Updated: 2026-05-24 — Bounded the probe fan-out via a module-level
-# ``_PROBE_CONCURRENCY=8`` semaphore. The previous unbounded
-# ``asyncio.gather`` could spawn one kb-go subprocess per candidate
-# scope; on a workspace with 100 pockets + 50 agents that's 151
-# concurrent subprocesses, which exceeds the default-executor
-# thread-pool back-pressure (~32) and pressures FS + OS PID limits.
-# The cap matches the thread-pool default and stops the fork storm.
-#
-# Created: 2026-05-24 — Adds the canonical ``list_scopes(workspace_id,
-# user_id)`` helper so the /knowledge surface handler can render the
-# real KB scopes attached to a workspace instead of the
-# ``[f"workspace:{workspace_id}"]`` placeholder it shipped with.
-#
-# Why a new file in ee/cloud/kb/ rather than a method on
-# ``agents.knowledge.KnowledgeService``: the existing class is an
-# agent-scoped utility wrapper around the kb-go binary (its methods
-# take ``agent_id``). A workspace-wide scope enumerator wants the
-# pocket + agent listings the agents/pockets services already own, and
-# parks naturally alongside ``workspace_aggregator.py`` in this
-# directory — both modules are workspace-level KB aggregations.
+# Invariants: the default probe runs kb-go in ``asyncio.to_thread`` (a blocking
+# subprocess on the loop stalls every user), and the probe fan-out is bounded
+# by ``_PROBE_CONCURRENCY`` so a big workspace can't fork one process per
+# scope. Lives beside ``workspace_aggregator.py`` rather than on the
+# agent-scoped ``KnowledgeService``, because it needs the workspace-wide pocket
+# and agent listings.
 """Workspace-level KB scope listing.
 
 The kb-go binary stores articles against scope strings of the shape
@@ -214,7 +197,7 @@ async def _candidate_scopes(workspace_id: str, user_id: str) -> list[str]:
     try:
         from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-        pockets = await pockets_service.list_pockets(workspace_id, user_id)
+        pockets = await pockets_service.visible_pocket_refs(workspace_id, user_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("pocket listing failed for workspace=%s: %s", workspace_id, exc)
         pockets = []
@@ -262,17 +245,20 @@ async def _probe_scope(scope: str, probe: KbListFn) -> bool:
     return isinstance(rows, list) and len(rows) > 0
 
 
-def _default_kb_list(scope: str) -> list[Any]:
+async def _default_kb_list(scope: str) -> list[Any]:
     """Default kb-go ``list`` probe. Mirrors ``knowledge_router._call_kb_list``.
 
     Lives inline rather than imported from the router so this module
     has no router dependency — the router can be unmounted in a
     headless deploy and the surface preamble still resolves cleanly.
+    ``_kb`` is a blocking ``subprocess.run``, so it runs in a worker
+    thread: called inline it would serialise every probe on the event
+    loop and stall every other request for the whole fan-out.
     """
     try:
         from pocketpaw_ee.cloud.agents.knowledge import _kb
 
-        result = _kb("list", "--scope", scope)
+        result = await asyncio.to_thread(_kb, "list", "--scope", scope)
     except Exception as exc:  # noqa: BLE001
         logger.debug("kb list raised for scope=%s: %s", scope, exc)
         return []

@@ -45,7 +45,7 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
     monkeypatch.setattr(mc_service, "get_instinct_store", lambda *a, **k: store)
     monkeypatch.setattr(
         mc_service.pockets_service,
-        "list_pockets",
+        "visible_pocket_refs",
         AsyncMock(return_value=[{"_id": "p1"}, {"_id": "p2"}]),
     )
     yield

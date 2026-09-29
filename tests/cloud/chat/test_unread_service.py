@@ -22,8 +22,8 @@ async def test_list_unreads_zero_when_caught_up():
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
-            new=AsyncMock(return_value=state),
+            "pocketpaw_ee.cloud.chat.unread_service._read_states_by_group",
+            new=AsyncMock(return_value={"g1": state}),
         ),
         patch(
             "pocketpaw_ee.cloud.chat.unread_service._count_messages_after",
@@ -48,8 +48,8 @@ async def test_list_unreads_counts_messages_after_last_read():
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
-            new=AsyncMock(return_value=state),
+            "pocketpaw_ee.cloud.chat.unread_service._read_states_by_group",
+            new=AsyncMock(return_value={"g1": state}),
         ),
         patch(
             "pocketpaw_ee.cloud.chat.unread_service._count_messages_after",
@@ -73,8 +73,8 @@ async def test_list_unreads_fresh_user_has_full_count():
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
-            new=AsyncMock(return_value=None),
+            "pocketpaw_ee.cloud.chat.unread_service._read_states_by_group",
+            new=AsyncMock(return_value={}),
         ),
     ):
         result = await unread_service.list_unreads("u1", "w1")
@@ -99,8 +99,8 @@ async def test_list_unreads_empty_last_read_falls_through_to_message_count():
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
-            new=AsyncMock(return_value=state),
+            "pocketpaw_ee.cloud.chat.unread_service._read_states_by_group",
+            new=AsyncMock(return_value={"g1": state}),
         ),
     ):
         result = await unread_service.list_unreads("u1", "w1")
