@@ -1,5 +1,20 @@
 """
 Claude Agent SDK backend for PocketPaw.
+
+Per-turn state on a warm client. The SDK applies ``ClaudeAgentOptions`` (the
+system prompt and the in-process MCP servers' task context) only at
+``connect()``; a reused client is sent the query text and nothing else. So the
+system prompt holds only session-stable layers, and everything that changes per
+turn rides the user message in a ``<turn-context>`` block
+(``compose_turn_message``): the caller's ``turn_context`` (KB hits, scope,
+participants, uploaded-file text, soul recall) and the stored history the client
+has not seen. Each client carries a ``_HistoryWatermark`` (on the client object,
+so a leased client keeps it): a turn whose history extends the watermark sends
+only the delta; one that diverged (an edit or delete) evicts the client and the
+replacement is sent the full conversation. Fresh and stateless launches get the
+full history; native-resume launches get none. A prewarm therefore needs no
+history and is never rebuilt for lack of it.
+
 Updated: 2026-09-27 (chore/bump-claude-agent-sdk) - ``_build_options`` passes
   ``settings.claude_sdk_cli_path`` through as ``ClaudeAgentOptions.cli_path``.
   The SDK prefers its bundled CLI over PATH, so a model newer than the bundled
@@ -76,9 +91,7 @@ Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``run`` / ``prewarm``
   it and an ordinary turn respawned the subprocess. Measured over 8 turns on a
   live soul, the prefix held 1 of 7 turn boundaries and the digest held 7 of 7.
   The prefix STAYS as the no-digest fallback — see the PA-7b note above for who
-  still reaches it now that the channel path does not, and ``run`` splices a growing
-  ``# Recent Conversation`` block into ``options.system_prompt`` after assembly,
-  so a whole-prompt key would rebuild there every turn (measured 0 of 7). The two
+  still reaches it now that the channel path does not. The two
   slots are prefixed ``d:`` / ``t:`` so a client warmed under one rule can never
   answer a turn asking the other.
 Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
@@ -159,10 +172,10 @@ Updated: 2026-06-30 (feat/warm-reuse WH-1) — ``run`` accepts two optional OSS-
   use, so it is byte-identical and the legacy ``self._client`` call stays
   untouched) and routes through ``_leased_dispatch``:
     • WARM REUSE — ``warm_client`` key MATCHES this turn (and not a resume turn,
-      and the lease is not ``busy``) → drive ``warm_client.client.query(message)``
-      directly: NO connect, NO resume, NO history injection (the live client
-      already carries the conversation natively), and it is NEVER disconnected
-      (the supervisor keeps it warm).
+      the lease is not ``busy``, and the history still extends its watermark) →
+      drive ``warm_client.client.query`` directly: NO connect, NO resume, only
+      the turn context and the history it has not seen, and it is NEVER
+      disconnected (the supervisor keeps it warm).
     • SUPERVISED FRESH BUILD — ``on_client_built`` set AND (no ``warm_client`` OR
       key mismatch OR busy) → build + ``connect()`` a fresh client (carrying
       ``resume`` only when ``session_handle.cli_session_id`` is set — the
@@ -232,13 +245,9 @@ Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
   now declared above the ``try`` so the error handler is safe if option assembly
   itself raises). ``prewarm`` is fire-and-forget: it swallows ALL errors, never
   raises, no-ops when a run holds the lease or the SDK/CLI is unavailable, and on
-  failure tears down only a client no run owns. History is baked into the
-  prompt only at ``connect()`` and is NOT part of the cache key, so
-  ``_get_or_create_client`` rebuilds a matching client that has never been
-  queried (``_client_served_turn``) when it was connected with fewer history
-  entries (``_client_history_len``) than the turn carries; otherwise a
-  history-less prewarm would serve a turn that has forgotten the session. A
-  client that has served a turn is always reused. ``_client_lock`` serializes
+  failure tears down only a client no run owns. It carries no history: turn 1
+  sends the prewarmed client the whole conversation in its query text (see the
+  per-turn state note at the top). ``_client_lock`` serializes
   the reuse-or-connect critical section in ``_get_or_create_client`` so a prewarm
   racing the first ``run`` (the trigger fires prewarm as a background task)
   cannot double-connect — the loser of the lock reuses the winner's client. The
@@ -873,6 +882,129 @@ async def stream_one_message(payload: dict):
     yield payload
 
 
+# ── Per-turn state for a warm client ──────────────────────────────────────────
+# The SDK applies ``ClaudeAgentOptions`` (the system prompt included) once, at
+# ``connect()``. A reused client is sent the query text and nothing else. So the
+# system prompt carries only what is stable across a session, and everything
+# that changes per turn rides the user message in a ``<turn-context>`` block:
+# the caller's ``turn_context`` (KB hits, scope/participants, uploaded-file text,
+# soul recall) and whatever stored history the live client has not seen yet.
+#
+# What a client has seen is its ``_HistoryWatermark``, kept ON the client object
+# (``_WATERMARK_ATTR``) so a leased client carries it between backend instances.
+# ``seen`` fingerprints the history entries it holds; ``pending`` is the turn it
+# is serving, which the store will show as a user entry and an assistant reply
+# the client already has natively. A new history must extend ``seen`` (a window
+# that dropped entries off the front is fine); if it does not, something was
+# edited or deleted and the client is rebuilt with the full conversation.
+
+_WATERMARK_ATTR = "_pocketpaw_history_watermark"
+# Fingerprints kept per client. The cloud window is 50 entries; the slack lets a
+# window slide without the alignment search ever losing its anchor.
+_WATERMARK_MAX_SEEN = 200
+_HISTORY_ENTRY_CHARS = 2000
+# Pending-reply marker: any assistant entry directly after the matched user
+# entry. The stored reply is post-processed (ripple specs stripped, labels
+# prefixed), so matching its text would miss more than it catches.
+_ANY_REPLY = None
+
+
+def _normalize_turn_text(text: object) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _history_fingerprint(entry: dict) -> str:
+    raw = f"{entry.get('role', 'user')}\x00{_normalize_turn_text(entry.get('content', ''))}"
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+class _HistoryWatermark:
+    """The stored history a live client already holds (see the block above)."""
+
+    __slots__ = ("seen", "pending")
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+        self.pending: list[tuple[str, str | None]] = []
+
+
+def _pending_matches(entry: dict, want: tuple[str, str | None]) -> bool:
+    role, text = want
+    if entry.get("role", "user") != role:
+        return False
+    if text is _ANY_REPLY:
+        return True
+    got = _normalize_turn_text(entry.get("content", ""))
+    # The sent message can be the stored one plus an appended block (the group
+    # bridge adds "Attached files"), so a shared opening counts as the same turn.
+    probe = min(len(got), len(text), 200)
+    return got == text or (probe > 0 and got[:probe] == text[:probe])
+
+
+def _unseen_history(wm: _HistoryWatermark, history: list[dict]) -> list[dict] | None:
+    """The entries of ``history`` the client behind ``wm`` has not seen, or
+    ``None`` when ``history`` no longer extends what it saw (edit / delete)."""
+    fps = [_history_fingerprint(e) for e in history]
+    start = 0
+    if wm.seen:
+        for i in range(len(wm.seen)):
+            tail = wm.seen[i:]
+            if fps[: len(tail)] == tail:
+                start = len(tail)
+                break
+        else:
+            return None
+    unseen: list[dict] = []
+    p = 0
+    for entry in history[start:]:
+        if p < len(wm.pending) and _pending_matches(entry, wm.pending[p]):
+            p += 1
+            continue
+        unseen.append(entry)
+    return unseen
+
+
+def _render_history(entries: list[dict]) -> str:
+    lines = []
+    for msg in entries:
+        role = str(msg.get("role", "user")).capitalize()
+        content = str(msg.get("content", ""))
+        if len(content) > _HISTORY_ENTRY_CHARS:
+            content = content[:_HISTORY_ENTRY_CHARS] + "..."
+        lines.append(f"**{role}**: {content}")
+    return "\n".join(lines)
+
+
+def compose_turn_message(
+    message: str,
+    *,
+    turn_context: str = "",
+    history: list[dict] | None = None,
+    history_is_delta: bool = False,
+) -> str:
+    """The query text for one turn: a ``<turn-context>`` block, then the user's
+    message. Returns ``message`` unchanged when there is nothing to add."""
+    parts: list[str] = []
+    if history:
+        heading = (
+            "# Messages since your last reply" if history_is_delta else "# Recent Conversation"
+        )
+        parts.append(f"{heading}\n{_render_history(history)}")
+    if turn_context and turn_context.strip():
+        parts.append(turn_context.strip())
+    if not parts:
+        return message
+    body = "\n\n".join(parts)
+    return (
+        "<turn-context>\n"
+        "Context for the message below, refreshed on every turn. It replaces any "
+        "earlier turn-context and is not something the user typed.\n\n"
+        f"{body}\n"
+        "</turn-context>\n\n"
+        f"{message}"
+    )
+
+
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
 
@@ -961,13 +1093,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client = None
         self._client_options_key: str | None = None
         self._client_in_use = False
-        # How many history entries the live client's system prompt was connected
-        # with, and whether it has been sent a query yet. History is baked into
-        # the prompt only at connect() and is not part of the cache key, so a
-        # client connected with less history (a prewarm) and never queried is
-        # rebuilt by a turn that brings more — see ``_get_or_create_client``.
-        self._client_history_len = 0
-        self._client_served_turn = False
         # Serializes the connect-or-reuse critical section in
         # ``_get_or_create_client`` (feat/claude-sdk-prewarm). ``prewarm`` runs
         # CONCURRENTLY with the first ``run`` (fired as a background task before
@@ -1827,11 +1952,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         notice.
 
         Measured 2026-08-03 over 8 turns of a realistic channel prompt: keying on
-        the whole prompt instead held 0/7 boundaries, because ``run`` itself
-        splices a GROWING ``# Recent Conversation`` block into
-        ``options.system_prompt`` (see the history injection in
-        ``_build_options``) — so the warm subprocess would be torn down and
-        respawned every turn. With this prefix it held 7/7. So PA-7b claims no
+        the whole prompt instead held 0/7 boundaries, because ``run`` then spliced
+        a GROWING ``# Recent Conversation`` block into ``options.system_prompt``
+        (history now rides the query text instead) — so the warm subprocess was
+        torn down and respawned every turn. With this prefix it held 7/7. So PA-7b claims no
         cache-rate win on the channel path — 7/7 was already the baseline that
         measurement recorded, and what the prefix genuinely cannot do is see a
         REAL behaviour change sitting below the marker it cuts at.
@@ -1989,10 +2113,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         the drift the prefix cannot: ``## Self-Understanding`` renders above the
         ``# Key Knowledge`` block the prefix excises, so the prefix keeps it and
         rebuilt the warm subprocess on 6 of 7 measured turn boundaries. Over the
-        same 8 turns the digest held one value. It is also honest about what it
-        does NOT cover — the ``# Recent Conversation`` block this backend splices
-        into ``options.system_prompt`` after assembly is per-turn volatile and is
-        outside both, which is the intended answer in both cases.
+        same 8 turns the digest held one value. History and per-turn context are
+        outside both, and outside the system prompt entirely: they ride the
+        query text (``compose_turn_message``).
 
         ``t:`` is not a transitional wart to be deleted on sight, and PA-7b did
         NOT retire it. The channel path gained a digest there, but the pocket
@@ -2047,7 +2170,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         plugin_digest: str = "",
         system_prompt_digest: str = "",
-        history_len: int = 0,
+        history: list[dict] | None = None,
     ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
@@ -2067,14 +2190,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         subprocess keeps the original path from its first connect — so the dir
         is cached per digest and only dropped on eviction or cleanup().
 
-        ``history_len`` is how many history entries ``options`` baked into the
-        system prompt. History is volatile and stays out of the key, so a key
-        match alone does not mean the live client knows the conversation: a
-        prewarm connects with no history, and a turn that reused it would reach
-        a model that has forgotten the session. A matching client that has never
-        been queried (``_client_served_turn`` False) and was connected with fewer
-        entries than ``history_len`` is therefore rebuilt. Once a client has
-        served a turn it holds the conversation natively and is always reused.
+        ``history`` is the stored conversation this turn carries. History is
+        volatile and stays out of the key, and it reaches the model in the query
+        text rather than the prompt, so a matching client is reused as long as
+        ``history`` still extends what it has seen (``_client_knows_history``). A
+        history that was edited or had entries deleted evicts it, and the new
+        client is sent the full conversation. ``None`` skips the check.
         """
         import time
 
@@ -2097,19 +2218,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
         async with self._client_lock:
             # Re-check INSIDE the lock: a prewarm (or sibling) may have connected
             # a matching client while we awaited the lock — reuse it, don't churn.
-            if (
-                self._client is not None
-                and self._client_options_key == key
-                and (self._client_served_turn or self._client_history_len >= history_len)
-            ):
-                logger.debug("Reusing persistent client (key=%s)", key)
-                return self._client
             if self._client is not None and self._client_options_key == key:
+                if self._client_knows_history(self._client, history):
+                    logger.debug("Reusing persistent client (key=%s)", key)
+                    return self._client
                 logger.info(
-                    "Rebuilding unqueried warm client: connected with %d history "
-                    "entries, this turn has %d (key=%s)",
-                    self._client_history_len,
-                    history_len,
+                    "Rebuilding warm client: the stored conversation no longer "
+                    "extends what it has seen (key=%s)",
                     key,
                 )
 
@@ -2128,11 +2243,72 @@ class ClaudeSDKBackend(BaseAgentBackend):
             await self._client.connect()
             self._client_options_key = key
             self._client_plugin_digest = plugin_digest
-            self._client_history_len = history_len
-            self._client_served_turn = False
+            setattr(self._client, _WATERMARK_ATTR, _HistoryWatermark())
             t1 = time.monotonic()
             logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
             return self._client
+
+    @staticmethod
+    def _client_knows_history(client: Any, history: list[dict] | None) -> bool:
+        """Can ``client`` serve a turn carrying ``history`` by being sent only
+        what it has not seen? False when the history diverged from its
+        watermark, or when the client has none (built somewhere that did not
+        track one), in which case what it holds is unknown."""
+        if history is None:
+            return True
+        wm = getattr(client, _WATERMARK_ATTR, None)
+        if not isinstance(wm, _HistoryWatermark):
+            return False
+        return _unseen_history(wm, history) is not None
+
+    @staticmethod
+    def _turn_query_text(
+        client: Any,
+        message: str,
+        *,
+        history: list[dict] | None,
+        turn_context: str,
+        history_is_native: bool = False,
+    ) -> str:
+        """Compose this turn's query text for ``client`` and advance its watermark.
+
+        ``client=None`` is a stateless launch: it holds nothing, so it gets the
+        full history. ``history_is_native`` is a native-resume launch, whose CLI
+        session already carries the conversation: no history is rendered, but it
+        counts as seen. Otherwise the client is sent only the entries it has not
+        seen. The watermark then records all of ``history`` plus this turn, which
+        the store will return as a user entry and a reply the client already has.
+        """
+        entries = list(history or ())
+        if client is None:
+            return compose_turn_message(message, turn_context=turn_context, history=entries)
+        wm = getattr(client, _WATERMARK_ATTR, None)
+        if not isinstance(wm, _HistoryWatermark):
+            wm = _HistoryWatermark()
+            setattr(client, _WATERMARK_ATTR, wm)
+        is_delta = bool(wm.seen or wm.pending)
+        unseen: list[dict] = []
+        if history is not None and not history_is_native:
+            planned = _unseen_history(wm, entries)
+            if planned is None:
+                unseen, is_delta = entries, False
+            else:
+                unseen = planned
+        if history is not None:
+            wm.seen = [_history_fingerprint(e) for e in entries][-_WATERMARK_MAX_SEEN:]
+        wm.pending = [("user", _normalize_turn_text(message)), ("assistant", _ANY_REPLY)]
+        return compose_turn_message(
+            message, turn_context=turn_context, history=unseen, history_is_delta=is_delta
+        )
+
+    @staticmethod
+    def _forget_history(client: Any) -> None:
+        """Drop ``client``'s watermark after a send that may not have landed, so
+        its next turn rebuilds instead of trusting what it may not hold."""
+        try:
+            setattr(client, _WATERMARK_ATTR, None)
+        except Exception:  # noqa: BLE001 - best effort on an exotic client
+            pass
 
     def _drop_skills_dir(self, plugin_digest: str) -> None:
         """Remove the materialized per-run skills dir cached under
@@ -2156,8 +2332,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
             self._client = None
             self._client_options_key = None
             self._client_in_use = False
-            self._client_history_len = 0
-            self._client_served_turn = False
             logger.info("Persistent client disconnected")
         # Sweep every materialized per-run skills dir adopted by a warm client.
         # Safe even when no client existed (the map is just empty).
@@ -2227,7 +2401,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
         message: str,
         *,
         system_prompt: str | None,
-        history: list[dict] | None,
         session_key: str | None,
         deny_mcp_tool_ids: frozenset[str],
         allow_sdk_tools: frozenset[str],
@@ -2344,33 +2517,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception:
             pass  # Don't break agent if connector registry fails
 
-        # Native-resume session id (feat/session-supervisor SS-1). When set, the
-        # CLI subprocess will be launched with ``resume=<id>`` and reloads that
-        # session's transcript NATIVELY, so injecting Mongo ``history`` into the
-        # prompt below would DUPLICATE the conversation. The whole point of the
-        # slice is native continuity INSTEAD of history replay, so a resume turn
-        # skips the injection. ``None`` (legacy / no handle) keeps every existing
-        # cold-start run injecting history exactly as before.
-        resume_session_id = session_handle.cli_session_id if session_handle is not None else None
-
-        # Inject prior turns into the system prompt at connect time. The
-        # persistent ClaudeSDKClient accumulates new turns natively after
-        # connect, but a fresh subprocess (after eviction, restart, or
-        # session switch) has empty native history — without this, those
-        # cold-start runs lose all conversation context. Reused clients
-        # keep the prompt set at first connect and ignore later option
-        # changes, so there's no duplication on the warm path. Skipped on a
-        # native-resume turn (the resumed session already carries its history).
+        # History is NOT in the system prompt. The SDK applies the prompt only
+        # at ``connect()``, so a reused warm client would keep whatever history
+        # the connecting turn had; ``run`` sends it in the query text instead
+        # (``_turn_query_text``), which keeps this prompt identical across turns.
         final_prompt = identity
-        if history and not resume_session_id:
-            lines = ["# Recent Conversation"]
-            for msg in history:
-                role = msg.get("role", "user").capitalize()
-                content = msg.get("content", "")
-                if len(content) > 2000:
-                    content = content[:2000] + "..."
-                lines.append(f"**{role}**: {content}")
-            final_prompt += "\n\n" + "\n".join(lines)
+
+        # Native-resume session id (feat/session-supervisor SS-1): the CLI is
+        # launched with ``resume=<id>`` and reloads that session's transcript.
+        resume_session_id = session_handle.cli_session_id if session_handle is not None else None
 
         # Pocket sessions don't need shell or filesystem access — the
         # MCP pocket tools (get_pocket / list_pockets / set_state /
@@ -2841,7 +2996,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
         *,
         session_key: str,
         system_prompt: str | None = None,
-        history: list[dict] | None = None,
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
@@ -2867,6 +3021,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         blocks sit below its cut. The digest survives it for a stronger reason:
         ``legacy_tail`` and ``retrieval`` are the layers those two fields feed and
         both declare ``cache_key=None``, so neither can reach the digest at all.
+
+        It takes no history. History rides the first turn's query text, and a
+        prewarmed client has seen none, so turn 1 sends it the whole
+        conversation (``_turn_query_text``) and the prewarm is never rebuilt.
 
         FIRE-AND-FORGET, never-break-a-turn semantics:
           * ALL exceptions are logged and SWALLOWED — a failed prewarm must never
@@ -2899,7 +3057,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 # message-independent (smart routing OFF). The trigger gates on
                 # this; see prewarm_session in run_core.
                 system_prompt=system_prompt,
-                history=history,
                 session_key=session_key,
                 deny_mcp_tool_ids=deny_mcp_tool_ids,
                 allow_sdk_tools=allow_sdk_tools,
@@ -2923,7 +3080,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_key=session_key,
                 plugin_digest=built.plugin_digest,
                 system_prompt_digest=system_prompt_digest,
-                history_len=len(history or ()),
             )
             logger.info(
                 "Prewarmed Claude client for session_key=%s (skills=%d)",
@@ -2967,6 +3123,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         warm_client: LeasedClient | None,
         on_client_built: Callable[[Any, str, Callable], None] | None,
         image_attachments: tuple[ImageAttachment, ...] = (),
+        history: list[dict] | None = None,
+        turn_context: str = "",
     ) -> tuple[Any, LeasedClient | None]:
         """feat/warm-reuse WH-1 — route a turn against a caller-LEASED warm client.
 
@@ -2983,10 +3141,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         Three outcomes:
           1. WARM REUSE — ``warm_client`` key matches, not a resume turn, lease not
-             ``busy`` → drive ``warm_client.client.query(message)`` directly (no
-             connect, no resume, no history injection) and return its receive
-             iterator. The lease stays ``busy`` for the stream's duration and is
-             NEVER disconnected.
+             ``busy``, and ``history`` still extends what the client has seen →
+             drive ``warm_client.client.query`` directly (no connect, no resume)
+             with this turn's context and only the history it has not seen, and
+             return its receive iterator. The lease stays ``busy`` for the
+             stream's duration and is NEVER disconnected. A diverged history
+             (an edit or delete) skips reuse and takes step 2.
           2. SUPERVISED FRESH BUILD — ``on_client_built`` set and warm reuse did not
              apply → build + ``connect()`` a fresh client (``options`` already carry
              ``resume`` iff ``session_handle.cli_session_id`` was set), hand it to
@@ -3000,14 +3160,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # A resume turn must take a fresh launch (the live client carries its OWN
         # conversation, not the requested on-disk session), so warm reuse is gated
         # on ``not resume_active`` as well as an exact key match.
-        # No history check here, unlike ``_get_or_create_client``: a leased client
-        # is only ever minted by step 2 below, connected with that turn's options
-        # (history included) and queried straight away. Prewarm never builds one,
-        # so a leased client always holds its conversation natively.
         if (
             warm_client is not None
             and not resume_active
             and warm_client.options_key == this_turn_key
+            and self._client_knows_history(warm_client.client, history)
         ):
             # Busy detection: the lease's own ``busy`` flag. Single-threaded
             # asyncio means the check-then-set below has no ``await`` between it, so
@@ -3023,19 +3180,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 return None, None
             warm_client.busy = True
             try:
-                logger.info(
-                    "WH-1: reusing leased warm client (key match) — "
-                    "no connect, no resume, no history injection"
+                logger.info("WH-1: reusing leased warm client (key match) — no connect, no resume")
+                text = self._turn_query_text(
+                    warm_client.client, message, history=history, turn_context=turn_context
                 )
                 await warm_client.client.query(
-                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    stream_one_message(build_streaming_user_message(text, image_attachments))
                     if image_attachments
-                    else message
+                    else text
                 )
                 return self._resilient_receive(warm_client.client), warm_client
             except Exception as exc:  # noqa: BLE001
                 # The leased client failed mid-send. Release its busy flag (we no
                 # longer drive it) but do NOT disconnect — the supervisor owns it.
+                # What it holds is now unknown, so its next turn rebuilds.
+                self._forget_history(warm_client.client)
                 warm_client.busy = False
                 logger.warning("WH-1: leased warm client query failed, stateless fallback: %s", exc)
                 return None, None
@@ -3081,15 +3240,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "WH-1: supervised fresh client built + bound (resume=%s) — driving query",
                     bool(getattr(options, "resume", None)),
                 )
+                text = self._turn_query_text(
+                    fresh,
+                    message,
+                    history=history,
+                    turn_context=turn_context,
+                    history_is_native=resume_active,
+                )
                 await fresh.query(
-                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    stream_one_message(build_streaming_user_message(text, image_attachments))
                     if image_attachments
-                    else message
+                    else text
                 )
                 # The supervisor now OWNS the client; the backend does not tear it
                 # down here even if the stream later aborts.
                 return self._resilient_receive(fresh), None
             except Exception as exc:  # noqa: BLE001
+                self._forget_history(fresh)
                 logger.warning(
                     "WH-1: supervised fresh client query failed, stateless fallback: %s",
                     exc,
@@ -3124,10 +3291,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # image attachments, so a stateless fresh-launch turn carrying images
         # would drop them silently. See where this is consumed below.
         image_attachments: tuple[ImageAttachment, ...] = (),
+        # Per-turn volatile context (KB hits, scope/participants, uploaded-file
+        # text, soul recall). Sent in the query text, never the system prompt.
+        turn_context: str = "",
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``turn_context`` and ``history`` reach the model in the QUERY TEXT
+        (``compose_turn_message``), never in ``options.system_prompt``: the SDK
+        applies the prompt only at ``connect()``, so on a reused warm client
+        anything per-turn in it would stay whatever the connecting turn carried.
+        A warm client is sent only the history it has not seen; a fresh or
+        stateless one gets all of it; a native-resume launch gets none.
 
         ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``, and
         it replaces ``_behavior_prefix`` in the warm-client cache key for every
@@ -3291,7 +3468,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
             _built = await self._build_options(
                 message,
                 system_prompt=system_prompt,
-                history=history,
                 session_key=session_key,
                 deny_mcp_tool_ids=deny_mcp_tool_ids,
                 allow_sdk_tools=allow_sdk_tools,
@@ -3361,6 +3537,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     warm_client=warm_client,
                     on_client_built=on_client_built,
                     image_attachments=image_attachments,
+                    history=history,
+                    turn_context=turn_context,
                 )
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in
@@ -3380,11 +3558,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         session_key=session_key,
                         plugin_digest=plugin_digest,
                         system_prompt_digest=system_prompt_digest,
-                        history_len=len(history or ()),
+                        history=history,
                     )
-                    # Mark it before the send: from here on the CLI owns this
-                    # conversation, so a later turn must reuse it, not rebuild.
-                    self._client_served_turn = True
+                    turn_text = self._turn_query_text(
+                        _persistent_client,
+                        message,
+                        history=history,
+                        turn_context=turn_context,
+                    )
                     logger.info(
                         "Persistent client: sending query (%d chars, %d image(s))",
                         len(message),
@@ -3412,9 +3593,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     # no attachment keeps sending the bare string every existing
                     # run sends, rather than a one-element parts list.
                     await _persistent_client.query(
-                        stream_one_message(build_streaming_user_message(message, image_attachments))
+                        stream_one_message(
+                            build_streaming_user_message(turn_text, image_attachments)
+                        )
                         if image_attachments
-                        else message
+                        else turn_text
                     )
                     # Use _resilient_receive instead of receive_response() +
                     # _safe_iter.  This handles MessageParseError by
@@ -3486,10 +3669,18 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         self._client_in_use,
                         bool(skill_names),
                     )
-                # ``_build_options`` already baked Mongo history into the system
-                # prompt inside ``options``, so the stateless path uses the same
-                # options as the persistent path — no separate prompt swap needed.
-                event_stream = self._resilient_query(prompt=message, options=options)
+                # A stateless launch holds nothing, so it gets the full history
+                # in the prompt text; a native-resume launch gets none (its CLI
+                # session carries the conversation).
+                event_stream = self._resilient_query(
+                    prompt=self._turn_query_text(
+                        None,
+                        message,
+                        history=None if _resume_active else history,
+                        turn_context=turn_context,
+                    ),
+                    options=options,
+                )
 
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False

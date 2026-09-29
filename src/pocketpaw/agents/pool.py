@@ -3,6 +3,14 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Per-turn prompt layers: ``legacy_tail`` (the KB wrapper carrying scope,
+participants, current pocket, member briefing and uploaded-file text) and
+``retrieval`` (soul recall) change every turn. A backend whose ``run`` declares
+``turn_context`` gets them there and a ``system_prompt`` holding only the stable,
+keyed layers (``_TURN_CONTEXT_LAYERS``, ``AssembledPrompt.split``); ``prewarm``
+connects it with the same stable text. The digest is unchanged by the split.
+Every other backend keeps the single assembled prompt.
+
 Updated: 2026-09-27 (fix/concierge-web-tool-deny) — ``run`` takes
   ``exclusive_tools`` and forwards an explicit True to a backend whose ``run``
   declares it (``_accepts_exclusive_tools_kwarg``). It is how a deny-by-default
@@ -43,10 +51,9 @@ Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards 
   the warm-client key now hashing the digest, a prewarm that withheld it would
   key under the OLD rule and be evicted by the very turn it spent ~12s connecting
   for. Both entry points read the digest off the SAME ``AssembledPrompt``, which
-  is the only way the two keys can be equal. ``prewarm`` also forwards the run's
-  ``history`` (when non-empty, to a ``prewarm`` that declares it): the Claude SDK
-  bakes history into the prompt only at connect, so the prewarmed client must
-  be connected with it.
+  is the only way the two keys can be equal. ``prewarm`` forwards the run's
+  ``history`` only to a ``prewarm`` that declares it; the Claude SDK's no longer
+  does, since history rides each turn's query text.
 Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
   gains ``atlas`` and ``user`` directly under ``identity``, and
   ``_assemble_system_prompt`` grows the four plain-data fields that feed them
@@ -208,6 +215,7 @@ from pocketpaw.agents.backend import (
     _accepts_prompt_digest,
     _accepts_prompt_digest_kwarg,
     _accepts_tools_enabled_kwarg,
+    _accepts_turn_context_kwarg,
 )
 from pocketpaw.agents.errors import (
     AgentBackendUnavailable,
@@ -303,6 +311,14 @@ _SYSTEM_PROMPT_LAYERS = (
     "legacy_tail",
     "retrieval",
 )
+
+# The per-turn layers: the knowledge-base wrapper (KB hits, <scope>,
+# <participants>, <current-pocket>, the member briefing, <uploaded-files>) and
+# the soul recall. Both are unkeyed and change every turn. A backend that
+# declares ``turn_context`` gets them there instead of in ``system_prompt``: the
+# Claude SDK applies its system prompt only at connect, so on a reused warm
+# client these would otherwise stay whatever the connecting turn carried.
+_TURN_CONTEXT_LAYERS = frozenset({"legacy_tail", "retrieval"})
 
 
 def _resolve_agent_model() -> Any:
@@ -627,10 +643,10 @@ class AgentPool:
         prewarm could warm the wrong model tier and cause evict-churn. The
         run_core trigger gates on this.
 
-        ``history`` is the conversation turn 1 will carry. The Claude SDK bakes it
-        into the system prompt only at ``connect()``, so a prewarm without it
-        builds a client that has forgotten the session. It is forwarded when
-        non-empty and only to a ``prewarm`` that declares it.
+        ``history`` is the conversation turn 1 will carry. It is forwarded when
+        non-empty and only to a ``prewarm`` that declares it. The Claude SDK's
+        does not: it sends history in each turn's query text, so a prewarmed
+        client needs none.
         """
         try:
             instance = await self.get(agent_id)
@@ -673,9 +689,14 @@ class AgentPool:
 
         # The backend's prewarm swallows ALL of its own errors, so this is
         # already safe; the outer guards above cover instance/prompt failures.
+        # A backend that takes per-turn context separately is connected with the
+        # stable layers only, exactly what its turns will send as system prompt.
+        system_prompt = assembled.text
+        if _accepts_turn_context_kwarg(getattr(instance.backend, "run", None)):
+            system_prompt = assembled.split(_TURN_CONTEXT_LAYERS)[0]
         prewarm_kwargs: dict[str, Any] = {
             "session_key": session_key,
-            "system_prompt": assembled.text,
+            "system_prompt": system_prompt,
         }
         # PA-6: the digest is now what the warm-client key hashes, so a prewarm
         # that withheld it would key under ``t:`` and turn 1 would key under
@@ -1057,6 +1078,14 @@ class AgentPool:
             # rather than running with its full tool set.
             if exclusive_tools and _accepts_exclusive_tools_kwarg(run_backend.run):
                 run_kwargs["exclusive_tools"] = True
+            # Per-turn layers ride ``turn_context`` for a backend that declares
+            # it (see ``_TURN_CONTEXT_LAYERS``); the digest is unchanged, since
+            # both layers are unkeyed. Asked of ``run_backend`` like the rest.
+            if _accepts_turn_context_kwarg(run_backend.run):
+                stable_text, turn_context = assembled.split(_TURN_CONTEXT_LAYERS)
+                run_kwargs["system_prompt"] = stable_text
+                if turn_context:
+                    run_kwargs["turn_context"] = turn_context
 
             async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)

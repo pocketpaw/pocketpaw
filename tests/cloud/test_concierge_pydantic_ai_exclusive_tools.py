@@ -316,7 +316,6 @@ async def test_concierge_on_claude_sdk_gets_no_grant_and_no_always_allowed_serve
     built = await backend._build_options(
         "hi",
         system_prompt="you are a site concierge",
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=kwargs.get("deny_mcp_tool_ids", frozenset()),
         allow_sdk_tools=kwargs.get("allow_sdk_tools", frozenset()),

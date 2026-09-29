@@ -249,6 +249,20 @@ def _accepts_history_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_turn_context_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``turn_context`` in its signature?
+
+    Asked of a bound ``run`` by the pool. A backend that declares it takes the
+    per-turn prompt layers (KB, scope, uploads, recall) separately from the
+    system prompt, because it applies the system prompt only when a client
+    connects (the Claude SDK). Every other backend keeps the one assembled prompt.
+    """
+    try:
+        return "turn_context" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str) -> dict[str, Any]:
     """Return ``run_kwargs`` carrying ``digest`` iff ``backend`` declares it.
 

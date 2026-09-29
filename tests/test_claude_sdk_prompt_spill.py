@@ -194,7 +194,6 @@ async def test_build_options_actually_uses_the_content_addressed_path(monkeypatc
     built = await backend._build_options(
         "hello",
         system_prompt=_BIG,
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=frozenset(),
         allow_sdk_tools=frozenset(),
@@ -239,7 +238,6 @@ async def test_a_prompt_under_the_limit_is_still_passed_inline(monkeypatch, _hom
     built = await backend._build_options(
         "hello",
         system_prompt="You are Paw.",
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=frozenset(),
         allow_sdk_tools=frozenset(),

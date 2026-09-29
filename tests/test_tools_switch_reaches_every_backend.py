@@ -180,7 +180,6 @@ def _built(tools_enabled: bool):
         backend._build_options(
             "hi",
             system_prompt="test",
-            history=None,
             session_key="s1",
             deny_mcp_tool_ids=frozenset(),
             allow_sdk_tools=frozenset(),

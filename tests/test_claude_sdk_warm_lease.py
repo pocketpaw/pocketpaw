@@ -250,14 +250,16 @@ async def test_warm_client_key_match_reuses_no_connect_no_resume_no_history() ->
     assert leased_client.connect_count == 1
     assert leased_client.queries == ["turn one"]
 
-    # Phase 2 — lease it back with a MATCHING key + a history block. Warm reuse
-    # must drive the SAME client with the raw message, never reconnect, never
-    # build a second client, never inject the history into the query.
+    # Phase 2 — lease it back with a MATCHING key + the history the store now
+    # holds (turn one). Warm reuse must drive the SAME client with the raw
+    # message, never reconnect, never build a second client, and never repeat
+    # history the client already holds (see test_claude_sdk_turn_state.py for
+    # the history it has NOT seen, which it is sent).
     lease = LeasedClient(client=leased_client, options_key=leased_key)
     events = await _drive_run(
         sdk,
         "turn two",
-        history=[{"role": "user", "content": "an earlier turn"}],
+        history=[{"role": "user", "content": "turn one"}],
         warm_client=lease,
     )
 
