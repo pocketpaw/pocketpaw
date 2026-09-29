@@ -80,7 +80,7 @@ async def _build_with(agent_doc, settings: Settings) -> ToolPolicy:
             return_value=_CapturingBackend,
         ),
         patch("pocketpaw.agents.claude_sdk.ClaudeSDKBackend", _CapturingBackend),
-        patch("pocketpaw.config.Settings.load", return_value=settings),
+        patch("pocketpaw.config.get_settings", return_value=settings),
     ):
         await pool._build(agent_doc)
     assert _CapturingBackend.last_policy is not None, "backend got no policy"
