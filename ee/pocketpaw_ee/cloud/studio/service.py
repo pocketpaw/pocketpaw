@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -1972,7 +1973,8 @@ async def generate_video_motion(
         raise ValueError("a motion reference video is required for motion control")
 
     image_data_url, image_mime = await _resolve_source_data_url(image_url)
-    image_data_url, _ = _fit_character_image(image_data_url, image_mime)
+    # Pillow decode + resize + JPEG encode is CPU work: keep it off the loop.
+    image_data_url, _ = await asyncio.to_thread(_fit_character_image, image_data_url, image_mime)
 
     # The reference motion video is typically a PUBLIC URL (the hardcoded preset).
     # fal fetches public URLs directly (and re-encoding a multi-MB clip into a

@@ -43,6 +43,11 @@
 # load the filtered set into memory then slice — the RFC's index design
 # means the filtered set is bounded by the most-selective axis.
 #
+# Threading
+# ---------
+# Every read is synchronous SQLite; the public methods are async wrappers
+# (``_off_loop``) that run the read in ``asyncio.to_thread``.
+#
 # Bootstrap
 # ---------
 # `init_decisions_projection()` lazily creates the singleton projection
@@ -51,11 +56,14 @@
 # fresh projection per fixture by calling `reset_projection_for_tests()`.
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 from collections import deque
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal, ParamSpec, TypeVar
 from uuid import UUID
 
 from pocketpaw_ee.cloud.decisions.domain import (
@@ -68,6 +76,25 @@ from pocketpaw_ee.cloud.decisions.projection import DecisionProjection
 from pocketpaw_ee.cloud.decisions.store import DecisionStore
 
 logger = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _off_loop(fn: Callable[_P, _R]) -> Callable[_P, Coroutine[Any, Any, _R]]:
+    """Make a blocking store read awaitable by running it in a worker thread.
+
+    Every ``DecisionGraph`` read walks the SQLite store synchronously; on the
+    event loop a big ``find`` or a deep ``trace`` stalls every other request.
+    The store's one connection is opened with ``check_same_thread=False`` and
+    writes hold its lock, so reads are safe from the thread pool.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +165,8 @@ class DecisionGraph:
 
     # --- single lookup -----------------------------------------------------
 
-    async def get(
+    @_off_loop
+    def get(
         self,
         decision_id: UUID,
         *,
@@ -155,7 +183,8 @@ class DecisionGraph:
 
     # --- multi-axis filter -------------------------------------------------
 
-    async def find(
+    @_off_loop
+    def find(
         self,
         *,
         actor: str | None = None,
@@ -214,7 +243,8 @@ class DecisionGraph:
 
     # --- post-scope-filter total ------------------------------------------
 
-    async def count(
+    @_off_loop
+    def count(
         self,
         *,
         actor: str | None = None,
@@ -251,7 +281,8 @@ class DecisionGraph:
 
     # --- trace upstream ----------------------------------------------------
 
-    async def trace(
+    @_off_loop
+    def trace(
         self,
         decision_id: UUID,
         *,
@@ -359,7 +390,8 @@ class DecisionGraph:
 
     # --- downstream --------------------------------------------------------
 
-    async def downstream(
+    @_off_loop
+    def downstream(
         self,
         decision_id: UUID,
         *,
