@@ -48,6 +48,8 @@ def _encryption_key(monkeypatch):
     from cryptography.fernet import Fernet
 
     monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    # upgrade_guest runs the register password policy; keep HIBP off the network.
+    monkeypatch.setenv("POCKETPAW_HIBP_ENABLED", "false")
 
 
 async def _mk_guest(**over) -> User:
@@ -389,7 +391,9 @@ class TestUpgradeGuest:
         doc = await _mk_guest(active_workspace="w_keep")
         before_id = doc.id
 
-        got = await guest_service.upgrade_guest(doc, email="Real@Example.com", password="hunter22")
+        got = await guest_service.upgrade_guest(
+            doc, email="Real@Example.com", password="Hunter22!x"
+        )
 
         assert got.id == before_id
         assert got.is_guest is False
@@ -403,7 +407,7 @@ class TestUpgradeGuest:
         await User(email="taken@x.co", hashed_password="x", is_active=True).insert()
         doc = await _mk_guest()
         with pytest.raises(CloudError) as exc:
-            await guest_service.upgrade_guest(doc, email="taken@x.co", password="hunter22")
+            await guest_service.upgrade_guest(doc, email="taken@x.co", password="Hunter22!x")
         assert exc.value.code == "auth.email_taken"
         assert exc.value.status_code == 409
 
@@ -411,7 +415,7 @@ class TestUpgradeGuest:
         doc = User(email="real2@x.co", hashed_password="x", is_active=True)
         await doc.insert()
         with pytest.raises(CloudError) as exc:
-            await guest_service.upgrade_guest(doc, email="new@x.co", password="hunter22")
+            await guest_service.upgrade_guest(doc, email="new@x.co", password="Hunter22!x")
         assert exc.value.code == "auth.not_a_guest"
 
     async def test_a_short_password_is_rejected(self, mongo_db):
