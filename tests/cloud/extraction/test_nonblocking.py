@@ -56,6 +56,38 @@ async def test_fallback_read_is_capped(tmp_path):
     assert str(limit) in marker
 
 
+def test_fallback_never_reads_past_the_cap(monkeypatch, tmp_path):
+    """The cap bounds memory, not just output: the read itself is sized."""
+    import builtins
+
+    sizes: list[int] = []
+
+    class _Spy:
+        def __init__(self, handle):
+            self._h = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._h.close()
+            return False
+
+        def read(self, n=-1):
+            sizes.append(n)
+            return self._h.read(n)
+
+    monkeypatch.setattr(
+        local_mod, "open", lambda *a, **k: _Spy(builtins.open(*a, **k)), raising=False
+    )
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"b" * 64)
+
+    local_mod._read_text_capped(path, limit=16)
+
+    assert sizes and all(0 <= n <= 17 for n in sizes)
+
+
 @pytest.mark.asyncio
 async def test_fallback_read_under_the_cap_is_whole(tmp_path):
     path = tmp_path / "notes.txt"
