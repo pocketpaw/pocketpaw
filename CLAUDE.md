@@ -456,6 +456,24 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   guard read is `is_multi_tenant_cloud()` in `ee/pocketpaw_ee/cloud/shared/db.py`
   (one name for the `get_client() is not None` check).
 - **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
+- **Realtime across web processes (`POCKETPAW_REALTIME_BUS`)**: `inprocess`
+  (default) or `redis-streams`. Sockets live in the process that accepted them,
+  so running more than one web process (`uvicorn --workers N`, or replicas)
+  needs `redis-streams`, set on the web service AND the worker. Then
+  `_core/realtime/broadcast.py` relays socket frames (bus audiences,
+  `broadcast_to_group`, `send_to_room`, worker ws envelopes) through the
+  `cloud:realtime:broadcast` stream, which each process reads with its OWN
+  consumer group (broadcast; a process skips frames it published). Bus
+  handlers are never relayed and worker bus envelopes stay on xproc's SHARED
+  `cloud-web` group, so side effects (agent runs, push, calendar) still fire
+  once. A process creates its group at startup, destroys it on clean shutdown,
+  and reaps siblings' groups idle over 10 minutes. The same stream carries
+  `cache.invalidate` (`register_invalidator` / `broadcast_invalidate`), wired
+  for API-key revocation and member action overrides. Not covered yet:
+  presence (`is_online`, the offline grace timer, the connect snapshot) and
+  push's WS-vs-Web-Push choice are per-process, so a user connected only to
+  another process can be shown offline, and a notification handled elsewhere
+  goes to them as Web Push instead of the WS notification frame. Design: workspace `docs/design/plans/pocketpaw/2026-09-04-redis-utilization-audit.md` §1.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
