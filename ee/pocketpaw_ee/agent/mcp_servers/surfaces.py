@@ -26,14 +26,29 @@
 # file" from inside the editor cannot open /files yet — add the id to that
 # surface's allowlist when a surface actually needs it.
 #
-# TRUST. ``validate_open_surface`` is shared with run_core, which re-validates
-# every promoted envelope: any tool result (a file read, a web fetch) that merely
-# CONTAINS the marker would otherwise be able to navigate the user's browser.
+# TRUST. run_core promotes the envelope only from a tool_result whose resolved
+# name is in ``OPEN_SURFACE_TOOL_NAMES`` (unresolved fails closed) — a file read
+# or web fetch can carry a well-formed marker — and re-validates it through
+# ``validate_open_surface``.
+#
+# EDITOR ``src``. /studio/editor fetches ``src`` into the timeline, so an
+# external URL would put attacker-chosen media in front of the user. Only the
+# backend's own media shapes are accepted, exactly the two URLs the agent is
+# ever handed for a file: ``/api/v1/uploads/<file_id>`` (uploads/service.py,
+# deliver.py) and ``/api/v1/media/<name>`` (cloud/media/storage.py). Both are
+# single-segment, relative, auth-gated routes; the frontend mints/resolves them
+# into the fetchable absolute URL its handoff wants (editor/handoff.ts says the
+# caller owns that). Absolute http(s) URLs — including a presigned S3 URL the
+# UI itself may mint — are rejected: the agent never needs one.
+#
+# Changes: 2026-09-29 (same branch, review fix) — name-gated promotion
+# (``OPEN_SURFACE_TOOL_NAMES``) and the /studio/editor ``src`` shape check.
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -43,6 +58,14 @@ SERVER_NAME = "pocketpaw_surfaces"
 OPEN_SURFACE_TOOL_ID = f"mcp__{SERVER_NAME}__open_surface"
 
 SURFACES_TOOL_IDS = (OPEN_SURFACE_TOOL_ID,)
+
+# The tool_result names run_core promotes from: the SDK's full MCP id and the
+# bare name a bridging backend may report. Exact match, not a suffix — another
+# MCP server could register its own ``open_surface``.
+OPEN_SURFACE_TOOL_NAMES = frozenset({OPEN_SURFACE_TOOL_ID, "open_surface"})
+
+# /studio/editor ``src``: the backend's own media routes only (see header).
+_EDITOR_SRC_RE = re.compile(r"/api/v1/(?:uploads|media)/[A-Za-z0-9][A-Za-z0-9._-]*")
 
 # The contract's closed route set. Anything else is rejected, never forwarded.
 ALLOWED_ROUTES = ("/files", "/studio/editor", "/chat", "/pockets", "/knowledge")
@@ -98,6 +121,12 @@ def validate_open_surface(args: Any) -> tuple[dict[str, Any] | None, str | None]
                 return None, f"param {key!r} must be a string (got {type(value).__name__})."
             if len(value) > MAX_PARAM_VALUE_CHARS:
                 return None, f"param {key!r} is over {MAX_PARAM_VALUE_CHARS} chars."
+        src = params.get("src")
+        if route == "/studio/editor" and src is not None and not _EDITOR_SRC_RE.fullmatch(src):
+            return None, (
+                "src for /studio/editor must be the file's own backend path, "
+                "/api/v1/uploads/<file_id> or /api/v1/media/<name>, not an external URL."
+            )
         if params:
             payload["params"] = dict(params)
 
@@ -141,7 +170,8 @@ Open an app surface on the user's screen.
 Use it when the user needs to SEE or CHOOSE something, not to answer a question
 you can answer in text. /files to upload or pick files; to edit a video, open
 /files first unless a clip is already known, then /studio/editor with the clip
-handoff params src, name, mime, kind; /chat to read a conversation; /pockets and
+handoff params src, name, mime, kind (src is the file's /api/v1/uploads/<id> or
+/api/v1/media/<name> path); /chat to read a conversation; /pockets and
 /knowledge to browse those. Returns once dispatched; the browser does the
 opening."""
 
@@ -162,7 +192,8 @@ def _open_surface_schema() -> dict[str, Any]:
             "description": (
                 f"Optional flat string-to-string map (at most {MAX_PARAMS} keys, values "
                 f"up to {MAX_PARAM_VALUE_CHARS} chars). For /studio/editor pass the clip "
-                "handoff: src, name, mime, kind."
+                "handoff: src (/api/v1/uploads/<file_id> or /api/v1/media/<name>), name, "
+                "mime, kind."
             ),
         },
         "reason": {
@@ -192,6 +223,7 @@ def build_surfaces_server() -> tuple[str, Any] | None:
 __all__ = [
     "ALLOWED_ROUTES",
     "OPEN_SURFACE_TOOL_ID",
+    "OPEN_SURFACE_TOOL_NAMES",
     "SERVER_NAME",
     "SURFACES_TOOL_IDS",
     "build_surfaces_server",

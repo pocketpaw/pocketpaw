@@ -21,7 +21,8 @@ _OPEN_SURFACE_HINT = (
     "<open-surface>If you have the open_surface tool, open an app surface when the "
     "user needs to SEE or CHOOSE something: /files to upload or pick files; to edit "
     "a video, /files first unless a clip is already known, then /studio/editor with "
-    "the clip handoff params src, name, mime, kind; /chat to read a conversation. "
+    "the clip handoff params src, name, mime, kind (src is the file's /api/v1/uploads/"
+    "<id> or /api/v1/media/<name> path); /chat to read a conversation. "
     "Do not open a surface for a question you can answer in text.</open-surface>"
 )
 

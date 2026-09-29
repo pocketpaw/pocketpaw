@@ -26,5 +26,19 @@
     "find": "    if route not in ALLOWED_ROUTES:",
     "replace": "    if not route:",
     "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: run_core promotes from any tool (name gate dropped)",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                    if name in OPEN_SURFACE_TOOL_NAMES\n",
+    "replace": "                    if True\n",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: editor src shape check dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "not _EDITOR_SRC_RE.fullmatch(src)",
+    "replace": "False",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
   }
 ]

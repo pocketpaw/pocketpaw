@@ -5,6 +5,10 @@
 # ACTUAL output fed through run_core's ACTUAL drive loop must come out as an
 # ``open_surface`` chat event with the fixed contract shape, and a forged marker
 # in some other tool's output must not.
+#
+# Changes: 2026-09-29 (review fix) — promotion is name-gated: a VALID-route
+# marker in a Read / WebFetch result, or under an unresolved name, is not
+# promoted; /studio/editor ``src`` must be a backend media path.
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ import pytest
 from pocketpaw_ee.agent.mcp_servers.surfaces import (
     ALLOWED_ROUTES,
     OPEN_SURFACE_TOOL_ID,
+    OPEN_SURFACE_TOOL_NAMES,
     SURFACES_TOOL_IDS,
     _open_surface_handler,
 )
@@ -49,7 +54,7 @@ async def test_envelope_route_only_omits_params_and_reason() -> None:
 
 
 async def test_envelope_carries_params_and_reason() -> None:
-    params = {"src": "https://x/clip.mp4", "name": "clip.mp4", "mime": "video/mp4", "kind": "video"}
+    params = {"src": "/api/v1/uploads/f1", "name": "clip.mp4", "mime": "video/mp4", "kind": "video"}
     result = await _open_surface_handler(
         {"route": "/studio/editor", "params": params, "reason": "  Edit your clip  "}
     )
@@ -91,6 +96,30 @@ async def test_reason_cap() -> None:
     assert (await _open_surface_handler({"route": "/chat", "reason": "r" * 201}))["is_error"]
     ok = await _open_surface_handler({"route": "/chat", "reason": "r" * 200})
     assert "is_error" not in ok
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "https://attacker.example/x.mp4",
+        "http://localhost:8888/api/v1/uploads/f1",
+        "//attacker.example/api/v1/uploads/f1",
+        "/api/v1/uploads/../admin",
+        "/api/v1/uploads/f1/grant",
+        "/api/v1/sessions/s1",
+        "javascript:alert(1)",
+        "",
+    ],
+)
+async def test_editor_src_must_be_a_backend_media_path(src: str) -> None:
+    result = await _open_surface_handler({"route": "/studio/editor", "params": {"src": src}})
+    assert result["is_error"] is True
+
+
+@pytest.mark.parametrize("src", ["/api/v1/uploads/6650f1a2b3c4d5e6f7a8b9c0", "/api/v1/media/a.mp4"])
+async def test_editor_src_backend_paths_pass(src: str) -> None:
+    result = await _open_surface_handler({"route": "/studio/editor", "params": {"src": src}})
+    assert json.loads(text(result))["open_surface"]["params"] == {"src": src}
 
 
 # ---------------------------------------------------------------------------
@@ -153,17 +182,21 @@ def _result(content: str, name: str) -> SimpleNamespace:
     return SimpleNamespace(type="tool_result", content=content, metadata={"name": name})
 
 
-async def test_tool_result_becomes_open_surface_event(monkeypatch) -> None:
+_SRC = "/api/v1/uploads/f1"
+
+
+@pytest.mark.parametrize("name", sorted(OPEN_SURFACE_TOOL_NAMES))
+async def test_tool_result_becomes_open_surface_event(monkeypatch, name: str) -> None:
     out = await _open_surface_handler(
-        {"route": "/studio/editor", "params": {"src": "s", "name": "n"}, "reason": "Edit it"}
+        {"route": "/studio/editor", "params": {"src": _SRC, "name": "n"}, "reason": "Edit it"}
     )
     frames = await _drive(
         monkeypatch,
-        [_result(text(out), OPEN_SURFACE_TOOL_ID), SimpleNamespace(type="done", content="")],
+        [_result(text(out), name), SimpleNamespace(type="done", content="")],
     )
     events = [d for n, d in frames if n == "open_surface"]
     assert events == [
-        {"route": "/studio/editor", "params": {"src": "s", "name": "n"}, "reason": "Edit it"}
+        {"route": "/studio/editor", "params": {"src": _SRC, "name": "n"}, "reason": "Edit it"}
     ]
     # The ordinary tool_result chip still fans out alongside it.
     assert any(n == "tool_result" for n, _ in frames)
@@ -175,9 +208,29 @@ async def test_forged_or_failed_marker_is_not_promoted(monkeypatch) -> None:
     frames = await _drive(
         monkeypatch,
         [
-            _result(forged, "Read"),
+            # Under the tool's OWN name, so only the re-validation stops it.
+            _result(forged, OPEN_SURFACE_TOOL_ID),
             _result(text(failed), OPEN_SURFACE_TOOL_ID),
             SimpleNamespace(type="done", content=""),
         ],
+    )
+    assert [n for n, _ in frames if n == "open_surface"] == []
+
+
+@pytest.mark.parametrize(
+    "name", ["Read", "WebFetch", "mcp__evil__open_surface", "mcp_server", "bash", ""]
+)
+async def test_valid_marker_from_another_tool_is_not_promoted(monkeypatch, name: str) -> None:
+    """A page or file carrying a WELL-FORMED, VALID marker must not open anything.
+
+    The payload below passes ``validate_open_surface`` on its own — only the
+    name gate stops it. ``mcp_server`` / ``bash`` are the backend's fallbacks
+    when it cannot resolve the tool name, and ``""`` is unresolved: both fail
+    closed.
+    """
+    real = await _open_surface_handler({"route": "/studio/editor", "params": {"src": _SRC}})
+    frames = await _drive(
+        monkeypatch,
+        [_result(text(real), name), SimpleNamespace(type="done", content="")],
     )
     assert [n for n, _ in frames if n == "open_surface"] == []

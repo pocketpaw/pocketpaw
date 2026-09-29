@@ -2292,13 +2292,24 @@ async def _drive_agent_loop(
                     _tl_payload = _timeline_payload(output, _marker)
                     if _tl_payload is not None:
                         yield (_marker, _tl_payload)
-                # The agent asked to open an app surface. Re-validated, not
-                # trusted: the marker can appear in ANY tool's output, and there
-                # is no browser-side check before the route opens.
-                _os_payload = _timeline_payload(output, "open_surface")
-                if _os_payload is not None:
-                    from pocketpaw_ee.agent.mcp_servers.surfaces import validate_open_surface
+                # The agent asked to open an app surface. Promoted ONLY from the
+                # open_surface tool's own result: a web page or file the agent
+                # reads can carry a well-formed marker with a valid route, so
+                # "the text parses" is a prompt-injection path to opening a
+                # surface with attacker-chosen params. An unresolved name ("",
+                # or a backend fallback like "mcp_server") fails closed. The
+                # payload is then re-validated, never trusted as-is.
+                from pocketpaw_ee.agent.mcp_servers.surfaces import (
+                    OPEN_SURFACE_TOOL_NAMES,
+                    validate_open_surface,
+                )
 
+                _os_payload = (
+                    _timeline_payload(output, "open_surface")
+                    if name in OPEN_SURFACE_TOOL_NAMES
+                    else None
+                )
+                if _os_payload is not None:
                     _os_clean, _ = validate_open_surface(_os_payload)
                     if _os_clean is not None:
                         yield ("open_surface", _os_clean)
