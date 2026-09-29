@@ -63,7 +63,13 @@ def mock_router():
     router = MagicMock()
 
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(type="message", content="Hello ")
         yield AgentEvent(type="message", content="world!")
@@ -385,7 +391,13 @@ async def test_agent_loop_builds_context_and_passes_to_router(
     captured_kwargs = {}
 
     async def capturing_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         captured_kwargs["system_prompt"] = system_prompt
         captured_kwargs["history"] = history
@@ -522,7 +534,13 @@ async def test_identity_reinforcement_appended_on_long_conversations(
     captured: dict = {}
 
     async def capturing_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         captured["system_prompt"] = system_prompt
         yield AgentEvent(type="message", content="OK")
@@ -606,7 +624,13 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
     captured: dict = {}
 
     async def capturing_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         captured["system_prompt"] = system_prompt
         yield AgentEvent(type="message", content="OK")
@@ -833,7 +857,13 @@ async def test_auto_tts_triggered_by_voice_message(
 
     # Mock router yields text response without calling text_to_speech tool
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(type="message", content="I heard your voice message!")
         yield AgentEvent(type="done", content="")
@@ -905,7 +935,13 @@ async def test_auto_tts_skipped_when_agent_already_sent_audio(
 
     # Mock router yields tool_result with media tag (agent already generated audio)
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(type="message", content="Here's my voice reply")
         yield AgentEvent(
@@ -972,7 +1008,13 @@ async def test_auto_tts_disabled_by_setting(
     mock_get_memory.return_value = mock_memory
 
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(type="message", content="Response")
         yield AgentEvent(type="done", content="")
@@ -1034,7 +1076,13 @@ async def test_auto_tts_handles_synthesis_failure_gracefully(
     mock_get_memory.return_value = mock_memory
 
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(type="message", content="Response text")
         yield AgentEvent(type="done", content="")
@@ -1187,7 +1235,13 @@ async def test_token_metrics_persist_failure_is_logged_at_debug(
     token_router = MagicMock()
 
     async def mock_run_with_token_usage(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(
             type="token_usage",
@@ -1334,7 +1388,13 @@ async def test_budget_warning_event_emitted_on_threshold_cross(
     warning_router = MagicMock()
 
     async def mock_run_with_token_usage(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         yield AgentEvent(
             type="token_usage",
@@ -1568,7 +1628,13 @@ async def test_cumulative_token_usage_is_recorded_as_a_delta(
     token_router = MagicMock()
 
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         for in_tok, out_tok, cost in ((100, 20, 0.001), (350, 60, 0.004)):
             yield AgentEvent(

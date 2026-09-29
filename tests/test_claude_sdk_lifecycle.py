@@ -10,7 +10,9 @@
 #   B2  the Bun-crash retry forwards EVERY run() parameter (checked against the
 #       signature, so a new kwarg cannot be silently dropped).
 #   B4  a connect() that hangs is abandoned after the configured timeout and the
-#       turn falls back like any failed connect.
+#       turn falls back like any failed connect; a stateless launch that yields
+#       nothing within the same timeout is an error, while a slow stream after
+#       its first event is never cut.
 #   B5  a leased warm client abandoned mid-stream is never reused dirty.
 #   B6  an "API Error" result is one clear error, never assistant text.
 #   B7  a max-turns stop names the limit instead of "None".
@@ -312,6 +314,43 @@ async def test_b4_hung_connect_times_out_and_falls_back():
     assert clients and clients[0].disconnected, "the hung client was not torn down"
     assert sdk._client is None
     assert sdk._client_in_use is False
+
+
+async def test_b4_hung_stateless_launch_times_out():
+    settings = _make_settings(claude_sdk_connect_timeout=0.05)
+    sdk, _ = _scripted_sdk(settings=settings)
+    closed: list = []
+
+    async def _hung_query(prompt, options):  # noqa: ARG001
+        try:
+            await asyncio.Event().wait()
+            yield _RM()  # pragma: no cover
+        finally:
+            closed.append(True)
+
+    sdk._query = _hung_query
+    sdk._client_in_use = True  # a sibling holds the lease -> stateless path
+    events = await asyncio.wait_for(_collect(sdk), timeout=5)
+    errors = [e for e in events if e.type == "error"]
+    assert errors, "a hung stateless launch produced no error"
+    assert closed, "the hung stateless query was not closed"
+
+
+async def test_b4_stateless_timeout_bounds_only_the_first_event():
+    settings = _make_settings(claude_sdk_connect_timeout=0.05)
+    sdk, _ = _scripted_sdk(settings=settings)
+
+    async def _slow_query(prompt, options):  # noqa: ARG001
+        yield _SE("first ")
+        await asyncio.sleep(0.2)  # longer than the timeout, after the first event
+        yield _SE("second")
+        yield _RM()
+
+    sdk._query = _slow_query
+    sdk._client_in_use = True
+    events = await asyncio.wait_for(_collect(sdk), timeout=5)
+    assert not [e for e in events if e.type == "error"]
+    assert "second" in "".join(e.content for e in events if e.type == "message")
 
 
 # --------------------------------------------------------------------------- #

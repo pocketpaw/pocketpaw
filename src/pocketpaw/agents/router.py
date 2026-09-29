@@ -37,7 +37,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, forward_prompt_digest
+from pocketpaw.agents.backend import BackendInfo, forward_prompt_digest, forward_turn_context
 from pocketpaw.agents.failover import BackendFailoverRunner
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.registry import get_backend_class
@@ -199,8 +199,13 @@ class AgentRouter:
         history: list[dict] | None = None,
         session_key: str | None = None,
         system_prompt_digest: str = "",
+        turn_split: tuple[str, str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run the agent with optional fallback backends.
+
+        ``turn_split`` is ``(stable system prompt, per-turn layers)``. A backend
+        whose ``run`` takes ``turn_context`` gets them apart; every other backend
+        gets the full ``system_prompt`` (``agents.backend.forward_turn_context``).
 
         ``system_prompt_digest`` (PA-7b) is the assembler's ``stable_digest`` for
         ``system_prompt``, supplied by ``AgentLoop`` on the channel path. It is
@@ -227,7 +232,11 @@ class AgentRouter:
             try:
                 async for event in self._backend.run(
                     message,
-                    **forward_prompt_digest(self._backend, base_kwargs, system_prompt_digest),
+                    **forward_turn_context(
+                        self._backend,
+                        forward_prompt_digest(self._backend, base_kwargs, system_prompt_digest),
+                        turn_split,
+                    ),
                 ):
                     yield event
 
@@ -255,7 +264,11 @@ class AgentRouter:
             try:
                 async for event in backend.run(
                     message,
-                    **forward_prompt_digest(backend, base_kwargs, system_prompt_digest),
+                    **forward_turn_context(
+                        backend,
+                        forward_prompt_digest(backend, base_kwargs, system_prompt_digest),
+                        turn_split,
+                    ),
                 ):
                     yield event
 
@@ -298,6 +311,7 @@ class AgentRouter:
         history: list[dict] | None = None,
         session_key: str | None = None,
         system_prompt_digest: str = "",
+        turn_split: tuple[str, str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run with L2 cross-backend (harness) failover when enabled.
 
@@ -326,6 +340,7 @@ class AgentRouter:
                 history=history,
                 session_key=session_key,
                 system_prompt_digest=system_prompt_digest,
+                turn_split=turn_split,
             ):
                 yield event
             return
@@ -338,6 +353,7 @@ class AgentRouter:
             history=history,
             session_key=session_key,
             system_prompt_digest=system_prompt_digest,
+            turn_split=turn_split,
         ):
             yield event
 

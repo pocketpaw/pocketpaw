@@ -270,6 +270,27 @@ def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str)
     return {**run_kwargs, "system_prompt_digest": digest}
 
 
+def forward_turn_context(
+    backend: Any, run_kwargs: dict[str, Any], turn_split: tuple[str, str] | None
+) -> dict[str, Any]:
+    """Route the per-turn prompt layers to ``turn_context`` iff ``backend`` takes it.
+
+    ``turn_split`` is ``(stable system prompt, per-turn layers)``. A backend whose
+    ``run`` declares ``turn_context`` (the Claude SDK, which applies the system
+    prompt only at connect) gets the stable text as ``system_prompt`` and the
+    per-turn text as ``turn_context``; any other backend keeps the full
+    ``system_prompt`` already in ``run_kwargs``. Asked per backend because the
+    router's fallback list and the failover chain mix both kinds.
+    """
+    if turn_split is None or not _accepts_turn_context_kwarg(getattr(backend, "run", None)):
+        return run_kwargs
+    stable, turn_context = turn_split
+    out = {**run_kwargs, "system_prompt": stable}
+    if turn_context:
+        out["turn_context"] = turn_context
+    return out
+
+
 class Capability(Flag):
     """Feature flags advertised by a backend."""
 
