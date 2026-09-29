@@ -198,6 +198,9 @@ class FileUpload(TimestampedDocument):
             # Stage 3.E: pocket-scoped queries hit this index. Newest
             # first because the Files panel orders by ``created`` desc.
             [("workspace", 1), ("pocket_id", 1), ("createdAt", -1)],
+            # GET /files: the live-rows page read and its ``total`` count both
+            # filter (workspace, pocket_id, deleted_at=None) and sort createdAt.
+            [("workspace", 1), ("pocket_id", 1), ("deleted_at", 1), ("createdAt", -1)],
             # FL-1: library filtering by tag / collection within a workspace.
             [("workspace", 1), ("tags", 1)],
             [("workspace", 1), ("collections", 1)],
