@@ -212,7 +212,6 @@ from typing import TYPE_CHECKING, Any
 from pocketpaw.agents.backend import (
     ImageAttachment,
     _accepts_exclusive_tools_kwarg,
-    _accepts_history_kwarg,
     _accepts_image_attachments_kwarg,
     _accepts_images_kwarg,
     _accepts_prompt_digest,
@@ -651,7 +650,6 @@ class AgentPool:
         exclusive_mcp_tools: bool = False,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
-        history: list[dict] | None = None,
         model_override: str | None = None,
         tools_enabled: bool = True,
     ) -> None:
@@ -678,10 +676,8 @@ class AgentPool:
         prewarm could warm the wrong model tier and cause evict-churn. The
         run_core trigger gates on this.
 
-        ``history`` is the conversation turn 1 will carry. It is forwarded when
-        non-empty and only to a ``prewarm`` that declares it. The Claude SDK's
-        does not: it sends history in each turn's query text, so a prewarmed
-        client needs none.
+        It takes no history: the Claude SDK sends history in each turn's query
+        text, so a prewarmed client needs none.
         """
         try:
             instance = await self.get(agent_id)
@@ -755,8 +751,6 @@ class AgentPool:
         # True; the caller passes the agent's declared ids as ``allow_mcp_tool_ids``.
         if exclusive_mcp_tools:
             prewarm_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
-        if history and _accepts_history_kwarg(backend_prewarm):
-            prewarm_kwargs["history"] = history
         # The turn's per-send model pick and tool switch change the model and
         # ``allowed_tools``, so the cache key. Withheld when default, and only to
         # a prewarm that declares them.

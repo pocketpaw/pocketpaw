@@ -1585,7 +1585,6 @@ def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
 async def _prewarm_session(
     ctx: ScopeContext,
     flow_context: dict[str, Any] | None = None,
-    history: list[dict[str, str]] | None = None,
 ) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
@@ -1608,12 +1607,8 @@ async def _prewarm_session(
     ``AgentPool.prewarm`` + the backend's ``prewarm``), so a failed prewarm just
     leaves turn 1 to pay the cold connect it would have paid anyway.
 
-    ``history`` is the run's conversation so far (``spec.history``). The Claude
-    SDK bakes it into the system prompt only at ``connect()``, and this prewarm
-    is what connects turn 1's client, so it has to carry the same history turn 1
-    does or the model answers without the earlier messages. (The backend also
-    rebuilds a never-queried client that has less history than the turn, so an
-    omission costs a reconnect rather than the context.)
+    It takes no history: turn 1 sends the whole conversation in its query text
+    (``<turn-context>``), so the prewarmed client needs none.
 
     LIMITATION: skipped when smart routing is ON, because the model is then
     classified from the message (which we don't have yet) — prewarming a guessed
@@ -1733,7 +1728,6 @@ async def _prewarm_session(
                 surface_cache_key=(
                     ctx.surface_context.preamble_cache_key if ctx.surface_context else None
                 ),
-                history=history,
                 # The turn's model pick and tool switch are part of the client's
                 # cache key; without them a picker / tools-off turn evicted the
                 # prewarmed client and paid a second cold connect.
@@ -3223,7 +3217,7 @@ async def execute_run(spec: RunSpec) -> None:
         # forget: _prewarm_session swallows every error, so it can never delay or
         # break this run; the task is intentionally not awaited.
         asyncio.create_task(
-            _prewarm_session(ctx, flow_context=spec.flow_context, history=list(spec.history))
+            _prewarm_session(ctx, flow_context=spec.flow_context)
         )
 
         # A False here means the run is no longer queued: the stale-run sweeper

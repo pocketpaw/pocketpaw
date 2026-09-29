@@ -9,15 +9,14 @@
 # Guarantees held here:
 #   1. A client that already served a turn on the key is REUSED when the next
 #      turn carries more history.
-#   2. ``AgentPool.prewarm`` forwards ``history`` to a backend whose ``prewarm``
-#      declares it, and withholds it from one that does not (the Claude SDK's
-#      no longer does).
+#   2. Neither ``AgentPool.prewarm`` nor the backend's ``prewarm`` takes
+#      history: a prewarmed client has seen none, so turn 1 sends it all.
 #
 # The fake-SDK harness is shared with tests/test_claude_sdk_prewarm.py.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import inspect
 
 from tests.test_claude_sdk_prewarm import _make_sdk, _patched
 
@@ -59,49 +58,10 @@ async def test_a_client_that_served_a_turn_is_reused_despite_more_history():
     assert len(sdk._client.queries) == 2
 
 
-def _instance(backend):
-    return SimpleNamespace(
-        agent_id="agent-1",
-        agent_name="Paw",
-        backend=backend,
-        soul_manager=None,
-        config={"soul_persona": "WHO I AM", "system_prompt": ""},
-        memory_namespace="ns",
-        created_from_updated_at=None,
-        active_runs=0,
-    )
 
-
-async def _pool_prewarm(monkeypatch, backend, **kwargs):
+def test_prewarm_takes_no_history():
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
     from pocketpaw.agents.pool import AgentPool
 
-    pool = AgentPool()
-    instance = _instance(backend)
-
-    async def _fake_get(agent_id):  # noqa: ARG001
-        return instance
-
-    monkeypatch.setattr(pool, "get", _fake_get)
-    await pool.prewarm("agent-1", "cloud:session:s1:agent-1", instructions="LAW.", **kwargs)
-
-
-async def test_pool_prewarm_forwards_history(monkeypatch):
-    seen: dict = {}
-
-    class _Backend:
-        async def prewarm(self, *, session_key, system_prompt, history=None, **kw):  # noqa: ARG002
-            seen["history"] = history
-
-    await _pool_prewarm(monkeypatch, _Backend(), history=_HISTORY)
-    assert seen.get("history") == _HISTORY
-
-
-async def test_pool_prewarm_withholds_history_from_a_narrow_backend(monkeypatch):
-    seen: dict = {}
-
-    class _Narrow:
-        async def prewarm(self, *, session_key, system_prompt):  # noqa: ARG002
-            seen["called"] = True
-
-    await _pool_prewarm(monkeypatch, _Narrow(), history=_HISTORY)
-    assert seen.get("called"), "a backend without a history param must still be prewarmed"
+    assert "history" not in inspect.signature(AgentPool.prewarm).parameters
+    assert "history" not in inspect.signature(ClaudeSDKBackend.prewarm).parameters
