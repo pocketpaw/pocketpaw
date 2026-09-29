@@ -87,7 +87,7 @@
 #   ``signed_key`` on events and the decision poll (the glass app never posts
 #   events and already keys the poll; only the frozen key-less ``src/`` widget,
 #   which serves unbound widgets, does). Per-(IP, widget) bucket on every public
-#   route; chat/ingest admit atomically (``store.admit_event``); chat bounds
+#   route; chat/ingest admit atomically (``paw_bar.admit``); chat bounds
 #   customer_ref and message; the visitor transcript drops author_* and the
 #   visitor error frame is always ``agent.error``.
 # Updated: 2026-09-26 (feat/pawbar-admin-widget-spec-route) — the owner can save
@@ -663,6 +663,7 @@ from pocketpaw.paw_bar.models import (
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
 from pocketpaw_ee.cloud._core.rate_limit import _client_ip
+from pocketpaw_ee.paw_bar.admit import admit as admit_event
 from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
 logger = logging.getLogger(__name__)
@@ -5310,12 +5311,7 @@ async def ingest_event(
     # most likely comes from. The only caller is the legacy widget, which already
     # surfaces a failed post; nothing a visitor is waiting on is lost.
     try:
-        admitted = await store.admit_event(
-            event,
-            overall_per_min=widget.rate_limit_per_min,
-            per_customer_per_min=widget.per_customer_limit_per_min,
-            bucket=_EVENTS_BUCKET,
-        )
+        admitted = await admit_event(store, event, widget, bucket=_EVENTS_BUCKET)
     except sqlite3.OperationalError:
         logger.warning("paw-bar event admit hit a locked store; refusing", exc_info=True)
         raise HTTPException(503, "Busy, try again") from None
@@ -6330,11 +6326,7 @@ async def _admit_chat_turn(store: Any, widget: PawBarWidget, customer_ref: str) 
         widget_id=widget.id, type="concierge_message", payload={}, customer_ref=customer_ref
     )
     try:
-        return await store.admit_event(
-            marker,
-            overall_per_min=widget.rate_limit_per_min,
-            per_customer_per_min=widget.per_customer_limit_per_min,
-        )
+        return await admit_event(store, marker, widget)
     except sqlite3.OperationalError:
         logger.warning("paw-bar chat admit hit a locked store; failing open", exc_info=True)
     try:

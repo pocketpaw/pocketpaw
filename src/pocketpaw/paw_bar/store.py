@@ -9,7 +9,8 @@
 #     proceed while another connection holds the write lock; under the default
 #     rollback journal every read queued behind the writer. WAL needs a LOCAL
 #     disk: it relies on shared memory, so a network filesystem breaks it.
-#   * Every connection carries an explicit busy timeout (_BUSY_TIMEOUT_S).
+#   * Every connection carries an explicit busy timeout (_BUSY_TIMEOUT_S), and
+#     schema setup runs once per process behind _schema_lock.
 #   * Schema changes are additive: SCHEMA_SQL for fresh files, _migrate_columns
 #     ALTERs (run BEFORE SCHEMA_SQL) for deployed ones, so an old file never
 #     fails on an index over a missing column.
@@ -20,7 +21,9 @@
 #   * admit_event counts and inserts in ONE BEGIN IMMEDIATE transaction behind a
 #     per-widget asyncio lock, so a burst cannot all read "under the cap". Events
 #     carry a rate bucket, so public event ingest cannot fill the chat budget.
-#     Atomic per SQLite file, which means per replica.
+#     Atomic per SQLite file, which means per replica. With Redis configured the
+#     EE router admits in Redis instead (pocketpaw_ee.paw_bar.admit) and only
+#     calls record_event; rows still land here either way.
 #   * Snooze expiry and the idle bot-pause auto-resume are computed on READ, so
 #     no sweeper is needed.
 #   * count_conversations_started_since compares ``since`` as a NAIVE local ISO
@@ -426,6 +429,10 @@ class PawBarStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
+        # Serializes the first _ensure_schema in this process. Many connections
+        # switching a fresh file to WAL at once can get "database is locked"
+        # without the busy timeout ever applying (seen on Windows).
+        self._schema_lock = asyncio.Lock()
         # One lock PER WIDGET serializes admit_event's count-then-insert in this
         # process, so a burst on one widget queues here instead of contending for
         # SQLite's write lock, and never queues behind another tenant's widget
@@ -439,6 +446,11 @@ class PawBarStore:
     async def _ensure_schema(self) -> None:
         if self._initialized:
             return
+        async with self._schema_lock:
+            if not self._initialized:
+                await self._create_schema()
+
+    async def _create_schema(self) -> None:
         async with self._conn() as db:
             # WAL persists in the file, so setting it here covers every later
             # connection. A ":memory:" db answers "memory" and stays as it is.

@@ -36,10 +36,21 @@ Several server processes (`serve_sim --workers N`, `POCKETPAW_REALTIME_BUS=redis
 | 4 | 869 | ~58 | 10 ms | ~1.5 GB | 58% |
 | 6 | 974 | ~58 | 8 ms | ~2.3 GB | 71% |
 
-- **The 4- and 6-worker mixed runs fail at 50 VUs on one endpoint:** `pawbar.event` (p50 235 ms, p95 2.6 s at 6 workers) while every other endpoint stays under 160 ms p95. Paw Bar's store is one SQLite file with no WAL, so processes queue on its write lock and reads wait behind writes. Fix in flight: `fix/paw-bar-sqlite-wal`.
+- **Paw Bar events at several workers.** Before this fix, the 4- and 6-worker mixed runs failed at 50 VUs on `pawbar.event` alone. Every event took SQLite's exclusive write lock (`BEGIN IMMEDIATE` in `admit_event`), even ones it refused, and the processes queued on it. WAL (#2301) did not remove that lock. With `POCKETPAW_REDIS_URL` set, the rate check now runs in Redis (`ee/pocketpaw_ee/paw_bar/admit.py`), and SQLite only takes a plain insert for admitted events. `pawbar.event` p95 at 6 workers, 429s included:
+
+  | Setup | 25 VUs | 50 VUs | 100 VUs |
+  |---|---|---|---|
+  | WAL, limits 10M/min (every event admitted) | 457 ms | 2394 ms | 3396 ms |
+  | Redis admit, limits 10M/min | 93 ms | 132 ms | 215 ms |
+  | WAL, real limits (60/min, 10 per visitor) | 176 ms | 1274 ms | 3761 ms |
+  | Redis admit, real limits | 59 ms | 78 ms | 135 ms |
+
+  Both Redis runs are healthy to 100 VUs at 920-980 rps. SQLite's `events` rows equal the 2xx count (3288 and 61).
+- **One worker with `POCKETPAW_REDIS_URL` unset, `pawbar.event` p95 is 1.6 s at 50 VUs.** That holds on `dev` and with the store from before WAL too. It is not the SQLite admit path: `dev`'s code at 1 worker with Redis set stays at 171-192 ms p95 up to 100 VUs, and its admit never touches Redis. Something else on the event route is slow without Redis; not traced yet. Production runs with Redis.
+
 - **Signups flatten at ~58/s from 4 workers:** 8-9 cores of Argon2. That is the box, not a bug.
-- **Request logs:** the ~1.2 Mongo inserts per request below are `request_logs` rows, already batched through `insert_many` with a 30-day TTL. But every row read `actor_id: "anonymous"`, authenticated or not. Fix in flight: `fix/auth-review-nits`.
-- **Sign-up limiter:** under `--prod-middleware`, register returned "Too many login attempts" with a fresh email each time. The (IP, email) key reads the email with `request.form()`, which returns an empty form for a JSON body, so every signup from one address shares a 5-per-15-minutes bucket. Fix in flight: `fix/register-limiter-json-email`.
+- **Request logs:** the ~1.2 Mongo inserts per request below are `request_logs` rows, already batched through `insert_many` with a 30-day TTL. Every row used to read `actor_id: "anonymous"`; fixed in #2300.
+- **Sign-up limiter:** register keyed its (IP, email) bucket on an email read with `request.form()`, which is empty for a JSON body, so every signup from one address shared one 5-per-15-minutes bucket. Fixed in #2302.
 
 ## Machine
 
