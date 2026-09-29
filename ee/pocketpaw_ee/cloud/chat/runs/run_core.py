@@ -9,6 +9,11 @@ collector) before ``pool.run`` and clears it in its finally, because the
 client's in-process MCP tools keep the context they were connected in. History
 still loads and persists under ``session_key_for``.
 
+A supervised turn that ends without the backend's ``done`` (a crash, a user
+stop, a host cancel, a closed stream) demotes its session with ``mark_crashed``,
+because its leased client is still mid-reply. ``_prewarm_session`` warms with the
+turn's model pick and tool switch so the warmed client's key matches the turn's.
+
 Changes:
 - 2026-09-27 (fix/concierge-web-tool-deny) — a profile with ``exclusive_tools``
   (the public concierge) forwards ``exclusive_mcp_tools=True`` and
@@ -1729,6 +1734,11 @@ async def _prewarm_session(
                     ctx.surface_context.preamble_cache_key if ctx.surface_context else None
                 ),
                 history=history,
+                # The turn's model pick and tool switch are part of the client's
+                # cache key; without them a picker / tools-off turn evicted the
+                # prewarmed client and paid a second cold connect.
+                model_override=ctx.model_override or None,
+                tools_enabled=ctx.tools_enabled is not False,
             )
         finally:
             exit_turn_slot(slot_token)
@@ -2804,6 +2814,12 @@ async def _drive_agent_loop(
         # runtime to COLD (``mark_crashed`` keeps the cli_session_id so the next
         # turn still resumes from the store). Best-effort: bookkeeping must never
         # break teardown. No-op on the legacy path (``sup_acq is None``).
+        # A turn that never saw ``done`` is demoted too, whatever ended it: a user
+        # stop, a host cancel or a consumer that closed the stream. The leased
+        # client is still writing that reply, and the next turn would read its
+        # tail as its own answer.
+        if sup_acq is not None and not sup_completed_ok:
+            sup_run_failed = True
         if sup_acq is not None:
             try:
                 _sup = get_session_supervisor()

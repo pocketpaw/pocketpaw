@@ -2,7 +2,9 @@
 
 Core event loop that consumes from the message bus, feeds messages
 through AgentRouter (which delegates to the configured backend),
-and streams AgentEvent responses back to channels.
+and streams AgentEvent responses back to channels. On a processing error it
+stops only that session's run (``router.stop(session_key=...)``), never every
+session sharing the router.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 
@@ -1940,10 +1942,11 @@ class AgentLoop:
                     "Failed to persist processing error in health engine",
                     exc_info=True,
                 )
-            # Kill the backend on error
+            # Stop THIS session's run on error. Scoped: the router is shared by
+            # every session, and an unscoped stop killed their streams too.
             if router is not None:
                 try:
-                    await router.stop()
+                    await router.stop(session_key=session_key)
                 except Exception:
                     logger.warning(
                         "Failed to stop router cleanly after processing error",

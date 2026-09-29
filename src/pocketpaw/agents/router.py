@@ -2,7 +2,11 @@
 
 Uses the backend registry to lazily discover and instantiate the
 configured agent backend. Supports optional user-configured fallback
-backends if the primary backend fails.
+backends if the primary backend fails. ``create_isolated_backend`` builds an
+uncached backend for one caller (BYOK turns, specialists), carrying a per-agent
+ToolPolicy when given one; the caller owns and releases it. ``stop`` takes an
+optional ``session_key`` so one session's failure stops only that session on
+backends that can scope a stop.
 
 Changes:
   - 2026-08-03 (PA-7b, feat/prompt-assembler-channel): ``run`` and
@@ -40,6 +44,16 @@ from pocketpaw.agents.registry import get_backend_class
 from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _stop_takes_session(backend: Any) -> bool:
+    """Does this backend's ``stop`` declare ``session_key``?"""
+    import inspect
+
+    try:
+        return "session_key" in inspect.signature(backend.stop).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
 
 
 class AgentRouter:
@@ -120,12 +134,17 @@ class AgentRouter:
         settings: Settings,
         *,
         settings_override: dict[str, Any] | None = None,
+        policy: Any = None,
     ) -> Any:
         """Build a fresh, non-cached AgentBackend with optional settings overrides.
 
         Used for short-lived specialist runs that should not share state with
         the main chat backend. Each call returns a new instance; nothing is
-        cached on the router.
+        cached on the router, so the caller releases it when done.
+
+        ``policy`` is a per-agent ToolPolicy, handed to a backend whose
+        ``__init__`` declares one; without it the backend builds the
+        process-wide policy from settings.
         """
         backend_cls = get_backend_class(backend_name)
         if backend_cls is None:
@@ -138,6 +157,15 @@ class AgentRouter:
         else:
             effective = settings
 
+        if policy is not None:
+            import inspect
+
+            try:
+                takes_policy = "policy" in inspect.signature(backend_cls.__init__).parameters
+            except (TypeError, ValueError):  # pragma: no cover - exotic callables
+                takes_policy = False
+            if takes_policy:
+                return backend_cls(effective, policy=policy)
         return backend_cls(effective)
 
     @asynccontextmanager
@@ -313,20 +341,25 @@ class AgentRouter:
         ):
             yield event
 
-    async def stop(self) -> None:
-        """Stop all backend instances."""
+    async def stop(self, session_key: str | None = None) -> None:
+        """Stop all backend instances.
 
-        if self._backend:
-            try:
-                await self._backend.stop()
-            except Exception as exc:
-                logger.debug("Error stopping primary backend: %s", exc)
+        With ``session_key``, a backend whose ``stop`` declares it stops only
+        that session's runs; one session's failure must not kill every other
+        session's stream on a shared backend. Backends with a bare ``stop()``
+        are stopped as before.
+        """
 
-        for backend in self._fallback_instances.values():
+        for label, backend in [("primary", self._backend), *self._fallback_instances.items()]:
+            if not backend:
+                continue
             try:
-                await backend.stop()
+                if session_key is not None and _stop_takes_session(backend):
+                    await backend.stop(session_key=session_key)
+                else:
+                    await backend.stop()
             except Exception as exc:
-                logger.debug("Error stopping fallback backend: %s", exc)
+                logger.debug("Error stopping %s backend: %s", label, exc)
 
     def get_backend_info(self) -> BackendInfo | None:
         """Return metadata about the active backend."""
