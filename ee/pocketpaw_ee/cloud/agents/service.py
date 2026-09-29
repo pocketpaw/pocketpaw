@@ -1,77 +1,47 @@
 """Agents domain — business logic service.
 
 Sole owner of writes to the ``Agent`` Beanie document. Module-level
-``async def`` API. Eager soul materialization
-(``get_agent_pool().ensure_soul``) preserved on create when
-``soul_enabled``.
+``async def`` API; a soul-enabled agent's soul is materialized eagerly on create
+(``get_agent_pool().ensure_soul``).
 
 Public API:
-- ``create(ctx, workspace_id, body)``
+- ``create`` / ``update`` / ``delete`` — ``tags``, the presentation fields and
+  ``tool_mode`` round-trip through the doc/domain mappers
 - ``get(agent_id)`` — unguarded load (internal / privileged callers only)
 - ``get_for_viewer(agent_id, workspace_id, user_id)`` — visibility-gated read
-- ``can_read_agent(doc, workspace_id, user_id)`` /
-  ``can_use_agent(doc, workspace_id, user_id)`` — the canonical visibility
-  predicate (owner always; else same-workspace + ``workspace`` visibility; else
+- ``can_read_agent`` / ``can_use_agent`` — the canonical visibility predicate
+  (owner always; else same-workspace + ``workspace`` visibility; else
   ``public``), mirroring the DM path in ``group_service.get_or_create_agent_dm``
 - ``ensure_can_read`` / ``ensure_can_use`` — raise ``NotFound`` when the caller
   may not read / attach the agent (knowledge reads + group/pocket attach)
 - ``get_by_slug(workspace_id, slug)``
-- ``list_agents(workspace_id, query=None, viewer_user_id=None)`` — pass
-  ``viewer_user_id`` on tenant reads to hide other users' ``private`` agents
-- ``update(ctx, agent_id, body)``
-- ``delete(ctx, agent_id)``
-- ``disable(ctx, agent_id)`` / ``enable(ctx, agent_id)`` — soft-disable / revoke
-  everywhere (AW-4): flips the doc's ``disabled`` flag, invalidates the run
-  pool's cached instance immediately, and emits ``AgentDisabled`` /
-  ``AgentEnabled``.
-- ``get_scopes(agent_id)``
-- ``set_scopes(agent_id, scopes)``
-- ``discover(ctx, workspace_id, body)``
+- ``list_agents(workspace_id, query=None, viewer_user_id=None,
+  include_concierges=False)`` — pass ``viewer_user_id`` on tenant reads to hide
+  other users' ``private`` agents. Site concierges are left out unless
+  ``include_concierges`` (internal readers such as the KB aggregation)
+- ``is_concierge_agent(agent)`` — is this a Paw Site's concierge agent? A
+  concierge lives on its site's concierge page, never in /agents, discover,
+  @-mentions or pickers. Marked at provisioning with the tags ``concierge`` +
+  ``site:<id>``; older ones are recognised by their immutable
+  ``concierge-<site_id>`` slug, so no backfill is needed
+- ``disable`` / ``enable`` — soft-disable / revoke everywhere: flips
+  ``disabled``, drops the run pool's cached instance, emits ``AgentDisabled`` /
+  ``AgentEnabled``; ``get_persona`` answers ``None`` for a disabled agent
+- ``get_scopes`` / ``set_scopes``
+- ``discover(ctx, workspace_id, body)`` — the gallery; ``scoped`` (default) never
+  unions in another owner's public agents
 - ``is_visible_to_site_visitors(agent_id)`` — does a Paw Bar widget bind this
   agent to a published site, i.e. do anonymous visitors reach it?
+- ``seed_default_agent`` / ``seed_code_agent`` (+ their all-workspace back-fills)
+  — the default agent and the ``code`` agent, whose tools are capped to the four
+  file tools (``tool_mode="exclusive"``)
 - ``legacy_ctx(user_id, workspace_id)`` — helper for the router
-
-Updated 2026-07-30 (Paw Bar inbox D5): added ``is_visible_to_site_visitors``.
-A concierge run now reads its own ``agent:<id>`` knowledge scope, so knowledge
-attached to a site concierge is publishable by definition; the agent knowledge
-read carries this flag so the owner is told that before they attach.
-
-Updated 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up): ``get_persona``
-now returns ``None`` for a soft-disabled agent (reusing the doc it already
-loads — no extra read), so ``agent_bridge``'s smart-relevance LLM probe never
-fires for an agent ``pool.get`` would refuse to run.
-
-Updated 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1): ``discover``
-grew a ``scoped`` flag (default True) — the default viewer union now OMITS the
-``{"visibility": "public"}`` clause so a public agent from another owner can
-never leak into the scoped gallery. Also threaded the additive presentation
-fields (``welcome_message`` / ``conversation_starters`` / ``voice`` /
-``appearance`` on config, ``tags`` on the agent) through the doc↔domain mappers,
-``create`` and ``update`` so they persist and round-trip on the wire.
-Updated 2026-07-15 (fix/agent-visibility-enforcement, ASG-7): "private means
-private" is now enforced on READS. Added the canonical visibility predicate
-``can_read_agent`` / ``can_use_agent`` and the gated entry points
-``get_for_viewer`` / ``ensure_can_read`` / ``ensure_can_use``; ``list_agents``
-grew a ``viewer_user_id`` filter. The tenant HTTP router routes reads through
-these; the unguarded ``get`` / unfiltered ``list_agents`` stay for internal
-callers. Mutation guards (``require_agent_owner_or_admin``) are unchanged.
-Updated 2026-07-24 (CX-2, feat/code-agent-exclusive-tools): ``tool_mode`` is
-threaded through the doc↔spec mappers (``_config_to_domain`` / ``_config_to_doc``)
-and the config-dict update path (``_apply_update``) so an "exclusive" policy
-round-trips and survives an update. Defaults to "additive", so every existing
-agent maps byte-for-byte as before.
-Updated 2026-07-24 (CX-3, feat/code-agent-exclusive-tools): added
-``seed_code_agent`` / ``ensure_code_agent_all_workspaces`` — the dedicated
-``code`` slug agent for the ``/code`` surface. Its config is
-``tool_mode="exclusive"`` + ``tools=_CODE_FILE_TOOL_IDS`` (the four file tools)
-and its persona reuses ``CODE_SYSTEM_PROMPT``, so every run it does is capped to
-exactly those ids — no pocket/planner/widget grant. Idempotent, mirrors the
-default-agent seed + boot back-fill.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -100,6 +70,44 @@ from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
 from pocketpaw_ee.cloud.models.agent import AgentConfig as _AgentConfigDoc
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Site concierges: agents that never appear in tenant-facing listings
+# ---------------------------------------------------------------------------
+
+#: The tag ``paw_bar.agent_provisioning`` stamps on a site's concierge agent,
+#: always together with ``site:<site_id>``. The pair is the marker: a member who
+#: tags their own agent "concierge" does not hide it.
+CONCIERGE_TAG = "concierge"
+_SITE_TAG_PREFIX = "site:"
+#: ``concierge-<site_id>``, the deterministic slug provisioning gives the agent.
+#: Slugs cannot be changed after create, so this still marks a concierge whose
+#: tags were edited away, and every concierge made before the tags existed.
+_CONCIERGE_SLUG_RE = re.compile(r"^concierge-[0-9a-f]{24}$")
+
+
+def is_concierge_agent(agent: Any) -> bool:
+    """True when ``agent`` (a doc or domain Agent) is a Paw Site's concierge."""
+    tags = [str(t) for t in (getattr(agent, "tags", None) or ())]
+    if CONCIERGE_TAG in tags and any(t.startswith(_SITE_TAG_PREFIX) for t in tags):
+        return True
+    return bool(_CONCIERGE_SLUG_RE.match(str(getattr(agent, "slug", "") or "")))
+
+
+def _not_a_concierge() -> dict[str, Any]:
+    """The Mongo clause ``is_concierge_agent`` negates, for listing queries."""
+    return {
+        "$nor": [
+            {
+                "$and": [
+                    {"tags": CONCIERGE_TAG},
+                    {"tags": {"$regex": f"^{_SITE_TAG_PREFIX}"}},
+                ]
+            },
+            {"slug": {"$regex": _CONCIERGE_SLUG_RE.pattern}},
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -442,11 +450,29 @@ async def get_by_slug(workspace_id: str, slug: str) -> Agent:
     return _to_domain(doc)
 
 
+# Longest search text used in a name match; longer input is truncated.
+QUERY_MAX_LEN = 200
+
+
+def _contains(text: str) -> dict[str, str]:
+    """Case-insensitive literal substring match. The user's text is
+    ``re.escape``d, so ``.*`` or ``(a+)+$`` match themselves and cannot
+    run a pathological regex on the server."""
+    return {"$regex": re.escape(text[:QUERY_MAX_LEN]), "$options": "i"}
+
+
+# Row cap for the tenant ``GET /agents`` listing. Generous: the response
+# carries full agent docs (config included), which the client reads.
+LIST_LIMIT = 1000
+
+
 async def list_agents(
     workspace_id: str,
     *,
     query: str | None = None,
     viewer_user_id: str | None = None,
+    include_concierges: bool = False,
+    limit: int | None = None,
 ) -> list[Agent]:
     """List a workspace's agents.
 
@@ -455,9 +481,19 @@ async def list_agents(
     agents plus any ``workspace``- or ``public``-visible agent — mirroring
     :func:`can_read_agent` scoped to the workspace. Another user's ``private``
     agents are excluded. Internal / privileged callers (planner, kb
-    aggregation) omit ``viewer_user_id`` and get every workspace agent.
+    aggregation) omit ``viewer_user_id`` and get every visibility.
+
+    Site concierges (:func:`is_concierge_agent`) are left out unless
+    ``include_concierges``: they are reached through their site, and a caller
+    that picks, lists or matches agents by name must never land on one. Only a
+    reader that genuinely needs every agent (the KB scope aggregation) opts in.
+
+    ``limit`` caps the rows (the tenant route passes ``LIST_LIMIT``); ``None``
+    is uncapped, for internal callers that need the whole roster.
     """
     filters: dict[str, Any] = {"workspace": workspace_id}
+    if not include_concierges:
+        filters.update(_not_a_concierge())
     if viewer_user_id is not None:
         filters["$or"] = [
             {"owner": viewer_user_id},
@@ -465,8 +501,13 @@ async def list_agents(
             {"visibility": "public"},
         ]
     if query:
-        filters["name"] = {"$regex": query, "$options": "i"}
-    docs = await _AgentDoc.find(filters).to_list()
+        filters["name"] = _contains(query)
+    cursor = _AgentDoc.find(filters)
+    if limit is not None:
+        # ponytail: natural order, so past the cap which agents drop is
+        # arbitrary; add a sort + cursor if a workspace ever nears it.
+        cursor = cursor.limit(limit)
+    docs = await cursor.to_list()
     return [_to_domain(d) for d in docs]
 
 
@@ -639,7 +680,9 @@ async def discover(
             union.append({"visibility": "public"})
         filters["$or"] = union
     if body.query:
-        filters["name"] = {"$regex": body.query, "$options": "i"}
+        filters["name"] = _contains(body.query)
+    # A site's concierge is never offered in the gallery.
+    filters.update(_not_a_concierge())
 
     skip = (body.page - 1) * body.page_size
     docs = await _AgentDoc.find(filters).skip(skip).limit(body.page_size).to_list()
@@ -661,12 +704,13 @@ async def _try_eager_soul(agent: Agent) -> None:
 
 async def suggest_for_mentions(workspace_id: str, q: str, *, limit: int = 8) -> list[dict]:
     """Return up to ``limit`` agents matching ``q`` against name / slug.
-    Used by the chat ``/mentions/suggest`` endpoint."""
-    aquery: dict = {"workspace": workspace_id}
+    Used by the chat ``/mentions/suggest`` endpoint. Site concierges are
+    never suggested."""
+    aquery: dict = {"workspace": workspace_id, **_not_a_concierge()}
     if q:
         aquery["$or"] = [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"slug": {"$regex": q, "$options": "i"}},
+            {"name": _contains(q)},
+            {"slug": _contains(q)},
         ]
     docs = await _AgentDoc.find(aquery).limit(limit).to_list()
     return [
@@ -980,6 +1024,7 @@ __all__ = [
     "get_by_slug",
     "get_for_viewer",
     "get_persona",
+    "is_concierge_agent",
     "get_scopes",
     "get_workspace",
     "is_owner_or_workspace_admin",

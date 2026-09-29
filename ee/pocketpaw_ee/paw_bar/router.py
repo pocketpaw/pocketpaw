@@ -620,6 +620,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -632,9 +633,11 @@ from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
@@ -830,25 +833,79 @@ def pawbar_app_dir() -> Path:
     return Path(os.environ.get("PAWBAR_APP_DIR", str(Path.home() / ".pocketpaw" / "pawbar-app")))
 
 
-def _asset_version() -> str:
-    """Cache-busting version stamp for the glass app assets.
+# The two files ``_asset_version`` stamps. Only these may be served ``immutable``.
+_VERSIONED_ASSETS = ("pawbar.js", "pawbar.css")
+# (dir, stat signature) -> version, so the hash is recomputed only when a file changes.
+_asset_version_memo: tuple[tuple[Any, ...], str] | None = None
+# Max-age for an asset request WITHOUT the current ``v``: an old frame asking for
+# a stale version, a hand-typed URL, the source map. Short, like the loader.
+_ASSET_SHORT_MAX_AGE = 300
 
-    The StaticFiles mount serves pawbar.js/css with no ``Cache-Control``, so
-    browsers fall back to heuristic freshness and can pin an embedder to a STALE
-    bundle after a deploy (bit the first live demo: a sizing fix shipped but the
-    browser kept replaying the old JS). The frame HTML appends ``?v=<newest
-    mtime>`` to both asset URLs so every deploy mints new URLs and busts every
-    embedder's cache with no server restart and no manual hard-reload. Two
-    ``stat`` calls per frame render — negligible next to the DB key lookup.
-    Returns "0" when the bundle isn't dropped in yet (assets 404 either way).
+
+def _asset_version() -> str:
+    """Cache-busting version stamp for the glass app assets: a content hash.
+
+    The frame HTML appends ``?v=<this>`` to both asset URLs, and ``PawBarAssets``
+    sends ``Cache-Control: immutable`` for a year when a request carries the
+    CURRENT value. So ``v`` must change whenever the bytes change. It is a hash of
+    both files' contents, not their mtime: a deploy that preserves or normalises
+    mtimes (``cp -p``, ``rsync -a``, reproducible builds, two writes in one
+    second) would otherwise mint new bytes under an old ``v`` and pin them for a
+    year. The hash is memoised on the files' (mtime, ctime, size): ctime is in the
+    signature because a same-size write with a preserved mtime would otherwise
+    hit the memo and keep the old hash (on Linux every write bumps ctime and
+    ``utime`` cannot reset it; on Windows ctime is creation time, dev only). A
+    frame render costs two ``stat`` calls. Returns "0" when the bundle isn't dropped in yet
+    (assets 404 either way).
     """
-    newest = 0
-    for name in ("pawbar.js", "pawbar.css"):
+    global _asset_version_memo
+    base = pawbar_app_dir()
+    sig: list[Any] = [str(base)]
+    for name in _VERSIONED_ASSETS:
         try:
-            newest = max(newest, int((pawbar_app_dir() / name).stat().st_mtime))
+            st = (base / name).stat()
+            sig.append((name, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
+        except OSError:
+            sig.append((name, None))
+    key = tuple(sig)
+    if _asset_version_memo is not None and _asset_version_memo[0] == key:
+        return _asset_version_memo[1]
+    h = hashlib.sha256()
+    found = False
+    for name in _VERSIONED_ASSETS:
+        try:
+            data = (base / name).read_bytes()
         except OSError:
             continue
-    return str(newest)
+        found = True
+        h.update(name.encode() + b"\0" + data + b"\0")
+    version = h.hexdigest()[:16] if found else "0"
+    _asset_version_memo = (key, version)
+    return version
+
+
+class PawBarAssets(StaticFiles):
+    """The StaticFiles mount for the glass app, with an explicit caching policy.
+
+    A request for ``pawbar.js`` / ``pawbar.css`` whose ``v`` query param equals the
+    CURRENT ``_asset_version()`` gets ``public, max-age=31536000, immutable``: that
+    URL can only ever name these bytes, because ``v`` is their content hash. Any
+    other request (no ``v``, a stale ``v``, any other file in the dir) gets a short
+    public max-age, so nothing can pin old bytes for long. Mounted by
+    ``ee/cloud/__init__.py``.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code not in (200, 304):
+            return response
+        v = parse_qs(scope.get("query_string", b"").decode("latin-1")).get("v", [""])[0]
+        current = _asset_version()
+        if path in _VERSIONED_ASSETS and current != "0" and v == current:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = f"public, max-age={_ASSET_SHORT_MAX_AGE}"
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -867,8 +924,21 @@ def _asset_version() -> str:
 # but a <script src> baked into a customer's deployed page has no version stamp we
 # control, so a long max-age would pin every embedder to whatever loader shipped on
 # the day their site was published. Five minutes keeps the edge useful and keeps a
-# fix at most one coffee away.
+# fix at most one coffee away. Revalidation after that is cheap: the bytes are held
+# in memory (``_widget_js_memo``, re-read only when the file's path, mtime, ctime or size
+# changes) and carry a strong ETag, so a browser's If-None-Match gets a bodiless 304.
 _WIDGET_JS_MAX_AGE = 300
+# (path, mtime_ns, ctime_ns, size, body, etag) of the last loader read. ctime is
+# there for the same reason as in ``_asset_version``'s signature.
+_widget_js_memo: tuple[str, int, int, int, bytes, str] | None = None
+
+
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    """RFC 9110 weak comparison of an If-None-Match header against ``etag``."""
+    if if_none_match.strip() == "*":
+        return True
+    tags = (t.strip() for t in if_none_match.split(","))
+    return any((t[2:] if t.startswith("W/") else t) == etag for t in tags)
 
 
 def paw_bar_widget_file() -> Path:
@@ -888,22 +958,33 @@ def paw_bar_widget_file() -> Path:
 
 
 @router.get("/paw-bar/widget.js")
-async def widget_js() -> Response:
+async def widget_js(request: Request) -> Response:
     """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
 
     No key, no Site read, no per-caller variation: this is a world-visible static
     script, and the credential (the embed key) is presented later by the iframe it
-    mounts, at ``/paw-bar/frame``. Read from disk per request rather than cached in
-    memory so replacing the file takes effect without a restart — the file is a few
-    KB and the OS page cache absorbs the repeat reads.
+    mounts, at ``/paw-bar/frame``. Held in memory and invalidated by a ``stat`` per
+    request (path, mtime, ctime, size), not only at startup: replacing the file, or
+    pointing ``PAW_BAR_WIDGET_JS`` somewhere else, still takes effect without a
+    restart, and a stat is far cheaper than the read it saves. A matching
+    ``If-None-Match`` gets a 304.
 
     A missing bundle is a clean 404 naming the env var that fixes it, not a
     FileNotFoundError escaping as an opaque 500: the operator seeing this is
     debugging why a live site shows no bar, and the message is the answer.
     """
+    global _widget_js_memo
     path = paw_bar_widget_file()
     try:
-        body = path.read_bytes()
+        st = path.stat()
+        memo = _widget_js_memo
+        sig = (str(path), st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+        if memo is not None and memo[:4] == sig:
+            body, etag = memo[4], memo[5]
+        else:
+            body = path.read_bytes()
+            etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+            _widget_js_memo = (*sig, body, etag)
     except OSError:
         logger.warning("paw-bar: loader bundle unavailable at %s", path)
         raise HTTPException(
@@ -914,10 +995,13 @@ async def widget_js() -> Response:
                 "pocketpaw_ee/paw_bar/static/paw-bar.js."
             ),
         ) from None
+    headers = {"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}", "ETag": etag}
+    if _etag_matches(request.headers.get("if-none-match", ""), etag):
+        return Response(status_code=304, headers=headers)
     return Response(
         content=body,
         media_type="application/javascript; charset=utf-8",
-        headers={"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}"},
+        headers=headers,
     )
 
 
@@ -1278,6 +1362,7 @@ def _pawbar_frame_config(
     greeting: str,
     starters: list[str] | None = None,
     appearance: ConciergeAppearance | None = None,
+    concierge_name: str = "",
     preview: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
@@ -1300,6 +1385,10 @@ def _pawbar_frame_config(
     renders the defaults, which reproduce the look every bar had before this
     existed — so a Site nobody has styled is byte-identical to before apart from
     the token map now carrying the base values explicitly.
+
+    ``concierge_name`` is the owner's guided name (``Site.concierge_name``). The
+    header shows the look editor's own ``agent_name`` when set, else this name,
+    so a concierge named in setup is not headed "Concierge" by the widget.
     """
     look = appearance or ConciergeAppearance()
     return {
@@ -1342,7 +1431,7 @@ def _pawbar_frame_config(
         "theme": look.surface_mode,
         # How the docked bar rests — narrow-and-widens-on-hover, or full width.
         "barResting": look.bar_resting,
-        "agentName": look.agent_name,
+        "agentName": look.agent_name or (concierge_name or "").strip(),
         "agentSubtitle": look.agent_subtitle,
         "agentAvatar": look.agent_avatar_url,
         "avatars": list(look.team_avatar_urls),
@@ -1471,6 +1560,34 @@ def _dashboard_origin() -> str:
     return os.environ.get("PAWBAR_DASHBOARD_ORIGIN", "").strip() or "http://localhost:5173"
 
 
+# How long a browser may reuse a rendered public frame, and how long this process
+# reuses a successful key -> Site lookup for it. The iframe reloads on every host-page
+# navigation, so without these each customer page view costs a Mongo read and a full
+# render. ``private`` because the frame is safe to cache per browser but not in a
+# shared cache (see ``frame``). The cost is lag: an owner turning the concierge off,
+# an entitlement lapsing, an appearance edit, or a key revocation reaches an open
+# frame within ``_FRAME_SITE_TTL_S`` + ``_FRAME_MAX_AGE_S`` (90 s worst case).
+# ``POST /paw-bar/chat`` does its own uncached lookup, so it refuses immediately.
+_FRAME_MAX_AGE_S = 60
+_FRAME_SITE_TTL_S = 30.0
+# signed_key -> (monotonic expiry, Site). Successes only: an unknown key raises and
+# is never stored, so a caller spraying random keys cannot grow this.
+_frame_site_memo: dict[str, tuple[float, Any]] = {}
+
+
+async def _frame_site_lookup(key: str) -> Any:
+    """``lookup_site_by_key`` memoised for ``_FRAME_SITE_TTL_S`` (the frame only)."""
+    from pocketpaw_ee.cloud.auth import site_keys
+
+    now = time.monotonic()
+    hit = _frame_site_memo.get(key) if isinstance(key, str) else None
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    site = await site_keys.lookup_site_by_key(key)
+    _frame_site_memo[key] = (now + _FRAME_SITE_TTL_S, site)
+    return site
+
+
 @router.get("/paw-bar/frame")
 async def frame(
     request: Request,
@@ -1501,11 +1618,12 @@ async def frame(
     the real controls stay the rate-limit + injection screen + the zero-authority
     CONCIERGE scope. CSP does not close the curl path.
     """
-    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, lookup_site_by_key
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available
 
     # (1) Authenticate the embed key. A missing/blank ``key`` query param is a
     # too-short key → 401 (never a 422), so the refusal is uniform with the chat path.
-    site = await lookup_site_by_key(key)
+    # Memoised for ``_FRAME_SITE_TTL_S``; failures are never memoised.
+    site = await _frame_site_lookup(key)
 
     # (1b) Kill switch (D1 / SS-6): the owner's ``concierge_enabled`` toggle. When
     # off, refuse to RENDER — but this response body lands inside a visible
@@ -1513,8 +1631,9 @@ async def frame(
     # (the 2026-07-30 rig showed literal {"detail":"concierge_disabled"} on the
     # page). Return the invisible shell: a blank document that tells the loader
     # to remove the iframe (``pawbar:dead``). Still 403 — curl callers see the
-    # status; browsers see nothing. Re-read per request (``lookup_site_by_key``
-    # does a fresh find_one), so toggling off silences the frame immediately.
+    # status; browsers see nothing. The Site comes from ``_frame_site_lookup``, so
+    # toggling off silences a frame within its TTL plus the browser's max-age
+    # (the dead shell itself is ``no-store``, so turning it back on is not delayed).
     # Distinct from ``revoked`` (which cuts the KEY at 401 inside
     # lookup_site_by_key — an api-shaped JSON 401 stays correct there: a revoked
     # key means the embed script itself is stale/removed on next publish).
@@ -1555,18 +1674,22 @@ async def frame(
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
         starters=await _time_boxed_frame_starters(site, w),
-        # Read off the Site every request, never cached, so an owner saving a
-        # colour sees it on the next reload rather than after a redeploy.
+        # Read off the (briefly memoised) Site, so an owner saving a colour sees
+        # it within ``_FRAME_SITE_TTL_S`` + ``_FRAME_MAX_AGE_S``, not after a redeploy.
         appearance=getattr(site, "concierge_appearance", None),
+        concierge_name=getattr(site, "concierge_name", "") or "",
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
         content=html,
         headers={
             "Content-Security-Policy": _frame_csp(csp),
-            # The embed key is baked into the loader HTML per-embedder; the frame
-            # doc itself must not be cached across keys/parents by a shared proxy.
-            "Cache-Control": "no-store",
+            # Every input that varies this document (key, w, po) is in the URL;
+            # the rest is the Site's own state. No cookie, no per-visitor field,
+            # no CSP nonce. So a browser may reuse it. ``private``, never
+            # ``public``: a shared proxy must still not store it, which was the
+            # reason this header was ``no-store`` before.
+            "Cache-Control": f"private, max-age={_FRAME_MAX_AGE_S}",
         },
     )
 
@@ -2179,11 +2302,18 @@ async def update_site_concierge_settings(
     # agent whenever it set concierge_enabled=true; turning a switch on is not
     # creating a concierge, and on a site with none the switch stays inert
     # (``concierge_available`` also requires the create marker).
+    previous_name = getattr(site, "concierge_name", "") or ""
     for name in req.model_fields_set:
         value = getattr(req, name)
         if value is not None:
             setattr(site, name, value)
     await site.save()
+    # A legacy concierge answers through its dedicated agent: carry a new name
+    # onto it (only where its name and persona are still the generated ones).
+    if (getattr(site, "concierge_name", "") or "") != previous_name:
+        from pocketpaw_ee.paw_bar.agent_provisioning import sync_concierge_identity
+
+        await sync_concierge_identity(site, previous_name)
     return await _concierge_settings_response(site, workspace_id, str(user.id))
 
 
@@ -3986,6 +4116,7 @@ async def get_site_preview_frame(
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id, workspace_id=workspace_id),
         appearance=getattr(site, "concierge_appearance", None),
+        concierge_name=getattr(site, "concierge_name", "") or "",
         preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
@@ -5082,10 +5213,13 @@ async def get_spec(
     if not _origin_allowed(widget, origin):
         raise HTTPException(403, "Origin not allowed for this widget")
 
-    headers: dict[str, str] = {}
+    # The spec is the widget's, identical for every visitor, so shared caches may
+    # hold it briefly. ``Vary: Origin`` goes on EVERY response, not only those with
+    # an Origin: a cache that stored an origin-less reply (no ACAO) must not replay
+    # it to a cross-origin fetch. Errors stay uncached.
+    headers: dict[str, str] = {"Cache-Control": "public, max-age=60", "Vary": "Origin"}
     if origin:
         headers["Access-Control-Allow-Origin"] = origin
-        headers["Vary"] = "Origin"
     return JSONResponse(widget.spec.model_dump(), headers=headers)
 
 

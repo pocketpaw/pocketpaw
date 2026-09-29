@@ -1,10 +1,12 @@
 # ee/pocketpaw_ee/paw_bar/concierge_prompt.py — the owner's guided fields, rendered.
 #
-# Created 2026-09-28 (feat/concierge-guided-fields, CR-4). ``render_owner_block``
-# turns a site's guided fields (``pocketpaw.paw_bar.concierge_fields``) into the
-# ``<owner-settings>`` block of a v2 concierge request. The block rides in the
-# DATA half of the request (``concierge_runtime.build_prompt``), never in the
-# frame: FRAME and FRAME_DOC_CODE stay byte-for-byte constants.
+# ``render_owner_block`` turns a site's guided fields
+# (``pocketpaw.paw_bar.concierge_fields``) into the ``<owner-settings>`` block. The
+# v2 runtime puts it first in the DATA half of the request
+# (``concierge_runtime.build_prompt``), never in the frame: FRAME and
+# FRAME_DOC_CODE stay byte-for-byte constants and point the model at this block
+# for its name, tone and manner. The legacy runtime appends the same block to a
+# concierge run's instructions (``cloud.chat.agent_service``).
 #
 # Every sentence is ours and fixed. Owner free text only ever appears as a value
 # inside «guillemets», folded to one line, with its own guillemets and angle
@@ -69,7 +71,11 @@ def render_owner_block(site: Any) -> str:
 
     name = one_line(str(getattr(site, "concierge_name", "") or ""))
     if name:
-        lines.append(f"Your name is {quote(name, NAME_MAX_CHARS)}.")
+        quoted = quote(name, NAME_MAX_CHARS)
+        lines.append(
+            f"Your name is {quoted}. Introduce yourself as {quoted} when you greet the "
+            "visitor or when they ask who you are."
+        )
 
     tone = _TONE_SENTENCES.get(str(getattr(site, "concierge_tone", "") or ""))
     if tone:

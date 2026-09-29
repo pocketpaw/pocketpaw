@@ -1163,15 +1163,17 @@ class AgentPool:
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
         from pocketpaw.agents.registry import _LEGACY_BACKENDS, get_backend_class
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
         from pocketpaw.llm.providers.base import route_model
         from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
         config = agent_doc.config.model_dump()
 
-        # Clone settings and override with agent config
-        settings = Settings.load()
+        # Clone the cached settings (``Settings.load()`` re-parses config + env
+        # on every build) and override with agent config. Deep copy: the cached
+        # instance is shared process-wide and is mutated below.
+        settings = get_settings().model_copy(deep=True)
         # The literal stays ``claude_agent_sdk`` on purpose, and is NOT the
         # cloud default (``pocketpaw_ee.cloud.agents.defaults``, which OSS core
         # cannot import anyway). ``AgentConfig`` carries a default, so

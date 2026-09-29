@@ -127,7 +127,7 @@ async def _list_workspace_agent_ids(workspace_id: str) -> list[str]:
     ``ee.cloud.models.agent``."""
     from pocketpaw_ee.cloud.agents import service as agents_service
 
-    agents = await agents_service.list_agents(workspace_id)
+    agents = await agents_service.list_agents(workspace_id, include_concierges=True)
     return [a.id for a in agents]
 
 

@@ -61,4 +61,6 @@ class Group(TimestampedDocument):
         name = "groups"
         indexes = [
             [("workspace", 1), ("slug", 1)],
+            # "Groups this user is in": unread listing and room membership.
+            [("workspace", 1), ("members", 1), ("archived", 1)],
         ]

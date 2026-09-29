@@ -63,10 +63,10 @@ def get_stream_transport() -> RunStreamTransport:
 
             _transport = InMemoryStreamTransport()
         elif backend == "redis":
-            from pocketpaw_ee.cloud._core.redis_client import get_redis
+            from pocketpaw_ee.cloud._core.redis_client import get_blocking_redis, get_redis
             from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport
 
-            _transport = RedisStreamTransport(get_redis())
+            _transport = RedisStreamTransport(get_redis(), blocking_redis=get_blocking_redis())
         else:
             raise RuntimeError(f"unknown POCKETPAW_CLOUD_STREAM_TRANSPORT={backend!r}")
     return _transport

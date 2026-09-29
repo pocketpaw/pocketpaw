@@ -1,13 +1,12 @@
 """Notification service — CRUD + realtime fan-out.
 
-Updated: 2026-07-08 (feat/external-alerting-delivery) — ``create`` now also
-fans the new notification OUT of the app: right after the in-app realtime
-``emit(NotificationNew(...))`` it awaits ``delivery._deliver_external(created)``,
-which POSTs to the workspace's configured Slack incoming-webhook and/or generic
-HTTPS webhook. That call is never-raise, so a dead sink can't roll back the
-insert. Added ``get_delivery_config`` / ``set_delivery_config`` — this service is
-the SOLE writer of the ``NotificationDeliveryConfig`` doc (upsert), fronted by
-the PUT /notifications/delivery-config route.
+Besides the in-app realtime ``emit(NotificationNew(...))``, new notifications
+fan OUT of the app to the workspace's Slack / generic webhook
+(``notifications/delivery.py``, never-raise, so a dead sink can't roll back the
+insert). ``create`` awaits that inline; ``create_many`` schedules it in a
+bounded background task. This service is the SOLE writer of the
+``NotificationDeliveryConfig`` doc (upsert), fronted by the PUT
+/notifications/delivery-config route.
 
 Sole owner of writes to the ``Notification`` Beanie document. Writes are
 inline; there is no separate repository layer. Tests use the shared
@@ -17,6 +16,8 @@ fake.
 Public API is module-level ``async def`` functions:
 
 - ``create(...)`` — insert a notification, emit ``NotificationNew``, fan out
+- ``create_many(...)`` — the same for many recipients: one ``insert_many``, the
+  external fan-out in a bounded background task (one config read per batch)
 - ``list_for_user(user_id)`` — list domain ``Notification`` objects
 - ``list_for_user_dicts(user_id)`` — list of legacy wire-format dicts
 - ``mark_read(notification_id, user_id)`` — flip the read flag, emit
@@ -42,9 +43,14 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     NotificationNew,
     NotificationRead,
 )
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
 from pocketpaw_ee.cloud.models.notification import NotificationSource as _NotificationSourceDoc
-from pocketpaw_ee.cloud.notifications.delivery import _deliver_external, is_safe_webhook_url
+from pocketpaw_ee.cloud.notifications.delivery import (
+    _deliver_external,
+    is_safe_webhook_url,
+    schedule_external_many,
+)
 from pocketpaw_ee.cloud.notifications.domain import Notification, NotificationSource
 from pocketpaw_ee.cloud.notifications.dto import notification_to_dto
 
@@ -138,6 +144,52 @@ async def create(
     # External fan-out (Slack / generic webhook). Never-raise: a dead sink must
     # not roll back the insert or the emit above. See notifications/delivery.py.
     await _deliver_external(created)
+    return created
+
+
+async def create_many(
+    *,
+    workspace_id: str,
+    recipients: list[str],
+    kind: str,
+    title: str,
+    body: str = "",
+    source: _NotificationSourceDoc | NotificationSource | None = None,
+    actor_id: str | None = None,
+    deliver_external: bool = True,
+) -> list[Notification]:
+    """``create`` for many recipients of the same notification: one
+    ``insert_many``, one ``NotificationNew`` per recipient (as ``create`` emits),
+    and ONE background external delivery for the batch (one config read, off
+    the caller's request path). A caller creating several batches for one event
+    passes ``deliver_external=False`` and hands them all to
+    ``schedule_external_many`` itself, so the config is read once."""
+    if not recipients:
+        return []
+    src = _source_to_doc(source)
+    # Beanie's insert_many writes no ids back and skips the Insert hook, so the
+    # id is minted here; ``createdAt`` comes from its default_factory.
+    docs = [
+        _NotificationDoc(
+            id=PydanticObjectId(),
+            workspace=workspace_id,
+            recipient=recipient,
+            actor=actor_id,
+            type=kind,
+            title=title,
+            body=body,
+            source=src,
+            read=False,
+        )
+        for recipient in recipients
+    ]
+    await _NotificationDoc.insert_many(docs)
+    created = [_to_domain(doc) for doc in docs]
+    await map_bounded(
+        created, lambda n: emit(NotificationNew(data=notification_to_dto(n).model_dump()))
+    )
+    if deliver_external:
+        schedule_external_many(created)
     return created
 
 

@@ -1,0 +1,352 @@
+[
+  {
+    "label": "presence: a second process's connect counts as a first connection",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "        return await registry.add(ws, user_id) == 1",
+    "replace": "        return await registry.add(ws, user_id) >= 1",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_second_process_connect_is_not_a_first_connection",
+      "tests/cloud/realtime/test_presence_cross_process.py::test_racing_connects_yield_exactly_one_first"
+    ]
+  },
+  {
+    "label": "presence: connect no longer prunes a crashed process's members",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. ARGV[3])",
+    "replace": "-- no pruning",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_crashed_process_members_expire"
+    ]
+  },
+  {
+    "label": "presence: reads trust members whatever their heartbeat age",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "pipe.zrangebyscore(self._key(uid), time.time() - self._stale, \"+inf\")",
+    "replace": "pipe.zrangebyscore(self._key(uid), \"-inf\", \"+inf\")",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_crashed_process_members_expire"
+    ]
+  },
+  {
+    "label": "presence: a process counts its own sockets as online elsewhere",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "if any(not str(m).startswith(mine) for m in members or ())",
+    "replace": "if any(True for m in members or ())",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_user_on_a_only_is_online_from_b"
+    ]
+  },
+  {
+    "label": "presence: every disconnect reads as the last one",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "    return user_id if left == 0 else None",
+    "replace": "    return user_id",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_last_disconnect_across_processes_is_reported_once",
+      "tests/cloud/realtime/test_presence_cross_process.py::test_endpoint_announces_only_a_cluster_wide_first_and_last"
+    ]
+  },
+  {
+    "label": "presence: the heartbeat writes a stale score",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "            pipe.zadd(key, {member: now})",
+    "replace": "            pipe.zadd(key, {member: 0})",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_heartbeat_keeps_a_live_process_online",
+      "tests/cloud/realtime/test_presence_cross_process.py::test_background_heartbeat_task_refreshes"
+    ]
+  },
+  {
+    "label": "presence: a socket the manager already pruned keeps its cluster member",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "    last_here = await manager.disconnect(ws)\n    registry = _for(manager)",
+    "replace": "    last_here = await manager.disconnect(ws)\n    if last_here is None:\n        return None\n    registry = _for(manager)",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_disconnect_removes_member_the_manager_already_pruned"
+    ]
+  },
+  {
+    "label": "presence: inprocess mode builds a Redis registry",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "    if not broadcast.is_enabled():\n        return None\n    if _registry is None:",
+    "replace": "    if False:\n        return None\n    if _registry is None:",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_inprocess_mode_makes_no_redis_calls"
+    ]
+  },
+  {
+    "label": "presence: a Redis failure on connect fails the socket",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/presence.py",
+    "find": "        logger.warning(\"presence connect failed; using this process's view\", exc_info=True)\n        return was_offline_here",
+    "replace": "        raise",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_redis_failure_falls_back_to_this_process"
+    ]
+  },
+  {
+    "label": "router: the grace timer only looks at this process",
+    "file": "ee/pocketpaw_ee/cloud/chat/router.py",
+    "find": "            if await presence.is_online(manager, user_id):",
+    "replace": "            if manager.is_online(user_id):",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_grace_timer_skips_offline_when_user_is_on_another_process"
+    ]
+  },
+  {
+    "label": "router: the connect snapshot only looks at this process",
+    "file": "ee/pocketpaw_ee/cloud/chat/router.py",
+    "find": "        online = await presence.online_among(manager, list(peer_ids))",
+    "replace": "        online = {p for p in peer_ids if manager.is_online(p)}",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_endpoint_snapshot_includes_peers_on_other_processes"
+    ]
+  },
+  {
+    "label": "router: the online announcement only looks at this process",
+    "file": "ee/pocketpaw_ee/cloud/chat/router.py",
+    "find": "    was_offline_before = await presence.connect(manager, websocket, user_id)",
+    "replace": "    was_offline_before = not manager.is_online(user_id)\n    await manager.connect(websocket, user_id)",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_endpoint_announces_only_a_cluster_wide_first_and_last"
+    ]
+  },
+  {
+    "label": "router: the offline timer starts when this process's last socket goes",
+    "file": "ee/pocketpaw_ee/cloud/chat/router.py",
+    "find": "        last_user = await presence.disconnect(manager, websocket)",
+    "replace": "        last_user = await manager.disconnect(websocket)",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_endpoint_announces_only_a_cluster_wide_first_and_last"
+    ]
+  },
+  {
+    "label": "dispatch: a user on another process never gets the WS frame",
+    "file": "ee/pocketpaw_ee/cloud/push/dispatch.py",
+    "find": "    if live_elsewhere:\n        await _relay_over_ws(user_id, payload)",
+    "replace": "    if False:\n        await _relay_over_ws(user_id, payload)",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_notify_on_a_reaches_user_on_b_over_ws_not_web_push"
+    ]
+  },
+  {
+    "label": "dispatch: a user on another process also gets Web Push",
+    "file": "ee/pocketpaw_ee/cloud/push/dispatch.py",
+    "find": "    if live_elsewhere:\n        # Delivered by the process holding the user's sockets.",
+    "replace": "    if False:\n        # Delivered by the process holding the user's sockets.",
+    "tests": [
+      "tests/cloud/realtime/test_presence_cross_process.py::test_notify_on_a_reaches_user_on_b_over_ws_not_web_push"
+    ]
+  },
+  {
+    "label": "lease: SET without NX, so every contender takes it",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "redis.set(self.key, self.owner, nx=True, px=self._ttl_ms)",
+    "replace": "redis.set(self.key, self.owner, px=self._ttl_ms)",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_only_one_of_two_contenders_runs_the_loop",
+      "tests/cloud/test_multiworker_leases.py::test_leased_with_the_switch_on_runs_on_one_process"
+    ]
+  },
+  {
+    "label": "lease: renewal extends a lease someone else owns",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "if redis.call('GET', KEYS[1]) == ARGV[1] then\n  return redis.call('PEXPIRE'",
+    "replace": "if true then\n  return redis.call('PEXPIRE'",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_only_one_of_two_contenders_runs_the_loop"
+    ]
+  },
+  {
+    "label": "lease: release deletes a successor's lease",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "if redis.call('GET', KEYS[1]) == ARGV[1] then\n  return redis.call('DEL'",
+    "replace": "if true then\n  return redis.call('DEL'",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_a_stalled_holder_cannot_release_its_successors_lease"
+    ]
+  },
+  {
+    "label": "lease: no background renewal",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "        self._task = asyncio.create_task(self._run())",
+    "replace": "        self._task = None",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_renewal_keeps_the_lease_past_its_ttl",
+      "tests/cloud/test_multiworker_leases.py::test_stopping_the_holder_hands_the_loop_over"
+    ]
+  },
+  {
+    "label": "lease: an unreachable Redis counts as holding the lease",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "            logger.warning(\"lease %s: acquire/renew failed\", self.key, exc_info=True)\n            return self.held",
+    "replace": "            self._valid_until = time.monotonic() + 60\n            return True",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_no_contender_runs_while_redis_is_down",
+      "tests/cloud/test_multiworker_leases.py::test_holder_stops_its_loop_when_redis_goes_down"
+    ]
+  },
+  {
+    "label": "lease: losing the lease leaves the loop running",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "        elif not self.held and self._running:",
+    "replace": "        elif False:",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_holder_stops_its_loop_when_redis_goes_down",
+      "tests/cloud/test_multiworker_leases.py::test_stopping_the_holder_hands_the_loop_over"
+    ]
+  },
+  {
+    "label": "lease: per-host leases share one cluster key",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "        self.key = f\"{prefix}{name}:{host}\" if per_host else f\"{prefix}{name}\"",
+    "replace": "        self.key = f\"{prefix}{name}\"",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_per_host_lease_is_keyed_by_hostname"
+    ]
+  },
+  {
+    "label": "leased: single-process mode takes a Redis lease",
+    "file": "ee/pocketpaw_ee/cloud/_core/lease.py",
+    "find": "        if not multi_worker_enabled():\n            await self._start()\n            return",
+    "replace": "        if False:\n            await self._start()\n            return",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_leased_with_the_switch_off_runs_directly_without_redis"
+    ]
+  },
+  {
+    "label": "sweeper: ticks ignore the leases",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "        if not may_run(lease):\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_sweeper_skips_cluster_sweeps_when_another_process_holds_the_lease"
+    ]
+  },
+  {
+    "label": "sweeper: the jail GC shares the cluster lease instead of a per-host one",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "    _jail_lease = gate(\"agent_jail_gc\", per_host=True)",
+    "replace": "    _jail_lease = gate(\"run_sweeper\")",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_sweeper_skips_cluster_sweeps_when_another_process_holds_the_lease"
+    ]
+  },
+  {
+    "label": "sweeper: the boot pass runs every sweep regardless of the leases",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "    await _run_sweeps(boot=True)\n    _sweeper_task = asyncio.create_task(_sweeper_loop())",
+    "replace": "    for fn in sum(_sweeps(), []):\n        await fn()\n    _sweeper_task = asyncio.create_task(_sweeper_loop())",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_sweeper_skips_cluster_sweeps_when_another_process_holds_the_lease"
+    ]
+  },
+  {
+    "label": "autopilot: a non-holder keeps an announced loop",
+    "file": "ee/pocketpaw_ee/cloud/mandates/autopilot.py",
+    "find": "    if not runs_here():\n        await stop_autopilot(mandate_id)\n        return",
+    "replace": "    if False:\n        await stop_autopilot(mandate_id)\n        return",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_autopilot_change_stops_the_loop_on_a_non_holder"
+    ]
+  },
+  {
+    "label": "autopilot: the holder never stops an announced loop",
+    "file": "ee/pocketpaw_ee/cloud/mandates/autopilot.py",
+    "find": "    if row is None:\n        await stop_autopilot(mandate_id)",
+    "replace": "    if False:\n        await stop_autopilot(mandate_id)",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_autopilot_change_starts_the_loop_on_the_holder"
+    ]
+  },
+  {
+    "label": "autopilot: every process thinks it runs the loops",
+    "file": "ee/pocketpaw_ee/cloud/mandates/autopilot.py",
+    "find": "    return _singleton is None or _singleton.held",
+    "replace": "    return True",
+    "tests": [
+      "tests/cloud/test_multiworker_leases.py::test_autopilot_runs_here_follows_the_lease"
+    ]
+  },
+  {
+    "label": "autopilot: the service starts a loop on a non-holder",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        if autopilot_mod.runs_here():",
+    "replace": "        if True:",
+    "tests": [
+      "tests/cloud/test_belt_autopilot.py::test_autopilot_start_runs_the_loop_only_on_the_lease_holder"
+    ]
+  },
+  {
+    "label": "autopilot: the service never announces a change",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    autopilot_mod.announce_change(mandate_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_autopilot.py::test_autopilot_start_runs_the_loop_only_on_the_lease_holder"
+    ]
+  },
+  {
+    "label": "cache: a settings write stays on this process",
+    "file": "src/pocketpaw/cache_invalidation.py",
+    "find": "        _notify(SETTINGS)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_settings_write_on_a_clears_b",
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_remote_hook_gets_the_cache_name_unless_local_only"
+    ]
+  },
+  {
+    "label": "cache: a skill install stays on this process",
+    "file": "src/pocketpaw/cache_invalidation.py",
+    "find": "        _notify(SKILLS)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_skill_install_on_a_reloads_b"
+    ]
+  },
+  {
+    "label": "cache: a failing relay fails the settings write",
+    "file": "src/pocketpaw/cache_invalidation.py",
+    "find": "        _REMOTE(name)\n    except Exception:",
+    "replace": "        _REMOTE(name)\n    except ZeroDivisionError:",
+    "tests": [
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_a_failing_remote_hook_never_fails_the_write"
+    ]
+  },
+  {
+    "label": "cache: a receiver relays the settings drop again",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "cache_invalidation.clear_settings_cache(local_only=True)",
+    "replace": "cache_invalidation.clear_settings_cache(local_only=False)",
+    "tests": [
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_settings_write_on_a_clears_b"
+    ]
+  },
+  {
+    "label": "cache: a receiver relays the skills reload again",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "cache_invalidation.reload_skills(local_only=True)",
+    "replace": "cache_invalidation.reload_skills(local_only=False)",
+    "tests": [
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_skill_install_on_a_reloads_b"
+    ]
+  },
+  {
+    "label": "cache: the skill installer reloads only this process",
+    "file": "src/pocketpaw/skills/installer.py",
+    "find": "        reload_skills()\n        return installed",
+    "replace": "        from pocketpaw.skills.loader import get_skill_loader\n\n        get_skill_loader().reload()\n        return installed",
+    "tests": [
+      "tests/cloud/realtime/test_oss_cache_invalidation.py::test_installer_uses_the_cross_process_reload"
+    ]
+  },
+  {
+    "label": "sweeper: the boot pass runs the tenant-key backfill, so a down LiteLLM proxy holds startup for every mint's timeout",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "            if boot and fn.__name__ in _TICK_ONLY_SWEEPS:\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py::test_the_boot_pass_skips_the_backfill_and_the_tick_runs_it"
+    ]
+  }
+]

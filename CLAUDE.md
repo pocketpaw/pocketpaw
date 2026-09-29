@@ -242,7 +242,17 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   `POCKETPAW_CLOUD_STREAM_TRANSPORT` (`redis` default — adapter selector for
   future non-Redis backends like NATS JetStream);
   `POCKETPAW_CLOUD_RUN_STREAM_TTL` (default `3600`, the Redis Stream retention
-  after a run terminates);
+  after a run terminates; every append also sets `EXPIRE NX` of run timeout +
+  120s grace + this value, so a stream orphaned by a killed worker still
+  expires, and a TTL already on the key is never overwritten);
+  `POCKETPAW_REDIS_MAX_CONNECTIONS` (default `128`, the shared non-blocking
+  pool for short commands: ws tickets, cancel keys, session revocation, rate
+  limits, arq enqueue; exhaustion raises at once);
+  `POCKETPAW_REDIS_STREAM_MAX_CONNECTIONS` (default `512`, a separate
+  `BlockingConnectionPool` used only by `XREAD`/`XREADGROUP BLOCK` — the SSE
+  run-stream reader and the xproc consumer — roughly one per open SSE stream
+  per process; an over-limit reader waits up to 5s, then fails with a
+  ConnectionError without touching the shared pool);
   `POCKETPAW_CLOUD_RUN_JOB_TIMEOUT` (default `1800` = 30 min, the arq per-run
   job timeout — arq's own default is 300s, which cancels a long agent run
   mid-generation, so a big coding task halts after ~5 min; lift it for long
@@ -446,6 +456,57 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   guard read is `is_multi_tenant_cloud()` in `ee/pocketpaw_ee/cloud/shared/db.py`
   (one name for the `get_client() is not None` check).
 - **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
+- **Realtime across web processes (`POCKETPAW_REALTIME_BUS`)**: `inprocess`
+  (default) or `redis-streams`. Sockets live in the process that accepted them,
+  so running more than one web process (`uvicorn --workers N`, or replicas)
+  needs `redis-streams`, set on the web service AND the worker (web first or
+  both at once: a worker alone on it sends agent replies to a stream no
+  `inprocess` web process reads; without `POCKETPAW_REDIS_URL` it falls back
+  to `inprocess` with a warning). Then
+  `_core/realtime/broadcast.py` relays socket frames (bus audiences,
+  `broadcast_to_group`, `send_to_room`, worker ws envelopes) through the
+  `cloud:realtime:broadcast` stream, which each process reads with its OWN
+  consumer group (broadcast; a process skips frames it published). Bus
+  handlers are never relayed and worker bus envelopes stay on xproc's SHARED
+  `cloud-web` group, so side effects (agent runs, push, calendar) still fire
+  once. A process creates its group at startup, destroys it on clean shutdown,
+  and reaps siblings' groups idle over 10 minutes. The same stream carries
+  `cache.invalidate` (`register_invalidator` / `broadcast_invalidate`), wired
+  for API-key revocation, member action overrides, the settings cache and the
+  skill loader. The OSS side reaches it without importing EE:
+  `pocketpaw.cache_invalidation.clear_settings_cache()` / `reload_skills()`
+  clear locally and call a remote hook that `mount_cloud` installs
+  (`_wire_oss_cache_invalidation`); new settings/skill write paths should call
+  those, not `get_settings.cache_clear()` / `loader.reload()`. Skills live on
+  local disk, so a reload on another HOST finds only that host's skills.
+  The same knob is the multi-worker switch for two more things:
+  **Presence** (`_core/realtime/presence.py`): a Redis sorted set per user
+  (`presence:{user}`), one member per socket scored by its process's 30s
+  heartbeat; members older than 90s are ignored and pruned, so a crashed
+  process's sockets age out. Until they do (up to 90s), they still count: a
+  user whose real last socket closes meanwhile gets no `presence.offline`,
+  and none is emitted when the stale members expire.
+  Connect/disconnect are single Lua scripts, so `presence.online` /
+  `presence.offline` fire once cluster-wide. The router's first/last verdicts,
+  the connect snapshot, the grace timer and push dispatch read it; a
+  notification for a user whose socket is on another process is relayed to
+  that process instead of going out as Web Push (the zero-accept Web Push
+  fallback does not cover remote sockets). **Leases** (`_core/lease.py`):
+  every scheduled loop (the `POCKETPAW_CLOUD_SCHEDULER_ENABLED` set in
+  `mount_cloud`, the pocket refresh and temporal schedulers, meeting-job
+  recovery, the 5-minute sweeper) runs on the process holding its Redis lease
+  (`SET NX PX`, renewed every ttl/3, compare-and-delete on shutdown); losing
+  it stops the loop, and with Redis down nothing runs. The agent-jail GC and
+  the decisions reconciler/action sweeper (local SQLite) lease per HOST.
+  Mandate autopilot toggles handled on a non-holder are relayed to the holder.
+  Per process by design: the activity buffer and push coalescing (each process
+  buffers/coalesces only what it handles; a Mission Control read on another
+  process sees a partial feed), the xproc consumer, the dev-server reaper.
+  **Rollout:** set `POCKETPAW_REDIS_URL`, then `POCKETPAW_REALTIME_BUS=redis-streams`
+  on the web service (and worker) while still at one web process; confirm the
+  broadcast group, `presence:*` keys and `lease:*` keys appear; only then raise
+  `uvicorn --workers` or the replica count. Rolling back is the reverse: drop
+  to one process first. Design: workspace `docs/design/plans/pocketpaw/2026-09-04-redis-utilization-audit.md` §1-2.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP

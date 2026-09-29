@@ -1035,6 +1035,14 @@ class ScopeContext:
     # array as "this pocket is an empty shell"). ``None`` when the chat
     # isn't anchored to a pocket — no block, behavior unchanged.
     pocket_summary: dict[str, Any] | None = None
+    # A public concierge run's <owner-settings> block: the site owner's guided
+    # fields (the concierge's name, tone, languages, topics to avoid, escalation),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` with every owner
+    # value quoted. ``_resolve_concierge`` fills it from the site;
+    # ``build_behavior_instructions`` appends it, so the legacy runtime hears the
+    # same settings as v2, including a name set after the agent's soul was born.
+    # ``None`` (every other scope, or a site with no guided field set) adds nothing.
+    concierge_owner_block: str | None = None
     # CS-13 — the per-send model override the client's composer picker chose for
     # THIS turn. ``execute_run`` copies it off ``RunSpec.model_override`` onto the
     # ctx it rebuilds; ``_drive_agent_loop`` forwards it into ``AgentPool.run`` only
@@ -1699,7 +1707,29 @@ async def _resolve_concierge(
         pocket_id=scope_id,
         pocket_type=getattr(pocket, "type", None),
         pocket_summary=pocket_summary,
+        concierge_owner_block=await _concierge_owner_block(scope_id, workspace_id),
     )
+
+
+async def _concierge_owner_block(pocket_id: str, workspace_id: str) -> str | None:
+    """The <owner-settings> block for the site whose pocket is ``pocket_id``.
+
+    The site is looked up in ``workspace_id`` only (the workspace the resolver
+    just reconciled), so another tenant's settings can never reach this run.
+    ``None`` when there is no such site, it sets no guided field, or the read
+    fails: the run then goes ahead exactly as before.
+    """
+    try:
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
+
+        site = await Site.find_one({"pocket_id": pocket_id, "workspace": workspace_id})
+        if site is None:
+            return None
+        return render_owner_block(site) or None
+    except Exception:  # noqa: BLE001 — the owner's settings never block a reply
+        logger.warning("concierge owner settings read failed for %s", pocket_id, exc_info=True)
+        return None
 
 
 async def _agent_in_workspace(agent_id: str, workspace_id: str) -> bool:
@@ -2215,6 +2245,10 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # it is elsewhere.
     if ctx.pocket_summary and ctx.intent != "pocket_create" and override is None:
         parts.append(_render_pocket_summary_block(ctx.pocket_summary))
+    # A public concierge's owner settings (its name first). Only ever set by the
+    # concierge resolver; owner values arrive quoted, never as instructions.
+    if ctx.kind is ScopeKind.CONCIERGE and ctx.concierge_owner_block:
+        parts.append(ctx.concierge_owner_block)
     # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
     # "about this member" block LAST so the agent greets the caller by name and
     # tailors to their role/focus from turn one. It is pre-resolved on the

@@ -1,159 +1,29 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
-Modified: 2026-09-28 (feat/concierge-pinned-faqs, CR-8) — Mounts the Paw Bar
-    knowledge router (``paw_bar/knowledge_routes.py``) beside ``paw_bar_router``
-    at /api/v1: the owner's pinned FAQs at
-    ``/paw-bar/admin/site/{id}/knowledge/faqs``, a separate module so the
-    knowledge-source routes grow there instead of in the 7,000-line router.
-Modified: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — Mounts the
-    Otherhand snapshot router (``other_hand/router.py``) at /api/v1: the single
-    POST that persists a notebook page's PNG to a workspace-scoped scratch path
-    and hands back the path the agent reads it from.
-Modified: 2026-08-06 (feat/coupling-alerts-to-bell, T-10) — Registers the
-    OSS operational-alert bridge (``notifications/bridges/alerts.py``):
-    SystemEvent(event_type="alert") on the OSS MessageBus now fans into
-    ``notifications_service.create`` for the default (operator)
-    workspace's admins, lighting the bell + Slack/webhook delivery.
-Modified: 2026-08-06 (feat/coupling-lead-captured, T-6) — Registers the leads
-    notification bridge (``leads.bridges.notifications``) alongside the meeting
-    bridges, after ``init_realtime``. It subscribes to the new ``lead.captured``
-    event and notifies the workspace owner/admins, so a form submitted on a
-    published Paw Site is heard instead of waiting to be polled for.
-Modified: 2026-07-28 (feat/growth-api-scale) — The growth router's list route
-    changed shape: ``GET /growth/prospects`` returns
-    ``{items, next_cursor, total}`` instead of a bare array (BREAKING), and
-    gained ``q`` / ``sort`` / ``cursor``. Two new routes on the same mount:
-    ``GET /growth/prospects/facets`` and ``POST /growth/drafts/propose-batch``.
-Modified: 2026-07-27 (feat/growth-g3) — The growth router now also carries
-    drafts (``/growth/prospects/{id}/drafts``, ``/growth/drafts``,
-    ``/growth/drafts/{id}/status``); its prefix widened to ``/growth`` with
-    final prospect URLs unchanged.
-Modified: 2026-07-27 (feat/growth-g1) — Mounts the growth prospect-store
-    router (``/growth/prospects`` create / get / list / update) under
-    ``/api/v1``. License gate + ``request_context`` on every route;
-    workspace-scoped reads inside the service (cross-tenant ids 404).
-Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
-    transform-surface router (``/fabric/ingest/mappings`` CRUD +
-    ``/fabric/ingest/run`` run-now) next to the fabric router under
-    ``/api/v1``. Same gates as fabric: license + plan feature at the router,
-    fabric.read/fabric.write per route.
-Modified: 2026-07-03 (feat/files-share-links, FL-12b) — Mounts two share-link
-    routers: ``share_router`` (owner + license gated POST/DELETE
-    /files/{id}/share) and ``public_share_router`` (intentionally
-    unauthenticated GET /share/{token} — the token is the capability). The
-    public route mints its download URL through EEUploadService.presigned_get so
-    it inherits the forced-attachment protection for non-inline mimes. Both are
-    feature-flagged behind POCKETPAW_SHARE_LINKS_ENABLED (default off).
-Modified: 2026-06-24 (integration/billing-credits, BC-6) — Mounts the
-    Entitlements resolver router (``GET /entitlements`` -> the caller workspace's
-    plan + features + monthly credit allotment). The plan CATALOG read
-    (``GET /billing/plans``) is added to the billing router; both build on the
-    declarative plan catalog (``billing.plans``) over the existing
-    ``PLAN_FEATURES`` / ``Workspace.plan`` tiers.
-Modified: 2026-06-24 (integration/billing-credits, BC-2) — Mounts the Billing
-    Gateway primitive: the authenticated ``/billing/topup`` router (Dodo hosted
-    checkout) and, SEPARATELY with NO auth dependency, the public
-    ``/billing/webhooks/dodo`` router (Standard-Webhooks-signed; verified before
-    the payload is trusted, then grants credits exactly once via BC-1).
-Modified: 2026-06-22 (feat/jobs-custom-job-entrypoints) — After
-    ``register_builtins()`` the mount now calls ``load_entrypoint_jobs()`` to
-    discover + register WORKSPACE-CUSTOM jobs declared by installed packages
-    under the ``pocketpaw.jobs`` entry-point group (SAFE plugin path; no runtime
-    import of user code). No-op when no custom-job package is installed.
-Modified: 2026-06-20 (feat/workspace-jobs, pp#1459) — Mounts the workspace-jobs
-    status router (``GET /workspaces/{ws}/jobs/{job_id}``) and registers the
-    built-in jobs into the process-wide registry via ``register_builtins()``
-    AFTER ``init_realtime()`` (so a job's writeback emit has a bus to publish
-    onto). Jobs are TRIGGERED through the existing
-    ``POST /pockets/{id}/actions/run`` kind=="job" branch.
-Modified: 2026-06-13 (feat/patrol-engine) — Registers the mandate cadence
-    SCHEDULER lifespan pair next to the autopilot pair, under the same
-    POCKETPAW_CLOUD_SCHEDULER_ENABLED gate: ``reconcile_scheduler`` at startup
-    (starts the single sweeper loop, run_immediate=False) and
-    ``shutdown_scheduler`` at shutdown (cancels + awaits it). The loop fires
-    cadence-due shifts so "weekly" mandates run without a manual trigger.
-Modified: 2026-06-11 (feat/belt-autopilot) — Registers the mandate-autopilot
-    lifespan pair under the POCKETPAW_CLOUD_SCHEDULER_ENABLED gate:
-    ``reconcile_autopilot_tasks`` at startup (re-derives per-mandate autopilot
-    loops from the persisted ``MandateDoc.autopilot.on`` flags,
-    run_immediate=False) and ``shutdown_all_autopilot_tasks`` at shutdown
-    (cancels + awaits every registered loop).
-Modified: 2026-06-10 (W4b — privilege-escalation fix) — Updated the inline
-    note on the EEAuthBridge middleware: the bridge now grants OSS
-    ``full_access`` only to genuine platform admins (``is_superuser``), not
-    to every workspace owner/admin. See ``_core/ee_auth_bridge.py``.
-Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
-    Mounts the Foresight router at ``/api/v1/foresight/*`` alongside the
-    other domain routers. Routes delegate to ``ee.cloud.foresight.service``
-    which owns Beanie writes against the ``foresight_runs`` collection.
-    The engine itself (vendored OASIS substrate + CAMEL adapter) lives at
-    ``ee/pocketpaw_ee/foresight/``; the cloud surface is a thin shell over
-    persistence + event emission.
-Modified: 2026-05-24 (#1202) — Registers ``register_audit_bridge`` during
-    ``mount_cloud`` so every ``security.audit.AuditLogger.log()`` call from
-    EE cloud writers (pocket actions, source runs, skills config, …) is
-    mirrored into ``pocketpaw.audit.store.AuditStore`` — the SQLite sink
-    the ``GET /api/v1/audit`` reader actually queries. Without this the
-    JSONL and SQLite sinks lived in parallel and the GET surface always
-    returned 0 rows even when ``~/.pocketpaw/audit.jsonl`` was full.
-Updated: 2026-05-22 (feat/api-skills, Increment 2b) — mounts the Skills
-    entity at ``/api/v1/skills`` (POST /skills/api-doc), the per-backend
-    API-skill install endpoint that turns a pocket backend's OpenAPI
-    document into a loadable SKILL.md for the authoring agent.
-Updated: 2026-05-22 (RFC 05 M2b.2) — Mounts the pocket-outcomes entity at
-    ``/api/v1/outcomes`` (the count surface over the per-workspace
-    outcome ledger) and registers its ``pocket.outcome`` bus subscriber
-    (``outcomes_service.record_outcome``) after ``init_realtime`` so a
-    successful gated/direct write appends to the ledger.
-Updated: 2026-05-17 — Mounts the workspace-scoped Audit entity at
-    ``/api/v1/audit`` (B1) with tenancy from ``RequestContext.workspace_id``,
-    the legacy ``/api/v1/runtime/audit`` remaining live; also mounts
-    ``CSRFMiddleware`` and the ``/auth/csrf`` token endpoint (#1117) so
-    cookie-auth callers echo ``X-CSRF-Token`` while Bearer-auth clients
-    (Tauri, MCP, scripts) bypass entirely — see ``ee/cloud/_core/csrf.py``.
-Updated: 2026-05-17 (pocketpaw#1118 P1) — Mounts the planner router
-    (``/api/v1/planner/run``, ``/api/v1/planner/by-project/{id}``).
-    The planner module wraps the OSS deep_work planner and lands its
-    output into cloud Projects / Tasks / FileUploads so workspace
-    operators can plan a project from Mission Control without
-    crossing into the OSS local-filesystem state.
-Updated: 2026-05-16 — Mission Control backend completion. Mounts the
-    Projects entity (workspace > project > pocket/task/cycle hierarchy)
-    and wires the in-process daily-snapshot scheduler, gated on
-    ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` (default false). Each
-    child entity (Pocket / Task / Cycle) now carries an optional
-    ``project_id`` reference; project delete soft-unassigns rather than
-    cascading the underlying work.
-Updated: 2026-05-13 — Mission Control cleanup PR. Lifted the 501 stubs
-    on Mission Control's bulk-reassign / bulk-snooze (they now delegate
-    to the Tasks service), added emit-or-no-event comments to the bulk
-    approve/reject paths and the cycle counter-sync read, documented the
-    snapshot_job's wiring placeholder in ``mount_cloud``, and pinned the
-    UTC weekend-flag drift note onto the cycle snapshot docstring.
-Updated: 2026-05-13 — Mission Control PR 2 of 3. Added the Tasks
-    entity (unified work-item primitive: Nudges + agent tasks +
-    projections) and its in-process listener that fans ``task.proposed``
-    out to human assignees via the existing notifications surface.
-Updated: 2026-05-13 — Mission Control PR 3. Mounts the Cycles router on
-    ``mount_cloud()``. The Cycles daily-snapshot job lives at
-    ``ee.cloud.cycles.snapshot_job`` and is invoked by the host platform's
-    scheduler (cron / Kubernetes CronJob / Celery beat) rather than wired
-    as an in-process loop — see that module's docstring for rationale.
-Updated: 2026-04-30 — Stage 1.B of "Files as Knowledge". Wires
-    ``register_upload_listeners`` into ``mount_cloud`` so the FileReady
-    bus subscriber drives KB indexing for every workspace upload.
-Updated: Added kb (knowledge base) domain router to mount_cloud().
-Updated: 2026-04-19 (Cluster C / PR1) — Mounted ee.cloud.kb.knowledge_router,
-    which exposes GET /api/v1/knowledge/articles as a workspace-level aggregate.
-Updated: 2026-04-19 (Cluster B) — Added pocket journal SSE stream router to
-    mount_cloud() — feeds the RippleGraphWidget with a live, pocket-scoped
-    slice of the org journal.
-Updated: 2026-05-13 (feat/mission-control-facade) — mounted the Mission
-    Control façade router at /api/v1/mission-control/* and wired the
-    in-process activity buffer's bus subscribers after init_realtime so
-    the live ticker fills in from agent.thinking / agent.tool_use /
-    agent.stream_end events. PR 1 of three; Tasks (PR 2) and Cycles
-    (PR 3) plug into the same façade in follow-ups.
+``mount_cloud(app)`` is the cloud's single entry point (reached through the
+``pocketpaw.routes`` entry-point). It mounts every domain router under
+``/api/v1`` (each domain keeps a thin router over a service that owns its
+Beanie writes), installs the CSRF and EE auth-bridge middleware (the bridge
+grants OSS ``full_access`` only to platform superusers), runs
+``init_realtime()``, and only then registers the bus subscribers and bridges
+that need the singleton bus: upload -> KB indexing, pocket outcomes, audit
+mirroring into the SQLite store, tasks/meeting/lead/alert notifications, push
+fan-out, the Mission Control activity buffer, and built-in plus entry-point
+workspace jobs. Public routes that must stay unauthenticated (the Dodo webhook,
+share-link GETs) are mounted separately from their authenticated siblings.
+
+Background loops are collected as lifespan hooks and run by
+``_install_cloud_lifespan`` inside the host's lifespan (after Mongo is open).
+The scheduled ones (decisions reconciler and action sweeper, cycle snapshots,
+member and Fabric ingest, the websandbox reaper, mandate autopilot and cadence
+scheduler) are gated on ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` and start
+through ``_core/lease.py``: with ``POCKETPAW_REALTIME_BUS=redis-streams`` (several
+web processes) only the lease holder runs each one, once per cluster, or once
+per host for the decisions loops that write a local SQLite file. The same knob
+turns on the cross-process socket broadcast and presence registry
+(``_core/realtime/``), whose start/stop hooks are registered here too.
+Hook names follow ``_start_<x>`` / ``_stop_<x>``: the lifespan derives the
+automations-status running mark from them.
 
 Domains: auth, workspace, chat, pockets, sessions, agents, kb, knowledge,
 mission_control, cycles, tasks.
@@ -162,6 +32,7 @@ Each has router.py (thin), service.py (logic), schemas.py (validation).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -169,6 +40,30 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 
 _logger = logging.getLogger(__name__)
+
+
+def _wire_oss_cache_invalidation() -> None:
+    """Relay the OSS core's per-process cache drops (settings, skills) to the
+    other web processes over the realtime broadcast. The OSS side cannot import
+    EE, so it exposes ``pocketpaw.cache_invalidation.set_remote_invalidator``
+    and EE fills it in here. Receivers run the local half only, so nothing is
+    relayed twice. With broadcast off ``broadcast_invalidate_soon`` is a no-op.
+    """
+    from pocketpaw import cache_invalidation
+    from pocketpaw_ee.cloud._core.realtime.broadcast import (
+        broadcast_invalidate_soon,
+        register_invalidator,
+    )
+
+    register_invalidator(
+        cache_invalidation.SETTINGS,
+        lambda _key: cache_invalidation.clear_settings_cache(local_only=True),
+    )
+    register_invalidator(
+        cache_invalidation.SKILLS,
+        lambda _key: cache_invalidation.reload_skills(local_only=True),
+    )
+    cache_invalidation.set_remote_invalidator(lambda name: broadcast_invalidate_soon(name, ""))
 
 
 def _install_cloud_lifespan(
@@ -240,6 +135,36 @@ def _install_cloud_lifespan(
     app.router.lifespan_context = _cloud_lifespan
 
 
+# uvicorn's graceful-shutdown bound (src/pocketpaw/api/serve.py). The drain below
+# gets the same budget so a stuck proxy call cannot stretch shutdown past it.
+_LLM_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+async def _drain_llm_provisioning(timeout: float = _LLM_DRAIN_TIMEOUT_SECONDS) -> None:
+    """Let in-flight tenant-key mints and post-run spend ingests finish. Never raises.
+
+    Both drains run together under one ``timeout``; a drain that raises is logged
+    and does not stop the other. Work cut off here is not lost: the sweep loop
+    backfills a missing key and bills unbilled spend on its next tick.
+    """
+    from pocketpaw_ee.cloud.llm_provisioning.run_end_trigger import drain_pending
+    from pocketpaw_ee.cloud.llm_provisioning.service import drain_pending_mints
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                drain_pending_mints(timeout), drain_pending(timeout), return_exceptions=True
+            ),
+            timeout,
+        )
+    except TimeoutError:
+        _logger.warning("LLM provisioning drain timed out after %.1fs", timeout)
+        return
+    for result in results:
+        if isinstance(result, BaseException):
+            _logger.warning("LLM provisioning drain failed", exc_info=result)
+
+
 def init_realtime() -> None:
     """Initialise the realtime EventBus. Idempotent."""
     import logging
@@ -260,13 +185,25 @@ def init_realtime() -> None:
         workspace_peers=workspace_service.list_peer_ids,
     )
 
-    mode = os.environ.get("POCKETPAW_REALTIME_BUS", "inprocess").lower()
-    if mode not in {"inprocess", ""}:
+    # ``redis-streams`` relays socket frames to every web process (needed for
+    # uvicorn --workers N or several replicas); bus handlers still run once.
+    # See ``_core/realtime/broadcast.py``. Anything else stays single-process.
+    from pocketpaw_ee.cloud._core.realtime import broadcast
+
+    mode = os.environ.get("POCKETPAW_REALTIME_BUS", "inprocess").strip().lower()
+    if mode not in {"inprocess", "", "redis-streams"}:
         logger.warning(
-            "POCKETPAW_REALTIME_BUS=%s is not yet supported (RedisBus lands in Task 33);"
-            " falling back to InProcessBus",
+            "POCKETPAW_REALTIME_BUS=%s is not recognised (use inprocess or redis-streams);"
+            " falling back to inprocess",
             mode,
         )
+    if mode == "redis-streams" and not os.environ.get("POCKETPAW_REDIS_URL", "").strip():
+        logger.warning(
+            "POCKETPAW_REALTIME_BUS=redis-streams needs POCKETPAW_REDIS_URL;"
+            " falling back to inprocess"
+        )
+        mode = "inprocess"
+    broadcast.configure(enabled=mode == "redis-streams")
 
     set_bus(InProcessBus(resolver=resolver, conn_manager=_conn_manager))
     set_resolver(resolver)
@@ -280,7 +217,6 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
     from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware
-    from pocketpaw_ee.cloud._core.timing import TimingMiddleware
 
     # Boot-time secret for the loopback internal bypass on the
     # pocket-specialist spec-merge endpoint (PR #1222 R1 fix). Generated
@@ -293,26 +229,18 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
-    #   CSRF → RequestLog → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
-    # RequestLogMiddleware sits outside Timing so it can log every request
-    # (including timing data) to the workspace audit for the /audit page.
-    # The bridge marks genuine *platform admins* (``is_superuser``) as
-    # ``full_access`` before the OSS AuthMiddleware reads it, so platform
-    # admins reach OSS routes (settings/channels/...) without 403'ing on
-    # missing scopes. Workspace owners/admins are NOT granted full_access —
-    # they stay subject to OSS require_scope (W4b escalation fix).
-    # A CSRF 403 short-circuits before Timing observes the request, so perf
-    # data won't include rejected POSTs. That's a deliberate tradeoff: the
-    # CSRF gate exists to be fast and predictable, not measured. Reorder
-    # ONLY if you want Timing to wrap CSRF rejections (swap the two add_
-    # middleware calls — TimingMiddleware would then run outermost).
+    #   CSRF → RequestLog → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    # All three cloud layers are pure ASGI. The bridge marks genuine
+    # *platform admins* (``is_superuser``) as ``full_access`` before the OSS
+    # AuthMiddleware reads it; workspace owners/admins are NOT granted
+    # full_access — they stay subject to OSS require_scope (W4b escalation
+    # fix). It also opens the per-request scope (user stash + read memo).
     app.add_middleware(EEAuthBridgeMiddleware)
-    app.add_middleware(TimingMiddleware)
 
-    # Request-log middleware — records every API request to the workspace
-    # audit (MongoDB) so the /audit page can show request logs, failures,
-    # and timing. Sits outside TimingMiddleware so it wraps the full
-    # handler chain including the timing measurement.
+    # Request-log middleware — times every request for /api/v1/_admin/perf
+    # (``_core.timing``) and records it to ``request_logs`` for the /audit
+    # page. A CSRF 403 short-circuits outside it, so rejected POSTs are
+    # neither timed nor logged: the CSRF gate exists to be fast, not measured.
     app.add_middleware(RequestLogMiddleware)
 
     # CSRF middleware — outermost on inbound, runs before any route.
@@ -506,7 +434,7 @@ def mount_cloud(app: FastAPI) -> None:
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process
     # runtime. In multi-tenant deployments this becomes a cross-process
-    # listener once Task 33 ships RedisBus; the contract is identical.
+    # listener once connector events cross processes; the contract is identical.
     try:
         from pocketpaw.runtime.connector_bus import register_listener
 
@@ -827,7 +755,7 @@ def mount_cloud(app: FastAPI) -> None:
     )
 
     # Admin perf endpoint — dumps the in-memory request-timing buffer
-    # populated by ``_core.timing.TimingMiddleware`` (Phase 0). The Phase 11
+    # populated by ``_core.request_log.RequestLogMiddleware`` (Phase 0). The Phase 11
     # perf pass uses this to identify hot endpoints from production load
     # before optimizing. Gated on ``admin.perf`` (owner-only) — per-route
     # timing reveals traffic patterns and shouldn't be visible to every
@@ -935,14 +863,15 @@ def mount_cloud(app: FastAPI) -> None:
     # binds (an empty dir just 404s the asset until the real bundle is copied in).
     # PAWBAR_APP_MOUNT and the dir resolver are imported from the router so the
     # mount path, the frame HTML's <script src>, and the ?v= cache-buster all read
-    # the same config and can never drift.
-    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT, pawbar_app_dir
+    # the same config and can never drift. PawBarAssets adds the Cache-Control
+    # policy (immutable only for the current ?v=).
+    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT, PawBarAssets, pawbar_app_dir
 
     pawbar_dir = pawbar_app_dir()
     pawbar_dir.mkdir(parents=True, exist_ok=True)
     app.mount(
         PAWBAR_APP_MOUNT,
-        StaticFiles(directory=str(pawbar_dir)),
+        PawBarAssets(directory=str(pawbar_dir)),
         name="pawbar-app",
     )
 
@@ -1076,6 +1005,33 @@ def mount_cloud(app: FastAPI) -> None:
         _shutdown_hooks.append(fn)
         return fn
 
+    # Every scheduled background loop below starts through ``leased``: with the
+    # multi-worker switch (POCKETPAW_REALTIME_BUS=redis-streams) only the process
+    # holding the loop's Redis lease runs it; otherwise it starts as before.
+    from pocketpaw_ee.cloud._core.lease import leased
+
+    # Cross-process socket broadcast (POCKETPAW_REALTIME_BUS=redis-streams).
+    # Joins this process's own consumer group at startup and destroys it on a
+    # clean shutdown; a crashed process's group is reaped by its siblings.
+    # The presence registry heartbeats this process's sockets into Redis so
+    # the other processes can see them (``_core/realtime/presence.py``).
+    from pocketpaw_ee.cloud._core.realtime import broadcast as _realtime_broadcast
+    from pocketpaw_ee.cloud._core.realtime import presence as _realtime_presence
+
+    _wire_oss_cache_invalidation()
+
+    if _realtime_broadcast.is_enabled():
+
+        @on_startup
+        async def _start_realtime_broadcast() -> None:
+            await _realtime_broadcast.start()
+            await _realtime_presence.start()
+
+        @on_shutdown
+        async def _stop_realtime_broadcast() -> None:
+            await _realtime_presence.stop()
+            await _realtime_broadcast.stop()
+
     # Decision-graph reconciler + abandon-path sweeper (RFC 09 Slice 4).
     #
     # The reconciler is a 60s background loop that drains the journal
@@ -1099,21 +1055,36 @@ def mount_cloud(app: FastAPI) -> None:
             stop_reconciler,
         )
 
+        # One runner per HOST, not per cluster: both write this host's own
+        # ~/.soul/decisions.db and journal.db.
+        _decisions_reconciler = leased(
+            "decisions_reconciler",
+            lambda: start_reconciler(app),
+            lambda: stop_reconciler(app),
+            per_host=True,
+        )
+        _decisions_sweeper = leased(
+            "decisions_sweeper",
+            lambda: start_action_sweeper(app),
+            lambda: stop_action_sweeper(app),
+            per_host=True,
+        )
+
         @on_startup
         async def _start_decisions_reconciler() -> None:
-            await start_reconciler(app)
+            await _decisions_reconciler.start()
 
         @on_shutdown
         async def _stop_decisions_reconciler() -> None:
-            await stop_reconciler(app)
+            await _decisions_reconciler.stop()
 
         @on_startup
         async def _start_decisions_sweeper() -> None:
-            await start_action_sweeper(app)
+            await _decisions_sweeper.start()
 
         @on_shutdown
         async def _stop_decisions_sweeper() -> None:
-            await stop_action_sweeper(app)
+            await _decisions_sweeper.stop()
 
     # Tasks → notifications fan-out. When a Task is proposed to a human
     # assignee, drop an in-app notification so they see it even without
@@ -1191,17 +1162,24 @@ def mount_cloud(app: FastAPI) -> None:
     import os as _os
 
     if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
-        from pocketpaw_ee.cloud.cycles.scheduler import start_in_process_scheduler
+        from pocketpaw_ee.cloud.cycles.scheduler import (
+            start_in_process_scheduler,
+            stop_in_process_scheduler,
+        )
+
+        _cycle_scheduler = leased(
+            "cycle_scheduler",
+            lambda: start_in_process_scheduler(app),
+            lambda: stop_in_process_scheduler(app),
+        )
 
         @on_startup
         async def _start_cycle_scheduler() -> None:
-            await start_in_process_scheduler(app)
+            await _cycle_scheduler.start()
 
         @on_shutdown
         async def _stop_cycle_scheduler() -> None:
-            from pocketpaw_ee.cloud.cycles.scheduler import stop_in_process_scheduler
-
-            await stop_in_process_scheduler(app)
+            await _cycle_scheduler.stop()
 
     # Per-user member-ingest sweep (VIP Onboarding Phase B). Every 5 minutes
     # (POCKETPAW_MEMBER_INGEST_INTERVAL_SECONDS override) it backfills/
@@ -1215,13 +1193,17 @@ def mount_cloud(app: FastAPI) -> None:
             stop_member_ingest,
         )
 
+        _member_ingest = leased(
+            "member_ingest", lambda: start_member_ingest(app), lambda: stop_member_ingest(app)
+        )
+
         @on_startup
         async def _start_member_ingest() -> None:
-            await start_member_ingest(app)
+            await _member_ingest.start()
 
         @on_shutdown
         async def _stop_member_ingest() -> None:
-            await stop_member_ingest(app)
+            await _member_ingest.stop()
 
     # Generic Firestore→Fabric ingest sweep. Every 5 minutes
     # (POCKETPAW_FABRIC_INGEST_INTERVAL_SECONDS override) it mirrors each
@@ -1237,13 +1219,17 @@ def mount_cloud(app: FastAPI) -> None:
             stop_fabric_ingest,
         )
 
+        _fabric_ingest = leased(
+            "fabric_ingest", lambda: start_fabric_ingest(app), lambda: stop_fabric_ingest(app)
+        )
+
         @on_startup
         async def _start_fabric_ingest() -> None:
-            await start_fabric_ingest(app)
+            await _fabric_ingest.start()
 
         @on_shutdown
         async def _stop_fabric_ingest() -> None:
-            await stop_fabric_ingest(app)
+            await _fabric_ingest.stop()
 
     # Web Cursor idle-TTL reaper (WC-2, feat/websandbox-vm-provision). Every
     # ~5 minutes (POCKETPAW_WEBSANDBOX_REAP_INTERVAL_SECONDS) it reclaims
@@ -1261,13 +1247,19 @@ def mount_cloud(app: FastAPI) -> None:
             stop_websandbox_reaper,
         )
 
+        _websandbox_reaper = leased(
+            "websandbox_reaper",
+            lambda: start_websandbox_reaper(app),
+            lambda: stop_websandbox_reaper(app),
+        )
+
         @on_startup
         async def _start_websandbox_reaper() -> None:
-            await start_websandbox_reaper(app)
+            await _websandbox_reaper.start()
 
         @on_shutdown
         async def _stop_websandbox_reaper() -> None:
-            await stop_websandbox_reaper(app)
+            await _websandbox_reaper.stop()
 
     # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
     # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a
@@ -1279,18 +1271,19 @@ def mount_cloud(app: FastAPI) -> None:
     # orphaned tasks. Same scheduler gate as the cycle/decisions loops so pytest
     # runs never spawn a background loop that outlives the test.
     if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
-        from pocketpaw_ee.cloud.mandates.autopilot import (
-            reconcile_autopilot_tasks,
-            shutdown_all_autopilot_tasks,
-        )
+        from pocketpaw_ee.cloud.mandates.autopilot import autopilot_singleton
+
+        # The holder runs every mandate's loop; a toggle handled on another
+        # process reaches it through the ``mandate.autopilot`` invalidation.
+        _mandate_autopilot = autopilot_singleton()
 
         @on_startup
         async def _start_mandate_autopilot() -> None:
-            await reconcile_autopilot_tasks()
+            await _mandate_autopilot.start()
 
         @on_shutdown
         async def _stop_mandate_autopilot() -> None:
-            await shutdown_all_autopilot_tasks()
+            await _mandate_autopilot.stop()
 
         # Mandate cadence scheduler (feat/patrol-engine). A single sweeper loop
         # that wakes every interval and fires ``service.trigger_shift`` for each
@@ -1308,13 +1301,15 @@ def mount_cloud(app: FastAPI) -> None:
             shutdown_scheduler,
         )
 
+        _mandate_scheduler = leased("mandate_scheduler", reconcile_scheduler, shutdown_scheduler)
+
         @on_startup
         async def _start_mandate_scheduler() -> None:
-            await reconcile_scheduler()
+            await _mandate_scheduler.start()
 
         @on_shutdown
         async def _stop_mandate_scheduler() -> None:
-            await shutdown_scheduler()
+            await _mandate_scheduler.stop()
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe
@@ -1356,6 +1351,13 @@ def mount_cloud(app: FastAPI) -> None:
         executor = get_executor()
         if isinstance(executor, InProcessExecutor):
             await executor.drain()
+
+    # Background LiteLLM work (tenant-key mints from workspace create, post-run
+    # spend ingests) is held in module sets; give it a bounded chance to finish
+    # before the loop closes. Registered last, so it runs first on shutdown.
+    @on_shutdown
+    async def _drain_llm_provisioning_tasks() -> None:
+        await _drain_llm_provisioning()
 
     # Install LAST: the closure captures the lists, so every hook above has to
     # be in them before this runs.

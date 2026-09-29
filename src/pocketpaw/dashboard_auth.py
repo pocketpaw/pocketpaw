@@ -1,7 +1,12 @@
 """Authentication middleware and token management for PocketPaw dashboard.
 
 Extracted from dashboard.py — contains:
-- ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled proxy)
+- ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled
+  proxy); remote hosts are rejected before any settings are loaded
+- ``_auth_dispatch()`` — the auth cascade; callers not authenticated here go
+  through the general ``api_limiter``: keyed per user (``user:<id>``) when the
+  EE auth bridge resolved an active cloud user on an auth-optional path, per IP
+  otherwise
 - ``verify_token()`` — standalone token verification
 - ``auth_middleware()`` — HTTP middleware (registered by dashboard.py)
 - ``auth_router`` — APIRouter with session token, cookie login/logout, QR code,
@@ -89,11 +94,13 @@ def _is_genuine_localhost(request_or_ws) -> bool:
 
     The ``localhost_auth_bypass`` setting (default True) controls whether genuine
     localhost connections skip auth.  Set to False to require tokens everywhere.
-    """
-    settings = Settings.load()
-    if not settings.localhost_auth_bypass:
-        return False
 
+    The cheap checks (client host, proxy headers) run first so remote traffic
+    never pays for ``Settings.load()`` (~5 ms: config.json + credential store).
+    All three conditions must hold, so the order does not change the result.
+    The setting is still read fresh (not via the cached ``get_settings()``)
+    because out-of-process config edits do not clear that cache.
+    """
     client_host = request_or_ws.client.host if request_or_ws.client else None
     if client_host not in _LOCALHOST_ADDRS:
         return False
@@ -109,7 +116,7 @@ def _is_genuine_localhost(request_or_ws) -> bool:
         if headers.get(hdr):
             return False
 
-    return True
+    return bool(Settings.load().localhost_auth_bypass)
 
 
 # ---------------------------------------------------------------------------
@@ -661,11 +668,27 @@ async def _auth_dispatch(request: Request) -> Response | None:
     #   - api-key callers already passed their own per-key limiter above
     #     (apikey:<id>); the per-IP bucket would only double-limit them.
     #   - oauth callers authenticated by token, not by IP.
-    # UNauthenticated /api (and any other non-exempt) traffic still hits the
-    # per-IP api_limiter, so the brute-force / abuse cap is preserved. The
-    # separate login / auth-session / qr buckets are untouched.
+    # Everyone else is limited. Cloud users whose fastapi-users JWT the EE auth
+    # bridge resolved to an active, non-revoked user (``ee_user_authenticated``
+    # + ``user_id``) are limited PER USER, not per IP, so users behind one
+    # NAT/proxy don't share a bucket. That is only a bucket choice: the flag
+    # sets neither is_valid nor full_access, so it grants no route access.
+    # Guests are users too and get the same per-user bucket; an anonymous
+    # caller can mint one, so there is no unlimited pass for any JWT. The
+    # per-user key applies only on auth-optional paths — anywhere else the
+    # request will 401 below and stays on the per-IP bucket. The separate
+    # login / auth-session / qr buckets are untouched.
     if not is_valid:
-        rl_info = api_limiter.check(client_ip)
+        ee_user_id = getattr(request.state, "user_id", None)
+        if (
+            is_auth_optional
+            and ee_user_id
+            and getattr(request.state, "ee_user_authenticated", False)
+        ):
+            rl_key = f"user:{ee_user_id}"
+        else:
+            rl_key = client_ip
+        rl_info = api_limiter.check(rl_key)
         if not rl_info.allowed:
             return JSONResponse(
                 status_code=429,

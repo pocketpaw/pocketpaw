@@ -11,6 +11,15 @@ from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _memory_transport(monkeypatch):
+    """``submit`` writes a ``queued`` frame first; keep it off a real Redis."""
+    from pocketpaw_ee.cloud.chat.runs import transport
+    from pocketpaw_ee.cloud.chat.runs.memory_stream import InMemoryStreamTransport
+
+    monkeypatch.setattr(transport, "_transport", InMemoryStreamTransport())
+
+
 def _spec(run_id: str = "r1") -> RunSpec:
     return RunSpec(
         run_id=run_id,

@@ -11,8 +11,8 @@
   {
     "label": "the enable PATCH provisions an agent again (trigger 2)",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    await site.save()\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\ndef _concierge_create_runtime(",
-    "replace": "    await site.save()\n    if req.concierge_enabled is True:\n        from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, site_widget as _w\n        _bar = await _w(site.pocket_id, workspace_id)\n        if _bar is not None and not _bar.agent_id:\n            await _e(site, _bar)\n    return await _concierge_settings_response(site, workspace_id, str(user.id))\n\n\ndef _concierge_create_runtime(",
+    "find": "    await site.save()\n    # A legacy concierge answers through its dedicated agent: carry a new name\n",
+    "replace": "    await site.save()\n    if req.concierge_enabled is True:\n        from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_agent as _e, site_widget as _w\n        _bar = await _w(site.pocket_id, workspace_id)\n        if _bar is not None and not _bar.agent_id:\n            await _e(site, _bar)\n    # A legacy concierge answers through its dedicated agent: carry a new name\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_manual_create.py::TestNoTriggerCreatesAConcierge::test_the_enable_patch_creates_no_concierge"
     ]

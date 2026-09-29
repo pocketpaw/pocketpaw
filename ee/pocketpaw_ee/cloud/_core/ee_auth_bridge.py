@@ -1,54 +1,52 @@
-"""Bridge EE JWT auth → OSS ``request.state.full_access`` for PLATFORM admins.
+"""Bridge EE JWT auth into the OSS ``AuthMiddleware``, and own the request scope.
 
-Change (2026-06-10, W4b — privilege-escalation fix): the bridge now grants
-``full_access`` only to genuine *platform* administrators (``User.is_superuser``),
-NOT to every owner/admin of their own workspace. ``full_access`` is the OSS
-superuser bypass — it skips ALL ``require_scope`` checks. Handing it to any
-self-service workspace owner let a tenant on shared infra (e.g. the cloud
-micro tier) escalate to platform-wide settings/channels/budget. A workspace
-owner is the owner of *their* workspace, not a superuser over the OSS guards.
+Pure ASGI. Runs just outside the OSS ``AuthMiddleware``; websockets and
+lifespan pass through untouched. For an HTTP request carrying a fastapi-users
+JWT (``paw_auth`` cookie, else a Bearer that is not ``pp_``/``ppat_``) it
+decodes the token, rejects revoked sessions, loads the User, and sets:
 
-OSS routes under ``src/pocketpaw/api/v1/`` (settings, channels, budget, soul,
-...) gate access with ``require_scope(...)`` from ``pocketpaw.api.deps``. That
-dependency accepts:
+  * ``workspace_id`` / ``user_id`` — the session's tenant, for OSS routers that
+    must not trust an ``X-Workspace-Id`` header.
+  * ``ee_user_authenticated`` — active users only (guests included). A
+    limiter-only marker: on ``/api/v1/`` the OSS middleware keys its
+    ``api_limiter`` on ``user:<user_id>`` instead of the client IP. It grants
+    no access and is no exemption from the limiter.
+  * ``full_access`` — platform admins (``is_superuser``) ONLY. It is the OSS
+    superuser bypass that skips every ``require_scope`` check, so it is never
+    derived from a workspace role (the W4b escalation fix).
 
-  * ``request.state.full_access`` truthy — the cookie/session/master-token
-    paths in ``dashboard_auth.py`` set this for fully-trusted callers.
-  * ``request.state.api_key`` with matching scopes.
-  * ``request.state.oauth_token`` with matching scopes.
+Everything is best-effort: a bad, expired or revoked token just leaves state
+untouched and the route's own auth decides.
 
-The EE cloud uses fastapi-users JWT (cookie ``paw_auth`` or Bearer) at the
-route level. The OSS ``AuthMiddleware`` doesn't know about EE auth, so a
-platform admin hitting ``/api/v1/settings`` would 403 with ``Missing required
-scope: settings:read or settings:write`` because nothing sets ``full_access``.
+Per-request scope (``_request_scope``, one ``_RequestScope`` per HTTP request,
+closed and reset when the request finishes):
 
-This middleware closes that gap for platform admins only. On every request:
+  * The user stash. After full verification of an ACTIVE user the bridge stores
+    ``(token, user)``; ``RevocableJWTStrategy.read_token`` asks ``stashed_user``
+    and gets it back only for the identical token string under the same key,
+    audience and algorithm. That turns the route's fastapi-users dependencies
+    (two when a route mixes ``current_optional_user`` and
+    ``current_active_user``) from a full re-verify each into a lookup. Only the
+    bridge writes it.
+  * ``request_memo`` — a per-request cache for idempotent reads, used for the
+    Workspace plan/overrides lookups. GET/HEAD requests only: a write request
+    could read, change and re-read the same document. Successful results only.
 
-  1. Decode the JWT from ``paw_auth`` cookie or ``Authorization: Bearer``.
-  2. Resolve the User.
-  3. If the user is a platform admin (``is_superuser``), set
-     ``request.state.full_access = True``.
-
-Everyone else — workspace owners, admins, members, viewers — stays subject to
-OSS ``require_scope``. ``full_access`` is a platform-operator capability; it is
-deliberately NOT derived from a workspace role. ``is_superuser`` is set only
-for the seeded operator who boots the tenant (see ``auth/core.py``); a
-self-service signup never receives it.
-
-Performance: the JWT decode is local (HMAC); the User lookup is one Beanie
-``get()`` per request. We skip entirely for paths that already exempt from
-auth (static assets, oauth callbacks) and for requests with no cookie or
-bearer at all.
+The scope is a mutable object set before the inner app runs, so child tasks
+(BaseHTTPMiddleware layers inside copy the context) see it; closing it at
+request end means a task that outlives the request reads nothing.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Hashable
+from contextvars import ContextVar
+from typing import Any
 
 import jwt
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -67,17 +65,88 @@ _EXEMPT_PREFIXES = (
     "/api/v1/auth/verify",
 )
 
+_MEMO_METHODS = frozenset({"GET", "HEAD"})
 
-class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
-    """Mark EE-authenticated *platform admin* requests as ``full_access`` for OSS."""
+
+class _RequestScope:
+    """State for ONE HTTP request. Created and closed by the bridge only."""
+
+    __slots__ = ("memo", "open", "token", "user", "verifier")
+
+    def __init__(self, memo: dict[Hashable, Any] | None) -> None:
+        self.memo = memo
+        self.open = True
+        self.token: str | None = None
+        self.user: Any = None
+        self.verifier: tuple[Any, ...] | None = None
+
+    def close(self) -> None:
+        self.open = False
+        self.token = self.user = self.verifier = None
+        self.memo = None
+
+
+_request_scope: ContextVar[_RequestScope | None] = ContextVar("ee_request_scope", default=None)
+
+
+def _verifier_of(strategy: Any) -> tuple[Any, ...]:
+    """What a token was verified under: key, audience, algorithm."""
+    key = strategy.decode_key
+    if not isinstance(key, str):
+        key = key.get_secret_value()
+    return (key, tuple(strategy.token_audience), strategy.algorithm)
+
+
+def stashed_user(token: str, strategy: Any) -> Any:
+    """The user the bridge verified for ``token`` in THIS request, else None."""
+    scope = _request_scope.get()
+    if scope is None or not scope.open or scope.user is None or scope.token != token:
+        return None
+    if scope.verifier != _verifier_of(strategy):
+        return None
+    return scope.user
+
+
+async def request_memo(key: Hashable, fetch: Callable[[], Awaitable[Any]]) -> Any:
+    """``await fetch()``, cached for the rest of this GET/HEAD request.
+
+    Outside a request, on a write method, or after the request ended it just
+    calls ``fetch``. An exception is not cached; ``None`` is.
+    """
+    scope = _request_scope.get()
+    memo = scope.memo if scope is not None and scope.open else None
+    if memo is None:
+        return await fetch()
+    if key in memo:
+        return memo[key]
+    value = await fetch()
+    memo[key] = value
+    return value
+
+
+class EEAuthBridgeMiddleware:
+    """Stamp EE-authenticated requests for OSS and open the per-request scope."""
 
     def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_scope = _RequestScope({} if scope["method"] in _MEMO_METHODS else None)
+        reset = _request_scope.set(request_scope)
+        try:
+            await self._stamp(Request(scope), request_scope)
+            await self.app(scope, receive, send)
+        finally:
+            request_scope.close()
+            _request_scope.reset(reset)
+
+    async def _stamp(self, request: Request, request_scope: _RequestScope) -> None:
         path = request.url.path
         if path == "/" or any(path.startswith(p) for p in _EXEMPT_PREFIXES):
-            return await call_next(request)
+            return
 
         # Pull the JWT from cookie first, then Authorization header. We don't
         # care which transport authenticated the caller — both are valid EE
@@ -94,43 +163,40 @@ class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
                     token = bearer
 
         if not token:
-            return await call_next(request)
+            return
 
-        user = await _resolve_user(token)
-        if user is None:
-            return await call_next(request)
+        resolved = await _resolve_user(token)
+        if resolved is None:
+            return
+        user, verifier = resolved
 
         # Stamp the SESSION's tenant so OSS-package routers mounted under
         # /api/v1/ can scope themselves without importing pocketpaw_ee (the
         # open-core import boundary forbids it, and an import-linter contract
-        # enforces that).
-        #
-        # This exists because src/pocketpaw/api/v1/cloud_projects.py stores
-        # per-tenant data and had no way to learn the tenant, so it read one
-        # out of an X-Workspace-Id header. A header is chosen by the caller, so
-        # every tenant's project storage was readable and writable by anyone
-        # who named the workspace. These two attributes are the supported way
-        # for an OSS router to get an authenticated tenant; nothing else on
-        # request.state carries one.
-        #
-        # Set for EVERY resolved user, not only superusers — an ordinary
-        # workspace member is exactly who needs their own workspace resolved.
+        # enforces that). src/pocketpaw/api/v1/cloud_projects.py once read its
+        # tenant from an X-Workspace-Id header, which the caller chooses; these
+        # two attributes are the supported way for an OSS router to get an
+        # authenticated tenant. Set for EVERY resolved user, not only superusers.
         request.state.workspace_id = getattr(user, "active_workspace", None)
         request.state.user_id = str(getattr(user, "id", "") or "") or None
 
+        # Limiter-only marker (see module docstring). Inactive users stay on the
+        # per-IP bucket like anonymous callers, and are never stashed.
+        if getattr(user, "is_active", False):
+            request.state.ee_user_authenticated = True
+            request_scope.token = token
+            request_scope.user = user
+            request_scope.verifier = verifier
+
         # full_access is the OSS superuser bypass — reserve it for genuine
-        # platform administrators. A workspace owner/admin is NOT a superuser
-        # over the OSS guards (settings/channels/budget); granting it here let
-        # a self-service tenant on shared infra escalate platform-wide. They
-        # remain subject to OSS require_scope like everyone else.
+        # platform administrators. A workspace owner/admin stays subject to OSS
+        # require_scope like everyone else.
         if getattr(user, "is_superuser", False):
             request.state.full_access = True
 
-        return await call_next(request)
 
-
-async def _resolve_user(token: str):  # noqa: ANN202 — Beanie Document, avoid circular import
-    """Decode the JWT and load the User document. Returns None on any failure."""
+async def _resolve_user(token: str) -> tuple[Any, tuple[Any, ...]] | None:
+    """Verify the JWT and load the User. ``(user, verifier)`` or None on any failure."""
     try:
         # Lazy imports — keeps middleware module light and avoids triggering
         # the EE auth chain on processes that don't mount the cloud.
@@ -139,12 +205,11 @@ async def _resolve_user(token: str):  # noqa: ANN202 — Beanie Document, avoid 
         from pocketpaw_ee.cloud.models.user import User
 
         strategy = RevocableJWTStrategy(secret=SECRET, lifetime_seconds=1)
+        verifier = _verifier_of(strategy)
         try:
             payload = jwt.decode(
                 token,
-                strategy.decode_key
-                if isinstance(strategy.decode_key, str)
-                else strategy.decode_key.get_secret_value(),
+                verifier[0],
                 audience=strategy.token_audience,
                 algorithms=[strategy.algorithm],
             )
@@ -157,9 +222,12 @@ async def _resolve_user(token: str):  # noqa: ANN202 — Beanie Document, avoid 
             return None
         if jti and await sessions_service.is_revoked(user_id, jti):
             return None
-        return await User.get(user_id)
+        user = await User.get(user_id)
+        if user is None:
+            return None
+        return user, verifier
     except Exception:
         # Swallow — bridge auth is best-effort. A failure here just means the
-        # caller doesn't get full_access; the route's own auth still runs.
+        # request is not stamped; the route's own auth still runs.
         logger.debug("EE auth bridge failed to resolve user", exc_info=True)
         return None

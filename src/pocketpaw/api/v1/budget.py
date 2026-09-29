@@ -14,7 +14,8 @@ from pocketpaw.budget import (
     set_budget_override_until_window_end,
     sync_budget_state,
 )
-from pocketpaw.config import Settings, get_settings
+from pocketpaw.cache_invalidation import clear_settings_cache
+from pocketpaw.config import Settings
 
 router = APIRouter(tags=["Budget"])
 
@@ -51,7 +52,7 @@ async def _sync_and_persist_if_needed(settings: Settings) -> dict[str, object]:
     snapshot, changed = sync_budget_state(settings)
     if changed:
         settings.save()
-        get_settings.cache_clear()
+        clear_settings_cache()
     return snapshot.to_dict()
 
 

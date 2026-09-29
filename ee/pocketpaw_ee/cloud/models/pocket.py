@@ -197,14 +197,17 @@ class Pocket(TimestampedDocument):
     class Settings:
         name = "pockets"
         indexes = [
-            # The list query is a $or over owner / shared_with / visibility,
-            # always anchored on ``workspace``. The inline ``Indexed`` on the
-            # workspace field alone left Mongo scanning every pocket in the
-            # workspace and filtering the $or in memory; these let it use the
-            # index for each branch of the union instead.
+            # The list query is a $or over owner / team / shared_with /
+            # visibility, always anchored on ``workspace``. The inline
+            # ``Indexed`` on the workspace field alone left Mongo scanning every
+            # pocket in the workspace and filtering the $or in memory; one index
+            # per branch lets it use an index for each branch of the union. A
+            # branch with no index makes the whole $or fall back to a scan.
             #
-            # shared_with is an array, so that one is multikey.
+            # team and shared_with are arrays, so those two are multikey.
+            # Created by init_beanie at startup; additive, so no migration.
             IndexModel([("workspace", 1), ("owner", 1)], name="workspace_owner_1"),
+            IndexModel([("workspace", 1), ("team", 1)], name="workspace_team_1"),
             IndexModel([("workspace", 1), ("visibility", 1)], name="workspace_visibility_1"),
             IndexModel([("workspace", 1), ("shared_with", 1)], name="workspace_shared_with_1"),
         ]

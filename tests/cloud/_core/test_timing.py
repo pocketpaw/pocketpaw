@@ -1,15 +1,24 @@
-"""Tests for ee.cloud._core.timing — request-timing middleware + percentiles."""
+"""Tests for ee.cloud._core.timing — the /_admin/perf buffers + percentiles.
+
+The samples are recorded by ``RequestLogMiddleware`` (there is no separate
+timing middleware), so the endpoint tests drive it. Its request_logs write is
+patched out; only the timing side is under test here.
+"""
 
 from __future__ import annotations
 
 import time
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware
 from pocketpaw_ee.cloud._core.timing import (
-    TimingMiddleware,
+    UNMATCHED_PATH,
     percentiles,
+    record,
     report,
     reset_buffers,
     snapshot,
@@ -19,7 +28,8 @@ from pocketpaw_ee.cloud._core.timing import (
 @pytest.fixture(autouse=True)
 def _reset() -> None:
     reset_buffers()
-    yield
+    with patch("pocketpaw_ee.cloud._core.request_log._log_request"):
+        yield
     reset_buffers()
 
 
@@ -42,7 +52,7 @@ def test_percentiles_sorted_correctly() -> None:
 
 def _build_app() -> FastAPI:
     app = FastAPI()
-    app.add_middleware(TimingMiddleware)
+    app.add_middleware(RequestLogMiddleware)
 
     @app.get("/fast")
     def _fast() -> dict:
@@ -52,6 +62,19 @@ def _build_app() -> FastAPI:
     def _slow() -> dict:
         time.sleep(0.005)
         return {"ok": True}
+
+    @app.get("/health")
+    def _health() -> dict:
+        return {"ok": True}
+
+    @app.get("/stream")
+    async def _stream() -> StreamingResponse:
+        async def _body():
+            yield b"head"
+            time.sleep(0.05)  # after the headers went out
+            yield b"tail"
+
+        return StreamingResponse(_body())
 
     return app
 
@@ -75,6 +98,27 @@ def test_middleware_records_durations_per_endpoint() -> None:
     assert snap[slow_key][0] >= 4.0
 
 
+def test_paths_skipped_from_the_request_log_are_still_timed() -> None:
+    client = TestClient(_build_app())
+    client.get("/health")
+    assert len(snapshot()[("GET", "/health")]) == 1
+
+
+def test_unmatched_requests_share_one_bucket() -> None:
+    client = TestClient(_build_app())
+    client.get("/nope/1")
+    client.get("/nope/2")
+    assert list(snapshot()) == [("GET", UNMATCHED_PATH)]
+    assert len(snapshot()[("GET", UNMATCHED_PATH)]) == 2
+
+
+def test_a_streamed_response_is_timed_to_its_headers() -> None:
+    client = TestClient(_build_app())
+    assert client.get("/stream").content == b"headtail"
+    # The body sleeps 50ms after the headers; time-to-headers excludes it.
+    assert snapshot()[("GET", "/stream")][0] < 40.0
+
+
 def test_reset_buffers_clears_state() -> None:
     client = TestClient(_build_app())
     client.get("/fast")
@@ -84,20 +128,10 @@ def test_reset_buffers_clears_state() -> None:
 
 
 def test_ring_buffer_caps_at_capacity() -> None:
-    app = FastAPI()
-    # Tiny capacity for the test
-    app.add_middleware(TimingMiddleware, capacity=5)
-
-    @app.get("/x")
-    def _x() -> dict:
-        return {"ok": True}
-
-    client = TestClient(app)
-    for _ in range(20):
-        client.get("/x")
-
-    snap = snapshot()
-    assert len(snap[("GET", "/x")]) == 5
+    route = type("R", (), {"path": "/x"})()
+    for i in range(20):
+        record("GET", route, float(i), capacity=5)
+    assert snapshot()[("GET", "/x")] == [15.0, 16.0, 17.0, 18.0, 19.0]
 
 
 def test_report_includes_collected_endpoints() -> None:

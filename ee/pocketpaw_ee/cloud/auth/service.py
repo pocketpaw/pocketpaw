@@ -29,6 +29,8 @@ write) so a first-login provision race resolves to a single home pocket.
 
 from __future__ import annotations
 
+import re
+
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext
@@ -190,9 +192,10 @@ async def suggest_workspace_members(workspace_id: str, q: str, *, limit: int = 8
     full_name / email. Used by the chat ``/mentions/suggest`` endpoint."""
     query: dict = {"workspaces.workspace": workspace_id}
     if q:
+        pattern = re.escape(q)  # literal substring: no injection, no ReDoS
         query["$or"] = [
-            {"full_name": {"$regex": q, "$options": "i"}},
-            {"email": {"$regex": q, "$options": "i"}},
+            {"full_name": {"$regex": pattern, "$options": "i"}},
+            {"email": {"$regex": pattern, "$options": "i"}},
         ]
     docs = await _UserDoc.find(query).limit(limit).to_list()
     return [

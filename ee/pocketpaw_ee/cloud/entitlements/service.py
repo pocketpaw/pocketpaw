@@ -35,6 +35,8 @@
 #     drive this resolver by monkeypatching ``get_workspace_plan`` against an id
 #     that is not a real Mongo id, and a combined fetch nulls out the mocked plan
 #     (44 failures when it was tried). One extra round trip buys every mock.
+#     Within one GET/HEAD request both are memoised (``_core.ee_auth_bridge.
+#     request_memo``); write requests and non-request callers always re-read.
 #   * An EXPIRED override set is wholly absent, not partly applied — an operator
 #     must never reason about which fields of one grant outlived the others.
 #   * Overrides reach only the fields this resolver enforces.
@@ -47,6 +49,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pocketpaw_ee.cloud._core.ee_auth_bridge import request_memo
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
@@ -277,8 +280,18 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
     # split avoids: ``get_workspace_plan`` stays the one function every mock
     # targets, and only the override lookup touches the DB, failing closed to
     # "no override" for the same fake ids those tests use.
-    plan_key = await workspace_service.get_workspace_plan(workspace_id)
-    overrides = await workspace_service.get_workspace_overrides(workspace_id)
+    #
+    # Both reads are memoised per GET/HEAD request, ABOVE the two calls so each
+    # still goes through the (patchable) service function on a miss. The plan
+    # key is shared with ``require_plan_feature``.
+    plan_key = await request_memo(
+        ("workspace_plan", workspace_id),
+        lambda: workspace_service.get_workspace_plan(workspace_id),
+    )
+    overrides = await request_memo(
+        ("workspace_overrides", workspace_id),
+        lambda: workspace_service.get_workspace_overrides(workspace_id),
+    )
 
     base = entitlements_from_plan(workspace_id, plan_key)
     return _apply_overrides(base, overrides)

@@ -45,6 +45,7 @@ only need the flat list keep working via ``page.files``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -366,10 +367,14 @@ class UnifiedFilesService:
         warnings: list[str] = []
         merged: list[UnifiedFile] = []
 
+        total = 0
         if source in (None, "chat"):
-            merged.extend(
-                await self.list_chat_uploads(workspace_id, limit=per_source, pocket_id=pocket_id)
+            # The page read and the ``total`` count are independent; overlap them.
+            chat_rows, total = await asyncio.gather(
+                self.list_chat_uploads(workspace_id, limit=per_source, pocket_id=pocket_id),
+                self._count_chat_uploads(workspace_id, pocket_id),
             )
+            merged.extend(chat_rows)
 
         if source in (None, "drive"):
             drive_hits = await self.list_drive(workspace_id, limit=per_source)
@@ -396,10 +401,6 @@ class UnifiedFilesService:
         # Dedupe once after all sources are merged. Sort newest first.
         merged.sort(key=lambda f: f.created or datetime.min, reverse=True)
         merged = _dedupe(merged)
-
-        total = 0
-        if source in (None, "chat"):
-            total = await self._count_chat_uploads(workspace_id, pocket_id)
 
         page = merged[offset : offset + limit]
         has_more = offset + len(page) < total

@@ -60,6 +60,7 @@ the core latency win.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -107,6 +108,50 @@ Scope = Literal["dm", "group", "pocket", "session"]
 # the window size is tunable in one place.
 SITES_REFINE_HISTORY_TURNS = 2
 _SITES_REFINE_HISTORY_ROWS = 2 * SITES_REFINE_HISTORY_TURNS
+
+
+async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: str) -> None:
+    """The read-only run-start checks, run concurrently, first failure wins.
+
+    Precedence is the declared order, the order these ran in when they were
+    sequential awaits: credit balance, monthly quota, guest turn gate, daily
+    turn ceiling. Every check runs to completion (they only read), then the
+    earliest one that raised is re-raised, so a turn failing several gets the
+    same error as before. None of them writes, so running a later check after
+    an earlier one failed has no side effect.
+
+    * Balance + quota (BC-4 / chunk 3): only under ``billing_enforced``.
+    * Guest turn gate (feat/byok-guest-backend): the frozen
+      ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
+      keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
+      owns the single atomic spend. One indexed read for non-guests.
+    * Workspace daily turn ceiling (feat/abuse-budgets): without it a capped
+      account still creates a run doc and opens a stream on every send. Does
+      NOT increment and fails OPEN; the executor's gate is the one that has to
+      be right.
+    """
+    from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_turn_allowed
+    from pocketpaw_ee.cloud.chat.runs import turn_budget
+
+    async def _turn_ceiling() -> None:
+        if await turn_budget.is_over_cap(scope_workspace_id):
+            from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
+
+            raise DailyTurnLimitError(turn_budget.daily_cap())
+
+    checks = []
+    if get_settings().billing_enforced:
+        from pocketpaw_ee.cloud.credits import service as credits_service
+
+        checks += [
+            credits_service.check_balance(workspace_id),
+            credits_service.check_quota(workspace_id),
+        ]
+    checks += [assert_guest_turn_allowed(user_id, scope_workspace_id), _turn_ceiling()]
+
+    for outcome in await asyncio.gather(*checks, return_exceptions=True):
+        if isinstance(outcome, BaseException):
+            raise outcome
 
 
 async def _assert_own_key_if_kiosk_requires_it(ctx: Any) -> None:
@@ -240,36 +285,12 @@ async def post_agent_chat(
     #     ``run_core.execute_run`` enforces, mirrored here so the synchronous
     #     chat HTTP path returns a clean 402 with no DB trace instead of starting
     #     a run that the executor would only reject afterward.
-    if get_settings().billing_enforced:
-        from pocketpaw_ee.cloud.credits import service as credits_service
-
-        await credits_service.check_balance(workspace_id)
-        await credits_service.check_quota(workspace_id)
-
-    # Guest turn gate, CHECK-ONLY (feat/byok-guest-backend, 2026-09-01). The
-    # guest sibling of the billing fast-reject above, and for the same reason:
-    # the browser gets a clean pre-stream 402 with no DB trace — the body
-    # carries the frozen top-level {"code": "guest_limit_reached",
-    # "kind": "turns"} (or {"code": "guest_key_required"}) the signup prompt
-    # keys on. Deliberately does NOT increment: the executor
-    # (run_core._reject_if_guest_over_limit) owns the single atomic spend, so
-    # a turn costs exactly one. No-op (one indexed read) for non-guests.
-    from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_turn_allowed
-
-    await assert_guest_turn_allowed(user_id, ctx.workspace_id)
-
-    # Workspace daily turn ceiling, CHECK-ONLY (feat/abuse-budgets). Same
-    # reason as the two fast-rejects above: without it a capped account still
-    # creates a run doc, opens a stream and sets a TTL on every send, and the
-    # per-IP limiter allows ten of those a second. Does NOT increment — the
-    # executor owns the single atomic spend — and fails OPEN, because the
-    # executor's gate is the one that has to be right.
-    from pocketpaw_ee.cloud.chat.runs import turn_budget
-
-    if await turn_budget.is_over_cap(ctx.workspace_id):
-        from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
-
-        raise DailyTurnLimitError(turn_budget.daily_cap())
+    #
+    # All four run-start checks (these two, the guest gate and the daily turn
+    # ceiling below) are read-only and independent, so ``_run_start_gates`` runs
+    # them concurrently and then raises the FIRST failure in this declared
+    # order. A turn failing several checks gets the same error it always did.
+    await _run_start_gates(workspace_id, user_id, ctx.workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved
