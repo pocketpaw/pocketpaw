@@ -1,4 +1,6 @@
 # test_listener_pocket_route.py — listener pocket-scope routing tests.
+# Updated: 2026-08-05 — Coupling T-1. Ingest source assertions now expect the
+#   provenance-stamped form "<filename>#file:<file_id>".
 # Created: 2026-05-03 — Stage 3.E "Files as Knowledge". Verifies that
 # FileReady events with ``pocket_id`` route into ``pocket:{id}`` and
 # events without ``pocket_id`` keep the Stage 1.B ``workspace:{wid}``
@@ -80,7 +82,7 @@ async def test_pocket_id_routes_to_pocket_scope(monkeypatch, tmp_path):
     ingest.assert_awaited_once_with(
         scope="pocket:PA",
         text="slide content",
-        source="deck.pdf",
+        source="deck.pdf#file:f1",
     )
 
 
@@ -111,7 +113,7 @@ async def test_no_pocket_id_keeps_workspace_scope(monkeypatch, tmp_path):
     ingest.assert_awaited_once_with(
         scope="workspace:w1",
         text="hello",
-        source="doc.pdf",
+        source="doc.pdf#file:f1",
     )
 
 
@@ -143,5 +145,5 @@ async def test_empty_pocket_id_falls_back_to_workspace(monkeypatch, tmp_path):
     ingest.assert_awaited_once_with(
         scope="workspace:w1",
         text="hello",
-        source="doc.pdf",
+        source="doc.pdf#file:f1",
     )
