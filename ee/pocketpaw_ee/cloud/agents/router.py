@@ -127,7 +127,7 @@ async def create_agent(
 async def list_agents(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
-    query: str | None = Query(default=None),
+    query: str | None = Query(default=None, max_length=agents_service.QUERY_MAX_LEN),
 ) -> list[dict]:
     # Visibility gate: pass the caller as ``viewer_user_id`` so another user's
     # private agents are filtered out of the tenant list.

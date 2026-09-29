@@ -131,5 +131,26 @@
     "find": "            [(\"workspace\", 1), (\"owner\", 1), (\"agent\", 1), (\"lastActivity\", -1)],\n",
     "replace": "",
     "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_new_indexes_are_declared_on_real_fields"]
+  },
+  {
+    "label": "agent name search stops escaping user input",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "\"$regex\": re.escape(text[:QUERY_MAX_LEN])",
+    "replace": "\"$regex\": text[:QUERY_MAX_LEN]",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_name_search_treats_regex_metacharacters_literally"]
+  },
+  {
+    "label": "agent name search loses case-insensitivity",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "re.escape(text[:QUERY_MAX_LEN]), \"$options\": \"i\"}",
+    "replace": "re.escape(text[:QUERY_MAX_LEN])}",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_name_search_treats_regex_metacharacters_literally"]
+  },
+  {
+    "label": "GET /agents query length uncapped",
+    "file": "ee/pocketpaw_ee/cloud/agents/router.py",
+    "find": "Query(default=None, max_length=agents_service.QUERY_MAX_LEN)",
+    "replace": "Query(default=None)",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_list_route_caps_the_query_length"]
   }
 ]

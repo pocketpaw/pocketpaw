@@ -457,3 +457,44 @@ async def test_rewrite_folder_prefix_still_moves_only_the_subtree() -> None:
     assert rows["grandchild"] == "/n/sub/deeper"
     assert rows["sibling-regex"] == "/aXb(c)+d"
     assert rows["sibling-suffix"] == "/a.b(c)+dx"
+
+
+# --- agent name search is a literal substring ------------------------------------------------
+
+
+@pytest.mark.parametrize("query", ["(a+)+$", ".*", "["])
+async def test_agent_name_search_treats_regex_metacharacters_literally(query: str) -> None:
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.models.agent import Agent
+
+    literal = f"Bot {query} v2"
+    for i, name in enumerate([literal, "aaaaaaaa!", "plain"]):
+        await Agent(
+            workspace="w1", name=name, slug=f"s{i}", owner="u1", visibility="workspace"
+        ).insert()
+
+    rows = await agents_service.list_agents("w1", query=query)
+    assert [a.name for a in rows] == [literal]
+    # Case-insensitive substring still works.
+    assert [a.name for a in await agents_service.list_agents("w1", query="BOT")] == [literal]
+    hits = await agents_service.suggest_for_mentions("w1", query)
+    assert [h["display_name"] for h in hits] == [literal]
+
+
+async def test_agent_list_route_caps_the_query_length() -> None:
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    assert agents_service.QUERY_MAX_LEN == 200
+    app = FastAPI()
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.cloud.agents.router import router
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id
+
+    app.include_router(router, prefix="/api/v1")
+    app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_workspace_id] = lambda: "w1"
+    app.dependency_overrides[current_user_id] = lambda: "u1"
+    ok = await _get(app, "/api/v1/agents?query=" + "x" * 200)
+    assert ok.status_code == 200, ok.text
+    assert (await _get(app, "/api/v1/agents?query=" + "x" * 201)).status_code == 422

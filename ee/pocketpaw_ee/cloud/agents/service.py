@@ -72,6 +72,7 @@ default-agent seed + boot back-fill.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -442,6 +443,17 @@ async def get_by_slug(workspace_id: str, slug: str) -> Agent:
     return _to_domain(doc)
 
 
+# Longest search text used in a name match; longer input is truncated.
+QUERY_MAX_LEN = 200
+
+
+def _contains(text: str) -> dict[str, str]:
+    """Case-insensitive literal substring match. The user's text is
+    ``re.escape``d, so ``.*`` or ``(a+)+$`` match themselves and cannot
+    run a pathological regex on the server."""
+    return {"$regex": re.escape(text[:QUERY_MAX_LEN]), "$options": "i"}
+
+
 # Row cap for the tenant ``GET /agents`` listing. Generous: the response
 # carries full agent docs (config included), which the client reads.
 LIST_LIMIT = 1000
@@ -474,7 +486,7 @@ async def list_agents(
             {"visibility": "public"},
         ]
     if query:
-        filters["name"] = {"$regex": query, "$options": "i"}
+        filters["name"] = _contains(query)
     cursor = _AgentDoc.find(filters)
     if limit is not None:
         # ponytail: natural order, so past the cap which agents drop is
@@ -653,7 +665,7 @@ async def discover(
             union.append({"visibility": "public"})
         filters["$or"] = union
     if body.query:
-        filters["name"] = {"$regex": body.query, "$options": "i"}
+        filters["name"] = _contains(body.query)
 
     skip = (body.page - 1) * body.page_size
     docs = await _AgentDoc.find(filters).skip(skip).limit(body.page_size).to_list()
@@ -679,8 +691,8 @@ async def suggest_for_mentions(workspace_id: str, q: str, *, limit: int = 8) -> 
     aquery: dict = {"workspace": workspace_id}
     if q:
         aquery["$or"] = [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"slug": {"$regex": q, "$options": "i"}},
+            {"name": _contains(q)},
+            {"slug": _contains(q)},
         ]
     docs = await _AgentDoc.find(aquery).limit(limit).to_list()
     return [
