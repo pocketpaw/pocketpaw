@@ -14,7 +14,9 @@
 #      WITHOUT a second proxy call. The budget / rpm / tpm / allowed-models come
 #      from runtime settings (``load_key_budget``) — config-driven, never
 #      hardcoded. ``get_tenant_key`` reads the key back for spend attribution on
-#      the tenant's proxy calls.
+#      the tenant's proxy calls. Workspace creation mints through
+#      ``schedule_ensure_tenant_key`` (a held background task, drained by
+#      ``drain_pending_mints``) so the proxy round trip stays off the request path.
 #
 #   2. SPEND INGESTION (``ingest_tenant_spend``) — read the tenant key's proxy
 #      spend (GET /spend/logs?api_key=<key>) and feed it into the EXISTING credit
@@ -242,6 +244,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -795,6 +799,56 @@ async def ensure_tenant_key(
         card.tpm_limit,
     )
     return ProvisionResult(workspace_id=workspace, litellm_key=key, created=True)
+
+
+# Background mints, held here until they finish. ``asyncio`` keeps only a weak
+# reference to a task, so an unreferenced fire-and-forget task can be collected
+# mid-await and never finish. Mirrors ``run_end_trigger._pending``.
+_pending_mints: set[asyncio.Task] = set()
+
+
+async def _mint_in_background(workspace: str) -> None:
+    """Run ``ensure_tenant_key`` off the request path. Logs, never raises."""
+    try:
+        await ensure_tenant_key(workspace)
+    except Exception:  # noqa: BLE001 — provisioning is best-effort, never fatal
+        logger.warning(
+            "llm_provisioning: background tenant-key mint failed for workspace=%s "
+            "(non-fatal; the workspace runs on the master key until a key is minted)",
+            workspace,
+            exc_info=True,
+        )
+
+
+def schedule_ensure_tenant_key(workspace: str) -> asyncio.Task | None:
+    """Mint ``workspace``'s tenant key in a background task. NEVER raises.
+
+    Workspace creation calls this so the proxy round trip (up to the admin
+    client's 30 s timeout when the proxy is down) is not on the request path.
+    Returns the task (tests await it), or None when there is no running loop.
+    """
+    if not workspace:
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    task = loop.create_task(_mint_in_background(workspace), name=f"tenant-key-mint:{workspace}")
+    _pending_mints.add(task)
+    task.add_done_callback(_pending_mints.discard)
+    return task
+
+
+async def drain_pending_mints(timeout: float = 30.0) -> None:
+    """Wait for in-flight background mints to finish. For shutdown and tests.
+
+    A mint still running at the timeout is left alone; nothing retries it, so
+    that workspace stays on the master key until a key is minted for it.
+    """
+    if not _pending_mints:
+        return
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.gather(*_pending_mints, return_exceptions=True), timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -1670,6 +1724,7 @@ async def spend_attribution_coverage(
 
 
 __all__ = [
+    "drain_pending_mints",
     "ensure_tenant_key",
     "get_tenant_key",
     "ingest_tenant_spend",
@@ -1680,6 +1735,7 @@ __all__ = [
     "prepare_spend_cutover",
     "reconcile_gap_threshold",
     "reconcile_tenant_spend",
+    "schedule_ensure_tenant_key",
     "spend_attribution_coverage",
     "spend_ingest_enabled",
     "spend_mode",
