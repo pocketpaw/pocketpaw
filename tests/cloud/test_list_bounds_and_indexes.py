@@ -405,6 +405,8 @@ _FOLDER_ROWS = [
     ("grandchild", "/a.b(c)+d/sub/deeper"),
     ("sibling-regex", "/aXb(c)+d"),  # '.' must not match any char
     ("regex-bait", "/aXbccd/sub"),  # what an unescaped "^/a.b(c)+d/" would match
+    ("nested-elsewhere", "/x/a.b(c)+d/sub"),  # the prefix, but not at the start
+    ("double-slash", "//odd"),  # under "/" only by string prefix, never by the old test
     ("sibling-suffix", "/a.b(c)+dx"),
     ("sibling-name", "/a.b(c)+d x/sub"),
     ("root", "/"),
