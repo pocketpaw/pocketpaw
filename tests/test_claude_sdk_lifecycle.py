@@ -333,7 +333,10 @@ async def test_b5_abandoned_leased_client_is_not_reused():
 
     async def _abandon():
         agen = sdk.run(
-            "second", system_prompt="identity", session_key="s1", warm_client=lease,
+            "second",
+            system_prompt="identity",
+            session_key="s1",
+            warm_client=lease,
             on_client_built=_on_built,
         )
         first = await agen.__anext__()
