@@ -51,8 +51,8 @@
   {
     "label": "mention suggest: agent query takes the raw regex",
     "file": "ee/pocketpaw_ee/cloud/agents/service.py",
-    "find": "        pattern = re.escape(q)  # literal substring: no injection, no ReDoS\n        aquery[\"$or\"]",
-    "replace": "        pattern = q\n        aquery[\"$or\"]",
+    "find": "            {\"name\": _contains(q)},\n            {\"slug\": _contains(q)},",
+    "replace": "            {\"name\": {\"$regex\": q, \"$options\": \"i\"}},\n            {\"slug\": {\"$regex\": q, \"$options\": \"i\"}},",
     "tests": ["tests/cloud/chat/test_chat_query_patterns.py::test_mention_inputs_are_literal"]
   },
   {
