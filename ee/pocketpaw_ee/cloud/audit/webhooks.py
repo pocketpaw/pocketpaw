@@ -23,7 +23,9 @@ Receiver guidance — what your SIEM endpoint must do to be safe:
 
 Auto-disable after 10 consecutive failures. Secrets are encrypted at
 rest with the shared SSO Fernet key; URLs are revalidated per delivery
-to catch DNS rebinding mid-flight.
+to catch DNS rebinding mid-flight. The SSRF check resolves hostnames through
+the loop's async resolver (never a sync ``getaddrinfo`` on the event loop), and
+fire-and-forget deliveries run at most ``_MAX_CONCURRENT_DELIVERIES`` at once.
 """
 
 from __future__ import annotations
@@ -59,6 +61,24 @@ _DELIVERY_TIMEOUT_SECONDS = 5.0
 # RuntimeWarning). Holding strong refs in a module-level set keeps them
 # alive until done_callback discards.
 _inflight_deliveries: set[asyncio.Task[None]] = set()
+
+# Cap on concurrent ``deliver`` fan-outs. Every audit event schedules one; an
+# audit burst (bulk invite, mass delete) would otherwise open one httpx client
+# and one Mongo query per event all at once. Excess events wait their turn.
+_MAX_CONCURRENT_DELIVERIES = 16
+_delivery_slots: asyncio.Semaphore | None = None
+_delivery_slots_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_delivery_slots() -> asyncio.Semaphore:
+    """The module semaphore, rebuilt if the running loop changed (a semaphore
+    that ever had a waiter is bound to that loop, and tests run many loops)."""
+    global _delivery_slots, _delivery_slots_loop
+    loop = asyncio.get_running_loop()
+    if _delivery_slots is None or _delivery_slots_loop is not loop:
+        _delivery_slots = asyncio.Semaphore(_MAX_CONCURRENT_DELIVERIES)
+        _delivery_slots_loop = loop
+    return _delivery_slots
 
 
 def mint_secret() -> str:
@@ -107,7 +127,7 @@ def _ip_is_unsafe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def _resolve_addresses(hostname: str) -> list[str] | None:
+async def _resolve_addresses(hostname: str) -> list[str] | None:
     """Return all resolved IP strings, or None if DNS resolution failed.
 
     Why None on failure: an unresolvable hostname will fail at HTTP time
@@ -115,13 +135,15 @@ def _resolve_addresses(hostname: str) -> list[str] | None:
     domains like ``siem.example.com``.
     """
     try:
-        infos = socket.getaddrinfo(hostname, None)
+        # The loop's resolver runs getaddrinfo in the executor; the sync call
+        # would block every request in the process for the whole DNS lookup.
+        infos = await asyncio.get_running_loop().getaddrinfo(hostname, None)
     except socket.gaierror:
         return None
     return [info[4][0] for info in infos]
 
 
-def _validate_url_safety(url: str) -> None:
+async def _validate_url_safety(url: str) -> None:
     """Reject non-https + URLs whose hostname targets internal/private space.
 
     Defense against SSRF: a workspace admin should not be able to point
@@ -156,7 +178,7 @@ def _validate_url_safety(url: str) -> None:
             )
         return
     # Hostname — resolve and require every returned IP to be public.
-    addresses = _resolve_addresses(hostname)
+    addresses = await _resolve_addresses(hostname)
     if addresses is None:
         return  # DNS failure; HTTP layer will surface the real error.
     for addr in addresses:
@@ -187,7 +209,7 @@ async def create_webhook(
     url: str,
     created_by: str,
 ) -> tuple[AuditWebhook, str]:
-    _validate_url_safety(url)
+    await _validate_url_safety(url)
     secret = mint_secret()
     doc = AuditWebhook(
         workspace=workspace_id,
@@ -268,7 +290,7 @@ async def _deliver_one(
     # Re-check at delivery time so a hostname that flipped to a private
     # IP after create (DNS rebinding, takeover) can't leak signed events.
     try:
-        _validate_url_safety(webhook.url)
+        await _validate_url_safety(webhook.url)
     except Forbidden as exc:
         webhook.failure_count += 1
         webhook.last_status = None
@@ -343,10 +365,17 @@ async def deliver(event: AuditEvent) -> None:
         logger.warning("audit.webhook deliver fan-out crashed", exc_info=True)
 
 
+async def _deliver_bounded(event: AuditEvent) -> None:
+    async with _get_delivery_slots():
+        await deliver(event)
+
+
 def schedule_delivery(event: AuditEvent) -> None:
-    """Fire-and-forget wrapper used by the audit record() path."""
+    """Fire-and-forget wrapper used by the audit record() path. At most
+    ``_MAX_CONCURRENT_DELIVERIES`` run at once; the rest queue on the
+    semaphore rather than being dropped (a SIEM feed must not lose events)."""
     try:
-        task = asyncio.create_task(deliver(event))
+        task = asyncio.create_task(_deliver_bounded(event))
     except RuntimeError:
         # No running loop (sync caller, test harness without event loop).
         logger.debug("audit.webhook schedule_delivery: no running loop")
