@@ -4167,10 +4167,29 @@ topics with `[]`. A value past its cap, outside its enum, or not a language code
 | `concierge_avoid_topics` | string[] | At most 10 topics of 80 characters each. Blank entries and case-insensitive duplicates are dropped. |
 | `concierge_escalation` | `{"mode": "handoff" \| "email" \| "none", "contact": string}` or `null` | Sent whole. `contact` is at most 120 characters and must be an email address when `mode` is `"email"`. It is kept for the other modes but not used. |
 
-Control and invisible formatting characters are stripped from every text value. None
-of these fields reaches the model's instructions: they are rendered into fixed
-sentences, with owner text quoted, in the data part of the request. See
+Control and invisible formatting characters are stripped from every text value. On v2
+none of these fields reaches the model's instructions: they are rendered into fixed
+sentences, with owner text quoted, in an `<owner-settings>` block in the data part of
+the request, and the fixed instructions tell the model to take its name, tone and
+manner from that block (and to call itself the site's assistant when no name is set).
+A legacy concierge run gets the same block appended to its instructions. See
 `docs/concepts/concierge-knowledge.mdx`.
+
+`concierge_name` also:
+
+- heads the widget. The frame boot's `agentName` is the look editor's own agent name
+  when one is set, otherwise `concierge_name`, on the public frame and the owner's
+  preview frame;
+- names the legacy runtime's dedicated agent (slug `concierge-<site_id>`). A PATCH
+  that changes it renames that agent and rewrites its persona, but only while they
+  still read as the generated ones: an agent the owner renamed or bound by hand is
+  left alone. Clearing the name goes back to `<Site name> Concierge`.
+
+A site's concierge agent never appears in tenant-facing agent listings: `GET /agents`,
+`POST /agents/discover`, `@`-mention suggestions, the agents surface snapshot and the
+planner's agent matching all leave it out. It is recognised by the `concierge` +
+`site:<id>` tags provisioning stamps, or by its `concierge-<site_id>` slug for older
+ones. `GET /agents/{id}` and the slug lookup still return it.
 
 Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the

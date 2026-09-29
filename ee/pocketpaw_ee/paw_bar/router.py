@@ -1278,6 +1278,7 @@ def _pawbar_frame_config(
     greeting: str,
     starters: list[str] | None = None,
     appearance: ConciergeAppearance | None = None,
+    concierge_name: str = "",
     preview: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
@@ -1300,6 +1301,10 @@ def _pawbar_frame_config(
     renders the defaults, which reproduce the look every bar had before this
     existed — so a Site nobody has styled is byte-identical to before apart from
     the token map now carrying the base values explicitly.
+
+    ``concierge_name`` is the owner's guided name (``Site.concierge_name``). The
+    header shows the look editor's own ``agent_name`` when set, else this name,
+    so a concierge named in setup is not headed "Concierge" by the widget.
     """
     look = appearance or ConciergeAppearance()
     return {
@@ -1342,7 +1347,7 @@ def _pawbar_frame_config(
         "theme": look.surface_mode,
         # How the docked bar rests — narrow-and-widens-on-hover, or full width.
         "barResting": look.bar_resting,
-        "agentName": look.agent_name,
+        "agentName": look.agent_name or (concierge_name or "").strip(),
         "agentSubtitle": look.agent_subtitle,
         "agentAvatar": look.agent_avatar_url,
         "avatars": list(look.team_avatar_urls),
@@ -1558,6 +1563,7 @@ async def frame(
         # Read off the Site every request, never cached, so an owner saving a
         # colour sees it on the next reload rather than after a redeploy.
         appearance=getattr(site, "concierge_appearance", None),
+        concierge_name=getattr(site, "concierge_name", "") or "",
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
@@ -2179,11 +2185,18 @@ async def update_site_concierge_settings(
     # agent whenever it set concierge_enabled=true; turning a switch on is not
     # creating a concierge, and on a site with none the switch stays inert
     # (``concierge_available`` also requires the create marker).
+    previous_name = getattr(site, "concierge_name", "") or ""
     for name in req.model_fields_set:
         value = getattr(req, name)
         if value is not None:
             setattr(site, name, value)
     await site.save()
+    # A legacy concierge answers through its dedicated agent: carry a new name
+    # onto it (only where its name and persona are still the generated ones).
+    if (getattr(site, "concierge_name", "") or "") != previous_name:
+        from pocketpaw_ee.paw_bar.agent_provisioning import sync_concierge_identity
+
+        await sync_concierge_identity(site, previous_name)
     return await _concierge_settings_response(site, workspace_id, str(user.id))
 
 
@@ -3986,6 +3999,7 @@ async def get_site_preview_frame(
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id, workspace_id=workspace_id),
         appearance=getattr(site, "concierge_appearance", None),
+        concierge_name=getattr(site, "concierge_name", "") or "",
         preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
