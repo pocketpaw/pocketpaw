@@ -222,3 +222,54 @@ async def test_store_error_after_redis_admit_propagates(monkeypatch):
 
     with pytest.raises(sqlite3.OperationalError):
         await admit_mod.admit(_Locked(), _event(), _widget())
+
+
+# --- router wiring ------------------------------------------------------------
+# The route tests elsewhere run with an unreachable Redis, so they exercise the
+# fallback and would still pass if the router called store.admit_event directly.
+
+
+from tests.cloud import test_paw_bar_reply_sources as _sources  # noqa: E402
+from tests.cloud.test_paw_bar_reply_sources import _ORIGIN  # noqa: E402
+from tests.cloud.test_paw_bar_reply_sources import _widget as _stored_widget  # noqa: E402
+
+concierge_client = _sources.concierge_client
+
+
+def _spy(monkeypatch, result: bool) -> list[tuple]:
+    from pocketpaw_ee.paw_bar import router
+
+    calls: list[tuple] = []
+
+    async def _fake(store, event, widget, *, bucket=""):
+        calls.append((event.type, widget.id, bucket))
+        return result
+
+    monkeypatch.setattr(router, "admit_event", _fake)
+    return calls
+
+
+async def test_ingest_route_admits_through_the_helper(concierge_client, monkeypatch):
+    client, store = concierge_client
+    widget = await store.create_widget(_stored_widget(agent_id=""))
+    calls = _spy(monkeypatch, False)
+
+    res = await client.post(
+        f"/paw-bar/events/{widget.id}",
+        json={"type": "order_click", "payload": {}, "customer_ref": "legacy-visitor-01"},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 429
+    assert calls == [("order_click", widget.id, "events")]
+
+
+async def test_chat_turn_admits_through_the_helper(concierge_client, monkeypatch):
+    from pocketpaw_ee.paw_bar import router
+
+    _, store = concierge_client
+    widget = await store.create_widget(_stored_widget())
+    calls = _spy(monkeypatch, False)
+
+    assert await router._admit_chat_turn(store, widget, "visitor-0001") is False
+    assert calls == [("concierge_message", widget.id, "")]

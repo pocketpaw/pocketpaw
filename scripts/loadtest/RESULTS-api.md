@@ -46,7 +46,8 @@ Several server processes (`serve_sim --workers N`, `POCKETPAW_REALTIME_BUS=redis
   | Redis admit, real limits | 59 ms | 78 ms | 135 ms |
 
   Both Redis runs are healthy to 100 VUs at 920-980 rps. SQLite's `events` rows equal the 2xx count (3288 and 61).
-- **One worker without Redis, Paw Bar is still the knee.** At 1 worker without Redis (the fallback path), `pawbar.event` p95 is 1.6 s at 50 VUs. It is the same with `dev`'s code and with the store from before WAL, so it predates this change. With Redis at 1 worker it is 212 ms at 50 VUs. These runs used a fresh scratch HOME, whereas the earlier 1-worker run that stayed healthy to 100 VUs did not. Why a fresh HOME is slower was not investigated.
+- **One worker with `POCKETPAW_REDIS_URL` unset, `pawbar.event` p95 is 1.6 s at 50 VUs.** That holds on `dev` and with the store from before WAL too. It is not the SQLite admit path: `dev`'s code at 1 worker with Redis set stays at 171-192 ms p95 up to 100 VUs, and its admit never touches Redis. Something else on the event route is slow without Redis; not traced yet. Production runs with Redis.
+
 - **Signups flatten at ~58/s from 4 workers:** 8-9 cores of Argon2. That is the box, not a bug.
 - **Request logs:** the ~1.2 Mongo inserts per request below are `request_logs` rows, already batched through `insert_many` with a 30-day TTL. Every row used to read `actor_id: "anonymous"`; fixed in #2300.
 - **Sign-up limiter:** register keyed its (IP, email) bucket on an email read with `request.form()`, which is empty for a JSON body, so every signup from one address shared one 5-per-15-minutes bucket. Fixed in #2302.

@@ -117,5 +117,23 @@
     "tests": [
       "tests/cloud/test_paw_bar_public_route_gates.py::test_concurrent_admits_never_exceed_the_cap"
     ]
+  },
+  {
+    "label": "ingest bypasses the helper and admits in SQLite again",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        admitted = await admit_event(store, event, widget, bucket=_EVENTS_BUCKET)",
+    "replace": "        admitted = await store.admit_event(\n            event,\n            overall_per_min=widget.rate_limit_per_min,\n            per_customer_per_min=widget.per_customer_limit_per_min,\n            bucket=_EVENTS_BUCKET,\n        )",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_ingest_route_admits_through_the_helper"
+    ]
+  },
+  {
+    "label": "chat turn bypasses the helper",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        return await admit_event(store, marker, widget)",
+    "replace": "        return await store.admit_event(\n            marker,\n            overall_per_min=widget.rate_limit_per_min,\n            per_customer_per_min=widget.per_customer_limit_per_min,\n        )",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_chat_turn_admits_through_the_helper"
+    ]
   }
 ]
