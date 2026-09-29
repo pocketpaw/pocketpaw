@@ -1,6 +1,6 @@
 """Agent-jail lifecycle GC (cloud only) — ART-3.
 
-Created 2026-06-26 (ART-3). Bounds the per-tenant agent scratch jails that
+Bounds the per-tenant agent scratch jails that
 ``agent_jail`` hands out so one build-heavy run can't fill the shared box and
 break every tenant. The jail is pure scratch (durability lives in blob storage,
 a later task), so an idle jail is always safe to evict.
@@ -26,6 +26,10 @@ the jail's newest mtime (``agent_jail.scan_jail_dir``), which the DB active-set
 check backstops: even a freshly-created queued run whose dir hasn't been written
 yet (old mtime, empty dir) is protected, because its scope is in the active set.
 
+The DB lookup of active runs is async; everything after it (the directory scan
+and ``rmtree``) is blocking filesystem work and runs in ``asyncio.to_thread`` so
+the sweep never stalls the event loop that serves every tenant.
+
 Registered on cloud startup and the 5-minute heartbeat in
 ``extensions._sweeper_loop`` / ``start_run_sweeper``, in its own try, exactly
 like the stale-run sweeper it mirrors — a jail-GC failure can never suppress the
@@ -34,6 +38,7 @@ other sweeps (or vice versa).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -61,6 +66,13 @@ async def sweep_agent_jails() -> int:
     from pocketpaw_ee.cloud.chat.runs import service as run_service
 
     active = await run_service.find_active_run_scopes()
+    # The scan (``os.walk`` over every jail) and ``shutil.rmtree`` are blocking
+    # filesystem work; run them in a worker thread so the loop keeps serving.
+    return await asyncio.to_thread(_sweep_sync, active)
+
+
+def _sweep_sync(active: set[tuple[str, str, str]]) -> int:
+    """The blocking body of ``sweep_agent_jails``: snapshot, TTL, watermark."""
     # A jail dir is named after its run's scope: SESSION runs → ``<scope_id>``;
     # the sessionless DM/group/pocket bridge → the per-workspace ``_shared`` dir.
     active_sessions = {(ws, scope) for (ws, ctype, scope) in active if ctype == "session"}
