@@ -17,6 +17,8 @@ audit lives in ``tests/cloud/auth/test_route_auth_audit.py``.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query
 from starlette.responses import Response
 
@@ -56,12 +58,15 @@ async def create_session(
 
 @router.get("", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
 async def list_sessions(
+    response: Response,
     agent_id: str | None = None,
     surface: Surface | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=sessions_service.LIST_LIMIT, ge=1, le=500),
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> list[dict]:
-    """List the user's sessions.
+    """List the user's ``limit`` most recent sessions, as a bare list.
 
     Query params:
     - ``agent_id`` filters to DM sessions for that agent (used by the
@@ -69,12 +74,19 @@ async def list_sessions(
     - ``surface`` filters to sessions stamped with the given originating
       surface (``chat`` / ``files`` / ``pocket_creation``). Omitted →
       every row, including legacy ``surface=None`` rows.
+    - ``limit`` caps the rows (default ``LIST_LIMIT``). Without ``agent_id``,
+      a further page exists when the ``X-Next-Cursor`` response header is set;
+      pass it back as ``cursor``. The body stays a list for old clients.
     """
     ctx = sessions_service.legacy_ctx(user_id, workspace_id)
     if agent_id:
-        items = await sessions_service.list_by_agent(ctx, workspace_id, agent_id)
+        items = await sessions_service.list_by_agent(ctx, workspace_id, agent_id, limit=limit)
     else:
-        items = await sessions_service.list_for_owner(ctx, workspace_id, surface=surface)
+        items, next_cursor = await sessions_service.list_for_owner_page(
+            ctx, workspace_id, surface=surface, cursor=cursor, limit=limit
+        )
+        if next_cursor:
+            response.headers["X-Next-Cursor"] = next_cursor
     return [session_to_wire_dict(s) for s in items]
 
 
@@ -89,9 +101,9 @@ async def list_sessions_by_agents(
 ) -> dict:
     """The caller's DM sessions for many agents, keyed by agent id.
 
-    Same rows and order as ``GET /sessions?agent_id=`` per agent, from one
-    query. Every requested agent id is a key; an agent with no sessions maps to
-    ``[]``.
+    Same order as ``GET /sessions?agent_id=`` per agent, the newest
+    ``AGENT_SESSIONS_LIMIT`` each. Every requested agent id is a key; an agent
+    with no sessions maps to ``[]``.
     """
     ctx = sessions_service.legacy_ctx(user_id, workspace_id)
     grouped = await sessions_service.list_by_agents(
@@ -180,7 +192,7 @@ async def list_pocket_creation_sessions(
 
 @router.get("/runtime", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
 async def list_runtime_sessions(
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
@@ -202,13 +214,20 @@ async def list_runtime_sessions(
     store = manager._store
 
     if hasattr(store, "_load_session_index_async"):
-        index = await store._load_session_index_async(workspace_id=workspace_id, owner_id=user_id)
+        # Mongo reads only the newest ``limit`` rows; ``total`` is a count.
+        index, total = await asyncio.gather(
+            store._load_session_index_async(
+                workspace_id=workspace_id, owner_id=user_id, limit=limit
+            ),
+            store._count_session_index_async(workspace_id=workspace_id, owner_id=user_id),
+        )
     elif hasattr(store, "_load_session_index"):
         # The file store is single-tenant by construction — it is the OSS /
         # dedicated-install backend, and a cloud deployment cannot reach this
         # branch (``verify_cloud_memory_backend`` refuses to boot on anything
         # but MongoMemoryStore). So there is no tenant to scope to here.
         index = store._load_session_index()
+        total = len(index)
     else:
         return {"sessions": [], "total": 0}
 
@@ -220,7 +239,7 @@ async def list_runtime_sessions(
 
     sessions = [{"id": safe_key, **meta} for safe_key, meta in entries]
 
-    return {"sessions": sessions, "total": len(index)}
+    return {"sessions": sessions, "total": total}
 
 
 @router.post("/runtime/create")
