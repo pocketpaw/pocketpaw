@@ -4,7 +4,42 @@
 **Scope 2:** Redis runs in Docker Desktop on Windows (NAT overhead on every Redis call); MongoDB 8.2.5 runs as a native Windows service.
 **Scope 3:** driver and server share one machine over loopback, so "bandwidth" below is server handling cost, not network throughput.
 
-Run 2026-09-29 against `origin/dev` at `6f15885c` (worktree code on `PYTHONPATH`), sim agent backend, no provider keys in the server's environment.
+Two runs on 2026-09-29, same machine and commands, sim agent backend, no provider keys in the server's environment:
+
+- **Baseline:** `origin/dev` at `6f15885c`. Everything from "Headline numbers" down describes this run.
+- **After the fixes:** `origin/dev` at `dbb6d86b` (#2284-#2298), plus a multi-process run. Summarised in the next section.
+
+## After the fixes (`dbb6d86b`)
+
+One server process, idle machine:
+
+| Scenario | Baseline | After |
+|---|---|---|
+| Mixed | 151 rps, healthy to 25 VUs | 355 rps, healthy to 100 VUs (200 VUs: p95 1091 ms) |
+| Mixed, `--prod-middleware`, per-VU addresses | 83-91 rps | ~290 ok rps |
+| Signup | 8.3 signups/s, fails at 25 VUs | ~30 signups/s, healthy to 50 VUs, server CPU ~250% |
+| Upload 1 MB | 14/s, fails at 25 VUs | 16/s, healthy at 25, fails at 50 |
+| Upload 256 KB | 27/s, fails at 50 VUs | 38/s, healthy at 50 |
+| Chat, 64 concurrent sim runs | 3.9 runs/s, accept p95 489 ms | 4.4-4.8 runs/s, accept p95 ~280 ms |
+| Realtime, spread arrivals | healthy at 2000; 4000: ticket p95 8.4 s | 8000 held, ticket p95 288 ms (with `--procs 4`; one driver process saturates first) |
+| Soak, 20 VUs, 4 min | 118-164 rps | 362-372 rps, RSS 381-425 MB |
+| Loop lag p99 | 28 -> 75 ms | 13 ms at every stage |
+
+Single request, one VU: reads 2.6-3.5 ms p50, writes 5.5-6.5 ms, login/register/workspace create 26-28 ms (Argon2). `--prod-middleware` adds under 1 ms.
+
+Several server processes (`serve_sim --workers N`, `POCKETPAW_REALTIME_BUS=redis-streams`, driver `--procs 4`):
+
+| Workers | Mixed rps | Signups/s | 8000 sockets, ticket p95 | Server RSS idle | Box CPU (mixed) |
+|---|---|---|---|---|---|
+| 1 | 355 | ~30 | 288 ms | ~380 MB | 21% |
+| 2 | 605-640 | ~47 | 31 ms | ~770 MB | 39% |
+| 4 | 869 | ~58 | 10 ms | ~1.5 GB | 58% |
+| 6 | 974 | ~58 | 8 ms | ~2.3 GB | 71% |
+
+- **The 4- and 6-worker mixed runs fail at 50 VUs on one endpoint:** `pawbar.event` (p50 235 ms, p95 2.6 s at 6 workers) while every other endpoint stays under 160 ms p95. Paw Bar's store is one SQLite file with no WAL, so processes queue on its write lock and reads wait behind writes. Fix in flight: `fix/paw-bar-sqlite-wal`.
+- **Signups flatten at ~58/s from 4 workers:** 8-9 cores of Argon2. That is the box, not a bug.
+- **Request logs:** the ~1.2 Mongo inserts per request below are `request_logs` rows, already batched through `insert_many` with a 30-day TTL. But every row read `actor_id: "anonymous"`, authenticated or not. Fix in flight: `fix/auth-review-nits`.
+- **Sign-up limiter:** under `--prod-middleware`, register returned "Too many login attempts" with a fresh email each time. The (IP, email) key reads the email with `request.form()`, which returns an empty form for a JSON body, so every signup from one address shares a 5-per-15-minutes bucket. Fix in flight: `fix/register-limiter-json-email`.
 
 ## Machine
 
@@ -51,7 +86,7 @@ Each VU normally sends its own synthetic `X-Forwarded-For` (10.x.y.z). serve_sim
 4. **Workspace creation waits on the LiteLLM key mint.** `workspace/service.py:479` awaits `ensure_tenant_key` inline, even though the comment above it (`:470`) calls it non-blocking. It never fails the create, but it does block it: one proxy round trip normally, up to the admin client's 30 s timeout if the proxy hangs. With no proxy listening, this Windows box spent ~2.3 s per workspace create on the refused connect. serve_sim now points it at an in-process stub so the numbers above do not carry that artifact. The stub is served by the same process, which slightly understates signup capacity.
 5. **Signup calls a third-party API per unique password.** `password_policy.py:69` opens a fresh `httpx.AsyncClient` for each Have I Been Pwned lookup. serve_sim disables it (`--hibp` turns it back on), so the signup numbers exclude that round trip.
 6. **Rig bug, fixed here:** serve_sim's scratch-database drop ran an async Motor call after uvicorn shut down, failed inside a `suppress(Exception)`, and left a `loadtest_*` database behind on every clean exit. It now drops with a synchronous client and prints a warning on failure.
-7. **Rig caveat, not fixed:** after the chat ramp, `POST /__loadtest/shutdown` released the port but the scratch database was not dropped. By the time I checked, the process had exited and its stderr had been overwritten by the next server's log, so I can't tell whether graceful shutdown hung on the in-process run executor or the drop itself failed. I dropped that database by hand. The other seven shutdowns exited cleanly and dropped theirs.
+7. **Rig caveat, fixed since:** after the chat ramp, `POST /__loadtest/shutdown` released the port but the scratch database was not dropped. It happened again after two later chat ramps and did not reproduce with 8 concurrent runs. The shutdown route now drops the database before asking uvicorn to exit, and graceful shutdown is capped at 15 s, so a hang or a kill after the request no longer leaves one behind.
 
 ## How this scales
 
@@ -68,7 +103,6 @@ Grounded in what moved the numbers above, most effective first:
 ## Skipped, and why
 
 - **`pawbar_chat` (public concierge chat): not run.** Seeding is cheap: a `Site` row needs only `workspace`, `pocket_id` and `owner` and can be inserted directly, with no Cloudflare publish. What blocks it is that the concierge never runs on the sim backend. Legacy concierge runs are forced onto pydantic_ai (`AgentPool._deny_by_default_backend`, see `chat/runs/run_core.py:1598`), and the v2 runtime makes a direct pydantic_ai model call (`paw_bar/concierge_runtime.py:811`). Either way a turn is a real provider call that spends tokens. It needs a sim model hook in the concierge path, or a budgeted run with a real key.
-- **`--workers`:** serve_sim hands uvicorn an app object built in-process (seeding, probe and lag sampler all live in that process), so multi-worker needs an import-string factory and a probe that aggregates across workers. Not cheap; skipped.
 - **Server-side Mongo cost** is recorded (`mongo_ops_per_s` in stages.json: ~3 queries and ~1.2 inserts per request in the mixed run; `RequestLogMiddleware` writes an audit row per request). Mongo was never the limiter at these rates.
 - **Upload extraction/KB cost:** the upload payload is whitespace, so text extraction comes back empty and the listener skips KB ingest (an LLM compile). Comprehension is off (`POCKETPAW_FILE_COMPREHENSION_DAILY=0`). Real text uploads add in-process extraction work these numbers do not include.
 
@@ -101,6 +135,15 @@ uv run python $D --scenarios realtime --stages 500,1000,2000,4000,6000 --stage-s
 uv run python $D --scenarios chat --stages 4,8,16,32,64 --stage-seconds 30 --pool-users 2 --out out/f-chat
 uv run python $D --scenarios mixed --mode soak --vus 20 --duration 240 --stage-seconds 30 --out out/g-soak
 uv run python $D --self-test
+```
+
+Several processes (needs Redis). serve_sim seeds once, then serves `--workers` processes on consecutive ports from `--port`; the driver pins VU `v` to port `v % N` and `--procs` splits the VUs over that many driver processes, so the driver stops being the ceiling:
+
+```bash
+uv run python scripts/loadtest/serve_sim.py --port 8099 --pockets 64 --workers 6 --seed-out out/loadtest_seed.json
+B=$(seq -s, -f "http://127.0.0.1:%g" 8099 8104)
+uv run python $D --scenarios mixed --stages 25,50,100,200,400 --stage-seconds 20 --base-url $B --procs 4 --out out/w6-mixed
+# stop: POST /__loadtest/shutdown to EVERY port; the parent drops the db once all have exited
 ```
 
 The reconnect-storm row came from an earlier version of the realtime scenario that opened each stage's sockets all at once (`--stages 250,500,1000,2000,4000 --slo-p95-ms 2000`). The shipped scenario spreads connects over the first half of each stage.
