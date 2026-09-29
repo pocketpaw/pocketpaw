@@ -1,39 +1,28 @@
 # ee/pocketpaw_ee/cloud/notifications/delivery.py
-# Created: 2026-07-08 (feat/external-alerting-delivery) — external fan-out for
-# cloud notifications (Criterion 1: get alerts OUT of the app). Every cloud
-# notification funnels through ``notifications.service.create`` (tasks, meetings,
-# mentions all call it); this module POSTs that notification to the workspace's
-# configured Slack incoming-webhook and/or generic HTTPS webhook.
+# External fan-out for cloud notifications: POSTs a notification to the
+# workspace's configured Slack incoming-webhook and/or generic HTTPS webhook.
+# A per-workspace kill switch (``enabled``) and per-kind routing live on
+# ``NotificationDeliveryConfig``.
 #
-# Contract with the caller: ``_deliver_external`` is FIRE-AND-FORGET / NEVER-RAISE
-# (modeled on ``_core/realtime/emit.py`` and ``audit/webhooks.deliver``). It is
-# awaited inline right after the ``emit(NotificationNew(...))`` in ``create``, so
-# a dead/slow/malicious webhook must NOT be able to roll back the notification
-# insert or bubble an exception out of ``create``. Every network call is wrapped
-# and every URL is bounded by a short timeout so a hung endpoint can't stall the
-# insert response. A per-workspace kill switch (``enabled``) and per-kind routing
-# live on ``NotificationDeliveryConfig``.
+# Contract: delivery is NEVER-RAISE. ``_deliver_external`` is awaited inline by
+# ``service.create`` right after the realtime emit; ``schedule_external_many``
+# runs a same-workspace batch (``service.create_many``, the chat message
+# fan-out) in a background task capped at ``_MAX_CONCURRENT_BATCHES``, reading
+# the config once per batch. Every POST has a short timeout, so a dead, slow or
+# malicious sink can neither roll back an insert nor raise out of the service.
 #
-# SSRF: the webhook URLs are workspace-admin-supplied, so a POST from the server
-# to an arbitrary URL is an SSRF vector. ``is_safe_webhook_url`` requires https://
-# and rejects literal private/loopback IPs and known-internal hostnames. It runs
-# at write time (the PUT route rejects a bad URL up front) AND here at delivery
-# time (defense-in-depth against a stored value that later became unsafe). Full
-# DNS-resolution hardening (like ``audit.webhooks._validate_url_safety``) is a
-# follow-up; this is the baseline.
-#
-# Updated 2026-07-09 (fix/ssrf-encoding-bypass): close the alternate-ENCODING
-# bypass. The old guard only ran ``ipaddress.ip_address(hostname)`` and treated a
-# parse FAILURE as "not an IP" — but that raises on encoded forms (decimal
-# ``2852039166`` == 169.254.169.254 metadata, ``0x7f000001`` / ``017700000001`` /
-# ``127.1`` == 127.0.0.1), so the guard returned True while ``getaddrinfo`` / httpx
-# still resolved them to metadata / loopback. ``_host_as_literal_ip`` now normalizes
-# the host (strict literal -> ``int(host, 0)`` -> ``socket.inet_aton``) before the
-# unsafe-IP check. DNS-name-resolution hardening (a host that RESOLVES to a private
-# IP) remains the documented follow-up — this needs no DNS control to exploit.
+# SSRF: the URLs are workspace-admin-supplied. ``is_safe_webhook_url`` requires
+# https://, rejects known-internal hostnames, and normalizes the host the way
+# the OS resolver would (strict literal -> ``int(host, 0)`` -> ``inet_aton``) so
+# decimal / hex / octal / short-dotted encodings of loopback or metadata IPs are
+# caught. It runs at write time (the PUT route) and again at delivery. A
+# hostname that RESOLVES to a private IP is not caught here (no DNS in the hot
+# path); ``audit.webhooks._validate_url_safety`` is the model for that
+# follow-up.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -49,6 +38,14 @@ logger = logging.getLogger(__name__)
 
 # Bounded so a hung endpoint can't stall the notification insert response.
 _DELIVERY_TIMEOUT_SECONDS = 5.0
+
+# Batch deliveries (``schedule_external_many``) run as background tasks. At most
+# this many run at once; the rest wait on the semaphore. Strong refs live in
+# ``_inflight`` so a task isn't garbage-collected mid-flight.
+_MAX_CONCURRENT_BATCHES = 8
+_batch_slots: asyncio.Semaphore | None = None
+_batch_slots_loop: asyncio.AbstractEventLoop | None = None
+_inflight: set[asyncio.Task[None]] = set()
 
 # Sink names. Kept as constants so ``routes`` values and future sinks stay
 # consistent. A third sink ("email") layers on here + a new URL field.
@@ -256,4 +253,53 @@ async def _deliver_external(notification: Notification) -> None:
         logger.warning("notification external delivery fan-out crashed", exc_info=True)
 
 
-__all__ = ["_deliver_external", "is_safe_webhook_url"]
+def _get_batch_slots() -> asyncio.Semaphore:
+    """The module semaphore, rebuilt when the running loop changes (a semaphore
+    that ever had a waiter is bound to its loop, and tests run many loops)."""
+    global _batch_slots, _batch_slots_loop
+    loop = asyncio.get_running_loop()
+    if _batch_slots is None or _batch_slots_loop is not loop:
+        _batch_slots = asyncio.Semaphore(_MAX_CONCURRENT_BATCHES)
+        _batch_slots_loop = loop
+    return _batch_slots
+
+
+async def _deliver_external_many(notifications: list[Notification]) -> None:
+    """Deliver a batch that shares one workspace: ONE config read for the whole
+    batch, then the same per-notification sink posts ``_deliver_external`` makes.
+    Never raises."""
+    async with _get_batch_slots():
+        try:
+            config = await _load_config(notifications[0].workspace_id)
+            if config is None or not config.enabled:
+                return
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                for notification in notifications:
+                    for sink_name, url in _resolve_sinks(config, notification.kind):
+                        try:
+                            await _post_one(client, sink_name, url, notification)
+                        except Exception:
+                            logger.warning(
+                                "notification external delivery to %s failed",
+                                sink_name,
+                                exc_info=True,
+                            )
+        except Exception:
+            logger.warning("notification batch external delivery crashed", exc_info=True)
+
+
+def schedule_external_many(notifications: list[Notification]) -> None:
+    """Fire-and-forget external delivery for a same-workspace batch, so a slow
+    sink never holds up the request that created the notifications."""
+    if not notifications:
+        return
+    try:
+        task = asyncio.create_task(_deliver_external_many(notifications))
+    except RuntimeError:
+        logger.debug("notification batch delivery: no running loop")
+        return
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)
+
+
+__all__ = ["_deliver_external", "is_safe_webhook_url", "schedule_external_many"]

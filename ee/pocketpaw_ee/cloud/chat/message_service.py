@@ -1,45 +1,32 @@
 """Chat domain — message business logic (CRUD, reactions, threads, pins, search).
 
 Sole owner of writes to the ``Message`` Beanie document. Module-level
-``async def`` API. The doc → domain mapping helpers (formerly in
-``repositories.py``) live alongside the public API as private helpers.
+``async def`` API; the doc -> domain mapping helpers live here as private helpers.
 
-Updated 2026-07-31 (Paw Bar inbox, slice 0): a CONCIERGE turn now persists NO
-``Message`` at all. ``ContextType`` has no "concierge" value, so those turns
-used to fall through to the group branch and write
-``Message(context_type="group", group=<pocket_id>)`` — an orphan row no surface
-reads, keyed by a pocket id in a field that means "room id". Concierge
-transcripts derive from ``ChatRunDoc`` instead, so
-``persist_assistant_message_for_scope`` returns an unsaved doc for that kind and
-the caller keeps the id and timestamp it needs. Consequence for anything built
-later: a message-id-addressable feature (reactions, thumbs writeback) must key
-off the RUN doc for concierge, because that id has no row behind it.
+Invariants a reader must not break:
 
-Updated 2026-09-09: ``MessageReaction`` now carries the post-toggle
-``reactions`` array. The event used to ship only the delta (emoji + user_id),
-which is enough to know something changed but not enough to draw the chips —
-so peers in the room got the event and rendered nothing until they reloaded
-the page. The array is serialized in the same shape as
-``dto.message_to_wire_dict`` so the realtime path and the REST response patch
-a client's message row identically.
-
-Updated 2026-09-27 (fix/chat-run-heartbeat): ``persist_assistant_message_for_scope``
-takes an optional ``run_status``. ``execute_run`` now persists the text a failed /
-cancelled / interrupted run had already streamed as an assistant Message instead
-of leaving it on the run doc only, and ``run_status`` marks that row as cut off.
-The doc -> domain mapper and ``_message_response`` carry it, and emit the wire
-key only when it is set, so a normal message's payload is unchanged.
-
-Updated 2026-09-28 (feat/persist-tool-steps): ``persist_assistant_message_for_scope``
-and ``create_agent_message`` take optional ``steps`` / ``steps_omitted`` (the
-thinking blocks and tool calls the reply streamed, from ``StepRecorder``), and the
-doc -> domain mapper and ``_message_response`` carry them. The wire keys go
-through the shared ``steps_wire_fields`` and appear only when non-empty.
+- A CONCIERGE turn persists no ``Message``: ``persist_assistant_message_for_scope``
+  returns an unsaved doc for that kind (its transcript derives from ``ChatRunDoc``),
+  so a message-id-addressable feature must key concierge off the RUN doc.
+- ``MessageReaction`` carries the post-toggle ``reactions`` array in the same shape
+  as ``dto.message_to_wire_dict``, so realtime peers and the REST response patch a
+  message row identically.
+- ``run_status`` marks an assistant row a failed / cancelled / interrupted run cut
+  off; ``steps`` / ``steps_omitted`` carry the reply's thinking and tool calls via
+  ``steps_wire_fields``. Both wire keys appear only when set.
+- Per-member fan-out on send is batched or bounded: notifications (message and
+  mention kinds) go through ``notifications_service.create_many`` (one
+  ``insert_many``, external webhook delivery in a background task), and the
+  per-member unread / mention-counter writes go through ``map_bounded``. One room
+  can hold thousands of members; an unbounded gather opens that many Mongo
+  writes at once on the loop every user shares.
+- ``send_message`` is the only place that bumps group stats and writes mention
+  notifications for a user message. The ``message.sent`` bus event it emits is
+  for agent routing, not for a second stats or mention write.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from datetime import UTC, datetime
@@ -47,6 +34,7 @@ from typing import cast
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.chat import group_service, unread_service
 from pocketpaw_ee.cloud.chat.domain import Attachment as _AttachmentDomain
 from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
@@ -494,19 +482,23 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
     await emit(MessageNew(data={**response, "group_id": group_id}))
     await emit(MessageSent(data={**response, "group_id": group_id, "sender_id": user_id}))
 
-    unread_tasks = [
-        emit(UnreadUpdate(data={"group_id": group_id, "user_id": member, "delta": 1}))
-        for member in group.members
-        if member != user_id
-    ]
-    if unread_tasks:
-        await asyncio.gather(*unread_tasks)
+    others = [member for member in group.members if member != user_id]
+    await map_bounded(
+        others,
+        lambda member: emit(
+            UnreadUpdate(data={"group_id": group_id, "user_id": member, "delta": 1})
+        ),
+    )
 
     group_name = getattr(group, "name", "") or ""
 
     # --- In-app notification: create for DM and group messages ---
     group_type = getattr(group, "type", "")
     is_dm = group_type == "dm"
+
+    # Every notification this message creates, delivered externally as ONE
+    # background batch (one delivery-config read per message).
+    created_notifs: list = []
 
     # Only create notifications for non-self messages
     notif_recipients = [m for m in group.members if m != user_id]
@@ -525,24 +517,21 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
             else sender_name
         )
 
-        notif_tasks = [
-            notifications_service.create(
-                workspace_id=str(group.workspace),
-                recipient=member,
-                kind="message",
-                title=title,
-                body=body.content[:200],
-                actor_id=user_id,
-                source=NotificationSource(
-                    type="message",
-                    id=domain_msg.id,
-                    pocket_id=None,
-                    room_id=group_id,
-                ),
-            )
-            for member in notif_recipients
-        ]
-        await asyncio.gather(*notif_tasks)
+        created_notifs += await notifications_service.create_many(
+            workspace_id=str(group.workspace),
+            recipients=notif_recipients,
+            kind="message",
+            title=title,
+            body=body.content[:200],
+            actor_id=user_id,
+            source=NotificationSource(
+                type="message",
+                id=domain_msg.id,
+                pocket_id=None,
+                room_id=group_id,
+            ),
+            deliver_external=False,
+        )
     broadcast_types = {"here", "channel", "everyone"}
     recipients: set[str] = set()
 
@@ -559,10 +548,11 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 if member != user_id:
                     recipients.add(member)
 
-    async def _fan_out_mention(target: str) -> None:
-        await notifications_service.create(
+    if recipients:
+        mentioned = sorted(recipients)
+        created_notifs += await notifications_service.create_many(
             workspace_id=str(group.workspace),
-            recipient=target,
+            recipients=mentioned,
             kind="mention",
             title=(f"You were mentioned in #{group_name}" if group_name else "You were mentioned"),
             body=body.content[:200],
@@ -573,11 +563,11 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 pocket_id=None,
                 room_id=group_id,
             ),
+            deliver_external=False,
         )
-        await unread_service.bump_mention(target, group_id)
+        await map_bounded(mentioned, lambda target: unread_service.bump_mention(target, group_id))
 
-    if recipients:
-        await asyncio.gather(*(_fan_out_mention(t) for t in recipients))
+    notifications_service.schedule_external_many(created_notifs)
 
     return response
 

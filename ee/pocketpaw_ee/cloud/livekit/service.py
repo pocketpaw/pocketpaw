@@ -1129,6 +1129,7 @@ async def post_meeting_notes_to_group(
     try:
         # Use direct message creation to bypass membership check
 
+        from pocketpaw_ee.cloud.chat import group_service
         from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
         from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -1139,7 +1140,15 @@ async def post_meeting_notes_to_group(
             sender_name="Meeting Notes",
             content=content,
         )
-        # Emit on internal event bus (group stats, mention notifications)
+        # The message's writer owns the group stats (nothing on the bus does).
+        # A stats failure must not lose the notes, so it is logged, not raised.
+        try:
+            await group_service.bump_message_stats(
+                group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)
+            )
+        except Exception:
+            logger.warning("meeting notes: group stats bump failed for %s", group_id)
+        # Emit on the internal event bus (agent routing)
         await event_bus.emit(
             "message.sent",
             {
