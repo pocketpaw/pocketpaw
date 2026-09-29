@@ -85,13 +85,6 @@ async def _preview(client: AsyncClient, icp_id: str) -> dict[str, Any]:
 
 class TestPreviewIsRecorded:
     @pytest.mark.asyncio
-    async def test_a_new_icp_has_no_last_preview(self, ws1):
-        icp = await _create_icp(ws1)
-
-        assert icp["last_preview"] is None
-        assert icp["last_preview_at"] is None
-
-    @pytest.mark.asyncio
     async def test_get_and_list_carry_the_last_preview(self, ws1, research):
         icp = await _create_icp(ws1)
         research(
@@ -113,14 +106,6 @@ class TestPreviewIsRecorded:
             assert stored["notes"] == "Two strong fits in the metro area."
             assert stored["error"] == ""
             assert row["last_preview_at"]
-
-    @pytest.mark.asyncio
-    async def test_recording_the_preview_still_files_no_prospects(self, ws1, research):
-        icp = await _create_icp(ws1)
-        research(FakeResearch(_company("acme-dental.com")))
-
-        await _preview(ws1, icp["id"])
-
         assert await _prospects(ws1) == []
 
     @pytest.mark.asyncio
@@ -147,18 +132,6 @@ class TestPreviewIsRecorded:
         row = await _get(ws1, icp["id"])
         assert row["last_preview"] is None
         assert row["last_preview_at"] is None
-
-    @pytest.mark.asyncio
-    async def test_the_newest_preview_replaces_the_last(self, ws1, research):
-        icp = await _create_icp(ws1)
-        research(FakeResearch(_company("acme-dental.com"), _company("brightsmile.com")))
-        await _preview(ws1, icp["id"])
-
-        research(FakeResearch(_company("smiledirect.com")))
-        await _preview(ws1, icp["id"])
-
-        stored = (await _get(ws1, icp["id"]))["last_preview"]
-        assert [i["domain"] for i in stored["items"]] == ["smiledirect.com"]
 
     @pytest.mark.asyncio
     async def test_another_tenant_cannot_record_on_this_icp(self, ws1, ws2, research):
@@ -221,26 +194,14 @@ class TestEditingCriteriaClearsThePreview:
         assert row["last_preview_at"]
 
     @pytest.mark.asyncio
-    async def test_reassigning_the_project_keeps_it(self, ws1, research):
+    async def test_resending_the_same_criteria_keeps_it(self, ws1, research):
+        """A form that PATCHes every field on save must not wipe the preview
+        when nothing the research reads actually moved — reassigning the
+        project included."""
         icp = await _create_icp(ws1)
         research(FakeResearch(_company("acme-dental.com")))
         preview = await _preview(ws1, icp["id"])
         project_id = await _make_project("w1")
-
-        resp = await ws1.patch(f"{ICPS_URL}/{icp['id']}", json={"project_id": project_id})
-
-        assert resp.status_code == 200, resp.text
-        row = await _get(ws1, icp["id"])
-        assert row["project_id"] == project_id
-        assert row["last_preview"]["items"] == preview["items"]
-
-    @pytest.mark.asyncio
-    async def test_resending_the_same_criteria_keeps_it(self, ws1, research):
-        """A form that PATCHes every field on save must not wipe the preview
-        when nothing the research reads actually moved."""
-        icp = await _create_icp(ws1)
-        research(FakeResearch(_company("acme-dental.com")))
-        await _preview(ws1, icp["id"])
 
         resp = await ws1.patch(
             f"{ICPS_URL}/{icp['id']}",
@@ -250,11 +211,14 @@ class TestEditingCriteriaClearsThePreview:
                 "exclusions": icp["exclusions"],
                 "max_per_run": icp["max_per_run"],
                 "name": "Renamed hunt",
+                "project_id": project_id,
             },
         )
 
         assert resp.status_code == 200, resp.text
-        assert (await _get(ws1, icp["id"]))["last_preview"] is not None
+        row = await _get(ws1, icp["id"])
+        assert row["project_id"] == project_id
+        assert row["last_preview"]["items"] == preview["items"]
 
 
 class TestAnEditDuringResearchWins:

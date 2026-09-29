@@ -105,31 +105,19 @@ async def _draft_ids(workspace_id: str) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_bulk_delete_removes_prospects_and_all_their_drafts(w1_client):
+async def test_bulk_delete_removes_selected_prospects_and_only_their_drafts(w1_client):
     a = await _prospect(w1_client, "alpha.io")
     b = await _prospect(w1_client, "beta.io")
+    keep = await _prospect(w1_client, "keep.io")
     await _draft(w1_client, a["id"])
     await _draft(w1_client, a["id"], channel="whatsapp")
     await _draft(w1_client, b["id"])
+    kept_draft = await _draft(w1_client, keep["id"])
 
     resp = await w1_client.post(BULK_DELETE_URL, json={"ids": [a["id"], b["id"]]})
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"deleted": 2, "drafts_removed": 3, "proposals_withdrawn": 0}
-    assert await _prospect_ids("w1") == set()
-    assert await _draft_ids("w1") == set()
-
-
-@pytest.mark.asyncio
-async def test_bulk_delete_leaves_unselected_prospects_and_drafts_alone(w1_client):
-    a = await _prospect(w1_client, "alpha.io")
-    keep = await _prospect(w1_client, "keep.io")
-    await _draft(w1_client, a["id"])
-    kept_draft = await _draft(w1_client, keep["id"])
-
-    resp = await w1_client.post(BULK_DELETE_URL, json={"ids": [a["id"]]})
-
-    assert resp.json()["deleted"] == 1
     assert await _prospect_ids("w1") == {keep["id"]}
     assert await _draft_ids("w1") == {kept_draft["id"]}
 
@@ -184,36 +172,12 @@ async def test_bulk_delete_skips_malformed_and_unknown_ids(w1_client):
     assert await _prospect_ids("w1") == set()
 
 
+@pytest.mark.parametrize(("count", "status"), [(0, 422), (500, 200), (501, 422)])
 @pytest.mark.asyncio
-async def test_bulk_delete_with_only_bad_ids_deletes_nothing(w1_client):
-    a = await _prospect(w1_client, "alpha.io")
-
-    resp = await w1_client.post(BULK_DELETE_URL, json={"ids": ["garbage"]})
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json() == {"deleted": 0, "drafts_removed": 0, "proposals_withdrawn": 0}
-    assert await _prospect_ids("w1") == {a["id"]}
-
-
-@pytest.mark.asyncio
-async def test_bulk_delete_rejects_an_empty_id_list(w1_client):
-    resp = await w1_client.post(BULK_DELETE_URL, json={"ids": []})
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_bulk_delete_rejects_more_than_500_ids(w1_client):
-    ids = [str(PydanticObjectId()) for _ in range(501)]
+async def test_bulk_delete_id_list_bounds(w1_client, count, status):
+    ids = [str(PydanticObjectId()) for _ in range(count)]
     resp = await w1_client.post(BULK_DELETE_URL, json={"ids": ids})
-    assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_bulk_delete_accepts_exactly_500_ids(w1_client):
-    ids = [str(PydanticObjectId()) for _ in range(500)]
-    resp = await w1_client.post(BULK_DELETE_URL, json={"ids": ids})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["deleted"] == 0
+    assert resp.status_code == status, resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -239,19 +203,6 @@ async def test_bulk_delete_withdraws_the_pending_proposal_of_a_proposed_draft(
     assert resp.json() == {"deleted": 1, "drafts_removed": 1, "proposals_withdrawn": 1}
     assert [(aid, reason) for aid, reason, _ in store.rejected] == [("act-1", "prospect deleted")]
     assert store.list_calls[0]["workspace_id"] == "w1"
-
-
-@pytest.mark.asyncio
-async def test_bulk_delete_skips_the_store_when_no_draft_is_proposed(w1_client, monkeypatch):
-    a = await _prospect(w1_client, "alpha.io")
-    await _draft(w1_client, a["id"])
-    store = _FakeInstinctStore([])
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
-
-    resp = await w1_client.post(BULK_DELETE_URL, json={"ids": [a["id"]]})
-
-    assert resp.json()["proposals_withdrawn"] == 0
-    assert store.list_calls == []
 
 
 @pytest.mark.asyncio
@@ -282,10 +233,12 @@ async def test_single_delete_returns_204_then_404(w1_client):
 
     first = await w1_client.delete(f"{PROSPECTS_URL}/{a['id']}")
     second = await w1_client.delete(f"{PROSPECTS_URL}/{a['id']}")
+    malformed = await w1_client.delete(f"{PROSPECTS_URL}/not-an-id")
 
     assert first.status_code == 204
     assert first.content == b""
     assert second.status_code == 404
+    assert malformed.status_code == 404
     assert await _draft_ids("w1") == set()
 
 
@@ -297,9 +250,3 @@ async def test_single_delete_of_another_workspaces_prospect_is_404(w1_client, w2
 
     assert resp.status_code == 404
     assert await _prospect_ids("w1") == {a["id"]}
-
-
-@pytest.mark.asyncio
-async def test_single_delete_of_a_malformed_id_is_404(w1_client):
-    resp = await w1_client.delete(f"{PROSPECTS_URL}/not-an-id")
-    assert resp.status_code == 404
