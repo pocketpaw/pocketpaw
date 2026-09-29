@@ -288,3 +288,79 @@ async def test_redis_failure_falls_back_to_this_process(monkeypatch):
     assert await presence.is_online(cm, "u1") is True
     assert await presence.is_online_elsewhere(cm, "u1") is False
     assert await presence.disconnect(cm, ws) == "u1"
+
+
+# --- the WebSocket endpoint wiring ------------------------------------------------
+
+
+async def _ws_session(monkeypatch, cm, user_id: str, peers: list[str]):
+    """Drive websocket_endpoint on process ``cm`` for one authenticated socket
+    that disconnects straight away. Returns (socket, emitted events, users the
+    offline grace timer was scheduled for)."""
+    import importlib
+
+    from fastapi import WebSocketDisconnect
+
+    router_mod = importlib.import_module("pocketpaw_ee.cloud.chat.router")
+
+    class _Lic:
+        expired = False
+
+    monkeypatch.setattr(router_mod, "get_license", lambda: _Lic())
+    consume = AsyncMock(return_value=user_id)
+    monkeypatch.setattr("pocketpaw_ee.cloud.auth.ws_tickets.consume_ws_ticket", consume)
+    monkeypatch.setattr(router_mod, "consume_ws_ticket", consume, raising=False)
+    monkeypatch.setattr(router_mod, "manager", cm)
+    ws_service = MagicMock()
+    ws_service.list_peer_ids = AsyncMock(return_value=peers)
+    monkeypatch.setattr(router_mod, "workspace_service", ws_service)
+    emitted: list = []
+
+    async def fake_emit(ev):
+        emitted.append(ev)
+
+    monkeypatch.setattr(router_mod, "emit", fake_emit)
+    scheduled: list[str] = []
+
+    async def fake_schedule(uid):
+        scheduled.append(uid)
+
+    monkeypatch.setattr(router_mod, "_schedule_presence_offline", fake_schedule)
+
+    ws = AsyncMock()
+    ws.cookies = {}
+    ws.receive_text = AsyncMock(
+        side_effect=['{"type": "auth", "ticket": "t"}', WebSocketDisconnect()]
+    )
+    await router_mod.websocket_endpoint(ws, token=None)
+    return ws, emitted, scheduled
+
+
+async def test_endpoint_snapshot_includes_peers_on_other_processes(redis, prefix, monkeypatch):
+    a, b = _proc(redis, prefix), _proc(redis, prefix)
+    await presence.connect(b, AsyncMock(), "peer")
+
+    ws, _emitted, _scheduled = await _ws_session(monkeypatch, a, "u1", ["peer", "away"])
+
+    frames = [c.args[0] for c in ws.send_json.await_args_list]
+    assert {"type": "presence.online", "data": {"user_id": "peer"}} in frames
+    assert not any(f.get("data", {}).get("user_id") == "away" for f in frames)
+
+
+async def test_endpoint_announces_only_a_cluster_wide_first_and_last(redis, prefix, monkeypatch):
+    from pocketpaw_ee.cloud.realtime.events import PresenceOnline
+
+    a, b = _proc(redis, prefix), _proc(redis, prefix)
+    other = AsyncMock()
+    await presence.connect(b, other, "u1")  # u1 already online on B
+
+    _ws, emitted, scheduled = await _ws_session(monkeypatch, a, "u1", [])
+
+    assert not any(isinstance(e, PresenceOnline) for e in emitted)
+    assert scheduled == []  # B still holds a socket: no offline timer
+
+    await presence.disconnect(b, other)
+    _ws, emitted, scheduled = await _ws_session(monkeypatch, a, "u1", [])
+
+    assert [type(e) for e in emitted] == [PresenceOnline]
+    assert scheduled == ["u1"]
