@@ -183,8 +183,8 @@
   {
     "label": "the deployment stops running the sites lane, so every site build and preview enqueued onto the sites queue waits forever with no consumer - worse than the shared queue it replaced",
     "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
-    "find": "    return [ChatWorkerSettings, SiteBuildWorkerSettings]",
-    "replace": "    return [ChatWorkerSettings]",
+    "find": "    lanes: list[type] = [ChatWorkerSettings, SiteBuildWorkerSettings]",
+    "replace": "    lanes: list[type] = [ChatWorkerSettings]",
     "tests": [
       "tests/cloud/test_worker_supervisor.py"
     ]
@@ -203,6 +203,24 @@
     "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
     "find": "    return str(queue) if queue else default_queue_name",
     "replace": "    return str(queue) if queue else settings_cls.__name__",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "the growth lane starts without POCKETPAW_GROWTH_WORKER_ENABLED, so a default deployment begins live email and WhatsApp sends and the daily follow-up cron that nobody opted into",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    if _growth_worker_enabled():",
+    "replace": "    if True:",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "the growth flag no longer starts the growth lane, so approved sends are enqueued onto a queue with no consumer and wait forever",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "        lanes.append(GrowthWorkerSettings)",
+    "replace": "        pass",
     "tests": [
       "tests/cloud/test_worker_supervisor.py"
     ]
