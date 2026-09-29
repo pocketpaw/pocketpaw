@@ -5199,8 +5199,23 @@ Batch form of `GET /sessions?agent_id=`, gated on `session.read_own`.
 
 `agent_ids` holds 1..100 ids. The answer has every requested id as a key, with
 the caller's own non-deleted sessions for that agent in the active workspace,
-newest activity first, and `[]` when there are none. All of it comes from one
-query.
+newest activity first, and `[]` when there are none. Each agent's list holds at
+most its 100 most recent sessions. The read count does not grow with the number
+of agents (one aggregation picks the ids, one query loads them).
+
+### `GET /api/v1/sessions`
+
+The caller's sessions in the active workspace, newest activity first, as a bare
+JSON list. Query params: `agent_id` (one agent's DM sessions), `surface`
+(`chat` also matches legacy rows with no surface), `limit` (default 200, 1..500)
+and `cursor`. Without `agent_id`, a response that stopped at `limit` carries an
+`X-Next-Cursor` header; send it back as `cursor` for the next page. The header
+is not in the CORS `expose_headers` list, so a cross-origin browser client
+cannot read it; the per-surface `GET /sessions/{chat,files,foresight,pocket-creation}`
+endpoints return the cursor in the body.
+
+`GET /api/v1/pockets/{id}/sessions` returns at most the 200 most recent threads.
+`GET /api/v1/sessions/runtime` takes `limit` 1..500; `total` counts every row.
 
 ```json
 { "sessions": { "agent-a": [ { "id": "…", "sessionId": "…", "agent": "agent-a" } ], "agent-b": [] } }

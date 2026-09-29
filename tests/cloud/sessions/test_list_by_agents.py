@@ -3,8 +3,9 @@
 # Created 2026-09-27 (feat/bulk-grants-conversations): every requested agent id
 # is a key (empty list when none); rows are the caller's own, in the active
 # workspace, not soft-deleted, newest activity first; each agent's list equals
-# what ``list_by_agent`` returns; all of it comes from ONE Mongo query; the
-# route validates 1..100 ids and dedupes them.
+# what ``list_by_agent`` returns; the reads do not grow with the agent count
+# (one id-picking aggregation plus ONE find); the route validates 1..100 ids and
+# dedupes them. Per-agent caps are pinned in tests/cloud/test_list_bounds_and_indexes.py.
 
 from __future__ import annotations
 

@@ -1,0 +1,156 @@
+[
+  {
+    "label": "GET /sessions stops passing the limit through (falls back to the 50-row page default)",
+    "file": "ee/pocketpaw_ee/cloud/sessions/router.py",
+    "find": "            ctx, workspace_id, surface=surface, cursor=cursor, limit=limit\n        )\n        if next_cursor:",
+    "replace": "            ctx, workspace_id, surface=surface, cursor=cursor\n        )\n        if next_cursor:",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_route_default_limit_is_200_and_upper_bound_is_enforced"]
+  },
+  {
+    "label": "GET /sessions drops the next-page cursor header",
+    "file": "ee/pocketpaw_ee/cloud/sessions/router.py",
+    "find": "            response.headers[\"X-Next-Cursor\"] = next_cursor",
+    "replace": "            pass",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_route_caps_pages_by_cursor_and_keeps_the_bare_list_shape"]
+  },
+  {
+    "label": "list_by_agent unbounded again",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "            _SessionDoc.agent == agent_id,\n            _SessionDoc.deleted_at == None,  # noqa: E711\n        )\n        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]\n        .limit(limit)\n",
+    "replace": "            _SessionDoc.agent == agent_id,\n            _SessionDoc.deleted_at == None,  # noqa: E711\n        )\n        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]\n",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_route_agent_filter_is_capped_newest_first"]
+  },
+  {
+    "label": "by-agents per-agent cap removed",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "            {\"$project\": {\"ids\": {\"$slice\": [\"$ids\", per_agent]}}},",
+    "replace": "            {\"$project\": {\"ids\": 1}},",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_by_agents_caps_each_agent_independently"]
+  },
+  {
+    "label": "pocket thread list unbounded again",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "        filters.append(_SessionDoc.owner == ctx.user_id)\n    docs = (\n        await _SessionDoc.find(*filters)\n        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]\n        .limit(limit)\n",
+    "replace": "        filters.append(_SessionDoc.owner == ctx.user_id)\n    docs = (\n        await _SessionDoc.find(*filters)\n        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]\n",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_pocket_list_is_capped_newest_first"]
+  },
+  {
+    "label": "non-reader pocket list loses its workspace pin",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "    if workspace_id is not None:\n        filters.append(_SessionDoc.workspace == workspace_id)\n    if readable:\n",
+    "replace": "    if readable:\n        filters.append(_SessionDoc.workspace == workspace_id)\n",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_non_reader_pocket_list_is_pinned_to_the_pockets_workspace"]
+  },
+  {
+    "label": "count_for_user ignores the surface filter",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "        _SessionDoc.owner == user_id,\n        _SessionDoc.deleted_at == None,  # noqa: E711\n        *_surface_filters(surface),\n    ).count()",
+    "replace": "        _SessionDoc.owner == user_id,\n        _SessionDoc.deleted_at == None,  # noqa: E711\n    ).count()",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_count_for_user_matches_the_listing_per_surface"]
+  },
+  {
+    "label": "runtime session index ignores the limit",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "            query = query.sort([(\"lastActivity\", -1)]).limit(limit)",
+    "replace": "            query = query",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_runtime_index_limit_keeps_newest_and_total_counts_all"]
+  },
+  {
+    "label": "mandate last shift picked by insertion order, not by shift number",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "                {\"$sort\": {\"no\": -1}},",
+    "replace": "",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_mandate_health_matches_the_old_per_mandate_queries"]
+  },
+  {
+    "label": "mandate open-gate count counts every shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "{\"$eq\": [\"$state\", \"in_gate\"]}, 1, 0]",
+    "replace": "{\"$eq\": [\"$state\", \"in_gate\"]}, 1, 1]",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_mandate_health_matches_the_old_per_mandate_queries"]
+  },
+  {
+    "label": "GET /agents cap not applied in the service",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "        cursor = cursor.limit(limit)",
+    "replace": "        cursor = cursor",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_list_limit_and_route_cap"]
+  },
+  {
+    "label": "GET /agents route stops passing the cap",
+    "file": "ee/pocketpaw_ee/cloud/agents/router.py",
+    "find": "        workspace_id, query=query, viewer_user_id=user_id, limit=agents_service.LIST_LIMIT\n",
+    "replace": "        workspace_id, query=query, viewer_user_id=user_id\n",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_list_limit_and_route_cap"]
+  },
+  {
+    "label": "folder prefix regex not escaped",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "\"^\" + re.escape(prefix + \"/\")",
+    "replace": "\"^\" + prefix + \"/\"",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_folder_prefix_matches_the_old_python_test"]
+  },
+  {
+    "label": "folder prefix regex no longer anchored",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "\"^\" + re.escape(prefix + \"/\")",
+    "replace": "re.escape(prefix + \"/\")",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_folder_prefix_matches_the_old_python_test"]
+  },
+  {
+    "label": "root folder loses rows with no folder_path",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "    if prefix in (\"/\", \"\"):",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_folder_prefix_matches_the_old_python_test"]
+  },
+  {
+    "label": "root folder matches every descendant",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "    if prefix != \"/\":\n        clauses.append(",
+    "replace": "    if True:\n        clauses.append(",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_folder_prefix_matches_the_old_python_test"]
+  },
+  {
+    "label": "folder delete re-stamps already-deleted rows (not exactly-once)",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "    return {\"workspace\": workspace, \"deleted_at\": None, \"$or\": clauses}",
+    "replace": "    return {\"workspace\": workspace, \"$or\": clauses}",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_folder_prefix_matches_the_old_python_test"]
+  },
+  {
+    "label": "folder delete loses its workspace pin",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "    return {\"workspace\": workspace, \"deleted_at\": None, \"$or\": clauses}",
+    "replace": "    return {\"deleted_at\": None, \"$or\": clauses}",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_folder_prefix_matches_the_old_python_test"]
+  },
+  {
+    "label": "agent DM index dropped",
+    "file": "ee/pocketpaw_ee/cloud/models/session.py",
+    "find": "            [(\"workspace\", 1), (\"owner\", 1), (\"agent\", 1), (\"lastActivity\", -1)],\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_new_indexes_are_declared_on_real_fields"]
+  },
+  {
+    "label": "agent name search stops escaping user input",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "\"$regex\": re.escape(text[:QUERY_MAX_LEN])",
+    "replace": "\"$regex\": text[:QUERY_MAX_LEN]",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_name_search_treats_regex_metacharacters_literally"]
+  },
+  {
+    "label": "agent name search loses case-insensitivity",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "re.escape(text[:QUERY_MAX_LEN]), \"$options\": \"i\"}",
+    "replace": "re.escape(text[:QUERY_MAX_LEN])}",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_name_search_treats_regex_metacharacters_literally"]
+  },
+  {
+    "label": "GET /agents query length uncapped",
+    "file": "ee/pocketpaw_ee/cloud/agents/router.py",
+    "find": "Query(default=None, max_length=agents_service.QUERY_MAX_LEN)",
+    "replace": "Query(default=None)",
+    "tests": ["tests/cloud/test_list_bounds_and_indexes.py::test_agent_list_route_caps_the_query_length"]
+  }
+]
