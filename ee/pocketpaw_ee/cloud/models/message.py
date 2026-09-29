@@ -185,4 +185,10 @@ class Message(TimestampedDocument):
             [("workspace_id", 1), ("session_key", 1), ("createdAt", 1)],
             [("session_key", 1), ("createdAt", 1)],
             [("group", 1), ("createdAt", -1)],
+            # Thread / reply reads: filter on the parent message id (globally
+            # unique, so no group prefix) and walk replies oldest-first.
+            [("thread_id", 1), ("createdAt", 1)],
+            [("reply_to", 1), ("createdAt", 1)],
+            # Unread count: ``group`` + ``_id > last_read_message_id``.
+            [("group", 1), ("_id", 1)],
         ]

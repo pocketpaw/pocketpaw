@@ -23,10 +23,14 @@ Invariants a reader must not break:
 - ``send_message`` is the only place that bumps group stats and writes mention
   notifications for a user message. The ``message.sent`` bus event it emits is
   for agent routing, not for a second stats or mention write.
+- Reads stay bounded and index-shaped: thread and reply lists page on the
+  ``(thread_id|reply_to, createdAt)`` indexes with a limit, search escapes the
+  user's text (``re.escape``) and caps the result count.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime
@@ -77,6 +81,9 @@ from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.time import iso_utc
 
 logger = logging.getLogger(__name__)
+
+# Ceiling on one page of ``GET /messages/{id}/thread`` replies.
+THREAD_REPLY_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -194,15 +201,40 @@ async def _list_for_group_paged(
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
-async def _list_replies(parent_message_id: str) -> list[_MessageDomain]:
-    """All non-deleted group-context replies to a parent, oldest first."""
-    cursor = _MessageDoc.find(
-        {
-            "context_type": "group",
-            "reply_to": parent_message_id,
-            "deleted": False,
-        }
-    ).sort([("createdAt", 1)])  # type: ignore[list-item]
+def _parse_cursor(cursor: str | None) -> tuple[datetime | None, PydanticObjectId | None]:
+    """``"{iso_timestamp}|{object_id}"`` -> ``(time, oid)``; ``(None, None)`` if malformed."""
+    if not cursor:
+        return None, None
+    parts = cursor.split("|", 1)
+    if len(parts) != 2:
+        return None, None
+    try:
+        return datetime.fromisoformat(parts[0]), PydanticObjectId(parts[1])
+    except Exception:
+        return None, None
+
+
+async def _list_replies(
+    parent_message_id: str, *, after: str | None = None, limit: int = 200
+) -> list[_MessageDomain]:
+    """Non-deleted group-context replies to a parent, oldest first, at most
+    ``limit``, starting after the ``after`` cursor when given."""
+    query: dict = {
+        "context_type": "group",
+        "reply_to": parent_message_id,
+        "deleted": False,
+    }
+    after_time, after_oid = _parse_cursor(after)
+    if after_time is not None:
+        query["$or"] = [
+            {"createdAt": {"$gt": after_time}},
+            {"createdAt": after_time, "_id": {"$gt": after_oid}},
+        ]
+    cursor = (
+        _MessageDoc.find(query)
+        .sort([("createdAt", 1), ("_id", 1)])  # type: ignore[list-item]
+        .limit(limit)
+    )
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
@@ -857,11 +889,19 @@ async def get_messages(
                 before_time = None
                 before_id = None
 
-    messages = await _list_for_group_paged(
-        group_id,
-        before_time=before_time,
-        before_id=before_id,
-        limit=limit + 1,
+    # History and the active-run lookup are independent reads.
+    messages, active = await asyncio.gather(
+        _list_for_group_paged(
+            group_id,
+            before_time=before_time,
+            before_id=before_id,
+            limit=limit + 1,
+        ),
+        run_service.find_active_run_for_scope(
+            workspace_id=group.workspace,
+            context_type=("dm", "group"),
+            scope_id=group_id,
+        ),
     )
     has_more = len(messages) > limit
     if has_more:
@@ -882,11 +922,6 @@ async def get_messages(
         if last.created_at is not None:
             next_cursor = f"{last.created_at.isoformat()}|{last.id}"
 
-    active = await run_service.find_active_run_for_scope(
-        workspace_id=group.workspace,
-        context_type=("dm", "group"),
-        scope_id=group_id,
-    )
     active_run = {"run_id": active.run_id, "status": active.status} if active else None
 
     return {
@@ -897,8 +932,16 @@ async def get_messages(
     }
 
 
-async def get_thread(message_id: str, user_id: str) -> list[dict]:
-    """Get all replies to a message, sorted ascending by creation time."""
+async def get_thread(
+    message_id: str,
+    user_id: str,
+    *,
+    after: str | None = None,
+    limit: int = THREAD_REPLY_LIMIT,
+) -> list[dict]:
+    """Replies to a message, oldest first: at most ``limit`` (capped at
+    ``THREAD_REPLY_LIMIT``), after the ``"{createdAt}|{_id}"`` cursor of the
+    last reply seen. The response stays a plain list."""
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     msg = await _get_group_message_domain_or_404(message_id)
@@ -906,7 +949,8 @@ async def get_thread(message_id: str, user_id: str) -> list[dict]:
     if group.type in ("private", "dm"):
         _require_group_member(group, user_id)
 
-    replies = await _list_replies(msg.id)
+    limit = max(1, min(limit, THREAD_REPLY_LIMIT))
+    replies = await _list_replies(msg.id, after=after, limit=limit)
     return [message_to_wire_dict(r) for r in replies]
 
 
