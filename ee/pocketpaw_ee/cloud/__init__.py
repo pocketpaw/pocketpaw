@@ -291,13 +291,19 @@ def init_realtime() -> None:
         workspace_peers=workspace_service.list_peer_ids,
     )
 
-    mode = os.environ.get("POCKETPAW_REALTIME_BUS", "inprocess").lower()
-    if mode not in {"inprocess", ""}:
+    # ``redis-streams`` relays socket frames to every web process (needed for
+    # uvicorn --workers N or several replicas); bus handlers still run once.
+    # See ``_core/realtime/broadcast.py``. Anything else stays single-process.
+    from pocketpaw_ee.cloud._core.realtime import broadcast
+
+    mode = os.environ.get("POCKETPAW_REALTIME_BUS", "inprocess").strip().lower()
+    if mode not in {"inprocess", "", "redis-streams"}:
         logger.warning(
-            "POCKETPAW_REALTIME_BUS=%s is not yet supported (RedisBus lands in Task 33);"
-            " falling back to InProcessBus",
+            "POCKETPAW_REALTIME_BUS=%s is not recognised (use inprocess or redis-streams);"
+            " falling back to inprocess",
             mode,
         )
+    broadcast.configure(enabled=mode == "redis-streams")
 
     set_bus(InProcessBus(resolver=resolver, conn_manager=_conn_manager))
     set_resolver(resolver)
@@ -537,7 +543,7 @@ def mount_cloud(app: FastAPI) -> None:
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process
     # runtime. In multi-tenant deployments this becomes a cross-process
-    # listener once Task 33 ships RedisBus; the contract is identical.
+    # listener once connector events cross processes; the contract is identical.
     try:
         from pocketpaw.runtime.connector_bus import register_listener
 
@@ -1107,6 +1113,21 @@ def mount_cloud(app: FastAPI) -> None:
     def on_shutdown(fn: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:
         _shutdown_hooks.append(fn)
         return fn
+
+    # Cross-process socket broadcast (POCKETPAW_REALTIME_BUS=redis-streams).
+    # Joins this process's own consumer group at startup and destroys it on a
+    # clean shutdown; a crashed process's group is reaped by its siblings.
+    from pocketpaw_ee.cloud._core.realtime import broadcast as _realtime_broadcast
+
+    if _realtime_broadcast.is_enabled():
+
+        @on_startup
+        async def _start_realtime_broadcast() -> None:
+            await _realtime_broadcast.start()
+
+        @on_shutdown
+        async def _stop_realtime_broadcast() -> None:
+            await _realtime_broadcast.stop()
 
     # Decision-graph reconciler + abandon-path sweeper (RFC 09 Slice 4).
     #
