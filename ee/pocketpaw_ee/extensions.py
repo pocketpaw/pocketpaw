@@ -188,6 +188,7 @@ async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
+    from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
@@ -227,6 +228,16 @@ async def _sweeper_loop() -> None:
             await run_cutover_sweep()
         except Exception:
             _run_sweeper_logger.exception("run_cutover_sweep tick failed")
+        # LiteLLM tenant keys: mint for up to 50 live workspaces that still have
+        # none. Workspace create mints in the background and does not retry, so
+        # this is what keeps a failed mint from leaving a workspace on the master
+        # key for good. Runs in every spend mode (the cutover sweep above is a
+        # no-op in ``off``); not in the boot pass, where a down proxy would hold
+        # startup. Own try so it cannot suppress the other sweeps.
+        try:
+            await backfill_tenant_keys()
+        except Exception:
+            _run_sweeper_logger.exception("backfill_tenant_keys tick failed")
         # Charge-first (review fix C): surface PAID sites stuck pending past the
         # threshold (a lost/delayed subscription.active webhook). VISIBILITY ONLY —
         # logs at WARNING, never auto-deploys or auto-cancels. Its own try so a
