@@ -42,7 +42,7 @@ from redis import exceptions as redis_exceptions
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
 from pocketpaw_ee.cloud._core.realtime.events import Event, rebuild_event
-from pocketpaw_ee.cloud._core.redis_client import get_redis
+from pocketpaw_ee.cloud._core.redis_client import get_blocking_redis, get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ async def run_consumer(
     to transient Redis/dispatch errors (logged, brief backoff, loop continues).
     Cancellation propagates out so the lifecycle hook can stop it cleanly.
     """
-    redis = get_redis()
+    redis = get_blocking_redis()
     try:
         await redis.xgroup_create(XPROC_STREAM, XPROC_GROUP, id="$", mkstream=True)
     except redis_exceptions.ResponseError as exc:
