@@ -1,67 +1,27 @@
-"""Enterprise auth — fastapi-users with JWT cookie + bearer transport.
+"""Enterprise auth: fastapi-users with JWT cookie + bearer transport.
+
+Provides the UserManager (registration, login, password reset), the cookie and
+bearer auth backends, the FastAPIUsers instance, and first-boot seeding
+(seed_admin, seed_workspace). Routes are mounted in ``auth/router.py``.
 
 Import-time side effect (read this before touching imports or tests):
-    ``SECRET = _resolve_secret()`` runs at MODULE IMPORT time (see below). In a
-    production posture with no real ``AUTH_SECRET``, importing this module
-    therefore raises ``RuntimeError`` during the import chain — the fail-fast is
-    intentional, but it fires at import, not at first use. Two consequences:
-      * Anything that imports ``auth.core`` (directly or transitively) inherits
-        that fail-fast, so the prod posture must have ``AUTH_SECRET`` set before
-        the import happens, not merely before the first auth call.
-      * Tests must set ``AUTH_SECRET`` / the posture env vars (``POCKETPAW_ENV``,
-        ``POCKETPAW_AUTH_COOKIE_SECURE``) BEFORE this module is first imported.
-        After the first import the module is cached, so ``SECRET`` is frozen at
-        the value resolved on that first import — later ``monkeypatch.setenv``
-        only affects functions that re-read the env (``_resolve_secret``,
-        ``_is_production``), not the already-bound module-level ``SECRET``.
+    ``SECRET = _resolve_secret()`` runs at MODULE IMPORT time. In a production
+    posture (POCKETPAW_ENV=production/prod, or POCKETPAW_AUTH_COOKIE_SECURE=true)
+    with no real ``AUTH_SECRET``, importing this module raises RuntimeError.
+    In dev it substitutes an ephemeral random secret and warns (loudly for a
+    non-dev, non-prod label such as ``staging``). Tests must set the env vars
+    BEFORE the first import; after it ``SECRET`` is frozen.
 
-Changes:
-    2026-06-10 (security R2b review — staging-posture blind spot) — Added
-        ``_is_ambiguous_nonprod_label()`` and a LOUD ``logger.warning`` on the
-        dev ephemeral-secret path (``_resolve_secret``) for deployments labelled
-        with a non-dev, non-prod ``POCKETPAW_ENV`` (e.g. ``staging``) that did
-        not positively trip the prod detector. Such a deployment used to boot
-        SILENTLY on the ephemeral default secret; it now warns. Dev / unset /
-        explicit prod behaviour is unchanged (prod still hard-fails; dev/unset
-        still warns only with the existing ephemeral message). Also documented
-        the import-time ``SECRET`` resolution side effect in this docstring.
-    2026-06-10 (security W0e — insecure-by-default first boot) — Fail-fast on
-        the placeholder AUTH_SECRET in production posture, and stop seeding the
-        hardcoded ``admin123`` password:
-        - ``_is_production()`` decides posture from POCKETPAW_ENV (production /
-          prod) OR the existing prod TLS signal POCKETPAW_AUTH_COOKIE_SECURE=
-          true. Dev/test (neither set) keeps the previous ergonomics.
-        - ``_resolve_secret()`` hard-fails (RuntimeError) when AUTH_SECRET is
-          unset or equals the known placeholder in production posture; in dev
-          it generates an ephemeral random secret and logs a loud warning so
-          tokens minted across a restart don't silently verify with a public
-          default.
-        - ``seed_admin()`` no longer defaults the password to ``admin123``. It
-          prefers an operator-supplied ADMIN_PASSWORD; otherwise it generates a
-          strong random one and prints it ONCE to stdout (never the logger).
-        - The "Admin user created (password: ...)" log line is gone — the
-          password is never written to the application logger.
-    2026-05-17 (security #1117 P1) — Cookie transport hardening:
-        - cookie_secure is now env-driven (POCKETPAW_AUTH_COOKIE_SECURE,
-          defaults to false for local HTTP dev; production must set true).
-        - cookie_httponly explicitly pinned to True so JS can never read
-          the JWT (defence against XSS token theft).
-        - Bearer transport stays registered for back-compat (native /
-          Tauri / API consumers); web build moves to cookie + CSRF.
-        - Slated for removal once all clients ship the cookie path —
-          see ee/cloud/auth/router.py for the deprecation note.
-    Earlier: Added seed_workspace() to auto-create default workspace +
-        General group on first boot.
+Password hashing never runs on the event loop. UserManager overrides the
+fastapi-users methods that hash (create, authenticate, forgot_password,
+reset_password, _update) so they go through ``auth.password_hashing``, and
+defaults to that module's OWASP-parameter helper. The overrides copy upstream
+logic from fastapi-users 15.0.5; ``tests/cloud/auth/test_password_offload.py``
+fails if the upstream source of those methods changes.
 
-Provides:
-- POST /auth/register — sign up with email + password
-- POST /auth/login — sign in, returns JWT cookie + token
-- POST /auth/logout — clear cookie
-- GET  /auth/me — current user
-- PATCH /auth/me — update profile
-
-Admin seeding: call seed_admin() on startup to ensure a default admin exists.
-Workspace seeding: call seed_workspace() after seed_admin() to bootstrap first workspace.
+seed_admin never defaults to a known password: ADMIN_PASSWORD (not the legacy
+``admin123``) or a generated one printed once to stdout, never to the logger.
+The cookie is httponly; Secure comes from POCKETPAW_AUTH_COOKIE_SECURE.
 """
 
 from __future__ import annotations
@@ -76,7 +36,7 @@ from typing import Any
 import jwt
 from beanie import PydanticObjectId
 from fastapi import Depends, Request
-from fastapi_users import BaseUserManager, FastAPIUsers
+from fastapi_users import BaseUserManager, FastAPIUsers, exceptions
 from fastapi_users import schemas as fastapi_users_schemas
 from fastapi_users.authentication import (
     AuthenticationBackend,
@@ -84,9 +44,11 @@ from fastapi_users.authentication import (
     CookieTransport,
     JWTStrategy,
 )
-from fastapi_users.jwt import generate_jwt
+from fastapi_users.jwt import decode_jwt, generate_jwt
+from fastapi_users.password import PasswordHelperProtocol
 from fastapi_users_db_beanie import BeanieUserDatabase, ObjectIDIDMixin
 
+from pocketpaw_ee.cloud.auth import password_hashing
 from pocketpaw_ee.cloud.auth.password_policy import validate_password_async
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 
@@ -233,9 +195,128 @@ class UserManager(ObjectIDIDMixin, BaseUserManager[User, PydanticObjectId]):
     reset_password_token_secret = SECRET
     verification_token_secret = SECRET
 
+    def __init__(self, user_db: Any, password_helper: PasswordHelperProtocol | None = None):
+        super().__init__(user_db, password_helper or password_hashing.password_helper)
+
     async def validate_password(self, password: str, user: Any) -> None:
         email = getattr(user, "email", None) or ""
         await validate_password_async(password, email=email)
+
+    # --- Hashing overrides --------------------------------------------------
+    # Upstream (fastapi-users 15.0.5) calls the sync password helper inside
+    # these async methods, blocking the event loop for a full argon2 call.
+    # Each override below is the upstream body with only the hash/verify line
+    # swapped for its offloaded twin. test_password_offload.py pins the
+    # upstream source; when it fails, re-diff these against the new version.
+
+    async def _hash(self, password: str) -> str:
+        return await password_hashing.hash_password(password, self.password_helper)
+
+    async def _verify_and_update(self, plain: str, hashed: str) -> tuple[bool, str | None]:
+        return await password_hashing.verify_and_update(plain, hashed, self.password_helper)
+
+    async def create(self, user_create: Any, safe: bool = False, request: Request | None = None):
+        await self.validate_password(user_create.password, user_create)
+
+        existing_user = await self.user_db.get_by_email(user_create.email)
+        if existing_user is not None:
+            raise exceptions.UserAlreadyExists()
+
+        user_dict = (
+            user_create.create_update_dict() if safe else user_create.create_update_dict_superuser()
+        )
+        password = user_dict.pop("password")
+        user_dict["hashed_password"] = await self._hash(password)
+
+        created_user = await self.user_db.create(user_dict)
+
+        await self.on_after_register(created_user, request)
+
+        return created_user
+
+    async def authenticate(self, credentials: Any) -> User | None:
+        try:
+            user = await self.get_by_email(credentials.username)
+        except exceptions.UserNotExists:
+            # Still pay for one hash so an unknown email takes as long as a
+            # wrong password (timing attack mitigation, as upstream does).
+            await self._hash(credentials.password)
+            return None
+
+        verified, updated_password_hash = await self._verify_and_update(
+            credentials.password, user.hashed_password
+        )
+        if not verified:
+            return None
+        # Rehash to the current parameters (e.g. an old 64 MiB argon2 hash).
+        if updated_password_hash is not None:
+            await self.user_db.update(user, {"hashed_password": updated_password_hash})
+
+        return user
+
+    async def forgot_password(self, user: User, request: Request | None = None) -> None:
+        if not user.is_active:
+            raise exceptions.UserInactive()
+
+        token_data = {
+            "sub": str(user.id),
+            "password_fgpt": await self._hash(user.hashed_password),
+            "aud": self.reset_password_token_audience,
+        }
+        token = generate_jwt(
+            token_data,
+            self.reset_password_token_secret,
+            self.reset_password_token_lifetime_seconds,
+        )
+        await self.on_after_forgot_password(user, token, request)
+
+    async def reset_password(self, token: str, password: str, request: Request | None = None):
+        try:
+            data = decode_jwt(
+                token,
+                self.reset_password_token_secret,
+                [self.reset_password_token_audience],
+            )
+        except jwt.PyJWTError:
+            raise exceptions.InvalidResetPasswordToken()
+
+        try:
+            user_id = data["sub"]
+            password_fingerprint = data["password_fgpt"]
+        except KeyError:
+            raise exceptions.InvalidResetPasswordToken()
+
+        try:
+            parsed_id = self.parse_id(user_id)
+        except exceptions.InvalidID:
+            raise exceptions.InvalidResetPasswordToken()
+
+        user = await self.get(parsed_id)
+
+        valid_password_fingerprint, _ = await self._verify_and_update(
+            user.hashed_password, password_fingerprint
+        )
+        if not valid_password_fingerprint:
+            raise exceptions.InvalidResetPasswordToken()
+
+        if not user.is_active:
+            raise exceptions.UserInactive()
+
+        updated_user = await self._update(user, {"password": password})
+
+        await self.on_after_reset_password(user, request)
+
+        return updated_user
+
+    async def _update(self, user: User, update_dict: dict[str, Any]) -> User:
+        # Hash the new password here, off the loop, and hand upstream a
+        # ready ``hashed_password``, which its loop passes through untouched.
+        password = update_dict.get("password")
+        if password is not None:
+            await self.validate_password(password, user)
+            update_dict = {k: v for k, v in update_dict.items() if k != "password"}
+            update_dict["hashed_password"] = await self._hash(password)
+        return await super()._update(user, update_dict)
 
     async def on_after_register(self, user: User, request: Request | None = None):
         logger.info("User registered: %s (%s)", user.email, user.id)
