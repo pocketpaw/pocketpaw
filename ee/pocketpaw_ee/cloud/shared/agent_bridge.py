@@ -416,9 +416,12 @@ async def _smart_relevance_check(agent_id: str, content: str) -> bool:
             return False
 
         from pocketpaw.agents.registry import get_backend_class
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
-        settings = Settings.load()
+        # ``Settings.load()`` re-parses config + env (~115 ms) on every group
+        # message. The cached instance is shared process-wide, so copy before
+        # overriding the backend and model.
+        settings = get_settings().model_copy(deep=True)
         settings.agent_backend = "claude_agent_sdk"
         settings.claude_sdk_model = "claude-haiku-4-5-20251001"
 
