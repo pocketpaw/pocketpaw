@@ -217,7 +217,6 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
     from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware
-    from pocketpaw_ee.cloud._core.timing import TimingMiddleware
 
     # Boot-time secret for the loopback internal bypass on the
     # pocket-specialist spec-merge endpoint (PR #1222 R1 fix). Generated
@@ -230,26 +229,18 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
-    #   CSRF → RequestLog → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
-    # RequestLogMiddleware sits outside Timing so it can log every request
-    # (including timing data) to the workspace audit for the /audit page.
-    # The bridge marks genuine *platform admins* (``is_superuser``) as
-    # ``full_access`` before the OSS AuthMiddleware reads it, so platform
-    # admins reach OSS routes (settings/channels/...) without 403'ing on
-    # missing scopes. Workspace owners/admins are NOT granted full_access —
-    # they stay subject to OSS require_scope (W4b escalation fix).
-    # A CSRF 403 short-circuits before Timing observes the request, so perf
-    # data won't include rejected POSTs. That's a deliberate tradeoff: the
-    # CSRF gate exists to be fast and predictable, not measured. Reorder
-    # ONLY if you want Timing to wrap CSRF rejections (swap the two add_
-    # middleware calls — TimingMiddleware would then run outermost).
+    #   CSRF → RequestLog → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    # All three cloud layers are pure ASGI. The bridge marks genuine
+    # *platform admins* (``is_superuser``) as ``full_access`` before the OSS
+    # AuthMiddleware reads it; workspace owners/admins are NOT granted
+    # full_access — they stay subject to OSS require_scope (W4b escalation
+    # fix). It also opens the per-request scope (user stash + read memo).
     app.add_middleware(EEAuthBridgeMiddleware)
-    app.add_middleware(TimingMiddleware)
 
-    # Request-log middleware — records every API request to the workspace
-    # audit (MongoDB) so the /audit page can show request logs, failures,
-    # and timing. Sits outside TimingMiddleware so it wraps the full
-    # handler chain including the timing measurement.
+    # Request-log middleware — times every request for /api/v1/_admin/perf
+    # (``_core.timing``) and records it to ``request_logs`` for the /audit
+    # page. A CSRF 403 short-circuits outside it, so rejected POSTs are
+    # neither timed nor logged: the CSRF gate exists to be fast, not measured.
     app.add_middleware(RequestLogMiddleware)
 
     # CSRF middleware — outermost on inbound, runs before any route.
@@ -764,7 +755,7 @@ def mount_cloud(app: FastAPI) -> None:
     )
 
     # Admin perf endpoint — dumps the in-memory request-timing buffer
-    # populated by ``_core.timing.TimingMiddleware`` (Phase 0). The Phase 11
+    # populated by ``_core.request_log.RequestLogMiddleware`` (Phase 0). The Phase 11
     # perf pass uses this to identify hot endpoints from production load
     # before optimizing. Gated on ``admin.perf`` (owner-only) — per-route
     # timing reveals traffic patterns and shouldn't be visible to every

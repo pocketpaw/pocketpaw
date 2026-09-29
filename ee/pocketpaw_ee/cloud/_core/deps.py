@@ -12,10 +12,11 @@ the actual policy lookup. We translate platform ``GuardForbidden``
 exceptions to cloud-native ``Forbidden`` so the standard error envelope
 applies.
 
-Changes: added require_plan_feature dependency for plan-tier feature gating;
-current_workspace_id now falls back to the user's first membership (and
-persists it) instead of 400-ing when active_workspace is unset but the user
-is a member — fixes joined members being locked out of workspace reads.
+``current_workspace_id`` falls back to the user's first membership (and
+persists it) when ``active_workspace`` is unset, so a joined member is never
+locked out. ``require_plan_feature`` gates a route on the workspace's plan
+tier; its plan read is memoised per GET/HEAD request (``request_memo``) and
+shared with ``entitlements.service.resolve_entitlements``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 
+from pocketpaw_ee.cloud._core.ee_auth_bridge import request_memo
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.models.user import User
@@ -189,8 +191,12 @@ def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None
 
         # Re-raises on DB errors — better to surface 5xx than silently
         # downgrade an enterprise customer to the most restrictive plan
-        # during a transient Mongo flap.
-        plan = await workspace_service.get_workspace_plan(workspace_id)
+        # during a transient Mongo flap. Memoised per GET/HEAD request under
+        # the key resolve_entitlements uses, so the two share one read.
+        plan = await request_memo(
+            ("workspace_plan", workspace_id),
+            lambda: workspace_service.get_workspace_plan(workspace_id),
+        )
         if plan is None:
             raise NotFound("workspace", workspace_id)
         allowed_features = PLAN_FEATURES.get(plan, set())

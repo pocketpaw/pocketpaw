@@ -390,11 +390,21 @@ class RevocableJWTStrategy(JWTStrategy):
     override it to embed one so :mod:`pocketpaw_ee.cloud.auth.sessions`
     can index per-session state. ``read_token`` short-circuits to None
     when the jti is in the Redis revocation set for the user.
+
+    ``read_token`` first asks the EE auth bridge for the user it already
+    verified (signature, audience, exp, revocation, active) for this exact
+    token in this request; only on a miss does it decode and look up again.
     """
 
     async def read_token(self, token, user_manager):  # type: ignore[override]
         if token is None:
             return None
+        from pocketpaw_ee.cloud._core.ee_auth_bridge import stashed_user
+
+        user = stashed_user(token, self)
+        if user is not None:
+            return user
+
         from pocketpaw_ee.cloud.auth import sessions as sessions_service
 
         try:
