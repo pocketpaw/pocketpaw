@@ -303,6 +303,12 @@ def init_realtime() -> None:
             " falling back to inprocess",
             mode,
         )
+    if mode == "redis-streams" and not os.environ.get("POCKETPAW_REDIS_URL", "").strip():
+        logger.warning(
+            "POCKETPAW_REALTIME_BUS=redis-streams needs POCKETPAW_REDIS_URL;"
+            " falling back to inprocess"
+        )
+        mode = "inprocess"
     broadcast.configure(enabled=mode == "redis-streams")
 
     set_bus(InProcessBus(resolver=resolver, conn_manager=_conn_manager))

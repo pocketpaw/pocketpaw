@@ -459,7 +459,10 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Realtime across web processes (`POCKETPAW_REALTIME_BUS`)**: `inprocess`
   (default) or `redis-streams`. Sockets live in the process that accepted them,
   so running more than one web process (`uvicorn --workers N`, or replicas)
-  needs `redis-streams`, set on the web service AND the worker. Then
+  needs `redis-streams`, set on the web service AND the worker (web first or
+  both at once: a worker alone on it sends agent replies to a stream no
+  `inprocess` web process reads; without `POCKETPAW_REDIS_URL` it falls back
+  to `inprocess` with a warning). Then
   `_core/realtime/broadcast.py` relays socket frames (bus audiences,
   `broadcast_to_group`, `send_to_room`, worker ws envelopes) through the
   `cloud:realtime:broadcast` stream, which each process reads with its OWN
