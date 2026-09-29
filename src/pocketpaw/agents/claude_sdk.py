@@ -935,10 +935,13 @@ def _pending_matches(entry: dict, want: tuple[str, str | None]) -> bool:
     if text is _ANY_REPLY:
         return True
     got = _normalize_turn_text(entry.get("content", ""))
-    # The sent message can be the stored one plus an appended block (the group
-    # bridge adds "Attached files"), so a shared opening counts as the same turn.
-    probe = min(len(got), len(text), 200)
-    return got == text or (probe > 0 and got[:probe] == text[:probe])
+    # The sent and stored texts differ at the edges: the group bridge appends an
+    # "Attached files" block to what it sends and prefixes the sender's name to
+    # what it replays. So the opening of either, found inside the other, counts.
+    if got == text:
+        return True
+    head_sent, head_got = text[:200], got[:200]
+    return bool(head_sent and head_got) and (head_sent in got or head_got in text)
 
 
 def _unseen_history(wm: _HistoryWatermark, history: list[dict]) -> list[dict] | None:

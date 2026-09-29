@@ -1,5 +1,14 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
+Warm-client turn state: the agent runs under ``warm_session_key_for(ctx)`` (the
+conversation key plus the user), so members of one scope never share a warm CLI
+process. ``_prewarm_session`` connects under that key's turn slot
+(``enter_turn_slot``) and ``_drive_agent_loop`` fills the slot with this turn's
+``TurnBinding`` (identity, pocket, Paw Bar run, timeline, SSE queue, artifact
+collector) before ``pool.run`` and clears it in its finally, because the
+client's in-process MCP tools keep the context they were connected in. History
+still loads and persists under ``session_key_for``.
+
 Changes:
 - 2026-09-27 (fix/concierge-web-tool-deny) — a profile with ``exclusive_tools``
   (the public concierge) forwards ``exclusive_mcp_tools=True`` and
@@ -347,7 +356,7 @@ Changes:
   inputs ``_drive_agent_loop`` will (instructions, the entity-aware
   deny/allow/skills/override, session_key, and the run's ``spec.history``) and
   calls ``AgentPool.prewarm`` so the prewarmed client's cache key matches the
-  first turn's and its prompt carries the conversation so far. It is gated to
+  first turn's. It is gated to
   smart-routing-OFF (the model is message-derived when routing is on, so a
   message-less prewarm could warm the wrong tier and churn) and swallows every
   error. Skill sessions on smart-routing-ON deployments keep today's cold turn-1.
@@ -463,15 +472,20 @@ from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
+    TurnBinding,
     attach_agent_identity,
     attach_sse_event_sink,
     bind_pawbar_run,
     bind_timeline,
+    bind_turn,
     build_behavior_instructions,
     build_knowledge_context,
     collect_delivered_artifacts,
+    current_delivered_artifacts,
     detach_agent_identity,
     detach_sse_event_sink,
+    enter_turn_slot,
+    exit_turn_slot,
     mark_cloud_chat_run,
     push_sse_event,
     register_stream_sink,
@@ -480,7 +494,9 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     session_key_for,
     unbind_pawbar_run,
     unbind_timeline,
+    unbind_turn,
     unregister_stream_sink,
+    warm_session_key_for,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,
@@ -1683,10 +1699,15 @@ async def _prewarm_session(
         # same pawbar_actions tool set turn 1 will resolve (None for every other run).
         pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
         timeline_token = bind_timeline(_timeline_from_ctx(ctx))
+        # The warm client's MCP tools keep the context they are connected in, so
+        # connect them under the session's turn slot: each turn then fills it
+        # with its own identity/collector (``bind_turn`` in _drive_agent_loop).
+        warm_key = warm_session_key_for(ctx)
+        slot_token = enter_turn_slot(warm_key)
         try:
             await pool.prewarm(
                 ctx.target_agent_id,
-                session_key_for(ctx),
+                warm_key,
                 instructions=behavior_instructions,
                 deny_mcp_tool_ids=surface_deny,
                 allow_sdk_tools=surface_allow,
@@ -1710,6 +1731,7 @@ async def _prewarm_session(
                 history=history,
             )
         finally:
+            exit_turn_slot(slot_token)
             unbind_timeline(timeline_token)
             unbind_pawbar_run(pawbar_token)
             detach_agent_identity(identity_tokens)
@@ -2018,9 +2040,15 @@ async def _drive_agent_loop(
     # C1 — bind this run's concierge action context (None for every non-concierge
     # or no-actions run). The pawbar_actions MCP server + tool handlers read it;
     # reset in the same finally as the identity tokens so it never leaks.
-    pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
+    pawbar_run = _pawbar_run_from_ctx(ctx)
+    pawbar_token = bind_pawbar_run(pawbar_run)
     # Same lifetime as the pawbar context: bound here, reset in the same finally.
-    timeline_token = bind_timeline(_timeline_from_ctx(ctx))
+    timeline = _timeline_from_ctx(ctx)
+    timeline_token = bind_timeline(timeline)
+    # This turn's values for the warm client's in-process MCP tools, which read
+    # the session's turn slot rather than the context they were connected in.
+    # Bound inside the try (a process-level slot must not outlive a raise).
+    turn_handle = None
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -2079,7 +2107,22 @@ async def _drive_agent_loop(
         # a process-level dict rather than a ContextVar, so a leak here would
         # outlive the task and hand a dead queue to the next turn.
         register_stream_sink(session_mongo_id, side_channel_queue, ctx.workspace_id)
-        session_key = session_key_for(ctx)
+        # Per-member warm key: two users of one pocket/session never share a
+        # warm CLI process (history still loads under ``session_key_for``).
+        session_key = warm_session_key_for(ctx)
+        turn_handle = bind_turn(
+            session_key,
+            TurnBinding(
+                workspace_id=ctx.workspace_id,
+                user_id=ctx.user_id,
+                session_mongo_id=session_mongo_id,
+                pocket_id=ctx.pocket_id,
+                pawbar_run=pawbar_run,
+                timeline=timeline,
+                sse_sink=side_channel_queue,
+                artifacts=current_delivered_artifacts(),
+            ),
+        )
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
         # profile (entity-rooms chunk ①). ``ctx.resolved_profile`` was resolved
         # once in ``execute_run`` — the surface base composed with the
@@ -2740,6 +2783,11 @@ async def _drive_agent_loop(
             unregister_stream_sink(session_mongo_id, side_channel_queue)
         except Exception:
             pass
+        if turn_handle is not None:
+            try:
+                unbind_turn(turn_handle)
+            except Exception:
+                pass
         try:
             unbind_timeline(timeline_token)
         except Exception:
