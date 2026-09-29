@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from fastapi import HTTPException, Request
 
+from pocketpaw_ee.cloud._core.realtime.broadcast import (
+    broadcast_invalidate_soon,
+    register_invalidator,
+)
 from pocketpaw_ee.guards.abac import evaluate_policy
 from pocketpaw_ee.guards.actions import (
     ActionRule,
@@ -261,17 +266,31 @@ _ACTION_OVERRIDE_MAX = 4096
 _ACTION_OVERRIDE_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 
 
-def invalidate_action_overrides(workspace_id: str, user_id: str | None = None) -> None:
+def invalidate_action_overrides(
+    workspace_id: str, user_id: str | None = None, *, _broadcast: bool = True
+) -> None:
     """Drop cached overrides for a member, or for a whole workspace.
 
     Called by ``workspace.service`` whenever ``action_permissions`` is written,
-    so an admin granting an action does not have to wait out the TTL.
+    so an admin granting an action does not have to wait out the TTL. The drop
+    is also broadcast to the other web processes (a no-op unless
+    ``POCKETPAW_REALTIME_BUS=redis-streams``); they run it with
+    ``_broadcast=False`` so it is not re-broadcast.
     """
+    if _broadcast:
+        broadcast_invalidate_soon(_ACTION_OVERRIDE_INVALIDATOR, json.dumps([workspace_id, user_id]))
     if user_id is not None:
         _ACTION_OVERRIDE_CACHE.pop((workspace_id, user_id), None)
         return
     for key in [k for k in _ACTION_OVERRIDE_CACHE if k[0] == workspace_id]:
         _ACTION_OVERRIDE_CACHE.pop(key, None)
+
+
+_ACTION_OVERRIDE_INVALIDATOR = "action_overrides"
+register_invalidator(
+    _ACTION_OVERRIDE_INVALIDATOR,
+    lambda key: invalidate_action_overrides(*json.loads(key), _broadcast=False),
+)
 
 
 async def _has_action_override(workspace_id: str, user_id: str, action: str) -> bool:
