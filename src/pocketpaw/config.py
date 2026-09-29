@@ -3476,15 +3476,38 @@ def get_settings(force_reload: bool = False) -> Settings:
     return Settings.load()
 
 
+# (path, st_mtime_ns, st_size, st_ino) -> token. The auth middleware reads the
+# token on every request; this turns the per-request read into a stat.
+# regenerate_token() refreshes it directly, so in-process rotation never waits
+# on mtime granularity.
+_token_cache: tuple[tuple, str] | None = None
+
+
+def _token_cache_key(token_path: Path) -> tuple | None:
+    try:
+        st = token_path.stat()
+    except OSError:
+        return None
+    return (str(token_path), st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def get_access_token() -> str:
     """
     Get the current access token.
     If it doesn't exist, generate a new one.
+
+    The file is re-read whenever its path, mtime, size or inode changes, so a
+    rotation by another process is honoured on the next call.
     """
+    global _token_cache  # noqa: PLW0603
     token_path = get_token_path()
-    if token_path.exists():
+    key = _token_cache_key(token_path)
+    if key is not None:
+        if _token_cache is not None and _token_cache[0] == key:
+            return _token_cache[1]
         token = token_path.read_text().strip()
         if token:
+            _token_cache = (key, token)
             return token
 
     return regenerate_token()
@@ -3501,6 +3524,9 @@ def regenerate_token() -> str:
     token_path = get_token_path()
     token_path.write_text(token)
     _chmod_safe(token_path, 0o600)
+    global _token_cache  # noqa: PLW0603
+    key = _token_cache_key(token_path)
+    _token_cache = (key, token) if key is not None else None
     return token
 
 
