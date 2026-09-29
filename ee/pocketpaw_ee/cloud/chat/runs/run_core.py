@@ -1,434 +1,36 @@
-"""Agent-run core — the loop the executor invokes for every chat run.
+"""Agent-run core: the loop the executor invokes for every chat run.
 
-Changes:
-- 2026-09-27 (fix/concierge-web-tool-deny) — a profile with ``exclusive_tools``
-  (the public concierge) forwards ``exclusive_mcp_tools=True`` and
-  ``exclusive_tools=True`` to ``AgentPool.run``. The run is offered only the
-  profile's allow set: no universal grant, no always-allowed servers, no bridged
-  builtins. The pool serves such a run on pydantic_ai whatever the bound agent's
-  backend is, so ``_prewarm_session`` skips it: there is no client to warm.
-- 2026-09-28 (feat/persist-tool-steps) — the tool calls, tool results and
-  thinking a run streams are persisted on the assistant Message as ``steps``.
-  They used to reach only the Redis run stream (1h TTL), so a refresh showed the
-  reply without the work behind it. ``execute_run`` feeds every frame it handles
-  to a ``StepRecorder`` (``chat/runs/steps.py``) in the same loop that builds
-  ``full_text``, finalizes it, and hands ``steps`` / ``steps_omitted`` to the
-  Message write on the completed path and on every partial path (failed,
-  cancelled, host-interrupted). The event held when the cancel check breaks is
-  NOT recorded: the client never saw it (it isn't appended to the transport),
-  and a result arriving after the stop must not turn the call the user watched
-  stop into a finished one. The ``tool_start`` frame gains ``input_pending:
-  True`` when the backend flags a provisional announcement (claude_sdk sends one
-  before the real call), so the recorder can keep one step per call; the field
-  is absent otherwise, so other frames are unchanged. Whether a Message is
-  written at all is unchanged: a run with steps but no text still writes none.
-- 2026-09-27 (fix/chat-run-heartbeat) — long runs no longer lose their reply.
-  Reported as "if the agent takes a lot of time the worker stops completely: no
-  message saved, only the user message after a refresh". Three fixes here:
+``execute_run(spec)`` rebuilds the scope context from the ``RunSpec``, runs the
+run-start gates (jail quota, off the event loop; daily turn cap; guest budget;
+credit quota; own-key rules), wins the ``queued -> running`` transition (a run
+the stale-run sweeper already interrupted is dropped, not driven), then drives
+``_drive_agent_loop`` and appends every frame it yields to the run's stream
+transport. A heartbeat task stamps ``last_heartbeat_at`` while the run is
+driven so the sweeper can tell a slow run from a dead one.
 
-  1. HEARTBEAT. ``execute_run`` refreshes ``ChatRunDoc.last_heartbeat_at`` on a
-     timer (``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS``, default 30s) for as long
-     as it drives the run, and the stale-run sweeper judges running runs by that
-     stamp instead of ``createdAt``. Timer-based on purpose: one tool call can go
-     many minutes without an event. ``_mark_running`` now reports whether it won
-     the ``queued -> running`` transition, and a run the sweeper already
-     interrupted is not driven (its client was sent the terminal frame and left).
-  2. PARTIALS ARE MESSAGES. The failed, cancelled and host-interrupted paths
-     persist the text already streamed as an assistant ``Message`` flagged with
-     ``run_status``, point the run at it, and broadcast ``message.new``, the same
-     steps the completed path takes. Before, that text lived only on
-     ``partial_text``, which the chat history never reads. Empty text still
-     writes nothing, concierge runs are unchanged (their transcript IS the run
-     doc), and a partial never trains the soul (no ``pool.observe``). The frames
-     the client gets are unchanged, except ``stream_end`` on cancel now carries
-     the persisted ``assistant_message_id``.
-  Review follow-ups: the ``active=True`` typing broadcast is best-effort (it
-  could leave the heartbeat beating for a run nobody drove), the heartbeat loop
-  ends once the run is not running, and a partial is dated to the run's start so
-  it sorts before a user message that superseded it.
-  3. SHUTDOWN ORDER. The shielded host-cancel cleanup is tracked in
-     ``_pending_cleanups`` and ``drain_pending_cleanups`` waits for it, so the
-     worker can finish those writes before it closes the database under them.
-- 2026-09-15 (feat/chat-image-wiring) — a turn's attached images are resolved
-  to bytes here and forwarded to the pool as ``image_attachments``, alongside the
-  existing ``images`` (the surface's own snapshot). Two channels, two reasons:
-  the snapshot is replaced every turn, the attachment is a file the user chose.
-  Withhold-when-empty, so a turn with no attachment is byte-identical to before.
-- 2026-09-14 (fix/partial-reply-survives-failed-run) — the cancel check at the
-  top of the event loop no longer THROWS AWAY the event it is holding. It runs
-  before the event is handled, so breaking on it discarded a chunk the model had
-  already produced; when the flag was already set as the loop opened, that was
-  every chunk, and ``mark_terminal(status="cancelled", partial_text=full_text)``
-  persisted an empty string. The stop button therefore erased the very text the
-  user had just read and deliberately stopped because of. The chunk is now folded
-  into ``full_text`` before the break — but deliberately NOT appended to the
-  transport: the client asked for the stream to end and it still ends at exactly
-  the event it did before. Only the durable record changes, which is what
-  ``load_history_for_scope`` replays.
-- 2026-09-11 (feat/byok-custom-gateway, review B2) — ``_iter_agent_events``
-  catches ``byok_service.GatewayEgressRejected`` from
-  ``resolve_turn_credentials`` and yields a terminal
-  ``byok.base_url_rejected`` instead of running the turn. The catch sits ABOVE
-  the existing broad ``except Exception``, which degrades to platform
-  credentials: reaching it with a rejected gateway address would put every
-  such turn on OUR key, so a tenant's bad (or hostile) address would spend our
-  money. A refused turn is the correct answer — the address is theirs to fix.
-- 2026-09-11 (feat/pydantic-ai-model-override) — a per-send ``model`` is checked
-  against the gateway's own catalog before it is forwarded. The edge validates a
-  SHAPE (a regex and a length) and the composer's picker is three hardcoded
-  presets plus a free-text field, so once the override became live on the
-  cloud's default backend the field was free-text model selection billed to the
-  platform key. ``_model_is_unknown_to_gateway`` rejects only what it positively
-  knows is unserved — an unreachable or empty catalog lets the turn through
-  rather than making the picker a dead control again, matching what
-  ``resolve_turn_credentials`` does with its own failure. It is NOT an
-  entitlement check: every model the gateway serves is in the catalog, so a
-  per-plan allowlist is still the thing that would put a ceiling on cost, and
-  this is the seam it plugs into.
-- 2026-09-11 (feat/other-hand-page-vision) — ``_read_turn_images`` gained a
-  PER-IMAGE ceiling (``_MAX_IMAGE_BYTES``, 5MB) beside the existing per-turn
-  budget. The two answer different questions and both are kept: the budget
-  caps what one turn puts on the wire across up to three images, and until now
-  it was the only check — so a single 5–6MB page snapshot sailed through our
-  guard and was rejected by the provider instead, which the user saw as a
-  failed turn with no useful message. 5MB is Anthropic's documented per-image
-  limit and the safe floor across providers (OpenAI and Gemini allow more), so
-  it is not conditional on which backend the turn runs. An over-size image is
-  skipped exactly like every other bad path here — warn, ``continue``, never
-  raise — so the other images in the turn still ride.
+``_drive_agent_loop`` resolves the entity-aware ``SurfaceProfile`` (tool deny /
+allow, skills, system-message override), BYOK credentials, the per-send model
+override, surface preamble and attachments, then calls ``AgentPool.run`` and maps
+backend events to SSE frames (chunks, thinking, tool chips with narration, plan
+updates, ripple / artifact / studio frames, token usage). Behind
+``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI session and
+can lease a warm client. A backend ``error`` event becomes a terminal ``error``
+frame; a rate-limited or overloaded provider gets the stable code
+``agent.provider_busy`` and a plain message, with the raw text kept to the
+server log. Every other backend error keeps ``agent.backend_error``.
 
-- 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
-  ``user_content`` through ``agent_service.resolve_user_content`` before
-  anything reads it. A send with attachments and no typed text arrives as the
-  composer's invisible sentinel, which the model reads as an empty turn while
-  the attachment's text sits in the knowledge channel looking like reference
-  material; the resolver replaces that one case with a message saying the
-  files ARE the request. Placed at the top of the loop because three things
-  downstream consume the string — the KB query, the session titler, and the
-  prompt handed to ``pool.run``. A turn with real text is untouched.
+Every terminal path (completed, failed, cancelled, host-interrupted) persists
+the text already streamed as an assistant ``Message`` with its tool/thinking
+``steps``, records the run's token ``usage`` on the run doc (latest-wins,
+floored) so metering can bill it, and sets the stream TTL. A concierge run
+never trains the agent's soul. Invariants worth keeping:
 
-- 2026-09-01 (feat/byok-guest-backend) — the turn path finally CALLS
-  ``byok.service.resolve_turn_credentials`` (the seam its own header always
-  promised): ``_iter_agent_events`` resolves the workspace's stored key per
-  turn and threads ``byok_api_key`` into ``pool.run`` (the pool swaps in an
-  isolated backend). Model pinning: a byok turn whose model does not belong to
-  the key's provider yields a clear ``byok.model_provider_mismatch`` error
-  instead of an upstream 401. Guests (``User.is_guest``) have NO platform
-  fallback — a missing/undecryptable key yields ``guest_key_required``. BYOK
-  turns also SKIP the session-supervisor warm-client wiring (a leased warm
-  client carries platform credentials; binding a byok client as the shared
-  warm slot would bleed the other way). ``execute_run`` gained
-  ``_reject_if_guest_over_limit`` beside the jail/credit gates — the single
-  atomic spend against the guest daily-turn budget (fail-closed; the HTTP
-  route fast-rejects check-only in ``agent_router``).
-
-- 2026-09-02 (fix/metering-partial-usage-capture) — the terminal states that
-  could never carry usage now do, and latest-wins grew a floor.
-
-  ``mark_terminal`` was called WITHOUT ``usage=`` on the ``failed`` path, and
-  ``_handle_interrupted_cleanup`` did not take the parameter at all. So a run
-  that crashed, or that the host killed mid-flight, persisted no token counts —
-  and ``metering/sweeper.py`` bills all four terminal states on purpose ("a
-  partial run consumed tokens too"), so it faithfully billed them zero. Only
-  ``cancelled`` ever passed usage; all three are pinned together now.
-
-  The captured usage is also FLOORED rather than blindly overwritten. Every
-  backend reports a RUN-CUMULATIVE payload, so keeping the LATEST is right and
-  summing would bill the conversation once per turn; the floor
-  (``_usage_total``, deliberately the same definition the meter bills on) means
-  a payload that shrank — a backend regressed to per-turn reporting — cannot
-  silently halve a bill.
-- 2026-08-15 (HTN-11) — the ``tool_start`` frame carries an additive
-  ``narration``: the tool's plain-language phrase, from the SAME
-  ``shared/tool_narration.py`` the group/DM bridge calls.
-
-  Narration shipped in HTN-1 wired to the bridge alone, so this surface — the
-  main streaming chat — kept sending bare tool names while group/DM read as
-  English. No task in that plan covered this path; HTN-7 is Mission Control's
-  activity ticker, not the chat stream. The asymmetry survived because each
-  surface had its own tests and neither compared against the other, which is
-  why ``test_run_core_narration.py`` asserts the two frames agree rather than
-  only that this one is populated.
-
-  Additive, exactly as on the bridge: a tool with no phrasing emits no field
-  and a client keyed on ``tool`` is unaffected.
-- 2026-08-15 (HTN-5) — ``_drive_agent_loop`` routes a recognized plan tool
-  (``write_plan`` today) through ``shared/plan_normalizer.py`` and yields a
-  ``plan_updated`` SSE frame INSTEAD of the ``tool_start`` chip, so the plan
-  panel renders on the streaming chat surface and not only on the group/DM
-  bridge. Same normalizer, same ``PlanTracker``, same fail-open rule as the
-  bridge: a plan call whose arguments don't normalize falls through to the
-  ordinary chip.
-
-  **Why a frame here and a bus event there.** The bridge emits
-  ``agent.plan_updated`` through ``emit()``, which the AudienceResolver scopes
-  by ``data["group_id"]``. This function has NO group identity — ``RunSpec.group``
-  is nullable and never reaches it, and ``ScopeContext`` carries no group — so a
-  bus emit would raise ``KeyError('group_id')`` inside the resolver, get
-  swallowed by ``emit``'s except, and be delivered to nobody. On this surface the
-  audience is the one client streaming the run, which is exactly what the SSE
-  transport already addresses. ``execute_run`` forwards every yielded frame via
-  ``transport.append_event`` with no name whitelist, so the frame needs no
-  registration.
-
-  ``_new_run_id()`` was hoisted to ``stream_run_id`` for this: it used to be
-  minted inline inside the ``emit_stream_start`` block, so it did not exist when
-  that flag was false and nothing else could reference it. Same value on the
-  wire; now the plan frames carry the same ``run_id`` the client already has
-  from ``stream_start``.
-- 2026-08-07 (fix/code-delegate-pooled-context) — ``_drive_agent_loop`` now
-  PUBLISHES its side-channel queue under the run's ``session_mongo_id``
-  (``register_stream_sink``, beside the existing ``attach_sse_event_sink``)
-  and withdraws it in the same ``finally`` that detaches the sink. The sink
-  ContextVar alone was not reachable by Code Mode's file tools: they run in an
-  in-process MCP server owned by a POOLED SDK client whose task is created
-  during ``_prewarm_session``, i.e. before this function binds anything, so
-  they inherited a context carrying identity (bound at prewarm too, per ART-2
-  below) and no sink — and reported "no browser attached" for a browser that
-  was attached and streaming. Binding the sink at prewarm as ART-2 did for
-  identity is wrong here, because prewarm has no live stream and would publish
-  a queue belonging to no turn; publishing by session id makes the stream
-  findable regardless of which task calls the tool.
-- 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``_drive_agent_loop`` and
-  ``_prewarm_session`` thread the resolved surface into ``pool.run`` /
-  ``pool.prewarm`` as ``surface_preamble`` + ``surface_cache_key``. The
-  preamble no longer reaches the prompt through ``knowledge_context`` (see
-  ``agent_service.build_dynamic_context``): it is a prompt LAYER now, so it
-  sits above the per-turn material and its key reaches the assembled prompt's
-  digest — which is what lets a backend caching an agent object notice that the
-  user navigated to a different pocket, or edited the one they were on. Both
-  halves cross the EE→OSS boundary as plain data, the shape
-  ``deny_mcp_tool_ids`` already uses. Unlike the other per-run kwargs these are
-  NOT withhold-when-empty: they never reach a backend, they feed the assembler,
-  and ``""`` / ``None`` is itself the meaningful "no surface" answer.
-- 2026-07-15 (fix/paw-bar-concierge-soul-policy) — ``_persist_and_complete``
-  now gates the ``pool.observe`` soul-learning call: a Paw Bar concierge run
-  (session_key prefix ``cloud:concierge:``) SKIPS it so anonymous, untrusted
-  website-visitor input can no longer feed the per-agent soul (a memory-
-  poisoning channel). Normal runs still observe unchanged. New helper
-  ``_is_concierge_run`` + constant ``_CONCIERGE_SESSION_PREFIX``; the prefix is
-  the pickle-safe signal that reaches the executor and also covers a typed
-  ``ScopeKind.CONCIERGE`` scope once it lands (session_key derives from
-  ``ctx.kind.value``). A future quarantine-via-Instinct path can supersede this.
-- 2026-07-11 (ART-1) — ``execute_run`` binds a per-run delivered-artifact
-  collector (``collect_delivered_artifacts``) around the run and, at persist
-  time, drains it into one ``{type:"artifact", meta}`` attachment on the
-  assistant message plus one ``artifact`` SSE event apiece (in delivery order,
-  mirroring the ripple event). A non-cancelled run that delivered artifacts but
-  produced no closing text no longer early-returns — it routes through the
-  persist path so the attachments + events are never dropped (the files already
-  landed in blob storage). ``deliver_artifact`` (``mcp_servers/deliver.py``)
-  feeds the collector via ``record_delivered_artifact`` on each success.
-- 2026-07-08 (CS-13, feat/per-send-model-override) — ``execute_run`` copies
-  ``spec.model_override`` onto the rebuilt ``ctx`` and ``_drive_agent_loop``
-  forwards it into ``pool.run`` as ``model_override`` ONLY when set (the same
-  withhold-when-empty idiom as the surface kwargs). It reaches the Claude SDK
-  backend, where it wins over smart-routing / ``claude_sdk_model``. ``None``
-  (older clients / no picker) is byte-identical to today.
-- 2026-06-28 (feat/aiam-agent-revoke, AW-4) — ``_drive_agent_loop`` catches
-  ``AgentDisabled`` from ``pool.get`` explicitly and yields a clean
-  ``agent.unavailable`` error instead of letting it fall through to the generic
-  ``agent.load_failed`` 500-style path. A soft-disabled agent surfaces a tidy
-  "currently unavailable" message to the chat client.
-- 2026-06-30 (fix/warm-noop-benign-error) — WARM hot-process reuse was a NO-OP
-  live: a benign backend ``error`` event flipped ``sup_run_failed`` True, so the
-  ``finally`` called ``mark_crashed`` and tore down the session's warm ``claude``
-  client EVERY turn — turn 2 never reused turn 1's slot. The real ``claude_sdk``
-  yields ``error`` THEN ``done`` for a non-fatal ResultMessage ``is_error`` (a turn
-  that still produced a response; the leased client stays healthy), but the error
-  branch ``break``-ed and flagged a crash before seeing the ``done``. Fixed: on the
-  supervised path the error branch now RECORDS the error (``sup_saw_error``) and
-  keeps consuming instead of breaking; ``sup_run_failed`` is decided at stream-end
-  — a trailing error followed by ``done`` (``sup_completed_ok``) keeps the slot
-  warm, while an ``error`` with no successful completion is still a genuine crash
-  that demotes the runtime to COLD (so the next turn cold-resumes from the store).
-  The legacy (flag-OFF) path keeps its original break-and-stop behavior byte-for-byte.
-- 2026-06-30 (feat/warm-reuse WH-3) — the supervised block now keeps a session's
-  ``claude`` client WARM across turns. When ``acquire`` returns a live, eligible
-  warm slot (``warm_reuse`` + ``slot``), the executor LEASES it to the backend
-  via ``run_kwargs["warm_client"]`` so turn 2+ drives the existing subprocess
-  directly (no re-materialize, no reconnect). On such a warm-reuse turn it
-  WITHHOLDS the resume id from the ``SessionHandle`` (``cli_session_id=None``,
-  store still threaded): the backend's warm-reuse path is gated on
-  ``not resume_active``, and the live client already holds THIS session's
-  conversation, so threading resume would silently demote warm reuse to a cold
-  re-materialize. On every other supervised turn (turn 1, a reaped/COLD runtime,
-  crash recovery) the resume id is threaded exactly as SS-5 did (cold-resume).
-  The executor ALSO always hands the backend an ``on_client_built`` callback that
-  binds the freshly-built client back to the supervisor (``bind_warm_slot`` with a
-  ``LeasedClient``) so the NEXT turn can reuse it; it is a no-op on a warm-reuse
-  turn and rebinds the new slot on a key-drift (model/tools changed) turn. Flag
-  OFF is byte-for-byte unchanged: neither ``warm_client`` nor ``on_client_built``
-  is added. (Known follow-up: a leased turn that carries ``skill_names``
-  materializes a per-run skills dir that is cleaned at backend ``cleanup()``, not
-  at the supervisor's per-leased-client teardown — a benign retention gap, no run
-  correctness impact; the clean fix spans the WH-1/WH-2 surface.)
-- 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — ``execute_run`` now
-  enforces the UNIVERSAL monthly-credit-quota gate at run-start. A new
-  ``_reject_if_over_credit_quota`` helper (the credit-spend sibling of the ART-3
-  ``_reject_if_over_jail_quota``) is called right AFTER the jail-quota gate —
-  after ``resolve_scope_context`` validates ``ctx.workspace_id`` and BEFORE the
-  prewarm / mark-running / agent spin-up. It is flag-gated on
-  ``get_settings().billing_enforced`` (a no-op otherwise — OSS / self-host),
-  calls ``credits.service.check_quota`` (the pure, flag-free assertion), and on
-  ``QuotaExceeded`` rejects the run the SAME clean way the jail-quota reject
-  does: a terminal ``error`` stream frame (``code=credits.quota_exceeded``) +
-  ``mark_terminal(failed)`` + an early return WITHOUT invoking the agent (no
-  model call — the no-overspend money guarantee). This is the universal cap that
-  covers the worker/executor path; the chat HTTP route ALSO fast-rejects in
-  ``agent_router`` so its synchronous caller gets a clean 402 with no DB trace.
-- 2026-07-08 (feat/billing-enforce-gate) — ``_reject_if_over_credit_quota`` now
-  delegates to the shared ``credits.guards.reject_if_over_billing`` so every
-  agent-run seam (this executor, the group/DM bridge, the /files agent ops, the
-  planner) blocks an over-budget tenant identically. The shared helper runs BOTH
-  credit assertions, so the worker/executor leg now ALSO rejects an empty wallet
-  (``check_balance``, 402 credits.insufficient) — previously it caught only the
-  monthly-ceiling case.
-- 2026-06-30 (feat/session-supervisor SS-5) — ``_drive_agent_loop`` now drives
-  every supervised agent turn through the ``SessionSupervisor`` + the durable
-  ``(workspace, session, agent) -> cli_session_id`` mapping (SS-3
-  ``runtime_service``) + the per-tenant ``MongoSessionStore`` (SS-2), gated
-  behind ``POCKETPAW_SESSION_SUPERVISOR`` (default OFF). When ON: it resolves the
-  stable session identity (``workspace_id`` / ``scope_id`` as the per-conversation
-  key / ``target_agent_id``), recovers any prior native ``cli_session_id`` from
-  the durable mapping, calls ``supervisor.acquire(...)``, builds a
-  ``SessionHandle(cli_session_id=acq.cli_session_id, session_store=MongoSessionStore(ws))``
-  and threads it as ``session_handle=`` into ``pool.run`` so the agent RESUMES
-  its native CLI session (durable across restart, tenant-isolated) instead of
-  replaying Mongo history. The run is bracketed with
-  ``mark_run_start`` / ``mark_run_end`` (the latter in ``finally``); the turn-1
-  ``("session_id", {...})`` event the claude_sdk backend emits is consumed
-  internally (NOT yielded to the SSE transport) and persisted via
-  ``runtime_service.set_cli_session_id`` + ``supervisor.record_cli_session_id``;
-  a crash (pool.run raised, or a backend ``error`` event) flips the runtime to
-  COLD via ``mark_crashed``. v1 does NOT bind a live warm slot (WARM hot-process
-  reuse is a documented fast-follow) — every supervised turn resumes from the
-  store. When OFF, ``sup_acq`` stays ``None``, no supervisor/store/mapping call
-  fires, and ``pool.run`` is invoked WITHOUT a ``session_handle`` — byte-for-byte
-  the legacy path.
-- 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
-  lifecycle (the prewarm ``create_task`` + the main agent loop) in
-  ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
-  (``agent_jail.resolve_agent_cwd``) fires ONLY for an actual cloud chat
-  dispatch — not for any workspace-less run in a cloud-connected process. The
-  marker is set BEFORE the prewarm ``create_task`` (``asyncio.create_task``
-  copies the context, carrying it into the prewarm task) and BEFORE the two
-  ``attach_agent_identity`` binds, so a run that reaches the backend WITHOUT
-  binding identity still trips the guard. Fixes the dev-CI regression where the
-  jail hard-failed direct claude_sdk backend tests + a broad ee set once a cloud
-  test left ``is_multi_tenant_cloud()`` True in the process.
-- 2026-06-26 (ART-2) — ``_prewarm_session`` now binds the run's identity
-  (``attach_agent_identity`` with the same ``session_mongo_id`` / ``pocket_id``
-  the stream path uses) around its ``pool.prewarm`` call, then detaches in a
-  ``finally``. The per-tenant cwd jail resolves the agent's working directory
-  from those ContextVars; since prewarm is fired in its own ``create_task``
-  context BEFORE the stream binds identity, without this the cloud cwd resolver
-  would fail closed during warm-up (swallowed) and every cloud session would
-  lose the turn-1 warm. Binding here makes prewarm warm the SAME per-session
-  jail turn 1 will use.
-- 2026-06-25 (fix/worker-trusts-spec-workspace) — ``execute_run`` now threads
-  the authenticated ``spec.workspace_id`` into ``resolve_scope_context`` via the
-  new ``expected_workspace_id`` kwarg, then raises a clean
-  ``CloudError("scope.no_workspace")`` if the resolved ``ctx.workspace_id`` is
-  STILL empty — instead of letting ``_drive_agent_loop`` attach an empty
-  identity. The worker used to re-derive tenancy from the scope doc alone and
-  discard the trusted, route-validated spec workspace; when the doc's
-  ``workspace`` field was empty the identity contextvar became ``""`` and the
-  sites-create MCP tool raised "requires workspace and user context (call from a
-  cloud chat session)". The resolver now falls back to the trusted spec
-  workspace (and rejects a spec that disagrees with a non-empty doc workspace —
-  the cross-tenant guard); this seam adds the loud, scope-specific failure.
-- 2026-06-13 (feat/claude-sdk-prewarm) — ``execute_run`` now fires
-  ``_prewarm_session(ctx)`` as a fire-and-forget ``asyncio.create_task`` right
-  after the entity-aware profile is resolved, so the agent's Claude CLI
-  subprocess warms CONCURRENTLY with the remaining pre-turn work (knowledge
-  context, soul recall, SSE setup, prompt assembly) and turn 1 reuses it instead
-  of paying the ~12s cold ``connect()``. ``_prewarm_session`` resolves the SAME
-  inputs ``_drive_agent_loop`` will (instructions, the entity-aware
-  deny/allow/skills/override, session_key) and calls ``AgentPool.prewarm`` so the
-  prewarmed client's cache key matches the first turn's. It is gated to
-  smart-routing-OFF (the model is message-derived when routing is on, so a
-  message-less prewarm could warm the wrong tier and churn) and swallows every
-  error. Skill sessions on smart-routing-ON deployments keep today's cold turn-1.
-- 2026-06-10 (sov/w3a-igw — per-run token metering) — real token usage is now
-  threaded through the run instead of being dropped. Every backend emits a
-  ``token_usage`` ``AgentEvent`` (input / output / cached token counts +
-  total_cost_usd + model + backend), but ``_drive_agent_loop`` had no handler for
-  it, so it was silently discarded and the ``stream_end`` frame's ``usage`` was a
-  hardcoded ``{}``. ``_drive_agent_loop`` now surfaces ``token_usage`` as a
-  ``("token_usage", {...})`` tuple; ``execute_run`` keeps the LATEST one, writes it
-  to the stream, folds it into BOTH ``stream_end`` frames (success + cancelled /
-  empty-text), and persists it onto ``ChatRunDoc.usage`` via
-  ``mark_completed`` / ``mark_terminal`` (the durable metering sink for
-  outcome-based pricing). Empty for backends / runs that report nothing, so
-  existing runs are unchanged.
-- 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
-  identity binding now also passes ``pocket_id=ctx.pocket_id`` into
-  ``attach_agent_identity``, publishing the room's ``Pocket._id`` on the new
-  ``agent_service._active_pocket_id`` ContextVar. The connector-execution MCP
-  server reads it to scope ``list_connector_actions`` / ``connector_execute``
-  to the current pocket. ``None`` for non-pocket (DM/group) threads.
-- 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
-  Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
-  as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
-  tells the agent to emit and the one paw-enterprise ``MarkdownRenderer`` tokenizes
-  as a ``ui-spec`` segment. The legacy ``json`` fence + ``{widgets, lifecycle}``
-  shape is still accepted via a transitional branch so in-flight conversations
-  don't break; that branch is deprecated and slated for removal once no active
-  conversation references the old shape (cutover window is RFC 13 open question #6).
-- 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
-  resolves the per-request ``SurfaceProfile`` and threads its
-  ``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
-  ``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
-  allowlist before launch. This replaces the deleted prompt-sniffing tool gate
-  in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
-  ripple-create tools via typed policy (resolved from ``meta``) instead of the
-  backend string-matching ``engine="svelte"`` in the system prompt. The set is
-  empty for every other surface, so the call is a no-op outside /sites
-  svelte-create.
-- 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
-  the per-run ``SurfaceProfile`` is now ENTITY-AWARE and resolved ONCE per run.
-  ``execute_run`` calls ``_resolve_entity_profile(ctx)`` right after it resolves
-  ``ctx.surface_context``: it takes the pure surface-kind base
-  (``resolve_profile``), and — when the chat is bound to a pocket-entity
-  (``meta.pocket_id`` set) whose pocket carries a ``surface_profile`` override —
-  loads that pocket TENANT-SCOPED (cloud Rule 7) and folds the override OVER the
-  base via ``compose_entity_profile`` (ripple entity-wins-if-set; deny / allow /
-  skill UNION; system-message entity-wins). The result is stashed on
-  ``ctx.resolved_profile``. BOTH profile consumers now read that pre-resolved
-  object instead of each calling ``resolve_profile``: ``build_behavior_instructions``
-  (ripple-omit, stays sync) and ``_drive_agent_loop`` (tool-deny + tool-allow).
-- 2026-06-07 (feat/entity-pocket-profile-field) — ``_drive_agent_loop`` also
-  reads ``ctx.resolved_profile.skill_names`` and ``.system_message_override`` and
-  forwards them as plain data into ``AgentPool.run`` (withhold-when-empty/None):
-  ``skill_names`` drives per-run skill materialization (SDK plugin) +
-  non-SDK skill filtering; ``system_message_override`` swaps the agent's base
-  system message while keeping the instruction / soul-memory / knowledge layers.
-  Net effect: ``ripple_mode``, ``deny_mcp_tool_ids``, ``allowed_sdk_tools``,
-  ``skill_names`` and ``system_message_override`` are all PER-ENTITY immediately.
-  ``meta.pocket_id`` unset OR no ``pocket.surface_profile`` → resolved profile
-  equals the surface base → behavior byte-identical to today (zero regression).
-  ``resolve_profile`` itself stays PURE/no-I/O; all entity I/O lives in the
-  once-per-run async ``_resolve_entity_profile``.
-- 2026-06-08 (feat/agent-plugin-fields, M2) — the AGENT now carries its own
-  skill set, folded into the per-run skill materialization so it applies on
-  EVERY run the agent does, regardless of surface. ``_agent_skill_set(instance)``
-  reads the agent's ``skill_refs`` (direct) UNION the skills of its enabled
-  ``plugins`` (resolved via the OSS ``PluginInstaller`` registry — plain read,
-  no clone, try/except → empty on failure so a missing registry never breaks a
-  run). ``_drive_agent_loop`` UNIONs that set into ``surface_skills`` BEFORE the
-  withhold-when-empty forward — including on the legacy ``resolved_profile is
-  None`` path — so agent skills materialize even on non-entity / non-profile
-  runs. The union still crosses into ``AgentPool.run`` as a plain
-  ``frozenset[str]`` (no EE symbol crosses into OSS).
-- 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — per-agent MCP tool policy
-  (the M2 slice previously marked DEFERRED) is now LANDED. When the resolved
-  agent's config declares ``tool_mode="exclusive"``, ``_agent_tool_policy(instance)``
-  returns its declared ``tools`` and ``_drive_agent_loop`` sets
-  ``exclusive_mcp_tools=True`` + ``allow_mcp_tool_ids=<those tools>`` — driving the
-  CX-1 suppressible-grant cap so an exclusive agent (e.g. /code) gets EXACTLY its
-  declared MCP ids, OVERRIDING any surface allow-list. "additive" (the default)
-  is unchanged. The flag/allow-list cross into ``AgentPool.run`` as plain data.
+- the cancel check keeps the chunk it holds in ``full_text`` but does not append
+  it, so the client stream stops exactly where it did;
+- ``mark_cloud_chat_run`` and the artifact collector are bound before the
+  prewarm task is created, so both are inherited by it;
+- the host-cancel cleanup is shielded and tracked, and the worker drains it
+  (``drain_pending_cleanups``) before closing the database.
 """
 
 from __future__ import annotations
@@ -552,6 +154,30 @@ def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
     question #6.
     """
     return isinstance(candidate, dict) and ("lifecycle" in candidate or "widgets" in candidate)
+
+
+# A provider that is rate-limiting or overloaded: 429, Anthropic's 529, or the
+# words for them. Deliberately narrower than ``failover.classify_lane_failure``,
+# which also matches auth (401/403) and outage text; the LiteLLM 401 rewrite in
+# the pydantic_ai backend must keep reaching the user unchanged. Word boundaries
+# so a token count like "14290" does not read as a 429.
+_PROVIDER_BUSY_RE = re.compile(
+    r"\b(?:429|529)\b|rate[ _-]?limit|too many requests|too_many_requests|overloaded",
+    re.IGNORECASE,
+)
+PROVIDER_BUSY_CODE = "agent.provider_busy"
+PROVIDER_BUSY_MESSAGE = "The AI provider is busy right now, try again in a moment."
+
+
+def _backend_error_frame(message: str) -> dict[str, str]:
+    """The ``error`` frame for a backend-yielded error.
+
+    A busy provider gets a stable code and a plain message; the raw provider text
+    (already logged by the caller) never reaches the client or the run doc.
+    """
+    if _PROVIDER_BUSY_RE.search(message):
+        return {"code": PROVIDER_BUSY_CODE, "message": PROVIDER_BUSY_MESSAGE}
+    return {"code": "agent.backend_error", "message": message}
 
 
 def _stream_ttl() -> int:
@@ -2669,7 +2295,7 @@ async def _drive_agent_loop(
                     ctx.target_agent_id,
                     message[:200],
                 )
-                yield ("error", {"code": "agent.backend_error", "message": message})
+                yield ("error", _backend_error_frame(message))
                 if sup_acq is not None:
                     # Supervised: a backend ``error`` event is NOT automatically a
                     # crash. The leased ``claude`` client can stay alive and healthy
@@ -2845,7 +2471,9 @@ async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport
     """
     from pocketpaw_ee.cloud import agent_jail
 
-    quota_error = agent_jail.check_workspace_jail_quota(ctx.workspace_id)
+    # A sync ``os.scandir`` walk of the whole jail: 0.3-3 s on a big one, so it
+    # runs in a thread rather than stalling every other run on this loop.
+    quota_error = await asyncio.to_thread(agent_jail.check_workspace_jail_quota, ctx.workspace_id)
     if not quota_error:
         return False
     logger.warning("run %s rejected — agent jail over quota: %s", spec.run_id, quota_error)
