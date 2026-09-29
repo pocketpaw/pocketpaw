@@ -234,7 +234,7 @@
   {
     "label": "sweeper: the boot pass runs every sweep regardless of the leases",
     "file": "ee/pocketpaw_ee/extensions.py",
-    "find": "    await _run_sweeps()\n    _sweeper_task = asyncio.create_task(_sweeper_loop())",
+    "find": "    await _run_sweeps(boot=True)\n    _sweeper_task = asyncio.create_task(_sweeper_loop())",
     "replace": "    for fn in sum(_sweeps(), []):\n        await fn()\n    _sweeper_task = asyncio.create_task(_sweeper_loop())",
     "tests": [
       "tests/cloud/test_multiworker_leases.py::test_sweeper_skips_cluster_sweeps_when_another_process_holds_the_lease"
@@ -338,6 +338,15 @@
     "replace": "        from pocketpaw.skills.loader import get_skill_loader\n\n        get_skill_loader().reload()\n        return installed",
     "tests": [
       "tests/cloud/realtime/test_oss_cache_invalidation.py::test_installer_uses_the_cross_process_reload"
+    ]
+  },
+  {
+    "label": "sweeper: the boot pass runs the tenant-key backfill, so a down LiteLLM proxy holds startup for every mint's timeout",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "            if boot and fn.__name__ in _TICK_ONLY_SWEEPS:\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py::test_the_boot_pass_skips_the_backfill_and_the_tick_runs_it"
     ]
   }
 ]
