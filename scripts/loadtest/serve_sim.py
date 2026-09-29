@@ -23,6 +23,13 @@ The load-test rig's server half. It:
      sampled INSIDE this process plus its RSS. A client-side measurement sees
      the network and the driver's own loop instead, and would flatter the
      server.
+  6. ``--workers N`` (N > 1) seeds once, then starts N server processes on
+     ports ``--port`` .. ``--port+N-1`` sharing the scratch db and Redis, with
+     ``POCKETPAW_REALTIME_BUS=redis-streams`` so sockets, presence and leases
+     work across them. Pass the ports to ``api_loadtest.py --base-url`` as a
+     comma list; it spreads VUs over them the way a proxy spreads clients over
+     replicas. Stop it by POSTing ``/__loadtest/shutdown`` to EVERY port; the
+     parent drops the db once all of them have exited.
 
 Uploads are forced onto local disk and signup's breached-password (HIBP) call
 is off unless ``--hibp``: a load test must not push bytes to a real bucket or
@@ -50,6 +57,7 @@ import contextlib
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import uuid
 from collections import deque
@@ -158,6 +166,10 @@ def _configure_env(args: argparse.Namespace, db_name: str) -> str:
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
     if args.redis_url:
         os.environ["POCKETPAW_REDIS_URL"] = args.redis_url
+    if args.workers > 1:
+        # Sockets, presence and the singleton loops only work across processes
+        # through Redis; inprocess would silently drop cross-process frames.
+        os.environ["POCKETPAW_REALTIME_BUS"] = "redis-streams"
     if args.model:
         # Per-backend model attribute, not a single global. Omitting a backend
         # from _BACKEND_MODEL_ATTR silently drops the per-agent model, so set
@@ -221,6 +233,11 @@ def _install_probe(app) -> None:
 
     @app.post("/__loadtest/shutdown")
     async def _loadtest_shutdown() -> dict:  # pyright: ignore[reportUnusedFunction]
+        # Drop first: if graceful shutdown then hangs and the process is
+        # killed, the scratch db is already gone.
+        drop = _SERVER.get("drop")
+        if callable(drop):
+            await asyncio.to_thread(drop)
         server = _SERVER.get("server")
         if server is not None:
             server.should_exit = True  # type: ignore[attr-defined]
@@ -344,8 +361,7 @@ async def _seed(app, base_url: str, n_pockets: int, backend: str) -> dict[str, s
         }
 
 
-async def main_async(args: argparse.Namespace) -> int:
-    db_name = args.db or f"loadtest_{uuid.uuid4().hex[:8]}"
+async def _build_app(args: argparse.Namespace, db_name: str):
     uri = _configure_env(args, db_name)
 
     import pocketpaw_ee.cloud.license as lic_mod
@@ -390,11 +406,87 @@ async def main_async(args: argparse.Namespace) -> int:
         app.add_middleware(BodySizeLimitMiddleware)
         print("[serve] prod middleware: OSS AuthMiddleware + BodySizeLimitMiddleware")
     mount_cloud(app)
+    return app
+
+
+async def _serve(app, args: argparse.Namespace) -> None:
+    import uvicorn
+
+    # Bounded: open SSE streams or in-flight chat runs must not hold the exit
+    # open until the caller gives up and kills the process.
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=args.port,
+        log_level=args.log_level,
+        access_log=False,
+        timeout_graceful_shutdown=15,
+    )
+    server = uvicorn.Server(config)
+    _SERVER["server"] = server
+    probe = asyncio.create_task(_loop_lag_probe())
+    try:
+        await server.serve()
+    finally:
+        probe.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await probe
+
+
+async def _supervise(args: argparse.Namespace, db_name: str) -> None:
+    """Run N server processes on consecutive ports until every one has exited."""
+    procs = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                *sys.argv[1:],
+                "--child",
+                "--port",
+                str(args.port + i),
+                "--db",
+                db_name,
+            ]
+        )
+        for i in range(args.workers)
+    ]
+    try:
+        while any(p.poll() is None for p in procs):
+            await asyncio.sleep(0.5)
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+
+
+def _drop_db(mongo_url: str, db_name: str) -> None:
+    """Drop the scratch db. Idempotent, so the shutdown route and the exit path
+    can both call it."""
+    print(f"\n[serve] dropping scratch db {db_name}", flush=True)
+    # A synchronous client, and a loud failure: an async Motor drop here,
+    # after uvicorn has shut down, was observed to fail inside a
+    # suppress() and leave the scratch db behind on every clean exit.
+    from pymongo import MongoClient
+
+    try:
+        MongoClient(mongo_url, serverSelectionTimeoutMS=5000).drop_database(db_name)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[serve] WARN could not drop {db_name}: {exc}", file=sys.stderr)
+
+
+async def main_async(args: argparse.Namespace) -> int:
+    db_name = args.db or f"loadtest_{uuid.uuid4().hex[:8]}"
+    app = await _build_app(args, db_name)
+    if args.child:
+        # A worker of --workers N: the parent seeded and owns the db drop.
+        await _serve(app, args)
+        return 0
 
     print("[serve] seeding workspace…", flush=True)
     seed = await _seed(app, f"http://127.0.0.1:{args.port}", args.pockets, args.backend)
     seed["mongo_db"] = db_name
     seed["port"] = str(args.port)
+    seed["ports"] = ",".join(str(args.port + i) for i in range(args.workers))
     seed["backend"] = args.backend
     n_pk = len(seed["pocket_ids"].split(","))
     print(f"[serve] workspace={seed['workspace_id']} pockets={n_pk}", flush=True)
@@ -430,31 +522,17 @@ async def main_async(args: argparse.Namespace) -> int:
         + "\n"
     )
 
-    import uvicorn
-
-    config = uvicorn.Config(
-        app, host="127.0.0.1", port=args.port, log_level=args.log_level, access_log=False
-    )
-    server = uvicorn.Server(config)
-    _SERVER["server"] = server
-    probe = asyncio.create_task(_loop_lag_probe())
+    if not args.keep_db and args.workers == 1:
+        _SERVER["drop"] = lambda: _drop_db(args.mongo_url, db_name)
     try:
-        await server.serve()
+        if args.workers > 1:
+            print(f"[serve] {args.workers} workers on ports {seed['ports']}", flush=True)
+            await _supervise(args, db_name)
+        else:
+            await _serve(app, args)
     finally:
-        probe.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await probe
         if not args.keep_db:
-            print(f"\n[serve] dropping scratch db {db_name}")
-            # A synchronous client, and a loud failure: an async Motor drop here,
-            # after uvicorn has shut down, was observed to fail inside a
-            # suppress() and leave the scratch db behind on every clean exit.
-            from pymongo import MongoClient
-
-            try:
-                MongoClient(args.mongo_url, serverSelectionTimeoutMS=5000).drop_database(db_name)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[serve] WARN could not drop {db_name}: {exc}", file=sys.stderr)
+            _drop_db(args.mongo_url, db_name)
     return 0
 
 
@@ -499,6 +577,13 @@ def main() -> int:
         action="store_true",
         help="keep the breached-password check on signup (one external call per new password)",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="server processes on consecutive ports from --port (needs Redis)",
+    )
+    p.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--log-level", default="warning")
     args = p.parse_args()
     try:

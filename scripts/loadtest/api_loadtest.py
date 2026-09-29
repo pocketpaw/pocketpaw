@@ -29,6 +29,13 @@ How it works:
     ``--slo-p95-ms``; the ramp stops there and the knee is printed.
   * Per stage it polls the server probe (loop lag, RSS, pid), samples driver
     and server CPU with psutil, and optionally Mongo opcounters.
+  * Multi-core: ``--base-url`` takes a comma list (``serve_sim --workers N``
+    ports) and VU ``v`` talks to ``bases[v % N]``, like a proxy pinning a
+    client to a replica; server CPU/RSS are summed across them and loop lag is
+    the worst one. ``--procs K`` splits the VUs over K driver processes (one
+    Python process tops out near 200 VUs) that start together on a file
+    barrier; the parent keeps the stage clock and the sampling, then merges
+    their records and judges the merged stages.
 
 Latency uses ``time.perf_counter()`` (the Windows wall clock ticks at ~15.6ms)
 and one shared ``httpx.AsyncClient`` (a client per request exhausts loopback
@@ -48,6 +55,7 @@ import contextlib
 import json
 import random
 import statistics
+import subprocess
 import sys
 import time
 import uuid
@@ -144,7 +152,7 @@ class Run:
     def __init__(self, args: argparse.Namespace, seed: dict[str, Any]) -> None:
         self.args = args
         self.seed = seed
-        self.base = args.base_url.rstrip("/")
+        self.bases = [b.strip().rstrip("/") for b in args.base_url.split(",") if b.strip()]
         self.stage = 0
         self.records: list[Rec] = []
         self.pool: list[PoolUser] = []
@@ -152,7 +160,9 @@ class Run:
         # A pocket runs one chat at a time: a new run supersedes the previous
         # one in the same scope, so two VUs sharing a pocket measure truncation.
         self.chat_pockets: asyncio.Queue[str] = asyncio.Queue()
-        for pid in [p for p in str(seed.get("pocket_ids", "")).split(",") if p]:
+        pockets = [p for p in str(seed.get("pocket_ids", "")).split(",") if p]
+        # Each driver process gets its own slice, so no two share a pocket.
+        for pid in pockets[args.child_index :: max(1, args.child_count)]:
             self.chat_pockets.put_nowait(pid)
         self.payload = (b" " * 1023 + b"\n") * max(1, args.upload_kb)
         jar = CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
@@ -164,6 +174,9 @@ class Run:
         )
         self.chat_http: httpx.AsyncClient | None = None
         self.ws_open = 0
+
+    def base_for(self, vu: int) -> str:
+        return self.bases[vu % len(self.bases)]
 
     def ip(self, vu: int) -> str:
         if self.args.single_ip:
@@ -195,7 +208,7 @@ class Run:
         stage = self.stage
         t0 = time.perf_counter()
         try:
-            resp = await self.http.request(method, self.base + path, headers=headers, **kw)
+            resp = await self.http.request(method, self.base_for(vu) + path, headers=headers, **kw)
             ms = (time.perf_counter() - t0) * 1000
         except Exception as exc:  # noqa: BLE001 - a load driver must never die
             ms = (time.perf_counter() - t0) * 1000
@@ -463,7 +476,7 @@ async def sc_chat(run: Run, vu: int) -> None:
         rec = await drive_one(
             run.chat_http,
             seq=vu,
-            url=f"{run.base}{API}/cloud/chat/pocket/{pid}/agent",
+            url=f"{run.base_for(vu)}{API}/cloud/chat/pocket/{pid}/agent",
             body=body,
             timeout=run.args.chat_timeout,
             inflight={"n": 0},
@@ -519,7 +532,7 @@ async def sc_realtime(run: Run, vu: int) -> None:
         await run.stop.wait()
         return
     ticket = r.json()["ticket"]
-    url = run.base.replace("http", "ws", 1) + f"/ws/cloud?token={ticket}"
+    url = run.base_for(vu).replace("http", "ws", 1) + f"/ws/cloud?token={ticket}"
     stage = run.stage
     t0 = time.perf_counter()
     try:
@@ -627,22 +640,41 @@ class Sampler:
     def __init__(self, run: Run, mongo_url: str | None) -> None:
         self.run = run
         self.rows: list[dict[str, Any]] = []
-        self.srv_proc = None
+        self.srv_procs: dict[int, Any] = {}
         self.mongo = None
         self.mongo_url = mongo_url
         self.me = psutil.Process() if psutil else None
+        self.drivers: list[Any] = [self.me] if self.me else []
 
     async def probe(self) -> dict[str, Any]:
-        try:
-            r = await self.run.http.get(f"{self.run.base}/__loadtest/metrics", timeout=10)
-            data = r.json()
-        except Exception:  # noqa: BLE001
-            return {}
-        if psutil and self.srv_proc is None and data.get("pid"):
+        """Poll every server: RSS summed, loop lag the worst of them."""
+        if self.run.args.child_count:
+            return {}  # a poll drains the lag buffer; only the parent may read it
+        rows = []
+        for base in self.run.bases:
             with contextlib.suppress(Exception):
-                self.srv_proc = psutil.Process(int(data["pid"]))
-                self.srv_proc.cpu_percent(None)
-        return data
+                r = await self.run.http.get(f"{base}/__loadtest/metrics", timeout=10)
+                rows.append(r.json())
+        for data in rows:
+            pid = int(data.get("pid") or 0)
+            if psutil and pid and pid not in self.srv_procs:
+                with contextlib.suppress(Exception):
+                    proc = psutil.Process(pid)
+                    proc.cpu_percent(None)
+                    self.srv_procs[pid] = proc
+        if not rows:
+            return {}
+
+        def worst(key: str) -> float | None:
+            vals = [d[key] for d in rows if d.get(key) is not None]
+            return max(vals) if vals else None
+
+        rss = [d["srv_rss_mb"] for d in rows if d.get("srv_rss_mb") is not None]
+        return {
+            "loop_lag_p99_ms": worst("loop_lag_p99_ms"),
+            "loop_lag_max_ms": worst("loop_lag_max_ms"),
+            "srv_rss_mb": round(sum(rss), 1) if rss else None,
+        }
 
     async def opcounters(self) -> dict[str, int]:
         if not self.mongo_url:
@@ -660,20 +692,28 @@ class Sampler:
     async def loop(self) -> None:
         if not psutil:
             return
-        self.me.cpu_percent(None)
+        for d in self.drivers:
+            d.cpu_percent(None)
         psutil.cpu_percent(None)
         while not self.run.stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.run.stop.wait(), timeout=1.0)
             row = {
                 "stage": self.run.stage,
-                "driver_cpu": self.me.cpu_percent(None),
+                "driver_cpu": _cpu_sum(self.drivers),
                 "sys_cpu": psutil.cpu_percent(None),
             }
-            if self.srv_proc is not None:
-                with contextlib.suppress(Exception):
-                    row["srv_cpu"] = self.srv_proc.cpu_percent(None)
+            if self.srv_procs:
+                row["srv_cpu"] = _cpu_sum(list(self.srv_procs.values()))
             self.rows.append(row)
+
+
+def _cpu_sum(procs: list[Any]) -> float:
+    total = 0.0
+    for proc in procs:
+        with contextlib.suppress(Exception):
+            total += proc.cpu_percent(None)
+    return total
 
 
 # --------------------------------------------------------------------------
@@ -772,31 +812,39 @@ async def vu_loop(run: Run, vu: int, names: list[str], weights: list[float]) -> 
             await asyncio.sleep(0.5)
 
 
-async def ramp(run: Run, names: list[str], plan: list[int], sampler: Sampler) -> list[dict]:
+async def ramp(
+    run: Run, names: list[str], plan: list[int], sampler: Sampler, *, spawn: bool = True
+) -> list[dict]:
+    """Run the stages. ``spawn=False`` is the ``--procs`` parent: it keeps the
+    stage clock and samples while its children run the VUs; their records are
+    merged and judged afterwards (``finish_stages``)."""
     weights = [SCENARIOS[n].weight for n in names]
     tasks: list[asyncio.Task] = []
     stages: list[dict[str, Any]] = []
+    k, n_procs = run.args.child_index, max(1, run.args.child_count)
+    judge_inline = spawn and not run.args.child_count
     await sampler.probe()  # drain the lag buffer so stage 0 starts clean
     base_rss = (await sampler.probe()).get("srv_rss_mb")
     ops_prev = await sampler.opcounters()
+    if run.args.start_at:
+        await asyncio.sleep(max(0.0, run.args.start_at - time.time()))
     for i, vus in enumerate(plan):
         run.stage = i
-        while len(tasks) < vus:
-            tasks.append(asyncio.create_task(vu_loop(run, len(tasks), names, weights)))
+        # VU ids are global: this process runs k, k+K, k+2K, ... below ``vus``.
+        while spawn and len(tasks) < len(range(k, vus, n_procs)):
+            vu = k + n_procs * len(tasks)
+            tasks.append(asyncio.create_task(vu_loop(run, vu, names, weights)))
         t0 = time.perf_counter()
         await asyncio.sleep(run.args.stage_seconds)
         secs = time.perf_counter() - t0
         probe = await sampler.probe()
         ops = await sampler.opcounters()
-        recs = [r for r in run.records if r.stage == i]
-        stats = stage_stats(recs, secs)
         cpu = [r for r in sampler.rows if r["stage"] == i]
         st: dict[str, Any] = {
             "stage": i,
             "vus": vus,
             "seconds": round(secs, 1),
-            "total_rps": round(len(recs) / secs, 1),
-            "endpoints": stats,
+            "base_rss_mb": base_rss,
             "loop_lag_p99_ms": probe.get("loop_lag_p99_ms"),
             "loop_lag_max_ms": probe.get("loop_lag_max_ms"),
             "srv_rss_mb": probe.get("srv_rss_mb"),
@@ -807,28 +855,60 @@ async def ramp(run: Run, names: list[str], plan: list[int], sampler: Sampler) ->
         if ops and ops_prev:
             st["mongo_ops_per_s"] = {k: round((ops[k] - ops_prev.get(k, 0)) / secs, 1) for k in ops}
         ops_prev = ops
-        if SCENARIOS[names[0]].held:
-            st["ws_open"] = run.ws_open
-            if base_rss and st["srv_rss_mb"] and run.ws_open:
-                st["rss_mb_per_1k_sockets"] = round(
-                    (st["srv_rss_mb"] - base_rss) / run.ws_open * 1000, 1
-                )
-        st["fail_reasons"] = (
-            []
-            if run.args.mode == "soak"
-            else judge(stats, run.args.slo_p95_ms, run.args.max_error_pct)
-        )
         stages.append(st)
-        print(_stage_line(st), flush=True)
-        if st["fail_reasons"]:
-            print(f"[driver] stopping ramp: {'; '.join(st['fail_reasons'])}", flush=True)
-            break
+        if judge_inline:
+            finish_stage(run, names, st, run.records, run.ws_open)
+            print(_stage_line(st), flush=True)
+            if st["fail_reasons"]:
+                print(f"[driver] stopping ramp: {'; '.join(st['fail_reasons'])}", flush=True)
+                break
+        else:
+            print(f"[stage {i}] vus={vus} done", flush=True)
     run.stage = len(plan)  # anything still in flight lands outside every stage
     run.stop.set()
-    _, pending = await asyncio.wait(tasks, timeout=max(30.0, run.args.chat_timeout))
-    for t in pending:
-        t.cancel()
+    if tasks:
+        _, pending = await asyncio.wait(tasks, timeout=max(30.0, run.args.chat_timeout))
+        for t in pending:
+            t.cancel()
     return stages
+
+
+def finish_stage(
+    run: Run, names: list[str], st: dict[str, Any], records: list[Rec], ws_open: int
+) -> None:
+    """Fill a stage's stats and verdict from the records that landed in it."""
+    recs = [r for r in records if r.stage == st["stage"]]
+    st["total_rps"] = round(len(recs) / st["seconds"], 1)
+    st["endpoints"] = stats = stage_stats(recs, st["seconds"])
+    if SCENARIOS[names[0]].held:
+        st["ws_open"] = ws_open
+        base_rss = st.get("base_rss_mb")
+        if base_rss and st["srv_rss_mb"] and ws_open:
+            st["rss_mb_per_1k_sockets"] = round((st["srv_rss_mb"] - base_rss) / ws_open * 1000, 1)
+    st["fail_reasons"] = (
+        [] if run.args.mode == "soak" else judge(stats, run.args.slo_p95_ms, run.args.max_error_pct)
+    )
+
+
+def finish_stages(
+    run: Run, names: list[str], stages: list[dict[str, Any]], records: list[Rec]
+) -> list[dict[str, Any]]:
+    """The ``--procs`` parent's judging: fill each stage from the merged
+    records and cut the report at the first failing one."""
+    out = []
+    for st in stages:
+        # Children report no live socket count; every handshake so far is held.
+        ws_open = sum(
+            1
+            for r in records
+            if r.endpoint == "ws.connect" and r.outcome == "ok" and 0 <= r.stage <= st["stage"]
+        )
+        finish_stage(run, names, st, records, ws_open)
+        print(_stage_line(st), flush=True)
+        out.append(st)
+        if st["fail_reasons"]:
+            break
+    return out
 
 
 def _mean(vals: list[float]) -> float | None:
@@ -940,6 +1020,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chat-timeout", type=float, default=120, help="per chat run (s)")
     p.add_argument("--mongo-url", default=None, help="sample serverStatus opcounters")
     p.add_argument("--out", default=None)
+    p.add_argument("--procs", type=int, default=1, help="driver processes to split the VUs over")
+    p.add_argument("--child-index", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--child-count", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--start-at", type=float, default=0.0, help=argparse.SUPPRESS)
     p.add_argument("--self-test", action="store_true")
     return p
 
@@ -954,6 +1038,9 @@ async def main_async(args: argparse.Namespace) -> int:
         plan = [int(x) for x in args.stages.split(",") if x.strip()]
     out = Path(args.out or f"out/api-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}")
     out.mkdir(parents=True, exist_ok=True)
+
+    if args.procs > 1:
+        return await run_parent(args, names, plan, seed, out)
 
     run = Run(args, seed)
     if "chat" in names:
@@ -970,7 +1057,15 @@ async def main_async(args: argparse.Namespace) -> int:
             timeout=None,
         )
     if any(n not in ("signup", "pawbar") for n in names):
-        await setup_pool(run, args.pool_users)
+        # Split the pool so K driver processes register as many users as one.
+        await setup_pool(run, max(1, args.pool_users // max(1, args.child_count)))
+    if args.child_count:
+        # File barrier: say we are set up, then wait for the parent's go time.
+        (out / "ready").write_text("1", encoding="utf-8")
+        go = out.parent / "go"
+        while not go.exists():
+            await asyncio.sleep(0.2)
+        args.start_at = float(go.read_text("utf-8"))
     sampler = Sampler(run, args.mongo_url)
     sampler_task = asyncio.create_task(sampler.loop())
     print(f"[driver] {names} plan={plan} x {args.stage_seconds}s single_ip={args.single_ip}")
@@ -984,6 +1079,88 @@ async def main_async(args: argparse.Namespace) -> int:
 
     with (out / "requests.jsonl").open("w", encoding="utf-8") as fh:
         for r in run.records:
+            fh.write(json.dumps(asdict(r)) + "\n")
+    if args.child_count:
+        return 0  # the parent merges, judges and reports
+    (out / "stages.json").write_text(json.dumps(stages, indent=2), encoding="utf-8")
+    report = summarize(args, names, stages)
+    (out / "summary.md").write_text(report, encoding="utf-8")
+    print(report)
+    print(f"[driver] wrote {out}/requests.jsonl, stages.json, summary.md")
+    return 0
+
+
+async def run_parent(
+    args: argparse.Namespace,
+    names: list[str],
+    plan: list[int],
+    seed: dict[str, Any],
+    out: Path,
+) -> int:
+    """``--procs K``: start K child drivers, release them together, keep the
+    stage clock and the server/driver sampling here, then merge and report."""
+    kids_dir = out / "procs"
+    kids_dir.mkdir(parents=True, exist_ok=True)
+    (kids_dir / "go").unlink(missing_ok=True)
+    procs = []
+    for k in range(args.procs):
+        kid_out = kids_dir / f"p{k}"
+        (kid_out / "ready").unlink(missing_ok=True)
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            *sys.argv[1:],
+            "--procs",
+            "1",
+            "--child-index",
+            str(k),
+            "--child-count",
+            str(args.procs),
+            "--mongo-url",
+            "",
+            "--out",
+            str(kid_out),
+        ]
+        procs.append(subprocess.Popen(cmd, stdout=subprocess.DEVNULL))
+    run = Run(args, seed)
+    sampler = Sampler(run, args.mongo_url)
+    try:
+        while not all((kids_dir / f"p{k}" / "ready").exists() for k in range(args.procs)):
+            if any(p.poll() is not None for p in procs):
+                raise SystemExit("[driver] a child driver died during setup")
+            await asyncio.sleep(0.2)
+        if psutil:
+            # A venv's python.exe on Windows is a launcher that runs the real
+            # interpreter as its child, so count the whole tree.
+            for proc in procs:
+                with contextlib.suppress(Exception):
+                    root = psutil.Process(proc.pid)
+                    sampler.drivers += [root, *root.children(recursive=True)]
+        args.start_at = time.time() + 2.0
+        (kids_dir / "go").write_text(str(args.start_at), encoding="utf-8")
+        print(f"[driver] {args.procs} procs {names} plan={plan} x {args.stage_seconds}s")
+        sampler_task = asyncio.create_task(sampler.loop())
+        stages = await ramp(run, names, plan, sampler, spawn=False)
+        with contextlib.suppress(BaseException):
+            await sampler_task
+        deadline = time.time() + max(60.0, args.chat_timeout + 30)
+        while any(p.poll() is None for p in procs) and time.time() < deadline:
+            await asyncio.sleep(0.5)
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+        await run.http.aclose()
+
+    records: list[Rec] = []
+    for k in range(args.procs):
+        path = kids_dir / f"p{k}" / "requests.jsonl"
+        if path.exists():
+            for line in path.read_text("utf-8").splitlines():
+                records.append(Rec(**json.loads(line)))
+    stages = finish_stages(run, names, stages, records)
+    with (out / "requests.jsonl").open("w", encoding="utf-8") as fh:
+        for r in records:
             fh.write(json.dumps(asdict(r)) + "\n")
     (out / "stages.json").write_text(json.dumps(stages, indent=2), encoding="utf-8")
     report = summarize(args, names, stages)
