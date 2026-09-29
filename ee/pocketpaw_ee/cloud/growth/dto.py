@@ -3,6 +3,8 @@
 # reuse a model for input and output. ``domain`` (the dedupe key) is normalised
 # to a bare lowercase hostname at the DTO boundary so every caller — router,
 # upsert, later ingestion slices — dedupes on the same canonical form.
+# DeleteProspectsRequest / DeleteProspectsResponse carry prospect deletion
+# (1..500 ids in, removed prospect / draft / withdrawn-proposal counts out).
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
 # store. Domain → DTO mapping lives in ``service.py`` as private helpers.
@@ -176,6 +178,23 @@ class BulkIngestRequest(BaseModel):
     """
 
     rows: list[dict[str, Any]] = Field(max_length=500)
+
+
+class DeleteProspectsRequest(BaseModel):
+    """Prospect ids to delete — 1 to 500, the same cap as bulk ingest. Ids stay
+    plain strings: malformed, unknown and cross-tenant ids are skipped by the
+    service, not rejected here."""
+
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class DeleteProspectsResponse(BaseModel):
+    """What a delete actually removed: prospects, their drafts, and the pending
+    Instinct send proposals withdrawn for those drafts."""
+
+    deleted: int
+    drafts_removed: int
+    proposals_withdrawn: int
 
 
 class BulkRowError(BaseModel):
@@ -505,6 +524,8 @@ __all__ = [
     "CreateDraftRequest",
     "CreateIcpRequest",
     "CreateProspectRequest",
+    "DeleteProspectsRequest",
+    "DeleteProspectsResponse",
     "DraftResponse",
     "IcpPreviewResponse",
     "IcpResponse",

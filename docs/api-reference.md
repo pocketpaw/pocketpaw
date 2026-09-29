@@ -4149,8 +4149,8 @@ and Instinct-gated sends on the dedicated `growth` arq queue
 
 **RBAC (G-4).** Every `/growth` route carries a workspace-role guard on top of
 the license gate. Reads (`GET /growth/prospects`, `GET /growth/drafts`, …)
-require `growth.read` (MEMBER); authoring writes — create/update a prospect,
-bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
+require `growth.read` (MEMBER); authoring writes — create/update/delete a
+prospect, bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
 (MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose` and
 `POST /growth/drafts/propose-batch` — require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
 `growth.executor` re-checks that same action against the proposer's *current*
@@ -4376,6 +4376,35 @@ an id reassigns the prospect to that client (validated against the workspace
 Un-assigning is deliberately explicit: a bulk upsert only ever *sets* the
 project, so an enrichment pass that carries no project can never orphan a
 client's prospect.
+
+### `POST /api/v1/growth/prospects/bulk-delete`
+
+Delete prospects and every draft attached to them. Requires `growth.write`.
+Body: `{"ids": ["<prospect id>", ...]}`, 1 to 500 ids. An empty list or more
+than 500 ids is a 422.
+
+Ids that are malformed, unknown, or belong to another workspace are skipped
+silently, and nothing outside the caller's workspace is ever touched. The
+counts in the response are the record of what was removed:
+
+```json
+{"deleted": 2, "drafts_removed": 3, "proposals_withdrawn": 1}
+```
+
+If any of those drafts is `proposed`, its pending `_growth_send` Instinct
+proposal is rejected with reason `prospect deleted`, and
+`proposals_withdrawn` counts the rejections. This step is best-effort. If
+the Instinct store fails, the delete still goes through and the executor
+fails closed when anyone approves a proposal whose draft is gone.
+`growth_message_logs` rows are kept, because they are the audit record of
+what was sent.
+
+### `DELETE /api/v1/growth/prospects/{prospect_id}`
+
+Delete one prospect and its drafts. It runs through the same service path as
+bulk delete, including proposal withdrawal. Returns `204` with no body.
+Requires `growth.write`. An id that is unknown, malformed, or in another
+workspace returns `404 prospect.not_found`.
 
 ## Growth — Drafts
 

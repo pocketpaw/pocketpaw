@@ -4,6 +4,8 @@
 # dependency on every route — services never see raw ``Request`` objects, and
 # every read/write is workspace-scoped inside the service (cross-tenant ids
 # 404). Mounted under ``/api/v1`` → final paths ``/api/v1/growth/prospects``.
+# Deletion is POST /prospects/bulk-delete (1..500 ids, counts back) and DELETE
+# /prospects/{id} (204, 404 outside the workspace), both at ``growth.write``.
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — create / get /
 # list (tier/status/source filters) / update. Later slices add ingestion,
@@ -90,6 +92,8 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateIcpRequest,
     CreateProspectRequest,
+    DeleteProspectsRequest,
+    DeleteProspectsResponse,
     DraftResponse,
     IcpPreviewResponse,
     IcpResponse,
@@ -135,6 +139,21 @@ async def bulk_ingest_prospects(
     error entries; the rest land. Idempotent — re-posting the same payload
     updates the existing rows instead of duplicating them."""
     return await growth_service.bulk_ingest(ctx, body)
+
+
+@router.post(
+    "/prospects/bulk-delete",
+    response_model=DeleteProspectsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def bulk_delete_prospects(
+    body: DeleteProspectsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DeleteProspectsResponse:
+    """Delete up to 500 prospects and every draft on them. Ids that are
+    malformed, unknown or in another workspace are skipped; the counts say
+    what was actually removed. Message-log rows are kept."""
+    return await growth_service.delete_prospects(ctx, body.ids)
 
 
 @router.get(
@@ -229,6 +248,21 @@ async def update_prospect(
     ctx: RequestContext = Depends(request_context),
 ) -> ProspectResponse:
     return await growth_service.update(ctx, prospect_id, body)
+
+
+@router.delete(
+    "/prospects/{prospect_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def delete_prospect(
+    prospect_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Delete one prospect and its drafts, through the same service path as
+    bulk delete. 404 when the prospect is not in the caller's workspace."""
+    await growth_service.delete_prospect(ctx, prospect_id)
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

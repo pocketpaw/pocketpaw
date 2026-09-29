@@ -4,6 +4,9 @@
 # existence never leaks. ``upsert_by_domain`` is the create-or-update seam the
 # later ingestion slices (Clay / directory imports) call — keyed on
 # (workspace_id, normalised domain), matching the unique index on the doc.
+# ``delete_prospects`` / ``delete_prospect`` remove prospects with all their
+# drafts (withdrawing pending send proposals best-effort) and leave the
+# ``MessageLog`` audit rows in place.
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
 # store. No events yet: growth has no realtime subscriber in v1, so writes
@@ -142,6 +145,8 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateIcpRequest,
     CreateProspectRequest,
+    DeleteProspectsRequest,
+    DeleteProspectsResponse,
     DraftResponse,
     IcpPreviewResponse,
     IcpResponse,
@@ -719,6 +724,74 @@ async def update(
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1; the prospects view polls.
     return _to_response(_to_domain(doc))
+
+
+async def delete_prospects(ctx: RequestContext, ids: list[str]) -> DeleteProspectsResponse:
+    """Delete prospects in the caller's workspace, with every draft on them.
+
+    Malformed, unknown and other-workspace ids are skipped, so the counts are
+    the only record of what was removed. Pending Instinct proposals for
+    ``proposed`` drafts are withdrawn best-effort. Message-log rows stay: they
+    are the audit record of what was sent.
+    """
+    ids = DeleteProspectsRequest(ids=list(ids)).ids
+    workspace_id = _require_workspace(ctx)
+
+    oids: list[PydanticObjectId] = []
+    for raw in ids:
+        try:
+            oids.append(PydanticObjectId(raw))
+        except Exception:
+            continue
+    if not oids:
+        return DeleteProspectsResponse(deleted=0, drafts_removed=0, proposals_withdrawn=0)
+
+    prospects = await _ProspectDoc.find({"_id": {"$in": oids}, "workspace": workspace_id}).to_list()
+    if not prospects:
+        return DeleteProspectsResponse(deleted=0, drafts_removed=0, proposals_withdrawn=0)
+    prospect_ids = [str(p.id) for p in prospects]
+
+    drafts = await _DraftDoc.find(
+        {"workspace": workspace_id, "prospect_id": {"$in": prospect_ids}}
+    ).to_list()
+
+    withdrawn = 0
+    if any(d.status == "proposed" for d in drafts):
+        from pocketpaw_ee.cloud.growth.propose import withdraw_growth_proposals
+
+        withdrawn = await withdraw_growth_proposals(
+            workspace_id=workspace_id,
+            draft_ids={str(d.id) for d in drafts},
+            rejector=str(ctx.user_id or "system"),
+        )
+
+    if drafts:
+        await _DraftDoc.find(
+            {"_id": {"$in": [d.id for d in drafts]}, "workspace": workspace_id}
+        ).delete()
+    await _ProspectDoc.find(
+        {"_id": {"$in": [p.id for p in prospects]}, "workspace": workspace_id}
+    ).delete()
+    logger.info(
+        "growth.delete_prospects workspace=%s prospects=%d drafts=%d proposals_withdrawn=%d",
+        workspace_id,
+        len(prospects),
+        len(drafts),
+        withdrawn,
+    )
+    # no-event: growth has no realtime subscriber in v1; the prospects view polls.
+    return DeleteProspectsResponse(
+        deleted=len(prospects), drafts_removed=len(drafts), proposals_withdrawn=withdrawn
+    )
+
+
+async def delete_prospect(ctx: RequestContext, prospect_id: str) -> None:
+    """Delete one prospect through ``delete_prospects``. 404 for a malformed,
+    missing or other-workspace id, the same answer GET gives."""
+    workspace_id = _require_workspace(ctx)
+    await _fetch_in_workspace(workspace_id, prospect_id)
+    await delete_prospects(ctx, [prospect_id])
+    # no-event: growth has no realtime subscriber in v1; the prospects view polls.
 
 
 async def upsert_by_domain(
