@@ -3,9 +3,10 @@
 Extracted from dashboard.py — contains:
 - ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled
   proxy); remote hosts are rejected before any settings are loaded
-- ``_auth_dispatch()`` — the auth cascade; the per-IP ``api_limiter`` applies
-  only to callers that are neither authenticated here nor resolved by the EE
-  auth bridge (``request.state.ee_user_authenticated``, a limiter-only flag)
+- ``_auth_dispatch()`` — the auth cascade; callers not authenticated here go
+  through the general ``api_limiter``: keyed per user (``user:<id>``) when the
+  EE auth bridge resolved an active cloud user on an auth-optional path, per IP
+  otherwise
 - ``verify_token()`` — standalone token verification
 - ``auth_middleware()`` — HTTP middleware (registered by dashboard.py)
 - ``auth_router`` — APIRouter with session token, cookie login/logout, QR code,
@@ -667,16 +668,27 @@ async def _auth_dispatch(request: Request) -> Response | None:
     #   - api-key callers already passed their own per-key limiter above
     #     (apikey:<id>); the per-IP bucket would only double-limit them.
     #   - oauth callers authenticated by token, not by IP.
-    #   - cloud users whose fastapi-users JWT the EE auth bridge resolved to an
-    #     active, non-revoked user (``ee_user_authenticated``). That flag only
-    #     skips this bucket: it does not set is_valid or full_access, so it
-    #     grants no route access (their routes authenticate the JWT themselves,
-    #     and non-/api/v1/ paths still 401 below).
-    # UNauthenticated /api (and any other non-exempt) traffic still hits the
-    # per-IP api_limiter, so the brute-force / abuse cap is preserved. The
-    # separate login / auth-session / qr buckets are untouched.
-    if not is_valid and not getattr(request.state, "ee_user_authenticated", False):
-        rl_info = api_limiter.check(client_ip)
+    # Everyone else is limited. Cloud users whose fastapi-users JWT the EE auth
+    # bridge resolved to an active, non-revoked user (``ee_user_authenticated``
+    # + ``user_id``) are limited PER USER, not per IP, so users behind one
+    # NAT/proxy don't share a bucket. That is only a bucket choice: the flag
+    # sets neither is_valid nor full_access, so it grants no route access.
+    # Guests are users too and get the same per-user bucket; an anonymous
+    # caller can mint one, so there is no unlimited pass for any JWT. The
+    # per-user key applies only on auth-optional paths — anywhere else the
+    # request will 401 below and stays on the per-IP bucket. The separate
+    # login / auth-session / qr buckets are untouched.
+    if not is_valid:
+        ee_user_id = getattr(request.state, "user_id", None)
+        if (
+            is_auth_optional
+            and ee_user_id
+            and getattr(request.state, "ee_user_authenticated", False)
+        ):
+            rl_key = f"user:{ee_user_id}"
+        else:
+            rl_key = client_ip
+        rl_info = api_limiter.check(rl_key)
         if not rl_info.allowed:
             return JSONResponse(
                 status_code=429,
