@@ -1,3 +1,5 @@
+<!-- Updated: 2026-09-28 (feat/persist-tool-steps) — documented tool calls and thinking persisted on the assistant message as `steps`. -->
+<!-- Updated: 2026-09-27 (fix/chat-run-heartbeat) — documented the run heartbeat, the heartbeat-based stale-run sweep, partial replies saved as messages, and POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS. -->
 # Tier 2 deploy — resumable chat runs with `arq` worker
 
 This is the operational guide for switching cloud chat runs from the
@@ -163,10 +165,31 @@ emitting a partial duplicate. The user decides via Retry.
 - Worker boot sweep uses a **5-second cutoff** (`worker._BOOT_SWEEP_OLDER_THAN_SECONDS`).
   A run that the web enqueued less than 5s before the worker booted is left
   alone for the worker to pick up.
-- Heartbeat sweep on the web side still runs every 5 minutes with a 10-minute
-  cutoff — that catches in-process orphans during the Tier-1 mode and also
-  serves as a safety net under Tier 2 if both worker replicas crash without
-  rebooting.
+- The stale-run sweep on the web side runs every 5 minutes with a 10-minute
+  cutoff. It catches in-process orphans during the Tier-1 mode and is the safety
+  net under Tier 2 if a worker dies without rebooting. A `queued` run is stale
+  when it was created before the cutoff; a `running` run is stale only when its
+  liveness stamp, `coalesce(last_heartbeat_at, started_at, createdAt)`, is
+  before the cutoff. The worker refreshes `last_heartbeat_at` every
+  `POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS` while it drives a run, so a long but
+  healthy run is never swept. The sweep writes conditionally, so it can't
+  overwrite a run the worker has just finished, and a queued run it interrupts
+  is not driven later (`mark_running` only claims `queued` runs).
+- A run that ends `failed`, `cancelled` or `interrupted` (including arq's
+  `job_timeout`) saves the text it had already streamed as an assistant
+  message with `run_status` set, and the run's `assistant_message_id` points
+  at it. `partial_text` on the run doc keeps a copy. Worker shutdown waits up to
+  10s for those cancelled-run writes before it closes the database.
+- The tool calls, tool results and thinking a run streams are also saved on
+  that assistant message as `steps` (ordered; one entry per thinking block or
+  tool call), on the completed path and on every partial path above. A call
+  still open when the run ends is stored as `missing_result`. Tool input is
+  scrubbed, output and thinking are redacted, and everything is capped (4 KB
+  output, 2 KB input, 8 KB thinking, 50 steps and ~64 KB per message; dropped
+  steps are counted in `steps_omitted`). The history APIs return them as
+  `steps` / `stepsOmitted` (camelCase inner keys) only when non-empty, so plain
+  messages are unchanged. They are display data: the agent's LLM history never
+  includes them. The group/DM agent bridge records its replies the same way.
 - Multiple worker replicas are safe: arq uses a single Redis-backed queue, so
   each job goes to exactly one worker.
 
@@ -191,6 +214,7 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | `POCKETPAW_REDIS_URL` | — | Required for both tiers; web + worker must share |
 | `CLOUD_MONGODB_URI` | `mongodb://localhost:27017/paw-enterprise` | Web + worker must share |
 | `POCKETPAW_CLOUD_RUN_STREAM_TTL` | `3600` | Redis Stream retention after a run terminates |
+| `POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS` | `30` | How often the worker stamps `last_heartbeat_at` on a running run. Keep it well under the sweeper's 10-minute cutoff. A non-numeric or non-positive value falls back to the default |
 | `POCKETPAW_CLOUD_STREAM_TRANSPORT` | `redis` | Future hook for non-Redis backends |
 | `PAW_SITES_BUILD_TIMEOUT_SEC[_<ENGINE>]` | `600` (floor) | Per-build sandbox budget for the site-build function. Read at worker **import**, so a change takes effect on the worker restart a deploy performs — see below |
 | `PAW_SITES_SVELTE_ASYNC_BUILD` | unset (off) | Routes STATIC svelte publishes to the Daytona build lane instead of building them inline. Read per call, so it takes effect without a restart — but set it on **both** the web service and the worker: the web side decides whether to enqueue, the worker side does the build. See the caveat below before turning it on |

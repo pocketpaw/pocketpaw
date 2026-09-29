@@ -1,4 +1,11 @@
 # tests/cloud/test_paw_bar_concierge_entitlement.py — the concierge is a PAID
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # per-site capability, and until this branch no plan was consulted anywhere.
 #
 # Created 2026-08-15 (feat/sites-concierge-entitlement). The hole:
@@ -208,6 +215,12 @@ async def _site(**ov):
         subscription_status="none",
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -418,6 +431,7 @@ async def test_the_publish_embed_treats_a_pending_subscription_as_paid(bound_wid
         concierge_enabled=True,
         # The publish path's own resolution, which maps pending -> active.
         concierge_entitled=True,
+        concierge_exists=True,
     )
 
     assert snippet != ""
@@ -464,6 +478,7 @@ async def test_an_unentitled_site_publishes_without_the_snippet(bound_widget, mo
         api_base="https://api.test/api/v1",
         concierge_enabled=True,
         concierge_entitled=False,
+        concierge_exists=True,
     )
 
     assert snippet == ""
@@ -484,6 +499,7 @@ async def test_an_entitled_site_still_gets_its_snippet(bound_widget, monkeypatch
         api_base="https://api.test/api/v1",
         concierge_enabled=True,
         concierge_entitled=True,
+        concierge_exists=True,
     )
 
     assert snippet != ""

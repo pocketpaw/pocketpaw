@@ -1,0 +1,10 @@
+{
+  "case_id": "on-kb-shipping",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved answer. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "b875e917caea1d7a",
+  "raw_model_output": "Shipping is free on orders over $40; otherwise it costs $6. Delivery takes 2 to 4 business days."
+}

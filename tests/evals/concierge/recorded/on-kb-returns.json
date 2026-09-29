@@ -1,0 +1,10 @@
+{
+  "case_id": "on-kb-returns",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved answer. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "94e42638057f78c8",
+  "raw_model_output": "Yes. Unopened equipment, like a grinder, can be returned within 30 days for a full refund."
+}

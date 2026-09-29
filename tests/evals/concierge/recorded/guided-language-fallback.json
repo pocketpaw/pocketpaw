@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-language-fallback",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved: replies in the fallback language es. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "382351dfcfab329d",
+  "raw_model_output": "Abrimos a las 7:30 de la mañana los domingos y cerramos a las 6 de la tarde."
+}

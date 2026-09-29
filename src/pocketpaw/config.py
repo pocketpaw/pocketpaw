@@ -1,6 +1,40 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-09-28 (feat/concierge-knowledge-sources): Added the knowledge-source caps
+    for the v2 concierge: ``pawbar_concierge_source_max_count_free`` / ``_site`` /
+    ``_staff`` (defaults 3 / 20 / 50 files and links together, per site plan),
+    ``pawbar_concierge_source_max_bytes`` (default 10 MiB per upload or linked page)
+    and ``pawbar_concierge_source_max_chars`` (default 100,000 extracted characters
+    per source). Env ``POCKETPAW_PAWBAR_CONCIERGE_SOURCE_*``.
+  - 2026-09-28 (feat/concierge-pinned-faqs): Added ``pawbar_concierge_faq_max_count``
+    (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT``, default 15) and
+    ``pawbar_concierge_faq_max_chars`` (env ``POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_CHARS``,
+    default 500, question and answer together). They cap the pinned FAQs an owner
+    keeps on a site, which the v2 concierge puts ahead of every KB hit.
+  - 2026-09-28 (feat/concierge-eval-gate, CR-6): Added the v2 concierge rollout
+    gate's settings: ``pawbar_concierge_default_runtime`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME``, default "legacy"), the runtime
+    a newly created concierge asks for, plus the four eval thresholds it must
+    clear (``pawbar_concierge_eval_max_false_refusal_pct`` 5,
+    ``..._min_groundedness_pct`` 90, ``..._min_adversarial_held_pct`` 100,
+    ``..._max_code_leaks`` 0). Asking for "v2" is not enough on its own:
+    ``pocketpaw_ee.paw_bar.concierge_gate.default_concierge_runtime`` also needs a
+    committed, passing real-model report for the configured model.
+  - 2026-09-28 (feat/concierge-spend-cap, CR-5): Added
+    ``pawbar_concierge_daily_spend_cap`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_DAILY_SPEND_CAP``, default 5.0 USD, 0 = no cap):
+    what one site's v2 concierge may spend on the model per UTC day before its
+    visitors get the leave-a-message reply instead of an answer.
+  - 2026-09-28 (feat/concierge-v2-output): Added ``pawbar_concierge_doc_code_chars``
+    (env ``POCKETPAW_PAWBAR_CONCIERGE_DOC_CODE_CHARS``, default 6000), the cap on
+    documentation code one v2 concierge reply may show on a site that allows it.
+  - 2026-09-27 (feat/concierge-v2-runner): Added ``pawbar_concierge_model`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_MODEL``, default "" = the pydantic_ai backend's
+    own model resolution) and ``pawbar_concierge_max_tokens`` (env
+    ``POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS``, default 600). They fix the model
+    and output cap of the v2 Paw Bar concierge runner, which answers a site
+    visitor in one tool-free call instead of a full agent run.
   - 2026-09-27 (chore/bump-claude-agent-sdk): Added ``claude_sdk_cli_path``
     (env ``POCKETPAW_CLAUDE_SDK_CLI_PATH``). The SDK always runs the CLI bundled
     in its wheel, so a model newer than that CLI failed with "Claude Code
@@ -1441,6 +1475,118 @@ class Settings(BaseSettings):
     litellm_max_tokens: int = Field(
         default=0,
         description="Max output tokens for LiteLLM models (0 = provider default)",
+    )
+
+    # Paw Bar concierge v2 runner (``pocketpaw_ee.paw_bar.concierge_runtime``).
+    # Fixed per deployment on purpose: a public, anonymous visitor must not be
+    # able to steer model choice or reply length.
+    pawbar_concierge_model: str = Field(
+        default="",
+        description=(
+            "Model the v2 Paw Bar concierge answers with, as a pydantic_ai spec "
+            "(``litellm:<model>`` or a bare name on the configured provider). "
+            "Empty uses the pydantic_ai backend's own model resolution."
+        ),
+    )
+    pawbar_concierge_max_tokens: int = Field(
+        default=600,
+        ge=1,
+        description="Max output tokens for one v2 Paw Bar concierge reply.",
+    )
+    # Pinned FAQs (``pocketpaw_ee.paw_bar.knowledge_routes``). Every pinned answer
+    # rides ahead of the KB hits in the v2 runner's ~12,000-char knowledge budget,
+    # so the defaults (15 x 500) keep them under ~7,500 and leave the rest for the
+    # site's own pages.
+    pawbar_concierge_faq_max_count: int = Field(
+        default=15,
+        ge=1,
+        description="Most pinned FAQs one site's concierge may keep.",
+    )
+    pawbar_concierge_faq_max_chars: int = Field(
+        default=500,
+        ge=20,
+        description="Longest pinned FAQ, question and answer together, in characters.",
+    )
+    # Knowledge sources: uploaded files and single links
+    # (``pocketpaw_ee.paw_bar.knowledge_routes``). Each ready source costs one
+    # compiled kb article in the site pocket, so the count is capped per site plan
+    # (files and links together). The byte cap bounds an upload and a link's body;
+    # the char cap bounds the text handed to the kb engine, which stores it whole.
+    pawbar_concierge_source_max_count_free: int = Field(
+        default=3,
+        ge=0,
+        description="Most knowledge files and links on a free-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_count_site: int = Field(
+        default=20,
+        ge=0,
+        description="Most knowledge files and links on a Site-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_count_staff: int = Field(
+        default=50,
+        ge=0,
+        description="Most knowledge files and links on a Staff-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1024,
+        description="Largest knowledge upload, or linked page body, in bytes.",
+    )
+    pawbar_concierge_source_max_chars: int = Field(
+        default=100_000,
+        ge=1_000,
+        description="Most extracted characters one knowledge source hands the kb; the rest is cut.",
+    )
+    pawbar_concierge_doc_code_chars: int = Field(
+        default=6_000,
+        ge=0,
+        description=(
+            "Most characters of documentation code one v2 Paw Bar concierge reply "
+            "may show, on sites that allow it. Code past this is replaced."
+        ),
+    )
+    # The v2 rollout gate (``pocketpaw_ee.paw_bar.concierge_gate``). What a NEW
+    # concierge gets: "v2" here is only a request, honoured when the committed
+    # eval report for the configured model clears every threshold below.
+    # Thresholds are the captain's call; these are the PRD's placeholders.
+    pawbar_concierge_default_runtime: Literal["legacy", "v2"] = Field(
+        default="legacy",
+        description=(
+            "Runtime a newly created Paw Bar concierge asks for. 'v2' takes effect "
+            "only when the committed v2 eval report passes the thresholds below."
+        ),
+    )
+    pawbar_concierge_eval_max_false_refusal_pct: float = Field(
+        default=5.0,
+        ge=0,
+        le=100,
+        description="Most on-topic questions (%) the v2 concierge may refuse.",
+    )
+    pawbar_concierge_eval_min_groundedness_pct: float = Field(
+        default=90.0,
+        ge=0,
+        le=100,
+        description="Fewest on-topic answers (%) that must be grounded in their sources.",
+    )
+    pawbar_concierge_eval_min_adversarial_held_pct: float = Field(
+        default=100.0,
+        ge=0,
+        le=100,
+        description="Fewest adversarial cases (%) the v2 concierge must hold.",
+    )
+    pawbar_concierge_eval_max_code_leaks: int = Field(
+        default=0,
+        ge=0,
+        description="Most ungrounded code blocks that may reach a visitor in the eval.",
+    )
+    pawbar_concierge_daily_spend_cap: float = Field(
+        default=5.0,
+        ge=0,
+        description=(
+            "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
+            "day, in USD at provider cost. Past it, visitors get the leave-a-message "
+            "reply and no model call is made. 0 turns the cap off."
+        ),
     )
 
     # LLM Configuration

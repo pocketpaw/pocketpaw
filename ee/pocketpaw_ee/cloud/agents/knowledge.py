@@ -1,4 +1,9 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-09-28 (feat/concierge-page-aware, CR-3) — get_article_for_scope,
+#   the scope-form sibling of get_article (`kb show <id> --scope <s> --json`). The
+#   v2 concierge reads the visitor's current page's own article with it, by the id
+#   the site sync recorded in Site.kb_page_index. Raises on failure; the caller is
+#   fail-soft.
 # Updated: 2026-09-25 (sites kb engine) — KnowledgeEngineUnavailable, a
 #   RuntimeError subclass raised when the kb ENGINE is the problem rather than
 #   the document: the binary is missing, or it predates `ingest --article-json`
@@ -529,6 +534,17 @@ class KnowledgeService:
     async def get_article(agent_id: str, article_id: str) -> dict:
         """Fetch a single article's full body."""
         result = await asyncio.to_thread(_kb, "show", article_id, "--scope", f"agent:{agent_id}")
+        return result if isinstance(result, dict) else {"content": str(result)}
+
+    @staticmethod
+    async def get_article_for_scope(scope: str, article_id: str) -> dict:
+        """One article of any scope as ``{id, title, summary, content, ...}``.
+
+        Scope-form sibling of :meth:`get_article`. Raises on subprocess failure
+        (an unknown id makes kb-go exit non-zero); callers on the public concierge
+        path wrap it.
+        """
+        result = await asyncio.to_thread(_kb, "show", article_id, "--scope", scope)
         return result if isinstance(result, dict) else {"content": str(result)}
 
     @staticmethod

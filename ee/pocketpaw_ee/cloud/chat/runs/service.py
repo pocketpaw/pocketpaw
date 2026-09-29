@@ -4,6 +4,22 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 ``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
 
 Changes:
+- 2026-09-27 (fix/chat-run-heartbeat) — ``mark_running`` is now a conditional
+  atomic ``queued -> running`` transition that returns whether it won. It used to
+  load and ``save()`` the whole doc unconditionally, so a queued run the sweeper
+  had already interrupted (and whose client had already been sent the terminal
+  frame) was flipped straight back to ``running`` and driven for nobody. It also
+  seeds ``last_heartbeat_at``, and ``touch_heartbeat`` refreshes it — conditional
+  on ``running`` so a late tick can never resurrect a finished run. The sweeper
+  judges running runs by that stamp instead of ``createdAt``.
+  ``find_stranded_replies`` now skips runs whose ``assistant_message_id`` is set:
+  ``execute_run`` persists a non-completed run's partial as a real ``Message``,
+  and counting it here too would replay the same reply twice.
+- 2026-09-28 (feat/concierge-spend-cap, CR-5) — added ``find_run_usage_since``,
+  the per-site daily spend read behind the v2 Paw Bar concierge's spend cap. It
+  returns ``(usage, createdAt)`` pairs for one scope's runs, projected to those two
+  fields, so the caller prices them with the meter (``metering.resolve_cost``)
+  without importing ``ChatRunDoc`` (EE Rule 2).
 - 2026-09-14 (fix/partial-reply-survives-failed-run) — added
   ``STRANDED_REPLY_STATUSES`` + ``find_stranded_replies``. ``execute_run`` writes
   an assistant ``Message`` from exactly one place, and the failed / cancelled /
@@ -171,11 +187,38 @@ def _trigger_spend_ingest(doc: ChatRunDoc) -> None:
         logger.debug("run spend-ingest trigger failed for %s", doc.run_id, exc_info=True)
 
 
-async def mark_running(run_id: str) -> None:
-    doc = await get_run(run_id)
-    doc.status = "running"
-    doc.started_at = _utcnow()
-    await doc.save()
+async def mark_running(run_id: str) -> bool:
+    """Atomically move a run from ``queued`` to ``running``. True when it moved.
+
+    One conditional update, never load-then-save: the web process's stale-run
+    sweeper can flip a queued run to ``interrupted`` between arq enqueueing it and
+    a worker picking it up, and by then the client has been sent the terminal
+    frame and stopped listening. A read-modify-write here would silently undo
+    that and run the agent for nobody. False means someone else already decided
+    this run's fate (swept, or claimed twice) and the caller must not drive it.
+    """
+    now = _utcnow()
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "status": "queued"},
+        {"$set": {"status": "running", "started_at": now, "last_heartbeat_at": now}},
+    )
+    return result.modified_count == 1
+
+
+async def touch_heartbeat(run_id: str) -> bool:
+    """Stamp ``last_heartbeat_at`` on a run that is still ``running``.
+
+    Conditional on the status so a tick that lands after the terminal write (or
+    after the sweeper gave up on the run) is a no-op rather than a write that
+    makes a finished run look alive. Returns whether the run is still running.
+    """
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "status": "running"},
+        {"$set": {"last_heartbeat_at": _utcnow()}},
+    )
+    # matched, not modified: two beats inside one millisecond write the same
+    # value and modify nothing, but the run is still running.
+    return result.matched_count == 1
 
 
 async def mark_completed(
@@ -391,6 +434,13 @@ async def find_stranded_replies(
     Empty ``partial_text`` is filtered in the query: a run that died before the
     model emitted a token has nothing to contribute, and excluding it here keeps
     it from spending one of the caller's window slots.
+
+    So is a run with ``assistant_message_id`` set: since 2026-09-27 ``execute_run``
+    persists a non-completed run's partial as a ``Message`` (flagged with
+    ``run_status``) and points the run at it. That reply is already in the
+    ``Message`` read, and returning it here too would put it in the prompt twice.
+    What is left is the runs from before that change, and any run whose Message
+    write failed.
     """
     docs = (
         await ChatRunDoc.find(
@@ -400,6 +450,7 @@ async def find_stranded_replies(
             ChatRunDoc.agent_id == agent_id,
             {"status": {"$in": list(STRANDED_REPLY_STATUSES)}},
             {"partial_text": {"$ne": ""}},
+            {"assistant_message_id": None},
         )
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .limit(limit)
@@ -408,3 +459,37 @@ async def find_stranded_replies(
     return [
         StrandedReply(status=d.status, text=d.partial_text, created_at=d.createdAt) for d in docs
     ]
+
+
+class _RunUsageProjection(BaseModel):
+    """The two fields a spend read prices: never the answer text or history."""
+
+    usage: dict[str, Any] = {}
+    createdAt: datetime
+
+
+async def find_run_usage_since(
+    *,
+    workspace_id: str,
+    context_type: str,
+    scope_id: str,
+    since: datetime,
+) -> list[tuple[dict[str, Any], datetime]]:
+    """``(usage, createdAt)`` for every run of one scope created at or after ``since``.
+
+    Served by the ``(workspace, context_type, scope_id, createdAt)`` index and
+    projected to the two fields, so a busy scope's answers never cross the wire.
+    The caller prices each pair with ``metering.resolve_cost`` (at its own
+    ``createdAt``), the same meter that writes the ``compute_spend`` debits.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == context_type,
+            ChatRunDoc.scope_id == scope_id,
+            ChatRunDoc.createdAt >= since,
+        )
+        .project(_RunUsageProjection)
+        .to_list()
+    )
+    return [(dict(d.usage or {}), d.createdAt) for d in docs]

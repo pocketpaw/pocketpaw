@@ -1825,7 +1825,7 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
     escaping the widget lookup leaves the snippet empty with a log line, because a
     row that is paid for and readable matters more than the panel's copy button.
     """
-    from pocketpaw_ee.cloud.auth.site_keys import concierge_available
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_exists
     from pocketpaw_ee.sites import foreign_grounding
 
     workspace_id = str(getattr(site, "workspace", "") or "")
@@ -1853,6 +1853,8 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
             # honours the sites-billing flag, which a re-expression here would
             # have to remember).
             concierge_entitled=available,
+            # CR-12: a bought connection has no concierge until its owner creates one.
+            concierge_exists=concierge_exists(site),
         )
     except Exception:  # noqa: BLE001 — the row is real whether or not the bar is
         import logging

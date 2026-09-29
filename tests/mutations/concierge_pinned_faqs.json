@@ -1,0 +1,102 @@
+[
+  {
+    "label": "pinned FAQs go after the KB hits instead of ahead of them",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        return pinned + items[:k]",
+    "replace": "        return items[:k] + pinned",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_retrieve_puts_pinned_faqs_ahead_of_kb_hits",
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_v2_prompt_lists_the_pinned_answer_before_the_kb_fact"
+    ]
+  },
+  {
+    "label": "retrieve never reads the pinned FAQs — the owner's answers never reach the model",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    pinned = _pinned_faqs(site)",
+    "replace": "    pinned = []",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_v2_turn_with_an_empty_kb_still_reaches_the_model_with_the_pinned_answer"
+    ]
+  },
+  {
+    "label": "a failing KB search drops the pinned FAQs too",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "exc_info=True)\n        return pinned",
+    "replace": "exc_info=True)\n        return []",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_pinned_faqs_survive_an_empty_or_failing_kb"
+    ]
+  },
+  {
+    "label": "an empty query drops the pinned FAQs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            return pinned",
+    "replace": "            return []",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_pinned_faqs_survive_an_empty_or_failing_kb"
+    ]
+  },
+  {
+    "label": "owner FAQ text reaches the prompt un-neutralized — it can close the knowledge block",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        text = _data(item.text)",
+    "replace": "        text = item.text",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_an_injection_in_a_faq_only_appears_inside_the_knowledge_block"
+    ]
+  },
+  {
+    "label": "the FAQ routes load the site without the workspace scope — another tenant's FAQs are readable and writable",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    return await _load_site_scoped(site_id, workspace_id)",
+    "replace": "    return await __import__('pocketpaw_ee.cloud.models.site', fromlist=['Site']).Site.find_one({'_id': __import__('bson').ObjectId(site_id)})",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_every_verb_404s_on_another_workspaces_site"
+    ]
+  },
+  {
+    "label": "the add route drops its manage gate — a workspace member can pin answers",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    status_code=201,\n    dependencies=[Depends(_require_paw_bar_manage)],",
+    "replace": "    status_code=201,",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_a_member_is_refused_every_verb_and_nothing_is_written"
+    ]
+  },
+  {
+    "label": "the count cap is never enforced",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    if len(site.concierge_faqs) >= max_count:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_post_past_the_count_cap_is_refused_and_writes_nothing"
+    ]
+  },
+  {
+    "label": "the length cap is never enforced",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    if len(question) + len(answer) > max_chars:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_a_faq_over_the_length_cap_is_refused_on_post_and_patch"
+    ]
+  },
+  {
+    "label": "the knowledge router is never mounted — the dashboard's FAQ calls 404 in production",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    app.include_router(paw_bar_knowledge_router, prefix=\"/api/v1\")",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_mount_cloud_serves_the_faq_routes"
+    ]
+  },
+  {
+    "label": "once CR-3 meets CR-8, the visitor's page article goes ahead of the pinned FAQs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    ordered = faqs + ([chunk] if chunk is not None else [])",
+    "replace": "    ordered = ([chunk] if chunk is not None else []) + faqs",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_faqs.py::test_pinned_faqs_lead_the_page_article_and_the_kb_hits"
+    ]
+  }
+]

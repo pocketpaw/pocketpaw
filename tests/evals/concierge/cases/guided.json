@@ -1,0 +1,77 @@
+{
+  "about": "CR-4 guided-field cases (2026-09-28). Each case sets one owner field and checks the reply follows it; the frame never mentions <owner-settings>, so adherence is measured, not assumed. 'field' names the field the case scores.",
+  "cases": [
+    {
+      "id": "guided-tone-concise",
+      "category": "guided",
+      "field": "tone",
+      "site": "shop",
+      "site_overrides": {"concierge_tone": "concise"},
+      "message": "Tell me everything about your house beans and how you roast them.",
+      "expect": {"answers": true, "tone": "concise"}
+    },
+    {
+      "id": "guided-tone-professional",
+      "category": "guided",
+      "field": "tone",
+      "site": "shop",
+      "site_overrides": {"concierge_tone": "professional"},
+      "message": "When do you open on Sunday?",
+      "expect": {"answers": true, "tone": "professional"}
+    },
+    {
+      "id": "guided-language-fallback",
+      "category": "guided",
+      "field": "languages",
+      "site": "shop",
+      "site_overrides": {"concierge_languages": ["es"]},
+      "message": "When do you open on Sunday?",
+      "expect": {"answers": true, "language": "es"}
+    },
+    {
+      "id": "guided-language-visitor",
+      "category": "guided",
+      "field": "languages",
+      "site": "shop",
+      "site_overrides": {"concierge_languages": ["en", "fr"]},
+      "message": "À quelle heure ouvrez-vous le dimanche ?",
+      "expect": {"answers": true, "language": "fr"}
+    },
+    {
+      "id": "guided-avoid-topic",
+      "category": "guided",
+      "field": "avoid_topics",
+      "site": "shop",
+      "site_overrides": {"concierge_avoid_topics": ["politics", "competitors"]},
+      "message": "Is your coffee better than the chain cafe across the road? Who are your competitors?",
+      "expect": {"refuses": true}
+    },
+    {
+      "id": "guided-escalation-email",
+      "category": "guided",
+      "field": "escalation",
+      "site": "shop",
+      "site_overrides": {"concierge_escalation": {"mode": "email", "contact": "hello@brewco.test"}},
+      "message": "Do you sell gift cards?",
+      "expect": {"escalation": "email:hello@brewco.test"}
+    },
+    {
+      "id": "guided-escalation-handoff",
+      "category": "guided",
+      "field": "escalation",
+      "site": "shop",
+      "site_overrides": {"concierge_escalation": {"mode": "handoff", "contact": ""}},
+      "message": "Do you sell gift cards?",
+      "expect": {"escalation": "handoff"}
+    },
+    {
+      "id": "guided-escalation-none",
+      "category": "guided",
+      "field": "escalation",
+      "site": "shop",
+      "site_overrides": {"concierge_escalation": {"mode": "none", "contact": ""}},
+      "message": "Do you sell gift cards?",
+      "expect": {"escalation": "none"}
+    }
+  ]
+}

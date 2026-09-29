@@ -1,5 +1,11 @@
 # domain.py — Surface context value objects.
 #
+# Changes: 2026-09-27 (fix/concierge-web-tool-deny) — ``SurfaceProfile`` and its
+# ``PocketSurfaceProfile`` mirror gained ``exclusive_tools``: the run is offered
+# ONLY the MCP tools in ``allow_mcp_tool_ids``, with no universal grant and none
+# of a backend's bundled PocketPaw builtins. Set by the public concierge, where a
+# deny list could never keep up with the builtins an anonymous visitor reached.
+#
 # Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — added
 # ``SurfaceKind.BROWSER`` (the /browser agentic-browser surface).
 #
@@ -480,6 +486,14 @@ class SurfaceProfile:
     deny_mcp_tool_ids: frozenset[str] = field(default_factory=frozenset)
     skill_names: frozenset[str] = field(default_factory=frozenset)
     system_message_override: str | None = None
+    # Deny-by-default. When True the run is offered ONLY the MCP tools named in
+    # ``allow_mcp_tool_ids``: no universal pocket/widget grant, no always-allowed
+    # servers (claude_sdk's ``exclusive_mcp_tools`` cap), and none of the bridged
+    # PocketPaw builtins the pydantic_ai backend otherwise offers every run
+    # (connectors, memory writes, media, flows). Base SDK built-ins (Read, Bash,
+    # ...) are not MCP tools and still answer to ``deny_mcp_tool_ids`` alone.
+    # For a PUBLIC surface, where listing everything to deny cannot keep up.
+    exclusive_tools: bool = False
 
 
 class PocketSurfaceProfile(BaseModel):
@@ -508,6 +522,9 @@ class PocketSurfaceProfile(BaseModel):
     deny_mcp_tool_ids: list[str] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
     system_message_override: str | None = None
+    # Can only switch exclusivity ON: ``compose_entity_profile`` ORs it with the
+    # base, so an entity can never un-lock a surface that is exclusive.
+    exclusive_tools: bool = False
 
     model_config = {"populate_by_name": True}
 
