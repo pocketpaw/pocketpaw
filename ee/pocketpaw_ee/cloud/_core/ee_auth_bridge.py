@@ -1,44 +1,21 @@
-"""Bridge EE JWT auth → OSS ``request.state.full_access`` for PLATFORM admins.
+"""Bridge EE JWT auth into the OSS ``AuthMiddleware``'s request state.
 
-Change (2026-06-10, W4b — privilege-escalation fix): the bridge now grants
-``full_access`` only to genuine *platform* administrators (``User.is_superuser``),
-NOT to every owner/admin of their own workspace. ``full_access`` is the OSS
-superuser bypass — it skips ALL ``require_scope`` checks. Handing it to any
-self-service workspace owner let a tenant on shared infra (e.g. the cloud
-micro tier) escalate to platform-wide settings/channels/budget. A workspace
-owner is the owner of *their* workspace, not a superuser over the OSS guards.
+Runs just outside the OSS ``AuthMiddleware``. For a request carrying a
+fastapi-users JWT (``paw_auth`` cookie or a Bearer that is not ``pp_``/``ppat_``)
+it decodes the token, rejects revoked sessions, loads the User, and sets:
 
-OSS routes under ``src/pocketpaw/api/v1/`` (settings, channels, budget, soul,
-...) gate access with ``require_scope(...)`` from ``pocketpaw.api.deps``. That
-dependency accepts:
+  * ``workspace_id`` / ``user_id`` — the session's tenant, for OSS routers that
+    must not trust an ``X-Workspace-Id`` header.
+  * ``ee_user_authenticated`` — active users only. A limiter-only marker: the
+    OSS middleware skips its per-IP ``api_limiter`` for it. It grants no access.
+  * ``full_access`` — platform admins (``is_superuser``) ONLY. It is the OSS
+    superuser bypass that skips every ``require_scope`` check, so it is never
+    derived from a workspace role: a self-service workspace owner on shared
+    infra must stay subject to OSS scopes (the W4b escalation fix).
 
-  * ``request.state.full_access`` truthy — the cookie/session/master-token
-    paths in ``dashboard_auth.py`` set this for fully-trusted callers.
-  * ``request.state.api_key`` with matching scopes.
-  * ``request.state.oauth_token`` with matching scopes.
-
-The EE cloud uses fastapi-users JWT (cookie ``paw_auth`` or Bearer) at the
-route level. The OSS ``AuthMiddleware`` doesn't know about EE auth, so a
-platform admin hitting ``/api/v1/settings`` would 403 with ``Missing required
-scope: settings:read or settings:write`` because nothing sets ``full_access``.
-
-This middleware closes that gap for platform admins only. On every request:
-
-  1. Decode the JWT from ``paw_auth`` cookie or ``Authorization: Bearer``.
-  2. Resolve the User.
-  3. If the user is a platform admin (``is_superuser``), set
-     ``request.state.full_access = True``.
-
-Everyone else — workspace owners, admins, members, viewers — stays subject to
-OSS ``require_scope``. ``full_access`` is a platform-operator capability; it is
-deliberately NOT derived from a workspace role. ``is_superuser`` is set only
-for the seeded operator who boots the tenant (see ``auth/core.py``); a
-self-service signup never receives it.
-
-Performance: the JWT decode is local (HMAC); the User lookup is one Beanie
-``get()`` per request. We skip entirely for paths that already exempt from
-auth (static assets, oauth callbacks) and for requests with no cookie or
-bearer at all.
+Everything is best-effort: a bad, expired or revoked token just leaves state
+untouched and the route's own auth decides. Cost is a local HMAC decode plus
+one ``User.get()``; static/auth-flow paths and token-less requests skip it.
 """
 
 from __future__ import annotations
@@ -117,6 +94,13 @@ class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
         # workspace member is exactly who needs their own workspace resolved.
         request.state.workspace_id = getattr(user, "active_workspace", None)
         request.state.user_id = str(getattr(user, "id", "") or "") or None
+
+        # Limiter-only marker: the OSS AuthMiddleware skips its per-IP
+        # api_limiter when this is set. It is NOT an auth signal — nothing
+        # grants access on it, and it never sets full_access. Inactive users
+        # stay limited like anonymous callers.
+        if getattr(user, "is_active", False):
+            request.state.ee_user_authenticated = True
 
         # full_access is the OSS superuser bypass — reserve it for genuine
         # platform administrators. A workspace owner/admin is NOT a superuser
