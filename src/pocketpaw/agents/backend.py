@@ -235,6 +235,20 @@ def _accepts_exclusive_tools_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_history_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``history`` in its signature?
+
+    Asked of a bound ``prewarm``. The Claude SDK bakes history into the system
+    prompt only at ``connect()``, so a prewarm that connects turn 1's client has
+    to be given the history turn 1 will carry. Other backends' ``prewarm`` (when
+    they have one) may take a narrower signature, so the pool asks first.
+    """
+    try:
+        return "history" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str) -> dict[str, Any]:
     """Return ``run_kwargs`` carrying ``digest`` iff ``backend`` declares it.
 

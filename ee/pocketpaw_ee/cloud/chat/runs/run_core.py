@@ -345,8 +345,9 @@ Changes:
   context, soul recall, SSE setup, prompt assembly) and turn 1 reuses it instead
   of paying the ~12s cold ``connect()``. ``_prewarm_session`` resolves the SAME
   inputs ``_drive_agent_loop`` will (instructions, the entity-aware
-  deny/allow/skills/override, session_key) and calls ``AgentPool.prewarm`` so the
-  prewarmed client's cache key matches the first turn's. It is gated to
+  deny/allow/skills/override, session_key, and the run's ``spec.history``) and
+  calls ``AgentPool.prewarm`` so the prewarmed client's cache key matches the
+  first turn's and its prompt carries the conversation so far. It is gated to
   smart-routing-OFF (the model is message-derived when routing is on, so a
   message-less prewarm could warm the wrong tier and churn) and swallows every
   error. Skill sessions on smart-routing-ON deployments keep today's cold turn-1.
@@ -1560,7 +1561,11 @@ def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
     return (True, frozenset(tools))
 
 
-async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | None = None) -> None:
+async def _prewarm_session(
+    ctx: ScopeContext,
+    flow_context: dict[str, Any] | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
 
@@ -1581,6 +1586,13 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
     ``asyncio.create_task``. Every failure path is swallowed (this guard +
     ``AgentPool.prewarm`` + the backend's ``prewarm``), so a failed prewarm just
     leaves turn 1 to pay the cold connect it would have paid anyway.
+
+    ``history`` is the run's conversation so far (``spec.history``). The Claude
+    SDK bakes it into the system prompt only at ``connect()``, and this prewarm
+    is what connects turn 1's client, so it has to carry the same history turn 1
+    does or the model answers without the earlier messages. (The backend also
+    rebuilds a never-queried client that has less history than the turn, so an
+    omission costs a reconnect rather than the context.)
 
     LIMITATION: skipped when smart routing is ON, because the model is then
     classified from the message (which we don't have yet) — prewarming a guessed
@@ -1695,6 +1707,7 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
                 surface_cache_key=(
                     ctx.surface_context.preamble_cache_key if ctx.surface_context else None
                 ),
+                history=history,
             )
         finally:
             unbind_timeline(timeline_token)
@@ -3145,7 +3158,9 @@ async def execute_run(spec: RunSpec) -> None:
         # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
         # forget: _prewarm_session swallows every error, so it can never delay or
         # break this run; the task is intentionally not awaited.
-        asyncio.create_task(_prewarm_session(ctx, flow_context=spec.flow_context))
+        asyncio.create_task(
+            _prewarm_session(ctx, flow_context=spec.flow_context, history=list(spec.history))
+        )
 
         # A False here means the run is no longer queued: the stale-run sweeper
         # interrupted it while it waited in arq, and its client already has the

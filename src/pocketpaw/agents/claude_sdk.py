@@ -232,7 +232,13 @@ Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
   now declared above the ``try`` so the error handler is safe if option assembly
   itself raises). ``prewarm`` is fire-and-forget: it swallows ALL errors, never
   raises, no-ops when a run holds the lease or the SDK/CLI is unavailable, and on
-  failure tears down only a client no run owns. A new ``_client_lock`` serializes
+  failure tears down only a client no run owns. History is baked into the
+  prompt only at ``connect()`` and is NOT part of the cache key, so
+  ``_get_or_create_client`` rebuilds a matching client that has never been
+  queried (``_client_served_turn``) when it was connected with fewer history
+  entries (``_client_history_len``) than the turn carries; otherwise a
+  history-less prewarm would serve a turn that has forgotten the session. A
+  client that has served a turn is always reused. ``_client_lock`` serializes
   the reuse-or-connect critical section in ``_get_or_create_client`` so a prewarm
   racing the first ``run`` (the trigger fires prewarm as a background task)
   cannot double-connect — the loser of the lock reuses the winner's client. The
@@ -955,6 +961,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client = None
         self._client_options_key: str | None = None
         self._client_in_use = False
+        # How many history entries the live client's system prompt was connected
+        # with, and whether it has been sent a query yet. History is baked into
+        # the prompt only at connect() and is not part of the cache key, so a
+        # client connected with less history (a prewarm) and never queried is
+        # rebuilt by a turn that brings more — see ``_get_or_create_client``.
+        self._client_history_len = 0
+        self._client_served_turn = False
         # Serializes the connect-or-reuse critical section in
         # ``_get_or_create_client`` (feat/claude-sdk-prewarm). ``prewarm`` runs
         # CONCURRENTLY with the first ``run`` (fired as a background task before
@@ -2034,6 +2047,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         plugin_digest: str = "",
         system_prompt_digest: str = "",
+        history_len: int = 0,
     ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
@@ -2052,6 +2066,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         anymore. Re-materializing the dir per turn does NOT work — the warm
         subprocess keeps the original path from its first connect — so the dir
         is cached per digest and only dropped on eviction or cleanup().
+
+        ``history_len`` is how many history entries ``options`` baked into the
+        system prompt. History is volatile and stays out of the key, so a key
+        match alone does not mean the live client knows the conversation: a
+        prewarm connects with no history, and a turn that reused it would reach
+        a model that has forgotten the session. A matching client that has never
+        been queried (``_client_served_turn`` False) and was connected with fewer
+        entries than ``history_len`` is therefore rebuilt. Once a client has
+        served a turn it holds the conversation natively and is always reused.
         """
         import time
 
@@ -2074,9 +2097,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
         async with self._client_lock:
             # Re-check INSIDE the lock: a prewarm (or sibling) may have connected
             # a matching client while we awaited the lock — reuse it, don't churn.
-            if self._client is not None and self._client_options_key == key:
+            if (
+                self._client is not None
+                and self._client_options_key == key
+                and (self._client_served_turn or self._client_history_len >= history_len)
+            ):
                 logger.debug("Reusing persistent client (key=%s)", key)
                 return self._client
+            if self._client is not None and self._client_options_key == key:
+                logger.info(
+                    "Rebuilding unqueried warm client: connected with %d history "
+                    "entries, this turn has %d (key=%s)",
+                    self._client_history_len,
+                    history_len,
+                    key,
+                )
 
             # Disconnect stale client and drop the skills dir it was connected with.
             if self._client is not None:
@@ -2093,6 +2128,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             await self._client.connect()
             self._client_options_key = key
             self._client_plugin_digest = plugin_digest
+            self._client_history_len = history_len
+            self._client_served_turn = False
             t1 = time.monotonic()
             logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
             return self._client
@@ -2119,6 +2156,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             self._client = None
             self._client_options_key = None
             self._client_in_use = False
+            self._client_history_len = 0
+            self._client_served_turn = False
             logger.info("Persistent client disconnected")
         # Sweep every materialized per-run skills dir adopted by a warm client.
         # Safe even when no client existed (the map is just empty).
@@ -2884,6 +2923,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_key=session_key,
                 plugin_digest=built.plugin_digest,
                 system_prompt_digest=system_prompt_digest,
+                history_len=len(history or ()),
             )
             logger.info(
                 "Prewarmed Claude client for session_key=%s (skills=%d)",
@@ -2960,6 +3000,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # A resume turn must take a fresh launch (the live client carries its OWN
         # conversation, not the requested on-disk session), so warm reuse is gated
         # on ``not resume_active`` as well as an exact key match.
+        # No history check here, unlike ``_get_or_create_client``: a leased client
+        # is only ever minted by step 2 below, connected with that turn's options
+        # (history included) and queried straight away. Prewarm never builds one,
+        # so a leased client always holds its conversation natively.
         if (
             warm_client is not None
             and not resume_active
@@ -3336,7 +3380,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         session_key=session_key,
                         plugin_digest=plugin_digest,
                         system_prompt_digest=system_prompt_digest,
+                        history_len=len(history or ()),
                     )
+                    # Mark it before the send: from here on the CLI owns this
+                    # conversation, so a later turn must reuse it, not rebuild.
+                    self._client_served_turn = True
                     logger.info(
                         "Persistent client: sending query (%d chars, %d image(s))",
                         len(message),

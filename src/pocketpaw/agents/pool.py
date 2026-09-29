@@ -43,7 +43,10 @@ Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards 
   the warm-client key now hashing the digest, a prewarm that withheld it would
   key under the OLD rule and be evicted by the very turn it spent ~12s connecting
   for. Both entry points read the digest off the SAME ``AssembledPrompt``, which
-  is the only way the two keys can be equal.
+  is the only way the two keys can be equal. ``prewarm`` also forwards the run's
+  ``history`` (when non-empty, to a ``prewarm`` that declares it): the Claude SDK
+  bakes history into the prompt only at connect, so the prewarmed client must
+  be connected with it.
 Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
   gains ``atlas`` and ``user`` directly under ``identity``, and
   ``_assemble_system_prompt`` grows the four plain-data fields that feed them
@@ -199,6 +202,7 @@ from typing import TYPE_CHECKING, Any
 from pocketpaw.agents.backend import (
     ImageAttachment,
     _accepts_exclusive_tools_kwarg,
+    _accepts_history_kwarg,
     _accepts_image_attachments_kwarg,
     _accepts_images_kwarg,
     _accepts_prompt_digest,
@@ -598,6 +602,7 @@ class AgentPool:
         exclusive_mcp_tools: bool = False,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
+        history: list[dict] | None = None,
     ) -> None:
         """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
         first turn, so the first ``run`` reuses it instead of paying the cold
@@ -621,6 +626,11 @@ class AgentPool:
         model is classified from the message, which prewarm doesn't have, so a
         prewarm could warm the wrong model tier and cause evict-churn. The
         run_core trigger gates on this.
+
+        ``history`` is the conversation turn 1 will carry. The Claude SDK bakes it
+        into the system prompt only at ``connect()``, so a prewarm without it
+        builds a client that has forgotten the session. It is forwarded when
+        non-empty and only to a ``prewarm`` that declares it.
         """
         try:
             instance = await self.get(agent_id)
@@ -689,6 +699,8 @@ class AgentPool:
         # True; the caller passes the agent's declared ids as ``allow_mcp_tool_ids``.
         if exclusive_mcp_tools:
             prewarm_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+        if history and _accepts_history_kwarg(backend_prewarm):
+            prewarm_kwargs["history"] = history
         await backend_prewarm(**prewarm_kwargs)
 
     async def run(
