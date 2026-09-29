@@ -453,3 +453,14 @@ async def test_init_realtime_reads_the_knob(monkeypatch, value, enabled):
     init_realtime()
 
     assert broadcast.is_enabled() is enabled
+
+
+async def test_redis_streams_without_a_redis_url_stays_inprocess(monkeypatch):
+    from pocketpaw_ee.cloud import init_realtime
+
+    monkeypatch.setenv("POCKETPAW_REALTIME_BUS", "redis-streams")
+    monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
+
+    init_realtime()
+
+    assert broadcast.is_enabled() is False
