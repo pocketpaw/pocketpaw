@@ -47,8 +47,6 @@
 # NEVER RAISES — a failure here must not break the approve response. Every
 # terminal path goes through the single ``_fail`` chokepoint or the one success
 # path, never both.
-#
-# Created 2026-07-27 (feat/growth-g4): new module.
 
 from __future__ import annotations
 
