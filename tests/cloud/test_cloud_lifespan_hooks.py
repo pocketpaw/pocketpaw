@@ -371,9 +371,9 @@ def test_every_shutdown_hook_pairs_with_a_startup_hook_by_name() -> None:
         for name in stops
         if not name.startswith("_stop_") or name.replace("_stop_", "_start_", 1) not in starts
     )
-    # The chat-run drain has no startup half by design: it is a defence-in-depth
-    # teardown, not a sweep, so it never marks anything running.
-    unpaired = [name for name in unpaired if name != "_drain_chat_runs"]
+    # Drains have no startup half by design: they are teardown, not sweeps, so
+    # they never mark anything running.
+    unpaired = [name for name in unpaired if not name.startswith("_drain_")]
 
     assert not unpaired, (
         f"shutdown hooks {unpaired} do not map to a startup hook by the "

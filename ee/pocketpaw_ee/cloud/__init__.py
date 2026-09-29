@@ -162,6 +162,7 @@ Each has router.py (thin), service.py (logic), schemas.py (validation).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -238,6 +239,36 @@ def _install_cloud_lifespan(
                         sweep_runtime.mark_stopped(name.replace("_stop_", "_start_", 1))
 
     app.router.lifespan_context = _cloud_lifespan
+
+
+# uvicorn's graceful-shutdown bound (src/pocketpaw/api/serve.py). The drain below
+# gets the same budget so a stuck proxy call cannot stretch shutdown past it.
+_LLM_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+async def _drain_llm_provisioning(timeout: float = _LLM_DRAIN_TIMEOUT_SECONDS) -> None:
+    """Let in-flight tenant-key mints and post-run spend ingests finish. Never raises.
+
+    Both drains run together under one ``timeout``; a drain that raises is logged
+    and does not stop the other. Work cut off here is not lost: the sweep loop
+    backfills a missing key and bills unbilled spend on its next tick.
+    """
+    from pocketpaw_ee.cloud.llm_provisioning.run_end_trigger import drain_pending
+    from pocketpaw_ee.cloud.llm_provisioning.service import drain_pending_mints
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                drain_pending_mints(timeout), drain_pending(timeout), return_exceptions=True
+            ),
+            timeout,
+        )
+    except TimeoutError:
+        _logger.warning("LLM provisioning drain timed out after %.1fs", timeout)
+        return
+    for result in results:
+        if isinstance(result, BaseException):
+            _logger.warning("LLM provisioning drain failed", exc_info=result)
 
 
 def init_realtime() -> None:
@@ -1356,6 +1387,13 @@ def mount_cloud(app: FastAPI) -> None:
         executor = get_executor()
         if isinstance(executor, InProcessExecutor):
             await executor.drain()
+
+    # Background LiteLLM work (tenant-key mints from workspace create, post-run
+    # spend ingests) is held in module sets; give it a bounded chance to finish
+    # before the loop closes. Registered last, so it runs first on shutdown.
+    @on_shutdown
+    async def _drain_llm_provisioning_tasks() -> None:
+        await _drain_llm_provisioning()
 
     # Install LAST: the closure captures the lists, so every hook above has to
     # be in them before this runs.
