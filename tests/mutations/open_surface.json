@@ -1,0 +1,30 @@
+[
+  {
+    "label": "open_surface: run_core trusts a forged marker without re-validating",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "_os_clean, _ = validate_open_surface(_os_payload)",
+    "replace": "_os_clean = _os_payload",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: run_core never emits the event",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                        yield (\"open_surface\", _os_clean)",
+    "replace": "                        pass",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: params key cap dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "if len(params) > MAX_PARAMS:",
+    "replace": "if False:",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: route allowlist dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "    if route not in ALLOWED_ROUTES:",
+    "replace": "    if not route:",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  }
+]
