@@ -256,6 +256,8 @@ async def test_a_worker_bus_event_is_handled_once_across_two_web_processes(
     xstream = f"{stream}:xproc"
     monkeypatch.setattr(xproc, "XPROC_STREAM", xstream)
     monkeypatch.setattr(xproc, "get_redis", lambda: redis)
+    # run_consumer reads through the separate blocking pool.
+    monkeypatch.setattr(xproc, "get_blocking_redis", lambda: redis)
     handled: list[str] = []
 
     async def _handler(event):

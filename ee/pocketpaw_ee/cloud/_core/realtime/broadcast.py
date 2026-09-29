@@ -42,7 +42,7 @@ from typing import Any
 
 from redis import exceptions as redis_exceptions
 
-from pocketpaw_ee.cloud._core.redis_client import get_redis
+from pocketpaw_ee.cloud._core.redis_client import get_blocking_redis, get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,11 @@ class Channel:
 
     def _r(self):
         return self._redis if self._redis is not None else get_redis()
+
+    def _rb(self):
+        # XREADGROUP BLOCK parks a connection for block_ms, so it uses the separate
+        # blocking pool and cannot starve the shared one (tickets, cancel keys).
+        return self._redis if self._redis is not None else get_blocking_redis()
 
     def _manager(self):
         if self._conn is None:
@@ -255,7 +260,7 @@ class Channel:
         next_cleanup = time.monotonic() + CLEANUP_INTERVAL_SECONDS
         while True:
             try:
-                resp = await self._r().xreadgroup(
+                resp = await self._rb().xreadgroup(
                     self.group,
                     _CONSUMER,
                     {self.stream: ">"},
