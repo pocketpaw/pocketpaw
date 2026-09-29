@@ -15,6 +15,7 @@ Extracted from dashboard.py — contains:
 
 import hmac
 import io
+import json
 import logging
 import re
 
@@ -380,11 +381,16 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     # Brute-force guard for login / register / bearer-login (OWASP A07).
     # These paths used to be unconditionally exempt from rate limiting, which
-    # left an unbounded brute-force window. The per-(ip, email) bucket prevents
-    # an attacker from rotating the email field behind one IP to slip the
-    # per-IP api_limiter. fastapi-users reads the form body downstream, so we
-    # cache the body bytes on request.state and the ASGI wrapper in
-    # AuthMiddleware.__call__ replays them via a wrapped `receive`.
+    # left an unbounded brute-force window. The bucket is per (ip, email), so
+    # rotating the email behind one IP falls to the per-IP api_limiter, while
+    # distinct signups from one office IP do not share a bucket. The email is
+    # read by Content-Type: login posts an OAuth2 form ("username"), register
+    # posts JSON ("email"). request.form() does not raise on a JSON body, it
+    # returns an empty form, so JSON must be parsed explicitly. A missing or
+    # unparseable email keys on "" (per-IP), the conservative fallback.
+    # Downstream handlers read the body again, so we cache the bytes on
+    # request.state and the ASGI wrapper in AuthMiddleware.__call__ replays
+    # them via a wrapped `receive`.
     if request.method == "POST" and path in _LOGIN_RATE_LIMITED_PATHS:
         try:
             body_bytes = await request.body()
@@ -394,22 +400,14 @@ async def _auth_dispatch(request: Request) -> Response | None:
             request.state.cached_body = body_bytes
         email = ""
         try:
-            form = await request.form()
-            # fastapi-users uses OAuth2PasswordRequestForm — field is "username".
-            # /register receives JSON with an "email" field instead.
-            email = str(form.get("username") or form.get("email") or "").strip().lower()
+            if "json" in request.headers.get("content-type", "").lower():
+                payload = json.loads(body_bytes or b"{}")
+                fields = payload if isinstance(payload, dict) else {}
+            else:
+                fields = await request.form()
+            email = str(fields.get("username") or fields.get("email") or "").strip().lower()
         except Exception:
-            # JSON body on /register — best-effort parse for the email key.
-            try:
-                import json as _json
-
-                payload = _json.loads(body_bytes.decode("utf-8") or "{}")
-                if isinstance(payload, dict):
-                    email = (
-                        str(payload.get("email") or payload.get("username") or "").strip().lower()
-                    )
-            except Exception:
-                email = ""
+            email = ""
         key = f"login:{client_ip}:{email}"
         rl_info = login_limiter.check(key)
         if not rl_info.allowed:
