@@ -1,0 +1,121 @@
+[
+  {
+    "label": "overall cap check removed: a widget admits past its cap",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_overall_cap_admits_up_to_the_cap"
+    ]
+  },
+  {
+    "label": "overall cap off by one",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3])",
+    "replace": "if redis.call('ZCARD', KEYS[1]) > tonumber(ARGV[3])",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_overall_cap_admits_up_to_the_cap"
+    ]
+  },
+  {
+    "label": "per-customer cap check removed",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return 0 end\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_per_customer_cap_is_separate_from_overall"
+    ]
+  },
+  {
+    "label": "per-customer key collapses to the widget key",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "return [base, f\"{base}:c:{customer_ref}\"]",
+    "replace": "return [base, f\"{base}:c\"]",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_per_customer_cap_is_separate_from_overall"
+    ]
+  },
+  {
+    "label": "window never slides: old entries are kept",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_window_slides"
+    ]
+  },
+  {
+    "label": "bucket dropped from the key: events and chat share one budget",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "base = f\"{_KEY_PREFIX}{widget_id}:{bucket}\"",
+    "replace": "base = f\"{_KEY_PREFIX}{widget_id}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_buckets_are_independent"
+    ]
+  },
+  {
+    "label": "refused events are counted too",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return 0 end\n",
+    "replace": "if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then redis.call('ZADD', KEYS[1], ARGV[1], ARGV[5]) return 0 end\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_refused_event_is_not_counted"
+    ]
+  },
+  {
+    "label": "admitted event is never written to SQLite",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "                await store.record_event(event, bucket=bucket)\n",
+    "replace": "                pass\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_admitted_event_is_one_row_and_refused_is_none",
+      "tests/cloud/test_paw_bar_admit_redis.py::test_redis_admit_records_a_plain_insert"
+    ]
+  },
+  {
+    "label": "row written to the wrong bucket",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "await store.record_event(event, bucket=bucket)",
+    "replace": "await store.record_event(event)",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_admitted_event_is_one_row_and_refused_is_none",
+      "tests/cloud/test_paw_bar_admit_redis.py::test_redis_admit_records_a_plain_insert"
+    ]
+  },
+  {
+    "label": "Redis error propagates instead of falling back",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "        except Exception:\n            global _redis_skip_until\n",
+    "replace": "        except ZeroDivisionError:\n            global _redis_skip_until\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_redis_error_falls_back_to_the_store_and_backs_off"
+    ]
+  },
+  {
+    "label": "no back-off: every event retries a dead Redis",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "    if time.monotonic() < _redis_skip_until:\n        return None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_redis_error_falls_back_to_the_store_and_backs_off"
+    ]
+  },
+  {
+    "label": "Redis used even when no URL is configured",
+    "file": "ee/pocketpaw_ee/paw_bar/admit.py",
+    "find": "    if not os.environ.get(\"POCKETPAW_REDIS_URL\", \"\").strip():\n        return None\n    if time",
+    "replace": "    if time",
+    "tests": [
+      "tests/cloud/test_paw_bar_admit_redis.py::test_without_redis_url_the_store_admits"
+    ]
+  },
+  {
+    "label": "schema setup unserialized: concurrent first opens hit database is locked (Windows)",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        async with self._schema_lock:\n            if not self._initialized:\n                await self._create_schema()\n",
+    "replace": "        await self._create_schema()\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_public_route_gates.py::test_concurrent_admits_never_exceed_the_cap"
+    ]
+  }
+]
