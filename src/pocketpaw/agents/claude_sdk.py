@@ -1,427 +1,46 @@
 """
-Claude Agent SDK backend for PocketPaw.
+Claude Agent SDK backend for PocketPaw: runs a turn on the Claude Code CLI
+through ``claude_agent_sdk``, keeping one warm CLI subprocess per backend.
 
-Per-turn state on a warm client. The SDK applies ``ClaudeAgentOptions`` (the
-system prompt and the in-process MCP servers' task context) only at
-``connect()``; a reused client is sent the query text and nothing else. So the
-system prompt holds only session-stable layers, and everything that changes per
-turn rides the user message in a ``<turn-context>`` block
+Per-turn state. The SDK applies ``ClaudeAgentOptions`` (system prompt, MCP
+servers, cwd, plugins) only at ``connect()``; a reused client is sent the query
+text and nothing else. So the system prompt holds only session-stable layers,
+and what changes per turn rides the user message in a ``<turn-context>`` block
 (``compose_turn_message``): the caller's ``turn_context`` (KB hits, scope,
-participants, uploaded-file text, soul recall) and the stored history the client
-has not seen. Each client carries a ``_HistoryWatermark`` (on the client object,
-so a leased client keeps it): a turn whose history extends the watermark sends
-only the delta; one that diverged (an edit or delete) evicts the client and the
-replacement is sent the full conversation. Fresh and stateless launches get the
-full history; native-resume launches get none. A prewarm therefore needs no
-history and is never rebuilt for lack of it.
+uploads, recall) and the stored history the client has not seen. Each client
+carries a ``_HistoryWatermark``: a turn whose history extends it sends only the
+delta; a diverged history (edit/delete) evicts the client and the replacement
+gets the whole conversation. Stateless launches get the full history,
+native-resume launches none. ``prewarm`` therefore takes no history.
 
-Warm-client lifecycle, as it stands (the dated notes below are history):
-  * ``self._client`` is one warm CLI subprocess per backend. A run holds it via
-    ``_client_in_use`` + ``_lease_token``; only that run releases the lease, and
-    its teardown touches only the client it drove (the slot is cleared only if it
-    still holds that client). ``cleanup()`` never releases a lease.
+Warm-client key (``_client_cache_key``): session key, cwd, model, allowed tools,
+the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
+plugin/skills digest and the tenant scope. Any change forces a fresh subprocess.
+Per-run skill dirs are cached per digest and dropped on eviction or cleanup.
+
+Lifecycle invariants:
+  * A run holds the client via ``_client_in_use`` + ``_lease_token``; only that
+    run releases the lease, and its teardown touches only the client it drove.
+    ``cleanup()`` never releases a lease.
   * ``prewarm`` never evicts: it no-ops while the client is in use (re-checked
-    under ``_client_lock``) or when a client that served the session is live,
-    and it takes the turn's ``model_override`` / ``tools_enabled`` so its key
-    matches the turn's.
-  * Every ``connect()`` is bounded by ``claude_sdk_connect_timeout``; a failed or
-    timed-out connect is disconnected and never cached.
+    under ``_client_lock``) or when a client that already served the session is
+    live, and it takes the turn's ``model_override`` / ``tools_enabled``.
+  * Every ``connect()`` goes through ``_connect_client``, bounded by
+    ``claude_sdk_connect_timeout``; the stateless path bounds its first event
+    by the same setting. A failed connect is disconnected and never cached.
   * A stream that ends without its ResultMessage tears down the backend's own
-    client, or interrupts and retires (key-poisons) a supervisor-leased one.
-  * ``stop(session_key)`` stops only that session's runs; each run has its own
-    stop flag (``_RunState``) that a later run cannot reset.
-  * The Bun-crash retry forwards every ``run`` parameter (captured from the
-    signature), dropping only the crashed ``warm_client``.
-  * API-error assistant text and error results become ONE error event (the
-    too-old-CLI case names ``POCKETPAW_CLAUDE_SDK_CLI_PATH``); a max-turns stop
-    names the limit.
+    client, or interrupts and retires a supervisor-leased one (``warm_client`` /
+    ``on_client_built``, WH-1).
+  * ``stop(session_key)`` stops only that session's runs (``_RunState``).
+  * The Bun-crash retry replays every ``run`` parameter except ``warm_client``.
+  * API-error text and error results become one error event (a too-old CLI names
+    ``POCKETPAW_CLAUDE_SDK_CLI_PATH``); a max-turns stop names the limit.
 
-Updated: 2026-09-27 (chore/bump-claude-agent-sdk) - ``_build_options`` passes
-  ``settings.claude_sdk_cli_path`` through as ``ClaudeAgentOptions.cli_path``.
-  The SDK prefers its bundled CLI over PATH, so a model newer than the bundled
-  CLI (2.1.276 in SDK 0.2.156) could not be reached even with a current
-  ``claude`` installed. Unset keeps the bundled CLI. The launch log now names
-  the CLI actually used instead of whatever ``which claude`` finds.
-Updated: 2026-09-27 (feat/sites-visual-research) — ``_build_options`` now sets
-  ``max_buffer_size`` to ``_SDK_MAX_BUFFER_BYTES`` (32 MiB) on every turn. The
-  SDK reads each CLI message into a buffer that defaults to 1 MB, and the new
-  image-returning MCP tools (``preview_site``, ``view_reference``,
-  ``view_reference_screenshot``) can put 1-3 MB of base64 JPEG tiles into one
-  tool result. Past the cap the turn went quiet and then died with "JSON message
-  exceeded maximum buffer size of 1048576 bytes". A constant, so the warm-client
-  cache key is unaffected.
-
-Updated: 2026-09-15 (fix/chat-image-persistent-client) — the images now ride the
-  LEGACY ``self._client`` persistent send too, not only the two leased sends in
-  ``_leased_dispatch``. Those two run only when a SessionSupervisor is driving,
-  and ``POCKETPAW_SESSION_SUPERVISOR`` defaults OFF — so in a default deployment
-  every turn took the legacy path and the attached image was dropped, while the
-  attachments block still named the file. The reported symptom was a model saying
-  it could see the filename and size but not the pixels. Not a capability limit:
-  ``_get_or_create_client`` returns a persistent ``ClaudeSDKClient`` and the SDK
-  docs list image uploads as a streaming-input capability. The stateless
-  ``query()`` fallback genuinely cannot carry one (the same docs say
-  single-message input does not support direct image attachments), so that one
-  now logs a warning naming which of the three routes forced it.
-
-Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
-  ``image_attachments`` and a turn carrying one is sent through
-  ``build_streaming_user_message``, which is the only shape the SDK takes an
-  image in. The images ride the PERSISTENT-client sends only: single-message mode
-  explicitly does not support image attachments, so a stateless fresh-launch turn
-  would drop them silently — that path keeps sending a plain string.
-
-Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — a ``tool_use`` event now
-  reaches consumers carrying the tool's REAL arguments. The stream loop announced
-  a tool twice over: once from the partial ``content_block_start`` (name known,
-  arguments not yet streamed, so ``input={}``) and once from the completed
-  ``AssistantMessage`` (the SDK's fully assembled ``input``). The second was
-  suppressed by an ``_announced_tools`` name guard the first had just populated,
-  so on the DEFAULT backend's streamed path every tool call reached consumers
-  with empty arguments — the announcement won and the truth was dropped. The
-  guard is gone (and with it the set, whose only reader it was): both emissions
-  now go out, distinguished by an additive ``metadata["input_pending"]`` — True
-  on the provisional announcement, False on the resolved one. Two events for one
-  streamed call is intended; consumers render a tool status line they REPLACE, so
-  the resolved event upgrades the display. The non-streaming path (no
-  ``_StreamEvent``, hence no ``include_partial_messages``) never ran the first
-  branch, so it still emits exactly one event per call, as it always did.
-Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — two things, and the
-  first is a docstring that had become false. ``_behavior_prefix`` said PA-7
-  would delete it once the channel path produced a digest of its own. The channel
-  path now does, and the function is NOT deletable: the pocket specialist calls
-  ``backend.run`` directly (bypassing the router that forwards the digest) and so
-  can any out-of-tree embedder, and both would key a warm client on a constant
-  without it. The correction is in the docstring itself rather than here, where a
-  reader of the function would not find it.
-  Second, ``_build_options``' Windows prompt spill is content-addressed:
-  ``~/.pocketpaw/runtime/prompts/system_prompt-<sha256>.md`` instead of one fixed
-  path. The fixed path was two bugs at once — two concurrent large-prompt runs on
-  one box overwrote each other's file (the pool holds an instance per agent, so
-  this is reachable on the desktop app), and ``_behavior_prefix`` returns
-  ``file:<path>`` for the dict form, which was CONSTANT, so every prompt over 24k
-  hashed identically and the warm client stopped rebuilding on prompt changes for
-  exactly the prompts big enough to spill. The hash in the name fixes both with no
-  I/O in the key function.
-Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``run`` / ``prewarm`` take
-  ``system_prompt_digest`` and the warm-client key prefers it over
-  ``_behavior_prefix``. The prefix INFERS which bytes are stable by cutting the
-  rendered text at known markers; the digest is what the prompt LAYERS said about
-  themselves. The prefix was inferring badly: it excises ``# Key Knowledge`` but
-  ``## Self-Understanding`` renders above that block, so the strip never reached
-  it and an ordinary turn respawned the subprocess. Measured over 8 turns on a
-  live soul, the prefix held 1 of 7 turn boundaries and the digest held 7 of 7.
-  The prefix STAYS as the no-digest fallback — see the PA-7b note above for who
-  still reaches it now that the channel path does not. The two
-  slots are prefixed ``d:`` / ``t:`` so a client warmed under one rule can never
-  answer a turn asking the other.
-Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
-  matches its volatile markers at a BLOCK BOUNDARY instead of on the literal
-  ``"\\n\\n…"`` alone: a block that OPENS the prompt carries no separator, so the
-  old ``find`` missed it and the whole volatile block stayed in the warm-client
-  key — subprocess rebuilt every turn, prewarm evicted on turn 1. It only ever
-  worked because the legacy string assembly emitted that separator even with
-  nothing before it; the prompt assembler joins layers, and PA-3/PA-4/PA-8 give
-  these blocks their own layers, where the join means their text never carries a
-  leading blank line. The cut is still a cut: a marker mid-prompt without its
-  blank line is content, not a header, and a real persona/instructions change
-  still rebuilds.
-Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
-  ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
-  MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
-  POCKET_CREATION_GRANT, no widget/atlas ids, and NOT the
-  ALWAYS_ALLOWED_MCP_SERVERS escape hatch — so a dedicated agent (e.g. /code) gets
-  EXACTLY the declared ids. ``exclusive_mcp_tools=True`` with
-  ``allow_mcp_tool_ids=None`` strips ALL ``mcp__`` ids (empty permitted set), so an
-  exclusive agent wins over even a broad surface. ``False`` (the default) keeps the
-  legacy grant-union scoping byte-for-byte. Built-in SDK tools are never touched.
-Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` /
-  ``_build_options`` grow an optional ``model_override: str | None = None``
-  keyword. When set, it is applied as the LAST word in the model-selection block,
-  so it wins over the non-anthropic ``llm.model``, smart-routing's complexity pick,
-  and the configured ``claude_sdk_model`` — it is the user's explicit per-send
-  choice from the composer's model picker. Because ``_client_cache_key`` already
-  folds ``model`` in, an override that differs from the warm client's model MISSES
-  the cache and gets a fresh subprocess (no stale-model reuse). ``None`` (the
-  default, and all ``prewarm`` ever passes) is byte-identical to the prior path.
-Updated: 2026-07-02 (feat/atlas-fabric AT-7) — the ``pocketpaw_atlas`` server
-  additionally gets a per-run live Fabric introspector (``atlas/fabric.py``)
-  when — and only when — the tenant scope is a real ``ws:<id>`` (not the OSS
-  ``"default"`` scope, not the blank-id sentinel, now the module constant
-  ``_SENTINEL_TENANT_SCOPE``) AND ``pocketpaw_ee.fabric`` imports; import or
-  construction failure degrades to no-introspector (fail-closed, DEBUG log).
-  Lets agents ask atlas "what entity types exist in THIS workspace" without
-  ever baking per-tenant ontology into the compiled artifact.
-Updated: 2026-07-02 (feat/atlas-overlay AT-5) — the ``pocketpaw_atlas`` server
-  is now built with a per-run ``DefaultEntitlementProvider``
-  (``atlas/overlay.py``): the connector scope key resolves from THIS backend
-  instance's ``_extra_subprocess_env`` (``ws:<POCKETPAW_WORKSPACE_ID>`` when an
-  isolated cloud run attached tenancy, else the OSS ``"default"`` scope), so
-  atlas answers carry the calling workspace's connector availability and the
-  fail-closed entitlement filter — never keyed off a process-global flag.
-Updated: 2026-07-02 (feat/atlas-core AT-1) — registered the ``pocketpaw_atlas``
-  in-process MCP server (``agents/sdk_mcp_atlas.py``) alongside
-  ``pocketpaw_widgets``: built in ``_get_mcp_servers`` behind the same tool
-  policy gate, its two tool ids (``atlas_search`` / ``atlas_describe``) added to
-  the allowlist in ``_collect_mcp_tool_ids`` and to the mode-scope grant, so the
-  agent can query the OS self-model (paw primitive meanings) instead of guessing
-  capabilities from LLM priors. Pure core — the atlas seed is packaged data.
-Updated: 2026-07-01 (fix/warm-reuse session_id) — the native ``session_id`` is now
-  ALSO captured from the terminal ``ResultMessage`` (``getattr(event,
-  "session_id", None)``), as a robust FALLBACK to the SS-1 init-``SystemMessage``
-  capture. Root cause of a live WARM NO-OP: on the leased supervised-fresh path
-  the init ``SystemMessage``'s ``data["session_id"]`` did NOT surface at runtime,
-  so ``set_cli_session_id`` never ran, ``runtime.cli_session_id`` stayed None,
-  ``owns_capture`` stayed True forever, and ``warm_reuse`` (= warm_alive AND not
-  owns_capture) never fired. The ``ResultMessage.session_id`` is a direct str
-  field ALWAYS carried on the terminal message of every completed run, so
-  capturing it here guarantees turn-1 capture. Still gated on ``session_handle is
-  not None`` + emit-once (``_session_id_emitted``): the init ``SystemMessage``
-  path still wins first when it fires (no double-emit), and the no-handle legacy
-  stream stays byte-identical. Two INFO logs mark the capture moment + source
-  ("session_id captured from init SystemMessage" / "... from ResultMessage
-  (fallback)") so a live re-smoke can confirm capture now fires.
-Updated: 2026-06-30 (feat/warm-reuse WH-1) — ``run`` accepts two optional OSS-only
-  params so the SessionSupervisor (WH-2/WH-3) can drive the turn against a
-  caller-LEASED warm client instead of the backend's own ``self._client``:
-  ``warm_client: LeasedClient | None`` and
-  ``on_client_built: Callable[[client, options_key, teardown], None] | None``
-  (forwarded by ``AgentPool.run`` only when set — withhold-when-empty, like the
-  deny/allow/skill kwargs). When either is set, ``run`` computes THIS turn's
-  ``_client_cache_key`` ONCE (recomputed via the pure classmethod with the SAME
-  ``options``/``session_key``/``plugin_digest`` ``_get_or_create_client`` would
-  use, so it is byte-identical and the legacy ``self._client`` call stays
-  untouched) and routes through ``_leased_dispatch``:
-    • WARM REUSE — ``warm_client`` key MATCHES this turn (and not a resume turn,
-      the lease is not ``busy``, and the history still extends its watermark) →
-      drive ``warm_client.client.query`` directly: NO connect, NO resume, only
-      the turn context and the history it has not seen, and it is NEVER
-      disconnected (the supervisor keeps it warm).
-    • SUPERVISED FRESH BUILD — ``on_client_built`` set AND (no ``warm_client`` OR
-      key mismatch OR busy) → build + ``connect()`` a fresh client (carrying
-      ``resume`` only when ``session_handle.cli_session_id`` is set — the
-      cold-recovery path), hand it to ``on_client_built(client, key, teardown)``
-      for the supervisor to OWN (``teardown`` disconnects it) instead of caching
-      on ``self._client``, then run the query against it.
-    • BUSY edge — a ``warm_client`` whose ``busy`` flag is already set (a sibling
-      turn is mid-query on it) falls back to a fresh stateless query for THIS turn
-      and does NOT rebind, so two turns never drive one subprocess concurrently.
-  Neither param → the existing ``self._client`` / ``_get_or_create_client`` path,
-  byte-for-byte unchanged. ``LeasedClient`` lives in ``backend.py`` (generic,
-  ``client: Any``) so the supervisor imports it without a cycle.
-Updated: 2026-06-30 (feat/session-supervisor SS-2) — ``_build_options`` now also
-  forwards ``session_handle.session_store`` to the SDK as
-  ``ClaudeAgentOptions.session_store`` when it is non-None. On a resume turn the
-  SDK materializes the conversation from THAT store (a tenancy-keyed custom
-  ``SessionStore``) instead of local disk, and mirrors new transcript lines back
-  via the store's ``append``. The store flows through OPAQUELY — OSS never
-  imports the concrete (possibly ee Mongo-backed) class, so the EE→OSS boundary
-  stays clean. ``None`` leaves ``session_store`` unset (unchanged SS-1 / legacy
-  behavior). Small additive change; the SS-1 resume wiring is untouched.
-Updated: 2026-06-30 (feat/session-supervisor SS-1) — ``run`` accepts an optional
-  ``session_handle: SessionHandle | None``. When it carries a non-None
-  ``cli_session_id``, ``_build_options`` sets ``ClaudeAgentOptions.resume`` so the
-  CLI subprocess RESUMES that on-disk session natively (no Mongo-history replay),
-  and ``run`` routes the turn down the FRESH stateless ``query()`` launch path
-  rather than the warm persistent client (the warm client applies its options
-  only at first ``connect()`` and its cache key omits ``resume``, so a reused warm
-  client would silently ignore a fresh ``resume`` — the documented hazard). The
-  freshly-rebuilt per-turn ``system_prompt`` still rides ``--system-prompt`` on
-  every turn, so a resumed session honors a new system prompt. Turn-1 capture: the
-  SDK's init/system message carries a ``session_id`` in its ``data``; when a
-  ``session_handle`` is present, ``run`` extracts it and surfaces it once as a
-  ``session_id`` ``AgentEvent`` (mirroring the ``token_usage`` event) so the
-  controller can persist it for a later resume (SS-3). ``cli_session_id is None``
-  / no handle = the unchanged legacy warm-client path. ``session_handle`` is
-  forwarded by ``AgentPool.run`` only when non-None (withhold-when-empty idiom).
-Updated: 2026-06-26 (ART-2) — the agent's working directory is now resolved
-  PER-RUN via ``_resolve_cwd`` instead of being frozen to
-  ``settings.file_jail_path`` at ``__init__``. OSS / dedicated behavior is
-  unchanged (still ``file_jail_path``); when an EE ``pocketpaw.agent_extensions``
-  provider supplies ``agent_cwd`` (the cloud product), the run uses a
-  per-workspace/session jail so a tenant's file ops never co-mingle in the
-  shared home dir. A provider that RAISES (a cloud run with no resolvable
-  workspace) propagates — fail-closed, never a silent fallback to ``~``.
-  ``_build_options`` carries the resolved cwd, so ``run`` and ``prewarm`` warm
-  the same per-session jail. ART-2 hardening: the resolved cwd is folded into
-  ``_client_cache_key`` so warm-client tenant isolation is STRUCTURAL (a changed
-  cwd forces a fresh subprocess), not merely an implicit session_key<->cwd
-  coupling; the now-inert ``set_working_directory`` setter was removed
-  (``_build_options`` no longer reads ``self._cwd``); and ``get_status`` reports
-  ``base_cwd`` (the OSS/default base) instead of a misleading ``cwd``.
-Updated: 2026-06-26 (integration/model-catalog-v2, MCG-11) — the ResultMessage
-  token-usage path now runs ``pocketpaw.llm.caching.report_savings`` over the SDK
-  usage to surface STRUCTURED prompt-cache telemetry (cache_read_tokens,
-  cache_write_tokens, cache_hit_rate, cache_est_tokens_saved) on the
-  ``token_usage`` AgentEvent metadata and log the per-turn margin. This is the
-  measurement hook for the byte-stable cached prefix used by site/pocket-gen;
-  the existing ``cached_input_tokens`` field is unchanged for back-compat.
-Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
-  ``connect()`` the warm CLI subprocess for a session BEFORE its first turn so
-  the first real ``run`` reuses it instead of paying the ~12s cold connect. To
-  make the prewarmed client's cache key MATCH the first turn's (else turn 1
-  evicts it — a net loss), the whole ``options_kwargs`` -> ``options`` assembly
-  was extracted from ``run`` into a shared ``_build_options`` helper that both
-  call; ``run``'s behavior is byte-identical (the only behavioral fix: ``llm`` is
-  now declared above the ``try`` so the error handler is safe if option assembly
-  itself raises). ``prewarm`` is fire-and-forget: it swallows ALL errors, never
-  raises, no-ops when a run holds the lease or the SDK/CLI is unavailable, and on
-  failure tears down only a client no run owns. It carries no history: turn 1
-  sends the prewarmed client the whole conversation in its query text (see the
-  per-turn state note at the top). ``_client_lock`` serializes
-  the reuse-or-connect critical section in ``_get_or_create_client`` so a prewarm
-  racing the first ``run`` (the trigger fires prewarm as a background task)
-  cannot double-connect — the loser of the lock reuses the winner's client. The
-  EE trigger lives in ``run_core._prewarm_session`` (gated to smart-routing-OFF,
-  where the model is message-independent so a message-less prewarm matches the
-  turn's key). Skill sessions on smart-routing-ON deployments still cold-start
-  turn 1 (documented limitation). Supersedes the prior "prewarm out of scope" note.
-Updated: 2026-06-13 (fix/claude-sdk-warm-client-skills) — skill/tool-bearing
-  runs now REUSE the warm persistent CLI subprocess instead of re-spawning a
-  fresh stateless query every turn (a ~6s/turn floor on any skill chat). The
-  2026-06-07 entry below BYPASSED the warm client for skill runs because
-  ``_client_cache_key`` did not hash the plugin set, so a warm client could not
-  tell a skill turn from a non-skill one. The cache key now folds in
-  ``_plugin_digest`` — a hash of the skill IDENTITY (sorted ``skill_names`` +
-  whether the bundled-skills plugin is loaded), NEVER the materialized
-  ``plugins=`` PATH (``materialize_run_skills`` mints a fresh ``mkdtemp`` per
-  run, so hashing the path would change the key every turn and defeat reuse).
-  With identity in the key, ``_get_or_create_client`` reuses the subprocess for
-  a same-skill turn and rebuilds it for a changed skill set. Lifecycle: because
-  the warm subprocess keeps the ``plugins=`` path from its first ``connect()``,
-  the materialized dir is cached per digest on the instance
-  (``_skills_dir_by_digest``) and reused across same-skill turns; it is removed
-  only when its warm client is evicted (``_get_or_create_client``) or on
-  ``cleanup()`` — NOT by the per-run ``finally``, which now rmtree's the dir
-  ONLY in the genuine stateless-fallback case (when ``_client_in_use`` forced a
-  stateless query and no warm client adopted the dir). The ``skip_warm_client``
-  bypass is removed. (``prewarm`` was deferred here and shipped in the
-  feat/claude-sdk-prewarm follow-up above.)
-Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``run``
-  also accepts ``skill_names: frozenset[str]``, the per-entity skill subset
-  (resolved upstream from the entity pocket's ``surface_profile.skill_names``).
-  When non-empty, those skills are MATERIALIZED into a throwaway local-plugin
-  dir (``pocketpaw.skills.materialize``) and appended to the SDK ``plugins=``
-  list so the agent sees ONLY the named skills (coexisting with the bundled
-  plugin). Because ``setting_sources=[]`` disables filesystem + ``skills=``
-  discovery, a local plugin is the only working channel — same mechanism the
-  bundled skills use. The persistent ("warm") client is BYPASSED for skill runs
-  (its cache key omits ``plugins=`` and it only applies options at first
-  connect), so the run goes through a fresh stateless query whose options carry
-  the plugin; the temp dir is removed in the outer ``finally``. Empty
-  ``skill_names`` is a no-op. Crosses the EE→OSS boundary as a plain frozenset.
-Updated: 2026-07-25 (feat/bundled-skills-per-surface) — a non-empty
-  ``skill_names`` now SUPPRESSES the wholesale bundled-skills plugin
-  (``_should_load_bundled_plugin``). Before this, the two plugin entries were
-  independent: the bundled plugin loaded from ``plugins=`` regardless of
-  ``skill_names``, so a surface could not withhold a bundled skill by naming a
-  narrower set — ``SurfaceProfile.skill_names`` was additive-only, and /code had
-  to deny the ``Skill`` BUILT-IN outright to keep ``pocketpaw-create-pocket``
-  from firing on "build an app with components and nice design". With the gate,
-  naming skills yields exactly those (``materialize_run_skills`` resolves
-  bundled names too, via its new packaged fallback) and naming none keeps the
-  full bundled set, so general chat is byte-for-byte unchanged.
-Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
-  ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
-  ADDITIVE SDK-tool allowlist (resolved upstream from the entity pocket's
-  ``surface_profile.allowed_sdk_tools`` and forwarded by ``AgentPool.run``). It
-  is UNIONed into ``allowed_tools`` BEFORE the deny set is subtracted, so the
-  precedence is ``effective = (agent_tools ∪ allow) − deny`` (the surface deny is
-  the HARD cap — an allow can never re-add a denied id). Empty for every legacy /
-  non-entity run, so the allowlist is unchanged there. Like the deny set, it
-  crosses the EE→OSS boundary as a plain ``frozenset[str]`` and never imports
-  ``pocketpaw_ee``. The persistent-client cache key already folds in
-  ``allowed_tools``, so an entity's allow/deny change rebuilds the warm
-  subprocess on the next turn automatically.
-Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` now accepts a threaded
-  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
-  upstream from the request's ``SurfaceProfile`` and forwarded by
-  ``AgentPool.run``) and subtracts those ids from ``allowed_tools`` BEFORE the
-  SDK launches, so the agent is physically unable to call them. This REPLACES the
-  prior prompt-SNIFFING gate that string-matched a ``<surface ... engine="svelte"
-  />`` marker in the system prompt to strip the ripple-create tools — brittle (a
-  preamble wording change or an unrelated prompt quoting the marker flipped it)
-  and unable to express the three-mode /sites policy the ``SurfaceProfile``
-  resolver now owns. On /sites svelte-create the resolved set forbids the two
-  ripple-create tools (``create_landing_site`` + ``pocket_specialist__create``)
-  so the agent cannot fall back to a rippleSpec landing page — leaving
-  ``create_svelte_site`` + ``publish`` as the only create path; prose-only routing
-  ("PREFER create_svelte_site, do NOT call create_landing_site") was proven
-  insufficient (the ``ripple_spec.unknown_widget_type`` warnings). The set is
-  empty for refine / ripple-engine / non-sites runs, so their tools (incl.
-  ``pocket_specialist__edit``) are untouched. The OSS backend takes a plain
-  ``frozenset[str]`` and never imports ``pocketpaw_ee``.
-Updated: 2026-05-31 (fix/home-backend-summary-per-turn) — the persistent-client
-  cache key now folds in a digest of the system prompt's STABLE behavioral
-  prefix (``_client_cache_key`` / ``_behavior_prefix``), not just
-  session+model+tools. The home agent bakes its non-secret backend summary
-  ({base_url, auth_type, configured}) into the static system prompt; that
-  prompt is applied to the subprocess only at connect() time and ignored on
-  warm reuse, so configuring a pocket's backend mid-session stayed frozen
-  until a cold restart. Keying on the behavioral prefix makes a config flip
-  change the key, which rebuilds the client on the very next turn. The volatile
-  per-turn tail (KB block, soul memories, conversation history) is stripped
-  before hashing so ordinary turns still reuse the warm subprocess.
-Updated: 2026-05-28 (#FU-F) — promote silent MCP provider build failures from
-  DEBUG to WARNING. A stale editable install (CloudForesightMcpProvider with a
-  missing SDK dependency) failed silently; the diagnostic took 30+ minutes.
-  Now logs provider class name, exception type, and message at WARNING with
-  exc_info so operators see it immediately on dashboard restart. Added an INFO
-  startup summary log (``MCP servers registered: …``) after the
-  ``pocketpaw.mcp_servers`` entry-point loop so the operator can confirm the
-  full registered set at a glance.
-Updated: 2026-05-25 (PR #1222 R1 Blocker 1) — added
-  ``attach_subprocess_env``. The pocket-specialist runtime calls it to
-  thread per-request tenancy values (``POCKETPAW_WORKSPACE_ID`` /
-  ``POCKETPAW_USER_ID`` / ``POCKETPAW_INTERNAL_TOKEN``) into the
-  Claude Code subprocess at spawn time without mutating the parent
-  process's ``os.environ``. The original MVP path wrote those vars to
-  the parent env from a request handler — racy across concurrent
-  requests. ``run()`` merges the attached dict into
-  ``options_kwargs["env"]`` AFTER the LLM-auth env so an attached value
-  cannot accidentally clobber the auth key. Each isolated backend
-  instance carries its own stash, so one request's tenancy can never
-  leak into another's subprocess.
-Updated: 2026-06-12 — ``_collect_mcp_tool_ids`` now also allowlists EXTERNAL
-  MCP servers from ``load_mcp_config`` (``~/.pocketpaw/mcp_servers.json``) with
-  a bare ``mcp__<server>`` entry. They are registered with the SDK in
-  ``_get_mcp_servers`` but, lacking an in-process ``tool_ids()`` provider, their
-  tools never reached the allowlist and were uncallable (a deployment's
-  ``fabric`` server was registered yet the agent could not call
-  ``fabric_query`` / ``fabric_stats``).
-Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
-  collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
-  server now carries a writable ``add_widget`` tool alongside the read tools;
-  its id flows through the same provider loop, so the home-pocket agent can
-  call ``add_widget`` on the ``claude_agent_sdk`` backend.
-Updated: 2026-05-21 — Gate the ``pocketpaw_planner`` in-process MCP server
-  behind an explicit policy opt-in (``is_mcp_server_explicitly_allowed``).
-  It was the only in-process MCP server with no gate, so the
-  ``plan_project`` tool schema loaded into every agent run. It now
-  registers only when the agent opts in. ``__init__`` accepts an optional
-  ``policy`` so AgentPool can inject a per-agent ToolPolicy carrying that
-  opt-in; when omitted the policy is built from settings as before.
-Updated: 2026-05-20 — Fix concurrency lease race in run(). On every exit path
-  (the finally block AND the outer except handler) run() cleared the shared
-  self._client_in_use flag and nulled self._client unconditionally, so a
-  non-owning run — a stateless-fallback run, or one that failed before
-  acquiring the lease — would steal a still-streaming sibling persistent run's
-  lease and destroy its subprocess. run() now tracks ownership with a local
-  acquired_lease flag (declared above the try so it is in scope for the except
-  handler) and gates the flag clear and the persistent-client teardown on it
-  on both exit paths — only the run that actually acquired the lease may
-  release it or disconnect the shared subprocess. The event_stream.aclose()
-  in the finally is unaffected: a run always owns its own stream.
-Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
-  tool calls (like memory save via Bash) hang on messaging channels (Telegram,
-  Discord, Slack) because there's no terminal to approve permission prompts.
-
-Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides:
-- Built-in tools: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
-- Streaming responses
-- PreToolUse hooks for security
-- Permission management
-- MCP server support for custom tools
+Options: permissions are always bypassed (headless), ``cli_path`` comes from
+``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
+image-returning tools, and the in-process MCP servers (pocketpaw, planner,
+atlas, ...) are gated by the ToolPolicy and the per-surface allow/deny sets.
+Images ride every persistent send; the stateless ``query()`` cannot carry them.
 """
 
 import asyncio
@@ -2529,9 +2148,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 await client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("disconnect after connect timeout failed: %s", exc)
-            raise RuntimeError(
-                f"Claude CLI did not finish starting within {timeout:.0f}s"
-            ) from None
+            raise RuntimeError(f"Claude CLI did not finish starting within {timeout:g}s") from None
 
     async def _discard_client(self, client: Any) -> None:
         """Best-effort disconnect of a client that is being dropped."""
@@ -2575,9 +2192,26 @@ class ClaudeSDKBackend(BaseAgentBackend):
         re-created mid-turn, so a parse error ends the stream. It yields
         ``_STATELESS_STREAM_CUT`` so ``run`` tells the user the reply was cut off
         instead of ending it silently.
+
+        Only the FIRST event is time-bounded, by ``claude_sdk_connect_timeout``:
+        the CLI emits its init message as soon as it has started, so a launch
+        that produces nothing in that window is hung (the SDK's own initialize
+        wait is 24 h here). Every later event is unbounded, so a long reply or a
+        slow tool is never cut.
         """
+        stream = self._query(prompt=prompt, options=options)
         try:
-            async for event in self._query(prompt=prompt, options=options):
+            timeout = self._connect_timeout()
+            try:
+                first = await asyncio.wait_for(anext(stream), timeout)
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                raise RuntimeError(
+                    f"Claude CLI did not finish starting within {timeout:g}s"
+                ) from None
+            yield first
+            async for event in stream:
                 yield event
         except Exception as exc:
             if "MessageParseError" in type(exc).__name__:
@@ -2585,6 +2219,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 yield _STATELESS_STREAM_CUT
             else:
                 raise
+        finally:
+            # Closing the SDK's generator is what ends its CLI subprocess.
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception as close_exc:  # noqa: BLE001
+                    logger.debug("closing the stateless query failed: %s", close_exc)
 
     async def _resilient_receive(self, client):
         """Iterate over client messages, recovering from parse errors.
