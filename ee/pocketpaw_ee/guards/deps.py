@@ -254,6 +254,10 @@ async def check_workspace_action(user: Any, workspace_id: str, action: str) -> W
 #: ``invalidate_action_overrides`` clears a pair the moment an admin changes it,
 #: so a grant made in the UI takes effect immediately rather than within a TTL.
 _ACTION_OVERRIDE_TTL_SECONDS = 60.0
+#: Cap on cached (workspace, member) pairs. At the cap, expired entries are
+#: evicted first, then the oldest inserts, so the dict can't grow with every
+#: member the process has ever checked.
+_ACTION_OVERRIDE_MAX = 4096
 _ACTION_OVERRIDE_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 
 
@@ -311,6 +315,11 @@ async def _has_action_override(workspace_id: str, user_id: str, action: str) -> 
         )
         return False
 
+    if len(_ACTION_OVERRIDE_CACHE) >= _ACTION_OVERRIDE_MAX:
+        for key in [k for k, (exp, _) in _ACTION_OVERRIDE_CACHE.items() if exp <= now]:
+            del _ACTION_OVERRIDE_CACHE[key]
+        while len(_ACTION_OVERRIDE_CACHE) >= _ACTION_OVERRIDE_MAX:
+            del _ACTION_OVERRIDE_CACHE[next(iter(_ACTION_OVERRIDE_CACHE))]  # oldest insert
     _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, overrides)
     return action in overrides
 

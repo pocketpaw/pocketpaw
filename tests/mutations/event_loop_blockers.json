@@ -1,0 +1,86 @@
+[
+  {
+    "label": "kb route calls the kb-go subprocess inline on the loop",
+    "file": "ee/pocketpaw_ee/cloud/kb/router.py",
+    "find": "    return await asyncio.to_thread(_kb, \"stats\", \"--scope\", scope)",
+    "replace": "    return _kb(\"stats\", \"--scope\", scope)",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_kb_route_does_not_block_the_loop"]
+  },
+  {
+    "label": "audit webhook fan-out loses its semaphore",
+    "file": "ee/pocketpaw_ee/cloud/audit/webhooks.py",
+    "find": "    async with _get_delivery_slots():\n        await deliver(event)",
+    "replace": "    await deliver(event)",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_webhook_fanout_is_capped"]
+  },
+  {
+    "label": "webhook SSRF check resolves with the sync resolver",
+    "file": "ee/pocketpaw_ee/cloud/audit/webhooks.py",
+    "find": "        infos = await asyncio.get_running_loop().getaddrinfo(hostname, None)",
+    "replace": "        infos = socket.getaddrinfo(hostname, None)",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_webhook_ssrf_check_uses_async_resolver"]
+  },
+  {
+    "label": "decision-graph reads run on the loop thread",
+    "file": "ee/pocketpaw_ee/cloud/decisions/service.py",
+    "find": "        return await asyncio.to_thread(fn, *args, **kwargs)",
+    "replace": "        return fn(*args, **kwargs)",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_decision_graph_reads_run_off_the_loop"]
+  },
+  {
+    "label": "action-override cache stops evicting",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "    if len(_ACTION_OVERRIDE_CACHE) >= _ACTION_OVERRIDE_MAX:",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_action_override_cache_is_bounded"]
+  },
+  {
+    "label": "compiled_with cache stops evicting",
+    "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
+    "find": "        if len(_compiled_with_cache) >= _COMPILED_WITH_MAX:",
+    "replace": "        if False:",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_compiled_with_cache_is_bounded"]
+  },
+  {
+    "label": "composio tools cache stops evicting",
+    "file": "ee/pocketpaw_ee/cloud/composio/providers.py",
+    "find": "        if len(_tools_cache) >= _TOOLS_CACHE_MAX:",
+    "replace": "        if False:",
+    "tests": ["tests/cloud/test_event_loop_blockers.py::test_composio_tools_cache_is_bounded"]
+  },
+  {
+    "label": "send_message awaits external delivery in the request",
+    "file": "ee/pocketpaw_ee/cloud/chat/message_service.py",
+    "find": "    notifications_service.schedule_external_many(created_notifs)",
+    "replace": "    from pocketpaw_ee.cloud.notifications import delivery as _d\n\n    await _d._deliver_external_many(created_notifs)",
+    "tests": ["tests/cloud/chat/test_send_message_fanout.py::test_external_delivery_is_off_the_request_and_reads_config_once"]
+  },
+  {
+    "label": "message notifications schedule their own delivery (two config reads)",
+    "file": "ee/pocketpaw_ee/cloud/chat/message_service.py",
+    "find": "            deliver_external=False,\n        )\n    broadcast_types",
+    "replace": "        )\n    broadcast_types",
+    "tests": ["tests/cloud/chat/test_send_message_fanout.py::test_external_delivery_is_off_the_request_and_reads_config_once"]
+  },
+  {
+    "label": "create_many inserts one document at a time",
+    "file": "ee/pocketpaw_ee/cloud/notifications/service.py",
+    "find": "    await _NotificationDoc.insert_many(docs)",
+    "replace": "    for doc in docs:\n        await doc.insert()",
+    "tests": ["tests/cloud/chat/test_send_message_fanout.py::test_notifications_are_batched_and_recipients_unchanged"]
+  },
+  {
+    "label": "the message.sent handler double-counts stats and mentions again",
+    "file": "ee/pocketpaw_ee/cloud/shared/event_handlers.py",
+    "find": "    event_bus.subscribe(\"invite.accepted\", _on_invite_accepted)",
+    "replace": "    event_bus.subscribe(\"invite.accepted\", _on_invite_accepted)\n\n    async def _dup(data):\n        from beanie import PydanticObjectId\n\n        from pocketpaw_ee.cloud.models.group import Group\n\n        g = await Group.get(PydanticObjectId(data[\"group_id\"]))\n        g.message_count += 1\n        await g.save()\n\n    event_bus.subscribe(\"message.sent\", _dup)",
+    "tests": ["tests/cloud/chat/test_send_message_fanout.py::test_stats_and_mentions_are_written_exactly_once_with_handlers_registered"]
+  },
+  {
+    "label": "meeting notes stop bumping group stats",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "            await group_service.bump_message_stats(\n                group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)\n            )",
+    "replace": "            pass",
+    "tests": ["tests/cloud/chat/test_send_message_fanout.py::test_meeting_notes_bump_group_stats_themselves"]
+  }
+]
