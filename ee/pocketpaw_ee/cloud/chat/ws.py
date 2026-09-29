@@ -13,9 +13,10 @@ Cross-process: with ``POCKETPAW_REALTIME_BUS=redis-streams``,
 ``broadcast_to_group`` and ``send_to_room`` also relay the frame through
 ``_core/realtime/broadcast.py`` so other web processes reach their own sockets.
 ``send_to_user`` never relays: its return value counts THIS process's accepting
-sockets, and ``push/dispatch.py`` reads it to choose WS over Web Push. Presence
-(``is_online``, the offline grace timer) and typing state are process-local;
-with several web processes they only see this process's sockets.
+sockets. ``is_online`` and typing state are process-local; the cluster-wide
+presence answer (first/last connection, online elsewhere) lives in
+``_core/realtime/presence.py``, which the router and ``push/dispatch.py`` call
+with this manager.
 
 Liveness is capability-gated. A socket that has sent a ``ping`` is marked
 ping-capable and is live only while INBOUND traffic arrives inside
@@ -98,6 +99,8 @@ class ConnectionManager:
         # several web processes in one; otherwise the process's own channel is
         # used, and exists only when broadcast is on (see broadcast.py).
         self.relay_channel: broadcast.Channel | None = None
+        # Same idea for the cluster presence registry (see presence.py).
+        self.presence_registry = None
 
     async def connect(self, websocket: WebSocket, user_id: str) -> None:
         """Register an authenticated WebSocket connection."""

@@ -40,16 +40,14 @@
 # swallowed per-cycle; the loop sleeps and tries again next interval.
 #
 # BACKGROUND TASK: each mandate's loop is an asyncio task in the process-local
-# ``_TASKS`` registry keyed by mandate id (mirrors
-# ``decisions._action_sweeper``'s create-task + cancel-and-await shape, but
-# per-mandate so STOP can cancel exactly one). The persisted
-# ``MandateDoc.autopilot.on`` flag is the source of truth for whether autopilot
-# SHOULD be running; the task is process-local and is re-derived from that flag
-# at boot by ``reconcile_autopilot_tasks`` (lifespan startup, run_immediate=False
-# so a boot never storms cycles); ``shutdown_all_autopilot_tasks`` drains every
-# loop at lifespan shutdown. Both are registered in ``cloud/__init__.mount_cloud``
-# under the same POCKETPAW_CLOUD_SCHEDULER_ENABLED gate the decisions
-# reconciler / run sweeper use.
+# ``_TASKS`` registry keyed by mandate id. The persisted ``MandateDoc.autopilot.on``
+# flag is the source of truth; ``reconcile_autopilot_tasks`` re-derives the loops
+# from it (run_immediate=False, so a boot never storms cycles) and
+# ``shutdown_all_autopilot_tasks`` drains them. ``autopilot_singleton`` wraps that
+# pair in the ``mandate_autopilot`` lease (``_core/lease.py``), so with several
+# web processes only the holder runs loops. A start/stop request handled by
+# another process saves the flag and announces ``mandate.autopilot``; the holder
+# re-reads the flag and starts or stops that one loop (``_on_remote_change``).
 
 from __future__ import annotations
 
@@ -557,6 +555,65 @@ async def stop_autopilot(mandate_id: str) -> None:
         await task
 
 
+# ---------------------------------------------------------------------------
+# Several web processes: one holder runs every loop (see the header).
+# ---------------------------------------------------------------------------
+
+AUTOPILOT_LEASE = "mandate_autopilot"
+_CHANGE_INVALIDATOR = "mandate.autopilot"
+_singleton = None  # the lease-wrapped start/stop pair, once mount_cloud made it
+
+
+def autopilot_singleton():
+    """The ``mandate_autopilot`` lease around reconcile/shutdown, for the
+    lifespan hooks in ``mount_cloud``."""
+    global _singleton
+    from pocketpaw_ee.cloud._core.lease import leased
+
+    _singleton = leased(AUTOPILOT_LEASE, reconcile_autopilot_tasks, shutdown_all_autopilot_tasks)
+    return _singleton
+
+
+def runs_here() -> bool:
+    """Whether this process runs autopilot loops: the lease holder, or any
+    process when there is no lease (single process, or the scheduler is off)."""
+    return _singleton is None or _singleton.held
+
+
+def announce_change(mandate_id: str) -> None:
+    """Tell the other web processes this mandate's autopilot flag changed.
+    A no-op unless ``POCKETPAW_REALTIME_BUS=redis-streams``."""
+    from pocketpaw_ee.cloud._core.realtime.broadcast import broadcast_invalidate_soon
+
+    broadcast_invalidate_soon(_CHANGE_INVALIDATOR, mandate_id)
+
+
+async def _on_remote_change(mandate_id: str) -> None:
+    if not runs_here():
+        await stop_autopilot(mandate_id)
+        return
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    # ponytail: scans every autopilot-on mandate; a by-id read if that list grows.
+    rows = await mandate_service.list_autopilot_enabled()
+    row = next((r for r in rows if str(r["mandate_id"]) == mandate_id), None)
+    if row is None:
+        await stop_autopilot(mandate_id)
+    else:
+        await start_autopilot(
+            str(row["workspace_id"]), mandate_id, int(row["users"]), run_immediate=False
+        )
+
+
+def _register_change_invalidator() -> None:
+    from pocketpaw_ee.cloud._core.realtime.broadcast import register_invalidator
+
+    register_invalidator(_CHANGE_INVALIDATOR, _on_remote_change)
+
+
+_register_change_invalidator()
+
+
 def is_running(mandate_id: str) -> bool:
     """True when a live autopilot loop is registered for the mandate."""
     task = _TASKS.get(mandate_id)
@@ -620,6 +677,10 @@ async def shutdown_all_autopilot_tasks() -> None:
 
 
 __all__ = [
+    "AUTOPILOT_LEASE",
+    "announce_change",
+    "autopilot_singleton",
+    "runs_here",
     "ClaudeCliUserSim",
     "MockUserSim",
     "Persona",

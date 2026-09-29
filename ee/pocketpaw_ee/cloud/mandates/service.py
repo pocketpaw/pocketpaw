@@ -25,8 +25,9 @@
 #   slice 4: trigger_shift (foreman → plan gate)
 #   slice 5: get_pawprints
 #   autopilot (feat/belt-autopilot): set_autopilot (start/stop Foresight-seeded
-#     simulated users feeding the feedback patrol) + repo_for_mandate (the
-#     dispatcher/autopilot surface read).
+#     simulated users feeding the feedback patrol; the loop starts only where
+#     ``autopilot.runs_here()``, and every change is announced to the other web
+#     processes) + repo_for_mandate (the dispatcher/autopilot surface read).
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
@@ -529,12 +530,18 @@ async def set_autopilot(
         # sightings, THEN start the loop (which skips its own immediate cycle so
         # the first cycle isn't double-filed). The cycle never raises.
         await autopilot_mod.run_autopilot_cycle(workspace_id, mandate_id, users=users)
-        await autopilot_mod.start_autopilot(workspace_id, mandate_id, users, run_immediate=False)
+        # With several web processes only the lease holder runs loops; it hears
+        # about this start through announce_change below.
+        if autopilot_mod.runs_here():
+            await autopilot_mod.start_autopilot(
+                workspace_id, mandate_id, users, run_immediate=False
+            )
     else:  # stop
         await autopilot_mod.stop_autopilot(mandate_id)
         users = doc.autopilot.users if doc.autopilot else 3
         doc.autopilot = Autopilot(on=False, users=users)
         await doc.save()
+    autopilot_mod.announce_change(mandate_id)
 
     await emit(
         mandate_events.MandateAutopilotChanged(

@@ -135,12 +135,37 @@ async def test_backfill_never_raises_when_listing_fails(monkeypatch) -> None:
 
 
 def test_the_sweep_loop_runs_the_backfill() -> None:
-    """The backfill only helps if something calls it on a schedule."""
-    import inspect
-
+    """The backfill only helps if something calls it on a schedule, and it must
+    stay off the boot pass, where a down proxy would hold startup."""
     from pocketpaw_ee import extensions
 
-    assert "await backfill_tenant_keys()" in inspect.getsource(extensions._sweeper_loop)
+    cluster, _per_host = extensions._sweeps()
+    assert "backfill_tenant_keys" in [fn.__name__ for fn in cluster]
+    assert "backfill_tenant_keys" in extensions._TICK_ONLY_SWEEPS
+
+
+async def test_the_boot_pass_skips_the_backfill_and_the_tick_runs_it(monkeypatch) -> None:
+    from pocketpaw_ee import extensions
+
+    calls: list[str] = []
+
+    def _fn(name):
+        async def fn():
+            calls.append(name)
+
+        fn.__name__ = name
+        return fn
+
+    monkeypatch.setattr(
+        extensions,
+        "_sweeps",
+        lambda: ([_fn("sweep_stale_runs"), _fn("backfill_tenant_keys")], []),
+    )
+    await extensions._run_sweeps(boot=True)
+    assert calls == ["sweep_stale_runs"]
+    calls.clear()
+    await extensions._run_sweeps()
+    assert calls == ["sweep_stale_runs", "backfill_tenant_keys"]
 
 
 # ---- shutdown drain ---------------------------------------------------------
