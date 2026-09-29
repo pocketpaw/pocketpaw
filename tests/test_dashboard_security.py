@@ -309,6 +309,18 @@ class TestAccessTokenCache:
             assert new != old
             assert get_access_token() == new
 
+    def test_rotation_swaps_in_a_new_file(self, tmp_path):
+        """A rotation must change the inode, so a same-tick, same-size rewrite by
+        another process still changes the cache key (and leaves no temp file)."""
+        from pocketpaw.config import get_access_token, regenerate_token
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            get_access_token()
+            before = (tmp_path / "access_token").stat().st_ino
+            regenerate_token()
+            assert (tmp_path / "access_token").stat().st_ino != before
+        assert [p.name for p in tmp_path.iterdir()] == ["access_token"]
+
     def test_external_rewrite_is_seen_on_next_call(self, tmp_path):
         import os
 

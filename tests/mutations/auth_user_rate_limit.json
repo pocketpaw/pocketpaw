@@ -1,0 +1,49 @@
+[
+  {
+    "label": "skip the limiter for flagged users (the old exemption)",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "    if not is_valid:\n        ee_user_id = getattr(request.state, \"user_id\", None)",
+    "replace": "    if not is_valid and not getattr(request.state, \"ee_user_authenticated\", False):\n        ee_user_id = getattr(request.state, \"user_id\", None)",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_flood_hits_its_own_bucket_not_the_ip_bucket",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_guest_jwt_gets_a_per_user_bucket_not_a_pass"
+    ]
+  },
+  {
+    "label": "key flagged users on the IP, not the user",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "            rl_key = f\"user:{ee_user_id}\"",
+    "replace": "            rl_key = client_ip",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_flood_hits_its_own_bucket_not_the_ip_bucket",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_anonymous_flood_does_not_drain_a_users_bucket"
+    ]
+  },
+  {
+    "label": "give the per-user bucket off the auth-optional prefix",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "            is_auth_optional\n            and ee_user_id",
+    "replace": "            ee_user_id",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_off_the_auth_optional_prefix_uses_the_ip_bucket"
+    ]
+  },
+  {
+    "label": "key on user_id without the active-user flag",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "            and getattr(request.state, \"ee_user_authenticated\", False)\n        ):",
+    "replace": "        ):",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_inactive_user_flood_is_still_limited"
+    ]
+  },
+  {
+    "label": "rotate the token by writing the file in place",
+    "file": "src/pocketpaw/config.py",
+    "find": "    fd, tmp = tempfile.mkstemp(dir=token_path.parent, prefix=\".access_token.\", suffix=\".tmp\")\n    try:\n        with os.fdopen(fd, \"w\") as f:\n            f.write(token)\n        os.replace(tmp, token_path)\n    except BaseException:\n        Path(tmp).unlink(missing_ok=True)\n        raise\n",
+    "replace": "    tempfile.gettempdir()\n    token_path.write_text(token)\n",
+    "tests": [
+      "tests/test_dashboard_security.py::TestAccessTokenCache::test_rotation_swaps_in_a_new_file"
+    ]
+  }
+]

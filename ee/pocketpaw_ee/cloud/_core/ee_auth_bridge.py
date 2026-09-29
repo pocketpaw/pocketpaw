@@ -6,8 +6,10 @@ it decodes the token, rejects revoked sessions, loads the User, and sets:
 
   * ``workspace_id`` / ``user_id`` — the session's tenant, for OSS routers that
     must not trust an ``X-Workspace-Id`` header.
-  * ``ee_user_authenticated`` — active users only. A limiter-only marker: the
-    OSS middleware skips its per-IP ``api_limiter`` for it. It grants no access.
+  * ``ee_user_authenticated`` — active users only (guests included). A
+    limiter-only marker: on ``/api/v1/`` the OSS middleware keys its
+    ``api_limiter`` on ``user:<user_id>`` instead of the client IP. It grants
+    no access and is no exemption from the limiter.
   * ``full_access`` — platform admins (``is_superuser``) ONLY. It is the OSS
     superuser bypass that skips every ``require_scope`` check, so it is never
     derived from a workspace role: a self-service workspace owner on shared
@@ -95,10 +97,10 @@ class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
         request.state.workspace_id = getattr(user, "active_workspace", None)
         request.state.user_id = str(getattr(user, "id", "") or "") or None
 
-        # Limiter-only marker: the OSS AuthMiddleware skips its per-IP
-        # api_limiter when this is set. It is NOT an auth signal — nothing
+        # Limiter-only marker: the OSS AuthMiddleware keys its api_limiter on
+        # this user instead of the client IP. It is NOT an auth signal — nothing
         # grants access on it, and it never sets full_access. Inactive users
-        # stay limited like anonymous callers.
+        # stay on the per-IP bucket like anonymous callers.
         if getattr(user, "is_active", False):
             request.state.ee_user_authenticated = True
 

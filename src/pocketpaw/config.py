@@ -21,8 +21,10 @@ by ``Settings.load()``. URL fields are SSRF-validated on construction.
 ``get_access_token()`` returns the dashboard master token from
 ``~/.pocketpaw/access_token``, generating one if it is missing. It caches the
 token keyed on the file's path, mtime, size and inode, so a per-request call
-costs a ``stat``; ``regenerate_token()`` (the only writer) refreshes the cache
-directly so a rotation is honoured on the next request.
+costs a ``stat``. ``regenerate_token()`` (the only writer) writes a 0600 temp
+file and ``os.replace``s it in, so a rotation always changes the inode (and the
+cache key) and readers never see a partial file; it also refreshes the cache
+directly so the rotation is honoured on the next request.
 
 History lives in git (``git log -p src/pocketpaw/config.py``), not here.
 """
@@ -3223,11 +3225,23 @@ def regenerate_token() -> str:
     Generate a new secure access token and save it.
     Invalidates previous tokens.
     """
+    import tempfile
     import uuid
 
     token = str(uuid.uuid4())
     token_path = get_token_path()
-    token_path.write_text(token)
+    # Write a 0600 temp file (mkstemp's mode) and swap it in: the new file has
+    # a new inode, so every get_access_token() cache key changes even when a
+    # rotation lands inside one mtime tick with the same size, and no reader
+    # ever sees a half-written or empty file.
+    fd, tmp = tempfile.mkstemp(dir=token_path.parent, prefix=".access_token.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        os.replace(tmp, token_path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     _chmod_safe(token_path, 0o600)
     global _token_cache  # noqa: PLW0603
     key = _token_cache_key(token_path)
