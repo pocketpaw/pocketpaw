@@ -18,6 +18,15 @@ from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 
 
+_OPEN_SURFACE_HINT = (
+    "<open-surface>If you have the open_surface tool, open an app surface when the "
+    "user needs to SEE or CHOOSE something: /files to upload or pick files; to edit "
+    "a video, /files first unless a clip is already known, then /studio/editor with "
+    "the clip handoff params src, name, mime, kind; /chat to read a conversation. "
+    "Do not open a surface for a question you can answer in text.</open-surface>"
+)
+
+
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the generic-surface preamble."""
     route = meta.route_path or "?"
@@ -26,7 +35,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
             f'<surface kind="generic" route="{route}" />\n'
             "<surface-snapshot>(no specific surface context available — "
             "answer using the user's last message and ordinary chat "
-            "tools)</surface-snapshot>"
+            "tools)</surface-snapshot>\n" + _OPEN_SURFACE_HINT
         ),
         cache_key=meta_key("generic", route),
     )
