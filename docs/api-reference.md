@@ -4844,10 +4844,96 @@ the same prospect never learns someone else's outreach got a reply.
 | `GROWTH_MSG91_WEBHOOK_SECRET` | *(unset)* | Shared secret for the inbound webhook HMAC. **Required** — while unset, `POST /growth/webhooks/msg91` rejects every request with 403. |
 | `CLOUD_ENCRYPTION_KEY` | *(unset)* | Existing deployment-wide Fernet key. Needed to store the MSG91 authkey as `authkey_enc` rather than plaintext. |
 
+## Growth — Hunts (ICPs)
+
+A hunt is an Ideal Customer Profile: a standing, free-text description of who
+a workspace wants, plus the cadence the discovery cron runs it on. Discovery
+files what the research finds as `source: "discovery"` prospects at `status:
+new`; nothing is drafted or sent. Workspace-scoped: another tenant's id is a
+404 on every route. Reads need `growth.read`, writes and the preview need
+`growth.write`.
+
+| Route | What it does |
+|---|---|
+| `POST /api/v1/growth/icps` | Create. `name` + `criteria` required; `geography`, `exclusions`, `project_id`, `max_per_run` (1-100, default 10), `status` (`active`/`paused`) optional. `cadence` defaults to `off`, so a new hunt never runs by itself. |
+| `GET /api/v1/growth/icps` | The workspace's hunts, newest first, as a bare array. Filters: `project_id` (`""` = unassigned), `status`, `limit`. |
+| `GET /api/v1/growth/icps/{icp_id}` | One hunt. |
+| `PATCH /api/v1/growth/icps/{icp_id}` | Partial update; `null`/omitted leaves a field as-is. Nothing re-runs on an edit. |
+| `POST /api/v1/growth/icps/{icp_id}/preview` | Dry run (below). |
+| `DELETE /api/v1/growth/icps/{icp_id}` | Delete the hunt. Prospects it already filed stay. |
+
+**Response (`IcpResponse`)** — every route above except the preview and the
+delete returns this shape; the list returns an array of it:
+
+```json
+{
+  "id": "66f…",
+  "workspace_id": "w1",
+  "name": "Small dental practices",
+  "criteria": "Dental practices with 2-6 chairs that still book by phone.",
+  "project_id": null,
+  "geography": "",
+  "exclusions": "",
+  "cadence": "off",
+  "max_per_run": 10,
+  "status": "active",
+  "last_run_at": null,
+  "last_preview": {
+    "items": [
+      {
+        "domain": "acme-dental.com",
+        "name": "",
+        "company": "Acme Dental",
+        "research_brief": "Three chairs, books by phone.",
+        "source_urls": ["https://acme-dental.com/about"],
+        "emails": [],
+        "already_known": false
+      }
+    ],
+    "notes": "One strong fit.",
+    "error": ""
+  },
+  "last_preview_at": "2026-09-29T10:00:00Z",
+  "created_at": "2026-09-29T09:58:00Z",
+  "updated_at": "2026-09-29T10:00:00Z"
+}
+```
+
+`last_preview` / `last_preview_at` are `null` until the hunt is previewed.
+
+### `POST /api/v1/growth/icps/{icp_id}/preview`
+
+Runs the research once and returns what a run **would** file:
+`{icp_id, items, notes, error}`, with the same item shape as
+`last_preview.items` above. `emails` has already been through the
+observed-only filter, and a company already in the pipeline comes back with
+`already_known: true` rather than being hidden.
+
+It writes no prospects. It does record the result on the hunt as
+`last_preview` (`items` / `notes` / `error`, the response minus `icp_id`) and
+stamps `last_preview_at`, so a page refresh does not lose a research pass that
+was already paid for. A failed research attempt is recorded too, with `error`
+set, so "the last attempt failed" survives a refresh. Each preview replaces
+the previous one.
+
+The stored preview only ever describes the criteria it ran against:
+
+- A `PATCH` that actually changes `criteria`, `geography`, `exclusions` or
+  `max_per_run` clears `last_preview` and `last_preview_at`. Changing only
+  `name`, `cadence`, `status` or `project_id`, or re-sending an unchanged
+  value, keeps them.
+- If one of those four fields changes while the research is running, the
+  result is still returned to the caller but is not recorded.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `icp.research_unavailable` | No research backend is wired on this deployment. Nothing is recorded. |
+| 404 | `icp.not_found` | Unknown id, or another workspace's hunt. |
+
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 
 The chat agent on the `/growth` rail reaches the same service layer through
-nine in-process MCP tools. It is the operator's assistant on that page: it can
+thirteen in-process MCP tools. It is the operator's assistant on that page: it can
 research and file a prospect, write and revise the copy, and put a send in
 front of a human. It cannot send.
 
@@ -4862,6 +4948,10 @@ front of a human. It cannot send.
 | `growth_update_draft` | `growth.write` | Revise copy, only while the draft is still `draft` |
 | `growth_propose_send` | `growth.manage` | Files one `_growth_send` Instinct proposal; returns `{status: "proposed", proposal_id}` |
 | `growth_propose_send_batch` | `growth.manage` | The same, over up to 100 draft ids — one proposal each |
+| `growth_list_icps` | `growth.read` | Hunts, each with a compact `last_preview` summary (`{found, error}` or `null`) and `last_preview_at` |
+| `growth_get_icp` | `growth.read` | One hunt in full, including its whole `last_preview` |
+| `growth_create_icp` | `growth.write` | Create a hunt. Takes no `cadence`; it lands `off` |
+| `growth_preview_icp` | `growth.write` | Dry-run a hunt. Writes no prospects; records the result on the hunt as its last preview |
 
 The agent's surface is deliberately **narrower than the HTTP one**:
 

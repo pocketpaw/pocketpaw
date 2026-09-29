@@ -148,6 +148,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     DeleteProspectsRequest,
     DeleteProspectsResponse,
     DraftResponse,
+    IcpLastPreviewResponse,
     IcpPreviewResponse,
     IcpResponse,
     LinkedInQueueItemResponse,
@@ -959,6 +960,8 @@ def _icp_to_domain(doc: _IcpDoc) -> Icp:
         max_per_run=doc.max_per_run,
         status=doc.status,
         last_run_at=doc.last_run_at,
+        last_preview=doc.last_preview,
+        last_preview_at=doc.last_preview_at,
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -977,9 +980,24 @@ def _icp_to_response(icp: Icp) -> IcpResponse:
         max_per_run=icp.max_per_run,
         status=icp.status,
         last_run_at=iso_utc(icp.last_run_at),
+        last_preview=(
+            IcpLastPreviewResponse.model_validate(icp.last_preview)
+            if icp.last_preview is not None
+            else None
+        ),
+        last_preview_at=iso_utc(icp.last_preview_at),
         created_at=iso_utc(icp.created_at),
         updated_at=iso_utc(icp.updated_at),
     )
+
+
+_ICP_RESEARCH_INPUTS = ("criteria", "geography", "exclusions", "max_per_run")
+
+
+def _icp_research_inputs(doc: _IcpDoc) -> dict[str, Any]:
+    """The fields a preview was run against. A stored preview vouches for
+    exactly these values and no others."""
+    return {field: getattr(doc, field) for field in _ICP_RESEARCH_INPUTS}
 
 
 async def _fetch_icp_in_workspace(workspace_id: str, icp_id: str) -> _IcpDoc:
@@ -1048,7 +1066,14 @@ async def update_icp(ctx: RequestContext, icp_id: str, body: UpdateIcpRequest) -
     """Partial update. Switching ``cadence`` on is how discovery starts running
     on a schedule — the field is an ordinary edit here because the BOUNDS (per
     run and per workspace per month) are what make an always-on cadence safe,
-    not a second approval on the switch."""
+    not a second approval on the switch.
+
+    An edit that actually changes what the research reads (``criteria``,
+    ``geography``, ``exclusions``, ``max_per_run``) clears ``last_preview``:
+    the UI unlocks the cadence switch off a stored preview, so one must never
+    vouch for criteria nobody previewed. Renaming, re-scheduling, pausing or
+    reassigning the project keeps it, and so does re-sending an unchanged
+    value."""
     body = UpdateIcpRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     doc = await _fetch_icp_in_workspace(workspace_id, icp_id)
@@ -1059,6 +1084,7 @@ async def update_icp(ctx: RequestContext, icp_id: str, body: UpdateIcpRequest) -
             doc.project_id = body.project_id
         else:
             doc.project_id = None
+    researched = _icp_research_inputs(doc)
     for field in (
         "name",
         "criteria",
@@ -1071,13 +1097,17 @@ async def update_icp(ctx: RequestContext, icp_id: str, body: UpdateIcpRequest) -
         value = getattr(body, field)
         if value is not None:
             setattr(doc, field, value)
+    if _icp_research_inputs(doc) != researched:
+        doc.last_preview = None
+        doc.last_preview_at = None
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1; the ICP view polls.
     return _icp_to_response(_icp_to_domain(doc))
 
 
 async def preview_icp(ctx: RequestContext, icp_id: str) -> IcpPreviewResponse:
-    """Dry-run an ICP: research once, report what WOULD be filed, write nothing.
+    """Dry-run an ICP: research once and report what WOULD be filed. Writes no
+    prospects; records the result on the ICP as its last preview.
 
     Lives here rather than in the router because tenancy does — the router
     stays a thin shell and every workspace check in this entity is in one file.
@@ -1089,7 +1119,15 @@ async def preview_icp(ctx: RequestContext, icp_id: str) -> IcpPreviewResponse:
     A deployment with no research backend wired returns 503 rather than an
     empty preview. "Found nobody" and "nothing went looking" are different
     answers, and an operator tuning criteria against a silently-disabled engine
-    would rewrite them forever.
+    would rewrite them forever. That path records nothing.
+
+    The result — a failed attempt included, ``error`` set — is stored as
+    ``last_preview`` / ``last_preview_at`` so a page refresh does not lose a
+    research pass someone already paid for. The write is conditional on the
+    research inputs still matching what was previewed: an edit that lands
+    while the research is running wins, and the stale result is dropped
+    rather than left vouching for criteria nobody previewed. Recording is
+    best-effort; the caller gets the preview either way.
     """
     from pocketpaw_ee.cloud.growth import discovery as growth_discovery
 
@@ -1102,8 +1140,9 @@ async def preview_icp(ctx: RequestContext, icp_id: str) -> IcpPreviewResponse:
             "Discovery research is not configured on this deployment",
         )
 
+    previewed = _icp_research_inputs(await _fetch_icp_in_workspace(workspace_id, icp_id))
     preview = await growth_discovery.preview_discovery(workspace_id, icp_id, research_fn)
-    return IcpPreviewResponse(
+    response = IcpPreviewResponse(
         icp_id=preview.icp_id,
         items=[
             PreviewedProspectResponse(
@@ -1120,6 +1159,36 @@ async def preview_icp(ctx: RequestContext, icp_id: str) -> IcpPreviewResponse:
         notes=preview.notes,
         error=preview.error,
     )
+    await _record_last_preview(workspace_id, icp_id, previewed, response)
+    return response
+
+
+async def _record_last_preview(
+    workspace_id: str,
+    icp_id: str,
+    previewed: dict[str, Any],
+    response: IcpPreviewResponse,
+) -> None:
+    """Store a preview on its ICP, only if the ICP still has the research
+    inputs the preview ran against. One atomic conditional ``$set``, so a
+    concurrent edit either lands first (and the stale preview is dropped) or
+    after (and clears it)."""
+    now = datetime.now(UTC)
+    try:
+        await _IcpDoc.find_one(
+            {"_id": PydanticObjectId(icp_id), "workspace": workspace_id, **previewed}
+        ).update(
+            {
+                "$set": {
+                    "last_preview": response.model_dump(exclude={"icp_id"}),
+                    "last_preview_at": now,
+                    "updatedAt": now,
+                }
+            }
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("growth: could not record last preview for icp=%s", icp_id, exc_info=True)
+    # no-event: growth has no realtime subscriber in v1; the ICP view polls.
 
 
 async def delete_icp(ctx: RequestContext, icp_id: str) -> None:

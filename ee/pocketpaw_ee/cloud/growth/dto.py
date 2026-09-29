@@ -325,22 +325,6 @@ class UpdateIcpRequest(BaseModel):
         return v
 
 
-class IcpResponse(BaseModel):
-    id: str
-    workspace_id: str
-    name: str
-    criteria: str
-    project_id: str | None
-    geography: str
-    exclusions: str
-    cadence: str
-    max_per_run: int
-    status: str
-    last_run_at: str | None
-    created_at: str | None
-    updated_at: str | None
-
-
 class PreviewedProspectResponse(BaseModel):
     """One company as a run WOULD file it.
 
@@ -373,6 +357,39 @@ class IcpPreviewResponse(BaseModel):
     items: list[PreviewedProspectResponse]
     notes: str = ""
     error: str = ""
+
+
+class IcpLastPreviewResponse(BaseModel):
+    """The ICP's most recent preview, as recorded on the ICP itself.
+
+    The ``IcpPreviewResponse`` shape without ``icp_id`` — it rides on the ICP
+    it belongs to. A failed attempt is recorded too, with ``error`` set, so
+    "the last look failed" survives a page refresh. Cleared whenever the
+    criteria, geography, exclusions or ``max_per_run`` change: a stored
+    preview never vouches for criteria nobody previewed.
+    """
+
+    items: list[PreviewedProspectResponse] = Field(default_factory=list)
+    notes: str = ""
+    error: str = ""
+
+
+class IcpResponse(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    criteria: str
+    project_id: str | None
+    geography: str
+    exclusions: str
+    cadence: str
+    max_per_run: int
+    status: str
+    last_run_at: str | None
+    last_preview: IcpLastPreviewResponse | None = None
+    last_preview_at: str | None = None
+    created_at: str | None
+    updated_at: str | None
 
 
 class CreateDraftRequest(BaseModel):
@@ -527,6 +544,7 @@ __all__ = [
     "DeleteProspectsRequest",
     "DeleteProspectsResponse",
     "DraftResponse",
+    "IcpLastPreviewResponse",
     "IcpPreviewResponse",
     "IcpResponse",
     "LinkedInQueueItemResponse",

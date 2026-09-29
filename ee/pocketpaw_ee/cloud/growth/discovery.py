@@ -18,7 +18,9 @@
 #   * ``run_discovery`` — research once, drop what cannot be filed, upsert the
 #     rest. Never raises: a research failure is a zero-result run, not a dead
 #     cron tick.
-#   * ``preview_discovery`` — the same research, none of the writes.
+#   * ``preview_discovery`` — the same research, none of the writes. The
+#     caller (``service.preview_icp``) records the result on the ICP as its
+#     last preview; no prospect is ever filed.
 #
 # WHAT THIS MODULE MAY NOT DO, and why each is structural rather than a
 # convention:
@@ -317,7 +319,9 @@ async def preview_discovery(
     icp_id: str,
     research_fn: ResearchFn,
 ) -> DiscoveryPreview:
-    """Run the research once and report what WOULD be filed. Writes nothing.
+    """Run the research once and report what WOULD be filed. Writes nothing
+    itself: ``service.preview_icp`` records the returned preview on the ICP as
+    its last preview, and no prospect is filed either way.
 
     This is how someone comes to trust an ICP before switching a cadence on.
     Criteria are prose, and prose that reads precisely to its author routinely

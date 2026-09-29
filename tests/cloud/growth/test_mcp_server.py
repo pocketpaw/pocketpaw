@@ -210,12 +210,15 @@ class TestTheGateHolds:
                 assert "switched off" in description
             assert "schedule it" not in description
 
-    def test_preview_is_honest_about_writing_nothing(self):
+    def test_preview_is_honest_about_writing_no_prospects(self):
         """The dry-run tool must not read as though it files prospects — the
-        whole trust step is that a human can run it without consequence."""
+        whole trust step is that a human can run it without consequence. It
+        does record the result on the hunt, and says so."""
         tools = growth_mcp._build_tools()
         preview = next(t for t in tools if t.name == "growth_preview_icp")
-        assert "writes nothing" in (preview.description or "").lower()
+        description = (preview.description or "").lower()
+        assert "writes no prospects" in description
+        assert "last preview" in description
 
     def test_no_tool_name_claims_to_send(self):
         """A tool is named for what it does. Nothing here sends, dispatches or
@@ -727,3 +730,57 @@ class TestValidation:
                 {"prospect_id": prospect["id"], "channel": "email", "body": "   "}
             )
         assert response.get("is_error")
+
+
+class TestIcpRowCarriesTheLastPreview:
+    def _icp(self, last_preview):
+        from pocketpaw_ee.cloud.growth.dto import IcpResponse
+
+        return IcpResponse(
+            id="icp1",
+            workspace_id="w1",
+            name="Dental",
+            criteria="Dental practices",
+            project_id=None,
+            geography="",
+            exclusions="",
+            cadence="off",
+            max_per_run=10,
+            status="active",
+            last_run_at=None,
+            last_preview=last_preview,
+            last_preview_at="2026-09-29T10:00:00Z" if last_preview else None,
+            created_at=None,
+            updated_at=None,
+        )
+
+    def _stored(self):
+        return {
+            "items": [
+                {
+                    "domain": "acme.com",
+                    "name": "",
+                    "company": "Acme",
+                    "research_brief": "Three chairs.",
+                    "source_urls": ["https://acme.com"],
+                    "emails": [],
+                    "already_known": False,
+                }
+            ],
+            "notes": "one fit",
+            "error": "",
+        }
+
+    def test_a_single_hunt_read_carries_the_full_preview(self):
+        row = growth_mcp._icp_row(self._icp(self._stored()), full_preview=True)
+        assert row["last_preview"] == self._stored()
+        assert row["last_preview_at"] == "2026-09-29T10:00:00Z"
+
+    def test_a_list_row_carries_only_a_summary(self):
+        row = growth_mcp._icp_row(self._icp(self._stored()))
+        assert row["last_preview"] == {"found": 1, "error": ""}
+
+    def test_a_never_previewed_hunt_says_so(self):
+        row = growth_mcp._icp_row(self._icp(None))
+        assert row["last_preview"] is None
+        assert row["last_preview_at"] is None

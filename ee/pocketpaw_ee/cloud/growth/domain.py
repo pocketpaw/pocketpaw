@@ -207,6 +207,8 @@ class Icp:
     max_per_run: int = DEFAULT_ICP_MAX_PER_RUN
     status: str = "active"  # IcpStatus
     last_run_at: datetime | None = None
+    last_preview: dict | None = None
+    last_preview_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

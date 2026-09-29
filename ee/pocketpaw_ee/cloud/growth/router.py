@@ -325,7 +325,9 @@ async def update_icp(
     ctx: RequestContext = Depends(request_context),
 ) -> IcpResponse:
     """Edit an ICP. Changing ``criteria`` does not re-run anything — the next
-    tick (or a preview) picks the new text up, so tuning stays free."""
+    tick (or a preview) picks the new text up, so tuning stays free. A change
+    to what the research reads (criteria, geography, exclusions,
+    ``max_per_run``) clears the ICP's ``last_preview``."""
     return await growth_service.update_icp(ctx, icp_id, body)
 
 
@@ -338,8 +340,11 @@ async def preview_icp(
     icp_id: str,
     ctx: RequestContext = Depends(request_context),
 ) -> IcpPreviewResponse:
-    """Dry-run this ICP: research once, return what it WOULD file, write
-    nothing.
+    """Dry-run this ICP: research once and return what it WOULD file. Writes
+    no prospects; records the result on the ICP as its last preview (a failed
+    attempt included), so ``GET /icps`` and ``GET /icps/{id}`` still carry it
+    after a refresh. Editing the criteria, geography, exclusions or
+    ``max_per_run`` clears it.
 
     This is how someone comes to trust an ICP before switching its cadence on
     — criteria are prose, and prose that reads precisely to its author
@@ -347,7 +352,7 @@ async def preview_icp(
     back flagged ``already_known`` rather than hidden, because a preview full
     of them is the useful signal.
 
-    A POST despite writing nothing: it spends a real research pass, so it is
+    A POST: it spends a real research pass and records its result, so it is
     not safe to retry blindly and does not belong on a GET. It sits at
     ``growth.write`` for the same reason — it is not the outbound verb (it
     cannot reach a prospect), but it is not free either."""
