@@ -242,7 +242,17 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   `POCKETPAW_CLOUD_STREAM_TRANSPORT` (`redis` default — adapter selector for
   future non-Redis backends like NATS JetStream);
   `POCKETPAW_CLOUD_RUN_STREAM_TTL` (default `3600`, the Redis Stream retention
-  after a run terminates);
+  after a run terminates; every append also sets `EXPIRE NX` of run timeout +
+  120s grace + this value, so a stream orphaned by a killed worker still
+  expires, and a TTL already on the key is never overwritten);
+  `POCKETPAW_REDIS_MAX_CONNECTIONS` (default `128`, the shared non-blocking
+  pool for short commands: ws tickets, cancel keys, session revocation, rate
+  limits, arq enqueue; exhaustion raises at once);
+  `POCKETPAW_REDIS_STREAM_MAX_CONNECTIONS` (default `512`, a separate
+  `BlockingConnectionPool` used only by `XREAD`/`XREADGROUP BLOCK` — the SSE
+  run-stream reader and the xproc consumer — roughly one per open SSE stream
+  per process; an over-limit reader waits up to 5s, then fails with a
+  ConnectionError without touching the shared pool);
   `POCKETPAW_CLOUD_RUN_JOB_TIMEOUT` (default `1800` = 30 min, the arq per-run
   job timeout — arq's own default is 300s, which cancels a long agent run
   mid-generation, so a big coding task halts after ~5 min; lift it for long
