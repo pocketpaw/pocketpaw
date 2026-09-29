@@ -18,6 +18,9 @@ spec in workspace A can never surface workspace B's objects. The store is the
 local SQLite Fabric DB (``~/.pocketpaw/fabric.db`` via ``get_fabric_store``),
 NOT Mongo, so the "every Mongo read scopes by workspace" rule is satisfied here
 by the SQLite tenant scope instead — same invariant, different store.
+
+The Mongo sources read raw projected BSON, never hydrated documents, so each
+substitutes the model defaults for a missing key itself.
 """
 
 from __future__ import annotations
@@ -114,26 +117,34 @@ async def _list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
         except Exception:
             logger.debug("ripple_resolver: skipping non-ObjectId user_id %r", uid)
 
-    users = await User.find({"_id": {"$in": object_ids}}).to_list()
-    by_id = {str(u.id): u for u in users}
+    # Projected to the fields rendered below. A full User carries auth state,
+    # settings and every membership; hydrating one per member was most of this
+    # source's cost. Raw BSON, so the model defaults ("" for name/avatar) are
+    # substituted by hand.
+    cursor = User.get_pymongo_collection().find(
+        {"_id": {"$in": object_ids}},
+        {"full_name": 1, "email": 1, "avatar": 1, "workspaces.workspace": 1, "workspaces.role": 1},
+    )
+    by_id = {str(row["_id"]): row async for row in cursor}
 
     out: list[dict[str, Any]] = []
     for uid in member_ids:
-        user = by_id.get(uid)
-        if user is None:
+        row = by_id.get(uid)
+        if row is None:
             continue
         role = "member"
-        for membership in getattr(user, "workspaces", []) or []:
-            if getattr(membership, "workspace", None) == workspace_id:
-                role = getattr(membership, "role", "member") or "member"
+        for membership in row.get("workspaces") or []:
+            if membership.get("workspace") == workspace_id:
+                role = membership.get("role") or "member"
                 break
-        name = (user.full_name or "").strip() or (user.email or "").split("@")[0]
+        email = row.get("email") or ""
+        name = (row.get("full_name") or "").strip() or email.split("@")[0]
         out.append(
             {
                 "id": uid,
                 "name": name,
-                "email": user.email,
-                "avatar": user.avatar or "",
+                "email": email,
+                "avatar": row.get("avatar") or "",
                 "role": role,
             }
         )

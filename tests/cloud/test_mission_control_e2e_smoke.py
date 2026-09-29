@@ -112,7 +112,9 @@ class TestFullChain:
 
         from pocketpaw_ee.cloud.mission_control import service as mc_service
 
-        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+        )
 
         with TestClient(app_alpha) as client:
             # 1. Create a project
@@ -203,7 +205,9 @@ class TestTenancy:
 
         from pocketpaw_ee.cloud.mission_control import service as mc_service
 
-        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+        )
 
         with TestClient(app_alpha) as alpha:
             r = alpha.post(
@@ -239,7 +243,9 @@ class TestCycleSnapshotEndpoint:
 
         from pocketpaw_ee.cloud.mission_control import service as mc_service
 
-        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+        )
 
         with TestClient(app_alpha) as client:
             r = client.post(

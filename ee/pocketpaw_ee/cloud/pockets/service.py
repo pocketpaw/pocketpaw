@@ -526,7 +526,12 @@ async def _source_visible_for_doc(
 
 
 async def _resolved_wire_dict(
-    doc: _PocketDoc, viewer_user_id: str, *, workspace_entitled: bool | None = None
+    doc: _PocketDoc,
+    viewer_user_id: str,
+    *,
+    workspace_entitled: bool | None = None,
+    resolve_memo: dict | None = None,
+    team_users: dict[str, dict] | None = None,
 ) -> dict:
     """The wire dict as it goes OVER THE WIRE — ``source`` withheld when the
     workspace may not read it (SF-2). The default entry point, and the one every
@@ -536,12 +541,16 @@ async def _resolved_wire_dict(
     ``workspace_entitled`` lets a caller that is already serializing N pockets of
     ONE workspace resolve the entitlement once and hand the answer down. Only
     ``list_pockets`` needs it; everything else resolves per pocket, which is one
-    workspace lookup on a single-pocket read.
+    workspace lookup on a single-pocket read. ``resolve_memo`` and ``team_users``
+    are the same idea for the ``$source`` reads and the team lookup (see
+    ``_wire_dict``).
     """
     return await _wire_dict(
         doc,
         viewer_user_id,
         source_visible=await _source_visible_for_doc(doc, workspace_entitled=workspace_entitled),
+        resolve_memo=resolve_memo,
+        team_users=team_users,
     )
 
 
@@ -556,7 +565,14 @@ async def _unredacted_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
     return await _wire_dict(doc, viewer_user_id, source_visible=True)
 
 
-async def _wire_dict(doc: _PocketDoc, viewer_user_id: str, *, source_visible: bool) -> dict:
+async def _wire_dict(
+    doc: _PocketDoc,
+    viewer_user_id: str,
+    *,
+    source_visible: bool,
+    resolve_memo: dict | None = None,
+    team_users: dict[str, dict] | None = None,
+) -> dict:
     """Build the wire dict with rippleSpec ``$source`` markers resolved
     against ``viewer_user_id``'s workspace context.
 
@@ -574,6 +590,11 @@ async def _wire_dict(doc: _PocketDoc, viewer_user_id: str, *, source_visible: bo
     Also resolves the ``team`` field from raw user IDs to user objects
     so the frontend can display member names/avatars without a second
     lookup.
+
+    A caller serializing many pockets for one viewer passes ``resolve_memo``
+    (one dict for the whole page, so identical ``$source`` markers across
+    pockets resolve once) and ``team_users`` (every page's team ids resolved in
+    one query). Both default to per-pocket behaviour.
     """
     import dataclasses
 
@@ -600,6 +621,7 @@ async def _wire_dict(doc: _PocketDoc, viewer_user_id: str, *, source_visible: bo
                     workspace_id=doc.workspace,
                     user_id=viewer_user_id,
                     pocket_id=str(doc.id),
+                    memo=resolve_memo,
                 ),
             )
             pocket = dataclasses.replace(pocket, ripple_spec=resolved)
@@ -616,7 +638,9 @@ async def _wire_dict(doc: _PocketDoc, viewer_user_id: str, *, source_visible: bo
     if raw_team:
         # Only resolve if team contains raw string IDs (not already objects).
         if raw_team and isinstance(raw_team[0], str):
-            resolved_map = await _resolve_user_ids(raw_team)
+            resolved_map = (
+                team_users if team_users is not None else await _resolve_user_ids(raw_team)
+            )
             wire["team"] = [
                 resolved_map.get(uid, {"_id": uid, "fullName": "Unknown", "email": ""})
                 for uid in raw_team
@@ -1504,6 +1528,11 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     return await _resolved_wire_dict(doc, user_id)
 
 
+#: The BuiltInWidget collection this process has already seeded (see
+#: ``_ensure_builtin_widgets_seeded``). None until the first seed.
+_builtin_seeded_collection: Any = None
+
+
 async def _ensure_builtin_widgets_seeded() -> list[dict[str, Any]]:
     """Idempotently insert the canonical built-in widget definitions.
 
@@ -1587,29 +1616,45 @@ async def _ensure_builtin_widgets_seeded() -> list[dict[str, Any]]:
         },
     ]
 
-    seeded: list[dict[str, Any]] = []
-    for entry in CANONICAL:
-        slug = entry["slug"]
-        existing = await _BuiltInDoc.find_one({"slug": slug})
-        if existing is None:
-            doc = _BuiltInDoc(**entry)
-            await doc.insert()
-        else:
-            # Refresh sort_order, position, color, icon from the canonical
-            # source — an operator can change enabled/sort_order/position
-            # at runtime; this upsert keeps the core identity fields in sync.
-            existing.name = entry["name"]
-            existing.widget_type = entry["type"]
-            existing.icon = entry["icon"]
-            existing.color = entry["color"]
-            existing.pocket_name = entry["pocket_name"]
-            existing.position = entry["position"]
-            existing.sort_order = entry["sort_order"]
-            existing.auto_seed = entry.get("auto_seed", False)
-            await existing.save()
-        seeded.append(entry)
+    # Seed once per process per collection. ``GET /pockets/builtin-widgets``
+    # calls this on every request, and it used to cost 6 reads and 6 writes each
+    # time. Keyed on the collection object rather than a bare bool so a
+    # re-initialised database (a fresh test DB, a reconnect) seeds again. Holding
+    # the reference keeps its id() from being reused by a later collection.
+    global _builtin_seeded_collection
+    collection = _BuiltInDoc.get_pymongo_collection()
+    if collection is _builtin_seeded_collection:
+        return list(CANONICAL)
 
-    return seeded
+    existing_by_slug = {
+        d.slug: d
+        for d in await _BuiltInDoc.find({"slug": {"$in": [e["slug"] for e in CANONICAL]}}).to_list()
+    }
+    for entry in CANONICAL:
+        existing = existing_by_slug.get(entry["slug"])
+        if existing is None:
+            await _BuiltInDoc(**entry).insert()
+            continue
+        # Refresh the core identity fields from the canonical source (an
+        # operator may change enabled/sort_order/position at runtime). Written
+        # only when something differs, so a seeded collection costs no write.
+        wanted = {
+            "name": entry["name"],
+            "widget_type": entry["type"],
+            "icon": entry["icon"],
+            "color": entry["color"],
+            "pocket_name": entry["pocket_name"],
+            "position": entry["position"],
+            "sort_order": entry["sort_order"],
+            "auto_seed": entry.get("auto_seed", False),
+        }
+        if any(getattr(existing, k) != v for k, v in wanted.items()):
+            for k, v in wanted.items():
+                setattr(existing, k, v)
+            await existing.save()
+
+    _builtin_seeded_collection = collection
+    return list(CANONICAL)
 
 
 async def _seed_home_pocket_widgets(doc: _PocketDoc) -> None:
@@ -1850,19 +1895,11 @@ async def list_pockets(
     leak every site back into the gallery. Malformed ids are skipped (they can't
     match any stored ``_id`` anyway). A ``None`` / empty set is a no-op so every
     other caller (mission control, planners, kb, surface) is unchanged.
+
+    Callers that need only ids and names use ``visible_pocket_refs``, which
+    applies the same filter without the spec resolution this function pays.
     """
-    query: dict = {
-        "workspace": workspace_id,
-        "$or": [
-            {"owner": user_id},
-            {"team": user_id},
-            {"shared_with": user_id},
-            {"visibility": "workspace"},
-        ],
-    }
-    if project_id is not None:
-        # Empty string is intentional → "no project assigned".
-        query["project_id"] = project_id or None
+    query = _visible_pockets_query(workspace_id, user_id, project_id=project_id)
     if exclude_pocket_ids:
         # _id is stored as an ObjectId — cast the wire-string ids. Skip any
         # malformed id rather than raise: it can't match a stored _id anyway.
@@ -1918,11 +1955,95 @@ async def list_pockets(
     workspace_entitled: bool | None = None
     if any(getattr(d, "source_gated", False) for d in docs):
         workspace_entitled = await _workspace_source_entitled(workspace_id)
+    # One ``$source`` memo for the whole page: a ``workspace.pockets`` or
+    # ``workspace.members`` marker repeated across N specs is one read, not N
+    # (each of those reads scans the workspace, so per-pocket it was O(N^2)).
+    # And every pocket's team ids resolve in ONE user query instead of one each.
+    resolve_memo: dict = {}
+    team_ids = sorted(
+        {
+            uid
+            for d in docs
+            if d.team and isinstance(d.team[0], str)
+            for uid in d.team
+            if isinstance(uid, str)
+        }
+    )
+    team_users = await _resolve_user_ids(team_ids)
     return list(
         await asyncio.gather(
-            *(_resolved_wire_dict(d, user_id, workspace_entitled=workspace_entitled) for d in docs)
+            *(
+                _resolved_wire_dict(
+                    d,
+                    user_id,
+                    workspace_entitled=workspace_entitled,
+                    resolve_memo=resolve_memo,
+                    team_users=team_users,
+                )
+                for d in docs
+            )
         )
     )
+
+
+def _visible_pockets_query(
+    workspace_id: str, user_id: str, *, project_id: str | None = None
+) -> dict:
+    """The read-visibility filter for pocket LISTS: owner, team member,
+    ``shared_with``, or workspace-visible, anchored on ``workspace``.
+
+    This is the tenancy boundary for every list read, so ``list_pockets`` and
+    ``visible_pocket_refs`` both build their query here rather than each keeping
+    a copy. ``project_id`` narrows it; an empty string means "no project
+    assigned".
+    """
+    query: dict = {
+        "workspace": workspace_id,
+        "$or": [
+            {"owner": user_id},
+            {"team": user_id},
+            {"shared_with": user_id},
+            {"visibility": "workspace"},
+        ],
+    }
+    if project_id is not None:
+        # Empty string is intentional → "no project assigned".
+        query["project_id"] = project_id or None
+    return query
+
+
+async def visible_pocket_refs(
+    workspace_id: str, user_id: str, *, project_id: str | None = None
+) -> list[dict]:
+    """The pockets ``list_pockets`` would return, as small refs.
+
+    ``{_id, name, type, widget_count, agent_count}`` per pocket, in the same
+    order, from ONE projected query and no ``$source`` resolution. For callers
+    that need ids and names (mission control's visibility set and name map, the
+    kb scope list, the pockets surface preamble) and were paying for a fully
+    resolved gallery to read them.
+
+    Visibility is exactly ``list_pockets``' filter (``_visible_pockets_query``).
+    Keys mirror the wire dict (``_id``, not ``id``) so callers swap in without
+    re-keying. Raw BSON, so the model defaults are substituted by hand
+    (models/pocket.py: type="custom").
+    """
+    cursor = _PocketDoc.get_pymongo_collection().find(
+        _visible_pockets_query(workspace_id, user_id, project_id=project_id),
+        # ``widgets._id`` keeps one tiny entry per widget, enough to count them
+        # without pulling each widget's spec.
+        {"_id": 1, "name": 1, "type": 1, "widgets._id": 1, "agents": 1},
+    )
+    return [
+        {
+            "_id": str(row["_id"]),
+            "name": row.get("name", ""),
+            "type": row.get("type") or "custom",
+            "widget_count": len(row.get("widgets") or []),
+            "agent_count": len(row.get("agents") or []),
+        }
+        async for row in cursor
+    ]
 
 
 async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
@@ -6264,6 +6385,7 @@ __all__ = [
     "is_owner",
     "list_interval_source_pockets",
     "list_pockets",
+    "visible_pocket_refs",
     "list_workspace_pocket_connector_permissions",
     "remove_agent",
     "remove_collaborator",

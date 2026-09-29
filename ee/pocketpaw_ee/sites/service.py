@@ -11590,9 +11590,15 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     keyed on pockets that still have an ACTIVE Site — a fully-archived pocket
     would be wrong to hide from the /pockets gallery. Pre-field docs (no
     ``archived`` key) still count as active.
+
+    Projected to ``pocket_id``: a Site doc carries its deploy history, pages and
+    kb sources, and this runs on every ``GET /pockets`` to read one string.
     """
-    cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}})
-    return {doc.pocket_id async for doc in cursor}
+    cursor = _SiteDoc.get_pymongo_collection().find(
+        {"workspace": workspace_id, "archived": {"$ne": True}},
+        {"_id": 0, "pocket_id": 1},
+    )
+    return {row["pocket_id"] async for row in cursor if row.get("pocket_id")}
 
 
 async def live_site_for_pocket(*, workspace_id: str, pocket_id: str) -> tuple[str, str] | None:
