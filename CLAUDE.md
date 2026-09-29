@@ -483,7 +483,9 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   **Presence** (`_core/realtime/presence.py`): a Redis sorted set per user
   (`presence:{user}`), one member per socket scored by its process's 30s
   heartbeat; members older than 90s are ignored and pruned, so a crashed
-  process's sockets age out (no `presence.offline` is emitted for them).
+  process's sockets age out. Until they do (up to 90s), they still count: a
+  user whose real last socket closes meanwhile gets no `presence.offline`,
+  and none is emitted when the stale members expire.
   Connect/disconnect are single Lua scripts, so `presence.online` /
   `presence.offline` fire once cluster-wide. The router's first/last verdicts,
   the connect snapshot, the grace timer and push dispatch read it; a

@@ -28,9 +28,10 @@ Invariants a reader must not break:
   otherwise the heartbeat would keep refreshing a ghost forever.
 - A Redis failure never fails the socket: every function falls back to the
   manager's process-local answer.
-- A crashed process's users drop out of ``is_online`` after ``STALE_SECONDS``,
-  but no ``presence.offline`` is emitted for them; peers correct on their next
-  connect snapshot.
+- A crashed process's members count for up to ``STALE_SECONDS``: a user whose
+  real last socket closes meanwhile gets no ``presence.offline``, and none is
+  emitted when the stale members expire. Peers correct on their next connect
+  snapshot.
 """
 
 from __future__ import annotations
