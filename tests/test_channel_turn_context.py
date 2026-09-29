@@ -186,6 +186,9 @@ async def test_agent_loop_routes_per_message_layers_to_turn_split(
         with patch("pocketpaw.agents.loop.Settings") as settings_cls:
             settings_cls.load.return_value = settings
             loop = AgentLoop()
+            # A first message starts background chat titling; with mocked
+            # settings it never finishes and blocks interpreter exit.
+            loop._generate_and_emit_title = AsyncMock()
             await loop._process_message(
                 InboundMessage(
                     channel=Channel.CLI,
