@@ -52,6 +52,7 @@ def _encode_unknown(value: Any) -> str:
 
 
 _DEFAULT_RUN_STREAM_TTL_SECONDS = 3600
+_expire_nx_warned = False
 
 
 def _terminal_stream_ttl() -> int:
@@ -96,8 +97,11 @@ class RedisStreamTransport:
             raise entry_id
         if isinstance(expired, Exception):
             # e.g. Redis < 7 has no EXPIRE NX. The event is written; only the
-            # orphan-stream safety net is missing.
-            logger.warning("redis_stream: EXPIRE NX failed on %s: %s", key, expired)
+            # orphan-stream safety net is missing. Warn once, not per chunk.
+            global _expire_nx_warned
+            if not _expire_nx_warned:
+                _expire_nx_warned = True
+                logger.warning("redis_stream: EXPIRE NX failed on %s: %s", key, expired)
         return entry_id
 
     async def read_events(
