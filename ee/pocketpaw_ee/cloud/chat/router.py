@@ -321,9 +321,11 @@ async def react_to_message(
 @_licensed.get("/messages/{message_id}/thread")
 async def get_thread(
     message_id: str,
+    after: str | None = Query(None, description="'{iso}|{id}' of the last reply seen"),
+    limit: int = Query(message_service.THREAD_REPLY_LIMIT, ge=1, le=200),
     user_id: str = Depends(current_user_id),
 ):
-    return await message_service.get_thread(message_id, user_id)
+    return await message_service.get_thread(message_id, user_id, after=after, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +424,7 @@ async def unpin_message(
 @_licensed.get("/groups/{group_id}/search")
 async def search_messages(
     group_id: str,
-    q: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1, max_length=200),
     user_id: str = Depends(current_user_id),
 ):
     return await message_service.search_messages(group_id, user_id, q)
@@ -499,16 +501,16 @@ async def suggest_mentions(
 
     kinds = {k.strip() for k in types.split(",") if k.strip()}
     q_lower = q.lower()
-    results: list[dict] = []
 
+    # Independent reads: run them together, keep the user/agent/channel order.
+    lookups = []
     if "user" in kinds:
-        results.extend(await auth_service.suggest_workspace_members(workspace_id, q))
-
+        lookups.append(auth_service.suggest_workspace_members(workspace_id, q))
     if "agent" in kinds:
-        results.extend(await agents_service.suggest_for_mentions(workspace_id, q))
-
+        lookups.append(agents_service.suggest_for_mentions(workspace_id, q))
     if "channel" in kinds:
-        results.extend(await group_service.suggest_channels(workspace_id, q))
+        lookups.append(group_service.suggest_channels(workspace_id, q))
+    results: list[dict] = [row for rows in await asyncio.gather(*lookups) for row in rows]
 
     # Broadcast tokens — always offered, filtered by prefix match when q is set.
     for token, display in (("here", "@here"), ("channel", "@channel"), ("everyone", "@everyone")):
