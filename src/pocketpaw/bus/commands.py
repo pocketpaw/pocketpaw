@@ -476,7 +476,9 @@ class CommandHandler:
 
         settings.agent_backend = name
         settings.save()
-        get_settings.cache_clear()
+        from pocketpaw.cache_invalidation import clear_settings_cache
+
+        clear_settings_cache()
         self._notify_settings_changed()
 
         return OutboundMessage(
@@ -517,7 +519,9 @@ class CommandHandler:
         new_model = args.strip()
         setattr(settings, model_field, new_model)
         settings.save()
-        get_settings.cache_clear()
+        from pocketpaw.cache_invalidation import clear_settings_cache
+
+        clear_settings_cache()
         self._notify_settings_changed()
 
         return OutboundMessage(
@@ -567,7 +571,9 @@ class CommandHandler:
 
         settings.tool_profile = name
         settings.save()
-        get_settings.cache_clear()
+        from pocketpaw.cache_invalidation import clear_settings_cache
+
+        clear_settings_cache()
         self._notify_settings_changed()
 
         return OutboundMessage(

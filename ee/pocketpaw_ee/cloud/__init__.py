@@ -42,6 +42,30 @@ from fastapi import Depends, FastAPI
 _logger = logging.getLogger(__name__)
 
 
+def _wire_oss_cache_invalidation() -> None:
+    """Relay the OSS core's per-process cache drops (settings, skills) to the
+    other web processes over the realtime broadcast. The OSS side cannot import
+    EE, so it exposes ``pocketpaw.cache_invalidation.set_remote_invalidator``
+    and EE fills it in here. Receivers run the local half only, so nothing is
+    relayed twice. With broadcast off ``broadcast_invalidate_soon`` is a no-op.
+    """
+    from pocketpaw import cache_invalidation
+    from pocketpaw_ee.cloud._core.realtime.broadcast import (
+        broadcast_invalidate_soon,
+        register_invalidator,
+    )
+
+    register_invalidator(
+        cache_invalidation.SETTINGS,
+        lambda _key: cache_invalidation.clear_settings_cache(local_only=True),
+    )
+    register_invalidator(
+        cache_invalidation.SKILLS,
+        lambda _key: cache_invalidation.reload_skills(local_only=True),
+    )
+    cache_invalidation.set_remote_invalidator(lambda name: broadcast_invalidate_soon(name, ""))
+
+
 def _install_cloud_lifespan(
     app: FastAPI,
     startup_hooks: list[Callable[[], Awaitable[None]]],
@@ -1003,6 +1027,8 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud._core.realtime import broadcast as _realtime_broadcast
     from pocketpaw_ee.cloud._core.realtime import presence as _realtime_presence
 
+    _wire_oss_cache_invalidation()
+
     if _realtime_broadcast.is_enabled():
 
         @on_startup
@@ -1176,7 +1202,9 @@ def mount_cloud(app: FastAPI) -> None:
             stop_member_ingest,
         )
 
-        _member_ingest = leased("member_ingest", lambda: start_member_ingest(app), lambda: stop_member_ingest(app))
+        _member_ingest = leased(
+            "member_ingest", lambda: start_member_ingest(app), lambda: stop_member_ingest(app)
+        )
 
         @on_startup
         async def _start_member_ingest() -> None:
@@ -1200,7 +1228,9 @@ def mount_cloud(app: FastAPI) -> None:
             stop_fabric_ingest,
         )
 
-        _fabric_ingest = leased("fabric_ingest", lambda: start_fabric_ingest(app), lambda: stop_fabric_ingest(app))
+        _fabric_ingest = leased(
+            "fabric_ingest", lambda: start_fabric_ingest(app), lambda: stop_fabric_ingest(app)
+        )
 
         @on_startup
         async def _start_fabric_ingest() -> None:
@@ -1226,7 +1256,11 @@ def mount_cloud(app: FastAPI) -> None:
             stop_websandbox_reaper,
         )
 
-        _websandbox_reaper = leased("websandbox_reaper", lambda: start_websandbox_reaper(app), lambda: stop_websandbox_reaper(app))
+        _websandbox_reaper = leased(
+            "websandbox_reaper",
+            lambda: start_websandbox_reaper(app),
+            lambda: stop_websandbox_reaper(app),
+        )
 
         @on_startup
         async def _start_websandbox_reaper() -> None:

@@ -60,6 +60,7 @@ from pydantic_core import PydanticUndefined
 # permission gate, injection/PII scanning and the terminal — duplicating that
 # list here would drift the moment either copy changes.
 from pocketpaw.api.v1.settings import _IMMUTABLE_FIELDS
+from pocketpaw.cache_invalidation import clear_settings_cache
 from pocketpaw.config import Settings, _chmod_safe, get_config_path, get_settings
 from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, Internal, ValidationError
@@ -631,7 +632,7 @@ async def update_platform_settings(
         config_path.write_text(json.dumps(updated_config_json, indent=2))
         _chmod_safe(config_path, 0o600)
 
-        get_settings.cache_clear()
+        clear_settings_cache()
     except Exception as exc:
         await audit.settle(event, ok=False)
         raise Internal("platform.settings.write_failed", "Failed to write settings") from exc
