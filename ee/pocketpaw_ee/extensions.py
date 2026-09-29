@@ -418,10 +418,12 @@ class CloudLifecycleHook:
         from pocketpaw_ee.cloud.agents.service import (
             ensure_code_agent_all_workspaces,
             ensure_growth_researcher_agent_all_workspaces,
+            ensure_growth_writer_agent_all_workspaces,
         )
 
         await ensure_code_agent_all_workspaces()
         await ensure_growth_researcher_agent_all_workspaces()
+        await ensure_growth_writer_agent_all_workspaces()
 
         # Persist Haiku-generated chat titles into MongoDB.
         try:

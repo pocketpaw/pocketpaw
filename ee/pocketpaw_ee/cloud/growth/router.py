@@ -94,6 +94,8 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateProspectRequest,
     DeleteProspectsRequest,
     DeleteProspectsResponse,
+    DraftProspectRequest,
+    DraftProspectResponse,
     DraftResponse,
     IcpPreviewResponse,
     IcpResponse,
@@ -263,6 +265,39 @@ async def delete_prospect(
     bulk delete. 404 when the prospect is not in the caller's workspace."""
     await growth_service.delete_prospect(ctx, prospect_id)
     return Response(status_code=204)
+
+
+@router.post(
+    "/prospects/{prospect_id}/research",
+    response_model=ProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def research_prospect(
+    prospect_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ProspectResponse:
+    """Research this one prospect and fold the findings in: a structured
+    ``research`` profile, gaps filled (never overwritten), and a tier
+    suggested to an unqualified row. 503 when no research backend is wired,
+    502 when the run fails or returns nothing for this domain."""
+    return await growth_service.research_prospect(ctx, prospect_id)
+
+
+@router.post(
+    "/prospects/{prospect_id}/draft",
+    response_model=DraftProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def draft_prospect(
+    prospect_id: str,
+    body: DraftProspectRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DraftProspectResponse:
+    """Write first-touch drafts for this prospect on every channel it can be
+    reached on (or the ``channels`` asked for). Channels it cannot be reached
+    on, or that already hold a first-touch draft, come back in ``skipped``.
+    422 ``prospect.no_channel`` when none is left to write for."""
+    return await growth_service.draft_prospect(ctx, prospect_id, body)
 
 
 # ---------------------------------------------------------------------------

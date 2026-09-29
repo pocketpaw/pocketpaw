@@ -112,6 +112,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from beanie import PydanticObjectId
 from pydantic import ValidationError as PydanticValidationError
@@ -137,6 +138,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     Icp,
     MessageLog,
     Prospect,
+    recordable_emails,
 )
 from pocketpaw_ee.cloud.growth.dto import (
     BulkIngestRequest,
@@ -147,7 +149,10 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateProspectRequest,
     DeleteProspectsRequest,
     DeleteProspectsResponse,
+    DraftProspectRequest,
+    DraftProspectResponse,
     DraftResponse,
+    DraftSkipped,
     IcpLastPreviewResponse,
     IcpPreviewResponse,
     IcpResponse,
@@ -159,6 +164,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProposeSendResponse,
     ProspectFacetsResponse,
     ProspectPageResponse,
+    ProspectResearch,
     ProspectResponse,
     TransitionDraftRequest,
     UpdateDraftRequest,
@@ -197,6 +203,8 @@ def _to_domain(doc: _ProspectDoc) -> Prospect:
         status=doc.status,
         icp_id=getattr(doc, "icp_id", None),
         source_urls=tuple(getattr(doc, "source_urls", None) or ()),
+        research=getattr(doc, "research", None),
+        researched_at=getattr(doc, "researched_at", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -252,6 +260,8 @@ def _to_response(p: Prospect) -> ProspectResponse:
         status=p.status,
         icp_id=p.icp_id,
         source_urls=list(p.source_urls),
+        research=ProspectResearch.model_validate(p.research) if p.research is not None else None,
+        researched_at=iso_utc(p.researched_at),
         created_at=iso_utc(p.created_at),
         updated_at=iso_utc(p.updated_at),
     )
@@ -1208,6 +1218,284 @@ async def delete_icp(ctx: RequestContext, icp_id: str) -> None:
     doc = await _fetch_icp_in_workspace(workspace_id, icp_id)
     await doc.delete()
     # no-event: growth has no realtime subscriber in v1; the ICP view polls.
+
+
+# ---------------------------------------------------------------------------
+# Single-prospect actions: research one prospect, draft its first touch
+# ---------------------------------------------------------------------------
+
+_SOURCE_URL_CAP = 50
+_ALL_DRAFT_CHANNELS = ("email", "linkedin", "whatsapp")
+_LIVE_DRAFT_STATUSES = ("draft", "proposed", "approved", "sent")
+
+
+async def _icp_for(workspace_id: str, doc: _ProspectDoc) -> Icp | None:
+    """The prospect's ICP as context for an agent run. A deleted or foreign
+    ICP is simply no context, never a 404 on the prospect."""
+    icp_id = getattr(doc, "icp_id", None)
+    if not icp_id:
+        return None
+    try:
+        return _icp_to_domain(await _fetch_icp_in_workspace(workspace_id, icp_id))
+    except NotFound:
+        return None
+
+
+def _linkedin_url_or_none(value: str) -> str | None:
+    """``value`` if it is an https URL on linkedin.com, else None. Hostname is
+    what the browser would connect to, so ``https://linkedin.com@evil.io`` is
+    evil.io and is refused."""
+    value = value.strip()
+    if not value or len(value) > 2048:
+        return None
+    try:
+        parts = urlsplit(value)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if parts.scheme != "https" or parts.username or parts.password:
+        return None
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return None
+    return value
+
+
+def _is_http_url(value: str) -> bool:
+    try:
+        return urlsplit(value).scheme in ("http", "https")
+    except ValueError:
+        return False
+
+
+def _research_brief_from(profile: ProspectResearch) -> str:
+    parts = [profile.summary]
+    if profile.fit:
+        parts.append(f"Fit: {profile.fit}")
+    if profile.hook:
+        parts.append(f"Hook: {profile.hook}")
+    return "\n\n".join(p for p in parts if p)
+
+
+def _apply_research(doc: _ProspectDoc, company: Any, now: datetime) -> None:
+    """Fold one research result into the prospect.
+
+    Fills gaps and never overwrites what a person typed: name and company only
+    when blank, emails and sources merged, LinkedIn only when blank. Emails
+    come from the evidence through ``recordable_emails`` and nowhere else.
+    Tier is suggested only to an unqualified prospect, and status moves
+    new → qualified and never backwards.
+    """
+    profile = ProspectResearch.model_validate(company.profile or {})
+
+    if not doc.name.strip() and company.name:
+        doc.name = company.name[:200]
+    if not doc.company.strip() and company.company:
+        doc.company = company.company[:200]
+
+    emails = list(doc.emails)
+    known = {e.lower() for e in emails}
+    for address in recordable_emails(company.emails):
+        if address not in known:
+            emails.append(address)
+            known.add(address)
+    doc.emails = emails
+
+    if not (doc.linkedin_url or "").strip():
+        linkedin = _linkedin_url_or_none(company.linkedin_url)
+        if linkedin is not None:
+            doc.linkedin_url = linkedin
+
+    brief = _research_brief_from(profile) or company.research_brief.strip()
+    if brief:
+        doc.research_brief = brief
+
+    sources = list(getattr(doc, "source_urls", None) or [])
+    for url in (*company.source_urls, *profile.sources):
+        if len(sources) >= _SOURCE_URL_CAP:
+            break
+        if url not in sources and _is_http_url(url):
+            sources.append(url)
+    doc.source_urls = sources
+
+    if doc.tier == "unqualified" and profile.suggested_tier:
+        doc.tier = profile.suggested_tier
+    if doc.status == "new":
+        doc.status = "qualified"
+
+    doc.research = profile.model_dump()
+    doc.researched_at = now
+
+
+async def research_prospect(ctx: RequestContext, prospect_id: str) -> ProspectResponse:
+    """Research one prospect with the researcher agent and fold the result in.
+
+    503 when no backend is wired (nothing went looking is not the same answer
+    as found nothing); 502 when the run fails or returns no entry for this
+    prospect's domain. The row is re-read after the run, so an edit made while
+    the agent was working is kept rather than overwritten by a stale copy.
+    """
+    from pocketpaw_ee.cloud.growth import researcher as growth_researcher
+
+    workspace_id = _require_workspace(ctx)
+    research_fn = growth_researcher.resolve_prospect_research_fn()
+    if research_fn is None:
+        raise CloudError(
+            503,
+            "prospect.research_unavailable",
+            "Prospect research is not configured on this deployment",
+        )
+
+    doc = await _fetch_in_workspace(workspace_id, prospect_id)
+    icp = await _icp_for(workspace_id, doc)
+    try:
+        outcome = await research_fn(_to_domain(doc), icp)
+    except CloudError:
+        raise
+    except growth_researcher.ResearchUnavailable as exc:
+        raise CloudError(502, "prospect.research_failed", f"Research failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("growth: research run failed for prospect=%s", prospect_id, exc_info=True)
+        raise CloudError(502, "prospect.research_failed", "The research run failed") from exc
+
+    if outcome.company is None:
+        raise CloudError(
+            502,
+            "prospect.research_failed",
+            "The researcher returned nothing usable for this prospect",
+        )
+
+    doc = await _fetch_in_workspace(workspace_id, prospect_id)
+    _apply_research(doc, outcome.company, datetime.now(UTC))
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the prospect view polls.
+    return _to_response(_to_domain(doc))
+
+
+def _channel_ineligible_reason(doc: _ProspectDoc, channel: str) -> str | None:
+    if channel == "email" and not doc.emails:
+        return "no email address on file"
+    if channel == "linkedin" and not (doc.linkedin_url or "").strip():
+        return "no LinkedIn profile on file"
+    if channel == "whatsapp":
+        if not (doc.whatsapp_number or "").strip():
+            return "no WhatsApp number on file"
+        if not doc.opted_in:
+            return "the prospect has not opted in to WhatsApp"
+    return None
+
+
+async def _first_touch_channels(workspace_id: str, prospect_id: str) -> set[str]:
+    docs = await _DraftDoc.find(
+        {
+            "workspace": workspace_id,
+            "prospect_id": prospect_id,
+            "variant": "first_touch",
+            "status": {"$in": list(_LIVE_DRAFT_STATUSES)},
+        }
+    ).to_list()
+    return {d.channel for d in docs}
+
+
+async def draft_prospect(
+    ctx: RequestContext, prospect_id: str, body: DraftProspectRequest
+) -> DraftProspectResponse:
+    """Have the writer agent draft first-touch copy for a prospect.
+
+    Only channels the prospect can actually be reached on are written for
+    (email needs an address, LinkedIn a profile URL, WhatsApp a number AND an
+    opt-in), and a channel that already holds a live first-touch draft is
+    skipped rather than duplicated. Every skipped channel comes back with its
+    reason. Anything the writer returns for a channel it was not given is
+    dropped. Drafts go through ``_insert_draft``, so they are born ``draft``
+    and the prospect moves to ``drafted`` exactly as a hand-typed draft would.
+    """
+    from pocketpaw_ee.cloud.growth import writer as growth_writer
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+
+    body = DraftProspectRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    writer_fn = growth_writer.resolve_writer_fn()
+    if writer_fn is None:
+        raise CloudError(
+            503,
+            "prospect.writer_unavailable",
+            "Draft writing is not configured on this deployment",
+        )
+
+    doc = await _fetch_in_workspace(workspace_id, prospect_id)
+    requested = list(
+        dict.fromkeys(body.channels if body.channels is not None else _ALL_DRAFT_CHANNELS)
+    )
+    drafted = await _first_touch_channels(workspace_id, str(doc.id))
+    eligible: list[str] = []
+    skipped: list[DraftSkipped] = []
+    for channel in requested:
+        reason = (
+            "already drafted" if channel in drafted else _channel_ineligible_reason(doc, channel)
+        )
+        if reason is None:
+            eligible.append(channel)
+        else:
+            skipped.append(DraftSkipped(channel=channel, reason=reason))
+
+    if not eligible:
+        if skipped and all(s.reason == "already drafted" for s in skipped):
+            message = "Every requested channel already has a first-touch draft"
+        else:
+            message = (
+                "No email, LinkedIn profile or opted-in WhatsApp number on file — "
+                "research the prospect first"
+            )
+        raise CloudError(422, "prospect.no_channel", message)
+
+    icp = await _icp_for(workspace_id, doc)
+    try:
+        written = await writer_fn(_to_domain(doc), icp, list(eligible), body.instructions)
+    except CloudError:
+        raise
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "prospect.draft_failed", f"Drafting failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("growth: writer run failed for prospect=%s", prospect_id, exc_info=True)
+        raise CloudError(502, "prospect.draft_failed", "The writer run failed") from exc
+
+    by_channel: dict[str, Any] = {}
+    for item in written:
+        if item.channel in eligible and item.channel not in by_channel:
+            by_channel[item.channel] = item
+
+    drafts: list[DraftResponse] = []
+    for channel in eligible:
+        item = by_channel.get(channel)
+        text = item.body.strip()[:10_000] if item is not None else ""
+        if not text:
+            skipped.append(
+                DraftSkipped(
+                    channel=channel, reason="the writer returned no draft for this channel"
+                )
+            )
+            continue
+        subject = item.subject.strip()[:200] if channel == "email" else None
+        if channel == "email" and not subject:
+            skipped.append(
+                DraftSkipped(channel=channel, reason="the writer returned an email with no subject")
+            )
+            continue
+        drafts.append(
+            await _insert_draft(
+                workspace_id,
+                str(doc.id),
+                CreateDraftRequest(
+                    channel=channel, subject=subject, body=text, variant="first_touch"
+                ),
+            )
+        )
+
+    if not drafts:
+        raise CloudError(
+            502, "prospect.draft_failed", "The writer returned no usable draft for this prospect"
+        )
+    return DraftProspectResponse(drafts=drafts, skipped=skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -2272,6 +2560,7 @@ __all__ = [
     "create",
     "create_draft",
     "create_followup_draft",
+    "draft_prospect",
     "finish_whatsapp_attempt",
     "gate_transition",
     "get",
@@ -2290,6 +2579,7 @@ __all__ = [
     "record_message_log",
     "record_whatsapp_attempt",
     "record_whatsapp_inbound_reply",
+    "research_prospect",
     "transition",
     "update",
     "upsert_by_domain",

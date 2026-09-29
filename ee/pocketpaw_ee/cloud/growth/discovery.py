@@ -156,6 +156,11 @@ class DiscoveredCompany:
     research_brief: str = ""
     source_urls: tuple[str, ...] = ()
     emails: tuple[EmailEvidence, ...] = ()
+    # Only a single-prospect research run asks for these: the raw structured
+    # profile (validated by ``dto.ProspectResearch`` where it is stored) and a
+    # LinkedIn URL the model reported. Discovery ignores both.
+    profile: dict | None = None
+    linkedin_url: str = ""
 
 
 @dataclass(frozen=True)

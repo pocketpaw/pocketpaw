@@ -929,6 +929,8 @@ class TestGrowthRouteRbac:
             ("PATCH", "/growth/prospects/{prospect_id}"): "growth.write",
             ("POST", "/growth/prospects/bulk-delete"): "growth.write",
             ("DELETE", "/growth/prospects/{prospect_id}"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/research"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/draft"): "growth.write",
             ("POST", "/growth/drafts/{draft_id}/status"): "growth.write",
             # Editing a draft's COPY is authoring, not outbound — and the
             # service refuses it past ``draft`` anyway, so it can never touch

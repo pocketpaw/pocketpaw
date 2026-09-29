@@ -1061,6 +1061,89 @@ async def ensure_growth_researcher_agent_all_workspaces() -> int:
     return seeded
 
 
+async def seed_growth_writer_agent(
+    workspace_id: str, owner_id: str
+) -> tuple[_AgentDoc, bool] | tuple[None, bool]:
+    """Create the ``growth-writer`` Agent for a workspace if missing.
+
+    Built from ``GROWTH_WRITER_AGENT`` in ``growth/writer.py``. Like the
+    researcher seeder, the short-circuit NARROWS an existing row back to the
+    pinned surface (no tools, ``exclusive``): a writer holding tools could look
+    things up or act on the workspace instead of only composing copy.
+    Returns ``(agent, created)``.
+    """
+    from pocketpaw_ee.cloud.growth.writer import (
+        GROWTH_WRITER_AGENT,
+        GROWTH_WRITER_SLUG,
+        GROWTH_WRITER_TOOLS,
+    )
+
+    pinned_tools = list(GROWTH_WRITER_TOOLS)
+    existing = await _AgentDoc.find_one(
+        _AgentDoc.workspace == workspace_id, _AgentDoc.slug == GROWTH_WRITER_SLUG
+    )
+    if existing is not None:
+        widened = list(existing.config.tools or []) != pinned_tools
+        if widened or existing.config.tool_mode != "exclusive":
+            logger.info(
+                "Narrowed '%s' agent in workspace %s from tool_mode=%s tools=%s",
+                GROWTH_WRITER_SLUG,
+                workspace_id,
+                existing.config.tool_mode,
+                existing.config.tools,
+            )
+            existing.config.tool_mode = "exclusive"
+            existing.config.tools = pinned_tools
+            await existing.save()
+        return existing, False
+
+    agent = _AgentDoc(
+        workspace=workspace_id,
+        name=GROWTH_WRITER_AGENT["name"],
+        slug=GROWTH_WRITER_SLUG,
+        avatar="",
+        owner=owner_id,
+        visibility="workspace",
+        config=_AgentConfigDoc(**GROWTH_WRITER_AGENT["config"]),
+    )
+    await agent.insert()
+    logger.info(
+        "'%s' agent seeded in workspace %s (id: %s)", GROWTH_WRITER_SLUG, workspace_id, agent.id
+    )
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
+    return agent, True
+
+
+async def ensure_growth_writer_agent_all_workspaces() -> int:
+    """Back-fill the ``growth-writer`` agent for every existing workspace.
+
+    Called on every boot beside the researcher's ensure. Returns the number of
+    agents actually created this run.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    seeded = 0
+    async for ws in _WorkspaceDoc.find_all():
+        try:
+            _, created = await seed_growth_writer_agent(str(ws.id), str(ws.owner))
+            if created:
+                seeded += 1
+        except Exception as exc:
+            logger.warning("Failed to back-fill growth writer agent for ws=%s: %s", ws.id, exc)
+    return seeded
+
+
 __all__ = [
     "can_read_agent",
     "can_use_agent",
@@ -1072,6 +1155,7 @@ __all__ = [
     "ensure_code_agent_all_workspaces",
     "ensure_default_agent_all_workspaces",
     "ensure_growth_researcher_agent_all_workspaces",
+    "ensure_growth_writer_agent_all_workspaces",
     "get",
     "get_by_slug",
     "get_for_viewer",
@@ -1084,6 +1168,7 @@ __all__ = [
     "seed_code_agent",
     "seed_default_agent",
     "seed_growth_researcher_agent",
+    "seed_growth_writer_agent",
     "set_scopes",
     "suggest_for_mentions",
     "update",

@@ -2,6 +2,11 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-29 (feat/growth-prospect-actions) — Growth — Prospects: added
+  POST /growth/prospects/{id}/research (one-prospect research run that fills
+  gaps and stores a `research` profile + `researched_at` on the envelope) and
+  POST /growth/prospects/{id}/draft (first-touch drafts from the tool-less
+  growth-writer agent, per eligible channel, with `skipped` reasons).
 Updated: 2026-09-27 (feat/sites-visual-research) — added the `preview_site` agent
   tool under "Draft verification": a full-page screenshot of the draft, returned
   to the agent as images so it can look at the page before calling it ready.
@@ -4198,7 +4203,11 @@ A duplicate `(workspace, domain)` returns `409 prospect.domain_taken` —
 create-or-update callers use the service's `upsert_by_domain` seam instead.
 
 Returns the prospect envelope: all fields above plus `id`, `workspace_id`,
-and ISO `created_at` / `updated_at`.
+and ISO `created_at` / `updated_at`. The envelope also carries `research`
+(the structured profile from the last research run, or `null`) and
+`researched_at` (ISO timestamp or `null`). Both are written only by
+`POST /growth/prospects/{id}/research` below and cannot be set by create,
+bulk or PATCH.
 
 ### `POST /api/v1/growth/prospects/bulk`
 
@@ -4405,6 +4414,125 @@ Delete one prospect and its drafts. It runs through the same service path as
 bulk delete, including proposal withdrawal. Returns `204` with no body.
 Requires `growth.write`. An id that is unknown, malformed, or in another
 workspace returns `404 prospect.not_found`.
+
+### `POST /api/v1/growth/prospects/{prospect_id}/research`
+
+Research one prospect with the workspace's `growth-researcher` agent (the one
+a hunt uses: web search and fetch only) and write what it found onto the row.
+No body. Requires `growth.write`. Returns the updated prospect envelope. The
+run is synchronous, so expect tens of seconds.
+
+The prospect's hunt (its ICP) is passed as context when one exists. A
+prospect with no hunt, or whose hunt was deleted, is researched without it.
+
+`research` holds the profile. Every field has a default, so a sparse answer
+still parses:
+
+```json
+{
+  "summary": "Three-chair family dental practice in Austin.",
+  "suggested_tier": "a",
+  "tier_reason": "Owner-run, books by phone only.",
+  "fit": "Matches the hunt: independent practice, no online booking.",
+  "hook": "Their booking page is a phone number.",
+  "caveats": ["Hours differ between the site and Google."],
+  "next_steps": ["Email the practice manager."],
+  "locations": [{"name": "Main office", "address": "…", "hours": "…", "notes": ""}],
+  "people": [{"name": "Dana Ruiz", "role": "Practice manager", "notes": ""}],
+  "channels": [{"kind": "phone", "value": "+1 512 555 0100", "notes": ""}],
+  "facts": [{"label": "Founded", "value": "2009"}],
+  "sources": ["https://acme-dental.com/about"]
+}
+```
+
+`suggested_tier` is `a | b | c | ""`, and anything else becomes `""`.
+`channels[].kind` is `phone | whatsapp | email | form | chat | booking |
+social | other`, and an unknown kind becomes `other`. Every list holds at most
+15 items. Prose (`summary`, `tier_reason`, `fit`, `hook`, each `caveats` and
+`next_steps` item, every `notes` and `facts[].value`) is cut at 600
+characters, and the short fields (names, roles, addresses, hours, channel
+values, fact labels) at 200.
+`sources` keeps only `http(s)` URLs.
+
+The run fills gaps and never overwrites what an operator entered:
+
+- `name` and `company` are set only when blank.
+- Emails the agent saw on a page (`confidence: observed` with a
+  `seen_at_url`) are merged into `emails`. Existing addresses are kept.
+  Guessed patterns are never recorded.
+- `linkedin_url` is set only when blank, and only to an `https` URL on
+  `linkedin.com`.
+- `research_brief` is rebuilt from `summary`, `fit` and `hook`. If all three
+  are empty, the old brief is kept.
+- `source_urls` becomes the ordered, de-duplicated union of the old and new
+  sources, capped at 50.
+- `tier` takes `suggested_tier` only while the prospect is `unqualified`.
+- `status` moves `new → qualified` and never goes backwards.
+- `research` is replaced and `researched_at` is set to now (UTC).
+
+The row is re-read after the run, so an edit made while the agent was working
+is kept.
+
+Errors: `404 prospect.not_found`; `503 prospect.research_unavailable` when no
+research backend is wired; `502 prospect.research_failed` when the run fails
+or returns no usable entry for this domain. A 502 writes nothing.
+
+### `POST /api/v1/growth/prospects/{prospect_id}/draft`
+
+Write first-touch copy for one prospect with the workspace's `growth-writer`
+agent and store it as drafts. Requires `growth.write`. Body (both fields
+optional):
+
+```json
+{"channels": ["email", "linkedin"], "instructions": "Mention the Austin office."}
+```
+
+`channels` is any of `email | linkedin | whatsapp`. Omitted or `null` means
+all three. `instructions` (max 1000 characters) are operator notes passed to
+the writer. They cannot override its rule against inventing facts.
+
+The writer has no tools. It works only from what is on the prospect: the
+research profile (or `research_brief`), name, company and the hunt's criteria.
+It is seeded into each workspace at boot and lazily on first use, with
+`tools: []`, `tool_mode: exclusive`, trust level 1, temperature 0.6 and soul
+off.
+
+A requested channel is drafted only when the prospect can be reached on it.
+Otherwise it is listed in `skipped` with a reason:
+
+| Channel | Needs | Skip reason |
+|---|---|---|
+| `email` | at least one address in `emails` | `no email address on file` |
+| `linkedin` | `linkedin_url` | `no LinkedIn profile on file` |
+| `whatsapp` | `whatsapp_number` | `no WhatsApp number on file` |
+| `whatsapp` | `opted_in: true` | `the prospect has not opted in to WhatsApp` |
+
+A channel that already has a `first_touch` draft in `draft`, `proposed`,
+`approved` or `sent` is skipped as `already drafted`. A `rejected` or
+`replied` draft does not block a new one. The writer is only asked for the
+eligible channels, and anything it returns for another channel is ignored. An
+eligible channel it leaves out is skipped with `the writer returned no draft
+for this channel`. An email with no subject is skipped with `the writer
+returned an email with no subject`.
+
+Each draft is stored through the same path as
+`POST /growth/prospects/{id}/drafts`: `variant: first_touch`, status `draft`,
+subject kept for email only. The prospect moves to `drafted` unless it is
+already further along. Nothing is proposed or sent. Response:
+
+```json
+{
+  "drafts": [ { ...draft envelope }, ... ],
+  "skipped": [ {"channel": "whatsapp", "reason": "no WhatsApp number on file"} ]
+}
+```
+
+Errors: `404 prospect.not_found`; `503 prospect.writer_unavailable` when no
+writer is wired; `422 prospect.no_channel` when no requested channel is
+eligible (this includes `channels: []` and the case where every requested
+channel is already drafted); `422` for `instructions` over 1000 characters;
+`502 prospect.draft_failed` when the run fails or returns no usable draft. A
+502 stores nothing.
 
 ## Growth — Drafts
 

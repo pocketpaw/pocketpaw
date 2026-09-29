@@ -30,6 +30,12 @@
 # Same shape as the send gate one layer up (the agent proposes, a human
 # disposes); here the engine disposes.
 #
+# The same agent also researches ONE known prospect on demand
+# (``agent_prospect_research``, behind the ``ProspectResearchFn`` seam). Its
+# system prompt is frozen in workspaces that already hold the row, so every
+# single-company instruction — the extra ``profile`` object, ``linkedin_url`` —
+# travels in the per-run message instead.
+#
 # WebSearch and WebFetch need no wiring — the Claude SDK backend already grants
 # both (``src/pocketpaw/agents/claude_sdk.py``). This is a persona and a policy,
 # not plumbing.
@@ -39,15 +45,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from pocketpaw_ee.cloud.growth.discovery import (
     DiscoveredCompany,
     ResearchRequest,
     ResearchResult,
 )
-from pocketpaw_ee.cloud.growth.domain import EmailEvidence
+from pocketpaw_ee.cloud.growth.domain import EmailEvidence, Icp, Prospect
+from pocketpaw_ee.cloud.growth.dto import _normalise_domain
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +362,8 @@ def _company_from(raw: Any) -> DiscoveredCompany | None:
         if isinstance(emails_raw, list)
         else ()
     )
+    profile = raw.get("profile")
+    linkedin_url = raw.get("linkedin_url")
     return DiscoveredCompany(
         domain=domain,
         name=str(raw.get("name") or "").strip(),
@@ -361,6 +371,8 @@ def _company_from(raw: Any) -> DiscoveredCompany | None:
         research_brief=str(raw.get("research_brief") or "").strip(),
         source_urls=source_urls,
         emails=emails,
+        profile=profile if isinstance(profile, dict) else None,
+        linkedin_url=linkedin_url.strip() if isinstance(linkedin_url, str) else "",
     )
 
 
@@ -388,6 +400,48 @@ def parse_research_response(text: str, *, max_results: int) -> ResearchResult:
     )
 
 
+async def workspace_owner_id(workspace_id: str) -> str:
+    """The workspace owner's id, or "" when the lookup fails — a seed then
+    proceeds with an empty owner rather than being blocked."""
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.workspace import Workspace
+
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+        return str(getattr(ws, "owner", "") or "") if ws is not None else ""
+    except Exception:
+        logger.debug("growth: workspace owner lookup failed for ws=%s", workspace_id)
+        return ""
+
+
+async def run_agent_text(agent_id: str, message: str, session_key: str) -> str:
+    """Run one agent turn and return the assistant's own text.
+
+    ONLY ``message`` events are kept. ``tool_result`` events carry the raw
+    WebSearch payload, which is itself JSON; collecting those too would hand
+    the extractor a page of search hits instead of the answer. Exceptions from
+    the run propagate — callers map them to their own "unavailable" error.
+    """
+    # Lazy, in-function import of the OSS package — keeps the EE→OSS edge off
+    # the module import graph (see ``shared/agent_bridge.py``).
+    from pocketpaw.agents.pool import get_agent_pool
+
+    chunks: list[str] = []
+    pool = get_agent_pool()
+    async for event in pool.run(agent_id=agent_id, message=message, session_key=session_key):
+        if getattr(event, "type", None) != "message":
+            continue
+        content = getattr(event, "content", None)
+        if isinstance(content, str) and content:
+            chunks.append(content)
+    return "".join(chunks)
+
+
+def _run_stamp() -> str:
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+
+
 async def _seed_researcher(workspace_id: str) -> Any:
     """Seed the researcher into a workspace that lacks it, owned by the workspace owner.
 
@@ -396,16 +450,7 @@ async def _seed_researcher(workspace_id: str) -> Any:
     """
     from pocketpaw_ee.cloud.agents import service as agents_service
 
-    owner_id = ""
-    try:
-        from beanie import PydanticObjectId
-
-        from pocketpaw_ee.cloud.models.workspace import Workspace
-
-        ws = await Workspace.get(PydanticObjectId(workspace_id))
-        owner_id = str(getattr(ws, "owner", "") or "") if ws is not None else ""
-    except Exception:
-        logger.debug("growth researcher: workspace owner lookup failed for ws=%s", workspace_id)
+    owner_id = await workspace_owner_id(workspace_id)
 
     try:
         doc, _created = await agents_service.seed_growth_researcher_agent(workspace_id, owner_id)
@@ -426,12 +471,6 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
     ``ResearchUnavailable`` when the agent cannot be set up or the run errors;
     an unreadable response parses to an empty result.
     """
-    # Lazy, in-function import of the OSS package — the convention every cloud
-    # module reaching into ``pocketpaw.agents`` follows (see
-    # ``shared/agent_bridge.py``), which keeps the EE→OSS edge off the module
-    # import graph.
-    from pocketpaw.agents.pool import get_agent_pool
-
     # The agents entity owns the Agent document — growth resolves the
     # researcher through its public service rather than reading the doc, which
     # would put a second entity's Beanie import inside growth/service.py.
@@ -453,30 +492,10 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
     # natural completion became "I already reported those" — so a hunt filed
     # nothing from day two onward while last_run_at kept advancing, and the
     # session's context grew without bound.
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-    session_key = f"growth-discovery:{request.workspace_id}:{request.icp_id}:{stamp}"
+    session_key = f"growth-discovery:{request.workspace_id}:{request.icp_id}:{_run_stamp()}"
 
-    chunks: list[str] = []
     try:
-        pool = get_agent_pool()
-        async for event in pool.run(
-            agent_id=agent_id,
-            message=prompt,
-            session_key=session_key,
-        ):
-            # ONLY the assistant's own text. This filter is load-bearing, not
-            # tidiness: ``tool_result`` events carry the raw WebSearch payload,
-            # which is itself JSON. Collecting those too would leave the buffer
-            # holding a search result's opening brace long before the answer's
-            # — and the extractor, scanning for the outermost object, would
-            # parse a page of search hits instead of the research. Cost a real
-            # run to find; every hunt returned "could not be read" while the
-            # agent was in fact answering perfectly.
-            if getattr(event, "type", None) != "message":
-                continue
-            content = getattr(event, "content", None)
-            if isinstance(content, str) and content:
-                chunks.append(content)
+        text = await run_agent_text(agent_id, prompt, session_key)
     except Exception:
         logger.exception(
             "growth researcher: the run failed for icp %s (workspace %s)",
@@ -485,7 +504,159 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
         )
         raise ResearchUnavailable("the research run failed")
 
-    return parse_research_response("".join(chunks), max_results=request.max_results)
+    return parse_research_response(text, max_results=request.max_results)
+
+
+# ---------------------------------------------------------------------------
+# Single-prospect research — one known company, on demand.
+# ---------------------------------------------------------------------------
+
+
+def build_prospect_research_prompt(prospect: Prospect, icp: Icp | None = None) -> str:
+    """The per-run message for researching ONE prospect.
+
+    Everything specific to this mode lives here, not in the system prompt:
+    workspaces that already hold the researcher row keep the prompt they were
+    seeded with, so a new instruction written there would never reach them.
+    The fields are described in prose — no literal object the model could echo.
+    """
+    lines = [
+        "Research ONE company and report on it. Only this company: do not look "
+        "for others and do not report any other company.",
+        "",
+        f"Domain: {prospect.domain}",
+    ]
+    if prospect.company.strip():
+        lines.append(f"Company: {prospect.company.strip()}")
+    if prospect.name.strip():
+        lines.append(f"Contact we have on file: {prospect.name.strip()}")
+    if icp is not None:
+        lines += ["", "We are weighing them against this description of who we want:", ""]
+        lines.append(icp.criteria.strip())
+        if icp.geography.strip():
+            lines.append(f"Where: {icp.geography.strip()}")
+    lines += [
+        "",
+        "Start with the company's own site, then whatever else helps you understand "
+        "them. Report what you read, not what seems likely.",
+        "",
+        "Answer with the JSON object your instructions describe: a `companies` list "
+        "and `notes`. The `companies` list must hold exactly ONE entry, for the domain "
+        "above, with the usual fields (domain, company, name, research_brief, "
+        "source_urls, emails). Add two more fields to that entry:",
+        "",
+        "  linkedin_url   the company's LinkedIn page, only if you actually saw its URL;",
+        "                 otherwise leave it out",
+        "  profile        an object; every field in it is optional:",
+        "    summary         two or three sentences on what they do",
+        "    suggested_tier  the single letter a, b or c for how strong a fit they are",
+        "                    (a is strongest); leave it empty if you cannot judge",
+        "    tier_reason     one or two sentences on why that tier",
+        "    fit             why they fit the description, or where they do not",
+        "    hook            what a first approach could open with, specific to them",
+        "    caveats         a list of short strings: doubts, conflicting information,",
+        "                    anything you could not verify",
+        "    next_steps      a list of short strings: what a person should check or do next",
+        "    locations       a list; each with name, address, hours and notes",
+        "    people          a list of people you saw named on a page; each with name,",
+        "                    role and notes",
+        "    channels        a list of ways to reach them; each with kind (one of phone,",
+        "                    whatsapp, email, form, chat, booking, social, other), value",
+        "                    and notes",
+        "    facts           a list of label and value pairs worth knowing, such as when",
+        "                    they were founded, team size or pricing",
+        "    sources         a list of the page URLs this profile rests on",
+        "",
+        "The email rule still holds, for `emails` and for email channels alike: never "
+        "construct an address. Report one only if you read that exact string on a page, "
+        "marked observed, with the URL you read it on. No address is a fine answer.",
+        "",
+        "Return only the JSON object, with nothing around it.",
+    ]
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ProspectResearchOutcome:
+    """What a single-prospect research run returned. ``company`` is the entry
+    for the requested domain, or None when the answer had no usable one."""
+
+    company: DiscoveredCompany | None = None
+    notes: str = ""
+
+
+def parse_prospect_research_response(text: str, domain: str) -> ProspectResearchOutcome:
+    """Model output → the entry for ``domain``. Never raises.
+
+    Domains are compared after the same normalisation the prospect store uses,
+    so ``www.acme.com`` answers a question about ``acme.com``. An answer about
+    some other company is not an answer about this one and is dropped.
+    """
+    parsed = _extract_json(text)
+    if parsed is None:
+        logger.warning("growth researcher: prospect research carried no parseable JSON object")
+        return ProspectResearchOutcome(notes="the researcher's response could not be read")
+    notes = str(parsed.get("notes") or "")
+    raw_companies = parsed.get("companies")
+    if not isinstance(raw_companies, list):
+        return ProspectResearchOutcome(notes=notes)
+    wanted = _normalise_domain(domain)
+    for item in raw_companies:
+        company = _company_from(item)
+        if company is not None and _normalise_domain(company.domain) == wanted:
+            return ProspectResearchOutcome(company=company, notes=notes)
+    return ProspectResearchOutcome(notes=notes)
+
+
+class ProspectResearchFn(Protocol):
+    async def __call__(self, prospect: Prospect, icp: Icp | None) -> ProspectResearchOutcome: ...
+
+
+async def agent_prospect_research(
+    prospect: Prospect, icp: Icp | None = None
+) -> ProspectResearchOutcome:
+    """The production ``ProspectResearchFn`` — run the researcher on one prospect.
+
+    Seeds the agent on a miss, like ``agent_research``. Raises
+    ``ResearchUnavailable`` when the agent cannot be set up or the run errors.
+    """
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    try:
+        agent = await agents_service.get_by_slug(prospect.workspace_id, GROWTH_RESEARCHER_SLUG)
+    except Exception:
+        agent = await _seed_researcher(prospect.workspace_id)
+    agent_id = str(getattr(agent, "id", "") or "")
+    if not agent_id:
+        raise ResearchUnavailable("the researcher agent could not be set up in this workspace")
+
+    session_key = f"growth-prospect-research:{prospect.workspace_id}:{prospect.id}:{_run_stamp()}"
+    try:
+        text = await run_agent_text(
+            agent_id, build_prospect_research_prompt(prospect, icp), session_key
+        )
+    except Exception:
+        logger.exception(
+            "growth researcher: prospect research failed for %s (workspace %s)",
+            prospect.id,
+            prospect.workspace_id,
+        )
+        raise ResearchUnavailable("the research run failed")
+    return parse_prospect_research_response(text, prospect.domain)
+
+
+# Empty until app wiring installs ``agent_prospect_research``; the research
+# route answers 503 while it is. Tests install a fake here.
+_PRODUCTION_PROSPECT_RESEARCH_FN: ProspectResearchFn | None = None
+
+
+def set_production_prospect_research_fn(fn: ProspectResearchFn | None) -> None:
+    global _PRODUCTION_PROSPECT_RESEARCH_FN
+    _PRODUCTION_PROSPECT_RESEARCH_FN = fn
+
+
+def resolve_prospect_research_fn() -> ProspectResearchFn | None:
+    return _PRODUCTION_PROSPECT_RESEARCH_FN
 
 
 __all__ = [
@@ -493,8 +664,17 @@ __all__ = [
     "GROWTH_RESEARCHER_PROMPT",
     "GROWTH_RESEARCHER_SLUG",
     "GROWTH_RESEARCHER_TOOLS",
+    "ProspectResearchFn",
+    "ProspectResearchOutcome",
     "ResearchUnavailable",
+    "agent_prospect_research",
     "agent_research",
+    "build_prospect_research_prompt",
     "build_research_prompt",
+    "parse_prospect_research_response",
     "parse_research_response",
+    "resolve_prospect_research_fn",
+    "run_agent_text",
+    "set_production_prospect_research_fn",
+    "workspace_owner_id",
 ]

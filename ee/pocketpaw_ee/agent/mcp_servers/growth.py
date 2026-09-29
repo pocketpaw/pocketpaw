@@ -245,6 +245,8 @@ def _prospect_full(p: Any) -> dict[str, Any]:
         "linkedin_url": p.linkedin_url,
         "whatsapp_number": p.whatsapp_number,
         "opted_in": p.opted_in,
+        "research": p.research.model_dump() if p.research is not None else None,
+        "researched_at": p.researched_at,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     }
