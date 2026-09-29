@@ -56,8 +56,10 @@ _PROTECTED_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # Why: pre-auth or out-of-band-state endpoints can't carry a paired CSRF
 # token. Login + MFA + password reset + SSO callback all bootstrap or
 # rotate the session; they carry their own anti-replay state (form
-# credentials, mfa_pending JWT, reset token, OIDC state).
-_EXEMPT_PATH_PREFIXES: Final = (
+# credentials, mfa_pending JWT, reset token, OIDC state). Each entry matches
+# itself and its subpaths ("/login/" too), never a look-alike such as
+# "/api/v1/auth/verify-anything" or "/healthX".
+_EXEMPT_PATHS: Final = (
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
     "/api/v1/auth/bearer/login",
@@ -72,6 +74,7 @@ _EXEMPT_PATH_PREFIXES: Final = (
     "/api/v1/auth/sso/callback",
     "/health",
 )
+_EXEMPT_SUBTREES: Final = tuple(p + "/" for p in _EXEMPT_PATHS)
 
 
 def mint_csrf_token() -> str:
@@ -110,7 +113,7 @@ def clear_csrf_cookie(response: Response) -> None:
 
 
 def _path_is_exempt(path: str) -> bool:
-    return any(path.startswith(prefix) for prefix in _EXEMPT_PATH_PREFIXES)
+    return path in _EXEMPT_PATHS or path.startswith(_EXEMPT_SUBTREES)
 
 
 def _request_uses_bearer_auth(request: Request) -> bool:
@@ -182,7 +185,13 @@ class CSRFMiddleware:
             await _csrf_invalid(scope, receive, send)
             return
 
-        if not secrets.compare_digest(cookie_value, header_value):
+        # Bytes, not str: compare_digest raises TypeError on non-ASCII str,
+        # which would turn a forged token into a 500. surrogatepass encodes
+        # every str, so this cannot raise.
+        if not secrets.compare_digest(
+            cookie_value.encode("utf-8", "surrogatepass"),
+            header_value.encode("utf-8", "surrogatepass"),
+        ):
             logger.debug("csrf reject: mismatch path=%s", request.url.path)
             await _csrf_invalid(scope, receive, send)
             return
