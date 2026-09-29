@@ -27,8 +27,8 @@ Tenancy:
     The caller's ``user_id`` filters the pocket candidates through
     ``pockets_service.list_pockets``, which already gates by
     owner / shared_with / workspace-visible. Agent candidates come from
-    ``agents_service.list_agents(workspace_id)`` and are pinned to the
-    workspace at the source. Cross-workspace stamps therefore return
+    ``agents_service.list_agents(workspace_id, include_concierges=True)``
+    and are pinned to the workspace at the source. Cross-workspace stamps therefore return
     nothing — both list functions filter on the explicit workspace_id.
 
 Failure mode:
@@ -207,12 +207,13 @@ async def _candidate_scopes(workspace_id: str, user_id: str) -> list[str]:
             scopes.append(f"pocket:{pocket_id}")
 
     # Agent scopes — workspace-pinned at the source. No per-user
-    # filter: a workspace member sees every agent in the workspace by
-    # convention (the agents page lists them all).
+    # filter: a workspace member sees every agent's knowledge by
+    # convention, site concierges included (their knowledge is the
+    # owner's, even though /agents does not list them).
     try:
         from pocketpaw_ee.cloud.agents import service as agents_service
 
-        agents = await agents_service.list_agents(workspace_id)
+        agents = await agents_service.list_agents(workspace_id, include_concierges=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("agent listing failed for workspace=%s: %s", workspace_id, exc)
         agents = []
