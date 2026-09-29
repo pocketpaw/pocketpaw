@@ -18,10 +18,11 @@ the forgeable DEV key is active, warns loudly for an ambiguous non-prod label
 (e.g. ``staging``), and is silent in dev. It runs on every uncached load.
 
 Caching: ``_cached_license`` holds the loaded payload, or the
-``_NO_KEY_CONFIGURED`` sentinel when no key is set, so the per-request
-``require_license`` dependency does no env/posture work after the first load.
-Setting ``_cached_license = None`` invalidates either result. An INVALID key
-is not cached and is re-verified on every call.
+``_NO_LICENSE`` sentinel when the load failed (no key, or an invalid one). A
+payload is kept for the process; the sentinel only for ``_NO_LICENSE_TTL_SECONDS``,
+after which the next call re-runs the load once, so a key added or fixed in
+``.env`` after boot is picked up without a restart. Setting
+``_cached_license = None`` invalidates either result.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import UTC, datetime
 from typing import Final
 
@@ -196,11 +198,19 @@ def enforce_license_key_posture() -> None:
         )
 
 
-#: Stored in ``_cached_license`` once a load found no key configured, so the
-#: per-request ``require_license`` stops re-running ``load_dotenv()`` and the
-#: posture check. Living in the same slot means ``_cached_license = None``
-#: invalidates the negative result exactly as it does a positive one.
-_NO_KEY_CONFIGURED: Final = object()
+#: Stored in ``_cached_license`` once a load failed (no key, or a key that did
+#: not verify), so the per-request ``require_license`` stops re-running
+#: ``load_dotenv()``, the posture check and the signature check. Living in the
+#: same slot means ``_cached_license = None`` invalidates the negative result
+#: exactly as it does a positive one. ``_license_error`` keeps the reason.
+_NO_LICENSE: Final = object()
+
+#: How long a failed load is trusted before the next call re-checks the env.
+#: Short, so a key added or fixed after boot opens the gate within a minute.
+_NO_LICENSE_TTL_SECONDS: Final = 60.0
+
+#: ``time.monotonic()`` deadline for the sentinel; meaningless otherwise.
+_no_license_until = 0.0
 
 _cached_license: LicensePayload | object | None = None
 _license_error: str | None = None
@@ -272,11 +282,12 @@ def validate_license_key(key: str) -> LicensePayload:
 
 def load_license() -> LicensePayload | None:
     """Load license from env var POCKETPAW_LICENSE_KEY. Returns None if absent/invalid."""
-    global _cached_license, _license_error
+    global _cached_license, _license_error, _no_license_until
 
-    if _cached_license is _NO_KEY_CONFIGURED:
-        return None
-    if _cached_license is not None:
+    if _cached_license is _NO_LICENSE:
+        if time.monotonic() < _no_license_until:
+            return None
+    elif _cached_license is not None:
         return _cached_license  # type: ignore[return-value]
 
     # Ensure .env is loaded
@@ -297,7 +308,8 @@ def load_license() -> LicensePayload | None:
     key = os.environ.get("POCKETPAW_LICENSE_KEY", "").strip()
     if not key:
         _license_error = "No license key configured (set POCKETPAW_LICENSE_KEY)"
-        _cached_license = _NO_KEY_CONFIGURED
+        _cached_license = _NO_LICENSE
+        _no_license_until = time.monotonic() + _NO_LICENSE_TTL_SECONDS
         return None
 
     try:
@@ -312,15 +324,18 @@ def load_license() -> LicensePayload | None:
         return _cached_license
     except ValueError as exc:
         _license_error = str(exc)
+        _cached_license = _NO_LICENSE
+        _no_license_until = time.monotonic() + _NO_LICENSE_TTL_SECONDS
         logger.warning("Enterprise license invalid: %s", exc)
         return None
 
 
 def get_license() -> LicensePayload | None:
     """Return cached license or None."""
-    if _cached_license is _NO_KEY_CONFIGURED:
-        return None
-    if _cached_license is not None:
+    if _cached_license is _NO_LICENSE:
+        if time.monotonic() < _no_license_until:
+            return None
+    elif _cached_license is not None:
         return _cached_license  # type: ignore[return-value]
     return load_license()
 
