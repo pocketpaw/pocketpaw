@@ -1,8 +1,9 @@
 # chain.py — ExtractionChain runner + build_chain factory.
-# Created: 2026-04-30 — Phase 1 of "Files as Knowledge" plan, Stage 1.A.
 # Routes a (path, mime) pair to the configured adapter chain with offline
 # detection and per-MIME overrides. Always falls back to a network-free
-# adapter on failure or offline conditions.
+# adapter on failure or offline conditions. The reachability probe is a
+# blocking socket connect, so it runs in a worker thread and its answer is
+# cached for `_ONLINE_TTL_S`; tests replace `_is_online` wholesale.
 """Extraction chain runner.
 
 Selection order on `run(path, mime)`:
@@ -19,8 +20,10 @@ The fallback is always available — it's wired to LocalExtractor in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
+import time
 from pathlib import Path
 
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionAdapter, ExtractionResult
@@ -28,13 +31,24 @@ from pocketpaw_ee.cloud.extraction.adapter import ExtractionAdapter, ExtractionR
 logger = logging.getLogger(__name__)
 
 
+_ONLINE_TTL_S = 60.0
+_online_cache: tuple[float, bool] | None = None
+
+
 def _is_online() -> bool:
-    """Cheap reachability check. Tests monkeypatch this."""
+    """Reachability check, cached for ``_ONLINE_TTL_S``. Blocking — call it in a
+    thread. Tests monkeypatch this."""
+    global _online_cache
+    now = time.monotonic()
+    if _online_cache is not None and now - _online_cache[0] < _ONLINE_TTL_S:
+        return _online_cache[1]
     try:
         with socket.create_connection(("8.8.8.8", 53), timeout=2):
-            return True
+            online = True
     except OSError:
-        return False
+        online = False
+    _online_cache = (now, online)
+    return online
 
 
 class ExtractionChain:
@@ -69,7 +83,7 @@ class ExtractionChain:
         return await self._offline_fallback.extract(path, mime)
 
     async def _call(self, adapter: ExtractionAdapter, path: Path, mime: str) -> ExtractionResult:
-        if adapter.requires_network and not _is_online():
+        if adapter.requires_network and not await asyncio.to_thread(_is_online):
             logger.info(
                 "adapter %s requires network but host is offline; using fallback",
                 adapter.name,
