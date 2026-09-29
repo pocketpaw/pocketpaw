@@ -24,7 +24,8 @@ closed and reset when the request finishes):
   * The user stash. After full verification of an ACTIVE user the bridge stores
     ``(token, user)``; ``RevocableJWTStrategy.read_token`` asks ``stashed_user``
     and gets it back only for the identical token string under the same key,
-    audience and algorithm. That turns the route's fastapi-users dependencies
+    audience and algorithm (compared as an HMAC fingerprint, so the scope never
+    holds the secret). That turns the route's fastapi-users dependencies
     (two when a route mixes ``current_optional_user`` and
     ``current_active_user``) from a full re-verify each into a lookup. Only the
     bridge writes it.
@@ -39,6 +40,8 @@ request end means a task that outlives the request reads nothing.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from collections.abc import Awaitable, Callable, Hashable
 from contextvars import ContextVar
@@ -51,10 +54,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 logger = logging.getLogger(__name__)
 
 # Paths the OSS AuthMiddleware skips entirely. Don't waste a JWT decode
-# on these.
-_EXEMPT_PREFIXES = (
-    "/static/",
-    "/uploads/",
+# on these. Each entry matches itself and its subpaths ("/login/" too), never
+# a look-alike such as "/api/v1/auth/verify-anything".
+_EXEMPT_PATHS = (
     "/api/v1/auth/login",
     "/api/v1/auth/register",
     "/api/v1/auth/bearer/login",
@@ -64,6 +66,12 @@ _EXEMPT_PREFIXES = (
     "/api/v1/auth/request-verify-token",
     "/api/v1/auth/verify",
 )
+_EXEMPT_SUBTREES = ("/static/", "/uploads/", *(p + "/" for p in _EXEMPT_PATHS))
+
+
+def _path_is_exempt(path: str) -> bool:
+    return path == "/" or path in _EXEMPT_PATHS or path.startswith(_EXEMPT_SUBTREES)
+
 
 _MEMO_METHODS = frozenset({"GET", "HEAD"})
 
@@ -78,7 +86,7 @@ class _RequestScope:
         self.open = True
         self.token: str | None = None
         self.user: Any = None
-        self.verifier: tuple[Any, ...] | None = None
+        self.verifier: bytes | None = None
 
     def close(self) -> None:
         self.open = False
@@ -89,12 +97,20 @@ class _RequestScope:
 _request_scope: ContextVar[_RequestScope | None] = ContextVar("ee_request_scope", default=None)
 
 
-def _verifier_of(strategy: Any) -> tuple[Any, ...]:
-    """What a token was verified under: key, audience, algorithm."""
+def _decode_key(strategy: Any) -> str:
     key = strategy.decode_key
-    if not isinstance(key, str):
-        key = key.get_secret_value()
-    return (key, tuple(strategy.token_audience), strategy.algorithm)
+    return key if isinstance(key, str) else key.get_secret_value()
+
+
+def _verifier_of(strategy: Any) -> bytes:
+    """Fingerprint of what a token was verified under: key, audience, algorithm.
+
+    An HMAC keyed by the secret, so the per-request scope (which child tasks
+    share) never holds the secret itself. Equal fingerprints mean equal
+    verifiers; a different key, audience or algorithm gives a different one.
+    """
+    message = repr((tuple(strategy.token_audience), strategy.algorithm)).encode()
+    return hmac.new(_decode_key(strategy).encode(), message, hashlib.sha256).digest()
 
 
 def stashed_user(token: str, strategy: Any) -> Any:
@@ -102,7 +118,7 @@ def stashed_user(token: str, strategy: Any) -> Any:
     scope = _request_scope.get()
     if scope is None or not scope.open or scope.user is None or scope.token != token:
         return None
-    if scope.verifier != _verifier_of(strategy):
+    if not hmac.compare_digest(scope.verifier or b"", _verifier_of(strategy)):
         return None
     return scope.user
 
@@ -145,7 +161,7 @@ class EEAuthBridgeMiddleware:
 
     async def _stamp(self, request: Request, request_scope: _RequestScope) -> None:
         path = request.url.path
-        if path == "/" or any(path.startswith(p) for p in _EXEMPT_PREFIXES):
+        if _path_is_exempt(path):
             return
 
         # Pull the JWT from cookie first, then Authorization header. We don't
@@ -195,7 +211,7 @@ class EEAuthBridgeMiddleware:
             request.state.full_access = True
 
 
-async def _resolve_user(token: str) -> tuple[Any, tuple[Any, ...]] | None:
+async def _resolve_user(token: str) -> tuple[Any, bytes] | None:
     """Verify the JWT and load the User. ``(user, verifier)`` or None on any failure."""
     try:
         # Lazy imports — keeps middleware module light and avoids triggering
@@ -205,11 +221,10 @@ async def _resolve_user(token: str) -> tuple[Any, tuple[Any, ...]] | None:
         from pocketpaw_ee.cloud.models.user import User
 
         strategy = RevocableJWTStrategy(secret=SECRET, lifetime_seconds=1)
-        verifier = _verifier_of(strategy)
         try:
             payload = jwt.decode(
                 token,
-                verifier[0],
+                _decode_key(strategy),
                 audience=strategy.token_audience,
                 algorithms=[strategy.algorithm],
             )
@@ -225,7 +240,7 @@ async def _resolve_user(token: str) -> tuple[Any, tuple[Any, ...]] | None:
         user = await User.get(user_id)
         if user is None:
             return None
-        return user, verifier
+        return user, _verifier_of(strategy)
     except Exception:
         # Swallow — bridge auth is best-effort. A failure here just means the
         # request is not stamped; the route's own auth still runs.

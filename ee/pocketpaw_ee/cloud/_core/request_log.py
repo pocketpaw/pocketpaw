@@ -5,8 +5,10 @@ its time to first byte, not its stream length) and that sample goes to
 ``_core.timing`` for ``GET /api/v1/_admin/perf``. Every request not on the
 skip list below is also recorded in the dedicated ``request_logs`` collection
 (method + route template, status, duration, actor, workspace, ``is_error`` for
-4xx/5xx), which powers the /audit page. It is NOT the workspace audit, so API
-traffic stays out of the Activity feed. Websockets and lifespan pass through.
+4xx/5xx), which powers the /audit page. Actor and workspace are read from the
+shared ``request.state`` at response start, after the inner auth bridge ran. It
+is NOT the workspace audit, so API traffic stays out of the Activity feed.
+Websockets and lifespan pass through.
 
 Skipped from the log (still timed): health probes, the CSRF token fetch and
 static assets. They carry no audit value and were the bulk of the volume.
@@ -92,21 +94,15 @@ class RequestLogMiddleware:
         skipped = _is_skipped(request.url.path)
         start = time.perf_counter()
 
-        # Read auth info before the response (the user may be resolved
-        # by downstream middleware during request processing).
-        actor_id = "" if skipped else _resolve_actor(request)
-
         async def _send(message: Message) -> None:
             if message["type"] == "http.response.start":
-                _on_response_start(request, skipped, actor_id, start, message["status"])
+                _on_response_start(request, skipped, start, message["status"])
             await send(message)
 
         await self.app(scope, receive, _send)
 
 
-def _on_response_start(
-    request: Request, skipped: bool, actor_id: str, start: float, status_code: int
-) -> None:
+def _on_response_start(request: Request, skipped: bool, start: float, status_code: int) -> None:
     duration_ms = (time.perf_counter() - start) * 1000.0
     scope_route = request.scope.get("route")
     timing.record(request.method, scope_route, duration_ms)
@@ -127,7 +123,9 @@ def _on_response_start(
         path=path,
         status_code=status_code,
         duration_ms=duration_ms,
-        actor_id=actor_id,
+        # Resolved here, not on the way in: the auth bridge that stamps the
+        # user runs INSIDE this middleware, and request.state is shared.
+        actor_id=_resolve_actor(request),
         workspace_id=_resolve_workspace(request),
         is_error=status_code >= 400,
         user_agent=request.headers.get("user-agent", ""),

@@ -21,7 +21,7 @@
   {
     "label": "the stash is served to a strategy with another key",
     "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
-    "find": "    if scope.verifier != _verifier_of(strategy):\n        return None\n",
+    "find": "    if not hmac.compare_digest(scope.verifier or b\"\", _verifier_of(strategy)):\n        return None\n",
     "replace": "",
     "tests": [
       "tests/cloud/auth/test_auth_request_path.py::test_a_strategy_with_another_key_never_reads_the_stash"
@@ -111,8 +111,8 @@
   {
     "label": "the no-key result is not cached (load_dotenv per request again)",
     "file": "ee/pocketpaw_ee/cloud/license.py",
-    "find": "        _cached_license = _NO_KEY_CONFIGURED\n",
-    "replace": "",
+    "find": "        _license_error = \"No license key configured (set POCKETPAW_LICENSE_KEY)\"\n        _cached_license = _NO_LICENSE\n",
+    "replace": "        _license_error = \"No license key configured (set POCKETPAW_LICENSE_KEY)\"\n",
     "tests": [
       "tests/cloud/test_license_negative_cache.py::test_no_key_is_loaded_once_across_requests"
     ]
@@ -120,8 +120,8 @@
   {
     "label": "get_license hands the sentinel back as a license",
     "file": "ee/pocketpaw_ee/cloud/license.py",
-    "find": "    \"\"\"Return cached license or None.\"\"\"\n    if _cached_license is _NO_KEY_CONFIGURED:\n        return None\n",
-    "replace": "    \"\"\"Return cached license or None.\"\"\"\n",
+    "find": "    \"\"\"Return cached license or None.\"\"\"\n    if _cached_license is _NO_LICENSE:\n        if time.monotonic() < _no_license_until:\n            return None\n    elif _cached_license is not None:\n",
+    "replace": "    \"\"\"Return cached license or None.\"\"\"\n    if _cached_license is not None:\n",
     "tests": [
       "tests/cloud/test_license_negative_cache.py"
     ]
@@ -156,10 +156,100 @@
   {
     "label": "a cookie-auth POST with a mismatched csrf token is let through",
     "file": "ee/pocketpaw_ee/cloud/_core/csrf.py",
-    "find": "        if not secrets.compare_digest(cookie_value, header_value):",
-    "replace": "        if False:",
+    "find": "        if not secrets.compare_digest(\n            cookie_value.encode(\"utf-8\", \"surrogatepass\"),\n            header_value.encode(\"utf-8\", \"surrogatepass\"),\n        ):\n",
+    "replace": "        if False:\n",
     "tests": [
       "tests/cloud/test_csrf_middleware.py::test_post_with_mismatched_csrf_header_returns_403"
+    ]
+  },
+  {
+    "label": "the no-key result never expires (a key added after boot needs a restart)",
+    "file": "ee/pocketpaw_ee/cloud/license.py",
+    "find": "    global _cached_license, _license_error, _no_license_until\n\n    if _cached_license is _NO_LICENSE:\n        if time.monotonic() < _no_license_until:\n            return None\n",
+    "replace": "    global _cached_license, _license_error, _no_license_until\n\n    if _cached_license is _NO_LICENSE:\n        return None\n",
+    "tests": [
+      "tests/cloud/test_license_negative_cache.py::test_a_key_added_after_the_ttl_opens_the_gate_without_a_restart"
+    ]
+  },
+  {
+    "label": "the request log reads a state snapshot taken before the auth bridge ran",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "        request = Request(scope)\n",
+    "replace": "        request = Request({**scope, \"state\": dict(scope.get(\"state\", {}))})\n",
+    "tests": [
+      "tests/cloud/auth/test_auth_request_path.py::test_the_request_log_records_the_jwt_user"
+    ]
+  },
+  {
+    "label": "csrf compares str tokens (a non-ASCII token is a 500, not a 403)",
+    "file": "ee/pocketpaw_ee/cloud/_core/csrf.py",
+    "find": "        if not secrets.compare_digest(\n            cookie_value.encode(\"utf-8\", \"surrogatepass\"),\n            header_value.encode(\"utf-8\", \"surrogatepass\"),\n        ):\n",
+    "replace": "        if not secrets.compare_digest(cookie_value, header_value):\n",
+    "tests": [
+      "tests/cloud/test_csrf_middleware.py::test_a_non_ascii_token_mismatch_is_a_403_not_a_500"
+    ]
+  },
+  {
+    "label": "the stash verifier carries the raw secret",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "    return hmac.new(_decode_key(strategy).encode(), message, hashlib.sha256).digest()\n",
+    "replace": "    return _decode_key(strategy).encode() + message\n",
+    "tests": [
+      "tests/cloud/auth/test_auth_request_path.py::test_the_stash_fingerprint_does_not_carry_the_secret"
+    ]
+  },
+  {
+    "label": "the stash fingerprint ignores audience and algorithm",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "    message = repr((tuple(strategy.token_audience), strategy.algorithm)).encode()\n",
+    "replace": "    message = b\"\"\n",
+    "tests": [
+      "tests/cloud/auth/test_auth_request_path.py::test_the_stash_fingerprint_does_not_carry_the_secret"
+    ]
+  },
+  {
+    "label": "csrf exempts any path that merely starts with an exempt one (/healthX)",
+    "file": "ee/pocketpaw_ee/cloud/_core/csrf.py",
+    "find": "    return path in _EXEMPT_PATHS or path.startswith(_EXEMPT_SUBTREES)\n",
+    "replace": "    return path.startswith(_EXEMPT_PATHS)\n",
+    "tests": [
+      "tests/cloud/test_csrf_middleware.py::test_a_look_alike_path_is_csrf_checked"
+    ]
+  },
+  {
+    "label": "the bridge skips any path that merely starts with an exempt one",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "    return path == \"/\" or path in _EXEMPT_PATHS or path.startswith(_EXEMPT_SUBTREES)\n",
+    "replace": "    return path == \"/\" or path.startswith((\"/static/\", \"/uploads/\", *_EXEMPT_PATHS))\n",
+    "tests": [
+      "tests/cloud/auth/test_auth_request_path.py::test_the_bridge_stamps_look_alike_paths"
+    ]
+  },
+  {
+    "label": "an invalid key is not cached (signature re-checked on every request)",
+    "file": "ee/pocketpaw_ee/cloud/license.py",
+    "find": "        _license_error = str(exc)\n        _cached_license = _NO_LICENSE\n",
+    "replace": "        _license_error = str(exc)\n",
+    "tests": [
+      "tests/cloud/test_license_negative_cache.py::test_an_invalid_key_is_cached_for_the_ttl_then_re_verified"
+    ]
+  },
+  {
+    "label": "the invalid-key result never expires",
+    "file": "ee/pocketpaw_ee/cloud/license.py",
+    "find": "        _cached_license = _NO_LICENSE\n        _no_license_until = time.monotonic() + _NO_LICENSE_TTL_SECONDS\n        logger.warning(",
+    "replace": "        _cached_license = _NO_LICENSE\n        _no_license_until = float(\"inf\")\n        logger.warning(",
+    "tests": [
+      "tests/cloud/test_license_negative_cache.py::test_an_invalid_key_is_cached_for_the_ttl_then_re_verified"
+    ]
+  },
+  {
+    "label": "an anonymous request is logged with an empty actor",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "        return str(uid)\n    return \"anonymous\"\n",
+    "replace": "        return str(uid)\n    return \"\"\n",
+    "tests": [
+      "tests/cloud/auth/test_auth_request_path.py::test_the_request_log_records_an_anonymous_request_as_anonymous"
     ]
   }
 ]

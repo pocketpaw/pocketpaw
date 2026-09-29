@@ -270,6 +270,107 @@ async def test_read_token_returns_the_user_type_fastapi_users_expects(client) ->
     assert served is user and isinstance(served, User)
 
 
+def test_the_stash_fingerprint_does_not_carry_the_secret() -> None:
+    fingerprint = ee_auth_bridge._verifier_of(get_jwt_strategy())
+    assert isinstance(fingerprint, bytes)
+    assert SECRET.encode() not in fingerprint
+    assert SECRET not in repr(fingerprint)
+    other = RevocableJWTStrategy(secret="a-different-secret-entirely", lifetime_seconds=60)
+    assert ee_auth_bridge._verifier_of(other) != fingerprint
+    other_aud = RevocableJWTStrategy(secret=SECRET, lifetime_seconds=60, token_audience=["x"])
+    assert ee_auth_bridge._verifier_of(other_aud) != fingerprint
+    assert ee_auth_bridge._verifier_of(get_jwt_strategy()) == fingerprint
+
+
+# ---------------------------------------------------------------------------
+# Which paths the bridge skips
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/static/app.js",
+        "/uploads/avatars/a.png",
+        "/api/v1/auth/login",
+        "/api/v1/auth/register",
+        "/api/v1/auth/bearer/login",
+        "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password",
+        "/api/v1/auth/request-verify-token",
+        "/api/v1/auth/verify",
+        "/api/v1/auth/login/",
+    ],
+)
+def test_the_bridge_skips_its_bootstrap_paths(path: str) -> None:
+    assert ee_auth_bridge._path_is_exempt(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/auth/verify-anything",
+        "/api/v1/auth/loginx",
+        "/api/v1/auth/registered",
+        "/staticx/app.js",
+        "/api/v1/auth/me",
+    ],
+)
+def test_the_bridge_stamps_look_alike_paths(path: str) -> None:
+    assert not ee_auth_bridge._path_is_exempt(path)
+
+
+# ---------------------------------------------------------------------------
+# The request log sees the user the bridge resolved
+# ---------------------------------------------------------------------------
+
+_LOGGED_FIELDS = {
+    "method",
+    "path",
+    "status_code",
+    "duration_ms",
+    "actor_id",
+    "workspace_id",
+    "is_error",
+    "user_agent",
+    "ip",
+}
+
+
+@pytest_asyncio.fixture
+async def logged_client(mongo_db, fake_redis):  # noqa: ARG001 — Beanie + fakeredis
+    app = _build_app()
+    app.add_middleware(RequestLogMiddleware)  # outside the bridge, as mount_cloud stacks it
+    limiter = RateLimiter(rate=1e6, capacity=10**6)
+    transport = ASGITransport(app=app, client=("203.0.113.7", 40000))
+    with (
+        patch("pocketpaw.dashboard_auth.api_limiter", limiter),
+        patch("pocketpaw.dashboard_auth.get_access_token", return_value="oss-master-token"),
+        patch("pocketpaw_ee.cloud._core.request_log._log_request") as log,
+    ):
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            yield c, log
+
+
+async def test_the_request_log_records_the_jwt_user(logged_client) -> None:
+    client, log = logged_client
+    user = await _seed("logged@t.test")
+    r = await client.get("/api/v1/optional", headers=_bearer(await _jwt(user)))
+    assert r.status_code == 200
+    assert log.call_count == 1
+    assert log.call_args.kwargs["actor_id"] == str(user.id)
+    assert set(log.call_args.kwargs) == _LOGGED_FIELDS
+
+
+async def test_the_request_log_records_an_anonymous_request_as_anonymous(logged_client) -> None:
+    client, log = logged_client
+    r = await client.get("/api/v1/optional")
+    assert r.status_code == 200
+    assert log.call_args.kwargs["actor_id"] == "anonymous"
+    assert set(log.call_args.kwargs) == _LOGGED_FIELDS
+
+
 # ---------------------------------------------------------------------------
 # Pure ASGI: streaming and websockets pass through untouched
 # ---------------------------------------------------------------------------
