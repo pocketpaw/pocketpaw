@@ -1,5 +1,5 @@
 # tests/cloud/auth/test_password_offload.py — password hashing stays off the
-# event loop, at OWASP argon2id parameters, with old hashes upgraded on login.
+# event loop, at OWASP argon2id parameters, bounded, and never downgraded.
 #
 # What each test guards:
 #   * every auth flow that hashes (register, login known/unknown/wrong,
@@ -7,11 +7,15 @@
 #     seed_admin) runs the hash on a worker thread, never the loop thread;
 #   * an unknown email still costs one hash and gets the same 400 as a wrong
 #     password (timing-attack mitigation);
-#   * a hash made with the old 64 MiB params logs in and is rewritten to the
-#     new params;
+#   * rehash-on-login only raises cost: a weaker argon2 (or bcrypt) hash is
+#     rewritten, the older stronger 64 MiB hash and a mixed one are kept;
 #   * the loop keeps ticking while 8 logins hash (a blocking fake stands in
 #     for argon2 so the margin is not at the mercy of Windows' ~16 ms timer);
-#   * the semaphore caps in-flight hashes;
+#   * the pool caps in-flight hashes, also across cancelled requests, and the
+#     pending cap fails fast with 429 auth.busy (also through /auth/login);
+#   * a missing / garbage stored hash is a wrong password, not a 500;
+#   * guest upgrade runs the register password policy (weak + breached);
+#   * MFA disable / regenerate are rate-limited per user;
 #   * the UserManager overrides still match the upstream fastapi-users code
 #     they were copied from.
 
@@ -216,23 +220,56 @@ async def test_seed_admin_hashes_off_the_loop(mongo_db, recorder, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_old_params_hash_logs_in_and_is_rehashed(mongo_db):
+async def _login_with_stored(manager: UserManager, stored: str) -> str:
+    user = await User.find_one(User.email == _EMAIL)
+    await manager.user_db.update(user, {"hashed_password": stored})
+    assert await manager.authenticate(_Creds(_EMAIL, _PASSWORD)) is not None
+    return (await User.find_one(User.email == _EMAIL)).hashed_password
+
+
+async def test_older_stronger_hash_logs_in_and_is_kept(mongo_db):
     manager = await _manager()
-    user = await manager.create(UserCreate(email=_EMAIL, password=_PASSWORD))
-    old_helper = PasswordHash((Argon2Hasher(),))  # pwdlib default: m=64 MiB, t=3, p=4
-    old_hash = old_helper.hash(_PASSWORD)
+    await manager.create(UserCreate(email=_EMAIL, password=_PASSWORD))
+    old_hash = PasswordHash((Argon2Hasher(),)).hash(_PASSWORD)  # pwdlib default
     assert "$m=65536,t=3,p=4$" in old_hash
-    await manager.user_db.update(user, {"hashed_password": old_hash})
-
-    assert await manager.authenticate(_Creds(_EMAIL, _PASSWORD)) is not None
-
-    rehashed = (await User.find_one(User.email == _EMAIL)).hashed_password
-    assert rehashed.startswith(_NEW_PARAMS)
-    assert rehashed != old_hash
-    # The rewritten hash still logs in, and is not rewritten again.
-    assert await manager.authenticate(_Creds(_EMAIL, _PASSWORD)) is not None
-    assert (await User.find_one(User.email == _EMAIL)).hashed_password == rehashed
+    assert await _login_with_stored(manager, old_hash) == old_hash
+    # Mixed (lower memory, higher time) is not strictly weaker: kept too.
+    mixed = PasswordHash((Argon2Hasher(memory_cost=8192, time_cost=3, parallelism=1),))
+    mixed_hash = mixed.hash(_PASSWORD)
+    assert await _login_with_stored(manager, mixed_hash) == mixed_hash
     assert await manager.authenticate(_Creds(_EMAIL, "WrongPass999!")) is None
+
+
+async def test_weaker_hash_logs_in_and_is_rehashed(mongo_db):
+    manager = await _manager()
+    await manager.create(UserCreate(email=_EMAIL, password=_PASSWORD))
+    weak = PasswordHash((Argon2Hasher(memory_cost=8192, time_cost=1, parallelism=1),))
+    weak_hash = weak.hash(_PASSWORD)
+    rehashed = await _login_with_stored(manager, weak_hash)
+    assert rehashed.startswith(_NEW_PARAMS)
+    # The rewritten hash still logs in, and is not rewritten again.
+    assert await _login_with_stored(manager, rehashed) == rehashed
+
+
+async def test_missing_or_garbage_stored_hash_is_a_wrong_password():
+    for stored in (None, "", "not-a-hash", "$argon2id$garbage"):
+        assert await password_hashing.verify_and_update(_PASSWORD, stored) == (False, None)
+
+
+async def test_mfa_disable_with_unusable_stored_hash_is_400_not_500(client):
+    manager = await _manager()
+    await manager.create(UserCreate(email=_EMAIL, password=_PASSWORD, is_verified=True))
+    assert (await _login(client, _EMAIL, _PASSWORD)).status_code in (200, 204)
+    user = await User.find_one(User.email == _EMAIL)
+    user.mfa_enabled = True
+    user.mfa_totp_secret = pyotp.random_base32()
+    user.hashed_password = "not-a-hash"  # e.g. a social-only account
+    await user.save()
+    resp = await client.post(
+        "/api/v1/auth/mfa/disable",
+        json={"password": _PASSWORD, "code": pyotp.TOTP(user.mfa_totp_secret).now()},
+    )
+    assert resp.status_code == 400 and "mfa_invalid_password" in resp.text
 
 
 async def test_bcrypt_hash_still_verifies():
@@ -314,9 +351,55 @@ async def test_event_loop_keeps_ticking_during_eight_logins(mongo_db, slow_helpe
     assert max_gap < _FAKE_HASH_SECONDS / 2, f"loop stalled for {max_gap * 1000:.0f} ms"
 
 
-async def test_semaphore_caps_concurrent_hashes(slow_helper):
+async def _drain() -> None:
+    for _ in range(200):
+        if password_hashing._pending == 0:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{password_hashing._pending} hash jobs never finished")
+
+
+async def test_pool_caps_concurrent_hashes(slow_helper):
     await asyncio.gather(*(password_hashing.hash_password(f"p{i}") for i in range(12)))
     assert slow_helper["peak"] == password_hashing.MAX_CONCURRENT_HASHES
+
+
+async def test_cancelled_requests_do_not_free_running_slots(slow_helper):
+    first = [asyncio.create_task(password_hashing.hash_password(f"a{i}")) for i in range(4)]
+    await asyncio.sleep(0.03)  # all four threads are now burning
+    for task in first:
+        task.cancel()
+    await asyncio.gather(*first, return_exceptions=True)
+    # The cancelled jobs' threads are still burning, so they still hold slots.
+    assert password_hashing._pending == 4
+    await asyncio.gather(*(password_hashing.hash_password(f"b{i}") for i in range(4)))
+    # A slot freed on cancel would have let 8 hashes run at once.
+    assert slow_helper["peak"] == password_hashing.MAX_CONCURRENT_HASHES
+    await _drain()
+
+
+async def test_pending_cap_fails_fast_with_auth_busy(slow_helper, monkeypatch):
+    from pocketpaw_ee.cloud._core.errors import RateLimited
+
+    monkeypatch.setattr(password_hashing, "MAX_PENDING_HASHES", 6)
+    results = await asyncio.gather(
+        *(password_hashing.hash_password(f"p{i}") for i in range(10)), return_exceptions=True
+    )
+    busy = [r for r in results if isinstance(r, RateLimited)]
+    assert len(busy) == 4 and sum(isinstance(r, str) for r in results) == 6
+    assert busy[0].status_code == 429 and busy[0].code == "auth.busy"
+    await _drain()
+    # Slots come back once the jobs finish.
+    assert (await password_hashing.hash_password("again")).startswith("$fake$")
+
+
+async def test_busy_login_is_a_429_not_a_500(client, monkeypatch):
+    manager = await _manager()
+    await manager.create(UserCreate(email=_EMAIL, password=_PASSWORD))
+    monkeypatch.setattr(password_hashing, "MAX_PENDING_HASHES", 0)
+    resp = await _login(client, _EMAIL, _PASSWORD)
+    assert resp.status_code == 429, resp.text
+    assert resp.json()["error"]["code"] == "auth.busy"
 
 
 async def test_shared_helper_uses_owasp_params():
@@ -324,6 +407,80 @@ async def test_shared_helper_uses_owasp_params():
     assert hashed.startswith(_NEW_PARAMS)
     manager = UserManager(user_db=None)
     assert manager.password_helper is password_hashing.password_helper
+
+
+# ---------------------------------------------------------------------------
+# Guest upgrade password policy and the MFA password limiter
+# ---------------------------------------------------------------------------
+
+
+async def _guest() -> User:
+    doc = User(
+        email=f"guest-{time.monotonic_ns()}@guest.invalid",
+        hashed_password="x",
+        is_active=True,
+        is_guest=True,
+    )
+    await doc.insert()
+    return doc
+
+
+async def test_guest_upgrade_rejects_weak_and_breached_passwords(mongo_db, monkeypatch):
+    from fastapi_users.exceptions import InvalidPasswordException
+    from pocketpaw_ee.cloud.auth import password_policy
+
+    guest = await _guest()
+    with pytest.raises(InvalidPasswordException) as weak:
+        await guest_service.upgrade_guest(guest, email="real@x.co", password="alllowercase1!")
+    assert weak.value.reason == "missing_uppercase"
+
+    async def _breached(_password):
+        return True
+
+    monkeypatch.setenv("POCKETPAW_HIBP_ENABLED", "true")
+    monkeypatch.setattr(password_policy, "_is_breached", _breached)
+    with pytest.raises(InvalidPasswordException) as breached:
+        await guest_service.upgrade_guest(guest, email="real@x.co", password=_PASSWORD)
+    assert breached.value.reason == "breached"
+    fresh = await User.get(guest.id)
+    assert fresh.is_guest is True and fresh.hashed_password == "x"
+
+
+async def test_guest_upgrade_route_answers_with_the_register_error_shape(mongo_db):
+    from pocketpaw_ee.cloud.auth.core import current_active_user
+
+    guest = await _guest()
+    app = _app()
+    app.dependency_overrides[current_active_user] = lambda: guest
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/auth/guest/upgrade", json={"email": "real@x.co", "password": "weakpass1!"}
+        )
+    assert resp.status_code == 400, resp.text
+    assert resp.json() == {
+        "detail": {"code": "REGISTER_INVALID_PASSWORD", "reason": "missing_uppercase"}
+    }
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/auth/mfa/disable", "/api/v1/auth/mfa/backup-codes/regenerate"]
+)
+async def test_mfa_password_endpoints_are_rate_limited_per_user(client, path):
+    manager = await _manager()
+    await manager.create(UserCreate(email=_EMAIL, password=_PASSWORD, is_verified=True))
+    assert (await _login(client, _EMAIL, _PASSWORD)).status_code in (200, 204)
+    secret = pyotp.random_base32()
+    user = await User.find_one(User.email == _EMAIL)
+    user.mfa_enabled = True
+    user.mfa_totp_secret = secret
+    await user.save()
+
+    for _ in range(5):
+        bad = await client.post(path, json={"password": "WrongPass999!", "code": "000000"})
+        assert bad.status_code == 400
+    # Sixth attempt is refused even with the right password.
+    resp = await client.post(path, json={"password": _PASSWORD, "code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 429 and "mfa_too_many_attempts" in resp.text
 
 
 # ---------------------------------------------------------------------------

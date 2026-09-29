@@ -9,6 +9,7 @@
 # ``upgrade_guest`` / ``upgrade_guest_via_social`` promote the SAME user id in
 # place (password or social identity), so pages and the stored key survive.
 # Password hashes use the shared ``auth.password_hashing`` helper, off the loop.
+# ``upgrade_guest`` runs the register password policy (incl. HIBP) first.
 #
 # Flow (the order is the security property):
 #   rate-limit -> validate the key against the provider -> mint user ->
@@ -38,6 +39,7 @@ import uuid
 
 from pocketpaw_ee.cloud._core.errors import CloudError, ValidationError
 from pocketpaw_ee.cloud.auth.password_hashing import hash_password
+from pocketpaw_ee.cloud.auth.password_policy import validate_password_async
 from pocketpaw_ee.cloud.byok import service as byok_service
 from pocketpaw_ee.cloud.models.user import GuestLimits, User
 
@@ -176,6 +178,9 @@ async def upgrade_guest(user: User, *, email: str, password: str) -> User:
     existing = await User.find_one(User.email == email)
     if existing is not None and existing.id != user.id:
         raise CloudError(409, "auth.email_taken", "That email already has an account — sign in.")
+    # Same policy (and HIBP check) as /auth/register; raises
+    # InvalidPasswordException, which the route maps to register's 400 shape.
+    await validate_password_async(password, email=email)
 
     user.email = email
     user.hashed_password = await hash_password(password)

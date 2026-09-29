@@ -248,7 +248,8 @@ class UserManager(ObjectIDIDMixin, BaseUserManager[User, PydanticObjectId]):
         )
         if not verified:
             return None
-        # Rehash to the current parameters (e.g. an old 64 MiB argon2 hash).
+        # Rehash only when the stored hash is weaker (bcrypt, or argon2 below
+        # our params); password_hashing never lowers an existing hash's cost.
         if updated_password_hash is not None:
             await self.user_db.update(user, {"hashed_password": updated_password_hash})
 
