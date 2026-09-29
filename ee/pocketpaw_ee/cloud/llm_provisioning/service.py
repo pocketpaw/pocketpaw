@@ -843,12 +843,15 @@ async def drain_pending_mints(timeout: float = 30.0) -> None:
     """Wait for in-flight background mints to finish. For shutdown and tests.
 
     A mint still running at the timeout is left alone; nothing retries it, so
-    that workspace stays on the master key until a key is minted for it.
+    that workspace stays on the master key until a key is minted for it. Only
+    tasks on the running loop are awaited; a task left on a closed loop cannot be.
     """
-    if not _pending_mints:
+    loop = asyncio.get_running_loop()
+    tasks = [t for t in _pending_mints if t.get_loop() is loop]
+    if not tasks:
         return
     with contextlib.suppress(asyncio.TimeoutError):
-        await asyncio.wait_for(asyncio.gather(*_pending_mints, return_exceptions=True), timeout)
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout)
 
 
 # ---------------------------------------------------------------------------

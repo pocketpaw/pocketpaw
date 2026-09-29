@@ -76,6 +76,9 @@ async def stub_proxy(monkeypatch):
             return {"key": f"sk-{kwargs.get('key_alias', 'x')}", **kwargs}
 
     monkeypatch.setattr(svc, "LiteLLMAdminClient", lambda *a, **k: _FakeAdmin())
+    # Other tests create workspaces without draining; their mints sit on loops
+    # that are already closed. Start each test from an empty set.
+    svc._pending_mints.clear()
     yield
     # Never leak a background mint into the next test.
     for task in list(svc._pending_mints):
