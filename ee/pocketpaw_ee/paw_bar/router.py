@@ -851,8 +851,11 @@ def _asset_version() -> str:
     both files' contents, not their mtime: a deploy that preserves or normalises
     mtimes (``cp -p``, ``rsync -a``, reproducible builds, two writes in one
     second) would otherwise mint new bytes under an old ``v`` and pin them for a
-    year. The hash is memoised on the files' (mtime_ns, size), so a frame render
-    costs two ``stat`` calls. Returns "0" when the bundle isn't dropped in yet
+    year. The hash is memoised on the files' (mtime, ctime, size): ctime is in the
+    signature because a same-size write with a preserved mtime would otherwise
+    hit the memo and keep the old hash (on Linux every write bumps ctime and
+    ``utime`` cannot reset it; on Windows ctime is creation time, dev only). A
+    frame render costs two ``stat`` calls. Returns "0" when the bundle isn't dropped in yet
     (assets 404 either way).
     """
     global _asset_version_memo
@@ -861,7 +864,7 @@ def _asset_version() -> str:
     for name in _VERSIONED_ASSETS:
         try:
             st = (base / name).stat()
-            sig.append((name, st.st_mtime_ns, st.st_size))
+            sig.append((name, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
         except OSError:
             sig.append((name, None))
     key = tuple(sig)
@@ -922,11 +925,12 @@ class PawBarAssets(StaticFiles):
 # control, so a long max-age would pin every embedder to whatever loader shipped on
 # the day their site was published. Five minutes keeps the edge useful and keeps a
 # fix at most one coffee away. Revalidation after that is cheap: the bytes are held
-# in memory (``_widget_js_memo``, re-read only when the file's path, mtime or size
+# in memory (``_widget_js_memo``, re-read only when the file's path, mtime, ctime or size
 # changes) and carry a strong ETag, so a browser's If-None-Match gets a bodiless 304.
 _WIDGET_JS_MAX_AGE = 300
-# (path, mtime_ns, size, body, etag) of the last loader read.
-_widget_js_memo: tuple[str, int, int, bytes, str] | None = None
+# (path, mtime_ns, ctime_ns, size, body, etag) of the last loader read. ctime is
+# there for the same reason as in ``_asset_version``'s signature.
+_widget_js_memo: tuple[str, int, int, int, bytes, str] | None = None
 
 
 def _etag_matches(if_none_match: str, etag: str) -> bool:
@@ -960,7 +964,7 @@ async def widget_js(request: Request) -> Response:
     No key, no Site read, no per-caller variation: this is a world-visible static
     script, and the credential (the embed key) is presented later by the iframe it
     mounts, at ``/paw-bar/frame``. Held in memory and invalidated by a ``stat`` per
-    request (path, mtime, size), not only at startup: replacing the file, or
+    request (path, mtime, ctime, size), not only at startup: replacing the file, or
     pointing ``PAW_BAR_WIDGET_JS`` somewhere else, still takes effect without a
     restart, and a stat is far cheaper than the read it saves. A matching
     ``If-None-Match`` gets a 304.
@@ -974,12 +978,13 @@ async def widget_js(request: Request) -> Response:
     try:
         st = path.stat()
         memo = _widget_js_memo
-        if memo is not None and memo[:3] == (str(path), st.st_mtime_ns, st.st_size):
-            body, etag = memo[3], memo[4]
+        sig = (str(path), st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+        if memo is not None and memo[:4] == sig:
+            body, etag = memo[4], memo[5]
         else:
             body = path.read_bytes()
             etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
-            _widget_js_memo = (str(path), st.st_mtime_ns, st.st_size, body, etag)
+            _widget_js_memo = (*sig, body, etag)
     except OSError:
         logger.warning("paw-bar: loader bundle unavailable at %s", path)
         raise HTTPException(

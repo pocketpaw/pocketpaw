@@ -147,6 +147,21 @@ async def test_asset_without_current_version_gets_short_max_age(assets, params):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("versioned", [True, False])
+async def test_asset_revalidation_304_keeps_the_policy(assets, versioned):
+    """After max-age a browser revalidates with StaticFiles' own ETag; the 304 must
+    carry the same Cache-Control the 200 did."""
+    from pocketpaw_ee.paw_bar.router import _asset_version
+
+    c, _ = assets
+    params = {"v": _asset_version()} if versioned else {}
+    etag = (await c.get("/pawbar-app/pawbar.js", params=params)).headers["etag"]
+    res = await c.get("/pawbar-app/pawbar.js", params=params, headers={"If-None-Match": etag})
+    assert res.status_code == 304
+    assert res.headers["cache-control"] == (_IMMUTABLE if versioned else "public, max-age=300")
+
+
+@pytest.mark.asyncio
 async def test_unversioned_file_never_immutable_even_with_current_v(assets):
     """The source map is not part of ``v``, so ``v`` says nothing about its bytes."""
     from pocketpaw_ee.paw_bar.router import _asset_version
