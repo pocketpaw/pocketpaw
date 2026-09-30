@@ -25,7 +25,12 @@ additionally require workspace ownership.
 no license and no membership check, so any authenticated user could inject a
 fabricated participant-left event into any group in any workspace. It now
 carries the same guard as its siblings; see
-``tests/cloud/livekit/test_leave_route_guard.py``."""
+``tests/cloud/livekit/test_leave_route_guard.py``.
+
+2026-09-30 (fix/livekit-call-security): ``/token`` now refuses any room name
+that isn't ``group-call-<id>`` for a group the caller belongs to in their
+workspace (it used to check only ``group-call-*`` names). See
+``tests/cloud/livekit/test_token_room_access.py``."""
 
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ from pydantic import BaseModel, Field
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.chat.group_service import (
     _get_group_domain_or_404,
+    _get_group_domain_or_none,
     _require_domain_group_member,
 )
 from pocketpaw_ee.cloud.license import require_license
@@ -233,11 +239,16 @@ async def generate_token(
     """
     await require_license()
 
-    # Verify the caller is a member of the group that owns this room.
+    # Every room name must map to a group the caller belongs to in their
+    # workspace. Until 2026-09-30 only ``group-call-*`` names were checked, so
+    # any other name minted a token with no check at all. One 403 for "not a
+    # call room", "no such group", "other workspace" and "not a member", so the
+    # response is not an existence oracle. The call-bot and guests never come
+    # here: their tokens are minted in create_room and invite accept.
     gid = _group_id_from_room_name(body.room_name)
-    if gid:
-        group = await _get_group_domain_or_404(gid)
-        _require_domain_group_member(group, str(user.id))
+    group = await _get_group_domain_or_none(gid) if gid else None
+    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:
+        raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
 
     # Use the user's full_name as the LiveKit participant name
     display_name = user.full_name or body.identity
@@ -252,20 +263,19 @@ async def generate_token(
     )
 
     # Notify group members that someone joined the call.
-    if gid:
-        try:
-            await emit(
-                CallParticipantJoined(
-                    data={
-                        "group_id": gid,
-                        "room_name": body.room_name,
-                        "identity": body.identity,
-                        "name": display_name,
-                    }
-                )
+    try:
+        await emit(
+            CallParticipantJoined(
+                data={
+                    "group_id": gid,
+                    "room_name": body.room_name,
+                    "identity": body.identity,
+                    "name": display_name,
+                }
             )
-        except Exception:
-            pass
+        )
+    except Exception:
+        pass
 
     return TokenResponse(
         token=token,
