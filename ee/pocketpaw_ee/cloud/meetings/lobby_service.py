@@ -24,6 +24,8 @@
 # ``access="open"`` admits a knock on its own once the call is running, at knock
 # time or on the guest's next poll.
 #
+# Every admit / deny is written to the audit log (``meeting.knock_decide``).
+#
 # Events (realtime, to the meeting room's members): ``meeting.knock`` for a new
 # knock that needs a decision, ``meeting.knock_resolved`` whenever a knock leaves
 # "waiting" (admitted, denied, cancelled, expired).
@@ -361,4 +363,15 @@ async def decide_knock(
     status = "admitted" if admit else "denied"
     if not await _transition(row, meeting, status, decided_by=user_id):
         raise _decided()
+
+    from pocketpaw_ee.guards import audit
+
+    audit.log_privileged_action(
+        actor=user_id,
+        action="meeting.knock_decide",
+        resource_id=str(row.id),
+        workspace_id=workspace_id,
+        meeting_id=str(meeting.id),
+        decision=status,
+    )
     return KnockDecisionResponse(knock_id=str(row.id), status=status)

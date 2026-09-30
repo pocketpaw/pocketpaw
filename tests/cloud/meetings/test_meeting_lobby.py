@@ -651,6 +651,26 @@ async def test_two_members_racing_only_one_decision_lands(client, lk, recording_
     assert knock["knock_id"] == str(row.id)
 
 
+@pytest.mark.parametrize("action", ["admit", "deny"])
+async def test_decisions_are_audited(client, lk, action) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+
+    with patch("pocketpaw_ee.guards.audit.log_privileged_action") as audit:
+        assert (await _decide(client, s, knock["knock_id"], action)).status_code == 200
+        again = await _decide(client, s, knock["knock_id"], action)
+
+    assert again.status_code == 409
+    audit.assert_called_once_with(
+        actor=s.host,
+        action="meeting.knock_decide",
+        resource_id=knock["knock_id"],
+        workspace_id=s.ws,
+        meeting_id=s.m.id,
+        decision="admitted" if action == "admit" else "denied",
+    )
+
+
 async def test_unknown_knock_is_404(client, lk) -> None:
     s = await _setup(lk)
     resp = await _decide(client, s, "0123456789abcdef01234567", "admit")

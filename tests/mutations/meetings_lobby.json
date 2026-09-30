@@ -376,5 +376,23 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
+  },
+  {
+    "label": "audit: decisions not logged",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    audit.log_privileged_action(\n        actor=user_id,",
+    "replace": "    (lambda **_: None)(\n        actor=user_id,",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "audit: wrong decision recorded",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        decision=status,\n    )",
+    "replace": "        decision=\"admitted\",\n    )",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
   }
 ]
