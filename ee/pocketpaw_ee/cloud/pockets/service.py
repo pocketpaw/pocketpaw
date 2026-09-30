@@ -1,38 +1,23 @@
 """Pockets domain — business logic service.
 
-Updated 2026-09-25 (fix/shared-pocket-chat-visibility): added ``can_read`` — a
-boolean wrapper over ``_fetch_readable`` so the sessions service can share a
-pocket's conversations with everyone who may read the pocket, using the same
-read rule rather than a second copy of it.
-
-Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): added ``site_render_inputs`` —
-a workspace-scoped projection of the fields that decide a site's render, so the
-``/sites/by-pocket/{id}/status`` verification summary can hash the current source
-without a user id.
-
 SOLE OWNER OF WRITES to the ``Pocket`` Beanie document, and of the
 ``PocketBackendCredential`` collection beside it. Module-level ``async def`` API
 returning wire dicts (legacy router compatibility); the doc → domain mapping
 helpers live here as private helpers.
 
-That ownership is a boundary the import-linter pins, not a convention: sites, kb,
-connectors, reconcile, the refresh scheduler and the jobs worker all read and
-write pockets THROUGH this module and none of them imports the Pocket model. A
-new caller that needs a field adds a function here rather than a second reader.
+The import-linter pins that boundary: sites, kb, connectors, reconcile, the
+schedulers and the jobs worker reach pockets THROUGH this module, so a new
+caller that needs a field adds a function here rather than a second reader.
 
-Public API: ``create`` / ``get`` / ``get_for_wire`` / ``list_pockets`` /
-``update`` / ``delete``; ``ensure_home_pocket``; ``duplicate_pocket`` and the
-``copy_site_snapshot`` it writes through (reused by template use); the share-link, collaborator,
-team and agent mutators; the per-pocket backend + write/tool allowlist setters;
-``merge_spec``; the ``set_{svelte,react,html}_source_file`` edit lane and its
-``set_site_dependency_manifest`` sibling (added 2026-09-24, PP-1: the only writer of
-a site's ``paw.dependencies.json``, called after the sites resolver vets each
-package); ``scan_source_site_pockets`` + ``migrate_legacy_build_shell`` (added
-2026-09-24, PP-4: the operator migration that moves build-shell files an old site
-authored out of its source map once the generator owns them — a draft-versioned
-write, never a publish); and the
-``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist subagent drives
-over MCP.
+Public API: ``create`` / ``get`` / ``get_for_wire`` / ``can_read`` /
+``list_pockets`` / ``update`` / ``delete``; ``ensure_home_pocket``;
+``duplicate_pocket`` and the ``copy_site_snapshot`` it writes through; the
+share-link, collaborator, team and agent mutators; the per-pocket backend +
+write/tool allowlist setters; ``merge_spec``; ``site_render_inputs``; the
+``set_{svelte,react,html}_source_file`` edit lane and
+``set_site_dependency_manifest`` (the only writer of ``paw.dependencies.json``);
+``scan_source_site_pockets`` + ``migrate_legacy_build_shell``; and the
+``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist drives over MCP.
 
 INVARIANTS a reader must not break:
 
