@@ -304,5 +304,41 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_schedule.py"
     ]
+  },
+  {
+    "label": "guest poll: admitted knock not told it ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n    ):",
+    "replace": "        \"waiting\",\n        \"expired\",\n    ):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest poll: waiting knock not told it ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n    ):",
+    "replace": "        \"admitted\",\n    ):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest poll: a denial turns into ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n    ):",
+    "replace": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n        \"denied\",\n    ):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest poll: ended only for status ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "if meetings_service._is_closed(meeting, _now()) and knock_row.status in (",
+    "replace": "if meeting.status == \"ended\" and knock_row.status in (",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
   }
 ]

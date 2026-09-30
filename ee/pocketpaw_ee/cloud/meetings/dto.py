@@ -27,6 +27,8 @@
 # ``scheduled_start`` and ``duration_minutes`` (rescheduling; ``status`` and any
 # other field are still a 422). ``MeetingResponse.joining_info`` is the same text
 # ``GET /meetings/{id}/joining-info`` returns; None for meetings without a code.
+# ``KnockStatusResponse.status`` can also be ``ended`` (the guest's poll once the
+# meeting is over).
 
 from __future__ import annotations
 
@@ -321,9 +323,10 @@ class KnockCreatedResponse(BaseModel):
 
 class KnockStatusResponse(BaseModel):
     """Guest poll / cancel. The four call fields are set only when the guest may
-    connect now (admitted, meeting open, someone in the call); None otherwise."""
+    connect now (admitted, meeting open, someone in the call); None otherwise.
+    ``ended`` (poll only): the meeting is over, stop polling."""
 
-    status: KnockStatus
+    status: KnockStatus | Literal["ended"]
     token: str | None = None
     room_name: str | None = None
     identity: str | None = None

@@ -222,11 +222,13 @@ Once admitted, and only while a member is in the call, the reply also carries wh
 }
 ```
 
-The token joins that one room and lasts 5 minutes, never past the admission. Each poll returns a fresh one, so a guest who drops and reconnects should poll again first (LiveKit keeps a connected participant's session alive past the token's expiry). The identity stays the same for the knock, and the `guest-` prefix means it can never match a member id or `call-bot`. With no member in the call, an admitted guest gets `{ "status": "admitted" }` without a token; keep polling. An admission lasts an hour, after which the knock reads `expired`.
+The token joins that one room and lasts 5 minutes, never past the admission. Each poll returns a fresh one, so a guest who drops and reconnects should poll again first (LiveKit keeps a connected participant's session alive past the token's expiry). The identity stays the same for the knock, and the `guest-` prefix means it can never match a member id or `call-bot`. With no member in the call but the meeting still open, an admitted guest gets `{ "status": "admitted" }` without a token; keep polling. An admission lasts an hour, after which the knock reads `expired`.
 
 **3. Cancel.** `DELETE /api/v1/meetings/by-code/{code}/knocks/{knock_id}` with the same header returns `{ "status": "cancelled" }`.
 
 A knock is `waiting`, `admitted`, `denied`, `cancelled` or `expired`. A waiting knock expires 10 minutes after it was made, or as soon as the meeting ends.
+
+The poll has one more answer, `{ "status": "ended" }`: the meeting is over (ended, including "End for everyone", cancelled, failed, or past its link expiry). Stop polling. It replaces `waiting`, `admitted` and `expired` once the meeting is over; a `denied` or `cancelled` knock keeps its answer.
 
 | Status | Code | When |
 |--------|------|------|

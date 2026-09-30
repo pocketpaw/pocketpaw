@@ -13,7 +13,10 @@
 #
 # 2026-10-01 (feat/meetings-ics, MC-4): PATCH now takes ``scheduled_start`` /
 # ``duration_minutes`` (tested in test_meeting_schedule.py), so the "refused
-# field" cases are ``status`` and an unknown field instead.
+# field" cases are ``status`` and an unknown field instead. A guest's poll says
+# ``{"status": "ended"}`` once the meeting is over (ended, cancelled, failed or
+# past its link expiry) for a waiting or admitted knock; "admitted" with no token
+# now only means "open meeting, no member in the call yet, keep polling".
 
 from __future__ import annotations
 
@@ -354,7 +357,7 @@ async def test_a_waiting_knock_ends_with_its_meeting(client, lk) -> None:
 
     assert admit.status_code == 410
     assert admit.json()["error"]["code"] == "meeting.ended"
-    assert polled.json() == {"status": "expired"}
+    assert polled.json() == {"status": "ended"}
 
 
 async def test_guest_token_never_outlives_the_admission(client, lk) -> None:
@@ -616,15 +619,67 @@ async def test_guests_alone_do_not_count_as_a_running_call(client, lk) -> None:
     assert (await _poll(client, s.m.code, b)).json() == {"status": "waiting"}
 
 
-async def test_admitted_guest_gets_no_token_once_the_meeting_ended(client, lk) -> None:
+@pytest.mark.parametrize("how", ["ended", "cancelled", "failed", "expired"])
+async def test_admitted_guest_is_told_the_meeting_ended(client, lk, how) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     await _decide(client, s, knock["knock_id"], "admit")
     row = await Meeting.find_one()
+    if how == "expired":
+        row.link_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    else:
+        row.status = how
+    await row.save()
+
+    assert (await _poll(client, s.m.code, knock)).json() == {"status": "ended"}
+
+
+async def _host_in_call(client, s, lk) -> None:
+    """The host joins by code, so the meeting row is the running call's row."""
+    client.act_as(s.host, s.ws)
+    assert (await client.post(f"/api/v1/meetings/by-code/{s.m.code}/join")).status_code == 200
+
+
+async def test_end_for_everyone_tells_an_admitted_guest_it_ended(client, lk) -> None:
+    s = await _setup(lk)
+    await _host_in_call(client, s, lk)
+    knock = (await _knock(client, s.m.code)).json()
+    await _decide(client, s, knock["knock_id"], "admit")
+    assert "token" in (await _poll(client, s.m.code, knock)).json()
+    lk.svc.delete_room = AsyncMock()
+    client.act_as(s.host, s.ws)
+
+    ended = await client.delete(f"/api/v1/livekit/rooms/{s.room}")
+    lk.participants.clear()
+
+    assert ended.status_code == 200, ended.text
+    assert (await _poll(client, s.m.code, knock)).json() == {"status": "ended"}
+    client.log_out()
+    lookup = await client.get(f"/api/v1/meetings/by-code/{s.m.code}", headers=GUEST_IP)
+    assert lookup.json()["status"] == "ended"
+
+
+async def test_end_for_everyone_tells_a_waiting_guest_it_ended(client, lk) -> None:
+    s = await _setup(lk)
+    await _host_in_call(client, s, lk)
+    knock = (await _knock(client, s.m.code)).json()
+    lk.svc.delete_room = AsyncMock()
+    client.act_as(s.host, s.ws)
+
+    await client.delete(f"/api/v1/livekit/rooms/{s.room}")
+
+    assert (await _poll(client, s.m.code, knock)).json() == {"status": "ended"}
+
+
+async def test_a_denied_guest_stays_denied_after_the_meeting_ends(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    await _decide(client, s, knock["knock_id"], "deny")
+    row = await Meeting.find_one()
     row.status = "ended"
     await row.save()
 
-    assert (await _poll(client, s.m.code, knock)).json() == {"status": "admitted"}
+    assert (await _poll(client, s.m.code, knock)).json() == {"status": "denied"}
 
 
 # ---------------------------------------------------------------------------
