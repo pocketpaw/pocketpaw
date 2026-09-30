@@ -1123,19 +1123,20 @@ class SiteEntitlementsResponse(BaseModel):
     The two fields that are NOT on ``SiteEntitlements`` are the ones that make the
     difference between a usable message and a useless one:
 
-    * ``domained_sites_used`` — how many sites in this workspace already spend the
-      floor allowance. "You cannot add a domain" and "your one free domain is on
-      another site" are different sentences, and only the count separates them.
+    * ``domained_sites_used`` — retained on the wire for older clients and always
+      0. It used to count sites across the workspace; the free allowance is now
+      per site, so there is nothing to count.
     * ``domain_slots_available`` — the same answer ``add_domain`` will give,
-      computed by the SAME function it calls (``_domain_cap_exceeded``), so the
+      computed by the SAME function it calls (``_hostname_cap_exceeded``), so the
       button's enabled state and the endpoint's verdict cannot drift apart. A
       second copy of the rule here would eventually disagree with the gate, and
-      the UI would confidently offer a button that 402s.
+      the UI would confidently offer a button that 402s. It closes only when THIS
+      site holds its free apex + ``www``; sibling sites never affect it.
 
-    ``max_domained_sites`` is None for an uncapped (paid) tier, mirroring the
-    catalog. ``subscription_active`` distinguishes a lapsed paid site from a site
-    that never had the capability — the tier stays recorded, only the payment
-    stopped, and the UI should say so.
+    ``max_domained_sites`` is the plan's per-site grant (1 on free, None for an
+    uncapped paid tier), mirroring the catalog. ``subscription_active``
+    distinguishes a lapsed paid site from a site that never had the capability —
+    the tier stays recorded, only the payment stopped, and the UI should say so.
 
     ``analytics`` says whether this site's plan buys visitor counting. It is what
     lets the panel disable itself with a reason BEFORE the call, and it is

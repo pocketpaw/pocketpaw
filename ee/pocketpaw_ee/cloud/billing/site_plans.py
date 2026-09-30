@@ -36,17 +36,13 @@
 #   docs/design/drafts/2026-08-13-paw-sites-pricing-spec.md): when basic/pro/
 #   business are rekeyed to free/site/staff, this mapping moves with them and is
 #   the ONLY place the badge's plan gate is expressed.
-# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): added
-#   ``max_domained_sites`` — HOW MANY SITES in a workspace may carry a custom
-#   domain on this tier (None = uncapped). The floor now carries 1 rather than 0,
-#   which is the captain's rule of 2026-08-21: "only 1 site is allowed to have a
-#   custom domain in free". THE UNIT IS THE SITE, NOT THE HOSTNAME — apex and
-#   ``www`` on one site cost one, not two — which is why the field is not called
-#   ``max_custom_domains``. Custom-domain entitlement now reads this field rather
-#   than ``"custom_domain" in cloudflare_features``, so ``cloudflare_features``
-#   goes back to meaning only what its name says: RESOLD Cloudflare capability
-#   that BC-10 provisions. Also added ``_FREE_MAX_HOSTNAMES_PER_SITE`` — see its
-#   own comment for why a site-unit cap needs a hostname-unit companion.
+# ``max_domained_sites`` is the per-site custom-domain grant (None = uncapped).
+#   Free carries 1: every free site may carry its own custom domain, apex +
+#   ``www``, enforced as ``_FREE_MAX_HOSTNAMES_PER_SITE`` hostnames on that site.
+#   It is per site, never a workspace-wide count. Custom-domain entitlement reads
+#   this field rather than ``"custom_domain" in cloudflare_features``, so
+#   ``cloudflare_features`` means only RESOLD Cloudflare capability that BC-10
+#   provisions.
 
 # Updated 2026-08-21 (feat/site-plan-purchasable): added the ``purchasable``
 # property — "can a customer actually buy this tier right now". It then meant
@@ -130,7 +126,7 @@ from dataclasses import dataclass, field
 # US dollars.
 #
 #   free    — $0    — per account. Unlimited builds, watermark ON, our subdomain,
-#                     and ONE custom-domained site (the floor grant).
+#                     and a custom domain (apex + www) on every site.
 #   site    — $7    — per SITE. Custom domain + the Paw watermark comes off.
 #   staff   — $19   — per SITE. Everything in site, plus the visitor concierge
 #                     with 200 conversations a month included.
@@ -290,35 +286,32 @@ _SITE_PLAN_HIGHLIGHTS: dict[str, tuple[str, ...]] = {
     "staff": (),
 }
 
-# How many SITES in a workspace may carry a custom domain on this tier.
-# ``None`` means uncapped.
+# The custom-domain grant for ONE site on this tier. ``None`` means uncapped.
 #
-# THE UNIT IS THE SITE, NOT THE HOSTNAME. A site pointing both ``acme.com`` and
-# ``www.acme.com`` at itself spends ONE of these, not two — which is the pair
-# almost every customer wants and the reason this is not named
-# ``max_custom_domains``. A reader who takes the name literally counts
-# ``SiteDomain`` rows, and ``SiteDomain`` is one row per hostname.
+# Pricing is per site, so this is per site too: ``free: 1`` means "this site may
+# carry one custom domain", NOT "one site per workspace". One domain is apex +
+# ``www`` — the pair almost every customer wants — so the hostname ceiling lives
+# in ``_FREE_MAX_HOSTNAMES_PER_SITE`` below, and nothing a sibling site holds
+# counts against this one. The name is historical; the wire keeps it.
 #
-# The floor carries 1, not 0: "only 1 site is allowed to have a custom domain in
-# free" (captain, 2026-08-21, reaffirmed against the pricing spec 2026-08-22 —
-# the spec itself says subdomain-only, and this is the one place we knowingly
-# depart from it). That 1 is a FLOOR GRANT — it needs no subscription, unlike
-# every other capability on this catalog — so the resolver reads it off the base
-# tier whether or not the site is paying. Unknown keys resolve to 0 in ``_build``:
-# fail-closed, matching ``badge_removal``.
-#
-# This field answers "how many domained sites does THIS SITE's own plan allow".
+# The floor carries 1, not 0, so free includes a custom domain even though the
+# pricing spec says subdomain-only — the one place we knowingly depart from it.
+# That 1 is a FLOOR GRANT — it needs no subscription, unlike every other
+# capability on this catalog — so the resolver reads it off the base tier whether
+# or not the site is paying. A non-zero value is what makes ``custom_domain``
+# true. Unknown keys resolve to 0 in ``_build``: fail-closed, matching
+# ``badge_removal``.
 _SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {
     "free": 1,
     "site": None,
     "staff": None,
 }
 
-# How many HOSTNAMES one FLOOR-tier site may carry. The companion cap to
-# ``max_domained_sites``, and it exists because that field caps sites: without
-# this, a free workspace can point fifty hostnames at its one allowed site, each
-# one costing a Cloudflare custom hostname and a Worker route at $0 revenue. Two
-# is apex + ``www``.
+# How many HOSTNAMES one FLOOR-tier site may carry: the free site's one custom
+# domain, as apex + ``www``. This is the number the attach gate and the Domains
+# button enforce per site. Without it a free site could point fifty hostnames at
+# itself, each costing a Cloudflare custom hostname and a Worker route at $0
+# revenue.
 #
 # Deliberately a single named constant with a single comparison — this is a
 # recommendation the build made, not a rule the captain handed down, so raising it
@@ -365,9 +358,9 @@ class SitePlanTier:
     tier resells (BC-10 provisions them). ``badge_removal`` is whether a site on
     this tier may ship without the attribution badge — read by
     ``sites.badge.badge_required``. ``sells_concierge`` is whether the tier sells
-    the visitor concierge at all. ``max_domained_sites`` is how many SITES in the
-    workspace may carry a custom domain on this tier (None = uncapped) — the site,
-    not the hostname, so apex + ``www`` on one site spend one.
+    the visitor concierge at all. ``max_domained_sites`` is this site's own
+    custom-domain grant on this tier (None = uncapped); on the floor it is one
+    domain, apex + ``www``, and it is never a workspace-wide count.
 
     ``scope`` is ``"site"`` or ``"org"`` and decides which of the two billing
     shapes this row is. Read it before doing anything with ``key``.
@@ -515,10 +508,10 @@ def _build(key: str) -> SitePlanTier:
 def free_max_hostnames_per_site() -> int:
     """How many hostnames one FLOOR-tier site may carry.
 
-    A function rather than a bare constant import so the one seam that enforces it
-    (``sites.service.add_domain``) reads it through the catalog's public surface,
-    the same way it reads every other plan rule. See the constant's comment for why
-    a site-unit cap needs a hostname-unit companion at all.
+    A function rather than a bare constant import so the seam that enforces it
+    (``sites.service._hostname_cap_exceeded``, shared by ``add_domain`` and
+    ``site_entitlements``) reads it through the catalog's public surface, the same
+    way it reads every other plan rule.
     """
     return _FREE_MAX_HOSTNAMES_PER_SITE
 
