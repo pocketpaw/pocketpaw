@@ -1,10 +1,12 @@
 # Meetings — FastAPI router.
 # Created: 2026-05-19. Mounted at /api/v1/meetings via mount_cloud().
 # See docs/plans/2026-05-19-meetings-integration-design.md.
+# 2026-10-01 (feat/meetings-instant, MC-1): POST /meetings/instant.
 #
 # Routes:
 #   GET    /meetings                          — list workspace meetings
 #   POST   /meetings                          — create a meeting
+#   POST   /meetings/instant                  — start a meeting now (code + link)
 #   GET    /meetings/search/                  — cross-provider search
 #   GET    /meetings/{meeting_id}             — get one meeting
 #   DELETE /meetings/{meeting_id}             — cancel a meeting
@@ -47,6 +49,7 @@ from pocketpaw_ee.cloud.meetings.dto import (
     MeetingDetailResponse,
     MeetingResponse,
     MeetingsSettingsResponse,
+    StartInstantMeetingRequest,
     StoreGoogleMeetCredentialsRequest,
     StoreZoomCredentialsRequest,
     TranscriptResponse,
@@ -90,6 +93,20 @@ async def create_meeting(
 ) -> MeetingResponse:
     """Create a meeting via the configured provider adapter."""
     return await meetings_service.create_meeting(workspace_id, user_id, body)
+
+
+@router.post("/instant", response_model=MeetingResponse)
+async def start_instant_meeting(
+    body: StartInstantMeetingRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> MeetingResponse:
+    """Start a meeting now: hidden meeting room, meeting code + link, live call.
+
+    402 ``billing.call_limit`` when the plan has no call time left today; then
+    nothing is created.
+    """
+    return await meetings_service.start_instant_meeting(workspace_id, user_id, body)
 
 
 # ---------------------------------------------------------------------------

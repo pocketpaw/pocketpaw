@@ -1,6 +1,13 @@
 # Meetings — request / response schemas.
 # Created: 2026-05-19. Every request schema is distinct from every
 # response schema (cloud rule §4).
+#
+# 2026-10-01 (feat/meetings-instant, MC-1): ``StartInstantMeetingRequest`` for
+# ``POST /meetings/instant``; ``MeetingResponse`` gains ``code`` (display form
+# ``xxx-xxxx-xxx``), ``link`` (``<app>/m/<code>``), ``room_group_id``,
+# ``access``, ``host_user_id`` and ``description``. ``guest_emails`` is kept
+# off the wire for now (nothing writes it yet; the host-only view comes with
+# the invite slice).
 
 from __future__ import annotations
 
@@ -36,6 +43,13 @@ class CreateMeetingRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     scheduled_start: datetime | None = None
     duration_minutes: int = Field(default=30, ge=1, le=1440)
+
+
+class StartInstantMeetingRequest(BaseModel):
+    """POST /meetings/instant body. Both fields optional."""
+
+    title: str | None = Field(default=None, max_length=300)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 class ListMeetingsRequest(BaseModel):
@@ -84,6 +98,16 @@ class MeetingResponse(BaseModel):
     # "has recording" indicator next to the event. None for meetings that
     # don't originate from a calendar event.
     calendar_event_id: str | None = None
+    # Meeting code + shareable link. ``code`` is the display form
+    # ``xxx-xxxx-xxx``; the link is ``<app base>/m/<code>``. Both None for
+    # meetings that predate codes (and Recall meetings).
+    code: str | None = None
+    link: str | None = None
+    # The hidden ``type="meeting"`` chat room the meeting runs in.
+    room_group_id: str | None = None
+    access: Literal["ask", "open"] = "ask"
+    host_user_id: str | None = None
+    description: str | None = None
 
     # ── Force UTC serialization ───────────────────────────────────────
     # Backend stores all datetimes as naive (timezone-unaware) UTC values.

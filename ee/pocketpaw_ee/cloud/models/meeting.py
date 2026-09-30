@@ -2,6 +2,13 @@
 # Created: 2026-05-19 — Native meetings integration (Google Meet + Zoom).
 # See docs/plans/2026-05-19-meetings-integration-design.md.
 #
+# 2026-10-01 (feat/meetings-instant, MC-1): Meeting gains the Google-Meet-style
+# fields — ``code`` (10 letters stored WITHOUT dashes, unique via a partial
+# index so the many code-less rows don't collide), ``room_group_id`` (the
+# hidden ``type="meeting"`` chat room backing the meeting), ``host_user_id``,
+# ``access`` ("ask" | "open"), ``guest_emails``, ``description`` and
+# ``link_expires_at``.
+#
 # Two documents:
 #   * Meeting — one row per provider meeting we know about.
 #   * MeetingTranscript — one row per transcript session. Transcript entries
@@ -20,6 +27,7 @@ from typing import Any, Literal
 
 from beanie import Indexed
 from pydantic import Field
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -99,6 +107,20 @@ class Meeting(TimestampedDocument):
     bot_status: str | None = None
     bot_status_detail: str | None = None  # Recall sub_code, e.g. bot_kicked_from_call
     bot_status_at: datetime | None = None
+    # Meeting code — 10 letters from an alphabet without l/i/o, stored
+    # canonical (no dashes); shown and linked as ``xxx-xxxx-xxx``. None for
+    # rows that predate meeting codes (and for Recall meetings).
+    code: str | None = None
+    # The hidden ``type="meeting"`` chat group this meeting runs in. Also
+    # mirrored into ``raw_provider_payload["group_id"]`` for older readers.
+    room_group_id: str | None = None
+    host_user_id: str | None = None
+    # "ask" = people outside the room wait for the host; "open" = anyone with
+    # the link joins. Enforced by the lobby slice.
+    access: Literal["ask", "open"] = "ask"
+    guest_emails: list[str] = Field(default_factory=list)
+    description: str | None = None
+    link_expires_at: datetime | None = None
 
     class Settings(TimestampedDocument.Settings):
         name = "meetings"
@@ -106,6 +128,14 @@ class Meeting(TimestampedDocument):
             [("workspace", 1), ("status", 1)],
             [("workspace", 1), ("scheduled_start", -1)],
             [("provider", 1), ("provider_meeting_id", 1)],
+            # Partial: only rows that HAVE a code take part, so every
+            # code-less row (null) doesn't collide with the others.
+            IndexModel(
+                [("code", 1)],
+                unique=True,
+                name="uq_meeting_code",
+                partialFilterExpression={"code": {"$type": "string"}},
+            ),
         ]
 
 
