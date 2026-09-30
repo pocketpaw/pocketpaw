@@ -666,3 +666,13 @@ async def test_cancelling_removes_the_calendar_event(client, lk, calendar):
     ctx, event_id = calendar.delete.await_args.args
     assert (ctx.user_id, event_id) == (host, "evt-1")
     assert _job_at("autostart", out.id) is None
+
+
+def test_calendar_registers_edit_listener(monkeypatch):
+    bus = EventBus()
+    monkeypatch.setattr(calendar_bridge, "event_bus", bus)
+
+    calendar_bridge.register_meeting_calendar_listeners()
+
+    assert bus._handlers["meeting.edited"] == [calendar_bridge._on_meeting_edited]
+    assert "meeting.updated" not in bus._handlers  # the Recall webhook upsert stays out

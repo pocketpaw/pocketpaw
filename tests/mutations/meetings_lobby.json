@@ -218,8 +218,8 @@
   {
     "label": "patch: not workspace-filtered",
     "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
-    "find": "    doc = await _MeetingDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    if (doc.host_user_id",
-    "replace": "    doc = await _MeetingDoc.find_one({\"_id\": oid})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    if (doc.host_user_id",
+    "find": "    doc = await _MeetingDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    return doc",
+    "replace": "    doc = await _MeetingDoc.find_one({\"_id\": oid})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    return doc",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]

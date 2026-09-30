@@ -957,11 +957,6 @@ async def _get_doc(workspace_id: str, meeting_id: str) -> _MeetingDoc:
     return doc
 
 
-def _naive_utc(dt: datetime) -> datetime:
-    """Stored form: naive UTC (what Mongo hands back; the response adds the Z)."""
-    return ics.utc(dt).replace(tzinfo=None)  # type: ignore[union-attr]
-
-
 def _reschedule(doc: _MeetingDoc, schedule: dict) -> None:
     """Apply ``scheduled_start`` / ``duration_minutes`` to the row (not saved yet)."""
     if doc.source != "livekit" or doc.status != "scheduled" or doc.actual_start is not None:
@@ -974,7 +969,8 @@ def _reschedule(doc: _MeetingDoc, schedule: dict) -> None:
     payload["duration_minutes"] = duration
     doc.raw_provider_payload = payload
     if "scheduled_start" in schedule:
-        doc.scheduled_start = _naive_utc(schedule["scheduled_start"])
+        # An offset-aware value is fine: save() hands back naive UTC, as on create.
+        doc.scheduled_start = schedule["scheduled_start"]
     if doc.scheduled_start is not None:
         # Same end rule as create: start (seconds dropped) + duration.
         doc.scheduled_end = doc.scheduled_start.replace(second=0, microsecond=0) + timedelta(
