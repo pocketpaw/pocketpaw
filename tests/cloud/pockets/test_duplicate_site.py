@@ -1,14 +1,16 @@
 # tests/cloud/pockets/test_duplicate_site.py — duplicating a site pocket.
 #
 # ``pockets.service.duplicate_pocket`` copies exactly five authored fields
-# (engine, pattern, rippleSpec, source, keeps_client_bundle) plus the
-# ``source_gated`` cohort stamp into a new site pocket the caller owns, through
-# ``copy_site_snapshot``. These tests pin, per site track, that the copy is
-# faithful and independent, that the copy gets its own draft Site row and nothing
-# else rides along (no sharing, no connectors), that a private site stays
-# private, and the refusals: cross-tenant (404), unreadable private (403), not a
-# site (422), plan cap (402), no Sites on the plan (403). The pocket and its Site
-# land together or not at all. Mutation plan: tests/mutations/pocket_duplicate.json.
+# (engine, pattern, rippleSpec, source, keeps_client_bundle) into a new site
+# pocket the caller owns, through ``copy_site_snapshot``. These tests pin, per
+# site track, that the copy is faithful and independent, that the copy gets its
+# own draft Site row and nothing else rides along (no sharing, no connectors),
+# that a private site stays private, that the copy is never less source-gated
+# than a new pocket (source stamp OR create-time stamp), that a successful copy
+# writes one ``pocket.duplicated`` audit row, and the refusals: cross-tenant
+# (404), unreadable private (403), not a site (422), plan cap (402), no Sites on
+# the plan (403). The pocket and its Site land together or not at all.
+# Mutation plan: tests/mutations/pocket_duplicate.json.
 from __future__ import annotations
 
 from typing import Any
@@ -17,6 +19,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.errors import PocketLimitError
+from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.pocket import Pocket as PocketDoc
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.cloud.pockets import service as pockets_service
@@ -125,14 +128,53 @@ async def test_copy_is_faithful_per_track(track: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_gated_false_is_inherited_too(monkeypatch) -> None:
-    # Gate ON, so the create-time stamp would be True: only inheritance keeps False.
+@pytest.mark.parametrize(
+    ("gate_on", "source_gated", "expected"),
+    [
+        (True, True, True),
+        (True, False, True),  # an SF-2-exempt source does not pass its exemption on
+        (False, True, True),  # a gated source stays gated with the gate off
+        (False, False, False),
+    ],
+)
+async def test_copy_is_never_less_gated_than_a_new_pocket(
+    monkeypatch, gate_on: bool, source_gated: bool, expected: bool
+) -> None:
     from pocketpaw.config import get_settings
 
-    monkeypatch.setattr(get_settings(), "sites_source_gate_enabled", True)
-    src = await _site(source_gated=False, **SITES["svelte"])
+    monkeypatch.setattr(get_settings(), "sites_source_gate_enabled", gate_on)
+    src = await _site(source_gated=source_gated, **SITES["svelte"])
     wire = await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
-    assert (await PocketDoc.get(wire["_id"])).source_gated is False
+    assert (await PocketDoc.get(wire["_id"])).source_gated is expected
+
+
+@pytest.mark.asyncio
+async def test_duplicate_writes_one_audit_row() -> None:
+    src = await _site(visibility="private", shared_with=[STRANGER], **SITES["svelte"])
+    wire = await pockets_service.duplicate_pocket(WS, STRANGER, str(src.id), {})
+
+    rows = await AuditEvent.find_all().to_list()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.action == "pocket.duplicated"
+    assert row.workspace == WS
+    assert row.actor_id == STRANGER
+    assert row.target_type == "pocket"
+    assert row.target_id == wire["_id"]
+    assert row.metadata == {"source_pocket_id": str(src.id), "source_visibility": "private"}
+
+
+@pytest.mark.asyncio
+async def test_refused_duplicate_writes_no_audit_row(sites_plan: dict[str, str]) -> None:
+    src = await _site(**SITES["svelte"])
+    sites_plan["plan"] = "free"
+    with pytest.raises(Forbidden):
+        await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+    private = await _site(visibility="private", **SITES["svelte"])
+    sites_plan["plan"] = "go"
+    with pytest.raises(Forbidden):
+        await pockets_service.duplicate_pocket(WS, STRANGER, str(private.id), {})
+    assert await AuditEvent.find_all().count() == 0
 
 
 @pytest.mark.asyncio

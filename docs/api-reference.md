@@ -900,8 +900,7 @@ be able to read the source pocket under the same within-workspace rule as
 
 The copy carries exactly the authored site: `engine`, `pattern`, `rippleSpec`,
 `source` (the whole map, including `paw.dependencies.json` and a dynamic site's
-`objects` / `sources` / `actions` / `auth` keys) and `keepsClientBundle`, plus
-the source pocket's source-gate cohort. Nothing else is copied: no sharing, team,
+`objects` / `sources` / `actions` / `auth` keys) and `keepsClientBundle`. Nothing else is copied: no sharing, team,
 agents, widgets, tools, connector allowlist (the copy allows none), surface
 profile or project, and nothing from the source's Site row (slug, domains, D1
 database, deployment).
@@ -911,6 +910,14 @@ row is never built or deployed and nothing is billed. Visibility: a private
 source gives a private copy; any other source (workspace or public) gives a
 workspace-visible copy, so a public site is never re-published. Emits
 `PocketCreated` and `site.created`.
+
+Source gate: the copy is never less gated than a new pocket. It is gated if the
+source is gated or if the source gate is on at copy time, so an older exempt
+pocket does not pass its exemption to a copy.
+
+Audit: a successful copy writes one `pocket.duplicated` workspace audit event
+(`actorId` = caller, `targetId` = new pocket id, metadata `source_pocket_id` and
+`source_visibility`). The write is best-effort; a refused duplicate writes none.
 
 Request body (optional):
 

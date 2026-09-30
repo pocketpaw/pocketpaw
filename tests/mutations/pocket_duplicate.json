@@ -20,13 +20,21 @@
     ]
   },
   {
-    "label": "duplicate: stop inheriting source_gated (fall back to the create-time stamp)",
+    "label": "duplicate: drop the create-time stamp from the source_gated OR (exempt source passes its exemption on)",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "        source_gated=source.source_gated,\n",
-    "replace": "",
+    "find": "        source_gated=source.source_gated or _source_gated_at_create(),\n",
+    "replace": "        source_gated=source.source_gated,\n",
     "tests": [
-      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_faithful_per_track",
-      "tests/cloud/pockets/test_duplicate_site.py::test_source_gated_false_is_inherited_too"
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_never_less_gated_than_a_new_pocket"
+    ]
+  },
+  {
+    "label": "duplicate: drop the source's stamp from the source_gated OR (gated source loses its gate when the setting is off)",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        source_gated=source.source_gated or _source_gated_at_create(),\n",
+    "replace": "        source_gated=_source_gated_at_create(),\n",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_never_less_gated_than_a_new_pocket"
     ]
   },
   {
@@ -129,6 +137,15 @@
     "replace": "    await doc.insert()\n    await emit(PocketCreated(data=await _pocket_event_payload(doc)))\n    # The /sites gallery",
     "tests": [
       "tests/cloud/pockets/test_duplicate_site.py::test_failed_site_mint_leaves_no_orphan"
+    ]
+  },
+  {
+    "label": "duplicate: skip the pocket.duplicated audit record",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    await audit_service.record(\n        workspace_id=workspace_id,\n        actor_id=user_id,\n        action=\"pocket.duplicated\",\n        target_type=\"pocket\",\n        target_id=wire[\"_id\"],\n        metadata={\"source_pocket_id\": pocket_id, \"source_visibility\": source.visibility},\n    )\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_duplicate_writes_one_audit_row"
     ]
   }
 ]

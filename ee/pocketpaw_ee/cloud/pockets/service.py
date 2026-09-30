@@ -2254,8 +2254,8 @@ async def copy_site_snapshot(
     DRAFT Site doc is minted so the copy lists in the gallery; nothing of the
     source's Site (slug, domains, D1, deploy) is copied, and nothing is published.
 
-    ``source_gated`` defaults to the create-time stamp. A duplicate passes the
-    source pocket's value so copying never moves a pocket across the SF-2 cohort.
+    ``source_gated`` defaults to the create-time stamp; a caller may pass its own
+    value (``duplicate_pocket`` passes the source's stamp OR the create-time one).
 
     Gated first on the Sites plan (``require_sites_plan``, Forbidden
     ``plan.feature_denied``, like every other site-create path), then the pocket
@@ -2286,7 +2286,7 @@ async def copy_site_snapshot(
         keeps_client_bundle=snap["keeps_client_bundle"],
         template_id=template_id,
         template_version=template_version,
-        # SF-2 — inherit the cohort when copying, stamp it when minting.
+        # SF-2 — the caller's cohort when given, else the create-time stamp.
         source_gated=_source_gated_at_create() if source_gated is None else source_gated,
         # Same as ``create``: a new pocket starts with no connectors allowed.
         allowed_connectors=[],
@@ -2312,10 +2312,19 @@ async def duplicate_pocket(
 ) -> dict:
     """Copy a site pocket the caller can read into a new site pocket they own.
 
-    Copies only ``SITE_SNAPSHOT_FIELDS`` plus ``source_gated``; the original is
-    untouched. A pocket outside ``workspace_id`` is NotFound (never Forbidden, so
-    this is not an existence oracle across tenants); a private pocket the caller
-    cannot read is Forbidden, as on ``get``; a non-site pocket is a ValidationError.
+    Copies only ``SITE_SNAPSHOT_FIELDS``; the original is untouched. The copy is
+    never less source-gated than a brand-new pocket: a gated source gives a gated
+    copy, and an SF-2-exempt source (``source_gated=False``, kept so old pockets
+    don't lose source they already had) gives a copy stamped like any new pocket.
+
+    A pocket outside ``workspace_id`` is NotFound (never Forbidden, so this is not
+    an existence oracle across tenants); a private pocket the caller cannot read is
+    Forbidden, as on ``get``; a non-site pocket is a ValidationError.
+
+    A successful copy writes one ``pocket.duplicated`` workspace audit row (actor,
+    new pocket id, source pocket id and visibility). ``audit_service.record`` is
+    best-effort and never raises, so an audit outage cannot fail the duplicate; a
+    refused duplicate writes nothing.
     """
     body = DuplicatePocketRequest.model_validate(body)
     try:
@@ -2336,17 +2345,28 @@ async def duplicate_pocket(
         "source": source.source,
         "keeps_client_bundle": source.keeps_client_bundle,
     }
-    return await copy_site_snapshot(
+    wire = await copy_site_snapshot(
         snapshot,
         workspace_id=workspace_id,
         owner=user_id,
         # ``name`` is capped at 100 like the request body; trim the source name to fit.
         name=body.name or f"{source.name[:93]} (copy)",
-        source_gated=source.source_gated,
+        source_gated=source.source_gated or _source_gated_at_create(),
         # A private site stays private; anything else lands workspace-visible,
         # so duplicating a public site never publishes a second one.
         visibility="private" if source.visibility == "private" else "workspace",
     )
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    await audit_service.record(
+        workspace_id=workspace_id,
+        actor_id=user_id,
+        action="pocket.duplicated",
+        target_type="pocket",
+        target_id=wire["_id"],
+        metadata={"source_pocket_id": pocket_id, "source_visibility": source.visibility},
+    )
+    return wire
 
 
 async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:
