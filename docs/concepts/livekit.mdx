@@ -92,7 +92,9 @@ Events fire on the realtime bus:
 
 The frontend's realtime channel subscribes to both so participant lists update without polling.
 
-Starting a call goes through the workspace plan's daily call-time budget, whether a member starts it or a scheduled meeting auto-starts. When the budget is spent, a member gets 402 `billing.call_limit`, and a scheduled meeting that reaches its start time is marked `failed` with `raw_provider_payload.start_error = "billing.call_limit"`. A guest invite link never starts a call.
+Starting a call goes through the workspace plan's daily call-time budget, whether a member starts it or a scheduled meeting auto-starts. When the budget is spent, a member gets 402 `billing.call_limit`, and a scheduled meeting that reaches its start time is marked `failed` with `raw_provider_payload.start_error = "billing.call_limit"`. Scheduling a LiveKit meeting on a group requires the scheduler to be a member of that group in the same workspace.
+
+A guest invite link never starts a call. Guests of a scheduled meeting can join only after a member has joined the call; until then the join page gets `meeting_invite.call_ended`.
 
 ## Soul Memory Integration
 
