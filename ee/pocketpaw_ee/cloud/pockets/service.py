@@ -2256,8 +2256,18 @@ async def copy_site_snapshot(
 
     ``source_gated`` defaults to the create-time stamp. A duplicate passes the
     source pocket's value so copying never moves a pocket across the SF-2 cohort.
-    Raises ``PocketLimitError`` at the plan cap, like ``create``.
+
+    Gated first on the Sites plan (``require_sites_plan``, Forbidden
+    ``plan.feature_denied``, like every other site-create path), then the pocket
+    cap (``PocketLimitError``, like ``create``); both refuse before any write.
+    The pocket and its draft Site land together or not at all: if the Site mint
+    fails the new pocket is deleted and the error re-raised, and
+    ``PocketCreated`` is emitted only once both exist.
     """
+    # Function-local import: sites.service reads pockets (cycle).
+    from pocketpaw_ee.sites import service as sites_service
+
+    await sites_service.require_sites_plan(workspace_id)
     exceeded, _count, limit = await _pocket_cap_exceeded(workspace_id)
     if exceeded:
         raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded
@@ -2282,15 +2292,17 @@ async def copy_site_snapshot(
         allowed_connectors=[],
     )
     await doc.insert()
-    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
     # The /sites gallery lists Site docs, not pockets, so the copy needs its own
     # DRAFT Site (no build, no deploy) to be visible, the same as every other
-    # create path. Function-local import: sites.service reads pockets (cycle).
-    from pocketpaw_ee.sites import service as sites_service
-
-    await sites_service.create_draft_site(
-        workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name
-    )
+    # create path. A copy with no Site would be an orphan nobody can find.
+    try:
+        await sites_service.create_draft_site(
+            workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name
+        )
+    except BaseException:
+        await doc.delete()
+        raise
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, owner)
 
 

@@ -927,6 +927,7 @@ returns.
 Returns `404` for a missing or cross-tenant pocket, `403` when the caller can't
 read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site,
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
+Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
 
 ## Skills — Per-Backend API Skills
 

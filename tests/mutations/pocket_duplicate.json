@@ -64,8 +64,8 @@
       "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_faithful_per_track"
     ],
     "label": "duplicate no longer mints the draft Site row",
-    "find": "    await sites_service.create_draft_site(\n        workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name\n    )\n",
-    "replace": ""
+    "find": "        await sites_service.create_draft_site(\n            workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name\n        )\n",
+    "replace": "        pass\n"
   },
   {
     "label": "duplicate: drop the visibility argument (copy falls back to the private default)",
@@ -88,8 +88,8 @@
   {
     "label": "copy_site_snapshot: stop clearing allowed_connectors",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "        allowed_connectors=[],\n    )\n    await doc.insert()\n    await emit(PocketCreated(data=await _pocket_event_payload(doc)))\n    # The /sites gallery",
-    "replace": "    )\n    await doc.insert()\n    await emit(PocketCreated(data=await _pocket_event_payload(doc)))\n    # The /sites gallery",
+    "find": "        allowed_connectors=[],\n    )\n    await doc.insert()\n    # The /sites gallery",
+    "replace": "    )\n    await doc.insert()\n    # The /sites gallery",
     "tests": [
       "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_faithful_per_track"
     ]
@@ -101,6 +101,34 @@
     "replace": "    if False:\n        raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded\n\n    snap = copy.deepcopy(",
     "tests": [
       "tests/cloud/pockets/test_duplicate_site.py::test_at_pocket_cap_writes_nothing"
+    ]
+  },
+  {
+    "label": "copy_site_snapshot: skip the Sites plan gate",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    await sites_service.require_sites_plan(workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_plan_without_sites_writes_nothing",
+      "tests/cloud/pockets/test_duplicate_site.py::test_template_copy_is_plan_gated_too"
+    ]
+  },
+  {
+    "label": "copy_site_snapshot: keep the pocket when the Site mint fails",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    except BaseException:\n        await doc.delete()\n        raise\n",
+    "replace": "    except BaseException:\n        raise\n",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_failed_site_mint_leaves_no_orphan"
+    ]
+  },
+  {
+    "label": "copy_site_snapshot: emit PocketCreated before the Site mint",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    await doc.insert()\n    # The /sites gallery",
+    "replace": "    await doc.insert()\n    await emit(PocketCreated(data=await _pocket_event_payload(doc)))\n    # The /sites gallery",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_failed_site_mint_leaves_no_orphan"
     ]
   }
 ]

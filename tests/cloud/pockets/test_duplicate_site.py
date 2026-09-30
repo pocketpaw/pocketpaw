@@ -7,7 +7,8 @@
 # faithful and independent, that the copy gets its own draft Site row and nothing
 # else rides along (no sharing, no connectors), that a private site stays
 # private, and the refusals: cross-tenant (404), unreadable private (403), not a
-# site (422), plan cap (402). Mutation plan: tests/mutations/pocket_duplicate.json.
+# site (422), plan cap (402), no Sites on the plan (403). The pocket and its Site
+# land together or not at all. Mutation plan: tests/mutations/pocket_duplicate.json.
 from __future__ import annotations
 
 from typing import Any
@@ -66,6 +67,22 @@ async def _site(workspace: str = WS, **fields: Any) -> PocketDoc:
     doc = PocketDoc(workspace=workspace, **fields)
     await doc.insert()
     return doc
+
+
+@pytest.fixture(autouse=True)
+def sites_plan(monkeypatch) -> dict[str, str]:
+    """The workspaces here are synthetic ids with no Workspace doc, so answer the
+    real ``require_sites_plan`` gate with a plan that has Sites ("go"). Set
+    ``["plan"]`` to "free" to make it deny."""
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    state = {"plan": "go"}
+
+    async def _plan(workspace_id: str) -> str:
+        return state["plan"]
+
+    monkeypatch.setattr(workspace_service, "get_workspace_plan", _plan)
+    return state
 
 
 def _snapshot(doc: PocketDoc) -> dict[str, Any]:
@@ -155,6 +172,43 @@ async def test_at_pocket_cap_writes_nothing(monkeypatch) -> None:
         await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
     assert await PocketDoc.find_all().count() == 1
     assert await Site.find_all().count() == 0
+
+
+@pytest.mark.asyncio
+async def test_plan_without_sites_writes_nothing(sites_plan: dict[str, str]) -> None:
+    src = await _site(**SITES["svelte"])
+    sites_plan["plan"] = "free"
+    with pytest.raises(Forbidden) as exc:
+        await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+    assert exc.value.code == "plan.feature_denied"
+    assert await PocketDoc.find_all().count() == 1
+    assert await Site.find_all().count() == 0
+
+
+@pytest.mark.asyncio
+async def test_template_copy_is_plan_gated_too(sites_plan: dict[str, str]) -> None:
+    sites_plan["plan"] = "free"
+    with pytest.raises(Forbidden):
+        await pockets_service.copy_site_snapshot(
+            {"engine": "svelte", "source": SVELTE_SOURCE}, workspace_id=WS, owner=OWNER, name="T"
+        )
+    assert await PocketDoc.find_all().count() == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_site_mint_leaves_no_orphan(monkeypatch, recording_bus) -> None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    src = await _site(**SITES["svelte"])
+
+    async def _boom(**_kw: Any) -> None:
+        raise RuntimeError("site mint failed")
+
+    monkeypatch.setattr(sites_service, "create_draft_site", _boom)
+    with pytest.raises(RuntimeError, match="site mint failed"):
+        await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+    assert [p.id for p in await PocketDoc.find_all().to_list()] == [src.id]
+    assert [e for e in recording_bus.events if e.type == "pocket.created"] == []
 
 
 @pytest.mark.asyncio
