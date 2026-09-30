@@ -1,5 +1,8 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added ``MeetingKnock`` (a guest
+asking to join a meeting; see meetings/lobby_service.py).
+
 Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``ReleasedSlug`` (a site
 address given up by a rename, held 30 days for the workspace that released it)
 to the imports and ``get_all_documents()`` so the ``released_slugs`` collection
@@ -251,6 +254,7 @@ from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
+    MeetingKnock,
     MeetingProviderCredentials,
     MeetingsSettings,
     MeetingTranscript,
@@ -437,6 +441,7 @@ __all__ = [
     "ShipBox",
     "ShipDeploy",
     "Meeting",
+    "MeetingKnock",
     "MeetingProviderCredentials",
     "MeetingsSettings",
     "MeetingTranscript",
@@ -595,6 +600,7 @@ def get_all_documents():
         Project,
         PlanSession,
         Meeting,
+        MeetingKnock,
         MeetingTranscript,
         MeetingProviderCredentials,
         MeetingsSettings,

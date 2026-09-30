@@ -37,6 +37,11 @@
 #   * ``start_meeting_room_call`` backs ``POST /livekit/rooms`` for a hidden
 #     meeting room (the call engine always calls it on join): same
 #     ``_run_meeting_call`` as a by-code join, so no "Instant call" twin row.
+#
+# 2026-10-01 (feat/meetings-lobby, MC-3): ``update_meeting`` backs
+# ``PATCH /meetings/{id}`` — host only (``host_user_id``, else the creator),
+# ``access`` / ``title`` / ``description``, realtime ``meeting.updated`` to the
+# meeting's room. The lobby itself lives in lobby_service.py.
 
 from __future__ import annotations
 
@@ -59,6 +64,7 @@ from pocketpaw_ee.cloud.meetings.dto import (
     MeetingResponse,
     StartInstantMeetingRequest,
     TranscriptResponse,
+    UpdateMeetingRequest,
 )
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
 from pocketpaw_ee.cloud.models.meeting import MeetingTranscript as _TranscriptDoc
@@ -891,6 +897,55 @@ async def join_meeting_by_code(
         await group_service.add_meeting_room_member(room_id, user_id)
 
     return JoinMeetingByCodeResponse(room_group_id=room_id, room_name=result["room_name"])
+
+
+async def update_meeting(
+    workspace_id: str, user_id: str, meeting_id: str, body: UpdateMeetingRequest
+) -> MeetingResponse:
+    """PATCH /meetings/{id}: the host changes ``access``, ``title`` or ``description``.
+
+    404 outside this workspace, 403 ``meeting.host_only`` for anyone but the host
+    (``host_user_id``; the creator for rows that predate it), 422
+    ``meeting.empty_title`` for a blank title. Fields left out are unchanged.
+    """
+    from beanie import PydanticObjectId
+
+    body = UpdateMeetingRequest.model_validate(body)
+    try:
+        oid = PydanticObjectId(meeting_id)
+    except Exception:
+        raise NotFound("meeting", meeting_id) from None
+    doc = await _MeetingDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("meeting", meeting_id)
+    if (doc.host_user_id or doc.created_by_user_id) != user_id:
+        raise Forbidden("meeting.host_only", "Only the meeting's host can change it.")
+
+    changes = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "title" in changes:
+        changes["title"] = changes["title"].strip()
+        if not changes["title"]:
+            raise ValidationError("meeting.empty_title", "title must not be empty or whitespace")
+    if "description" in changes:
+        changes["description"] = changes["description"].strip() or None
+    for field, value in changes.items():
+        setattr(doc, field, value)
+    await doc.save()
+
+    from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+    from pocketpaw_ee.cloud._core.realtime.events import MeetingUpdated
+
+    await _emit_realtime(
+        MeetingUpdated(
+            data={
+                "workspace_id": workspace_id,
+                "meeting_id": str(doc.id),
+                "group_id": _room_of(doc),
+                "fields": sorted(changes),
+            }
+        )
+    )
+    return _doc_to_response(doc)
 
 
 async def cancel_meeting(workspace_id: str, meeting_id: str, user_id: str = "") -> MeetingResponse:

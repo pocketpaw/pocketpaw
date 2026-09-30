@@ -1,4 +1,6 @@
 # audience.py — resolves an Event into the user_ids that should receive it.
+# Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — meeting.knock and
+# meeting.knock_resolved fan out to the meeting room's members, like meeting.*.
 # Updated: 2026-09-04 — the member cache is now an LRU with single-flight.
 #   It was a plain dict whose 2-second TTL was only a freshness check on read,
 #   so nothing was ever removed and one entry per group/workspace/user ever
@@ -410,8 +412,17 @@ class AudienceResolver:
             return await self._peers(d["user_id"])
 
         # --- Meetings ----------------------------------------------------------
-        if t in {"meeting.scheduled", "meeting.updated", "meeting.cancelled", "meeting.started"}:
-            # Fan out to all group members so they see meeting schedule/updates
+        if t in {
+            "meeting.scheduled",
+            "meeting.updated",
+            "meeting.cancelled",
+            "meeting.started",
+            "meeting.knock",
+            "meeting.knock_resolved",
+        }:
+            # Fan out to all group members so they see meeting schedule/updates.
+            # Lobby knocks go to the meeting room's members (the people who can
+            # admit); guests have no socket and poll instead.
             gid = d.get("group_id")
             if not gid:
                 return []

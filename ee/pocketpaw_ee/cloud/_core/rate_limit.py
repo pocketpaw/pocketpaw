@@ -19,6 +19,12 @@ free enumeration oracle.
 Updated: 2026-10-01 (MC-2, feat/meetings-by-code) — added
 ``rate_limit_meeting_lookup``, a per-IP bucket (30/min) on the unauthenticated
 ``GET /meetings/by-code/{code}`` so the lookup can't be used to sweep codes.
+
+Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added
+``rate_limit_meeting_knock`` (per IP 10/min AND per meeting code 30/min on the
+public ``POST /meetings/by-code/{code}/knock``) and
+``rate_limit_meeting_knock_poll`` (per IP 120/min on the guest's knock status
+poll and cancel).
 """
 
 from __future__ import annotations
@@ -59,6 +65,15 @@ _slug_check_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 # page calls it before sign-in); a person opening links needs a handful, a script
 # guessing codes gets 30 tries a minute out of ~4e13.
 _meeting_lookup_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+
+# Knocks (a guest asking to join). Per IP: a guest knocks once, maybe again after
+# a denial. Per code: every knock puts a card in front of the people in the call,
+# so one meeting can't be flooded by many addresses either.
+_meeting_knock_ip_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
+_meeting_knock_code_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+# The waiting screen polls every 2s (30/min); 120 leaves room for a few guests
+# behind one NAT.
+_meeting_knock_poll_limiter = RateLimiter(rate=120.0 / 60.0, capacity=120)
 
 
 def _client_ip(request: Request) -> str:
@@ -113,6 +128,30 @@ async def rate_limit_meeting_lookup(request: Request) -> None:
             "meetings.lookup_rate_limited",
             "Too many meeting lookups - wait a moment and try again.",
         )
+
+
+def _knock_limited() -> RateLimited:
+    return RateLimited(
+        "meetings.knock_rate_limited",
+        "Too many requests to join - wait a moment and try again.",
+    )
+
+
+async def rate_limit_meeting_knock(request: Request) -> None:
+    """Per-IP and per-code buckets guarding POST /meetings/by-code/{code}/knock."""
+    if not _meeting_knock_ip_limiter.check(f"meeting-knock:{_client_ip(request)}").allowed:
+        raise _knock_limited()
+    # One bucket per code however it's spelled; capped so junk paths can't mint
+    # unbounded keys (the per-IP check above already ran).
+    code = str(request.path_params.get("code", "")).replace("-", "").strip().lower()[:16]
+    if not _meeting_knock_code_limiter.check(f"meeting-knock-code:{code}").allowed:
+        raise _knock_limited()
+
+
+async def rate_limit_meeting_knock_poll(request: Request) -> None:
+    """Per-IP bucket guarding the guest's knock status poll and cancel."""
+    if not _meeting_knock_poll_limiter.check(f"meeting-knock-poll:{_client_ip(request)}").allowed:
+        raise _knock_limited()
 
 
 async def rate_limit_invite_create(
@@ -186,6 +225,8 @@ __all__ = [
     "consume_invite_create_tokens",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
+    "rate_limit_meeting_knock",
+    "rate_limit_meeting_knock_poll",
     "rate_limit_meeting_lookup",
     "rate_limit_slug_check",
 ]

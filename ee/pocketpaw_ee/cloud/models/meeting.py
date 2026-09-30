@@ -15,6 +15,11 @@
 # days out for undated meetings (pushed out on each join) and ``scheduled_end``
 # for dated ones; see meetings/service.py.
 #
+# 2026-10-01 (feat/meetings-lobby, MC-3): ``MeetingKnock`` — one row per guest
+# asking to join a meeting. Holds only a sha256 of the guest's bearer secret.
+# Waiting knocks read as expired after 10 minutes (meetings/lobby_service.py);
+# a TTL index drops every row a day after it was made.
+#
 # Two documents:
 #   * Meeting — one row per provider meeting we know about.
 #   * MeetingTranscript — one row per transcript session. Transcript entries
@@ -28,10 +33,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from beanie import Indexed
+from beanie import Document, Indexed
 from pydantic import Field
 from pymongo import IndexModel
 
@@ -142,6 +147,39 @@ class Meeting(TimestampedDocument):
                 name="uq_meeting_code",
                 partialFilterExpression={"code": {"$type": "string"}},
             ),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Meeting knock (lobby)
+# ---------------------------------------------------------------------------
+
+
+class MeetingKnock(Document):
+    """A guest asking to join a meeting through its link.
+
+    ``secret_hash`` is ``sha256(secret)``; the plaintext secret goes to the
+    guest once and is what they present to read the knock's status.
+    ``guest_identity`` is the fixed ``guest-<hex>`` LiveKit identity the guest
+    joins under once admitted.
+    """
+
+    meeting: Indexed(str)  # type: ignore[valid-type]  # Meeting._id as str
+    workspace: str
+    name: str
+    email: str | None = None
+    status: Literal["waiting", "admitted", "denied", "expired", "cancelled"] = "waiting"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    guest_identity: str
+    secret_hash: str
+
+    class Settings:
+        name = "meeting_knocks"
+        indexes = [
+            [("meeting", 1), ("status", 1)],
+            IndexModel([("created_at", 1)], expireAfterSeconds=86400),
         ]
 
 

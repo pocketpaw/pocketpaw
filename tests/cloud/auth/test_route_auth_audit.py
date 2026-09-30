@@ -57,6 +57,10 @@ The general lesson is about the category rather than those routes.
 for the other three, and nothing distinguished them from the outside — which
 is why an entry here has to name the check it relies on, so the next reader
 can confirm it in one step instead of re-deriving it.
+
+2026-10-01 (feat/meetings-lobby, MC-3) — the four public meeting-link routes
+(``/meetings/by-code/{code}`` lookup, knock, knock status, knock cancel) join
+the allowlist; MC-2 shipped the lookup without an entry.
 """
 
 from __future__ import annotations
@@ -172,6 +176,13 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     "POST /workspaces/invites/{token}/decline": "same, declining must not need an account",
     "GET /pockets/shared/{token}": "public share link; the token IS the grant",
     "GET /codeconnect/github/callback": "GitHub redirect; carries a signed state",
+    # Meeting links (MC-2/MC-3): a guest opening /m/<code> has no account.
+    # Each is rate-limited per IP; the lookup returns six non-identifying fields,
+    # the knock status/cancel need the knock's own bearer secret.
+    "GET /meetings/by-code/{code}": "join-page lookup; rate-limited, no tenant data",
+    "POST /meetings/by-code/{code}/knock": "guest asks to join; rate-limited per IP + code",
+    "GET /meetings/by-code/{code}/knocks/{knock_id}": "guest poll; the knock secret authorises",
+    "DELETE /meetings/by-code/{code}/knocks/{knock_id}": "guest cancels; knock secret authorises",
     # --- static catalogues, no tenant data ---
     "GET /billing/plans": "public price list",
     "GET /billing/site-plans": "public price list",

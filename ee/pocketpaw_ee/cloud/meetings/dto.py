@@ -12,13 +12,21 @@
 # 2026-10-01 (feat/meetings-by-code, MC-2): ``MeetingLookupResponse`` (the
 # public ``GET /meetings/by-code/{code}`` shape — six fields, nothing that
 # identifies a person, room or workspace) and ``JoinMeetingByCodeResponse``.
+#
+# 2026-10-01 (feat/meetings-lobby, MC-3): the lobby shapes. Guest side (public):
+# ``KnockRequest`` → ``KnockCreatedResponse`` {knock_id, secret, status};
+# ``KnockStatusResponse`` {status} plus {token, room_name, identity,
+# livekit_url} once admitted and the call is running (routes drop the None
+# keys). Member side: ``KnockSummaryResponse`` and ``KnockDecisionResponse``.
+# ``UpdateMeetingRequest`` backs PATCH /meetings/{id} (host only; access, title,
+# description; any other field is refused, not ignored).
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_serializer
 
 MeetingSourceName = Literal["recall", "livekit"]
 MeetingProviderName = Literal["google_meet", "zoom"]
@@ -277,3 +285,66 @@ class UpdateMeetingsSettingsRequest(BaseModel):
 
     transcript_provider: str = Field(min_length=1, max_length=80)
     transcript_model: str = Field(default="", max_length=80)
+
+
+# ---------------------------------------------------------------------------
+# Lobby — guests ask to join, people in the call admit or deny
+# ---------------------------------------------------------------------------
+
+KnockStatus = Literal["waiting", "admitted", "denied", "expired", "cancelled"]
+
+
+class KnockRequest(BaseModel):
+    """POST /meetings/by-code/{code}/knock — public."""
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    email: Annotated[str, StringConstraints(strip_whitespace=True, max_length=254)] | None = None
+
+
+class KnockCreatedResponse(BaseModel):
+    """The guest keeps ``secret``; it is shown once and needed for every poll."""
+
+    knock_id: str
+    secret: str
+    status: KnockStatus
+
+
+class KnockStatusResponse(BaseModel):
+    """Guest poll / cancel. The four call fields are set only when the guest may
+    connect now (admitted, meeting open, someone in the call); None otherwise."""
+
+    status: KnockStatus
+    token: str | None = None
+    room_name: str | None = None
+    identity: str | None = None
+    livekit_url: str | None = None
+
+
+class KnockSummaryResponse(BaseModel):
+    """One waiting guest, for people in the meeting."""
+
+    knock_id: str
+    name: str
+    email: str | None
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created(v: datetime) -> str:
+        if v.tzinfo is not None:
+            v = v.astimezone(UTC).replace(tzinfo=None)
+        return v.isoformat() + "Z"
+
+
+class KnockDecisionResponse(BaseModel):
+    knock_id: str
+    status: KnockStatus
+
+
+class UpdateMeetingRequest(BaseModel):
+    """PATCH /meetings/{id} — host only. Unknown fields are a 422, not a no-op."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=300)
+    description: str | None = Field(default=None, max_length=2000)
+    access: Literal["ask", "open"] | None = None
