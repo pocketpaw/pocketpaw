@@ -254,6 +254,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    claude_sdk_connect_timeout: float = Field(
+        default=90.0,
+        description=(
+            "Seconds the Claude SDK backend waits for the CLI subprocess to start "
+            "(connect()) before abandoning it and falling back. The SDK's own start-up "
+            "timeout follows CLAUDE_CODE_STREAM_CLOSE_TIMEOUT, which this backend sets "
+            "to 24h for long tool runs, so without this a hung CLI blocked a session "
+            "for a day."
+        ),
+    )
+
     # OpenAI Agents SDK Settings
     openai_agents_provider: str = Field(
         default="openai",

@@ -1,391 +1,46 @@
 """
-Claude Agent SDK backend for PocketPaw.
-Updated: 2026-09-27 (chore/bump-claude-agent-sdk) - ``_build_options`` passes
-  ``settings.claude_sdk_cli_path`` through as ``ClaudeAgentOptions.cli_path``.
-  The SDK prefers its bundled CLI over PATH, so a model newer than the bundled
-  CLI (2.1.276 in SDK 0.2.156) could not be reached even with a current
-  ``claude`` installed. Unset keeps the bundled CLI. The launch log now names
-  the CLI actually used instead of whatever ``which claude`` finds.
-Updated: 2026-09-27 (feat/sites-visual-research) — ``_build_options`` now sets
-  ``max_buffer_size`` to ``_SDK_MAX_BUFFER_BYTES`` (32 MiB) on every turn. The
-  SDK reads each CLI message into a buffer that defaults to 1 MB, and the new
-  image-returning MCP tools (``preview_site``, ``view_reference``,
-  ``view_reference_screenshot``) can put 1-3 MB of base64 JPEG tiles into one
-  tool result. Past the cap the turn went quiet and then died with "JSON message
-  exceeded maximum buffer size of 1048576 bytes". A constant, so the warm-client
-  cache key is unaffected.
+Claude Agent SDK backend for PocketPaw: runs a turn on the Claude Code CLI
+through ``claude_agent_sdk``, keeping one warm CLI subprocess per backend.
 
-Updated: 2026-09-15 (fix/chat-image-persistent-client) — the images now ride the
-  LEGACY ``self._client`` persistent send too, not only the two leased sends in
-  ``_leased_dispatch``. Those two run only when a SessionSupervisor is driving,
-  and ``POCKETPAW_SESSION_SUPERVISOR`` defaults OFF — so in a default deployment
-  every turn took the legacy path and the attached image was dropped, while the
-  attachments block still named the file. The reported symptom was a model saying
-  it could see the filename and size but not the pixels. Not a capability limit:
-  ``_get_or_create_client`` returns a persistent ``ClaudeSDKClient`` and the SDK
-  docs list image uploads as a streaming-input capability. The stateless
-  ``query()`` fallback genuinely cannot carry one (the same docs say
-  single-message input does not support direct image attachments), so that one
-  now logs a warning naming which of the three routes forced it.
+Per-turn state. The SDK applies ``ClaudeAgentOptions`` (system prompt, MCP
+servers, cwd, plugins) only at ``connect()``; a reused client is sent the query
+text and nothing else. So the system prompt holds only session-stable layers,
+and what changes per turn rides the user message in a ``<turn-context>`` block
+(``compose_turn_message``): the caller's ``turn_context`` (KB hits, scope,
+uploads, recall) and the stored history the client has not seen. Each client
+carries a ``_HistoryWatermark``: a turn whose history extends it sends only the
+delta; a diverged history (edit/delete) evicts the client and the replacement
+gets the whole conversation. Stateless launches get the full history,
+native-resume launches none. ``prewarm`` therefore takes no history.
 
-Updated: 2026-09-15 (feat/chat-image-wiring) — ``run`` grows
-  ``image_attachments`` and a turn carrying one is sent through
-  ``build_streaming_user_message``, which is the only shape the SDK takes an
-  image in. The images ride the PERSISTENT-client sends only: single-message mode
-  explicitly does not support image attachments, so a stateless fresh-launch turn
-  would drop them silently — that path keeps sending a plain string.
+Warm-client key (``_client_cache_key``): session key, cwd, model, allowed tools,
+the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
+plugin/skills digest and the tenant scope. Any change forces a fresh subprocess.
+Per-run skill dirs are cached per digest and dropped on eviction or cleanup.
 
-Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — a ``tool_use`` event now
-  reaches consumers carrying the tool's REAL arguments. The stream loop announced
-  a tool twice over: once from the partial ``content_block_start`` (name known,
-  arguments not yet streamed, so ``input={}``) and once from the completed
-  ``AssistantMessage`` (the SDK's fully assembled ``input``). The second was
-  suppressed by an ``_announced_tools`` name guard the first had just populated,
-  so on the DEFAULT backend's streamed path every tool call reached consumers
-  with empty arguments — the announcement won and the truth was dropped. The
-  guard is gone (and with it the set, whose only reader it was): both emissions
-  now go out, distinguished by an additive ``metadata["input_pending"]`` — True
-  on the provisional announcement, False on the resolved one. Two events for one
-  streamed call is intended; consumers render a tool status line they REPLACE, so
-  the resolved event upgrades the display. The non-streaming path (no
-  ``_StreamEvent``, hence no ``include_partial_messages``) never ran the first
-  branch, so it still emits exactly one event per call, as it always did.
-Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — two things, and the
-  first is a docstring that had become false. ``_behavior_prefix`` said PA-7
-  would delete it once the channel path produced a digest of its own. The channel
-  path now does, and the function is NOT deletable: the pocket specialist calls
-  ``backend.run`` directly (bypassing the router that forwards the digest) and so
-  can any out-of-tree embedder, and both would key a warm client on a constant
-  without it. The correction is in the docstring itself rather than here, where a
-  reader of the function would not find it.
-  Second, ``_build_options``' Windows prompt spill is content-addressed:
-  ``~/.pocketpaw/runtime/prompts/system_prompt-<sha256>.md`` instead of one fixed
-  path. The fixed path was two bugs at once — two concurrent large-prompt runs on
-  one box overwrote each other's file (the pool holds an instance per agent, so
-  this is reachable on the desktop app), and ``_behavior_prefix`` returns
-  ``file:<path>`` for the dict form, which was CONSTANT, so every prompt over 24k
-  hashed identically and the warm client stopped rebuilding on prompt changes for
-  exactly the prompts big enough to spill. The hash in the name fixes both with no
-  I/O in the key function.
-Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``run`` / ``prewarm`` take
-  ``system_prompt_digest`` and the warm-client key prefers it over
-  ``_behavior_prefix``. The prefix INFERS which bytes are stable by cutting the
-  rendered text at known markers; the digest is what the prompt LAYERS said about
-  themselves. The prefix was inferring badly: it excises ``# Key Knowledge`` but
-  ``## Self-Understanding`` renders above that block, so the strip never reached
-  it and an ordinary turn respawned the subprocess. Measured over 8 turns on a
-  live soul, the prefix held 1 of 7 turn boundaries and the digest held 7 of 7.
-  The prefix STAYS as the no-digest fallback — see the PA-7b note above for who
-  still reaches it now that the channel path does not, and ``run`` splices a growing
-  ``# Recent Conversation`` block into ``options.system_prompt`` after assembly,
-  so a whole-prompt key would rebuild there every turn (measured 0 of 7). The two
-  slots are prefixed ``d:`` / ``t:`` so a client warmed under one rule can never
-  answer a turn asking the other.
-Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
-  matches its volatile markers at a BLOCK BOUNDARY instead of on the literal
-  ``"\\n\\n…"`` alone: a block that OPENS the prompt carries no separator, so the
-  old ``find`` missed it and the whole volatile block stayed in the warm-client
-  key — subprocess rebuilt every turn, prewarm evicted on turn 1. It only ever
-  worked because the legacy string assembly emitted that separator even with
-  nothing before it; the prompt assembler joins layers, and PA-3/PA-4/PA-8 give
-  these blocks their own layers, where the join means their text never carries a
-  leading blank line. The cut is still a cut: a marker mid-prompt without its
-  blank line is content, not a header, and a real persona/instructions change
-  still rebuilds.
-Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
-  ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
-  MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
-  POCKET_CREATION_GRANT, no widget/atlas ids, and NOT the
-  ALWAYS_ALLOWED_MCP_SERVERS escape hatch — so a dedicated agent (e.g. /code) gets
-  EXACTLY the declared ids. ``exclusive_mcp_tools=True`` with
-  ``allow_mcp_tool_ids=None`` strips ALL ``mcp__`` ids (empty permitted set), so an
-  exclusive agent wins over even a broad surface. ``False`` (the default) keeps the
-  legacy grant-union scoping byte-for-byte. Built-in SDK tools are never touched.
-Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` /
-  ``_build_options`` grow an optional ``model_override: str | None = None``
-  keyword. When set, it is applied as the LAST word in the model-selection block,
-  so it wins over the non-anthropic ``llm.model``, smart-routing's complexity pick,
-  and the configured ``claude_sdk_model`` — it is the user's explicit per-send
-  choice from the composer's model picker. Because ``_client_cache_key`` already
-  folds ``model`` in, an override that differs from the warm client's model MISSES
-  the cache and gets a fresh subprocess (no stale-model reuse). ``None`` (the
-  default, and all ``prewarm`` ever passes) is byte-identical to the prior path.
-Updated: 2026-07-02 (feat/atlas-fabric AT-7) — the ``pocketpaw_atlas`` server
-  additionally gets a per-run live Fabric introspector (``atlas/fabric.py``)
-  when — and only when — the tenant scope is a real ``ws:<id>`` (not the OSS
-  ``"default"`` scope, not the blank-id sentinel, now the module constant
-  ``_SENTINEL_TENANT_SCOPE``) AND ``pocketpaw_ee.fabric`` imports; import or
-  construction failure degrades to no-introspector (fail-closed, DEBUG log).
-  Lets agents ask atlas "what entity types exist in THIS workspace" without
-  ever baking per-tenant ontology into the compiled artifact.
-Updated: 2026-07-02 (feat/atlas-overlay AT-5) — the ``pocketpaw_atlas`` server
-  is now built with a per-run ``DefaultEntitlementProvider``
-  (``atlas/overlay.py``): the connector scope key resolves from THIS backend
-  instance's ``_extra_subprocess_env`` (``ws:<POCKETPAW_WORKSPACE_ID>`` when an
-  isolated cloud run attached tenancy, else the OSS ``"default"`` scope), so
-  atlas answers carry the calling workspace's connector availability and the
-  fail-closed entitlement filter — never keyed off a process-global flag.
-Updated: 2026-07-02 (feat/atlas-core AT-1) — registered the ``pocketpaw_atlas``
-  in-process MCP server (``agents/sdk_mcp_atlas.py``) alongside
-  ``pocketpaw_widgets``: built in ``_get_mcp_servers`` behind the same tool
-  policy gate, its two tool ids (``atlas_search`` / ``atlas_describe``) added to
-  the allowlist in ``_collect_mcp_tool_ids`` and to the mode-scope grant, so the
-  agent can query the OS self-model (paw primitive meanings) instead of guessing
-  capabilities from LLM priors. Pure core — the atlas seed is packaged data.
-Updated: 2026-07-01 (fix/warm-reuse session_id) — the native ``session_id`` is now
-  ALSO captured from the terminal ``ResultMessage`` (``getattr(event,
-  "session_id", None)``), as a robust FALLBACK to the SS-1 init-``SystemMessage``
-  capture. Root cause of a live WARM NO-OP: on the leased supervised-fresh path
-  the init ``SystemMessage``'s ``data["session_id"]`` did NOT surface at runtime,
-  so ``set_cli_session_id`` never ran, ``runtime.cli_session_id`` stayed None,
-  ``owns_capture`` stayed True forever, and ``warm_reuse`` (= warm_alive AND not
-  owns_capture) never fired. The ``ResultMessage.session_id`` is a direct str
-  field ALWAYS carried on the terminal message of every completed run, so
-  capturing it here guarantees turn-1 capture. Still gated on ``session_handle is
-  not None`` + emit-once (``_session_id_emitted``): the init ``SystemMessage``
-  path still wins first when it fires (no double-emit), and the no-handle legacy
-  stream stays byte-identical. Two INFO logs mark the capture moment + source
-  ("session_id captured from init SystemMessage" / "... from ResultMessage
-  (fallback)") so a live re-smoke can confirm capture now fires.
-Updated: 2026-06-30 (feat/warm-reuse WH-1) — ``run`` accepts two optional OSS-only
-  params so the SessionSupervisor (WH-2/WH-3) can drive the turn against a
-  caller-LEASED warm client instead of the backend's own ``self._client``:
-  ``warm_client: LeasedClient | None`` and
-  ``on_client_built: Callable[[client, options_key, teardown], None] | None``
-  (forwarded by ``AgentPool.run`` only when set — withhold-when-empty, like the
-  deny/allow/skill kwargs). When either is set, ``run`` computes THIS turn's
-  ``_client_cache_key`` ONCE (recomputed via the pure classmethod with the SAME
-  ``options``/``session_key``/``plugin_digest`` ``_get_or_create_client`` would
-  use, so it is byte-identical and the legacy ``self._client`` call stays
-  untouched) and routes through ``_leased_dispatch``:
-    • WARM REUSE — ``warm_client`` key MATCHES this turn (and not a resume turn,
-      and the lease is not ``busy``) → drive ``warm_client.client.query(message)``
-      directly: NO connect, NO resume, NO history injection (the live client
-      already carries the conversation natively), and it is NEVER disconnected
-      (the supervisor keeps it warm).
-    • SUPERVISED FRESH BUILD — ``on_client_built`` set AND (no ``warm_client`` OR
-      key mismatch OR busy) → build + ``connect()`` a fresh client (carrying
-      ``resume`` only when ``session_handle.cli_session_id`` is set — the
-      cold-recovery path), hand it to ``on_client_built(client, key, teardown)``
-      for the supervisor to OWN (``teardown`` disconnects it) instead of caching
-      on ``self._client``, then run the query against it.
-    • BUSY edge — a ``warm_client`` whose ``busy`` flag is already set (a sibling
-      turn is mid-query on it) falls back to a fresh stateless query for THIS turn
-      and does NOT rebind, so two turns never drive one subprocess concurrently.
-  Neither param → the existing ``self._client`` / ``_get_or_create_client`` path,
-  byte-for-byte unchanged. ``LeasedClient`` lives in ``backend.py`` (generic,
-  ``client: Any``) so the supervisor imports it without a cycle.
-Updated: 2026-06-30 (feat/session-supervisor SS-2) — ``_build_options`` now also
-  forwards ``session_handle.session_store`` to the SDK as
-  ``ClaudeAgentOptions.session_store`` when it is non-None. On a resume turn the
-  SDK materializes the conversation from THAT store (a tenancy-keyed custom
-  ``SessionStore``) instead of local disk, and mirrors new transcript lines back
-  via the store's ``append``. The store flows through OPAQUELY — OSS never
-  imports the concrete (possibly ee Mongo-backed) class, so the EE→OSS boundary
-  stays clean. ``None`` leaves ``session_store`` unset (unchanged SS-1 / legacy
-  behavior). Small additive change; the SS-1 resume wiring is untouched.
-Updated: 2026-06-30 (feat/session-supervisor SS-1) — ``run`` accepts an optional
-  ``session_handle: SessionHandle | None``. When it carries a non-None
-  ``cli_session_id``, ``_build_options`` sets ``ClaudeAgentOptions.resume`` so the
-  CLI subprocess RESUMES that on-disk session natively (no Mongo-history replay),
-  and ``run`` routes the turn down the FRESH stateless ``query()`` launch path
-  rather than the warm persistent client (the warm client applies its options
-  only at first ``connect()`` and its cache key omits ``resume``, so a reused warm
-  client would silently ignore a fresh ``resume`` — the documented hazard). The
-  freshly-rebuilt per-turn ``system_prompt`` still rides ``--system-prompt`` on
-  every turn, so a resumed session honors a new system prompt. Turn-1 capture: the
-  SDK's init/system message carries a ``session_id`` in its ``data``; when a
-  ``session_handle`` is present, ``run`` extracts it and surfaces it once as a
-  ``session_id`` ``AgentEvent`` (mirroring the ``token_usage`` event) so the
-  controller can persist it for a later resume (SS-3). ``cli_session_id is None``
-  / no handle = the unchanged legacy warm-client path. ``session_handle`` is
-  forwarded by ``AgentPool.run`` only when non-None (withhold-when-empty idiom).
-Updated: 2026-06-26 (ART-2) — the agent's working directory is now resolved
-  PER-RUN via ``_resolve_cwd`` instead of being frozen to
-  ``settings.file_jail_path`` at ``__init__``. OSS / dedicated behavior is
-  unchanged (still ``file_jail_path``); when an EE ``pocketpaw.agent_extensions``
-  provider supplies ``agent_cwd`` (the cloud product), the run uses a
-  per-workspace/session jail so a tenant's file ops never co-mingle in the
-  shared home dir. A provider that RAISES (a cloud run with no resolvable
-  workspace) propagates — fail-closed, never a silent fallback to ``~``.
-  ``_build_options`` carries the resolved cwd, so ``run`` and ``prewarm`` warm
-  the same per-session jail. ART-2 hardening: the resolved cwd is folded into
-  ``_client_cache_key`` so warm-client tenant isolation is STRUCTURAL (a changed
-  cwd forces a fresh subprocess), not merely an implicit session_key<->cwd
-  coupling; the now-inert ``set_working_directory`` setter was removed
-  (``_build_options`` no longer reads ``self._cwd``); and ``get_status`` reports
-  ``base_cwd`` (the OSS/default base) instead of a misleading ``cwd``.
-Updated: 2026-06-26 (integration/model-catalog-v2, MCG-11) — the ResultMessage
-  token-usage path now runs ``pocketpaw.llm.caching.report_savings`` over the SDK
-  usage to surface STRUCTURED prompt-cache telemetry (cache_read_tokens,
-  cache_write_tokens, cache_hit_rate, cache_est_tokens_saved) on the
-  ``token_usage`` AgentEvent metadata and log the per-turn margin. This is the
-  measurement hook for the byte-stable cached prefix used by site/pocket-gen;
-  the existing ``cached_input_tokens`` field is unchanged for back-compat.
-Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
-  ``connect()`` the warm CLI subprocess for a session BEFORE its first turn so
-  the first real ``run`` reuses it instead of paying the ~12s cold connect. To
-  make the prewarmed client's cache key MATCH the first turn's (else turn 1
-  evicts it — a net loss), the whole ``options_kwargs`` -> ``options`` assembly
-  was extracted from ``run`` into a shared ``_build_options`` helper that both
-  call; ``run``'s behavior is byte-identical (the only behavioral fix: ``llm`` is
-  now declared above the ``try`` so the error handler is safe if option assembly
-  itself raises). ``prewarm`` is fire-and-forget: it swallows ALL errors, never
-  raises, no-ops when a run holds the lease or the SDK/CLI is unavailable, and on
-  failure tears down only a client no run owns. A new ``_client_lock`` serializes
-  the reuse-or-connect critical section in ``_get_or_create_client`` so a prewarm
-  racing the first ``run`` (the trigger fires prewarm as a background task)
-  cannot double-connect — the loser of the lock reuses the winner's client. The
-  EE trigger lives in ``run_core._prewarm_session`` (gated to smart-routing-OFF,
-  where the model is message-independent so a message-less prewarm matches the
-  turn's key). Skill sessions on smart-routing-ON deployments still cold-start
-  turn 1 (documented limitation). Supersedes the prior "prewarm out of scope" note.
-Updated: 2026-06-13 (fix/claude-sdk-warm-client-skills) — skill/tool-bearing
-  runs now REUSE the warm persistent CLI subprocess instead of re-spawning a
-  fresh stateless query every turn (a ~6s/turn floor on any skill chat). The
-  2026-06-07 entry below BYPASSED the warm client for skill runs because
-  ``_client_cache_key`` did not hash the plugin set, so a warm client could not
-  tell a skill turn from a non-skill one. The cache key now folds in
-  ``_plugin_digest`` — a hash of the skill IDENTITY (sorted ``skill_names`` +
-  whether the bundled-skills plugin is loaded), NEVER the materialized
-  ``plugins=`` PATH (``materialize_run_skills`` mints a fresh ``mkdtemp`` per
-  run, so hashing the path would change the key every turn and defeat reuse).
-  With identity in the key, ``_get_or_create_client`` reuses the subprocess for
-  a same-skill turn and rebuilds it for a changed skill set. Lifecycle: because
-  the warm subprocess keeps the ``plugins=`` path from its first ``connect()``,
-  the materialized dir is cached per digest on the instance
-  (``_skills_dir_by_digest``) and reused across same-skill turns; it is removed
-  only when its warm client is evicted (``_get_or_create_client``) or on
-  ``cleanup()`` — NOT by the per-run ``finally``, which now rmtree's the dir
-  ONLY in the genuine stateless-fallback case (when ``_client_in_use`` forced a
-  stateless query and no warm client adopted the dir). The ``skip_warm_client``
-  bypass is removed. (``prewarm`` was deferred here and shipped in the
-  feat/claude-sdk-prewarm follow-up above.)
-Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``run``
-  also accepts ``skill_names: frozenset[str]``, the per-entity skill subset
-  (resolved upstream from the entity pocket's ``surface_profile.skill_names``).
-  When non-empty, those skills are MATERIALIZED into a throwaway local-plugin
-  dir (``pocketpaw.skills.materialize``) and appended to the SDK ``plugins=``
-  list so the agent sees ONLY the named skills (coexisting with the bundled
-  plugin). Because ``setting_sources=[]`` disables filesystem + ``skills=``
-  discovery, a local plugin is the only working channel — same mechanism the
-  bundled skills use. The persistent ("warm") client is BYPASSED for skill runs
-  (its cache key omits ``plugins=`` and it only applies options at first
-  connect), so the run goes through a fresh stateless query whose options carry
-  the plugin; the temp dir is removed in the outer ``finally``. Empty
-  ``skill_names`` is a no-op. Crosses the EE→OSS boundary as a plain frozenset.
-Updated: 2026-07-25 (feat/bundled-skills-per-surface) — a non-empty
-  ``skill_names`` now SUPPRESSES the wholesale bundled-skills plugin
-  (``_should_load_bundled_plugin``). Before this, the two plugin entries were
-  independent: the bundled plugin loaded from ``plugins=`` regardless of
-  ``skill_names``, so a surface could not withhold a bundled skill by naming a
-  narrower set — ``SurfaceProfile.skill_names`` was additive-only, and /code had
-  to deny the ``Skill`` BUILT-IN outright to keep ``pocketpaw-create-pocket``
-  from firing on "build an app with components and nice design". With the gate,
-  naming skills yields exactly those (``materialize_run_skills`` resolves
-  bundled names too, via its new packaged fallback) and naming none keeps the
-  full bundled set, so general chat is byte-for-byte unchanged.
-Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
-  ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
-  ADDITIVE SDK-tool allowlist (resolved upstream from the entity pocket's
-  ``surface_profile.allowed_sdk_tools`` and forwarded by ``AgentPool.run``). It
-  is UNIONed into ``allowed_tools`` BEFORE the deny set is subtracted, so the
-  precedence is ``effective = (agent_tools ∪ allow) − deny`` (the surface deny is
-  the HARD cap — an allow can never re-add a denied id). Empty for every legacy /
-  non-entity run, so the allowlist is unchanged there. Like the deny set, it
-  crosses the EE→OSS boundary as a plain ``frozenset[str]`` and never imports
-  ``pocketpaw_ee``. The persistent-client cache key already folds in
-  ``allowed_tools``, so an entity's allow/deny change rebuilds the warm
-  subprocess on the next turn automatically.
-Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` now accepts a threaded
-  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
-  upstream from the request's ``SurfaceProfile`` and forwarded by
-  ``AgentPool.run``) and subtracts those ids from ``allowed_tools`` BEFORE the
-  SDK launches, so the agent is physically unable to call them. This REPLACES the
-  prior prompt-SNIFFING gate that string-matched a ``<surface ... engine="svelte"
-  />`` marker in the system prompt to strip the ripple-create tools — brittle (a
-  preamble wording change or an unrelated prompt quoting the marker flipped it)
-  and unable to express the three-mode /sites policy the ``SurfaceProfile``
-  resolver now owns. On /sites svelte-create the resolved set forbids the two
-  ripple-create tools (``create_landing_site`` + ``pocket_specialist__create``)
-  so the agent cannot fall back to a rippleSpec landing page — leaving
-  ``create_svelte_site`` + ``publish`` as the only create path; prose-only routing
-  ("PREFER create_svelte_site, do NOT call create_landing_site") was proven
-  insufficient (the ``ripple_spec.unknown_widget_type`` warnings). The set is
-  empty for refine / ripple-engine / non-sites runs, so their tools (incl.
-  ``pocket_specialist__edit``) are untouched. The OSS backend takes a plain
-  ``frozenset[str]`` and never imports ``pocketpaw_ee``.
-Updated: 2026-05-31 (fix/home-backend-summary-per-turn) — the persistent-client
-  cache key now folds in a digest of the system prompt's STABLE behavioral
-  prefix (``_client_cache_key`` / ``_behavior_prefix``), not just
-  session+model+tools. The home agent bakes its non-secret backend summary
-  ({base_url, auth_type, configured}) into the static system prompt; that
-  prompt is applied to the subprocess only at connect() time and ignored on
-  warm reuse, so configuring a pocket's backend mid-session stayed frozen
-  until a cold restart. Keying on the behavioral prefix makes a config flip
-  change the key, which rebuilds the client on the very next turn. The volatile
-  per-turn tail (KB block, soul memories, conversation history) is stripped
-  before hashing so ordinary turns still reuse the warm subprocess.
-Updated: 2026-05-28 (#FU-F) — promote silent MCP provider build failures from
-  DEBUG to WARNING. A stale editable install (CloudForesightMcpProvider with a
-  missing SDK dependency) failed silently; the diagnostic took 30+ minutes.
-  Now logs provider class name, exception type, and message at WARNING with
-  exc_info so operators see it immediately on dashboard restart. Added an INFO
-  startup summary log (``MCP servers registered: …``) after the
-  ``pocketpaw.mcp_servers`` entry-point loop so the operator can confirm the
-  full registered set at a glance.
-Updated: 2026-05-25 (PR #1222 R1 Blocker 1) — added
-  ``attach_subprocess_env``. The pocket-specialist runtime calls it to
-  thread per-request tenancy values (``POCKETPAW_WORKSPACE_ID`` /
-  ``POCKETPAW_USER_ID`` / ``POCKETPAW_INTERNAL_TOKEN``) into the
-  Claude Code subprocess at spawn time without mutating the parent
-  process's ``os.environ``. The original MVP path wrote those vars to
-  the parent env from a request handler — racy across concurrent
-  requests. ``run()`` merges the attached dict into
-  ``options_kwargs["env"]`` AFTER the LLM-auth env so an attached value
-  cannot accidentally clobber the auth key. Each isolated backend
-  instance carries its own stash, so one request's tenancy can never
-  leak into another's subprocess.
-Updated: 2026-06-12 — ``_collect_mcp_tool_ids`` now also allowlists EXTERNAL
-  MCP servers from ``load_mcp_config`` (``~/.pocketpaw/mcp_servers.json``) with
-  a bare ``mcp__<server>`` entry. They are registered with the SDK in
-  ``_get_mcp_servers`` but, lacking an in-process ``tool_ids()`` provider, their
-  tools never reached the allowlist and were uncallable (a deployment's
-  ``fabric`` server was registered yet the agent could not call
-  ``fabric_query`` / ``fabric_stats``).
-Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
-  collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
-  server now carries a writable ``add_widget`` tool alongside the read tools;
-  its id flows through the same provider loop, so the home-pocket agent can
-  call ``add_widget`` on the ``claude_agent_sdk`` backend.
-Updated: 2026-05-21 — Gate the ``pocketpaw_planner`` in-process MCP server
-  behind an explicit policy opt-in (``is_mcp_server_explicitly_allowed``).
-  It was the only in-process MCP server with no gate, so the
-  ``plan_project`` tool schema loaded into every agent run. It now
-  registers only when the agent opts in. ``__init__`` accepts an optional
-  ``policy`` so AgentPool can inject a per-agent ToolPolicy carrying that
-  opt-in; when omitted the policy is built from settings as before.
-Updated: 2026-05-20 — Fix concurrency lease race in run(). On every exit path
-  (the finally block AND the outer except handler) run() cleared the shared
-  self._client_in_use flag and nulled self._client unconditionally, so a
-  non-owning run — a stateless-fallback run, or one that failed before
-  acquiring the lease — would steal a still-streaming sibling persistent run's
-  lease and destroy its subprocess. run() now tracks ownership with a local
-  acquired_lease flag (declared above the try so it is in scope for the except
-  handler) and gates the flag clear and the persistent-client teardown on it
-  on both exit paths — only the run that actually acquired the lease may
-  release it or disconnect the shared subprocess. The event_stream.aclose()
-  in the finally is unaffected: a run always owns its own stream.
-Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
-  tool calls (like memory save via Bash) hang on messaging channels (Telegram,
-  Discord, Slack) because there's no terminal to approve permission prompts.
+Lifecycle invariants:
+  * A run holds the client via ``_client_in_use`` + ``_lease_token``; only that
+    run releases the lease, and its teardown touches only the client it drove.
+    ``cleanup()`` never releases a lease.
+  * ``prewarm`` never evicts: it no-ops while the client is in use (re-checked
+    under ``_client_lock``) or when a client that already served the session is
+    live, and it takes the turn's ``model_override`` / ``tools_enabled``.
+  * Every ``connect()`` goes through ``_connect_client``, bounded by
+    ``claude_sdk_connect_timeout``; the stateless path bounds its first event
+    by the same setting. A failed connect is disconnected and never cached.
+  * A stream that ends without its ResultMessage tears down the backend's own
+    client, or interrupts and retires a supervisor-leased one (``warm_client`` /
+    ``on_client_built``, WH-1).
+  * ``stop(session_key)`` stops only that session's runs (``_RunState``).
+  * The Bun-crash retry replays every ``run`` parameter except ``warm_client``.
+  * API-error text and error results become one error event (a too-old CLI names
+    ``POCKETPAW_CLAUDE_SDK_CLI_PATH``); a max-turns stop names the limit.
 
-Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides:
-- Built-in tools: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
-- Streaming responses
-- PreToolUse hooks for security
-- Permission management
-- MCP server support for custom tools
+Options: permissions are always bypassed (headless), ``cli_path`` comes from
+``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
+image-returning tools, and the in-process MCP servers (pocketpaw, planner,
+atlas, ...) are gated by the ToolPolicy and the per-surface allow/deny sets.
+Images ride every persistent send; the stateless ``query()`` cannot carry them.
 """
 
 import asyncio
@@ -493,6 +148,17 @@ def _scrub_nul_chars(options_kwargs: dict[str, Any]) -> list[str]:
     for key, item in list(options_kwargs.items()):
         options_kwargs[key] = walk(item, key)
     return offenders
+
+
+class _RunState:
+    """Per-run stop state: which session the run serves and whether ``stop``
+    reached it. Replaces a single backend-wide flag that any new run reset."""
+
+    __slots__ = ("session_key", "stopped")
+
+    def __init__(self, session_key: str | None) -> None:
+        self.session_key = session_key
+        self.stopped = False
 
 
 class _BuiltOptions(NamedTuple):
@@ -704,10 +370,19 @@ def _spill_prompt_to_file(prompt: str) -> Path:
     """
     path = _spilled_prompt_path(prompt)
     if path.exists():
+        # Refresh the mtime: the prune keeps the NEWEST files, so a reused file
+        # left at its original mtime could be pruned by a sibling's spill before
+        # the CLI launched for this turn reads it.
+        try:
+            os.utime(path)
+        except OSError:  # pragma: no cover - best effort
+            pass
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(prompt, encoding="utf-8")
+    # Bytes, not write_text: text mode on Windows turns every "\n" into "\r\n",
+    # so the CLI would read a prompt that differs from the one we hashed.
+    tmp.write_bytes(prompt.encode("utf-8", "replace"))
     try:
         os.replace(tmp, path)
     except OSError:
@@ -760,6 +435,99 @@ def _prune_spilled_prompts(
             candidate.unlink()
         except OSError:
             logger.debug("could not prune spilled system prompt %s", candidate)
+
+
+def _bundled_cli_path() -> Path | None:
+    """The CLI shipped inside the ``claude-agent-sdk`` wheel, if there is one.
+
+    The SDK prefers this binary over anything on PATH, so a machine with no
+    ``claude`` installed still has a working CLI when the wheel bundles one.
+    """
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return None
+    name = "claude.exe" if os.name == "nt" else "claude"
+    path = Path(claude_agent_sdk.__file__).parent / "_bundled" / name
+    return path if path.is_file() else None
+
+
+def _claude_cli_available(cli_path: str | None) -> bool:
+    """Whether a CLI the SDK will actually spawn exists.
+
+    Mirrors the SDK's own order: an explicit ``cli_path`` (the operator's
+    ``claude_sdk_cli_path``) wins and must exist; otherwise the bundled CLI;
+    otherwise ``claude`` on PATH.
+    """
+    import shutil
+
+    if isinstance(cli_path, str) and cli_path.strip():
+        return Path(cli_path).is_file()
+    if _bundled_cli_path() is not None:
+        return True
+    return shutil.which("claude") is not None
+
+
+# Upper bound on one ``connect()`` of the CLI subprocess when the setting is
+# absent or unusable. ``CLAUDE_CODE_STREAM_CLOSE_TIMEOUT`` (24 h, see ``run``)
+# also sets the SDK's own initialize timeout, so without this a CLI that hangs
+# during start-up would hold the warm-client lock for a day.
+_DEFAULT_CONNECT_TIMEOUT_S = 90.0
+
+
+class _StatelessStreamCut:
+    """Yielded by ``_resilient_query`` when a parse error killed the stateless
+    stream, so ``run`` can tell the user the reply was cut off."""
+
+
+_STATELESS_STREAM_CUT = _StatelessStreamCut()
+
+_CLI_TOO_OLD_RE = re.compile(
+    r"Claude Code (?P<version>[\d.]+) does not support this model"
+    r"|version (?P<required>[\d.]+) or newer is required",
+    re.IGNORECASE,
+)
+
+
+def _result_error_text(event: Any, *, max_turns: int | None) -> str:
+    """The user-facing text for a ``ResultMessage`` with ``is_error`` set.
+
+    ``result`` is None on the ``error_*`` subtypes (max turns, execution errors),
+    which used to reach the user as the string "None". A CLI too old for the
+    requested model gets one message naming the setting that fixes it.
+    """
+    result = getattr(event, "result", None)
+    subtype = getattr(event, "subtype", "") or ""
+    terminal = getattr(event, "terminal_reason", None) or ""
+    if isinstance(result, str) and result.strip():
+        text = result.strip()
+    elif subtype == "error_max_turns" or terminal == "max_turns":
+        limit = max_turns or getattr(event, "num_turns", None)
+        if limit:
+            return (
+                f"Stopped after reaching the tool-turn limit ({limit}). "
+                "Ask me to continue, or raise the limit in settings."
+            )
+        return "Stopped after reaching the tool-turn limit."
+    else:
+        errors = getattr(event, "errors", None) or []
+        text = "; ".join(str(e) for e in errors if e) or (
+            f"The agent run failed ({subtype})." if subtype else "The agent run failed."
+        )
+    return _cli_too_old_message(text) or text
+
+
+def _cli_too_old_message(text: str) -> str | None:
+    """One clear message for "this CLI is too old for this model", else None."""
+    match = _CLI_TOO_OLD_RE.search(text or "")
+    if not match:
+        return None
+    found = match.group("version")
+    which = f"The Claude Code CLI in use ({found})" if found else "The Claude Code CLI in use"
+    return (
+        f"{which} is too old for the selected model. Set "
+        "POCKETPAW_CLAUDE_SDK_CLI_PATH to a newer `claude` binary, or pick another model."
+    )
 
 
 def _mcp_result_text(content: object) -> str:
@@ -867,6 +635,143 @@ async def stream_one_message(payload: dict):
     yield payload
 
 
+# ── Per-turn state for a warm client ──────────────────────────────────────────
+# The SDK applies ``ClaudeAgentOptions`` (the system prompt included) once, at
+# ``connect()``. A reused client is sent the query text and nothing else. So the
+# system prompt carries only what is stable across a session, and everything
+# that changes per turn rides the user message in a ``<turn-context>`` block:
+# the caller's ``turn_context`` (KB hits, scope/participants, uploaded-file text,
+# soul recall) and whatever stored history the live client has not seen yet.
+#
+# What a client has seen is its ``_HistoryWatermark``, kept ON the client object
+# (``_WATERMARK_ATTR``) so a leased client carries it between backend instances.
+# ``seen`` fingerprints the history entries it holds; ``pending`` is the turn it
+# is serving, which the store will show as a user entry and an assistant reply
+# the client already has natively. A new history must extend ``seen`` (a window
+# that dropped entries off the front is fine); if it does not, something was
+# edited or deleted and the client is rebuilt with the full conversation.
+
+_WATERMARK_ATTR = "_pocketpaw_history_watermark"
+# Fingerprints kept per client. The cloud window is 50 entries; the slack lets a
+# window slide without the alignment search ever losing its anchor.
+_WATERMARK_MAX_SEEN = 200
+_HISTORY_ENTRY_CHARS = 2000
+# Pending-reply marker: any assistant entry directly after the matched user
+# entry. The stored reply is post-processed (ripple specs stripped, labels
+# prefixed), so matching its text would miss more than it catches.
+_ANY_REPLY = None
+
+
+def _normalize_turn_text(text: object) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _history_fingerprint(entry: dict) -> str:
+    raw = f"{entry.get('role', 'user')}\x00{_normalize_turn_text(entry.get('content', ''))}"
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+class _HistoryWatermark:
+    """The stored history a live client already holds (see the block above)."""
+
+    __slots__ = ("seen", "pending")
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+        self.pending: list[tuple[str, str | None]] = []
+
+
+def _pending_matches(entry: dict, want: tuple[str, str | None]) -> bool:
+    role, text = want
+    if entry.get("role", "user") != role:
+        return False
+    if text is _ANY_REPLY:
+        return True
+    got = _normalize_turn_text(entry.get("content", ""))
+    # The sent and stored texts differ at the edges: the group bridge appends an
+    # "Attached files" block to what it sends and prefixes the sender's name to
+    # what it replays. So the opening of either, found inside the other, counts.
+    if got == text:
+        return True
+    head_sent, head_got = text[:200], got[:200]
+    return bool(head_sent and head_got) and (head_sent in got or head_got in text)
+
+
+def _client_has_served(client: Any) -> bool:
+    """Has ``client`` been sent a turn? A fresh connect installs an empty
+    watermark; any sent turn fills it. A client whose watermark was dropped
+    (``_forget_history``) or never set counts as served, so a prewarm leaves it
+    alone rather than guess."""
+    wm = getattr(client, _WATERMARK_ATTR, None)
+    if not isinstance(wm, _HistoryWatermark):
+        return True
+    return bool(wm.seen or wm.pending)
+
+
+def _unseen_history(wm: _HistoryWatermark, history: list[dict]) -> list[dict] | None:
+    """The entries of ``history`` the client behind ``wm`` has not seen, or
+    ``None`` when ``history`` no longer extends what it saw (edit / delete)."""
+    fps = [_history_fingerprint(e) for e in history]
+    start = 0
+    if wm.seen:
+        for i in range(len(wm.seen)):
+            tail = wm.seen[i:]
+            if fps[: len(tail)] == tail:
+                start = len(tail)
+                break
+        else:
+            return None
+    unseen: list[dict] = []
+    p = 0
+    for entry in history[start:]:
+        if p < len(wm.pending) and _pending_matches(entry, wm.pending[p]):
+            p += 1
+            continue
+        unseen.append(entry)
+    return unseen
+
+
+def _render_history(entries: list[dict]) -> str:
+    lines = []
+    for msg in entries:
+        role = str(msg.get("role", "user")).capitalize()
+        content = str(msg.get("content", ""))
+        if len(content) > _HISTORY_ENTRY_CHARS:
+            content = content[:_HISTORY_ENTRY_CHARS] + "..."
+        lines.append(f"**{role}**: {content}")
+    return "\n".join(lines)
+
+
+def compose_turn_message(
+    message: str,
+    *,
+    turn_context: str = "",
+    history: list[dict] | None = None,
+    history_is_delta: bool = False,
+) -> str:
+    """The query text for one turn: a ``<turn-context>`` block, then the user's
+    message. Returns ``message`` unchanged when there is nothing to add."""
+    parts: list[str] = []
+    if history:
+        heading = (
+            "# Messages since your last reply" if history_is_delta else "# Recent Conversation"
+        )
+        parts.append(f"{heading}\n{_render_history(history)}")
+    if turn_context and turn_context.strip():
+        parts.append(turn_context.strip())
+    if not parts:
+        return message
+    body = "\n\n".join(parts)
+    return (
+        "<turn-context>\n"
+        "Context for the message below, refreshed on every turn. It replaces any "
+        "earlier turn-context and is not something the user typed.\n\n"
+        f"{body}\n"
+        "</turn-context>\n\n"
+        f"{message}"
+    )
+
+
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
 
@@ -955,6 +860,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client = None
         self._client_options_key: str | None = None
         self._client_in_use = False
+        # The session the live client was connected for (prewarm leaves a
+        # session's served client alone whatever its key) and the token of the
+        # run holding ``_client_in_use`` (only that run may release it).
+        self._client_session_key: str | None = None
+        self._lease_token: object | None = None
+        # One entry per in-flight ``run``: its session and whether stop() hit it.
+        # Stop is per run, so a new run cannot clear a pending stop of another.
+        self._active_runs: dict[object, _RunState] = {}
         # Serializes the connect-or-reuse critical section in
         # ``_get_or_create_client`` (feat/claude-sdk-prewarm). ``prewarm`` runs
         # CONCURRENTLY with the first ``run`` (fired as a background task before
@@ -1082,15 +995,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             self._sdk_available = True
 
-            # Check if the `claude` CLI binary is actually installed
-            import shutil
-
-            if shutil.which("claude"):
+            # Check that a CLI the SDK will spawn exists: the configured
+            # cli_path, else the wheel's bundled CLI, else `claude` on PATH.
+            if _claude_cli_available(getattr(self.settings, "claude_sdk_cli_path", None)):
                 self._cli_available = True
                 logger.info("✓ Claude Agent SDK ready ─ cwd: %s", self._cwd)
             else:
                 logger.warning(
-                    "⚠️ Claude Code CLI not found on PATH. "
+                    "⚠️ Claude Code CLI not found (no claude_sdk_cli_path, no bundled "
+                    "CLI, nothing on PATH). "
                     "Install with: npm install -g @anthropic-ai/claude-code "
                     "and set ANTHROPIC_API_KEY, or switch to a different backend in Settings."
                 )
@@ -1814,11 +1727,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         notice.
 
         Measured 2026-08-03 over 8 turns of a realistic channel prompt: keying on
-        the whole prompt instead held 0/7 boundaries, because ``run`` itself
-        splices a GROWING ``# Recent Conversation`` block into
-        ``options.system_prompt`` (see the history injection in
-        ``_build_options``) — so the warm subprocess would be torn down and
-        respawned every turn. With this prefix it held 7/7. So PA-7b claims no
+        the whole prompt instead held 0/7 boundaries, because ``run`` then spliced
+        a GROWING ``# Recent Conversation`` block into ``options.system_prompt``
+        (history now rides the query text instead) — so the warm subprocess was
+        torn down and respawned every turn. With this prefix it held 7/7. So PA-7b claims no
         cache-rate win on the channel path — 7/7 was already the baseline that
         measurement recorded, and what the prefix genuinely cannot do is see a
         REAL behaviour change sitting below the marker it cuts at.
@@ -1976,10 +1888,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         the drift the prefix cannot: ``## Self-Understanding`` renders above the
         ``# Key Knowledge`` block the prefix excises, so the prefix keeps it and
         rebuilt the warm subprocess on 6 of 7 measured turn boundaries. Over the
-        same 8 turns the digest held one value. It is also honest about what it
-        does NOT cover — the ``# Recent Conversation`` block this backend splices
-        into ``options.system_prompt`` after assembly is per-turn volatile and is
-        outside both, which is the intended answer in both cases.
+        same 8 turns the digest held one value. History and per-turn context are
+        outside both, and outside the system prompt entirely: they ride the
+        query text (``compose_turn_message``).
 
         ``t:`` is not a transitional wart to be deleted on sight, and PA-7b did
         NOT retire it. The channel path gained a digest there, but the pocket
@@ -2034,8 +1945,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         plugin_digest: str = "",
         system_prompt_digest: str = "",
+        history: list[dict] | None = None,
+        prewarm: bool = False,
     ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
+
+        ``prewarm=True`` makes the call a no-op (returns None) when a run holds
+        the lease or a client that already served ``session_key`` is live, so a
+        prewarm can never evict a client someone is using.
 
         Reuses the existing subprocess if model, tools, session, the system
         prompt's behavioral prefix, **and the plugin-identity digest** haven't
@@ -2052,6 +1969,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
         anymore. Re-materializing the dir per turn does NOT work — the warm
         subprocess keeps the original path from its first connect — so the dir
         is cached per digest and only dropped on eviction or cleanup().
+
+        ``history`` is the stored conversation this turn carries. History is
+        volatile and stays out of the key, and it reaches the model in the query
+        text rather than the prompt, so a matching client is reused as long as
+        ``history`` still extends what it has seen (``_client_knows_history``). A
+        history that was edited or had entries deleted evicts it, and the new
+        client is sent the full conversation. ``None`` skips the check.
         """
         import time
 
@@ -2072,11 +1996,33 @@ class ClaudeSDKBackend(BaseAgentBackend):
         )
 
         async with self._client_lock:
+            # A prewarm never takes a client away from anyone. Checked INSIDE the
+            # lock because a run can take the lease between prewarm's entry check
+            # and here. A client that already served this session is left alone
+            # whatever its key (a model-picker or tools-off turn keys differently
+            # from the default prewarm): the turn itself decides whether to reuse.
+            if prewarm:
+                if self._client_in_use:
+                    logger.debug("prewarm skipped: the warm client is in use")
+                    return None
+                if (
+                    self._client is not None
+                    and self._client_session_key == session_key
+                    and _client_has_served(self._client)
+                ):
+                    logger.debug("prewarm skipped: session %s is already warm", session_key)
+                    return None
             # Re-check INSIDE the lock: a prewarm (or sibling) may have connected
             # a matching client while we awaited the lock — reuse it, don't churn.
             if self._client is not None and self._client_options_key == key:
-                logger.debug("Reusing persistent client (key=%s)", key)
-                return self._client
+                if self._client_knows_history(self._client, history):
+                    logger.debug("Reusing persistent client (key=%s)", key)
+                    return self._client
+                logger.info(
+                    "Rebuilding warm client: the stored conversation no longer "
+                    "extends what it has seen (key=%s)",
+                    key,
+                )
 
             # Disconnect stale client and drop the skills dir it was connected with.
             if self._client is not None:
@@ -2085,17 +2031,90 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 except Exception as e:
                     logger.debug("Failed to disconnect Claude client: %s", e)
                 self._client = None
+                self._client_options_key = None
+                self._client_session_key = None
                 self._drop_skills_dir(self._client_plugin_digest)
 
-            # Create and connect new client
+            # Create and connect the new client; it becomes the warm client only
+            # once connected, so a failed connect never leaves a broken client
+            # cached under a key a later turn could match.
             t0 = time.monotonic()
-            self._client = self._ClaudeSDKClient(options=options)
-            await self._client.connect()
+            client = self._ClaudeSDKClient(options=options)
+            try:
+                await self._connect_client(client)
+            except BaseException:
+                await self._discard_client(client)
+                raise
+            self._client = client
+            self._client_session_key = session_key
             self._client_options_key = key
             self._client_plugin_digest = plugin_digest
+            setattr(self._client, _WATERMARK_ATTR, _HistoryWatermark())
             t1 = time.monotonic()
             logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
             return self._client
+
+    @staticmethod
+    def _client_knows_history(client: Any, history: list[dict] | None) -> bool:
+        """Can ``client`` serve a turn carrying ``history`` by being sent only
+        what it has not seen? False when the history diverged from its
+        watermark, or when the client has none (built somewhere that did not
+        track one), in which case what it holds is unknown."""
+        if history is None:
+            return True
+        wm = getattr(client, _WATERMARK_ATTR, None)
+        if not isinstance(wm, _HistoryWatermark):
+            return False
+        return _unseen_history(wm, history) is not None
+
+    @staticmethod
+    def _turn_query_text(
+        client: Any,
+        message: str,
+        *,
+        history: list[dict] | None,
+        turn_context: str,
+        history_is_native: bool = False,
+    ) -> str:
+        """Compose this turn's query text for ``client`` and advance its watermark.
+
+        ``client=None`` is a stateless launch: it holds nothing, so it gets the
+        full history. ``history_is_native`` is a native-resume launch, whose CLI
+        session already carries the conversation: no history is rendered, but it
+        counts as seen. Otherwise the client is sent only the entries it has not
+        seen. The watermark then records all of ``history`` plus this turn, which
+        the store will return as a user entry and a reply the client already has.
+        """
+        entries = list(history or ())
+        if client is None:
+            return compose_turn_message(message, turn_context=turn_context, history=entries)
+        wm = getattr(client, _WATERMARK_ATTR, None)
+        if not isinstance(wm, _HistoryWatermark):
+            wm = _HistoryWatermark()
+            setattr(client, _WATERMARK_ATTR, wm)
+        is_delta = bool(wm.seen or wm.pending)
+        unseen: list[dict] = []
+        if history is not None and not history_is_native:
+            planned = _unseen_history(wm, entries)
+            if planned is None:
+                unseen, is_delta = entries, False
+            else:
+                unseen = planned
+        if history is not None:
+            wm.seen = [_history_fingerprint(e) for e in entries][-_WATERMARK_MAX_SEEN:]
+        wm.pending = [("user", _normalize_turn_text(message)), ("assistant", _ANY_REPLY)]
+        return compose_turn_message(
+            message, turn_context=turn_context, history=unseen, history_is_delta=is_delta
+        )
+
+    @staticmethod
+    def _forget_history(client: Any) -> None:
+        """Drop ``client``'s watermark after a send that may not have landed, so
+        its next turn rebuilds instead of trusting what it may not hold."""
+        try:
+            setattr(client, _WATERMARK_ATTR, None)
+        except Exception:  # noqa: BLE001 - best effort on an exotic client
+            pass
 
     def _drop_skills_dir(self, plugin_digest: str) -> None:
         """Remove the materialized per-run skills dir cached under
@@ -2109,8 +2128,44 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             cleanup_run_skills(root)
 
+    def _connect_timeout(self) -> float:
+        raw = getattr(self.settings, "claude_sdk_connect_timeout", None)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            return float(raw)
+        return _DEFAULT_CONNECT_TIMEOUT_S
+
+    async def _connect_client(self, client: Any) -> None:
+        """``client.connect()`` bounded by ``claude_sdk_connect_timeout``.
+
+        On timeout the half-started client is disconnected and a RuntimeError
+        raised, which every caller already treats as a failed connect.
+        """
+        timeout = self._connect_timeout()
+        try:
+            await asyncio.wait_for(client.connect(), timeout)
+        except TimeoutError:
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("disconnect after connect timeout failed: %s", exc)
+            raise RuntimeError(f"Claude CLI did not finish starting within {timeout:g}s") from None
+
+    async def _discard_client(self, client: Any) -> None:
+        """Best-effort disconnect of a client that is being dropped."""
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to disconnect Claude client: %s", exc)
+
     async def cleanup(self) -> None:
-        """Disconnect the persistent client and release resources."""
+        """Disconnect the persistent client and release resources.
+
+        Does NOT release ``_client_in_use``: only the run holding the lease may,
+        from its own ``finally``. Releasing it here let a second run take the
+        lease while the first was still streaming.
+        """
         if self._client is not None:
             try:
                 await self._client.disconnect()
@@ -2118,7 +2173,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 logger.debug("Failed to disconnect Claude client: %s", e)
             self._client = None
             self._client_options_key = None
-            self._client_in_use = False
+            self._client_session_key = None
             logger.info("Persistent client disconnected")
         # Sweep every materialized per-run skills dir adopted by a warm client.
         # Safe even when no client existed (the map is just empty).
@@ -2131,15 +2186,47 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client_plugin_digest = ""
 
     async def _resilient_query(self, prompt: str, options):
-        """Wrap stateless _query with MessageParseError recovery."""
+        """Wrap stateless _query with MessageParseError handling.
+
+        Unlike the persistent client, a stateless ``query()`` generator cannot be
+        re-created mid-turn, so a parse error ends the stream. It yields
+        ``_STATELESS_STREAM_CUT`` so ``run`` tells the user the reply was cut off
+        instead of ending it silently.
+
+        Only the FIRST event is time-bounded, by ``claude_sdk_connect_timeout``:
+        the CLI emits its init message as soon as it has started, so a launch
+        that produces nothing in that window is hung (the SDK's own initialize
+        wait is 24 h here). Every later event is unbounded, so a long reply or a
+        slow tool is never cut.
+        """
+        stream = self._query(prompt=prompt, options=options)
         try:
-            async for event in self._query(prompt=prompt, options=options):
+            timeout = self._connect_timeout()
+            try:
+                first = await asyncio.wait_for(anext(stream), timeout)
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                raise RuntimeError(
+                    f"Claude CLI did not finish starting within {timeout:g}s"
+                ) from None
+            yield first
+            async for event in stream:
                 yield event
         except Exception as exc:
             if "MessageParseError" in type(exc).__name__:
-                logger.warning("Skipping unrecognised SDK event in stateless query: %s", exc)
+                logger.warning("Unreadable SDK event ended the stateless query: %s", exc)
+                yield _STATELESS_STREAM_CUT
             else:
                 raise
+        finally:
+            # Closing the SDK's generator is what ends its CLI subprocess.
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception as close_exc:  # noqa: BLE001
+                    logger.debug("closing the stateless query failed: %s", close_exc)
 
     async def _resilient_receive(self, client):
         """Iterate over client messages, recovering from parse errors.
@@ -2188,7 +2275,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
         message: str,
         *,
         system_prompt: str | None,
-        history: list[dict] | None,
         session_key: str | None,
         deny_mcp_tool_ids: frozenset[str],
         allow_sdk_tools: frozenset[str],
@@ -2305,33 +2391,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception:
             pass  # Don't break agent if connector registry fails
 
-        # Native-resume session id (feat/session-supervisor SS-1). When set, the
-        # CLI subprocess will be launched with ``resume=<id>`` and reloads that
-        # session's transcript NATIVELY, so injecting Mongo ``history`` into the
-        # prompt below would DUPLICATE the conversation. The whole point of the
-        # slice is native continuity INSTEAD of history replay, so a resume turn
-        # skips the injection. ``None`` (legacy / no handle) keeps every existing
-        # cold-start run injecting history exactly as before.
-        resume_session_id = session_handle.cli_session_id if session_handle is not None else None
-
-        # Inject prior turns into the system prompt at connect time. The
-        # persistent ClaudeSDKClient accumulates new turns natively after
-        # connect, but a fresh subprocess (after eviction, restart, or
-        # session switch) has empty native history — without this, those
-        # cold-start runs lose all conversation context. Reused clients
-        # keep the prompt set at first connect and ignore later option
-        # changes, so there's no duplication on the warm path. Skipped on a
-        # native-resume turn (the resumed session already carries its history).
+        # History is NOT in the system prompt. The SDK applies the prompt only
+        # at ``connect()``, so a reused warm client would keep whatever history
+        # the connecting turn had; ``run`` sends it in the query text instead
+        # (``_turn_query_text``), which keeps this prompt identical across turns.
         final_prompt = identity
-        if history and not resume_session_id:
-            lines = ["# Recent Conversation"]
-            for msg in history:
-                role = msg.get("role", "user").capitalize()
-                content = msg.get("content", "")
-                if len(content) > 2000:
-                    content = content[:2000] + "..."
-                lines.append(f"**{role}**: {content}")
-            final_prompt += "\n\n" + "\n".join(lines)
+
+        # Native-resume session id (feat/session-supervisor SS-1): the CLI is
+        # launched with ``resume=<id>`` and reloads that session's transcript.
+        resume_session_id = session_handle.cli_session_id if session_handle is not None else None
 
         # Pocket sessions don't need shell or filesystem access — the
         # MCP pocket tools (get_pocket / list_pockets / set_state /
@@ -2802,17 +2870,27 @@ class ClaudeSDKBackend(BaseAgentBackend):
         *,
         session_key: str,
         system_prompt: str | None = None,
-        history: list[dict] | None = None,
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
+        model_override: str | None = None,
+        tools_enabled: bool = True,
     ) -> None:
         """Eagerly ``connect()`` the warm CLI subprocess for a session before its
         first turn, so the first real ``run`` reuses it instead of paying the
         ~12s cold ``connect()`` (feat/claude-sdk-prewarm).
+
+        ``model_override`` / ``tools_enabled`` are the turn's per-send model pick
+        and tool switch. They change the model / ``allowed_tools`` and so the
+        cache key; passing the turn's values is what lets a model-picker or
+        tools-off turn reuse the prewarmed client instead of rebuilding it.
+
+        Prewarm never evicts: it is a no-op while a run holds the lease (checked
+        again under the client lock) and when a client that already served this
+        session is live, whatever that client's key.
 
         Builds the SAME options the first turn will (via ``_build_options``) and
         hands them to ``_get_or_create_client`` with the SAME ``session_key`` +
@@ -2828,6 +2906,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         blocks sit below its cut. The digest survives it for a stronger reason:
         ``legacy_tail`` and ``retrieval`` are the layers those two fields feed and
         both declare ``cache_key=None``, so neither can reach the digest at all.
+
+        It takes no history. History rides the first turn's query text, and a
+        prewarmed client has seen none, so turn 1 sends it the whole
+        conversation (``_turn_query_text``) and the prewarm is never rebuilt.
 
         FIRE-AND-FORGET, never-break-a-turn semantics:
           * ALL exceptions are logged and SWALLOWED — a failed prewarm must never
@@ -2860,31 +2942,31 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 # message-independent (smart routing OFF). The trigger gates on
                 # this; see prewarm_session in run_core.
                 system_prompt=system_prompt,
-                history=history,
                 session_key=session_key,
                 deny_mcp_tool_ids=deny_mcp_tool_ids,
                 allow_sdk_tools=allow_sdk_tools,
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 skill_names=skill_names,
                 exclusive_mcp_tools=exclusive_mcp_tools,
-                # No ``tools_enabled`` here on purpose: prewarm runs BEFORE the
-                # send, so the per-send switch does not exist yet. It builds the
-                # default (tools on), and a tools-off turn therefore has a
-                # different ``allowed_tools`` and so a different cache key, and
-                # pays a cold start. That is the right trade: the alternative is
-                # prewarming a client the common case would then evict.
+                model_override=model_override,
+                tools_enabled=tools_enabled,
                 stderr_sink=[],
             )
             # Remember the digest we may have adopted a dir under, so a failed
             # connect can release it instead of leaking.
             if built.skills_dir_adopted:
                 adopted_digest = built.plugin_digest
-            await self._get_or_create_client(
+            warmed = await self._get_or_create_client(
                 built.options,
                 session_key=session_key,
                 plugin_digest=built.plugin_digest,
                 system_prompt_digest=system_prompt_digest,
+                prewarm=True,
             )
+            if warmed is None:
+                if adopted_digest and self._client_plugin_digest != adopted_digest:
+                    self._drop_skills_dir(adopted_digest)
+                return
             logger.info(
                 "Prewarmed Claude client for session_key=%s (skills=%d)",
                 session_key,
@@ -2899,23 +2981,16 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # would corrupt that run. Do the teardown UNDER the client lock and
             # only when no run holds the lease, so we can't disconnect a client a
             # sibling run is actively using.
+            # ``_get_or_create_client`` already disconnected the client whose
+            # connect failed and never cached it, so the only thing left to
+            # release is a skills dir adopted for a client that does not exist.
             if self._client_lock is None:
                 self._client_lock = asyncio.Lock()
             async with self._client_lock:
-                if not self._client_in_use:
-                    try:
-                        if self._client is not None:
-                            await self._client.disconnect()
-                    except Exception as disc_exc:  # noqa: BLE001
-                        logger.debug("prewarm cleanup disconnect error (ignored): %s", disc_exc)
-                    self._client = None
-                    self._client_options_key = None
-                    # If _build_options adopted a materialized skills dir for this
-                    # digest but no live client now references it, drop it so it
-                    # doesn't leak.
-                    if adopted_digest:
-                        self._drop_skills_dir(adopted_digest)
-                        self._client_plugin_digest = ""
+                if adopted_digest and not (
+                    self._client is not None and self._client_plugin_digest == adopted_digest
+                ):
+                    self._drop_skills_dir(adopted_digest)
 
     async def _leased_dispatch(
         self,
@@ -2927,6 +3002,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         warm_client: LeasedClient | None,
         on_client_built: Callable[[Any, str, Callable], None] | None,
         image_attachments: tuple[ImageAttachment, ...] = (),
+        history: list[dict] | None = None,
+        turn_context: str = "",
     ) -> tuple[Any, LeasedClient | None]:
         """feat/warm-reuse WH-1 — route a turn against a caller-LEASED warm client.
 
@@ -2943,10 +3020,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         Three outcomes:
           1. WARM REUSE — ``warm_client`` key matches, not a resume turn, lease not
-             ``busy`` → drive ``warm_client.client.query(message)`` directly (no
-             connect, no resume, no history injection) and return its receive
-             iterator. The lease stays ``busy`` for the stream's duration and is
-             NEVER disconnected.
+             ``busy``, and ``history`` still extends what the client has seen →
+             drive ``warm_client.client.query`` directly (no connect, no resume)
+             with this turn's context and only the history it has not seen, and
+             return its receive iterator. The lease stays ``busy`` for the
+             stream's duration and is NEVER disconnected. A diverged history
+             (an edit or delete) skips reuse and takes step 2.
           2. SUPERVISED FRESH BUILD — ``on_client_built`` set and warm reuse did not
              apply → build + ``connect()`` a fresh client (``options`` already carry
              ``resume`` iff ``session_handle.cli_session_id`` was set), hand it to
@@ -2964,6 +3043,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             warm_client is not None
             and not resume_active
             and warm_client.options_key == this_turn_key
+            and self._client_knows_history(warm_client.client, history)
         ):
             # Busy detection: the lease's own ``busy`` flag. Single-threaded
             # asyncio means the check-then-set below has no ``await`` between it, so
@@ -2979,19 +3059,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 return None, None
             warm_client.busy = True
             try:
-                logger.info(
-                    "WH-1: reusing leased warm client (key match) — "
-                    "no connect, no resume, no history injection"
+                logger.info("WH-1: reusing leased warm client (key match) — no connect, no resume")
+                text = self._turn_query_text(
+                    warm_client.client, message, history=history, turn_context=turn_context
                 )
                 await warm_client.client.query(
-                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    stream_one_message(build_streaming_user_message(text, image_attachments))
                     if image_attachments
-                    else message
+                    else text
                 )
                 return self._resilient_receive(warm_client.client), warm_client
             except Exception as exc:  # noqa: BLE001
                 # The leased client failed mid-send. Release its busy flag (we no
                 # longer drive it) but do NOT disconnect — the supervisor owns it.
+                # What it holds is now unknown, so its next turn rebuilds.
+                self._forget_history(warm_client.client)
                 warm_client.busy = False
                 logger.warning("WH-1: leased warm client query failed, stateless fallback: %s", exc)
                 return None, None
@@ -3000,7 +3082,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         if on_client_built is not None:
             try:
                 fresh = self._ClaudeSDKClient(options=options)
-                await fresh.connect()
+                try:
+                    await self._connect_client(fresh)
+                except Exception:
+                    await self._discard_client(fresh)
+                    raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "WH-1: supervised fresh client connect failed, stateless fallback: %s",
@@ -3037,15 +3123,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "WH-1: supervised fresh client built + bound (resume=%s) — driving query",
                     bool(getattr(options, "resume", None)),
                 )
+                text = self._turn_query_text(
+                    fresh,
+                    message,
+                    history=history,
+                    turn_context=turn_context,
+                    history_is_native=resume_active,
+                )
                 await fresh.query(
-                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    stream_one_message(build_streaming_user_message(text, image_attachments))
                     if image_attachments
-                    else message
+                    else text
                 )
                 # The supervisor now OWNS the client; the backend does not tear it
                 # down here even if the stream later aborts.
                 return self._resilient_receive(fresh), None
             except Exception as exc:  # noqa: BLE001
+                self._forget_history(fresh)
                 logger.warning(
                     "WH-1: supervised fresh client query failed, stateless fallback: %s",
                     exc,
@@ -3080,10 +3174,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # image attachments, so a stateless fresh-launch turn carrying images
         # would drop them silently. See where this is consumed below.
         image_attachments: tuple[ImageAttachment, ...] = (),
+        # Per-turn volatile context (KB hits, scope/participants, uploaded-file
+        # text, soul recall). Sent in the query text, never the system prompt.
+        turn_context: str = "",
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``turn_context`` and ``history`` reach the model in the QUERY TEXT
+        (``compose_turn_message``), never in ``options.system_prompt``: the SDK
+        applies the prompt only at ``connect()``, so on a reused warm client
+        anything per-turn in it would stay whatever the connecting turn carried.
+        A warm client is sent only the history it has not seen; a fresh or
+        stateless one gets all of it; a native-resume launch gets none.
 
         ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``, and
         it replaces ``_behavior_prefix`` in the warm-client cache key for every
@@ -3152,6 +3256,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         falling back to a fresh stateless query). Neither set → the unchanged
         legacy ``self._client`` path. See the module docstring for the full table.
         """
+        # Every parameter of this call, captured before anything else is bound,
+        # so the crash retry below re-runs the SAME turn (tool caps, model, skills,
+        # images…) and a parameter added later is forwarded without anyone
+        # remembering to list it. MUST stay the first statement.
+        _call_kwargs = {k: v for k, v in locals().items() if k not in ("self", "message")}
         if not self._sdk_available:
             yield AgentEvent(
                 type="error",
@@ -3180,7 +3289,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
             )
             return
 
+        # Status only (``get_status``). Whether THIS run was stopped lives in
+        # ``_run_state``, which a later run cannot reset.
         self._stop_flag = False
+        _run_token = object()
+        _run_state = _RunState(session_key)
+        self._active_runs[_run_token] = _run_state
 
         # ── Prevent the SDK from closing stdin too early ──────────
         # When hooks are present the SDK's stream_input() waits for
@@ -3220,6 +3334,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # non-owning run (stateless fallback, or a failure before acquisition)
         # can never release a sibling's lease or destroy its subprocess.
         acquired_lease = False
+        # The warm client THIS run drives under the lease. Teardown is always of
+        # this object, and the backend's slot is cleared only while it still
+        # holds it: after a cleanup() the slot may belong to the next run.
+        _persistent_client: Any = None
         # feat/warm-reuse WH-1: the ``LeasedClient`` whose ``busy`` flag THIS run
         # set on the warm-reuse path. Declared above the try so the finally /
         # except can always release it (set ``busy=False``) without ever
@@ -3247,7 +3365,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
             _built = await self._build_options(
                 message,
                 system_prompt=system_prompt,
-                history=history,
                 session_key=session_key,
                 deny_mcp_tool_ids=deny_mcp_tool_ids,
                 allow_sdk_tools=allow_sdk_tools,
@@ -3317,6 +3434,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     warm_client=warm_client,
                     on_client_built=on_client_built,
                     image_attachments=image_attachments,
+                    history=history,
+                    turn_context=turn_context,
                 )
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in
@@ -3330,12 +3449,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
             elif not self._client_in_use and not _resume_active:
                 try:
                     self._client_in_use = True
+                    self._lease_token = _run_token
                     acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
                         options,
                         session_key=session_key,
                         plugin_digest=plugin_digest,
                         system_prompt_digest=system_prompt_digest,
+                        history=history,
+                    )
+                    turn_text = self._turn_query_text(
+                        _persistent_client,
+                        message,
+                        history=history,
+                        turn_context=turn_context,
                     )
                     logger.info(
                         "Persistent client: sending query (%d chars, %d image(s))",
@@ -3364,9 +3491,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     # no attachment keeps sending the bare string every existing
                     # run sends, rather than a one-element parts list.
                     await _persistent_client.query(
-                        stream_one_message(build_streaming_user_message(message, image_attachments))
+                        stream_one_message(
+                            build_streaming_user_message(turn_text, image_attachments)
+                        )
                         if image_attachments
-                        else message
+                        else turn_text
                     )
                     # Use _resilient_receive instead of receive_response() +
                     # _safe_iter.  This handles MessageParseError by
@@ -3385,14 +3514,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             "CLI stderr during persistent client failure:\n%s",
                             "\n".join(_stderr_lines),
                         )
-                    # Clear broken client so next call creates a fresh one.
-                    # This run is falling back to stateless: it no longer owns
-                    # the persistent client, so drop the lease and the
-                    # ownership flag so the finally/except teardown below
-                    # cannot misfire on a client this run no longer holds.
-                    self._client = None
-                    self._client_options_key = None
-                    self._client_in_use = False
+                    # Disconnect the broken client (dropping it without that
+                    # leaked its subprocess) so the next call creates a fresh
+                    # one. A failed connect never reached the slot, so there is
+                    # nothing more to drop then. This run is falling back to
+                    # stateless: release the lease and the ownership flag so the
+                    # finally/except teardown below cannot misfire.
+                    if _persistent_client is not None and self._client is _persistent_client:
+                        self._client = None
+                        self._client_options_key = None
+                        self._client_session_key = None
+                        await self._discard_client(_persistent_client)
+                    if self._lease_token is _run_token:
+                        self._client_in_use = False
+                        self._lease_token = None
                     acquired_lease = False
                     _persistent_client = None
                     # No warm client adopted the skills dir we cached for this
@@ -3438,10 +3573,18 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         self._client_in_use,
                         bool(skill_names),
                     )
-                # ``_build_options`` already baked Mongo history into the system
-                # prompt inside ``options``, so the stateless path uses the same
-                # options as the persistent path — no separate prompt swap needed.
-                event_stream = self._resilient_query(prompt=message, options=options)
+                # A stateless launch holds nothing, so it gets the full history
+                # in the prompt text; a native-resume launch gets none (its CLI
+                # session carries the conversation).
+                event_stream = self._resilient_query(
+                    prompt=self._turn_query_text(
+                        None,
+                        message,
+                        history=None if _resume_active else history,
+                        turn_context=turn_context,
+                    ),
+                    options=options,
+                )
 
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
@@ -3460,6 +3603,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # name-match pops the right pending entry (and the UI shows the real
             # tool, not a fallback).
             _server_tool_names: dict[str, str] = {}
+            # Text of an assistant message the CLI synthesized for an API error
+            # (``AssistantMessage.error`` set). It is not a reply: it is held back
+            # and reported once, as an error, with the result.
+            _api_error_text: str | None = None
+            _error_emitted = False
 
             # Stream responses — release the persistent client guard when done
             try:
@@ -3471,9 +3619,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             _event_count,
                             type(event).__name__,
                         )
-                    if self._stop_flag:
-                        logger.info("🛑 Stop flag set, breaking stream")
+                    if _run_state.stopped:
+                        logger.info("🛑 Stop requested for this run, breaking stream")
                         break
+
+                    if event is _STATELESS_STREAM_CUT:
+                        yield AgentEvent(
+                            type="error",
+                            content=(
+                                "The reply was cut off: the Claude CLI sent a message "
+                                "this SDK could not read. Please try again."
+                            ),
+                        )
+                        _error_emitted = True
+                        continue
 
                     # Handle different message types using isinstance checks
 
@@ -3606,6 +3765,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         _msg_model = getattr(event, "model", None)
                         if isinstance(_msg_model, str) and _msg_model:
                             _last_seen_model = _msg_model
+                        if getattr(event, "error", None):
+                            # The CLI's stand-in reply for a failed API call
+                            # ("API Error: 400 …"). Never the assistant's answer:
+                            # emitting it put the raw error in the reply AND
+                            # persisted it as the message.
+                            _api_error_text = self._extract_text_from_message(event) or str(
+                                event.error
+                            )
+                            logger.warning("SDK API error message: %s", _api_error_text)
+                            _streamed_via_events = False
+                            continue
                         if not _streamed_via_events:
                             text = self._extract_text_from_message(event)
                             if text:
@@ -3770,8 +3940,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             )
 
                         if is_error:
-                            logger.error(f"ResultMessage error: {result}")
-                            yield AgentEvent(type="error", content=str(result))
+                            logger.error(
+                                "ResultMessage error (subtype=%s): %s",
+                                getattr(event, "subtype", ""),
+                                result,
+                            )
+                            if not _error_emitted:
+                                _error_emitted = True
+                                yield AgentEvent(
+                                    type="error",
+                                    content=_result_error_text(
+                                        event, max_turns=options_kwargs.get("max_turns")
+                                    ),
+                                )
+                        elif _api_error_text and not _error_emitted:
+                            _error_emitted = True
+                            yield AgentEvent(
+                                type="error",
+                                content=_cli_too_old_message(_api_error_text) or _api_error_text,
+                            )
                         else:
                             logger.debug(f"ResultMessage: {str(result)[:100]}...")
                         continue
@@ -3787,28 +3974,43 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 # we still need to ensure the pipe is clean. ──
                 # Only a run that actually acquired the lease may tear down
                 # the shared persistent client — a stateless-fallback run does
-                # not own it and must leave a sibling's subprocess alone.
-                if (
-                    acquired_lease
-                    and _persistent_client is not None
-                    and not _saw_result
-                    and self._client is not None
-                ):
+                # not own it and must leave a sibling's subprocess alone. It
+                # tears down ITS client, and clears the backend's slot only if
+                # the slot still holds it (after a cleanup() the slot may
+                # already belong to the next run).
+                if acquired_lease and _persistent_client is not None and not _saw_result:
                     logger.warning(
                         "Main loop exited without ResultMessage — "
                         "destroying persistent client to avoid stale data"
                     )
+                    if self._client is _persistent_client:
+                        self._client = None
+                        self._client_options_key = None
+                        self._client_session_key = None
+                    await self._discard_client(_persistent_client)
+
+                # A LEASED warm client (supervisor-owned) abandoned before its
+                # ResultMessage still has the rest of this reply in its pipe, and
+                # the next turn would read that tail as its own answer. The
+                # backend may not disconnect it, so it interrupts it and poisons
+                # the lease's key: no turn can match it again, and the next turn
+                # builds fresh and rebinds the slot (which tears this one down).
+                if _warm_lease is not None and not _saw_result:
+                    logger.warning(
+                        "Leased warm client abandoned mid-reply — interrupting "
+                        "and retiring it so the next turn cannot read its tail"
+                    )
+                    _warm_lease.options_key = "retired:" + _warm_lease.options_key
                     try:
-                        await self._client.disconnect()
+                        await asyncio.wait_for(_warm_lease.client.interrupt(), 5)
                     except Exception as exc:  # noqa: BLE001
-                        logger.debug("Failed to disconnect client during cleanup: %s", exc)
-                    self._client = None
-                    self._client_options_key = None
+                        logger.debug("leased client interrupt failed: %s", exc)
 
                 # Only release the lease if this run acquired it. Clearing it
                 # unconditionally would steal a sibling persistent run's lease.
-                if acquired_lease:
+                if acquired_lease and self._lease_token is _run_token:
                     self._client_in_use = False
+                    self._lease_token = None
                 logger.info(
                     "SDK stream finished: %d events, _client_in_use=%s",
                     _event_count,
@@ -3854,9 +4056,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # lease acquisition) must not destroy a sibling persistent run's
             # subprocess or release its lease on the error path.
             if acquired_lease:
-                self._client = None
-                self._client_options_key = None
-                self._client_in_use = False
+                if _persistent_client is not None and self._client is _persistent_client:
+                    self._client = None
+                    self._client_options_key = None
+                    self._client_session_key = None
+                await self._discard_client(_persistent_client)
+                if self._lease_token is _run_token:
+                    self._client_in_use = False
+                    self._lease_token = None
 
             if _is_bun_crash and not getattr(self, "_bun_retry_done", False):
                 self._bun_retry_done = True
@@ -3882,16 +4089,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 #    correctly see _client_in_use=True and fall back to
                 #    stateless again — it cannot steal or double-release the
                 #    sibling's lease.
+                # The retry is the SAME turn: every parameter is forwarded
+                # (``_call_kwargs``), so a turn with a narrowed tool surface,
+                # skills, a picked model or images cannot retry wider or
+                # different. The one exception is ``warm_client``: the crashed
+                # lease is not driven again; with ``on_client_built`` the retry
+                # builds fresh and rebinds the slot, otherwise it runs stateless.
                 try:
                     async for retry_event in self.run(
-                        message,
-                        system_prompt=system_prompt,
-                        history=history,
-                        session_key=session_key,
-                        # Preserve native-resume identity across the crash retry
-                        # (feat/session-supervisor SS-1) so a resumed turn does
-                        # not silently restart a fresh session after a Bun crash.
-                        session_handle=session_handle,
+                        message, **{**_call_kwargs, "warm_client": None}
                     ):
                         yield retry_event
                 finally:
@@ -3941,6 +4147,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # its lifecycle and keeps it warm.
             if _warm_lease is not None:
                 _warm_lease.busy = False
+            self._active_runs.pop(_run_token, None)
             # Remove the per-run materialized-skills plugin dir (entity-rooms
             # A2) ONLY when this run owns it — i.e. the genuine stateless-
             # fallback case where no warm client adopted the dir
@@ -3955,9 +4162,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
                 cleanup_run_skills(run_skills_root)
 
-    async def stop(self) -> None:
-        """Stop the agent execution and disconnect persistent client."""
+    async def stop(self, session_key: str | None = None) -> None:
+        """Stop in-flight runs and disconnect the persistent client.
+
+        With ``session_key`` only that session's runs are stopped, and the warm
+        client is interrupted and disconnected only if it belongs to that
+        session; other sessions' streams on this backend are left alone. Without
+        it (pool teardown, shutdown) every run is stopped and the client released.
+        Each run carries its own stop flag, so a run started after this call
+        cannot clear the stop for one already unwinding.
+        """
         self._stop_flag = True
+        for state in self._active_runs.values():
+            if session_key is None or state.session_key == session_key:
+                state.stopped = True
+        if session_key is not None and self._client_session_key != session_key:
+            logger.info("🛑 Claude Agent SDK stop requested for session %s", session_key)
+            return
         if self._client is not None:
             try:
                 await self._client.interrupt()

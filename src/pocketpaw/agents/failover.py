@@ -47,7 +47,7 @@ import re
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from pocketpaw.agents.backend import forward_prompt_digest
+from pocketpaw.agents.backend import forward_prompt_digest, forward_turn_context
 from pocketpaw.agents.protocol import AgentEvent
 
 logger = logging.getLogger(__name__)
@@ -199,6 +199,9 @@ class BackendFailoverRunner:
         re-asked per harness rather than once by the caller. Asked via the shared
         ``agents.backend`` guard, which refuses ``**kwargs`` — a harness that
         swallowed the digest would key on nothing while looking ported.
+
+        ``turn_split`` (``(stable prompt, per-turn layers)``) is likewise resolved
+        per harness by ``forward_turn_context`` and never forwarded as itself.
         """
         last_error: str | None = "All configured harnesses failed"
         tried_any = False
@@ -222,11 +225,14 @@ class BackendFailoverRunner:
             # the generator is fully exhausted/closed before we move on.
             failed_over = False
 
-            attempt_kwargs = run_kwargs
+            attempt_kwargs = {k: v for k, v in run_kwargs.items() if k != "turn_split"}
+            attempt_kwargs = forward_turn_context(
+                backend, attempt_kwargs, run_kwargs.get("turn_split")
+            )
             if "system_prompt_digest" in run_kwargs:
                 digest = run_kwargs["system_prompt_digest"]
                 attempt_kwargs = {
-                    k: v for k, v in run_kwargs.items() if k != "system_prompt_digest"
+                    k: v for k, v in attempt_kwargs.items() if k != "system_prompt_digest"
                 }
                 attempt_kwargs = forward_prompt_digest(backend, attempt_kwargs, digest)
 
