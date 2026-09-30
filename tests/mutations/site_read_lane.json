@@ -49,9 +49,9 @@
     "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_a_ripple_pocket_is_rejected_not_a_keyerror"]
   },
   {
-    "label": "the unknown-path guard is skipped, so a typo dies on a raw KeyError instead of the relayable 404 that names what exists",
+    "label": "the unknown-path guard is skipped, so a typo is silently dropped from the read instead of the relayable 404 that names what exists",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if key not in files:\n        # Name what DOES exist:",
+    "find": "    if missing:\n        # Name what DOES exist:",
     "replace": "    if False:\n        # Name what DOES exist:",
     "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_an_unknown_file_is_not_found_and_names_what_exists"]
   },
@@ -61,5 +61,26 @@
     "find": "\"`read_site_source` (pocket_id + file_path) FIRST and copy old_string \"",
     "replace": "\"the current file FIRST and copy old_string \"",
     "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestEditDescriptionsPointAtTheReadTool::test_edit_description_names_the_read_tool[edit_html_file]"]
+  },
+  {
+    "label": "file contents go back JSON-escaped, inflating a large file past Claude Code's MCP output cap so the agent gets it truncated and re-reads in a loop",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "\"text\": f\"=== FILE: {f['path']} ({f['bytes']} bytes) ===\\n{f['contents']}\",",
+    "replace": "\"text\": f\"=== FILE: {f['path']} ({f['bytes']} bytes) ===\\n{json.dumps(f['contents'])}\",",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestCompleteUnescapedRead::test_contents_come_back_verbatim_in_their_own_block"]
+  },
+  {
+    "label": "file_paths is ignored, so a batched read returns nothing and the agent falls back to one call per file",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    requested = ([file_path] if file_path is not None else []) + list(file_paths or [])",
+    "replace": "    requested = [file_path] if file_path is not None else []",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestBatchRead::test_file_paths_reads_several_files_from_one_pocket_fetch"]
+  },
+  {
+    "label": "the Claude Code subprocess never gets MAX_MCP_OUTPUT_TOKENS, so tool results fall back to the 25k default and large site files come back cut",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            sdk_env.setdefault(\"MAX_MCP_OUTPUT_TOKENS\", str(cap))",
+    "replace": "            pass",
+    "tests": ["tests/test_claude_sdk_mcp_output_cap.py::test_the_cap_is_always_in_the_subprocess_env"]
   }
 ]
