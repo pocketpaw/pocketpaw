@@ -10,6 +10,10 @@
 # ``access="open"`` admits on its own once the call is running. Waiting knocks
 # expire after 10 minutes. ``PATCH /meetings/{id}`` lets the host flip access.
 # LiveKit is the stateful mock from conftest.py.
+#
+# 2026-10-01 (feat/meetings-ics, MC-4): PATCH now takes ``scheduled_start`` /
+# ``duration_minutes`` (tested in test_meeting_schedule.py), so the "refused
+# field" cases are ``status`` and an unknown field instead.
 
 from __future__ import annotations
 
@@ -687,7 +691,8 @@ async def test_only_the_host_can_patch(client, lk) -> None:
     [
         {"access": "public"},
         {"title": "   "},
-        {"scheduled_start": "2026-10-02T10:00:00Z"},  # not supported: loud, not a no-op
+        {"status": "ended"},  # not settable here: loud, not a no-op
+        {"room_group_id": "elsewhere"},
     ],
 )
 async def test_patch_rejects_bad_or_unsupported_fields(client, lk, body) -> None:

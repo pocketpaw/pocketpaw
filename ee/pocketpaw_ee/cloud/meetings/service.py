@@ -42,6 +42,20 @@
 # ``PATCH /meetings/{id}`` — host only (``host_user_id``, else the creator),
 # ``access`` / ``title`` / ``description``, realtime ``meeting.updated`` to the
 # meeting's room. The lobby itself lives in lobby_service.py.
+#
+# 2026-10-01 (feat/meetings-ics, MC-4): scheduling on meeting rooms.
+#   * ``update_meeting`` also reschedules: ``scheduled_start`` /
+#     ``duration_minutes`` on a LiveKit meeting that is ``scheduled`` and has not
+#     started (else 409 ``meeting.not_reschedulable``). It recomputes
+#     ``scheduled_end`` and ``link_expires_at``, replaces the reminder / auto-start
+#     / auto-end jobs (old ones removed first, so a reminder that no longer fits
+#     can't fire at the old time) and emits bus ``meeting.edited`` so the calendar
+#     bridge re-syncs the in-app event. (Bus ``meeting.updated`` is the Recall
+#     webhook upsert; the bridge deliberately doesn't listen to that.)
+#   * ``get_joining_info`` / ``get_meeting_ics`` back ``GET /meetings/{id}/
+#     joining-info`` and ``/ics``: open to the meeting's workspace, the same
+#     visibility as ``GET /meetings/{id}`` (which already carries code + link).
+#     ``MeetingResponse.joining_info`` carries the same text. Formatting is in ics.py.
 
 from __future__ import annotations
 
@@ -53,7 +67,14 @@ from datetime import UTC, datetime, timedelta
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.connectors.protocol import ActionResult
-from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    ConflictError,
+    Forbidden,
+    NotFound,
+    ValidationError,
+)
+from pocketpaw_ee.cloud.meetings import ics
 from pocketpaw_ee.cloud.meetings.domain import Meeting as MeetingDomain
 from pocketpaw_ee.cloud.meetings.dto import (
     CreateMeetingRequest,
@@ -108,10 +129,27 @@ def display_code(code: str) -> str:
     return f"{code[:3]}-{code[3:7]}-{code[7:]}"
 
 
+def _frontend_base() -> str:
+    return os.environ.get("POCKETPAW_FRONTEND_BASE_URL", "http://localhost:1420").rstrip("/")
+
+
 def _meeting_link(code: str) -> str:
     """``<frontend base>/m/<display code>`` — same base the OAuth redirects use."""
-    base = os.environ.get("POCKETPAW_FRONTEND_BASE_URL", "http://localhost:1420").rstrip("/")
-    return f"{base}/m/{display_code(code)}"
+    return f"{_frontend_base()}/m/{display_code(code)}"
+
+
+def joining_info_for(doc: _MeetingDoc) -> str | None:
+    """The paste-into-an-invite text; None for a meeting without a code."""
+    if not doc.code:
+        return None
+    return ics.joining_info(
+        title=doc.title,
+        start=doc.scheduled_start,
+        end=doc.scheduled_end,
+        link=_meeting_link(doc.code),
+        code=display_code(doc.code),
+        description=doc.description,
+    )
 
 
 def _canonical_code(code: str) -> str | None:
@@ -167,6 +205,7 @@ def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) ->
         access=doc.access,
         host_user_id=doc.host_user_id,
         description=doc.description,
+        joining_info=joining_info_for(doc),
     )
 
 
@@ -899,18 +938,10 @@ async def join_meeting_by_code(
     return JoinMeetingByCodeResponse(room_group_id=room_id, room_name=result["room_name"])
 
 
-async def update_meeting(
-    workspace_id: str, user_id: str, meeting_id: str, body: UpdateMeetingRequest
-) -> MeetingResponse:
-    """PATCH /meetings/{id}: the host changes ``access``, ``title`` or ``description``.
-
-    404 outside this workspace, 403 ``meeting.host_only`` for anyone but the host
-    (``host_user_id``; the creator for rows that predate it), 422
-    ``meeting.empty_title`` for a blank title. Fields left out are unchanged.
-    """
+async def _get_doc(workspace_id: str, meeting_id: str) -> _MeetingDoc:
+    """The meeting in this workspace; NotFound for another workspace or a bad id."""
     from beanie import PydanticObjectId
 
-    body = UpdateMeetingRequest.model_validate(body)
     try:
         oid = PydanticObjectId(meeting_id)
     except Exception:
@@ -918,20 +949,78 @@ async def update_meeting(
     doc = await _MeetingDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         raise NotFound("meeting", meeting_id)
+    return doc
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Stored form: naive UTC (what Mongo hands back; the response adds the Z)."""
+    return ics.utc(dt).replace(tzinfo=None)  # type: ignore[union-attr]
+
+
+def _reschedule(doc: _MeetingDoc, schedule: dict) -> None:
+    """Apply ``scheduled_start`` / ``duration_minutes`` to the row (not saved yet)."""
+    if doc.source != "livekit" or doc.status != "scheduled" or doc.actual_start is not None:
+        raise ConflictError(
+            "meeting.not_reschedulable",
+            "Only a meeting that hasn't started can be moved.",
+        )
+    payload = dict(doc.raw_provider_payload or {})
+    duration = schedule.get("duration_minutes") or payload.get("duration_minutes", 30)
+    payload["duration_minutes"] = duration
+    doc.raw_provider_payload = payload
+    if "scheduled_start" in schedule:
+        doc.scheduled_start = _naive_utc(schedule["scheduled_start"])
+    if doc.scheduled_start is not None:
+        # Same end rule as create: start (seconds dropped) + duration.
+        doc.scheduled_end = doc.scheduled_start.replace(second=0, microsecond=0) + timedelta(
+            minutes=duration
+        )
+        doc.link_expires_at = doc.scheduled_end
+
+
+async def update_meeting(
+    workspace_id: str, user_id: str, meeting_id: str, body: UpdateMeetingRequest
+) -> MeetingResponse:
+    """PATCH /meetings/{id}: the host changes access, title, description or time.
+
+    404 outside this workspace, 403 ``meeting.host_only`` for anyone but the host
+    (``host_user_id``; the creator for rows that predate it), 422
+    ``meeting.empty_title`` for a blank title, 409 ``meeting.not_reschedulable``
+    when ``scheduled_start`` / ``duration_minutes`` is sent for a meeting that has
+    started, ended, been cancelled, or isn't a LiveKit meeting (moving a Zoom/Meet
+    row here wouldn't move the real meeting). Fields left out are unchanged.
+    """
+    from pocketpaw_ee.cloud.meetings.scheduling.reminders import (
+        schedule_meeting_jobs,
+        unschedule_meeting_jobs,
+    )
+
+    body = UpdateMeetingRequest.model_validate(body)
+    doc = await _get_doc(workspace_id, meeting_id)
     if (doc.host_user_id or doc.created_by_user_id) != user_id:
         raise Forbidden("meeting.host_only", "Only the meeting's host can change it.")
 
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
+    schedule = {k: changes.pop(k) for k in ("scheduled_start", "duration_minutes") if k in changes}
     if "title" in changes:
         changes["title"] = changes["title"].strip()
         if not changes["title"]:
             raise ValidationError("meeting.empty_title", "title must not be empty or whitespace")
     if "description" in changes:
         changes["description"] = changes["description"].strip() or None
+    if schedule:
+        _reschedule(doc, schedule)
     for field, value in changes.items():
         setattr(doc, field, value)
     await doc.save()
 
+    if schedule:
+        # Remove first: re-adding only replaces jobs that are re-added, and a
+        # reminder whose time has passed is not re-added.
+        unschedule_meeting_jobs(str(doc.id))
+        schedule_meeting_jobs(doc)
+
+    fields = sorted([*changes, *schedule])
     from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
     from pocketpaw_ee.cloud._core.realtime.events import MeetingUpdated
 
@@ -941,11 +1030,57 @@ async def update_meeting(
                 "workspace_id": workspace_id,
                 "meeting_id": str(doc.id),
                 "group_id": _room_of(doc),
-                "fields": sorted(changes),
+                "fields": fields,
             }
         )
     )
+    # The calendar bridge re-syncs the in-app event from this.
+    await event_bus.emit(
+        "meeting.edited",
+        {"workspace_id": workspace_id, "meeting_id": str(doc.id), "fields": fields},
+    )
     return _doc_to_response(doc)
+
+
+async def get_joining_info(workspace_id: str, meeting_id: str) -> str:
+    """Joining-info text for any member of the meeting's workspace.
+
+    404 outside the workspace; 409 ``meeting.no_link`` for a meeting with no code
+    (Zoom/Meet rows).
+    """
+    info = joining_info_for(await _get_doc(workspace_id, meeting_id))
+    if info is None:
+        raise ConflictError("meeting.no_link", "This meeting has no meeting link.")
+    return info
+
+
+async def get_meeting_ics(workspace_id: str, meeting_id: str) -> tuple[str, str]:
+    """``(filename, text/calendar body)`` for one meeting; same access as joining info.
+
+    409 ``meeting.no_link`` without a code, 409 ``meeting.not_scheduled`` for a
+    meeting with no date.
+    """
+    from urllib.parse import urlparse
+
+    doc = await _get_doc(workspace_id, meeting_id)
+    info = joining_info_for(doc)
+    if info is None or not doc.code:
+        raise ConflictError("meeting.no_link", "This meeting has no meeting link.")
+    if doc.scheduled_start is None:
+        raise ConflictError("meeting.not_scheduled", "This meeting has no date yet.")
+    start = doc.scheduled_start
+    end = doc.scheduled_end or start + timedelta(minutes=30)
+    host = urlparse(_frontend_base()).hostname or "pocketpaw"
+    body = ics.build_ics(
+        uid=f"{doc.id}@{host}",
+        title=doc.title or "Meeting",
+        start=start,
+        end=end,
+        link=_meeting_link(doc.code),
+        description=info,
+        now=datetime.now(UTC),
+    )
+    return ics.filename(doc.title), body
 
 
 async def cancel_meeting(workspace_id: str, meeting_id: str, user_id: str = "") -> MeetingResponse:

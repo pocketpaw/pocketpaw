@@ -8,6 +8,10 @@
 # 2026-10-01 (feat/meetings-lobby, MC-3): the lobby — guest knock / status /
 # cancel (public, rate-limited, per-knock secret) and member list / admit / deny;
 # PATCH /meetings/{id} (host: access, title, description).
+# 2026-10-01 (feat/meetings-ics, MC-4): PATCH /meetings/{id} also reschedules
+# (scheduled_start, duration_minutes); GET /meetings/{id}/joining-info (text/plain)
+# and GET /meetings/{id}/ics (text/calendar download), both open to the meeting's
+# workspace like GET /meetings/{id}.
 #
 # Routes:
 #   GET    /meetings                          — list workspace meetings
@@ -20,7 +24,9 @@
 #   DELETE /meetings/by-code/{code}/knocks/{knock_id} — PUBLIC guest cancels (secret)
 #   GET    /meetings/search/                  — cross-provider search
 #   GET    /meetings/{meeting_id}             — get one meeting
-#   PATCH  /meetings/{meeting_id}             — host edits access/title/description
+#   PATCH  /meetings/{meeting_id}             — host edits access/title/description/time
+#   GET    /meetings/{meeting_id}/joining-info — joining info as text/plain
+#   GET    /meetings/{meeting_id}/ics         — one-event .ics download
 #   DELETE /meetings/{meeting_id}             — cancel a meeting
 #   GET    /meetings/{meeting_id}/knocks      — guests waiting (room members)
 #   POST   /meetings/{meeting_id}/knocks/{knock_id}/admit|deny — someone in the call
@@ -48,6 +54,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, Query
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, field_serializer
 
 from pocketpaw_ee.cloud._core.rate_limit import (
@@ -339,11 +346,42 @@ async def update_meeting(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> MeetingResponse:
-    """Host only: ``access`` ("ask" | "open"), ``title``, ``description``.
+    """Host only: ``access`` ("ask" | "open"), ``title``, ``description``,
+    ``scheduled_start``, ``duration_minutes`` (1-1440).
 
-    403 ``meeting.host_only``; 422 for any other field (rescheduling isn't here).
+    403 ``meeting.host_only``; 409 ``meeting.not_reschedulable`` when moving a
+    meeting that has started / ended / been cancelled, or a Zoom/Meet one; 422 for
+    any other field (``status`` included).
     """
     return await meetings_service.update_meeting(workspace_id, user_id, meeting_id, body)
+
+
+@router.get("/{meeting_id}/joining-info", response_class=PlainTextResponse)
+async def get_joining_info(
+    meeting_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> PlainTextResponse:
+    """Title, time (UTC), ``Join: <link>``, ``Meeting code: <code>``, description.
+
+    Any member of the meeting's workspace (404 otherwise); 409 ``meeting.no_link``
+    for a meeting without a code.
+    """
+    return PlainTextResponse(await meetings_service.get_joining_info(workspace_id, meeting_id))
+
+
+@router.get("/{meeting_id}/ics", response_class=Response)
+async def download_ics(
+    meeting_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> Response:
+    """The meeting as a one-event ``.ics`` attachment. Same access as joining info;
+    409 ``meeting.not_scheduled`` for a meeting with no date."""
+    filename, body = await meetings_service.get_meeting_ics(workspace_id, meeting_id)
+    return Response(
+        body,
+        media_type="text/calendar",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{meeting_id}/knocks", response_model=list[KnockSummaryResponse])
