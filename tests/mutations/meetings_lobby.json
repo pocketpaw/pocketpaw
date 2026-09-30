@@ -63,15 +63,6 @@
     ]
   },
   {
-    "label": "token: minted with nobody in the call",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "    if not await meetings_service._room_is_live(room_id):\n        return out\n",
-    "replace": "",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
     "label": "token: minted after the meeting closed",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "if knock_row.status != \"admitted\" or meetings_service._is_closed(meeting, _now()):",
@@ -126,15 +117,6 @@
     ]
   },
   {
-    "label": "open access: ignores presence",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "        and await meetings_service._room_is_live(meetings_service._room_of(meeting))\n",
-    "replace": "",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
     "label": "knock event: not sent",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "    else:\n        await emit(\n            MeetingKnockEvent(",
@@ -171,28 +153,10 @@
     ]
   },
   {
-    "label": "decide: caller need not be in the call",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "if not any(p.get(\"identity\") == user_id for p in (info or {}).get(\"participants\", [])):",
-    "replace": "if False:",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
     "label": "list: shows knocks that just expired",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "        if row.status == \"waiting\":\n            out.append(",
     "replace": "        if True:\n            out.append(",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
-    "label": "identity: a new one per poll",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "out.token = await issue_guest_token(room_name, knock_row.guest_identity, knock_row.name)\n    out.room_name = room_name\n    out.identity = knock_row.guest_identity",
-    "replace": "out.token = await issue_guest_token(room_name, knock_row.guest_identity, knock_row.name)\n    out.room_name = room_name\n    out.identity = \"guest-\" + secrets.token_hex(8)",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
@@ -310,6 +274,213 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "    meeting, _room = await _open_meeting_for_guests(code)\n",
     "replace": "    meeting, _room = await _open_meeting_for_guests(code)\n    if not await meetings_service._room_is_live(_room):\n        raise _ended()\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "open access: ignores presence",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        and await _member_in_call(meetings_service._room_of(meeting) or \"\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token: minted with nobody in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if not await _member_in_call(room_id):\n        return out\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "presence: guests count as members",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    return any(i != \"call-bot\" and not i.startswith(\"guest-\") for i in identities)",
+    "replace": "    return any(i != \"call-bot\" for i in identities)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "presence: the call-bot counts as a member",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    return any(i != \"call-bot\" and not i.startswith(\"guest-\") for i in identities)",
+    "replace": "    return any(not i.startswith(\"guest-\") for i in identities)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token ttl: an hour",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "GUEST_TOKEN_TTL = timedelta(minutes=5)",
+    "replace": "GUEST_TOKEN_TTL = timedelta(hours=1)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token ttl: outlives the admission",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    ttl = int(min(GUEST_TOKEN_TTL, left).total_seconds())",
+    "replace": "    ttl = int(GUEST_TOKEN_TTL.total_seconds())",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token ttl: ignored by the helper",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "        ttl_seconds=ttl_seconds,\n    )",
+    "replace": "        ttl_seconds=3600,\n    )",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "identity: a new one per poll",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    out.room_name = room_name\n    out.identity = knock_row.guest_identity",
+    "replace": "    out.room_name = room_name\n    out.identity = \"guest-\" + secrets.token_hex(8)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "secret: poll reads ?secret= again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC \u2014 the guest's poll",
+    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC \u2014 the guest's poll",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "secret: cancel reads ?secret= again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC \u2014 the guest stops",
+    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC \u2014 the guest stops",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "audit: decisions not logged",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    audit.log_privileged_action(\n        actor=user_id,",
+    "replace": "    (lambda **_: None)(\n        actor=user_id,",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "audit: wrong decision recorded",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        decision=status,\n    )",
+    "replace": "        decision=\"admitted\",\n    )",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest knock: unknown code answers differently",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    except NotFound:\n        raise miss from None  # don't tell",
+    "replace": "    except KeyError:\n        raise miss from None  # don't tell",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "list: caller need not be in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    meeting = await _member_meeting(workspace_id, user_id, meeting_id)\n    await _require_in_call(meeting, user_id)\n",
+    "replace": "    meeting = await _member_meeting(workspace_id, user_id, meeting_id)\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "decide: caller need not be in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        raise _ended()\n    await _require_in_call(meeting, user_id)\n",
+    "replace": "        raise _ended()\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "in-call: any participant will do",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if user_id not in identities:",
+    "replace": "    if not identities:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "outage: LiveKit error escapes as 500",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    except Exception:\n        logger.warning(\"LiveKit presence check failed",
+    "replace": "    except ZeroDivisionError:\n        logger.warning(\"LiveKit presence check failed",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: never applies",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if ip_hash and await _KnockDoc.find_one(",
+    "replace": "    if False and await _KnockDoc.find_one(",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: forever",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "DENY_COOLDOWN = timedelta(seconds=60)",
+    "replace": "DENY_COOLDOWN = timedelta(days=1)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: every address",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "            \"ip_hash\": ip_hash,\n            \"status\": \"denied\",",
+    "replace": "            \"status\": \"denied\",",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: after a cancel too",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "            \"status\": \"denied\",\n            \"decided_at\"",
+    "replace": "            \"status\": {\"$in\": [\"denied\", \"cancelled\"]},\n            \"decided_at\"",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: raw address stored",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    ip_hash = _hash(f\"{meeting.id}:{client_ip}\") if client_ip else None",
+    "replace": "    ip_hash = f\"{meeting.id}:{client_ip}\" if client_ip else None",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: router drops the address",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "lobby_service.knock(code, body, client_ip=client_ip(request))",
+    "replace": "lobby_service.knock(code, body)",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]

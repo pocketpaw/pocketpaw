@@ -6,7 +6,8 @@
 # and no group_id creates a meeting for later; GET /meetings/by-code/{code}
 # (public, per-IP rate limit) and POST /meetings/by-code/{code}/join.
 # 2026-10-01 (feat/meetings-lobby, MC-3): the lobby — guest knock / status /
-# cancel (public, rate-limited, per-knock secret) and member list / admit / deny;
+# cancel (public, rate-limited, per-knock secret in the X-Knock-Secret header)
+# and member list / admit / deny;
 # PATCH /meetings/{id} (host: access, title, description).
 # 2026-10-01 (feat/meetings-ics, MC-4): PATCH /meetings/{id} also reschedules
 # (scheduled_start, duration_minutes); GET /meetings/{id}/joining-info (text/plain)
@@ -53,11 +54,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, field_serializer
 
 from pocketpaw_ee.cloud._core.rate_limit import (
+    client_ip,
     rate_limit_meeting_knock,
     rate_limit_meeting_knock_poll,
     rate_limit_meeting_lookup,
@@ -178,8 +180,8 @@ async def join_meeting_by_code(
 
 # ---------------------------------------------------------------------------
 # Lobby, guest side — PUBLIC. The knock's secret authorises every later read;
-# send it as the X-Knock-Secret header (a ?secret= query also works, but query
-# strings end up in access logs).
+# it is read ONLY from the X-Knock-Secret header (a query string would end up in
+# access logs).
 # ---------------------------------------------------------------------------
 
 
@@ -188,13 +190,14 @@ async def join_meeting_by_code(
     response_model=KnockCreatedResponse,
     dependencies=[Depends(rate_limit_meeting_knock)],
 )
-async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
+async def knock(code: str, body: KnockRequest, request: Request) -> KnockCreatedResponse:
     """PUBLIC — a guest asks to join. Keep ``secret``; it is shown only here.
 
     404 unknown code, 410 ``meeting.ended``, 403 ``meeting.email_not_allowed``,
-    422 bad name/email, 429 ``meetings.knock_rate_limited``.
+    422 bad name/email, 429 ``meetings.knock_rate_limited``, 429
+    ``meeting.knock_cooldown`` for a minute after this address was denied.
     """
-    return await lobby_service.knock(code, body)
+    return await lobby_service.knock(code, body, client_ip=client_ip(request))
 
 
 @router.get(
@@ -206,13 +209,12 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
 async def knock_status(
     code: str,
     knock_id: str,
-    secret: str | None = Query(default=None),
     x_knock_secret: str | None = Header(default=None),
 ) -> KnockStatusResponse:
     """PUBLIC — the guest's poll (every 2s). ``{status}``, plus ``token``,
     ``room_name``, ``identity`` and ``livekit_url`` when they can connect now.
     404 for an unknown knock or a wrong/missing secret."""
-    return await lobby_service.knock_status(code, knock_id, x_knock_secret or secret)
+    return await lobby_service.knock_status(code, knock_id, x_knock_secret)
 
 
 @router.delete(
@@ -224,11 +226,10 @@ async def knock_status(
 async def cancel_knock(
     code: str,
     knock_id: str,
-    secret: str | None = Query(default=None),
     x_knock_secret: str | None = Header(default=None),
 ) -> KnockStatusResponse:
     """PUBLIC — the guest stops waiting. 409 ``meeting.knock_decided`` once answered."""
-    return await lobby_service.cancel_knock(code, knock_id, x_knock_secret or secret)
+    return await lobby_service.cancel_knock(code, knock_id, x_knock_secret)
 
 
 # ---------------------------------------------------------------------------

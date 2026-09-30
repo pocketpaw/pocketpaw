@@ -10,15 +10,23 @@
 # two people clicking at once get one decision and one 409.
 #
 # The guest's LiveKit token (livekit/invites.issue_guest_token: guest-<hex>,
-# this room only, 1h) is minted only while the meeting is open and a human is in
-# the call. LiveKit creates a missing room on connect, so a token for an empty
-# room would let a guest start the call alone: no budget gate, no row.
+# this room only) is minted only while the meeting is open and a MEMBER is in
+# the call (``_member_in_call``: neither call-bot nor guest-*). LiveKit creates a
+# missing room on connect, so a token for an empty room would let a guest start
+# the call alone: no budget gate, no row. Guests don't count, or admitted guests
+# could keep a call going and let others in with no member present.
 #
 # Time rules, computed on read (no sweep): a waiting knock expires 10 minutes
-# after it was made or as soon as the meeting closes; an admission lasts an hour
-# (the token's life). A TTL index drops every row after a day.
+# after it was made or as soon as the meeting closes; an admission lasts an hour.
+# Guest tokens live 5 minutes (never past the admission): every poll mints a
+# fresh one, and a short token limits what a leaked one can do. A TTL index
+# drops every row after a day.
 # ``access="open"`` admits a knock on its own once the call is running, at knock
 # time or on the guest's next poll.
+#
+# Every admit / deny is written to the audit log (``meeting.knock_decide``). A
+# denial holds back a re-knock on that meeting from the same address for a
+# minute (429 ``meeting.knock_cooldown``; the address is kept only salted+hashed).
 #
 # Events (realtime, to the meeting room's members): ``meeting.knock`` for a new
 # knock that needs a decision, ``meeting.knock_resolved`` whenever a knock leaves
@@ -34,7 +42,13 @@ from datetime import UTC, datetime, timedelta
 
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    ConflictError,
+    Forbidden,
+    NotFound,
+    RateLimited,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.dto import (
@@ -53,6 +67,10 @@ logger = logging.getLogger(__name__)
 
 KNOCK_TTL = timedelta(minutes=10)
 ADMIT_TTL = timedelta(hours=1)
+# Each poll mints a fresh token, so it can be short; never past the admission.
+GUEST_TOKEN_TTL = timedelta(minutes=5)
+# After a denial, the same address can't knock on that meeting again for a minute.
+DENY_COOLDOWN = timedelta(seconds=60)
 
 _aware = meetings_service._aware
 
@@ -152,7 +170,10 @@ async def _guest_knock(
         oid = PydanticObjectId(knock_id)
     except Exception:
         raise miss from None
-    meeting = await meetings_service._find_by_code(code)
+    try:
+        meeting = await meetings_service._find_by_code(code)
+    except NotFound:
+        raise miss from None  # don't tell a knock-id prober which codes exist
     knock = await _KnockDoc.find_one(
         {"_id": oid, "meeting": str(meeting.id), "workspace": meeting.workspace}
     )
@@ -161,11 +182,32 @@ async def _guest_knock(
     return knock, meeting
 
 
+async def _call_identities(room_id: str) -> list[str]:
+    """LiveKit identities in the room's call. Raises when LiveKit can't be read."""
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    info = await livekit_service.get_room_info(room_id)
+    return [p.get("identity", "") for p in (info or {}).get("participants", [])]
+
+
+async def _member_in_call(room_id: str) -> bool:
+    """True while a MEMBER is in the call: someone neither ``call-bot`` nor a
+    ``guest-*``. The lobby's gates use this instead of ``get_room_info().active``,
+    which counts guests, so admitted guests can't keep letting people in (or
+    keep minting themselves tokens) once every member has left."""
+    try:
+        identities = await _call_identities(room_id)
+    except Exception:
+        logger.debug("Room presence check failed for %s", room_id, exc_info=True)
+        return False
+    return any(i != "call-bot" and not i.startswith("guest-") for i in identities)
+
+
 async def _auto_admit_if_open(knock: _KnockDoc, meeting: _MeetingDoc) -> None:
     if (
         knock.status == "waiting"
         and meeting.access == "open"
-        and await meetings_service._room_is_live(meetings_service._room_of(meeting))
+        and await _member_in_call(meetings_service._room_of(meeting) or "")
     ):
         await _transition(knock, meeting, "admitted")
 
@@ -175,7 +217,9 @@ async def _auto_admit_if_open(knock: _KnockDoc, meeting: _MeetingDoc) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
+async def knock(
+    code: str, body: KnockRequest, *, client_ip: str | None = None
+) -> KnockCreatedResponse:
     """A guest asks to join. 404 unknown code, 410 closed meeting, 403
     ``meeting.email_not_allowed`` when the meeting has a guest list and the email
     isn't on it (trimmed, case-insensitive)."""
@@ -189,6 +233,18 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
             "This email isn't on the guest list. Check with the meeting host.",
         )
 
+    ip_hash = _hash(f"{meeting.id}:{client_ip}") if client_ip else None
+    if ip_hash and await _KnockDoc.find_one(
+        {
+            "meeting": str(meeting.id),
+            "workspace": meeting.workspace,
+            "ip_hash": ip_hash,
+            "status": "denied",
+            "decided_at": {"$gt": (_now() - DENY_COOLDOWN).replace(tzinfo=None)},
+        }
+    ):
+        raise RateLimited("meeting.knock_cooldown", "Please wait a minute before asking again.")
+
     from pocketpaw_ee.cloud.livekit.invites import new_guest_identity
 
     secret = secrets.token_urlsafe(32)
@@ -199,6 +255,7 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
         email=email,
         guest_identity=new_guest_identity(),
         secret_hash=_hash(secret),
+        ip_hash=ip_hash,
     )
     await row.insert()
 
@@ -223,7 +280,7 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
 
 async def knock_status(code: str, knock_id: str, secret: str | None) -> KnockStatusResponse:
     """The guest's poll. Carries a fresh LiveKit token while admitted, the meeting
-    is open and a human is in the call; just ``status`` otherwise."""
+    is open and a member is in the call; just ``status`` otherwise."""
     knock_row, meeting = await _guest_knock(code, knock_id, secret)
     await _age_out(knock_row, meeting)
     await _auto_admit_if_open(knock_row, meeting)
@@ -231,14 +288,20 @@ async def knock_status(code: str, knock_id: str, secret: str | None) -> KnockSta
     if knock_row.status != "admitted" or meetings_service._is_closed(meeting, _now()):
         return out
     room_id = meetings_service._room_of(meeting) or ""
-    if not await meetings_service._room_is_live(room_id):
+    if not await _member_in_call(room_id):
         return out
 
     from pocketpaw_ee.cloud.livekit import service as livekit_service
     from pocketpaw_ee.cloud.livekit.invites import issue_guest_token
 
+    left = _aware(knock_row.decided_at) + ADMIT_TTL - _now()
+    ttl = int(min(GUEST_TOKEN_TTL, left).total_seconds())
+    if ttl <= 0:
+        return out
     room_name = livekit_service.room_name_for_group(room_id)
-    out.token = await issue_guest_token(room_name, knock_row.guest_identity, knock_row.name)
+    out.token = await issue_guest_token(
+        room_name, knock_row.guest_identity, knock_row.name, ttl_seconds=ttl
+    )
     out.room_name = room_name
     out.identity = knock_row.guest_identity
     out.livekit_url = livekit_service.LIVEKIT_URL
@@ -275,11 +338,27 @@ async def _member_meeting(workspace_id: str, user_id: str, meeting_id: str) -> _
     return meeting
 
 
+async def _require_in_call(meeting: _MeetingDoc, user_id: str) -> None:
+    """403 ``meeting.not_in_call`` unless the caller is in the call right now;
+    503 ``livekit.unavailable`` when LiveKit can't be asked."""
+    try:
+        identities = await _call_identities(meetings_service._room_of(meeting) or "")
+    except Exception:
+        logger.warning("LiveKit presence check failed for meeting %s", meeting.id, exc_info=True)
+        raise CloudError(
+            503, "livekit.unavailable", "Calls are unavailable right now. Try again."
+        ) from None
+    if user_id not in identities:
+        raise Forbidden("meeting.not_in_call", "Join the call to see who's waiting.")
+
+
 async def list_knocks(
     workspace_id: str, user_id: str, meeting_id: str
 ) -> list[KnockSummaryResponse]:
-    """Guests still waiting, oldest first. Any member of the meeting room."""
+    """Guests still waiting, oldest first. A member of the meeting room who is in
+    the call (403 ``livekit.room_forbidden`` / ``meeting.not_in_call``)."""
     meeting = await _member_meeting(workspace_id, user_id, meeting_id)
+    await _require_in_call(meeting, user_id)
     rows = (
         await _KnockDoc.find(
             {"meeting": str(meeting.id), "workspace": workspace_id, "status": "waiting"}
@@ -306,14 +385,10 @@ async def decide_knock(
     ``livekit.room_forbidden``) AND in the call right now (403
     ``meeting.not_in_call``). 410 closed meeting, 404 unknown knock, 409
     ``meeting.knock_decided`` when it was already answered, cancelled or expired."""
-    from pocketpaw_ee.cloud.livekit import service as livekit_service
-
     meeting = await _member_meeting(workspace_id, user_id, meeting_id)
     if meetings_service._is_closed(meeting, _now()):
         raise _ended()
-    info = await livekit_service.get_room_info(meetings_service._room_of(meeting) or "")
-    if not any(p.get("identity") == user_id for p in (info or {}).get("participants", [])):
-        raise Forbidden("meeting.not_in_call", "Join the call to let people in.")
+    await _require_in_call(meeting, user_id)
 
     try:
         oid = PydanticObjectId(knock_id)
@@ -328,4 +403,15 @@ async def decide_knock(
     status = "admitted" if admit else "denied"
     if not await _transition(row, meeting, status, decided_by=user_id):
         raise _decided()
+
+    from pocketpaw_ee.guards import audit
+
+    audit.log_privileged_action(
+        actor=user_id,
+        action="meeting.knock_decide",
+        resource_id=str(row.id),
+        workspace_id=workspace_id,
+        meeting_id=str(meeting.id),
+        decision=status,
+    )
     return KnockDecisionResponse(knock_id=str(row.id), status=status)

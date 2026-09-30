@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import jwt
 import pytest
@@ -189,7 +189,7 @@ async def test_knock_admit_then_poll_returns_a_guest_token_for_the_meeting_room(
     assert claims["video"]["room"] == f"group-call-{s.room}"
     assert claims["video"]["roomJoin"] is True
     assert claims["name"] == "Gus Guest"
-    assert claims["exp"] - claims["nbf"] <= 3600
+    assert 0 < claims["exp"] - claims["nbf"] <= 300  # short: every poll mints a fresh one
 
     # Re-polling keeps the same identity; the list no longer shows the knock.
     again = (await _poll(client, s.m.code, knock)).json()
@@ -247,6 +247,48 @@ async def test_guest_cancels(client, lk, recording_bus) -> None:
     late = await _decide(client, s, knock["knock_id"], "admit")
     assert late.status_code == 409
     assert late.json()["error"]["code"] == "meeting.knock_decided"
+
+
+async def test_a_denied_guest_waits_a_minute_before_knocking_again(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    await _decide(client, s, knock["knock_id"], "deny")
+    other = await meetings_service.create_meeting(
+        s.ws, s.host, CreateMeetingRequest(source="livekit", title="Other")
+    )
+
+    again = await _knock(client, s.m.code)
+    assert again.status_code == 429
+    assert again.json()["error"]["code"] == "meeting.knock_cooldown"
+    # Another address, or another meeting, isn't held back.
+    assert (
+        await _knock(client, s.m.code, headers={"x-forwarded-for": "198.51.100.9"})
+    ).status_code == 200
+    assert (await _knock(client, other.code)).status_code == 200
+
+    later = datetime.now(UTC) + timedelta(seconds=61)
+    with patch.object(lobby_service, "_now", return_value=later):
+        assert (await _knock(client, s.m.code)).status_code == 200
+
+
+async def test_a_cancelled_knock_does_not_hold_the_guest_back(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    client.log_out()
+    await client.delete(
+        f"/api/v1/meetings/by-code/{s.m.code}/knocks/{knock['knock_id']}",
+        headers={**GUEST_IP, "x-knock-secret": knock["secret"]},
+    )
+
+    assert (await _knock(client, s.m.code)).status_code == 200
+
+
+async def test_the_guest_address_is_not_stored_in_the_clear(client, lk) -> None:
+    s = await _setup(lk)
+    await _knock(client, s.m.code)
+
+    row = await MeetingKnock.find_one()
+    assert row.ip_hash and "198.51.100.4" not in row.model_dump_json()
 
 
 async def test_cancel_after_a_decision_is_409(client, lk) -> None:
@@ -315,13 +357,29 @@ async def test_a_waiting_knock_ends_with_its_meeting(client, lk) -> None:
     assert polled.json() == {"status": "expired"}
 
 
+async def test_guest_token_never_outlives_the_admission(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    await _decide(client, s, knock["knock_id"], "admit")
+    decided = lobby_service._aware((await MeetingKnock.find_one()).decided_at)
+
+    with patch.object(lobby_service, "_now", return_value=decided + timedelta(minutes=58)):
+        body = (await _poll(client, s.m.code, knock)).json()
+
+    claims = jwt.decode(body["token"], options={"verify_signature": False})
+    assert 0 < claims["exp"] - claims["nbf"] <= 120
+
+
 # ---------------------------------------------------------------------------
 # The guest secret
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("how", ["missing", "wrong", "other_code", "bad_id"])
+@pytest.mark.parametrize(
+    "how", ["missing", "wrong", "other_code", "bad_id", "unknown_code", "junk_code"]
+)
 async def test_status_needs_the_right_secret(client, lk, how) -> None:
+    """Every miss is the same 404, so poll/cancel can't probe which codes exist."""
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     code = s.m.code
@@ -337,6 +395,10 @@ async def test_status_needs_the_right_secret(client, lk, how) -> None:
         code = other.code
     elif how == "bad_id":
         knock = {**knock, "knock_id": "not-an-id"}
+    elif how == "unknown_code":
+        code = "abc-defg-hjk"
+    elif how == "junk_code":
+        code = "not-a-code"
 
     resp = await _poll(client, code, knock, secret=secret)
     sent = {} if secret is False else {"x-knock-secret": secret or knock["secret"]}
@@ -345,23 +407,28 @@ async def test_status_needs_the_right_secret(client, lk, how) -> None:
         headers={**GUEST_IP, **sent},
     )
 
-    assert resp.status_code == 404
-    assert cancel.status_code == 404
+    for r in (resp, cancel):
+        assert r.status_code == 404
+        assert r.json()["error"] == {
+            "code": "meeting_knock.not_found",
+            "message": "meeting_knock not found",
+        }
     assert (await MeetingKnock.find_one()).status == "waiting"
 
 
-async def test_the_secret_also_works_as_a_query_param(client, lk) -> None:
+async def test_the_secret_is_only_read_from_the_header(client, lk) -> None:
+    """A ``?secret=`` query would land in access logs; it isn't accepted."""
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     client.log_out()
+    url = f"/api/v1/meetings/by-code/{s.m.code}/knocks/{knock['knock_id']}"
 
-    resp = await client.get(
-        f"/api/v1/meetings/by-code/{s.m.code}/knocks/{knock['knock_id']}",
-        params={"secret": knock["secret"]},
-        headers=GUEST_IP,
-    )
+    polled = await client.get(url, params={"secret": knock["secret"]}, headers=GUEST_IP)
+    cancelled = await client.delete(url, params={"secret": knock["secret"]}, headers=GUEST_IP)
 
-    assert resp.json() == {"status": "waiting"}
+    assert polled.status_code == 404
+    assert cancelled.status_code == 404
+    assert (await MeetingKnock.find_one()).status == "waiting"
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +594,28 @@ async def test_admitted_guest_gets_no_token_once_the_call_is_empty(client, lk) -
     assert body == {"status": "admitted"}
 
 
+async def test_guests_alone_do_not_count_as_a_running_call(client, lk) -> None:
+    """Only a member keeps the lobby open: once the last member leaves, an admitted
+    guest gets no fresh token and an open meeting stops admitting new knocks, even
+    though guests (and the call-bot) are still in the LiveKit room."""
+    s = await _setup(lk)
+    a = (await _knock(client, s.m.code, name="Ann Guest")).json()
+    await _decide(client, s, a["knock_id"], "admit")
+    first = (await _poll(client, s.m.code, a)).json()
+    assert "token" in first
+    _go_live(lk, s.room, first["identity"], "call-bot")  # A connects; bot is there too
+
+    lk.participants[:] = [p for p in lk.participants if p.identity != s.host]  # host leaves
+
+    assert (await _poll(client, s.m.code, a)).json() == {"status": "admitted"}
+    row = await Meeting.find_one()
+    row.access = "open"
+    await row.save()
+    b = (await _knock(client, s.m.code, name="Bob Guest")).json()
+    assert b["status"] == "waiting"
+    assert (await _poll(client, s.m.code, b)).json() == {"status": "waiting"}
+
+
 async def test_admitted_guest_gets_no_token_once_the_meeting_ended(client, lk) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
@@ -574,7 +663,7 @@ async def test_another_workspace_gets_404(client, lk) -> None:
     assert admit.status_code == 404
 
 
-async def test_a_room_member_who_is_not_in_the_call_cannot_decide(client, lk) -> None:
+async def test_a_room_member_who_is_not_in_the_call_cannot_list_or_decide(client, lk) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     mate = await _user("Mia Mate")
@@ -584,11 +673,14 @@ async def test_a_room_member_who_is_not_in_the_call_cannot_decide(client, lk) ->
     listed = await client.get(f"/api/v1/meetings/{s.m.id}/knocks")
     admit = await _decide(client, s, knock["knock_id"], "admit", as_user=mate)
 
-    assert listed.status_code == 200  # members may see who is waiting
-    assert admit.status_code == 403
-    assert admit.json()["error"]["code"] == "meeting.not_in_call"
+    # Waiting guests' names and emails are only shown to people in the call.
+    for resp in (listed, admit):
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "meeting.not_in_call"
 
     _go_live(lk, s.room, mate)
+    client.act_as(mate, s.ws)
+    assert (await client.get(f"/api/v1/meetings/{s.m.id}/knocks")).status_code == 200
     assert (await _decide(client, s, knock["knock_id"], "admit", as_user=mate)).status_code == 200
 
 
@@ -604,6 +696,25 @@ async def test_deciding_twice_is_409(client, lk) -> None:
     assert (await MeetingKnock.find_one()).status == "admitted"
 
 
+async def test_concurrent_admit_and_deny_over_http_one_wins(client, lk, recording_bus) -> None:
+    import asyncio
+
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    client.act_as(s.host, s.ws)
+    base = f"/api/v1/meetings/{s.m.id}/knocks/{knock['knock_id']}"
+
+    results = await asyncio.gather(
+        client.post(f"{base}/admit"), client.post(f"{base}/deny"), client.post(f"{base}/admit")
+    )
+
+    codes = sorted(r.status_code for r in results)
+    assert codes == [200, 409, 409]
+    winner = next(r.json()["status"] for r in results if r.status_code == 200)
+    assert (await MeetingKnock.find_one()).status == winner
+    assert [e["status"] for e in _events(recording_bus, "meeting.knock_resolved")] == [winner]
+
+
 async def test_two_members_racing_only_one_decision_lands(client, lk, recording_bus) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
@@ -617,6 +728,42 @@ async def test_two_members_racing_only_one_decision_lands(client, lk, recording_
     assert (await MeetingKnock.find_one()).status == "admitted"
     assert [e["status"] for e in _events(recording_bus, "meeting.knock_resolved")] == ["admitted"]
     assert knock["knock_id"] == str(row.id)
+
+
+@pytest.mark.parametrize("action", ["admit", "deny"])
+async def test_decisions_are_audited(client, lk, action) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+
+    with patch("pocketpaw_ee.guards.audit.log_privileged_action") as audit:
+        assert (await _decide(client, s, knock["knock_id"], action)).status_code == 200
+        again = await _decide(client, s, knock["knock_id"], action)
+
+    assert again.status_code == 409
+    audit.assert_called_once_with(
+        actor=s.host,
+        action="meeting.knock_decide",
+        resource_id=knock["knock_id"],
+        workspace_id=s.ws,
+        meeting_id=s.m.id,
+        decision="admitted" if action == "admit" else "denied",
+    )
+
+
+async def test_a_livekit_outage_is_503_not_500(client, lk, monkeypatch) -> None:
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    monkeypatch.setattr(livekit_service, "get_room_info", AsyncMock(side_effect=OSError("down")))
+
+    admit = await _decide(client, s, knock["knock_id"], "admit")
+    listed = await client.get(f"/api/v1/meetings/{s.m.id}/knocks")
+
+    for resp in (admit, listed):
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "livekit.unavailable"
+    assert (await MeetingKnock.find_one()).status == "waiting"
 
 
 async def test_unknown_knock_is_404(client, lk) -> None:

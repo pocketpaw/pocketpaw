@@ -24,7 +24,8 @@ Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added
 ``rate_limit_meeting_knock`` (per IP 10/min AND per meeting code 30/min on the
 public ``POST /meetings/by-code/{code}/knock``) and
 ``rate_limit_meeting_knock_poll`` (per IP 120/min on the guest's knock status
-poll and cancel).
+poll and cancel). ``client_ip`` is public so the knock route can key the
+one-minute re-knock cooldown after a denial on the same address.
 """
 
 from __future__ import annotations
@@ -109,6 +110,11 @@ def _client_ip(request: Request) -> str:
         return str(ip_address(candidate))
     except ValueError:
         return peer
+
+
+def client_ip(request: Request) -> str:
+    """Public name for ``_client_ip`` (same rightmost-XFF rule)."""
+    return _client_ip(request)
 
 
 async def rate_limit_social_exchange(request: Request) -> None:
@@ -222,6 +228,7 @@ async def rate_limit_slug_check(ctx: RequestContext = Depends(request_context)) 
 
 
 __all__ = [
+    "client_ip",
     "consume_invite_create_tokens",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
