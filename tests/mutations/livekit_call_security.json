@@ -1,17 +1,8 @@
 [
   {
-    "label": "token: drop the workspace comparison",
-    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
-    "find": "    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:",
-    "replace": "    if group is None or str(user.id) not in group.members:",
-    "tests": [
-      "tests/cloud/livekit/test_token_room_access.py"
-    ]
-  },
-  {
     "label": "token: drop the membership comparison",
-    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
-    "find": "    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or user_id not in group.members:",
     "replace": "    if group is None or group.workspace_id != workspace_id:",
     "tests": [
       "tests/cloud/livekit/test_token_room_access.py"
@@ -20,8 +11,8 @@
   {
     "label": "token: let non group-call room names through again",
     "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
-    "find": "    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:",
-    "replace": "    if gid and (group is None or group.workspace_id != workspace_id or str(user.id) not in group.members):",
+    "find": "    await livekit_service.require_call_group(gid, str(user.id), workspace_id)\n",
+    "replace": "    if gid:\n        await livekit_service.require_call_group(gid, str(user.id), workspace_id)\n",
     "tests": [
       "tests/cloud/livekit/test_token_room_access.py"
     ]
@@ -132,6 +123,53 @@
     "replace": "    if False:",
     "tests": [
       "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "rooms: return the call-bot token again",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    url: str\n    created_at: str",
+    "replace": "    url: str\n    bot_token: str\n    created_at: str",
+    "tests": [
+      "tests/cloud/livekit/test_room_routes_guard.py"
+    ]
+  },
+  {
+    "label": "require_call_group: drop the audit record",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        log_denial(\n            actor=user_id,",
+    "replace": "        (lambda **_: None)(\n            actor=user_id,",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "require_call_group: drop the workspace comparison",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or user_id not in group.members:",
+    "replace": "    if group is None or user_id not in group.members:",
+    "tests": [
+      "tests/cloud/livekit/test_room_routes_guard.py",
+      "tests/cloud/livekit/test_token_room_access.py",
+      "tests/cloud/livekit/test_scheduled_meeting_group_scope.py"
+    ]
+  },
+  {
+    "label": "end_call: back to membership-only",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)\n\n    result = await livekit_service.end_room(group_id, workspace_id)",
+    "replace": "    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))\n\n    result = await livekit_service.end_room(group_id, workspace_id)",
+    "tests": [
+      "tests/cloud/livekit/test_room_routes_guard.py"
+    ]
+  },
+  {
+    "label": "scheduling: skip the group check",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/livekit/provider.py",
+    "find": "            await livekit_service.require_call_group(group_id, ctx.user_id, ctx.workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/livekit/test_scheduled_meeting_group_scope.py"
     ]
   }
 ]
