@@ -171,15 +171,6 @@
     ]
   },
   {
-    "label": "identity: a new one per poll",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "out.token = await issue_guest_token(room_name, knock_row.guest_identity, knock_row.name)\n    out.room_name = room_name\n    out.identity = knock_row.guest_identity",
-    "replace": "out.token = await issue_guest_token(room_name, knock_row.guest_identity, knock_row.name)\n    out.room_name = room_name\n    out.identity = \"guest-\" + secrets.token_hex(8)",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
     "label": "secret: stored in the clear",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "        secret_hash=_hash(secret),",
@@ -328,6 +319,42 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "    return any(i != \"call-bot\" and not i.startswith(\"guest-\") for i in identities)",
     "replace": "    return any(not i.startswith(\"guest-\") for i in identities)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token ttl: an hour",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "GUEST_TOKEN_TTL = timedelta(minutes=5)",
+    "replace": "GUEST_TOKEN_TTL = timedelta(hours=1)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token ttl: outlives the admission",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    ttl = int(min(GUEST_TOKEN_TTL, left).total_seconds())",
+    "replace": "    ttl = int(GUEST_TOKEN_TTL.total_seconds())",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token ttl: ignored by the helper",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "        ttl_seconds=ttl_seconds,\n    )",
+    "replace": "        ttl_seconds=3600,\n    )",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "identity: a new one per poll",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    out.room_name = room_name\n    out.identity = knock_row.guest_identity",
+    "replace": "    out.room_name = room_name\n    out.identity = \"guest-\" + secrets.token_hex(8)",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]

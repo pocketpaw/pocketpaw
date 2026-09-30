@@ -17,8 +17,10 @@
 # could keep a call going and let others in with no member present.
 #
 # Time rules, computed on read (no sweep): a waiting knock expires 10 minutes
-# after it was made or as soon as the meeting closes; an admission lasts an hour
-# (the token's life). A TTL index drops every row after a day.
+# after it was made or as soon as the meeting closes; an admission lasts an hour.
+# Guest tokens live 5 minutes (never past the admission): every poll mints a
+# fresh one, and a short token limits what a leaked one can do. A TTL index
+# drops every row after a day.
 # ``access="open"`` admits a knock on its own once the call is running, at knock
 # time or on the guest's next poll.
 #
@@ -55,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 KNOCK_TTL = timedelta(minutes=10)
 ADMIT_TTL = timedelta(hours=1)
+# Each poll mints a fresh token, so it can be short; never past the admission.
+GUEST_TOKEN_TTL = timedelta(minutes=5)
 
 _aware = meetings_service._aware
 
@@ -260,8 +264,14 @@ async def knock_status(code: str, knock_id: str, secret: str | None) -> KnockSta
     from pocketpaw_ee.cloud.livekit import service as livekit_service
     from pocketpaw_ee.cloud.livekit.invites import issue_guest_token
 
+    left = _aware(knock_row.decided_at) + ADMIT_TTL - _now()
+    ttl = int(min(GUEST_TOKEN_TTL, left).total_seconds())
+    if ttl <= 0:
+        return out
     room_name = livekit_service.room_name_for_group(room_id)
-    out.token = await issue_guest_token(room_name, knock_row.guest_identity, knock_row.name)
+    out.token = await issue_guest_token(
+        room_name, knock_row.guest_identity, knock_row.name, ttl_seconds=ttl
+    )
     out.room_name = room_name
     out.identity = knock_row.guest_identity
     out.livekit_url = livekit_service.LIVEKIT_URL

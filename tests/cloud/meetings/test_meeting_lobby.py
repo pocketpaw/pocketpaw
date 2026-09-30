@@ -185,7 +185,7 @@ async def test_knock_admit_then_poll_returns_a_guest_token_for_the_meeting_room(
     assert claims["video"]["room"] == f"group-call-{s.room}"
     assert claims["video"]["roomJoin"] is True
     assert claims["name"] == "Gus Guest"
-    assert claims["exp"] - claims["nbf"] <= 3600
+    assert 0 < claims["exp"] - claims["nbf"] <= 300  # short: every poll mints a fresh one
 
     # Re-polling keeps the same identity; the list no longer shows the knock.
     again = (await _poll(client, s.m.code, knock)).json()
@@ -309,6 +309,19 @@ async def test_a_waiting_knock_ends_with_its_meeting(client, lk) -> None:
     assert admit.status_code == 410
     assert admit.json()["error"]["code"] == "meeting.ended"
     assert polled.json() == {"status": "expired"}
+
+
+async def test_guest_token_never_outlives_the_admission(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    await _decide(client, s, knock["knock_id"], "admit")
+    decided = lobby_service._aware((await MeetingKnock.find_one()).decided_at)
+
+    with patch.object(lobby_service, "_now", return_value=decided + timedelta(minutes=58)):
+        body = (await _poll(client, s.m.code, knock)).json()
+
+    claims = jwt.decode(body["token"], options={"verify_signature": False})
+    assert 0 < claims["exp"] - claims["nbf"] <= 120
 
 
 # ---------------------------------------------------------------------------

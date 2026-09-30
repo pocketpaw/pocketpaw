@@ -16,7 +16,7 @@ longer creates the room: a guest can only join a call a human is already in.
 2026-10-01 (feat/meetings-lobby, MC-3): ``new_guest_identity`` and
 ``issue_guest_token`` factored out of accept so the meeting lobby
 (meetings/lobby_service.py) mints guest tokens the same way: ``guest-<hex16>``
-identity, room-scoped grant, 1 hour.
+identity, room-scoped grant, 1 hour for invites (the lobby passes a shorter TTL).
 """
 
 from __future__ import annotations
@@ -76,8 +76,10 @@ def new_guest_identity() -> str:
     return f"guest-{secrets.token_hex(8)}"
 
 
-async def issue_guest_token(room_name: str, identity: str, display_name: str) -> str:
-    """A 1-hour LiveKit token that joins ``room_name`` only.
+async def issue_guest_token(
+    room_name: str, identity: str, display_name: str, *, ttl_seconds: int = 3600
+) -> str:
+    """A LiveKit token that joins ``room_name`` only (1 hour unless told otherwise).
 
     Callers must first make sure a human is in that room: LiveKit creates a
     missing room on connect, so a token for an empty room would start a call.
@@ -90,7 +92,7 @@ async def issue_guest_token(room_name: str, identity: str, display_name: str) ->
         name=display_name,
         can_publish=True,
         can_subscribe=True,
-        ttl_seconds=3600,  # 1 hour — typical meeting length
+        ttl_seconds=ttl_seconds,
     )
 
 
