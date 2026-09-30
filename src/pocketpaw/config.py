@@ -253,6 +253,17 @@ class Settings(BaseSettings):
             "/usr/local/bin/claude in the Docker images."
         ),
     )
+    claude_sdk_max_mcp_output_tokens: int = Field(
+        default=200_000,
+        ge=1,
+        description=(
+            "MAX_MCP_OUTPUT_TOKENS handed to the Claude Code CLI subprocess: the "
+            "largest MCP tool result it passes to the model whole. Claude Code's own "
+            "default (25,000) truncates large results such as a site file from "
+            "read_site_source. An explicit MAX_MCP_OUTPUT_TOKENS in the process "
+            "environment wins over this."
+        ),
+    )
 
     claude_sdk_connect_timeout: float = Field(
         default=90.0,
