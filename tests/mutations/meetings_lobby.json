@@ -153,15 +153,6 @@
     ]
   },
   {
-    "label": "decide: caller need not be in the call",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "if not any(p.get(\"identity\") == user_id for p in (info or {}).get(\"participants\", [])):",
-    "replace": "if False:",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
     "label": "list: shows knocks that just expired",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "        if row.status == \"waiting\":\n            out.append(",
@@ -400,6 +391,33 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "    except NotFound:\n        raise miss from None  # don't tell",
     "replace": "    except KeyError:\n        raise miss from None  # don't tell",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "list: caller need not be in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    meeting = await _member_meeting(workspace_id, user_id, meeting_id)\n    await _require_in_call(meeting, user_id)\n",
+    "replace": "    meeting = await _member_meeting(workspace_id, user_id, meeting_id)\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "decide: caller need not be in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        raise _ended()\n    await _require_in_call(meeting, user_id)\n",
+    "replace": "        raise _ended()\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "in-call: any participant will do",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if user_id not in await _call_identities(meetings_service._room_of(meeting) or \"\"):",
+    "replace": "    if not await _call_identities(meetings_service._room_of(meeting) or \"\"):",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]

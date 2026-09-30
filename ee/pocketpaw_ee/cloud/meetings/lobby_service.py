@@ -313,11 +313,19 @@ async def _member_meeting(workspace_id: str, user_id: str, meeting_id: str) -> _
     return meeting
 
 
+async def _require_in_call(meeting: _MeetingDoc, user_id: str) -> None:
+    """403 ``meeting.not_in_call`` unless the caller is in the call right now."""
+    if user_id not in await _call_identities(meetings_service._room_of(meeting) or ""):
+        raise Forbidden("meeting.not_in_call", "Join the call to see who's waiting.")
+
+
 async def list_knocks(
     workspace_id: str, user_id: str, meeting_id: str
 ) -> list[KnockSummaryResponse]:
-    """Guests still waiting, oldest first. Any member of the meeting room."""
+    """Guests still waiting, oldest first. A member of the meeting room who is in
+    the call (403 ``livekit.room_forbidden`` / ``meeting.not_in_call``)."""
     meeting = await _member_meeting(workspace_id, user_id, meeting_id)
+    await _require_in_call(meeting, user_id)
     rows = (
         await _KnockDoc.find(
             {"meeting": str(meeting.id), "workspace": workspace_id, "status": "waiting"}
@@ -344,14 +352,10 @@ async def decide_knock(
     ``livekit.room_forbidden``) AND in the call right now (403
     ``meeting.not_in_call``). 410 closed meeting, 404 unknown knock, 409
     ``meeting.knock_decided`` when it was already answered, cancelled or expired."""
-    from pocketpaw_ee.cloud.livekit import service as livekit_service
-
     meeting = await _member_meeting(workspace_id, user_id, meeting_id)
     if meetings_service._is_closed(meeting, _now()):
         raise _ended()
-    info = await livekit_service.get_room_info(meetings_service._room_of(meeting) or "")
-    if not any(p.get("identity") == user_id for p in (info or {}).get("participants", [])):
-        raise Forbidden("meeting.not_in_call", "Join the call to let people in.")
+    await _require_in_call(meeting, user_id)
 
     try:
         oid = PydanticObjectId(knock_id)

@@ -617,7 +617,7 @@ async def test_another_workspace_gets_404(client, lk) -> None:
     assert admit.status_code == 404
 
 
-async def test_a_room_member_who_is_not_in_the_call_cannot_decide(client, lk) -> None:
+async def test_a_room_member_who_is_not_in_the_call_cannot_list_or_decide(client, lk) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     mate = await _user("Mia Mate")
@@ -627,11 +627,14 @@ async def test_a_room_member_who_is_not_in_the_call_cannot_decide(client, lk) ->
     listed = await client.get(f"/api/v1/meetings/{s.m.id}/knocks")
     admit = await _decide(client, s, knock["knock_id"], "admit", as_user=mate)
 
-    assert listed.status_code == 200  # members may see who is waiting
-    assert admit.status_code == 403
-    assert admit.json()["error"]["code"] == "meeting.not_in_call"
+    # Waiting guests' names and emails are only shown to people in the call.
+    for resp in (listed, admit):
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "meeting.not_in_call"
 
     _go_live(lk, s.room, mate)
+    client.act_as(mate, s.ws)
+    assert (await client.get(f"/api/v1/meetings/{s.m.id}/knocks")).status_code == 200
     assert (await _decide(client, s, knock["knock_id"], "admit", as_user=mate)).status_code == 200
 
 
