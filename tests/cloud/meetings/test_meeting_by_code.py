@@ -108,6 +108,17 @@ async def test_for_later_creates_room_and_coded_meeting_without_a_call(
     assert not [e for e in recording_bus.events if e.type == "meeting.started"]
 
 
+async def test_for_later_stores_the_description(mongo_db, lk) -> None:
+    ws_id = await _workspace("enterprise")
+
+    out = await _for_later(ws_id, await _host(), description="  Q4 plan  ")
+    blank = await _for_later(ws_id, await _host("Bo Blank"), description="   ")
+
+    assert out.description == "Q4 plan"
+    assert (await Meeting.get(out.id)).description == "Q4 plan"
+    assert blank.description is None
+
+
 async def test_dated_for_later_link_lasts_until_the_meeting_ends(mongo_db, lk) -> None:
     ws_id = await _workspace("enterprise")
     host = await _host()
@@ -570,3 +581,59 @@ async def test_rooms_route_on_a_chat_room_still_records_an_instant_call(client, 
     assert resp.status_code == 200
     rows = await Meeting.find_all().to_list()
     assert [r.title for r in rows] == ["Instant call"]
+
+
+# ---------------------------------------------------------------------------
+# "Meeting scheduled" notification — only for dated meetings, human copy
+# ---------------------------------------------------------------------------
+
+
+async def _scheduled_notifications(monkeypatch, ws_id: str, host: str, **body) -> list[dict]:
+    """Create a meeting, feed the bus payload it emits to the notification bridge."""
+    from pocketpaw_ee.cloud.meetings.bridges import notifications as notif_bridge
+
+    emitted: list[tuple[str, dict]] = []
+
+    async def _capture(topic, data):
+        emitted.append((topic, data))
+
+    monkeypatch.setattr(meetings_service.event_bus, "emit", _capture)
+    created = AsyncMock()
+    monkeypatch.setattr("pocketpaw_ee.cloud.notifications.service.create", created)
+
+    await _for_later(ws_id, host, **body)
+
+    [(topic, data)] = emitted
+    assert topic == "meeting.scheduled"
+    await notif_bridge._on_meeting_scheduled(data)
+    return [c.kwargs for c in created.call_args_list]
+
+
+async def test_undated_for_later_sends_no_scheduled_notification(
+    mongo_db, lk, recording_bus, monkeypatch
+) -> None:
+    ws_id = await _workspace("enterprise")
+
+    sent = await _scheduled_notifications(monkeypatch, ws_id, await _host())
+
+    assert sent == []
+    # The realtime list update still goes out so the meetings list refreshes.
+    assert [e for e in recording_bus.events if e.type == "meeting.scheduled"]
+
+
+async def test_dated_meeting_notification_names_the_meeting_and_time(
+    mongo_db, lk, monkeypatch
+) -> None:
+    ws_id = await _workspace("enterprise")
+    host = await _host()
+    start = datetime(2026, 10, 3, 9, 0, tzinfo=UTC)
+
+    sent = await _scheduled_notifications(
+        monkeypatch, ws_id, host, title="Design review", scheduled_start=start
+    )
+
+    assert len(sent) == 1
+    kw = sent[0]
+    assert (kw["recipient"], kw["kind"]) == (host, "meeting_scheduled")
+    assert kw["body"] == "Design review is scheduled for Oct 3 at 09:00 UTC"
+    assert "livekit" not in (kw["title"] + kw["body"]).lower()
