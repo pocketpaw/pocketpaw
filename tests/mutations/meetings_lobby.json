@@ -146,8 +146,8 @@
   {
     "label": "resolved event: not sent",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "    knock.status, knock.decided_at, knock.decided_by = status, now, decided_by\n    await _emit_resolved(knock, meeting)\n",
-    "replace": "    knock.status, knock.decided_at, knock.decided_by = status, now, decided_by\n",
+    "find": "        setattr(knock, field, value)\n    await _emit_resolved(knock, meeting)\n",
+    "replace": "        setattr(knock, field, value)\n",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
@@ -292,6 +292,24 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
     "find": "    response_model=KnockStatusResponse,\n    response_model_exclude_none=True,\n    dependencies=[Depends(rate_limit_meeting_knock_poll)],\n)\nasync def knock_status(",
     "replace": "    response_model=KnockStatusResponse,\n    dependencies=[Depends(rate_limit_meeting_knock_poll)],\n)\nasync def knock_status(",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "age-out: forgets who admitted",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if from_status == \"waiting\":\n        changes |= {",
+    "replace": "    if True:\n        changes |= {",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "knock: a not-started ask meeting refuses",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    meeting, _room = await _open_meeting_for_guests(code)\n",
+    "replace": "    meeting, _room = await _open_meeting_for_guests(code)\n    if not await meetings_service._room_is_live(_room):\n        raise _ended()\n",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]

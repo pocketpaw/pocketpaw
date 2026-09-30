@@ -98,10 +98,12 @@ async def _transition(
     """Move a knock out of ``from_status`` if nobody beat us to it.
 
     One conditional update, so concurrent deciders can't both win. Returns
-    False (and reloads ``knock``) when the knock had already moved.
+    False (and reloads ``knock``) when the knock had already moved. An admission
+    that ages out keeps its ``decided_by`` / ``decided_at``.
     """
-    now = _now()
-    changes = {"status": status, "decided_at": now, "decided_by": decided_by}
+    changes: dict = {"status": status}
+    if from_status == "waiting":
+        changes |= {"decided_at": _now(), "decided_by": decided_by}
     result = await _KnockDoc.find_one({"_id": knock.id, "status": from_status}).update(
         {"$set": changes}
     )
@@ -112,7 +114,8 @@ async def _transition(
             knock.decided_at = fresh.decided_at
             knock.decided_by = fresh.decided_by
         return False
-    knock.status, knock.decided_at, knock.decided_by = status, now, decided_by
+    for field, value in changes.items():
+        setattr(knock, field, value)
     await _emit_resolved(knock, meeting)
     return True
 

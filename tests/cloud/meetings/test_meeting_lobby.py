@@ -194,6 +194,17 @@ async def test_knock_admit_then_poll_returns_a_guest_token_for_the_meeting_room(
     assert (await client.get(f"/api/v1/meetings/{s.m.id}/knocks")).json() == []
 
 
+async def test_a_knock_waits_when_nobody_is_in_the_call_yet(client, lk, recording_bus) -> None:
+    s = await _setup(lk, live=False)
+
+    resp = await _knock(client, s.m.code)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "waiting"
+    assert len(_events(recording_bus, "meeting.knock")) == 1
+    assert (await _poll(client, s.m.code, resp.json())).json() == {"status": "waiting"}
+
+
 async def test_the_secret_is_stored_only_as_a_hash(client, lk) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code, name="  Gus Guest  ")).json()
@@ -282,6 +293,7 @@ async def test_an_admission_lasts_an_hour(client, lk) -> None:
 
     with patch.object(lobby_service, "_now", return_value=later):
         assert (await _poll(client, s.m.code, knock)).json() == {"status": "expired"}
+    assert (await MeetingKnock.find_one()).decided_by == s.host  # who let them in is kept
 
 
 async def test_a_waiting_knock_ends_with_its_meeting(client, lk) -> None:
