@@ -523,6 +523,28 @@ async def test_admitted_guest_gets_no_token_once_the_call_is_empty(client, lk) -
     assert body == {"status": "admitted"}
 
 
+async def test_guests_alone_do_not_count_as_a_running_call(client, lk) -> None:
+    """Only a member keeps the lobby open: once the last member leaves, an admitted
+    guest gets no fresh token and an open meeting stops admitting new knocks, even
+    though guests (and the call-bot) are still in the LiveKit room."""
+    s = await _setup(lk)
+    a = (await _knock(client, s.m.code, name="Ann Guest")).json()
+    await _decide(client, s, a["knock_id"], "admit")
+    first = (await _poll(client, s.m.code, a)).json()
+    assert "token" in first
+    _go_live(lk, s.room, first["identity"], "call-bot")  # A connects; bot is there too
+
+    lk.participants[:] = [p for p in lk.participants if p.identity != s.host]  # host leaves
+
+    assert (await _poll(client, s.m.code, a)).json() == {"status": "admitted"}
+    row = await Meeting.find_one()
+    row.access = "open"
+    await row.save()
+    b = (await _knock(client, s.m.code, name="Bob Guest")).json()
+    assert b["status"] == "waiting"
+    assert (await _poll(client, s.m.code, b)).json() == {"status": "waiting"}
+
+
 async def test_admitted_guest_gets_no_token_once_the_meeting_ended(client, lk) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()

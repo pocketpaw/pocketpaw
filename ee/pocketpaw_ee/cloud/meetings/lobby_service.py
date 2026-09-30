@@ -10,9 +10,11 @@
 # two people clicking at once get one decision and one 409.
 #
 # The guest's LiveKit token (livekit/invites.issue_guest_token: guest-<hex>,
-# this room only, 1h) is minted only while the meeting is open and a human is in
-# the call. LiveKit creates a missing room on connect, so a token for an empty
-# room would let a guest start the call alone: no budget gate, no row.
+# this room only) is minted only while the meeting is open and a MEMBER is in
+# the call (``_member_in_call``: neither call-bot nor guest-*). LiveKit creates a
+# missing room on connect, so a token for an empty room would let a guest start
+# the call alone: no budget gate, no row. Guests don't count, or admitted guests
+# could keep a call going and let others in with no member present.
 #
 # Time rules, computed on read (no sweep): a waiting knock expires 10 minutes
 # after it was made or as soon as the meeting closes; an admission lasts an hour
@@ -161,11 +163,32 @@ async def _guest_knock(
     return knock, meeting
 
 
+async def _call_identities(room_id: str) -> list[str]:
+    """LiveKit identities in the room's call. Raises when LiveKit can't be read."""
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    info = await livekit_service.get_room_info(room_id)
+    return [p.get("identity", "") for p in (info or {}).get("participants", [])]
+
+
+async def _member_in_call(room_id: str) -> bool:
+    """True while a MEMBER is in the call: someone neither ``call-bot`` nor a
+    ``guest-*``. The lobby's gates use this instead of ``get_room_info().active``,
+    which counts guests, so admitted guests can't keep letting people in (or
+    keep minting themselves tokens) once every member has left."""
+    try:
+        identities = await _call_identities(room_id)
+    except Exception:
+        logger.debug("Room presence check failed for %s", room_id, exc_info=True)
+        return False
+    return any(i != "call-bot" and not i.startswith("guest-") for i in identities)
+
+
 async def _auto_admit_if_open(knock: _KnockDoc, meeting: _MeetingDoc) -> None:
     if (
         knock.status == "waiting"
         and meeting.access == "open"
-        and await meetings_service._room_is_live(meetings_service._room_of(meeting))
+        and await _member_in_call(meetings_service._room_of(meeting) or "")
     ):
         await _transition(knock, meeting, "admitted")
 
@@ -223,7 +246,7 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
 
 async def knock_status(code: str, knock_id: str, secret: str | None) -> KnockStatusResponse:
     """The guest's poll. Carries a fresh LiveKit token while admitted, the meeting
-    is open and a human is in the call; just ``status`` otherwise."""
+    is open and a member is in the call; just ``status`` otherwise."""
     knock_row, meeting = await _guest_knock(code, knock_id, secret)
     await _age_out(knock_row, meeting)
     await _auto_admit_if_open(knock_row, meeting)
@@ -231,7 +254,7 @@ async def knock_status(code: str, knock_id: str, secret: str | None) -> KnockSta
     if knock_row.status != "admitted" or meetings_service._is_closed(meeting, _now()):
         return out
     room_id = meetings_service._room_of(meeting) or ""
-    if not await meetings_service._room_is_live(room_id):
+    if not await _member_in_call(room_id):
         return out
 
     from pocketpaw_ee.cloud.livekit import service as livekit_service

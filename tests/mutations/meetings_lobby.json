@@ -63,15 +63,6 @@
     ]
   },
   {
-    "label": "token: minted with nobody in the call",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "    if not await meetings_service._room_is_live(room_id):\n        return out\n",
-    "replace": "",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
     "label": "token: minted after the meeting closed",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "if knock_row.status != \"admitted\" or meetings_service._is_closed(meeting, _now()):",
@@ -121,15 +112,6 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "        and meeting.access == \"open\"\n",
     "replace": "        and False\n",
-    "tests": [
-      "tests/cloud/meetings/test_meeting_lobby.py"
-    ]
-  },
-  {
-    "label": "open access: ignores presence",
-    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "        and await meetings_service._room_is_live(meetings_service._room_of(meeting))\n",
-    "replace": "",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
@@ -310,6 +292,42 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
     "find": "    meeting, _room = await _open_meeting_for_guests(code)\n",
     "replace": "    meeting, _room = await _open_meeting_for_guests(code)\n    if not await meetings_service._room_is_live(_room):\n        raise _ended()\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "open access: ignores presence",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        and await _member_in_call(meetings_service._room_of(meeting) or \"\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "token: minted with nobody in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if not await _member_in_call(room_id):\n        return out\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "presence: guests count as members",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    return any(i != \"call-bot\" and not i.startswith(\"guest-\") for i in identities)",
+    "replace": "    return any(i != \"call-bot\" for i in identities)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "presence: the call-bot counts as a member",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    return any(i != \"call-bot\" and not i.startswith(\"guest-\") for i in identities)",
+    "replace": "    return any(not i.startswith(\"guest-\") for i in identities)",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
