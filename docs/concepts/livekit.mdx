@@ -118,7 +118,7 @@ The title defaults to `"Instant meeting"`. The response is the usual meeting obj
 | `link` | `<POCKETPAW_FRONTEND_BASE_URL>/m/<code>`, also stored as `join_url` |
 | `room_group_id` | The hidden meeting room (also mirrored in `group_id`) |
 | `host_user_id` | The member who started it |
-| `access` | `"ask"` (default) or `"open"`: whether people outside the room wait for the host. The lobby that enforces this comes later |
+| `access` | `"ask"` (default) or `"open"`: whether guests wait to be let in or join on their own. See [Guest Lobby](#guest-lobby) |
 | `description` | Optional description |
 
 The meeting row starts as `status: "in_progress"` with `source: "livekit"`, and there is exactly one row per meeting. The call goes through the daily call-time budget like any other call. When the plan has no call time left, the endpoint returns 402 `billing.call_limit` and neither the room nor the meeting row is created.
@@ -181,6 +181,84 @@ If no LiveKit room is running, the join starts one through the daily call-time b
 Meeting rooms can only be joined this way. `POST /chat/groups/{id}/join` refuses them.
 
 `POST /livekit/rooms` on a meeting room (the call engine calls it every time a member joins a call) follows the same rules as the join above: it never adds an "Instant call" row, it restarts the call on the meeting's own row after LiveKit has closed an empty room, it returns 410 `meeting.ended` for an ended or expired meeting, and it goes through the call budget (402). For any other room it works as before. The recommended order for a code join is still `POST /meetings/by-code/{code}/join`, then the usual `POST /livekit/rooms` and `POST /livekit/token`.
+
+## Guest Lobby
+
+People without an account (or from another workspace) join through the meeting link by asking to be let in. Someone in the call admits or denies them. All three guest endpoints are public.
+
+**1. Knock.** `POST /api/v1/meetings/by-code/{code}/knock`
+
+```json
+{ "name": "Gus Guest", "email": "gus@example.com" }
+```
+
+`name` is 1 to 80 characters after trimming. `email` is optional unless the meeting has a guest list, in which case it must be on the list (compared trimmed and case-insensitive, on the server). The reply:
+
+```json
+{ "knock_id": "66fb…", "secret": "Qx3…", "status": "waiting" }
+```
+
+`secret` is shown once. The guest needs it for every later call; the server keeps only a hash of it. A knock on a meeting that has nobody in the call yet is fine: it waits until someone joins or it expires.
+
+**2. Poll.** `GET /api/v1/meetings/by-code/{code}/knocks/{knock_id}` with the secret in the `X-Knock-Secret` header (a `?secret=` query also works, but query strings end up in access logs). Poll every 2 seconds. While waiting, or after a denial:
+
+```json
+{ "status": "waiting" }
+```
+
+Once admitted, and only while a person is in the call, the reply also carries what the guest connects with:
+
+```json
+{
+  "status": "admitted",
+  "token": "eyJ…",
+  "room_name": "group-call-66fa…",
+  "identity": "guest-3f9a1c07b2d4e815",
+  "livekit_url": "wss://…"
+}
+```
+
+The token joins that one room, lasts an hour, and each poll returns a fresh one. The identity stays the same for the knock, and the `guest-` prefix means it can never match a member id or `call-bot`. If the call is empty (everyone left), an admitted guest gets `{ "status": "admitted" }` without a token, because LiveKit would start a new room for a token pointed at an empty one; keep polling. An admission lasts an hour, after which the knock reads `expired`.
+
+**3. Cancel.** `DELETE /api/v1/meetings/by-code/{code}/knocks/{knock_id}` with the same secret returns `{ "status": "cancelled" }`.
+
+A knock is `waiting`, `admitted`, `denied`, `cancelled` or `expired`. A waiting knock expires 10 minutes after it was made, or as soon as the meeting ends.
+
+| Status | Code | When |
+|--------|------|------|
+| 404 | `meeting.not_found` / `meeting_knock.not_found` | Unknown code; or an unknown knock, a knock from another meeting, or a wrong or missing secret (all the same answer) |
+| 410 | `meeting.ended` | Knock on a meeting that is ended, cancelled, failed or past its link expiry |
+| 403 | `meeting.email_not_allowed` | The meeting has a guest list and the email isn't on it |
+| 409 | `meeting.knock_decided` | Cancel after the knock was already answered or expired |
+| 422 | | Name empty or over 80 characters |
+| 429 | `meetings.knock_rate_limited` | Knocks: 10 a minute per client IP and 30 a minute per meeting code. Poll and cancel: 120 a minute per client IP |
+
+**Access "open".** When the meeting's `access` is `"open"`, nobody has to decide: a knock is admitted straight away if a person is in the call, or on the guest's first poll after someone joins. The guest list still applies.
+
+### Letting people in
+
+Members of the meeting room (anyone who passes the usual call check for it) get realtime events keyed on the room:
+
+| Event | Data |
+|-------|------|
+| `meeting.knock` | `{workspace_id, meeting_id, group_id, knock_id, name}`, sent for a new knock on an `"ask"` meeting |
+| `meeting.knock_resolved` | `{workspace_id, meeting_id, group_id, knock_id, status}`, sent whenever a knock leaves `waiting` (admitted, denied, cancelled, expired), so every admit card clears |
+
+`GET /api/v1/meetings/{id}/knocks` lists the guests still waiting, oldest first: `[{ "knock_id", "name", "email", "created_at" }]`. `email` is null when the guest gave none.
+
+`POST /api/v1/meetings/{id}/knocks/{knock_id}/admit` and `.../deny` return `{ "knock_id", "status" }`. The caller must be a member of the meeting room and in the call at that moment, checked against LiveKit (a host looking at the meetings page but not in the call can't admit; the admit cards live in the call). When two people answer at once, one wins and the other gets 409.
+
+| Status | Code | When |
+|--------|------|------|
+| 403 | `livekit.room_forbidden` | Not a member of the meeting room (list, admit, deny) |
+| 403 | `meeting.not_in_call` | A member, but not in the call (admit, deny) |
+| 404 | `meeting.not_found` / `meeting_knock.not_found` | Meeting not in the caller's workspace, or unknown knock |
+| 409 | `meeting.knock_decided` | Already admitted, denied, cancelled or expired |
+| 410 | `meeting.ended` | The meeting has ended |
+
+### Changing access
+
+`PATCH /api/v1/meetings/{id}` takes any of `access` (`"ask"` or `"open"`), `title` and `description`, and returns the meeting. Only the host can call it (403 `meeting.host_only`); a blank title is 422 `meeting.empty_title`. Any other field, such as `scheduled_start`, is refused with 422 rather than ignored. Members of the room get `meeting.updated`.
 
 ## Soul Memory Integration
 
