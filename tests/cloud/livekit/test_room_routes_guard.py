@@ -2,6 +2,11 @@
 #
 # Created 2026-09-30 (fix/livekit-call-security, MC-0 review fixes).
 #
+# B1: POST /livekit/rooms returned the call-bot's 24h LiveKit token to every
+#     member in ``bot_token``. With it a member could join as ``call-bot``, kick
+#     the real notes bot, make the room look empty, and keep access for a day
+#     after being removed from the group. The server still uses the token to
+#     spawn the bot; it just never leaves the server.
 # S4: POST /rooms, GET/DELETE /rooms/{id} and the recording routes checked
 #     group membership but not that the group is in the caller's active
 #     workspace, so budget use and Meeting rows could land in the wrong
@@ -91,6 +96,17 @@ def _calls(gid: str) -> list[tuple[str, str, dict | None]]:
         ("post", f"/livekit/rooms/{gid}/recording/stop", None),
         ("get", f"/livekit/rooms/{gid}/recording", None),
     ]
+
+
+async def test_create_room_does_not_hand_out_the_call_bot_token(client, lk, workspace_id) -> None:
+    """B1: the bot's token stays on the server."""
+    gid = await _group(workspace_id, ["u1"])
+
+    resp = await client.post("/livekit/rooms", json={"group_id": gid})
+
+    assert resp.status_code == 200
+    assert "call-bot-secret" not in resp.text
+    assert "bot_token" not in resp.json()
 
 
 async def test_room_routes_refuse_a_group_in_another_workspace(client, lk) -> None:

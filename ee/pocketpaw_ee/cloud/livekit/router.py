@@ -32,7 +32,8 @@ that isn't ``group-call-<id>`` for a group the caller belongs to in their
 workspace (it used to check only ``group-call-*`` names). See
 ``tests/cloud/livekit/test_token_room_access.py``. It also takes the LiveKit
 identity from the authenticated user (the body's ``identity`` is ignored) and
-clamps ``ttl_seconds`` to at most an hour. The room and recording routes use the same audited
+clamps ``ttl_seconds`` to at most an hour. ``POST /rooms`` no longer returns
+the call-bot's token, and the room and recording routes use the same audited
 workspace + membership check as ``/token`` (``service.require_call_group``;
 ``test_room_routes_guard.py``). The public invite join
 takes an optional ``email`` and the server enforces the invite's allow-list;
@@ -77,10 +78,11 @@ class CreateRoomRequest(BaseModel):
 
 
 class CreateRoomResponse(BaseModel):
+    # No bot_token: the call-bot's 24h token stays on the server, which uses
+    # it to spawn the bot. Handing it to members let them join as call-bot.
     room_name: str
     group_id: str
     url: str
-    bot_token: str
     created_at: str
     is_new: bool = False
 
@@ -208,7 +210,8 @@ async def create_room(
     """Create a LiveKit room for a group call.
 
     If a room already exists for this group, returns the existing one.
-    The response includes a short-lived admin token for the call bot.
+    Members get their own token from ``POST /token``; the call-bot's token is
+    never returned.
     """
     await require_license()
 

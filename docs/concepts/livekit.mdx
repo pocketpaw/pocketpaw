@@ -74,7 +74,7 @@ All routes under `/api/v1/livekit/*` require an active enterprise license, user 
 
 | Method + Path | Purpose |
 |---------------|---------|
-| `POST /livekit/rooms` | Create or fetch the room for a group; returns a short-lived admin token for the call bot |
+| `POST /livekit/rooms` | Create or fetch the room for a group. The call-bot's token stays on the server; members get their own from `POST /livekit/token` |
 | `POST /livekit/token` | Mint a participant access token. The LiveKit identity is always the caller's user id (a body `identity` is ignored) and `ttl_seconds` is clamped to 60-3600 (default 3600); display name comes from `user.full_name`. The room must be `group-call-<id>` for a group the caller belongs to in their workspace, otherwise 403 `livekit.room_forbidden` |
 | `GET /livekit/rooms/{group_id}` | Room state: participant count, list, active flag (`active` is true only while someone other than the call-bot is in the room) |
 | `DELETE /livekit/rooms/{group_id}` | End the call; all participants are disconnected; the bot's notes post shortly after |
