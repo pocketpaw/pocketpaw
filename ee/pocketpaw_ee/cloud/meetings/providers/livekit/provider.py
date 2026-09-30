@@ -1,5 +1,11 @@
 """LiveKit MeetingProvider — wraps existing livekit.service for the
-unified meetings platform."""
+unified meetings platform.
+
+2026-09-30 (fix/livekit-call-security): ``start()`` passes the meeting's
+workspace to ``create_room`` so a scheduled start goes through the plan's daily
+call budget (it used to skip it), and it records the room name and the budget
+deadline on the meeting's own row instead of letting ``create_room`` insert a
+second "Instant call" row."""
 
 from __future__ import annotations
 
@@ -51,13 +57,22 @@ class LiveKitProvider:
     async def start(self, ctx: RequestContext, meeting) -> ProviderStartResult:
         """Create the LiveKit room + spawn the in-call agent.
 
-        Idempotent: create_room is a no-op if the room already exists.
+        Idempotent: create_room is a no-op if the room already exists. Raises
+        ``CallLimitError`` when the workspace has no call time left today.
+        ``meeting`` is the row the caller saves afterwards, so the fields set
+        here are persisted with its status change.
         """
         group_id = meeting.raw_provider_payload.get("group_id")
         if not group_id:
             raise ValueError("LiveKit start requires group_id in provider_payload")
 
-        result = await livekit_service.create_room(group_id)
+        result = await livekit_service.create_room(
+            group_id, ctx.workspace_id, ctx.user_id or "", record_meeting=False
+        )
+        # end_room and the budget watchdog look the call's row up by room name.
+        meeting.provider_meeting_id = result["room_name"]
+        if result.get("call_budget_deadline") is not None:
+            meeting.call_budget_deadline = result["call_budget_deadline"]
 
         return ProviderStartResult(
             provider_payload_updates={

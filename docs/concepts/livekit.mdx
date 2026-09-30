@@ -92,6 +92,8 @@ Events fire on the realtime bus:
 
 The frontend's realtime channel subscribes to both so participant lists update without polling.
 
+Starting a call goes through the workspace plan's daily call-time budget, whether a member starts it or a scheduled meeting auto-starts. When the budget is spent, a member gets 402 `billing.call_limit`, and a scheduled meeting that reaches its start time is marked `failed` with `raw_provider_payload.start_error = "billing.call_limit"`. A guest invite link never starts a call.
+
 ## Soul Memory Integration
 
 PR #1112 wired soul memory recall into the meeting agent path. When an agent joins a call (via the subprocess agent lifecycle managed in `service.py`'s `_SubprocessAgentRef`), the agent's bootstrap pulls relevant soul memories into context:

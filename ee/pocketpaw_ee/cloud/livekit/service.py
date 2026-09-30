@@ -24,6 +24,10 @@ Change log:
 - ``get_room_info()["active"]`` now means a participant other than the call-bot
   is in the room (fix/livekit-call-security, 2026-09-30). It was hard-coded True
   for any existing room, which left invite accept's "call ended" branch dead.
+- ``create_room(..., record_meeting=False)`` (same branch): a scheduled meeting
+  starting through ``meetings/providers/livekit`` now passes its workspace, so
+  the daily budget gate and the watchdog apply, without inserting a duplicate
+  "Instant call" row. The result carries ``call_budget_deadline``.
 """
 
 from __future__ import annotations
@@ -714,6 +718,8 @@ async def create_room(
     group_id: str,
     workspace_id: str = "",
     user_id: str = "",
+    *,
+    record_meeting: bool = True,
 ) -> dict[str, Any]:
     """Create a LiveKit room for a group call.
 
@@ -732,6 +738,13 @@ async def create_room(
     room (joining an already-running room is allowed — that call already owns
     its budget). Each new call gets a ``call_budget_deadline`` and a watchdog
     that force-ends it at the deadline so a single over-budget call is cut off.
+
+    ``record_meeting=False`` is for a caller that already owns the call's
+    ``Meeting`` row (a scheduled meeting starting): the budget gate and the
+    watchdog still apply, but no "Instant call" row is inserted and no
+    ``meeting.started`` is emitted. The caller stores the returned
+    ``call_budget_deadline`` and sets ``provider_meeting_id`` to the room name
+    on its own row so ``end_room`` and the watchdog find it.
     """
     _ensure_configured()
 
@@ -775,19 +788,23 @@ async def create_room(
         else:
             logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
 
+    # The new call may run until its remaining daily budget is spent — the
+    # watchdog force-ends it there. Uncapped (Enterprise / no plan context)
+    # calls, and joins to a running room, get no deadline.
+    now = datetime.now(UTC)
+    budget_deadline = None
+    if is_new and budget is not None:
+        cap, remaining = budget
+        if cap is not None and remaining > 0:
+            budget_deadline = now + timedelta(seconds=remaining)
+
+    if budget_deadline is not None and not record_meeting:
+        asyncio.create_task(_force_end_at_budget(group_id, workspace_id, budget_deadline))
+
     # Persist a Meeting document when a new room is created so the
     # call shows up in the scheduled meetings sidebar as "Live".
-    if is_new and workspace_id:
+    if is_new and workspace_id and record_meeting:
         try:
-            now = datetime.now(UTC)
-            # The new call may run until its remaining daily budget is spent —
-            # the watchdog force-ends it there. Uncapped (Enterprise / no plan
-            # context) calls get no deadline.
-            budget_deadline = None
-            if budget is not None:
-                cap, remaining = budget
-                if cap is not None and remaining > 0:
-                    budget_deadline = now + timedelta(seconds=remaining)
             meeting = MeetingDoc(
                 workspace=workspace_id,
                 source="livekit",
@@ -888,6 +905,7 @@ async def create_room(
         "bot_token": bot_token,
         "created_at": datetime.now(UTC).isoformat(),
         "is_new": is_new,
+        "call_budget_deadline": budget_deadline,
     }
 
 
