@@ -10,7 +10,8 @@ here at accept time. The call invite modal sends it inside the ``display_name``
 JSON (``{"emails": [...], "description": ...}``); create moves it to
 ``MeetingInvite.allowed_emails``, legacy rows are parsed on read, validate
 returns ``requires_email`` instead of the list, and accept compares the guest's
-email (trimmed, case-insensitive) before minting a token.
+email (trimmed, case-insensitive) before minting a token. Accept also no
+longer creates the room: a guest can only join a call a human is already in.
 """
 
 from __future__ import annotations
@@ -157,9 +158,9 @@ async def validate_meeting_invite(token: str) -> dict[str, Any]:
             "This invite link has reached its maximum number of uses.",
         )
 
-    # Fetch the room info to check if the call is currently active.
-    # For scheduled meetings the room may not exist yet — that's fine,
-    # the invite is still valid and the room will be created on join.
+    # Fetch the room info to check if the call is currently active. For a
+    # scheduled meeting the room may not exist yet — the invite is still valid,
+    # but join works only once a member has started the call.
     from pocketpaw_ee.cloud.livekit.service import get_room_info
 
     room_info = await get_room_info(doc.group_id)
@@ -226,20 +227,19 @@ async def accept_meeting_invite(
             "This email is not on the invite list. Check with the meeting host.",
         )
 
-    # Ensure the LiveKit room exists — create it if this is a scheduled
-    # meeting where the room hasn't been started yet. If the room already
-    # exists and is inactive (call ended), reject.
-    from pocketpaw_ee.cloud.livekit.service import LIVEKIT_URL, create_room, get_room_info
+    # A guest link joins a running call; it never starts one. Until 2026-09-30
+    # a missing room was created here with no workspace_id, which skipped the
+    # plan's daily call budget and the Meeting insert, and let any unexpired
+    # link restart an ended call. "Running" means a human is in the room (see
+    # service.get_room_info), so a room left holding only the call-bot counts
+    # as ended too.
+    from pocketpaw_ee.cloud.livekit.service import LIVEKIT_URL, get_room_info
 
     room_info = await get_room_info(doc.group_id)
-    if room_info is None:
-        # Room doesn't exist yet — create it (scheduled meeting, guest is first to join)
-        logger.info("Creating LiveKit room for group %s (guest join via invite)", doc.group_id)
-        await create_room(doc.group_id)
-    elif not room_info.get("active", False):
+    if room_info is None or not room_info.get("active", False):
         raise Forbidden(
             "meeting_invite.call_ended",
-            "The call has ended. This invite is no longer valid.",
+            "This call isn't running. It may have ended, or the host hasn't started it yet.",
         )
 
     # Generate a guest identity.

@@ -21,6 +21,9 @@ Change log:
   call records its remaining budget as a ``Meeting.call_budget_deadline`` and a
   watchdog task (``_force_end_at_budget``) force-ends it at the deadline, so a
   single over-budget call is cut off rather than merely blocking later starts.
+- ``get_room_info()["active"]`` now means a participant other than the call-bot
+  is in the room (fix/livekit-call-security, 2026-09-30). It was hard-coded True
+  for any existing room, which left invite accept's "call ended" branch dead.
 """
 
 from __future__ import annotations
@@ -1018,7 +1021,8 @@ async def end_room(group_id: str, workspace_id: str = "", reason: str = "") -> d
 async def get_room_info(group_id: str) -> dict[str, Any] | None:
     """Get the current state of a LiveKit room.
 
-    Returns None if the room doesn't exist (no active call).
+    Returns None if the room doesn't exist (no active call). ``active`` is
+    True only while a participant other than the call-bot is in the room.
     """
     _ensure_configured()
 
@@ -1048,7 +1052,9 @@ async def get_room_info(group_id: str) -> dict[str, Any] | None:
                     }
                     for p in participants
                 ],
-                "active": True,
+                # A room holding only the call-bot (or nobody) is not a live
+                # call. It used to report True whenever the room existed.
+                "active": any(p.identity != "call-bot" for p in participants),
             }
         except Exception as exc:
             msg = str(exc).lower()
