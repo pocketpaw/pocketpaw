@@ -30,7 +30,9 @@ carries the same guard as its siblings; see
 2026-09-30 (fix/livekit-call-security): ``/token`` now refuses any room name
 that isn't ``group-call-<id>`` for a group the caller belongs to in their
 workspace (it used to check only ``group-call-*`` names). See
-``tests/cloud/livekit/test_token_room_access.py``. The public invite join
+``tests/cloud/livekit/test_token_room_access.py``. It also takes the LiveKit
+identity from the authenticated user (the body's ``identity`` is ignored) and
+clamps ``ttl_seconds`` to at most an hour. The public invite join
 takes an optional ``email`` and the server enforces the invite's allow-list;
 validate returns ``requires_email`` instead of the list
 (``test_invite_email_allowlist.py``)."""
@@ -82,12 +84,22 @@ class CreateRoomResponse(BaseModel):
     is_new: bool = False
 
 
+# Longest token /token will mint. The frontend asks for 3600 and LiveKit keeps
+# a connected participant in the room past the token's expiry, so an hour only
+# bounds how long a leaked token can be used to connect.
+MAX_TOKEN_TTL_SECONDS = 3600
+
+
 class TokenRequest(BaseModel):
     room_name: str = Field(..., description="LiveKit room name")
-    identity: str = Field(..., description="Participant identity (user ID)")
+    # Ignored: the identity is always the authenticated user's id. Kept so
+    # existing clients that still send it don't get a 422.
+    identity: str = Field(default="", description="Ignored; the caller's user id is used")
     can_publish: bool = True
     can_subscribe: bool = True
-    ttl_seconds: int = 3600
+    ttl_seconds: int = Field(
+        default=MAX_TOKEN_TTL_SECONDS, description="Clamped to 60..3600 seconds"
+    )
 
 
 class TokenResponse(BaseModel):
@@ -253,16 +265,22 @@ async def generate_token(
     if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:
         raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
 
-    # Use the user's full_name as the LiveKit participant name
-    display_name = user.full_name or body.identity
+    # The LiveKit identity is the authenticated user, never the request body:
+    # a body-supplied identity let a member join as ``call-bot``, as a
+    # ``guest-*`` or as another member. User ids are ObjectIds, so they can't
+    # collide with those reserved identities.
+    identity = str(user.id)
+    if body.identity and body.identity != identity:
+        logger.debug("Ignoring client-supplied LiveKit identity for user %s", identity)
+    display_name = user.full_name or identity
 
     token = await livekit_service.generate_participant_token(
         room_name=body.room_name,
-        identity=body.identity,
+        identity=identity,
         name=display_name,
         can_publish=body.can_publish,
         can_subscribe=body.can_subscribe,
-        ttl_seconds=body.ttl_seconds,
+        ttl_seconds=min(max(body.ttl_seconds, 60), MAX_TOKEN_TTL_SECONDS),
     )
 
     # Notify group members that someone joined the call.
@@ -272,7 +290,7 @@ async def generate_token(
                 data={
                     "group_id": gid,
                     "room_name": body.room_name,
-                    "identity": body.identity,
+                    "identity": identity,
                     "name": display_name,
                 }
             )

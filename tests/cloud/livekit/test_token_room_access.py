@@ -8,6 +8,12 @@
 #
 # The call-bot (token minted inside create_room) and guests (token minted by
 # invite accept) never hit this route, so the tighter check doesn't touch them.
+#
+# Updated 2026-09-30 (MC-0 hole 4): the route took ``identity`` and
+# ``ttl_seconds`` from the request body, so a member could mint a token as
+# ``call-bot``, a ``guest-*`` or another member, valid for as long as they
+# liked. The identity now comes from the authenticated user and the TTL is
+# capped at the one hour the frontend asks for.
 
 from __future__ import annotations
 
@@ -17,6 +23,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core.realtime.events import CallParticipantJoined
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
@@ -36,16 +43,20 @@ async def client(mongo_db) -> AsyncClient:  # noqa: ARG001 — fixture wires Bea
     app.include_router(livekit_router)
     app.dependency_overrides[current_user] = lambda: SimpleNamespace(id="u1", full_name="User One")
     app.dependency_overrides[current_workspace_id] = lambda: WS
-    with (
-        patch("pocketpaw_ee.cloud.livekit.router.require_license", new_callable=AsyncMock),
-        patch(
-            "pocketpaw_ee.cloud.livekit.service.generate_participant_token",
-            new_callable=AsyncMock,
-            return_value="lk-token",
-        ),
-    ):
+    with patch("pocketpaw_ee.cloud.livekit.router.require_license", new_callable=AsyncMock):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             yield c
+
+
+@pytest.fixture(autouse=True)
+def mint():
+    """Spy on the token minter so tests can read the identity and TTL it got."""
+    with patch(
+        "pocketpaw_ee.cloud.livekit.service.generate_participant_token",
+        new_callable=AsyncMock,
+        return_value="lk-token",
+    ) as m:
+        yield m
 
 
 async def _group(members: list[str], workspace: str = WS) -> str:
@@ -85,3 +96,28 @@ async def test_token_still_issued_to_a_member(client) -> None:
     resp = await client.post("/livekit/token", json=_body(f"group-call-{gid}"))
     assert resp.status_code == 200
     assert resp.json()["token"] == "lk-token"
+
+
+@pytest.mark.parametrize("claimed", ["call-bot", "guest-0123456789abcdef", "u2", ""])
+async def test_token_identity_is_the_caller_not_the_body(
+    client, mint, recording_bus, claimed
+) -> None:
+    """The finding: the body's identity went straight into the LiveKit token."""
+    gid = await _group(["u1", "u2"])
+    body = {"room_name": f"group-call-{gid}", "identity": claimed, "ttl_seconds": 10**7}
+
+    resp = await client.post("/livekit/token", json=body)
+
+    assert resp.status_code == 200
+    kwargs = mint.await_args.kwargs
+    assert kwargs["identity"] == "u1"
+    assert kwargs["ttl_seconds"] == 3600
+    joined = [e for e in recording_bus.events if isinstance(e, CallParticipantJoined)]
+    assert [e.data["identity"] for e in joined] == ["u1"]
+
+
+async def test_token_without_identity_field_still_works(client, mint) -> None:
+    gid = await _group(["u1"])
+    resp = await client.post("/livekit/token", json={"room_name": f"group-call-{gid}"})
+    assert resp.status_code == 200
+    assert mint.await_args.kwargs["identity"] == "u1"
