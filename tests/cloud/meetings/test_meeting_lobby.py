@@ -359,18 +359,19 @@ async def test_status_needs_the_right_secret(client, lk, how) -> None:
     assert (await MeetingKnock.find_one()).status == "waiting"
 
 
-async def test_the_secret_also_works_as_a_query_param(client, lk) -> None:
+async def test_the_secret_is_only_read_from_the_header(client, lk) -> None:
+    """A ``?secret=`` query would land in access logs; it isn't accepted."""
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     client.log_out()
+    url = f"/api/v1/meetings/by-code/{s.m.code}/knocks/{knock['knock_id']}"
 
-    resp = await client.get(
-        f"/api/v1/meetings/by-code/{s.m.code}/knocks/{knock['knock_id']}",
-        params={"secret": knock["secret"]},
-        headers=GUEST_IP,
-    )
+    polled = await client.get(url, params={"secret": knock["secret"]}, headers=GUEST_IP)
+    cancelled = await client.delete(url, params={"secret": knock["secret"]}, headers=GUEST_IP)
 
-    assert resp.json() == {"status": "waiting"}
+    assert polled.status_code == 404
+    assert cancelled.status_code == 404
+    assert (await MeetingKnock.find_one()).status == "waiting"
 
 
 # ---------------------------------------------------------------------------

@@ -358,5 +358,23 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
+  },
+  {
+    "label": "secret: poll reads ?secret= again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC \u2014 the guest's poll",
+    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC \u2014 the guest's poll",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "secret: cancel reads ?secret= again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC \u2014 the guest stops",
+    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC \u2014 the guest stops",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
   }
 ]
