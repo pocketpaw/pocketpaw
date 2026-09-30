@@ -2294,7 +2294,8 @@ async def copy_site_snapshot(
     await doc.insert()
     # The /sites gallery lists Site docs, not pockets, so the copy needs its own
     # DRAFT Site (no build, no deploy) to be visible, the same as every other
-    # create path. A copy with no Site would be an orphan nobody can find.
+    # create path. A copy with no Site would be an orphan nobody can find, so the
+    # cleanup catches BaseException: a cancelled request must not leave one either.
     try:
         await sites_service.create_draft_site(
             workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name
