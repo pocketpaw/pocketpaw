@@ -5,7 +5,8 @@ unified meetings platform.
 workspace to ``create_room`` so a scheduled start goes through the plan's daily
 call budget (it used to skip it), and it records the room name and the budget
 deadline on the meeting's own row instead of letting ``create_room`` insert a
-second "Instant call" row."""
+second "Instant call" row. ``create()`` refuses a ``group_id`` the caller is
+not a member of in their workspace (``livekit.room_forbidden``)."""
 
 from __future__ import annotations
 
@@ -43,6 +44,10 @@ class LiveKitProvider:
         """
         group_id = body.group_id
         if group_id:
+            # The meeting starts and ends this group's call, so the caller must
+            # be a member of it in this workspace. Unchecked, a user could
+            # schedule on another workspace's group and end its running call.
+            await livekit_service.require_call_group(group_id, ctx.user_id, ctx.workspace_id)
             room_name = livekit_service.room_name_for_group(group_id)
             provider_payload = {"group_id": group_id, "room_name": room_name}
         else:
