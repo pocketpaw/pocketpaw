@@ -121,3 +121,20 @@ async def test_token_without_identity_field_still_works(client, mint) -> None:
     resp = await client.post("/livekit/token", json={"room_name": f"group-call-{gid}"})
     assert resp.status_code == 200
     assert mint.await_args.kwargs["identity"] == "u1"
+
+
+async def test_token_denials_are_audited(client) -> None:
+    """Every refusal writes an rbac.deny audit record, like the old member check did."""
+    from unittest.mock import MagicMock
+
+    other_ws = await _group(["u1"], workspace="ws-other")
+    not_member = await _group(["u2"])
+    audit = MagicMock()
+    with patch("pocketpaw_ee.guards.audit.get_audit_logger", return_value=audit):
+        for room in ("any-room-i-like", f"group-call-{other_ws}", f"group-call-{not_member}"):
+            resp = await client.post("/livekit/token", json=_body(room))
+            assert resp.status_code == 403
+
+    events = [c.args[0] for c in audit.log.call_args_list]
+    assert len(events) == 3
+    assert all(e.action.startswith("rbac.deny:") and e.status == "block" for e in events)

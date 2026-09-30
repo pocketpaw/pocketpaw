@@ -28,6 +28,9 @@ Change log:
   starting through ``meetings/providers/livekit`` now passes its workspace, so
   the daily budget gate and the watchdog apply, without inserting a duplicate
   "Instant call" row. The result carries ``call_budget_deadline``.
+- ``require_call_group()`` (same branch): the shared, audited check that a
+  group exists, is in the caller's workspace and has the caller as a member.
+  Used by the LiveKit routes and by scheduling a LiveKit meeting.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ from livekit.protocol.room import (
     ListRoomsRequest,
 )
 
-from pocketpaw_ee.cloud._core.errors import CallLimitError
+from pocketpaw_ee.cloud._core.errors import CallLimitError, Forbidden
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     CallEnded,
@@ -135,6 +138,29 @@ def _ensure_configured() -> None:
 def room_name_for_group(group_id: str) -> str:
     """Build a deterministic LiveKit room name for a group."""
     return f"group-call-{group_id}"
+
+
+async def require_call_group(group_id: str | None, user_id: str, workspace_id: str) -> None:
+    """Refuse unless ``group_id`` is a group in ``workspace_id`` that ``user_id`` is in.
+
+    The one access check for every group-scoped call operation (token, room,
+    recording, scheduling a LiveKit meeting). A single 403 covers "no such
+    group", "another workspace" and "not a member", so the response doesn't
+    reveal which groups exist, and every refusal is written to the audit log.
+    """
+    from pocketpaw_ee.cloud.chat.group_service import _get_group_domain_or_none
+    from pocketpaw_ee.guards.audit import log_denial
+
+    group = await _get_group_domain_or_none(group_id) if group_id else None
+    if group is None or group.workspace_id != workspace_id or user_id not in group.members:
+        log_denial(
+            actor=user_id,
+            action="group.view",
+            code="livekit.room_forbidden",
+            resource_id=group_id or "",
+            workspace_id=workspace_id,
+        )
+        raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
 
 
 # ---------------------------------------------------------------------------

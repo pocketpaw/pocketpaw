@@ -32,7 +32,8 @@ that isn't ``group-call-<id>`` for a group the caller belongs to in their
 workspace (it used to check only ``group-call-*`` names). See
 ``tests/cloud/livekit/test_token_room_access.py``. It also takes the LiveKit
 identity from the authenticated user (the body's ``identity`` is ignored) and
-clamps ``ttl_seconds`` to at most an hour. The public invite join
+clamps ``ttl_seconds`` to at most an hour. Its refusals are audited through
+``service.require_call_group``. The public invite join
 takes an optional ``email`` and the server enforces the invite's allow-list;
 validate returns ``requires_email`` instead of the list
 (``test_invite_email_allowlist.py``)."""
@@ -47,7 +48,6 @@ from pydantic import BaseModel, Field
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.chat.group_service import (
     _get_group_domain_or_404,
-    _get_group_domain_or_none,
     _require_domain_group_member,
 )
 from pocketpaw_ee.cloud.license import require_license
@@ -261,9 +261,7 @@ async def generate_token(
     # response is not an existence oracle. The call-bot and guests never come
     # here: their tokens are minted in create_room and invite accept.
     gid = _group_id_from_room_name(body.room_name)
-    group = await _get_group_domain_or_none(gid) if gid else None
-    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:
-        raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
+    await livekit_service.require_call_group(gid, str(user.id), workspace_id)
 
     # The LiveKit identity is the authenticated user, never the request body:
     # a body-supplied identity let a member join as ``call-bot``, as a
