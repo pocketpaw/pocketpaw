@@ -2285,7 +2285,7 @@ Response `200`:
   "badge_required": false,
   "custom_domain": true,
   "max_domained_sites": null,
-  "domained_sites_used": 2,
+  "domained_sites_used": 0,
   "domain_slots_available": true,
   "analytics": true,
   "concierge_entitled": false,
@@ -2302,6 +2302,10 @@ Response `200`:
 - `max_domained_sites` is `null` for uncapped. It reports what the plan grants, while
   `domain_slots_available` reports what the gate will actually do — they differ when
   enforcement is off.
+- The custom-domain allowance is per site. On the free plan every site may carry its
+  own domain (apex + `www`), and `domain_slots_available` turns false only once THIS
+  site holds both. Another site holding a domain never closes it.
+- `domained_sites_used` is kept for older clients and is always `0`.
 
 **`analytics` is a pre-check, not the answer.** The analytics endpoint's `status` stays
 authoritative, because entitlement alone cannot separate "your plan does not include

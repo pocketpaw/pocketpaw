@@ -344,13 +344,13 @@ _PROJECT_DOWNLOAD_PLANS = frozenset({"site", "staff"})
 
 
 def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | None) -> int | None:
-    """How many SITES may carry a custom domain, from THIS site's own plan.
+    """THIS site's own custom-domain grant, from its plan.
 
-    ``None`` means uncapped. Public because the ATTACH seam needs it per row: to
-    decide whether a workspace has room for one more domained site it has to ask,
-    of every site already holding a domain, whether that site is riding the free
-    floor or paying for its own uncapped allowance. Only a site on the floor spends
-    the workspace's floor allowance.
+    ``None`` means uncapped (a paying site); a number means the site rides a
+    capped allowance, which today is the free floor's one domain per site (apex +
+    ``www``). It is per site — no other site in the workspace counts against it.
+    Public because the ATTACH seam asks it to decide whether the free floor's
+    per-site hostname cap applies to this site at all.
 
     Split out of ``resolve_site_entitlements`` rather than re-derived there, so the
     floor-vs-paid rule is written once. ``sites.service`` calling this is not a
@@ -360,13 +360,13 @@ def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | N
     """
     # The floor first — it applies to an unknown tier, an absent tier, and a paid
     # tier whose subscription has lapsed, all of which must land on the same
-    # answer. Free includes one domained site, so this is a grant, not a denial.
+    # answer. Free includes a domain on every site, so this is a grant, not a denial.
     floor = site_plan_catalog.get_site_plan(site_plan_catalog.BASE_SITE_PLAN_KEY)
     allowance = floor.max_domained_sites if floor is not None else 0
 
     # A paying tier's own allowance REPLACES the floor — normally upward
     # (None = uncapped). Not ``max(...)``: None is not a number, and a tier that
-    # deliberately sells fewer domained sites than free should be able to.
+    # deliberately grants less than free should be able to.
     #
     # ``site_scoped_tier`` and not ``get_site_plan``: the catalog now also holds
     # ORG flats (studio/agency), whose keys are not legal ``Site.plan_tier``
@@ -442,7 +442,7 @@ def resolve_site_entitlements(
     records a paid tier with no charge at all.
 
     FLOOR capabilities are the exception, and ``max_domained_sites`` is the first
-    of them. Free includes one domained site, so that allowance has to resolve with
+    of them. Free includes a domain on every site, so that allowance has to resolve with
     no subscription — the base tier confers it, and an active paid subscription
     only ever REPLACES it. Before this split there was one branch and every $0 tier
     fell straight through it to all-False, which made a floor capability impossible
@@ -471,8 +471,8 @@ def resolve_site_entitlements(
 
     # --- FLOOR grants: what the base tier confers with nobody paying -------- #
     # The rule lives in ``site_domain_allowance`` because the attach seam asks it
-    # per row too, and one rule written twice is one rule that drifts. A lapsed
-    # paid site lands on free's one domained site rather than on zero — losing a
+    # too, and one rule written twice is one rule that drifts. A lapsed paid site
+    # lands on free's one domain per site rather than on zero — losing a
     # subscription must not leave a customer worse off than never having had one.
     max_domained_sites = site_domain_allowance(
         plan_tier=plan_tier, subscription_status=subscription_status

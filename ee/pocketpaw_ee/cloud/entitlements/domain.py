@@ -138,13 +138,12 @@ class SiteEntitlements:
     includes a custom domain. An active paid subscription replaces the floor with
     the tier's own value (None = uncapped). A LAPSED paid site therefore falls back
     to the floor's 1 rather than to 0 — it keeps what free would have given it.
-    The unit is the SITE: how many hostnames sit on one site is a separate cap,
-    enforced at the attach seam, not here.
+    The grant is per site: every free site may carry its own domain, and how many
+    hostnames that is (apex + ``www``) is enforced at the attach seam off the site's
+    own domain list, not here.
 
     ``custom_domain`` is derived from it (``!= 0``) rather than stored separately.
-    It answers "may this site have a custom domain at all"; whether the WORKSPACE
-    has room for another is a count the resolver cannot answer, because counting
-    needs the site collection and ``entitlements`` may not import ``models.site``.
+    It answers "may this site have a custom domain at all".
 
     Deliberately ABSENT: ``conv_allowance``, ``conv_rate_usd`` and
     ``white_label``. The first two wait on which meter owns a concierge run, and

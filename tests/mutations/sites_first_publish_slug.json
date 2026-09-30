@@ -95,7 +95,7 @@
     "find": "                partialFilterExpression={\"slug\": {\"$type\": \"string\"}},",
     "replace": "",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_every_free_site_gets_its_own_domain"
     ]
   },
   {
@@ -104,7 +104,7 @@
     "find": "                partialFilterExpression=index.document.get(\"partialFilterExpression\"),",
     "replace": "",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_every_free_site_gets_its_own_domain"
     ]
   },
   {

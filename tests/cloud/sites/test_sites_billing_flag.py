@@ -100,12 +100,15 @@ async def _seed_site(*, workspace_id: str, pocket_id: str, plan_tier: str | None
     return str(doc.id)
 
 
-async def _fill_the_free_allowance(ws: str) -> None:
-    """Give the workspace its one domained free site, so the next attach is at the cap."""
-    first = await _seed_site(workspace_id=ws, pocket_id="pk_first")
-    await sites_service.add_domain(
-        workspace_id=ws, site_id=first, hostname="www.first.com", _cloudflare=_RecordingCF()
-    )
+async def _fill_the_free_allowance(ws: str) -> str:
+    """Give a free site its whole domain (apex + www), so its next attach is at the
+    cap. Returns the site id; the allowance is per site, so only this site is full."""
+    site_id = await _seed_site(workspace_id=ws, pocket_id="pk_first")
+    for host in ["first.com", "www.first.com"][: site_plans.free_max_hostnames_per_site()]:
+        await sites_service.add_domain(
+            workspace_id=ws, site_id=site_id, hostname=host, _cloudflare=_RecordingCF()
+        )
+    return site_id
 
 
 # --------------------------------------------------------------------------- #
@@ -146,13 +149,12 @@ def test_settings_missing_the_new_field_read_as_off(monkeypatch):
 async def test_the_sites_flag_alone_makes_the_domain_cap_bite(monkeypatch):
     _flags(monkeypatch, glob=False, sites=True)
     ws = "ws_sites_flag_only"
-    await _fill_the_free_allowance(ws)
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_second")
+    site_id = await _fill_the_free_allowance(ws)
     cf = _RecordingCF()
 
     with pytest.raises(CloudError) as exc:
         await sites_service.add_domain(
-            workspace_id=ws, site_id=second, hostname="www.second.com", _cloudflare=cf
+            workspace_id=ws, site_id=site_id, hostname="extra.first.com", _cloudflare=cf
         )
 
     assert exc.value.code == "billing.custom_domain_limit"
@@ -240,12 +242,11 @@ async def test_the_sites_flag_does_not_turn_on_the_connector_cap(monkeypatch):
 async def test_the_global_flag_alone_still_enforces_the_domain_cap(monkeypatch):
     _flags(monkeypatch, glob=True, sites=False)
     ws = "ws_global_only"
-    await _fill_the_free_allowance(ws)
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_second")
+    site_id = await _fill_the_free_allowance(ws)
 
     with pytest.raises(CloudError) as exc:
         await sites_service.add_domain(
-            workspace_id=ws, site_id=second, hostname="www.second.com", _cloudflare=_RecordingCF()
+            workspace_id=ws, site_id=site_id, hostname="extra.first.com", _cloudflare=_RecordingCF()
         )
 
     assert exc.value.code == "billing.custom_domain_limit"
@@ -256,23 +257,21 @@ async def test_the_global_flag_alone_still_enforces_the_domain_cap(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-async def test_with_both_flags_off_the_second_site_attaches(monkeypatch):
+async def test_with_both_flags_off_a_full_site_attaches_another(monkeypatch):
     _flags(monkeypatch, glob=False, sites=False)
     ws = "ws_both_off"
-    await _fill_the_free_allowance(ws)
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_second")
+    site_id = await _fill_the_free_allowance(ws)
 
     res = await sites_service.add_domain(
-        workspace_id=ws, site_id=second, hostname="www.second.com", _cloudflare=_RecordingCF()
+        workspace_id=ws, site_id=site_id, hostname="extra.first.com", _cloudflare=_RecordingCF()
     )
 
-    assert res.hostname == "www.second.com"
+    assert res.hostname == "extra.first.com"
 
 
-async def test_with_both_flags_off_the_census_query_never_runs(monkeypatch):
-    """Not merely "no error" — no read either. ``_load`` uses ``find_one``; the
-    census is the only caller of ``find`` on this path, which is what makes the
-    assertion specific rather than incidental."""
+async def test_with_both_flags_off_the_attach_reads_no_other_site(monkeypatch):
+    """Not merely "no error" — no extra read either. ``_load`` uses ``find_one``,
+    and nothing else on this path should query the site collection."""
     _flags(monkeypatch, glob=False, sites=False)
     ws = "ws_both_off_noread"
     site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1")
