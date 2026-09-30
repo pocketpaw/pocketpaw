@@ -79,5 +79,59 @@
     "tests": [
       "tests/cloud/livekit/test_invite_no_restart.py"
     ]
+  },
+  {
+    "label": "token: use the body identity again",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "        identity=identity,\n        name=display_name,",
+    "replace": "        identity=body.identity or identity,\n        name=display_name,",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "token: drop the TTL clamp",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "        ttl_seconds=min(max(body.ttl_seconds, 60), MAX_TOKEN_TTL_SECONDS),",
+    "replace": "        ttl_seconds=body.ttl_seconds,",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "scheduled start: drop the workspace",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/livekit/provider.py",
+    "find": "            group_id, ctx.workspace_id, ctx.user_id or \"\", record_meeting=False",
+    "replace": "            group_id, \"\", ctx.user_id or \"\", record_meeting=False",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "scheduled start: insert the Instant call row too",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/livekit/provider.py",
+    "find": "record_meeting=False",
+    "replace": "record_meeting=True",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "scheduled start: leave a budget-blocked meeting scheduled",
+    "file": "ee/pocketpaw_ee/cloud/meetings/scheduling/service.py",
+    "find": "        doc.status = \"failed\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "create_room: no watchdog when the caller owns the row",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    if budget_deadline is not None and not record_meeting:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
   }
 ]
