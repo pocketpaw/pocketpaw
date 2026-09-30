@@ -724,7 +724,8 @@ async def _room_is_live(room_id: str | None) -> bool:
     except Exception:
         # LiveKit unset or unreachable: report "not started" rather than fail
         # the join page; the join itself goes through create_room and errors there.
-        logger.warning("Room presence check failed for %s", room_id, exc_info=True)
+        # Debug, not warning: this runs on a public endpoint, 30 times a minute per IP.
+        logger.debug("Room presence check failed for %s", room_id, exc_info=True)
         return False
     return bool(info and info.get("active"))
 
