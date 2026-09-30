@@ -574,6 +574,7 @@ async def _create_meeting_row(
         "provider_meeting_id": provider_meeting_id,
         "provider_space_id": provider_payload.get("space_name"),
         "title": body.title,
+        "description": (body.description or "").strip() or None,
         "join_url": provider_result.join_url
         or str(provider_payload.get("join_url") or provider_payload.get("meetingUri") or ""),
         "organizer_email": provider_payload.get("host_email"),

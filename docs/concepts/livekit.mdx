@@ -131,7 +131,7 @@ The meeting row starts as `status: "in_progress"` with `source: "livekit"`, and 
 { "source": "livekit", "title": "Planning", "scheduled_start": "2026-10-03T09:00:00Z", "duration_minutes": 45 }
 ```
 
-`title` is required. `scheduled_start` and `duration_minutes` (default 30) are optional. The row's status is `scheduled` either way. A null `scheduled_start` means the meeting has no date: no reminder or auto-start job is set for it. A dated one gets the usual reminder, auto-start and auto-end.
+`title` is required. `scheduled_start`, `duration_minutes` (default 30) and `description` (up to 2000 characters, stored trimmed) are optional. The row's status is `scheduled` either way. A null `scheduled_start` means the meeting has no date: no reminder or auto-start job is set for it. A dated one gets the usual reminder, auto-start and auto-end.
 
 `POST /api/v1/meetings` with `source: "livekit"` and a chat-room `group_id` works as before (the caller must be a member of that room) and now also gets a `code` and `link`. Its `join_url` stays empty and `room_group_id` stays null; the room is in `group_id`. Recall (Zoom / Meet) meetings get no code.
 

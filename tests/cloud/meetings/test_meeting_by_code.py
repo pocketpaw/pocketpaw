@@ -149,6 +149,17 @@ async def test_for_later_creates_room_and_coded_meeting_without_a_call(
     assert not [e for e in recording_bus.events if e.type == "meeting.started"]
 
 
+async def test_for_later_stores_the_description(mongo_db, lk) -> None:
+    ws_id = await _workspace("enterprise")
+
+    out = await _for_later(ws_id, await _host(), description="  Q4 plan  ")
+    blank = await _for_later(ws_id, await _host("Bo Blank"), description="   ")
+
+    assert out.description == "Q4 plan"
+    assert (await Meeting.get(out.id)).description == "Q4 plan"
+    assert blank.description is None
+
+
 async def test_dated_for_later_link_lasts_until_the_meeting_ends(mongo_db, lk) -> None:
     ws_id = await _workspace("enterprise")
     host = await _host()

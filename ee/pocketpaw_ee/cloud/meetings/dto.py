@@ -12,6 +12,8 @@
 # 2026-10-01 (feat/meetings-by-code, MC-2): ``MeetingLookupResponse`` (the
 # public ``GET /meetings/by-code/{code}`` shape — six fields, nothing that
 # identifies a person, room or workspace) and ``JoinMeetingByCodeResponse``.
+# ``CreateMeetingRequest`` gains an optional ``description`` (stored trimmed;
+# blank means none), same limit as the instant request.
 
 from __future__ import annotations
 
@@ -47,6 +49,7 @@ class CreateMeetingRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     scheduled_start: datetime | None = None
     duration_minutes: int = Field(default=30, ge=1, le=1440)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 class StartInstantMeetingRequest(BaseModel):
