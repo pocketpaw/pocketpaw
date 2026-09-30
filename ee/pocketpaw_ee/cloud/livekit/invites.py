@@ -190,8 +190,8 @@ async def accept_meeting_invite(
 
     The guest provides a ``guest_display_name`` that is shown to other
     participants. When the invite has an email allow-list, ``email`` must be
-    on it (trimmed, case-insensitive) or the accept is refused. Returns a LiveKit access token so the guest can connect
-    immediately.
+    on it (trimmed, case-insensitive) or the accept is refused. Returns a
+    LiveKit access token so the guest can connect immediately.
 
     No authentication required — the guest may not have a Pocketpaw account.
     The returned token uses a ``guest-`` prefixed identity.
