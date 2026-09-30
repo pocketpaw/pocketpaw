@@ -133,6 +133,8 @@ The meeting row starts as `status: "in_progress"` with `source: "livekit"`, and 
 
 `title` is required. `scheduled_start`, `duration_minutes` (default 30) and `description` (up to 2000 characters, stored trimmed) are optional. The row's status is `scheduled` either way. A null `scheduled_start` means the meeting has no date: no reminder or auto-start job is set for it. A dated one gets the usual reminder, auto-start and auto-end.
 
+Only a dated meeting sends the "Meeting scheduled" notification, worded "<title> is scheduled for Oct 3 at 09:00 UTC". An undated one sends none, though the realtime `meeting.scheduled` event still goes out so meeting lists refresh.
+
 `POST /api/v1/meetings` with `source: "livekit"` and a chat-room `group_id` works as before (the caller must be a member of that room) and now also gets a `code` and `link`. Its `join_url` stays empty and `room_group_id` stays null; the room is in `group_id`. Recall (Zoom / Meet) meetings get no code.
 
 ### How long a link works

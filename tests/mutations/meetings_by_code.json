@@ -151,5 +151,32 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_by_code.py"
     ]
+  },
+  {
+    "label": "notify: undated livekit meetings announced again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/notifications.py",
+    "find": "    if source == \"livekit\" and not data.get(\"scheduled_start\"):\n        # A meeting \"for later\" with no date: nothing is scheduled to announce.\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "notify: provider copy for dated meetings",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/notifications.py",
+    "find": "    if starts is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "service: payload drops scheduled_start",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "            \"scheduled_start\": body.scheduled_start.isoformat() if body.scheduled_start else None,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
   }
 ]

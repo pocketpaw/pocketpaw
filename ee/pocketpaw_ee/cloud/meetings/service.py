@@ -495,6 +495,10 @@ async def create_meeting(
             "provider": body.provider,
             "group_id": body.group_id,
             "created_by": user_id,
+            # The notification bridge words the toast from these, and sends
+            # none for a LiveKit meeting with no date.
+            "title": body.title,
+            "scheduled_start": body.scheduled_start.isoformat() if body.scheduled_start else None,
         },
     )
     # Also emit on the realtime bus so ALL connected clients (not just the
