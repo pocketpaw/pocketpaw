@@ -855,8 +855,8 @@ class CloudSurfacesMcpProvider:
     an ``open_surface`` chat event; the browser does the opening.
 
     Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
-    with no MCP allowlist (the GENERIC / default profile), filtered out of the
-    specialised allowlisted surfaces.
+    with no MCP allowlist (the GENERIC / default profile) and on /studio/editor,
+    whose allowlist names it; filtered out of the other allowlisted surfaces.
     """
 
     def build_server(self) -> tuple[str, Any] | None:

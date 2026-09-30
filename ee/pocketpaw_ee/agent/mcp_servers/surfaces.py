@@ -16,15 +16,13 @@
 # tenant-scoped or persisted, so there is no identity to bind.
 #
 # SCOPING. Ambient registration (``CloudSurfacesMcpProvider``), NOT in
-# ``ALWAYS_ALLOWED_MCP_SERVERS`` and NOT in any surface allowlist. The GENERIC
-# surface (what the /no-ui-lab sends) resolves to ``_DEFAULT_PROFILE``, whose
-# ``allow_mcp_tool_ids`` is None — no MCP restriction — so the tool is reachable
-# there with zero scoping code. ALWAYS_ALLOWED would push it onto every
-# allowlisted surface (/sites, /studio, /belt, /ship, /browser, the public
-# concierge is exclusive anyway), which is wider than the need. Known ceiling:
-# allowlisted surfaces such as /studio/editor filter it out, so "pick another
-# file" from inside the editor cannot open /files yet — add the id to that
-# surface's allowlist when a surface actually needs it.
+# ``ALWAYS_ALLOWED_MCP_SERVERS``. The GENERIC surface (what the /no-ui-lab sends)
+# resolves to ``_DEFAULT_PROFILE``, whose ``allow_mcp_tool_ids`` is None (no MCP
+# restriction), so the tool is reachable there with zero scoping code.
+# ALWAYS_ALLOWED would push it onto every allow-listed surface (/sites, /studio,
+# /belt, /ship, /browser), which is wider than the need. Of the allow-listed
+# surfaces only /studio/editor names it (surface_registry ``timeline_allow``), so
+# "pick another clip" can open /files; the public concierge never gets it.
 #
 # TRUST. run_core promotes the envelope only from a tool_result whose resolved
 # name is in ``OPEN_SURFACE_TOOL_NAMES`` (unresolved fails closed) — a file read
@@ -43,6 +41,7 @@
 #
 # Changes: 2026-09-29 (same branch, review fix) — name-gated promotion
 # (``OPEN_SURFACE_TOOL_NAMES``) and the /studio/editor ``src`` shape check.
+# Changes: 2026-09-30 (same branch) — /studio/editor's allow-list carries the tool.
 
 from __future__ import annotations
 

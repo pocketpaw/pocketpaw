@@ -9,6 +9,9 @@
 # Changes: 2026-09-29 (review fix) — promotion is name-gated: a VALID-route
 # marker in a Read / WebFetch result, or under an unresolved name, is not
 # promoted; /studio/editor ``src`` must be a backend media path.
+# Changes: 2026-09-30 — scoping: reachable on the unrestricted GENERIC profile and
+# on /studio/editor's allow-list (the editor preamble names it), and on NO other
+# allow-listed surface, the public concierge included.
 
 from __future__ import annotations
 
@@ -234,3 +237,56 @@ async def test_valid_marker_from_another_tool_is_not_promoted(monkeypatch, name:
         [_result(text(real), name), SimpleNamespace(type="done", content="")],
     )
     assert [n for n, _ in frames if n == "open_surface"] == []
+
+
+# --- Scoping: which surfaces can reach the tool -------------------------------
+
+from pocketpaw_ee.cloud.surface import service  # noqa: E402
+from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta  # noqa: E402
+
+# Allow-listed surfaces that deliberately carry the tool. Anything else with an
+# allow-list must not: a new entry here is a scoping decision, not a typo fix.
+_GRANTED = {SurfaceKind.STUDIO_EDITOR}
+
+
+def test_reachable_on_the_generic_surface() -> None:
+    """The /no-ui-lab talks on GENERIC, whose profile has no MCP allow-list."""
+    assert service.resolve_profile(SurfaceKind.GENERIC, SurfaceMeta()).allow_mcp_tool_ids is None
+
+
+def test_reachable_on_the_studio_editor_surface() -> None:
+    """From the editor, "pick another clip" is a trip to /files."""
+    profile = service.resolve_profile(SurfaceKind.STUDIO_EDITOR, SurfaceMeta())
+    assert OPEN_SURFACE_TOOL_ID in (profile.allow_mcp_tool_ids or frozenset())
+    assert OPEN_SURFACE_TOOL_ID not in (profile.deny_mcp_tool_ids or frozenset())
+
+
+def test_the_editor_preamble_tells_the_agent_about_it() -> None:
+    import asyncio
+
+    from pocketpaw_ee.cloud.surface.handlers import studio_editor
+
+    text_ = asyncio.run(
+        studio_editor.build_preamble(
+            "w", "u", SurfaceMeta(route_path="/studio/editor", timeline={"name": "t"})
+        )
+    ).text
+    assert OPEN_SURFACE_TOOL_ID in text_
+
+
+@pytest.mark.parametrize("kind", [k for k in SurfaceKind if k not in _GRANTED])
+def test_absent_from_every_other_allow_list(kind: SurfaceKind) -> None:
+    """Every other allow-listed surface filters the tool out, the public
+    concierge most of all: a site visitor's chat must never drive the owner's
+    app. ``None`` (no allow-list) is the unrestricted default and is fine."""
+    allow = service.resolve_profile(kind, SurfaceMeta()).allow_mcp_tool_ids
+    if allow is not None:
+        assert OPEN_SURFACE_TOOL_ID not in allow, f"open_surface leaked onto {kind}"
+
+
+def test_the_allow_lists_actually_loaded() -> None:
+    """Guards the parametrized test above from passing vacuously on a degraded
+    load, where every allow-list is None."""
+    from pocketpaw_ee.cloud.surface.surface_registry import _mcp_tool_ids
+
+    assert _mcp_tool_ids().loaded
