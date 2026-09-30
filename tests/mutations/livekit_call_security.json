@@ -1,0 +1,83 @@
+[
+  {
+    "label": "token: drop the workspace comparison",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:",
+    "replace": "    if group is None or str(user.id) not in group.members:",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "token: drop the membership comparison",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:",
+    "replace": "    if group is None or group.workspace_id != workspace_id:",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "token: let non group-call room names through again",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or str(user.id) not in group.members:",
+    "replace": "    if gid and (group is None or group.workspace_id != workspace_id or str(user.id) not in group.members):",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "accept: skip the allow-list check",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if allowed and (email or \"\").strip().lower() not in allowed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "accept: compare without normalizing",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if allowed and (email or \"\").strip().lower() not in allowed:",
+    "replace": "    if allowed and (email or \"\") not in allowed:",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "allow-list: ignore legacy display_name emails",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    return doc.allowed_emails or _split_emails(doc.display_name)[1]",
+    "replace": "    return doc.allowed_emails",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "validate: echo display_name with the emails",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "        \"display_name\": _split_emails(doc.display_name)[0],",
+    "replace": "        \"display_name\": doc.display_name,",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "accept: treat a missing room as joinable",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if room_info is None or not room_info.get(\"active\", False):",
+    "replace": "    if room_info is not None and not room_info.get(\"active\", False):",
+    "tests": [
+      "tests/cloud/livekit/test_invite_no_restart.py"
+    ]
+  },
+  {
+    "label": "get_room_info: active whenever the room exists",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "                \"active\": any(p.identity != \"call-bot\" for p in participants),",
+    "replace": "                \"active\": True,",
+    "tests": [
+      "tests/cloud/livekit/test_invite_no_restart.py"
+    ]
+  }
+]
