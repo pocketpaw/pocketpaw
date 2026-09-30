@@ -430,5 +430,59 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
+  },
+  {
+    "label": "cooldown: never applies",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    if ip_hash and await _KnockDoc.find_one(",
+    "replace": "    if False and await _KnockDoc.find_one(",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: forever",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "DENY_COOLDOWN = timedelta(seconds=60)",
+    "replace": "DENY_COOLDOWN = timedelta(days=1)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: every address",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "            \"ip_hash\": ip_hash,\n            \"status\": \"denied\",",
+    "replace": "            \"status\": \"denied\",",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: after a cancel too",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "            \"status\": \"denied\",\n            \"decided_at\"",
+    "replace": "            \"status\": {\"$in\": [\"denied\", \"cancelled\"]},\n            \"decided_at\"",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: raw address stored",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    ip_hash = _hash(f\"{meeting.id}:{client_ip}\") if client_ip else None",
+    "replace": "    ip_hash = f\"{meeting.id}:{client_ip}\" if client_ip else None",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "cooldown: router drops the address",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "lobby_service.knock(code, body, client_ip=client_ip(request))",
+    "replace": "lobby_service.knock(code, body)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
   }
 ]

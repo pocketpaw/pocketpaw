@@ -48,10 +48,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, field_serializer
 
 from pocketpaw_ee.cloud._core.rate_limit import (
+    client_ip,
     rate_limit_meeting_knock,
     rate_limit_meeting_knock_poll,
     rate_limit_meeting_lookup,
@@ -182,13 +183,14 @@ async def join_meeting_by_code(
     response_model=KnockCreatedResponse,
     dependencies=[Depends(rate_limit_meeting_knock)],
 )
-async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
+async def knock(code: str, body: KnockRequest, request: Request) -> KnockCreatedResponse:
     """PUBLIC — a guest asks to join. Keep ``secret``; it is shown only here.
 
     404 unknown code, 410 ``meeting.ended``, 403 ``meeting.email_not_allowed``,
-    422 bad name/email, 429 ``meetings.knock_rate_limited``.
+    422 bad name/email, 429 ``meetings.knock_rate_limited``, 429
+    ``meeting.knock_cooldown`` for a minute after this address was denied.
     """
-    return await lobby_service.knock(code, body)
+    return await lobby_service.knock(code, body, client_ip=client_ip(request))
 
 
 @router.get(

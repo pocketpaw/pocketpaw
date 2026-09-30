@@ -18,7 +18,8 @@
 # 2026-10-01 (feat/meetings-lobby, MC-3): ``MeetingKnock`` — one row per guest
 # asking to join a meeting. Holds only a sha256 of the guest's bearer secret.
 # Waiting knocks read as expired after 10 minutes (meetings/lobby_service.py);
-# a TTL index drops every row a day after it was made.
+# a TTL index drops every row a day after it was made. ``ip_hash`` (salted with
+# the meeting id) backs the one-minute re-knock cooldown after a denial.
 #
 # Two documents:
 #   * Meeting — one row per provider meeting we know about.
@@ -174,6 +175,9 @@ class MeetingKnock(Document):
     decided_at: datetime | None = None
     guest_identity: str
     secret_hash: str
+    # sha256(meeting id + client IP): lets a denial hold back a re-knock from the
+    # same address for a minute without storing the address itself.
+    ip_hash: str | None = None
 
     class Settings:
         name = "meeting_knocks"

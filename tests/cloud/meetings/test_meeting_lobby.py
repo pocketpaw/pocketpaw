@@ -245,6 +245,48 @@ async def test_guest_cancels(client, lk, recording_bus) -> None:
     assert late.json()["error"]["code"] == "meeting.knock_decided"
 
 
+async def test_a_denied_guest_waits_a_minute_before_knocking_again(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    await _decide(client, s, knock["knock_id"], "deny")
+    other = await meetings_service.create_meeting(
+        s.ws, s.host, CreateMeetingRequest(source="livekit", title="Other")
+    )
+
+    again = await _knock(client, s.m.code)
+    assert again.status_code == 429
+    assert again.json()["error"]["code"] == "meeting.knock_cooldown"
+    # Another address, or another meeting, isn't held back.
+    assert (
+        await _knock(client, s.m.code, headers={"x-forwarded-for": "198.51.100.9"})
+    ).status_code == 200
+    assert (await _knock(client, other.code)).status_code == 200
+
+    later = datetime.now(UTC) + timedelta(seconds=61)
+    with patch.object(lobby_service, "_now", return_value=later):
+        assert (await _knock(client, s.m.code)).status_code == 200
+
+
+async def test_a_cancelled_knock_does_not_hold_the_guest_back(client, lk) -> None:
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    client.log_out()
+    await client.delete(
+        f"/api/v1/meetings/by-code/{s.m.code}/knocks/{knock['knock_id']}",
+        headers={**GUEST_IP, "x-knock-secret": knock["secret"]},
+    )
+
+    assert (await _knock(client, s.m.code)).status_code == 200
+
+
+async def test_the_guest_address_is_not_stored_in_the_clear(client, lk) -> None:
+    s = await _setup(lk)
+    await _knock(client, s.m.code)
+
+    row = await MeetingKnock.find_one()
+    assert row.ip_hash and "198.51.100.4" not in row.model_dump_json()
+
+
 async def test_cancel_after_a_decision_is_409(client, lk) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()

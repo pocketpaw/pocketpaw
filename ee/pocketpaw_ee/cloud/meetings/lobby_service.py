@@ -24,7 +24,9 @@
 # ``access="open"`` admits a knock on its own once the call is running, at knock
 # time or on the guest's next poll.
 #
-# Every admit / deny is written to the audit log (``meeting.knock_decide``).
+# Every admit / deny is written to the audit log (``meeting.knock_decide``). A
+# denial holds back a re-knock on that meeting from the same address for a
+# minute (429 ``meeting.knock_cooldown``; the address is kept only salted+hashed).
 #
 # Events (realtime, to the meeting room's members): ``meeting.knock`` for a new
 # knock that needs a decision, ``meeting.knock_resolved`` whenever a knock leaves
@@ -40,7 +42,13 @@ from datetime import UTC, datetime, timedelta
 
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    ConflictError,
+    Forbidden,
+    NotFound,
+    RateLimited,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.dto import (
@@ -61,6 +69,8 @@ KNOCK_TTL = timedelta(minutes=10)
 ADMIT_TTL = timedelta(hours=1)
 # Each poll mints a fresh token, so it can be short; never past the admission.
 GUEST_TOKEN_TTL = timedelta(minutes=5)
+# After a denial, the same address can't knock on that meeting again for a minute.
+DENY_COOLDOWN = timedelta(seconds=60)
 
 _aware = meetings_service._aware
 
@@ -207,7 +217,9 @@ async def _auto_admit_if_open(knock: _KnockDoc, meeting: _MeetingDoc) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
+async def knock(
+    code: str, body: KnockRequest, *, client_ip: str | None = None
+) -> KnockCreatedResponse:
     """A guest asks to join. 404 unknown code, 410 closed meeting, 403
     ``meeting.email_not_allowed`` when the meeting has a guest list and the email
     isn't on it (trimmed, case-insensitive)."""
@@ -221,6 +233,18 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
             "This email isn't on the guest list. Check with the meeting host.",
         )
 
+    ip_hash = _hash(f"{meeting.id}:{client_ip}") if client_ip else None
+    if ip_hash and await _KnockDoc.find_one(
+        {
+            "meeting": str(meeting.id),
+            "workspace": meeting.workspace,
+            "ip_hash": ip_hash,
+            "status": "denied",
+            "decided_at": {"$gt": (_now() - DENY_COOLDOWN).replace(tzinfo=None)},
+        }
+    ):
+        raise RateLimited("meeting.knock_cooldown", "Please wait a minute before asking again.")
+
     from pocketpaw_ee.cloud.livekit.invites import new_guest_identity
 
     secret = secrets.token_urlsafe(32)
@@ -231,6 +255,7 @@ async def knock(code: str, body: KnockRequest) -> KnockCreatedResponse:
         email=email,
         guest_identity=new_guest_identity(),
         secret_hash=_hash(secret),
+        ip_hash=ip_hash,
     )
     await row.insert()
 
