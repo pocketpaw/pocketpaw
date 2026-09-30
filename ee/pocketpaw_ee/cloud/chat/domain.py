@@ -17,6 +17,10 @@ row is (``None`` for every complete message).
 Updated: 2026-09-28 (feat/persist-tool-steps) — ``MessageStep`` and
 ``Message.steps`` / ``steps_omitted`` mirror the new persistence fields: the
 thinking blocks and tool calls an agent reply streamed, in order.
+
+Updated: 2026-10-01 (feat/meetings-instant, MC-1) — ``GroupType`` gains
+``"meeting"``; ``MEMBER_ONLY_GROUP_TYPES`` is the one list of member-gated types
+the chat reads check, and ``MEETING_GROUP_TYPE`` names the hidden meeting room.
 """
 
 from __future__ import annotations
@@ -29,7 +33,13 @@ from typing import Any, Literal
 ContextType = Literal["pocket", "group", "session"]
 PocketRole = Literal["user", "assistant", "system"]
 MemberRole = Literal["view", "edit", "post_no_media", "admin"]
-GroupType = Literal["public", "private", "dm", "channel"]
+GroupType = Literal["public", "private", "dm", "channel", "meeting"]
+
+# Group types only members may read. A type missing here is readable by any
+# workspace member, so a new members-only type must be added.
+MEMBER_ONLY_GROUP_TYPES = ("private", "dm", "meeting")
+# The hidden room behind a meeting: members only, left out of every room list.
+MEETING_GROUP_TYPE = "meeting"
 
 
 @dataclass(frozen=True)

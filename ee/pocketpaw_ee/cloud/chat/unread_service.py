@@ -10,6 +10,10 @@ counts each group through the ``(group, _id)`` index, stops each count at
 ``UNREAD_CAP``, and runs the per-group counts bounded-concurrent. The client
 renders anything over 99 as "99+", so the cap is invisible on screen.
 ``unread_count`` (the push body, "N new messages") stays exact.
+
+2026-10-01 (feat/meetings-instant, MC-1): meeting rooms (``type="meeting"``) are
+hidden, so ``list_unreads`` leaves them out — no sidebar badge for a room the
+sidebar never shows.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from datetime import UTC, datetime
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
 from pocketpaw_ee.cloud.models.read_state import ReadState as _ReadStateDoc
@@ -30,7 +35,12 @@ UNREAD_CAP = 100
 
 async def _list_member_groups(user_id: str, workspace_id: str) -> list[_GroupDoc]:
     return await _GroupDoc.find(
-        {"workspace": workspace_id, "archived": False, "members": user_id}
+        {
+            "workspace": workspace_id,
+            "archived": False,
+            "members": user_id,
+            "type": {"$ne": MEETING_GROUP_TYPE},
+        }
     ).to_list()
 
 

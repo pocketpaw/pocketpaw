@@ -31,6 +31,8 @@ Invariants a reader must not break:
 - ``platform_*`` helpers take no membership check and are listed in
   test_platform_boundary.py's ``_CROSS_TENANT_HELPERS``.
 - ``get_default_workspace_id`` skips soft-deleted workspaces.
+- ``get_delete_preview``'s ``room_count`` leaves out hidden ``type="meeting"``
+  rooms (2026-10-01, feat/meetings-instant): users never see them as rooms.
 """
 
 from __future__ import annotations
@@ -737,7 +739,10 @@ async def get_delete_preview(workspace_id: str) -> dict:
         raise NotFound("workspace", workspace_id)
 
     member_count = await _count_members(workspace_id)
-    room_count = await _GroupDoc.find({"workspace": workspace_id}).count()
+    # Meeting rooms are hidden behind their meetings; not counted as rooms.
+    room_count = await _GroupDoc.find(
+        {"workspace": workspace_id, "type": {"$ne": "meeting"}}
+    ).count()
     agent_count = await _AgentDoc.find({"workspace": workspace_id}).count()
     file_count = await _FileUploadDoc.find({"workspace": workspace_id, "deleted_at": None}).count()
     invite_count = await _InviteDoc.find(
