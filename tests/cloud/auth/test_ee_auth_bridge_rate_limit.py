@@ -1,22 +1,21 @@
-"""Cloud JWT users get a per-user api_limiter bucket, not an exemption.
+"""Signed-in cloud users skip the OSS per-IP api_limiter, and gain nothing else.
 
 The OSS ``AuthMiddleware`` caps every caller it does not itself authenticate
-with the general ``api_limiter`` (10 rps, burst 30). A fastapi-users cloud JWT
-matches none of its branches, so every logged-in cloud user behind one NAT/IP
-used to share one per-IP bucket and got 429s. The EE bridge sets
-``request.state.ee_user_authenticated`` + ``user_id`` for an active,
-non-revoked user, and on ``/api/v1/`` the limiter keys on ``user:<id>``
-instead of the IP. Anyone can mint a guest JWT, so there is no unlimited pass.
+with a per-IP bucket (10 rps, burst 30). A fastapi-users cloud JWT matches none
+of its branches, and one reload of the static web client fires 20+ /api/v1/
+calls, so any bucket that size 429s a signed-in user. The EE bridge sets
+``request.state.ee_user_authenticated`` for an active, non-revoked user
+(guests included) and the limiter skips on it. Guest minting is capped
+separately by ``guest_mint_limiter``.
 
 What must hold, with both middlewares stacked the way ``mount_cloud`` stacks
 them (bridge outside, OSS auth inside) and a remote client IP:
-  * a member flood is 429'd on its own bucket, while a second member and an
-    anonymous caller on the same IP are unaffected;
-  * a guest is limited the same way (a bucket, not a pass);
-  * anonymous, garbage-token, revoked, inactive and deleted-user floods stay on
-    the per-IP bucket;
-  * off the auth-optional prefix a member stays on the per-IP bucket;
-  * the flag grants no access: a member still 403s on a require_scope route.
+  * a member or guest is never 429'd by a burst from one IP, and its traffic
+    does not drain the per-IP bucket anonymous callers share;
+  * anonymous, garbage-token, revoked, inactive and deleted-user floods are
+    still 429'd on the per-IP bucket;
+  * the flag grants no access: a member still 403s on a require_scope route
+    and 401s outside the auth-optional prefix.
 """
 
 from __future__ import annotations
@@ -125,31 +124,30 @@ def _as(tokens: dict[str, str], who: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_member_flood_hits_its_own_bucket_not_the_ip_bucket(env) -> None:
+async def test_member_flood_is_not_limited_and_leaves_the_ip_bucket_alone(env) -> None:
     client, tokens = env
     res = await client.get("/api/v1/ping", headers={"Authorization": f"Bearer {tokens['member']}"})
     assert res.json() == {"flag": True, "full_access": False}
-    # The member is limited: an authenticated JWT is no pass.
-    assert 429 in await _flood(client, **_as(tokens, "member"))
-    # ...but only on its own bucket: another user and an anonymous caller on
-    # the SAME IP still get through (the NAT/proxy case).
-    assert (await client.get("/api/v1/ping", **_as(tokens, "other"))).status_code == 200
-    assert (await client.get("/api/v1/ping")).status_code == 200
+    codes = await _flood(client, **_as(tokens, "member"))
+    assert codes.count(429) == 0, codes
+    # The member drew nothing from the shared IP bucket: an anonymous caller
+    # on the SAME IP still has its full 30.
+    anon = await _flood(client)
+    assert anon.count(200) == 30, anon
 
 
 @pytest.mark.asyncio
-async def test_guest_jwt_gets_a_per_user_bucket_not_a_pass(env) -> None:
-    """Anyone can mint a guest via POST /auth/guest, so a guest must be limited."""
+async def test_guest_flood_is_not_limited(env) -> None:
+    """Guests are signed-in users too; minting them is what guest_mint_limiter caps."""
     client, tokens = env
     res = await client.get("/api/v1/ping", **_as(tokens, "guest"))
     assert res.json() == {"flag": True, "full_access": False}
-    assert 429 in await _flood(client, **_as(tokens, "guest"))
-    assert (await client.get("/api/v1/ping", **_as(tokens, "member"))).status_code == 200
-    assert (await client.get("/api/v1/ping")).status_code == 200
+    codes = await _flood(client, **_as(tokens, "guest"))
+    assert codes.count(429) == 0, codes
 
 
 @pytest.mark.asyncio
-async def test_anonymous_flood_does_not_drain_a_users_bucket(env) -> None:
+async def test_anonymous_flood_does_not_block_a_signed_in_user(env) -> None:
     client, tokens = env
     assert 429 in await _flood(client)
     assert (await client.get("/api/v1/ping", **_as(tokens, "member"))).status_code == 200
@@ -163,20 +161,6 @@ async def test_deleted_user_jwt_stays_on_the_ip_bucket(env) -> None:
     assert 429 in await _flood(client, **_as(tokens, "deleted"))
     # It drained the shared IP bucket, so plain anonymous traffic is 429 too.
     assert (await client.get("/api/v1/ping")).status_code == 429
-
-
-@pytest.mark.asyncio
-async def test_member_off_the_auth_optional_prefix_uses_the_ip_bucket(env) -> None:
-    """A path that will 401 anyway must not get a per-user bucket."""
-    client, tokens = env
-    codes = [
-        (await client.get("/internal/anything", **_as(tokens, "member"))).status_code
-        for _ in range(_FLOOD)
-    ]
-    assert 429 in codes, codes
-    # The flood drained the IP bucket, not the member's.
-    assert (await client.get("/api/v1/ping")).status_code == 429
-    assert (await client.get("/api/v1/ping", **_as(tokens, "member"))).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -224,3 +208,14 @@ async def test_flag_does_not_pass_the_oss_401_gate(env) -> None:
     client, tokens = env
     res = await client.get("/internal/anything", cookies={"paw_auth": tokens["member"]})
     assert res.status_code == 401, res.text
+
+
+@pytest.mark.asyncio
+async def test_member_double_reload_burst_is_not_throttled(env) -> None:
+    """One reload of the static web client fires 20+ /api/v1/ calls; two back
+    to back must not 429 (``{"detail": "Too many requests"}``)."""
+    client, tokens = env
+    codes = [
+        (await client.get("/api/v1/ping", **_as(tokens, "member"))).status_code for _ in range(60)
+    ]
+    assert codes.count(429) == 0, codes

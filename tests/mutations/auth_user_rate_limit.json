@@ -1,38 +1,31 @@
 [
   {
-    "label": "skip the limiter for flagged users (the old exemption)",
+    "label": "drop the exemption: flagged users go back on the per-IP bucket",
     "file": "src/pocketpaw/dashboard_auth.py",
-    "find": "    if not is_valid:\n        ee_user_id = getattr(request.state, \"user_id\", None)",
-    "replace": "    if not is_valid and not getattr(request.state, \"ee_user_authenticated\", False):\n        ee_user_id = getattr(request.state, \"user_id\", None)",
+    "find": "    if not is_valid and not getattr(request.state, \"ee_user_authenticated\", False):\n        rl_info = api_limiter.check(client_ip)",
+    "replace": "    if not is_valid:\n        rl_info = api_limiter.check(client_ip)",
     "tests": [
-      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_flood_hits_its_own_bucket_not_the_ip_bucket",
-      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_guest_jwt_gets_a_per_user_bucket_not_a_pass"
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_double_reload_burst_is_not_throttled",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_flood_is_not_limited_and_leaves_the_ip_bucket_alone",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_guest_flood_is_not_limited"
     ]
   },
   {
-    "label": "key flagged users on the IP, not the user",
+    "label": "exempt every caller, not only flagged ones",
     "file": "src/pocketpaw/dashboard_auth.py",
-    "find": "            rl_key = f\"user:{ee_user_id}\"",
-    "replace": "            rl_key = client_ip",
+    "find": "    if not is_valid and not getattr(request.state, \"ee_user_authenticated\", False):\n        rl_info = api_limiter.check(client_ip)",
+    "replace": "    if not is_valid and False:\n        rl_info = api_limiter.check(client_ip)",
     "tests": [
-      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_flood_hits_its_own_bucket_not_the_ip_bucket",
-      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_anonymous_flood_does_not_drain_a_users_bucket"
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_anonymous_flood_is_still_limited",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_garbage_jwt_flood_is_still_limited",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_deleted_user_jwt_stays_on_the_ip_bucket"
     ]
   },
   {
-    "label": "give the per-user bucket off the auth-optional prefix",
-    "file": "src/pocketpaw/dashboard_auth.py",
-    "find": "            is_auth_optional\n            and ee_user_id",
-    "replace": "            ee_user_id",
-    "tests": [
-      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_off_the_auth_optional_prefix_uses_the_ip_bucket"
-    ]
-  },
-  {
-    "label": "key on user_id without the active-user flag",
-    "file": "src/pocketpaw/dashboard_auth.py",
-    "find": "            and getattr(request.state, \"ee_user_authenticated\", False)\n        ):",
-    "replace": "        ):",
+    "label": "the bridge flags inactive users too",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "        if getattr(user, \"is_active\", False):\n            request.state.ee_user_authenticated = True\n",
+    "replace": "        if True:\n            request.state.ee_user_authenticated = True\n",
     "tests": [
       "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_inactive_user_flood_is_still_limited"
     ]

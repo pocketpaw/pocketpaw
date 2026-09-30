@@ -3,10 +3,11 @@
 Extracted from dashboard.py — contains:
 - ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled
   proxy); remote hosts are rejected before any settings are loaded
-- ``_auth_dispatch()`` — the auth cascade; callers not authenticated here go
-  through the general ``api_limiter``: keyed per user (``user:<id>``) when the
-  EE auth bridge resolved an active cloud user on an auth-optional path, per IP
-  otherwise
+- ``_auth_dispatch()`` — the auth cascade; the per-IP ``api_limiter`` applies
+  only to callers that are neither authenticated here nor resolved by the EE
+  auth bridge (``request.state.ee_user_authenticated``, a limiter-only flag).
+  Signed-in cloud users, guests included, are exempt; guest-JWT minting is
+  capped separately by ``guest_mint_limiter`` (3/hr per IP)
 - ``verify_token()`` — standalone token verification
 - ``auth_middleware()`` — HTTP middleware (registered by dashboard.py)
 - ``auth_router`` — APIRouter with session token, cookie login/logout, QR code,
@@ -660,33 +661,24 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # Runs now that the auth cascade above has set is_valid / full_access.
     # Authenticated callers are EXEMPT from this per-IP bucket:
     #   - full_access (master token / dashboard session / genuine localhost) is
-    #     already fully trusted — and is the bug we're fixing: the desktop
-    #     editor fans many /api/v1/* calls out of the single localhost IP, which
-    #     used to drain one shared 30-token bucket and 429.
+    #     already fully trusted; the desktop editor fans many /api/v1/* calls
+    #     out of the single localhost IP, which one 30-token bucket can't hold.
     #   - api-key callers already passed their own per-key limiter above
     #     (apikey:<id>); the per-IP bucket would only double-limit them.
     #   - oauth callers authenticated by token, not by IP.
-    # Everyone else is limited. Cloud users whose fastapi-users JWT the EE auth
-    # bridge resolved to an active, non-revoked user (``ee_user_authenticated``
-    # + ``user_id``) are limited PER USER, not per IP, so users behind one
-    # NAT/proxy don't share a bucket. That is only a bucket choice: the flag
-    # sets neither is_valid nor full_access, so it grants no route access.
-    # Guests are users too and get the same per-user bucket; an anonymous
-    # caller can mint one, so there is no unlimited pass for any JWT. The
-    # per-user key applies only on auth-optional paths — anywhere else the
-    # request will 401 below and stays on the per-IP bucket. The separate
-    # login / auth-session / qr buckets are untouched.
-    if not is_valid:
-        ee_user_id = getattr(request.state, "user_id", None)
-        if (
-            is_auth_optional
-            and ee_user_id
-            and getattr(request.state, "ee_user_authenticated", False)
-        ):
-            rl_key = f"user:{ee_user_id}"
-        else:
-            rl_key = client_ip
-        rl_info = api_limiter.check(rl_key)
+    #   - cloud users whose fastapi-users JWT the EE auth bridge resolved to an
+    #     active, non-revoked user (``ee_user_authenticated``), guests included.
+    #     A static SPA reload fans out 20+ /api/v1/* calls, which a 30-token
+    #     bucket cannot absorb. The flag only skips this bucket: it sets neither
+    #     is_valid nor full_access, so it grants no route access (their routes
+    #     authenticate the JWT themselves, and non-/api/v1/ paths still 401
+    #     below). Minting a guest JWT is capped separately by
+    #     ``guest_mint_limiter`` (3/hr per IP).
+    # Everyone else (anonymous, garbage/revoked/inactive-user tokens) stays on
+    # the per-IP api_limiter, so the brute-force / abuse cap is preserved. The
+    # separate login / auth-session / qr buckets are untouched.
+    if not is_valid and not getattr(request.state, "ee_user_authenticated", False):
+        rl_info = api_limiter.check(client_ip)
         if not rl_info.allowed:
             return JSONResponse(
                 status_code=429,

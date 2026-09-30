@@ -8,9 +8,8 @@ decodes the token, rejects revoked sessions, loads the User, and sets:
   * ``workspace_id`` / ``user_id`` — the session's tenant, for OSS routers that
     must not trust an ``X-Workspace-Id`` header.
   * ``ee_user_authenticated`` — active users only (guests included). A
-    limiter-only marker: on ``/api/v1/`` the OSS middleware keys its
-    ``api_limiter`` on ``user:<user_id>`` instead of the client IP. It grants
-    no access and is no exemption from the limiter.
+    limiter-only marker: the OSS middleware skips its per-IP ``api_limiter``
+    for it. It grants no access.
   * ``full_access`` — platform admins (``is_superuser``) ONLY. It is the OSS
     superuser bypass that skips every ``require_scope`` check, so it is never
     derived from a workspace role (the W4b escalation fix).
