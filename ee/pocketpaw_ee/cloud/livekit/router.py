@@ -32,8 +32,9 @@ that isn't ``group-call-<id>`` for a group the caller belongs to in their
 workspace (it used to check only ``group-call-*`` names). See
 ``tests/cloud/livekit/test_token_room_access.py``. It also takes the LiveKit
 identity from the authenticated user (the body's ``identity`` is ignored) and
-clamps ``ttl_seconds`` to at most an hour. Its refusals are audited through
-``service.require_call_group``. The public invite join
+clamps ``ttl_seconds`` to at most an hour. The room and recording routes use the same audited
+workspace + membership check as ``/token`` (``service.require_call_group``;
+``test_room_routes_guard.py``). The public invite join
 takes an optional ``email`` and the server enforces the invite's allow-list;
 validate returns ``requires_email`` instead of the list
 (``test_invite_email_allowlist.py``)."""
@@ -211,9 +212,8 @@ async def create_room(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(body.group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(body.group_id, str(user.id), workspace_id)
 
     result = await livekit_service.create_room(body.group_id, workspace_id, str(user.id))
 
@@ -316,9 +316,8 @@ async def get_room_info(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     info = await livekit_service.get_room_info(group_id)
     if info is None:
@@ -378,9 +377,8 @@ async def end_call(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     result = await livekit_service.end_room(group_id, workspace_id)
 
@@ -418,9 +416,8 @@ async def start_recording(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     # Only workspace owner can record
     await _require_workspace_owner(user=user, workspace_id=workspace_id)
@@ -445,9 +442,8 @@ async def stop_recording(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     # Only workspace owner can stop recording
     await _require_workspace_owner(user=user, workspace_id=workspace_id)
@@ -508,9 +504,8 @@ async def get_recording_status(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     info = await livekit_service.get_recording_info(group_id)
 
