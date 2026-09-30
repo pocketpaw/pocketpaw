@@ -38,8 +38,10 @@ Lifecycle invariants:
 
 Options: permissions are always bypassed (headless), ``cli_path`` comes from
 ``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
-image-returning tools, and the in-process MCP servers (pocketpaw, planner,
-atlas, ...) are gated by the ToolPolicy and the per-surface allow/deny sets.
+image-returning tools, the subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
+(``claude_sdk_max_mcp_output_tokens`` unless already set in the environment), and
+the in-process MCP servers (pocketpaw, planner, atlas, ...) are gated by the
+ToolPolicy and the per-surface allow/deny sets.
 Images ride every persistent send; the stateless ``query()`` cannot carry them.
 """
 
@@ -193,6 +195,10 @@ class _BuiltOptions(NamedTuple):
 # preview / reference image tools) can exceed that in one JSON message, which
 # kills the turn. 32 MiB leaves headroom without being unbounded.
 _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
+
+# Fallback for ``claude_sdk_max_mcp_output_tokens`` when settings carry no usable
+# int (they are sometimes mocks). Mirrors the config default.
+_DEFAULT_MAX_MCP_OUTPUT_TOKENS = 200_000
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
@@ -2728,6 +2734,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if sdk_env:
                 merged_env.update(sdk_env)
             sdk_env = merged_env
+        # Claude Code truncates any MCP tool result above MAX_MCP_OUTPUT_TOKENS
+        # (its default: 25k) or diverts it to a file surfaces like /sites cannot
+        # read, so a large ``read_site_source`` came back partial and the agent
+        # re-read in a loop. Always raise it, unless the parent env (which the
+        # SDK layers ``env`` over) or the per-run extras already set one.
+        sdk_env = sdk_env or {}
+        if "MAX_MCP_OUTPUT_TOKENS" not in os.environ:
+            cap = getattr(self.settings, "claude_sdk_max_mcp_output_tokens", None)
+            if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
+                cap = _DEFAULT_MAX_MCP_OUTPUT_TOKENS
+            sdk_env.setdefault("MAX_MCP_OUTPUT_TOKENS", str(cap))
         if sdk_env:
             options_kwargs["env"] = sdk_env
         if is_non_anthropic:

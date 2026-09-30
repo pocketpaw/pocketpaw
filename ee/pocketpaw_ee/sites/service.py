@@ -318,8 +318,8 @@
 # on a server the /sites allowlist excludes, and the profile drops the file/shell
 # built-ins. The reachable fallback was a whole-file rewrite from memory, which is how
 # a site loses its capture-form plumbing with no error raised. Two modes — a manifest
-# (paths + byte sizes, no contents, ``_paw/`` filtered) and one file verbatim — so the
-# read cannot itself flood the context the edit needs. Engine-agnostic on purpose:
+# (paths + byte sizes, no contents, ``_paw/`` filtered) and a batch of named files,
+# each verbatim, from one pocket fetch. Engine-agnostic on purpose:
 # only a pocket with no source map at all (ripple) is rejected.
 #
 # Updated 2026-08-12 (sites Settings consolidation): added ``get_site_client`` /
@@ -9348,6 +9348,7 @@ async def read_site_source(
     user_id: str,
     pocket_id: str,
     file_path: str | None = None,
+    file_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read an existing Paw Site's source map — the READ half of the edit lane.
 
@@ -9364,12 +9365,16 @@ async def read_site_source(
     rewrite, which is precisely the shape that silently drops a ``<form>``'s
     ``action`` and its hidden ``paw_*`` inputs and sends future leads nowhere.
 
-    TWO MODES, because a react site's whole source map would flood the context
-    window that has to hold it:
+    TWO MODES:
 
-      * ``file_path=None`` → the MANIFEST: ``{files: [{path, bytes}, ...],
-        file_count, bindings}``. Paths and sizes only, NO contents.
-      * ``file_path="index.html"`` → that ONE file's contents, byte-for-byte.
+      * no ``file_path`` / ``file_paths`` → the MANIFEST: ``{files: [{path,
+        bytes}, ...], file_count, bindings, keeps_client_bundle}``. Paths and
+        sizes only, NO contents.
+      * ``file_path`` and/or ``file_paths`` → every requested file, complete and
+        byte-for-byte: ``{files: [{path, bytes, contents}, ...]}``, in request
+        order (``file_path`` first), deduplicated by resolved path. All of them
+        come from ONE pocket fetch, so an edit touching several files costs one
+        read, not one per file.
 
     Engine-agnostic on purpose: unlike the edit tools (each pinned to its own
     engine) a read is safe everywhere, and the agent frequently does not know the
@@ -9382,8 +9387,9 @@ async def read_site_source(
     generated manifest is occasionally useful and never destructive.
 
     Raises ``ValidationError("pocket.no_source_map")`` for a ripple pocket and
-    ``NotFound`` for an unknown ``file_path``. Tenancy is the pockets service's
-    public ``get``, which raises NotFound / Forbidden for a missing or
+    ``NotFound`` when ANY requested path is unknown (the whole read fails; the
+    message names the missing paths and the files that do exist). Tenancy is the
+    pockets service's public ``get``, which raises NotFound / Forbidden for a missing or
     cross-tenant pocket, so this adds no isolation rules of its own.
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
@@ -9413,7 +9419,8 @@ async def read_site_source(
     files = {k: v for k, v in source.items() if k not in _SOURCE_BINDING_KEYS}
     bindings = [k for k in _SOURCE_BINDING_KEYS if k in source]
 
-    if file_path is None:
+    requested = ([file_path] if file_path is not None else []) + list(file_paths or [])
+    if not requested:
         listed = sorted(k for k in files if not is_reserved_html_path(k))
         return {
             "pocket_id": pocket_id,
@@ -9428,27 +9435,31 @@ async def read_site_source(
             "bindings": bindings,
         }
 
-    # Single-file read. Try the path as spelled first, then normalized, so
+    # File read. Try each path as spelled first, then normalized, so
     # './index.html' and 'img\\logo.svg' resolve to the file the agent meant —
     # the same courtesy the html edit path extends on write.
-    key = file_path if file_path in files else normalize_html_path(file_path)
-    if key not in files:
+    keys: list[str] = []
+    missing: list[str] = []
+    for path in requested:
+        key = path if path in files else normalize_html_path(path)
+        if key not in files:
+            missing.append(path)
+        elif key not in keys:
+            keys.append(key)
+    if missing:
         # Name what DOES exist: a typo must not read as "the file is empty", and a
         # blind retry is just another guess.
         available = ", ".join(sorted(k for k in files if not is_reserved_html_path(k))[:40])
         raise NotFound(
             "site_file",
-            f"{file_path} (this site's files are: {available})",
+            f"{', '.join(missing)} (this site's files are: {available})",
         )
 
-    contents = str(files[key])
-    return {
-        "pocket_id": pocket_id,
-        "engine": engine,
-        "file_path": key,
-        "bytes": len(contents.encode("utf-8")),
-        "contents": contents,
-    }
+    read: list[dict[str, Any]] = []
+    for key in keys:
+        contents = str(files[key])
+        read.append({"path": key, "bytes": len(contents.encode("utf-8")), "contents": contents})
+    return {"pocket_id": pocket_id, "engine": engine, "files": read}
 
 
 async def get_html_armed_source(
