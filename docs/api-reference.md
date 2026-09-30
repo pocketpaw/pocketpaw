@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-30 (feat/open-surface-tool) — added "Agent — Open an App Surface
+  (`open_surface`)": the in-process MCP tool, the `open_surface` chat stream event
+  it produces, and the checks between the two.
 Updated: 2026-09-28 (feat/concierge-knowledge-sources) — Paw Bar admin table: added
   the knowledge-source routes under /paw-bar/admin/site/{site_id}/knowledge/sources.
 Updated: 2026-09-28 (feat/concierge-pinned-faqs) — Paw Bar admin table: added
@@ -1844,6 +1847,48 @@ whose mime is not in `INLINE_MIMES` (HTML, SVG, JS, …) is served with
 does not render inline on the storage origin. Inline-safe types (images, pdf,
 plain text) still embed as before. The whole tool is gated on
 `is_multi_tenant_cloud()`.
+
+## Agent — Open an App Surface (`open_surface`)
+
+`open_surface` is an in-process MCP tool that lets the chat agent open an app
+surface on the user's screen: the file picker, the clip editor, a chat room,
+Pockets or Knowledge. It has no server-side effect. The tool validates its input
+and returns an envelope; the run loop turns that into an `open_surface` event on
+the chat stream, and the browser does the opening. Registered via the
+`pocketpaw.mcp_servers` entry point (`surfaces` → `pocketpaw_surfaces` →
+`mcp__pocketpaw_surfaces__open_surface`). Source:
+`ee/pocketpaw_ee/agent/mcp_servers/surfaces.py`.
+
+**Input:** `{ "route": "...", "params"?: { "<key>": "<string>" }, "reason"?: "..." }`
+
+- `route` is one of `/files`, `/studio/editor`, `/chat`, `/pockets`, `/knowledge`.
+  Anything else is rejected.
+- `params` is a flat string-to-string map: at most 10 keys, keys up to 64 chars,
+  values up to 500. A JSON-string `params` is decoded first.
+- For `/studio/editor`, `params` is the clip handoff (`src`, `name`, `mime`,
+  `kind`), and `src` must be the file's own backend path,
+  `/api/v1/uploads/<file_id>` or `/api/v1/media/<name>` (one segment). External
+  and presigned URLs are rejected.
+- `reason` is an optional line (max 200 chars) shown to the user.
+
+**Stream event:** `event: open_surface`, `data: {route, params?, reason?}`.
+`params` and `reason` are omitted when empty. It is emitted in addition to the
+normal `tool_result` frame.
+
+**Checks between the tool and the event.** `run_core` promotes the envelope
+only when the tool result's name is exactly
+`mcp__pocketpaw_surfaces__open_surface` or `open_surface`; a result with an
+unresolved name is dropped. It then re-runs the tool's own validation on the
+payload. The reason is prompt injection: a web page or file the agent reads can
+contain a well-formed envelope, and promoting on text shape alone would let that
+content navigate the user's browser.
+
+**Where the agent has it.** The server is ambient but not always-allowed, so the
+tool is reachable on surfaces with no MCP allow-list (the generic chat surface,
+which is what the /no-ui-lab talks on) and on `/studio/editor`, whose allow-list
+names it so the agent can send the user to `/files` for another clip. Every
+other allow-listed surface filters it out, including the public Paw Bar
+concierge.
 
 ## Sites — Native Editing
 
