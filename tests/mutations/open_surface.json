@@ -40,5 +40,19 @@
     "find": "not _EDITOR_SRC_RE.fullmatch(src)",
     "replace": "False",
     "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: dropped from the /studio/editor allow-list",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "timeline_allow=frozenset(TIMELINE_TOOL_IDS) | frozenset(SURFACES_TOOL_IDS),",
+    "replace": "timeline_allow=frozenset(TIMELINE_TOOL_IDS),",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: leaks onto the /studio allow-list",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "studio_allow=frozenset(MEDIA_TOOL_IDS),",
+    "replace": "studio_allow=frozenset(MEDIA_TOOL_IDS) | frozenset(SURFACES_TOOL_IDS),",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
   }
 ]
