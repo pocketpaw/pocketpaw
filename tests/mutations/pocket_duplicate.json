@@ -1,0 +1,60 @@
+[
+  {
+    "label": "duplicate: drop source from the snapshot",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        \"source\": source.source,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_faithful_per_track",
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_deep"
+    ]
+  },
+  {
+    "label": "duplicate: read the source pocket without the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "_PocketDoc.find_one(_PocketDoc.id == oid, _PocketDoc.workspace == workspace_id)",
+    "replace": "_PocketDoc.find_one(_PocketDoc.id == oid)",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_cross_workspace_is_not_found",
+      "tests/cloud/pockets/test_duplicate_site.py::test_route_refusals"
+    ]
+  },
+  {
+    "label": "duplicate: stop inheriting source_gated (fall back to the create-time stamp)",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        source_gated=source.source_gated,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_faithful_per_track"
+    ]
+  },
+  {
+    "label": "duplicate: skip the read-access check",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    _check_read_access(source, user_id)\n    if source.type != \"site\":",
+    "replace": "    if source.type != \"site\":",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_unreadable_private_pocket_is_forbidden"
+    ]
+  },
+  {
+    "label": "duplicate: allow non-site pockets",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if source.type != \"site\":\n        raise ValidationError(",
+    "replace": "    if False:\n        raise ValidationError(",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_non_site_pocket_is_rejected",
+      "tests/cloud/pockets/test_duplicate_site.py::test_route_refusals"
+    ]
+  },
+  {
+    "label": "copy_site_snapshot: alias the snapshot instead of deep-copying it",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "snap = copy.deepcopy({key: snapshot.get(key) for key in SITE_SNAPSHOT_FIELDS})",
+    "replace": "snap = {key: snapshot.get(key) for key in SITE_SNAPSHOT_FIELDS}",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_deep",
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_site_snapshot_does_not_alias_its_input"
+    ]
+  }
+]

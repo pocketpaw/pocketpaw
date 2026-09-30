@@ -21,7 +21,8 @@ write pockets THROUGH this module and none of them imports the Pocket model. A
 new caller that needs a field adds a function here rather than a second reader.
 
 Public API: ``create`` / ``get`` / ``get_for_wire`` / ``list_pockets`` /
-``update`` / ``delete``; ``ensure_home_pocket``; the share-link, collaborator,
+``update`` / ``delete``; ``ensure_home_pocket``; ``duplicate_pocket`` and the
+``copy_site_snapshot`` it writes through (reused by template use); the share-link, collaborator,
 team and agent mutators; the per-pocket backend + write/tool allowlist setters;
 ``merge_spec``; the ``set_{svelte,react,html}_source_file`` edit lane and its
 ``set_site_dependency_manifest`` sibling (added 2026-09-24, PP-1: the only writer of
@@ -107,6 +108,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
+    DuplicatePocketRequest,
     MergeSpecRequest,
     UpdatePocketRequest,
     UpdateWidgetRequest,
@@ -2163,6 +2165,13 @@ async def _fetch_readable(pocket_id: str, user_id: str) -> _PocketDoc:
     is whether ``source`` survives serialization.
     """
     doc = await _fetch_pocket(pocket_id)
+    _check_read_access(doc, user_id)
+    return doc
+
+
+def _check_read_access(doc: _PocketDoc, user_id: str) -> None:
+    """The read rule behind ``_fetch_readable`` and ``duplicate_pocket``: owner,
+    team member, ``shared_with``, or any non-private visibility. Raises Forbidden."""
     pocket = _pocket_to_domain(doc)
     if (
         pocket.owner != user_id
@@ -2171,7 +2180,6 @@ async def _fetch_readable(pocket_id: str, user_id: str) -> _PocketDoc:
         and pocket.visibility == "private"
     ):
         raise Forbidden("pocket.access_denied", "You do not have access to this pocket")
-    return doc
 
 
 async def can_read(pocket_id: str, user_id: str) -> bool:
@@ -2230,6 +2238,98 @@ async def get_for_wire(pocket_id: str, user_id: str) -> dict:
     """
     doc = await _fetch_readable(pocket_id, user_id)
     return await _resolved_wire_dict(doc, user_id)
+
+
+#: The authored fields that make up a site. A duplicate, and later a template
+#: "use", copies exactly these; everything else (sharing, team, agents, tools,
+#: connectors, the Site deployment row) belongs to the original.
+SITE_SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle")
+
+
+async def copy_site_snapshot(
+    snapshot: dict,
+    *,
+    workspace_id: str,
+    owner: str,
+    name: str,
+    template_id: str | None = None,
+    template_version: int | None = None,
+    source_gated: bool | None = None,
+) -> dict:
+    """Create a new site pocket owned by ``owner`` from a ``SITE_SNAPSHOT_FIELDS`` dict.
+
+    The snapshot is deep-copied, so the new pocket shares no mutable state with
+    whatever it came from. It is written as-is: no ripple normalization or catalog
+    gate, because it is a copy of content that was already accepted once. No Site
+    doc is created; publishing the copy is a separate step.
+
+    ``source_gated`` defaults to the create-time stamp. A duplicate passes the
+    source pocket's value so copying never moves a pocket across the SF-2 cohort.
+    Raises ``PocketLimitError`` at the plan cap, like ``create``.
+    """
+    exceeded, _count, limit = await _pocket_cap_exceeded(workspace_id)
+    if exceeded:
+        raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded
+
+    snap = copy.deepcopy({key: snapshot.get(key) for key in SITE_SNAPSHOT_FIELDS})
+    doc = _PocketDoc(
+        workspace=workspace_id,
+        name=name,
+        type="site",
+        owner=owner,
+        engine=snap["engine"] or "ripple",
+        pattern=snap["pattern"],
+        rippleSpec=snap["rippleSpec"],
+        source=snap["source"],
+        keeps_client_bundle=snap["keeps_client_bundle"],
+        template_id=template_id,
+        template_version=template_version,
+        # SF-2 — inherit the cohort when copying, stamp it when minting.
+        source_gated=_source_gated_at_create() if source_gated is None else source_gated,
+        # Same as ``create``: a new pocket starts with no connectors allowed.
+        allowed_connectors=[],
+    )
+    await doc.insert()
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, owner)
+
+
+async def duplicate_pocket(
+    workspace_id: str, user_id: str, pocket_id: str, body: DuplicatePocketRequest
+) -> dict:
+    """Copy a site pocket the caller can read into a new site pocket they own.
+
+    Copies only ``SITE_SNAPSHOT_FIELDS`` plus ``source_gated``; the original is
+    untouched. A pocket outside ``workspace_id`` is NotFound (never Forbidden, so
+    this is not an existence oracle across tenants); a private pocket the caller
+    cannot read is Forbidden, as on ``get``; a non-site pocket is a ValidationError.
+    """
+    body = DuplicatePocketRequest.model_validate(body)
+    try:
+        oid = PydanticObjectId(pocket_id)
+    except (InvalidId, TypeError, ValueError):
+        raise NotFound("pocket", pocket_id) from None
+    source = await _PocketDoc.find_one(_PocketDoc.id == oid, _PocketDoc.workspace == workspace_id)
+    if source is None:
+        raise NotFound("pocket", pocket_id)
+    _check_read_access(source, user_id)
+    if source.type != "site":
+        raise ValidationError("pocket.not_a_site", "Only site pockets can be duplicated")
+
+    snapshot = {
+        "engine": source.engine,
+        "pattern": source.pattern,
+        "rippleSpec": source.rippleSpec,
+        "source": source.source,
+        "keeps_client_bundle": source.keeps_client_bundle,
+    }
+    return await copy_site_snapshot(
+        snapshot,
+        workspace_id=workspace_id,
+        owner=user_id,
+        name=body.name or f"{source.name} (copy)",
+        source_gated=source.source_gated,
+    )
 
 
 async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:

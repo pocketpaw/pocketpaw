@@ -172,6 +172,13 @@ class ReorderWidgetsRequest(BaseModel):
     widget_ids: list[str]  # Ordered list of widget IDs
 
 
+class DuplicatePocketRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/duplicate``. ``name`` defaults to
+    ``"<source name> (copy)"`` when omitted."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class ShareLinkRequest(BaseModel):
     access: str = Field(default="view", pattern="^(view|comment|edit)$")
 
