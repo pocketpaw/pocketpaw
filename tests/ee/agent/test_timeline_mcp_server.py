@@ -1,4 +1,5 @@
-# test_timeline_mcp_server.py — the edit_timeline / export_timeline handlers.
+# test_timeline_mcp_server.py — the edit_timeline / export_timeline /
+# add_motion_graphic handlers, and the motion-graphic composition validator.
 #
 # Created: 2026-09-08 (feat/agentic-studio-editor).
 #
@@ -15,11 +16,14 @@ from typing import Any
 
 import pytest
 from pocketpaw_ee.agent.mcp_servers.timeline import (
+    ADD_MOTION_GRAPHIC_TOOL_ID,
     EDIT_TIMELINE_TOOL_ID,
     EXPORT_TIMELINE_TOOL_ID,
     TIMELINE_TOOL_IDS,
+    _add_motion_graphic_handler,
     _edit_timeline_handler,
     _export_timeline_handler,
+    validate_motion_graphic,
 )
 from pocketpaw_ee.cloud.chat.agent_service import bind_timeline, unbind_timeline
 
@@ -62,7 +66,12 @@ def test_tool_ids_are_namespaced_for_the_allowlist() -> None:
     """Claude Code matches allowlist entries on this exact form."""
     assert EDIT_TIMELINE_TOOL_ID == "mcp__pocketpaw_timeline__edit_timeline"
     assert EXPORT_TIMELINE_TOOL_ID == "mcp__pocketpaw_timeline__export_timeline"
-    assert set(TIMELINE_TOOL_IDS) == {EDIT_TIMELINE_TOOL_ID, EXPORT_TIMELINE_TOOL_ID}
+    assert ADD_MOTION_GRAPHIC_TOOL_ID == "mcp__pocketpaw_timeline__add_motion_graphic"
+    assert set(TIMELINE_TOOL_IDS) == {
+        EDIT_TIMELINE_TOOL_ID,
+        EXPORT_TIMELINE_TOOL_ID,
+        ADD_MOTION_GRAPHIC_TOOL_ID,
+    }
 
 
 async def test_edit_returns_the_validated_batch(open_timeline) -> None:
@@ -196,3 +205,56 @@ async def test_an_error_result_carries_no_payload(open_timeline) -> None:
 
     result = await _edit_timeline_handler({"ops": [{"op": "remove_clip", "clipId": "ghost"}]})
     assert _timeline_payload(text(result), "timeline_edit") is None
+
+
+# ── Motion graphics ────────────────────────────────────────────────────────
+
+COMPOSITION = """<!doctype html><html><head>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<style>#root { width: 1920px; height: 1080px; } h1 { color: "#fff"; }</style>
+</head><body>
+<div id="root" data-composition-id="intro" data-start="0" data-duration="4.5"
+     data-width="1920" data-height="1080"><h1 class="clip">Launch {day}</h1></div>
+<script>
+  const tl = gsap.timeline({ paused: true });
+  tl.from("h1", { opacity: 0, y: 40, duration: 1 });
+  window.__timelines = window.__timelines || {};
+  window.__timelines["intro"] = tl;
+</script></body></html>"""
+
+
+def test_a_valid_composition_parses_its_shape() -> None:
+    shape, error = validate_motion_graphic(COMPOSITION, None)
+    assert error is None
+    assert shape == {"durationS": 4.5, "width": 1920, "height": 1080, "fps": 30}
+
+
+def test_a_root_without_a_duration_is_refused() -> None:
+    shape, error = validate_motion_graphic(COMPOSITION.replace('data-duration="4.5"', ""), 30)
+    assert shape is None
+    assert "data-duration" in error
+
+
+def test_a_relative_asset_url_is_refused() -> None:
+    html = COMPOSITION.replace("https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/", "./")
+    shape, error = validate_motion_graphic(html, 30)
+    assert shape is None
+    assert "gsap.min.js" in error and "absolute" in error
+
+
+def test_audio_is_refused_with_the_timeline_alternative() -> None:
+    html = COMPOSITION.replace("</body>", '<audio src="https://x.test/a.mp3"></audio></body>')
+    shape, error = validate_motion_graphic(html, 30)
+    assert shape is None
+    assert "place_audio" in error
+
+
+async def test_motion_graphic_output_survives_the_run_core_extractor(open_timeline) -> None:
+    """The html carries braces, quotes and <script>; the frame must carry it intact."""
+    from pocketpaw_ee.cloud.chat.runs.run_core import _timeline_payload
+
+    result = await _add_motion_graphic_handler({"html": COMPOSITION, "fps": "60"})
+    payload = _timeline_payload(text(result), "motion_graphic")
+    assert payload is not None, "run_core no longer recognises add_motion_graphic's envelope"
+    assert payload["html"] == COMPOSITION
+    assert (payload["fps"], payload["width"], payload["name"]) == (60, 1920, "Motion graphic")

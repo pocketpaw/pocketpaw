@@ -1976,6 +1976,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /hyperframes-core in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:hyperframes-core",
+      "keywords": [
+        "hyperframes-core"
+      ],
+      "kind": "skill",
+      "name": "hyperframes-core",
+      "narrative": "The HyperFrames composition contract — build one renderable project. Use for composition structure, the `data-*` timing attributes, `class=\"clip\"`, tracks, sub-compositions, variables, framework-owned media playback, deterministic-render rules, and validation. Read before writing composition HTML.",
+      "requires": [],
+      "summary": "The HyperFrames composition contract — build one renderable project.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-dynamic-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-dynamic-site",
       "keywords": [
@@ -2291,7 +2305,7 @@
       ],
       "kind": "skill",
       "name": "studio-editor",
-      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". You do NOT generate media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
+      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". Also invoke for \"make a title card\", \"add an intro animation\", \"make a motion graphic\", \"animate this stat\", \"add a lower third\" — authored as HyperFrames HTML. You do NOT generate footage or AI media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
       "requires": [],
       "summary": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes.",
       "surface": ""

@@ -290,7 +290,9 @@ Rules that matter:
   media from their /studio gallery by typing `@` in the composer, and it is
   imported onto the rail before they even send. So when the rail lacks what they
   described, tell them to attach it with `@` (or drag the file onto the rail) —
-  do not tell them media cannot be brought in here.
+  do not tell them media cannot be brought in here. The one exception is a
+  motion graphic (title card, kinetic type, animated stat, lower third), which
+  you author yourself with `mcp__pocketpaw_timeline__add_motion_graphic`.
 - WHAT THEY JUST ATTACHED IS WHAT THEY MEAN. When ATTACHED THIS TURN appears
   above and the user says "add these", "put this on the timeline" or "use it",
   those assets are the ones — place them in the ORDER LISTED, and place all of
@@ -327,6 +329,11 @@ Honesty (this surface has burned people before):
 
 To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
 Never batch an export with edits — it would render a half-built timeline.
+
+For a motion graphic, load the `hyperframes-core` skill and call
+`mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
+composition. It renders in the browser after the call returns: say it is
+rendering, never that it is done.
 </studio-editor-procedure>"""
 
 _NO_TIMELINE = """\
@@ -351,7 +358,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "lay things out across lanes — opening new ones when the arrangement "
         "needs a row that is not there. This is NOT a dashboard: do not build widgets, "
         "charts, a pocket or a ui-spec. It is also NOT the generation surface: "
-        "you cannot make new footage here. Talk about 'clips', 'tracks', "
+        "you cannot make new footage here, except motion graphics you author as "
+        "HyperFrames HTML. Talk about 'clips', 'tracks', "
         "'captions' and 'the timeline'.\n"
         "</studio-editor-orientation>"
     )

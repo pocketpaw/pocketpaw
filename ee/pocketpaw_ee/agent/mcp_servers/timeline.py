@@ -5,10 +5,13 @@
 # sites.py shape: SDK import guard, SERVER_NAME + *_TOOL_ID allowlist constants,
 # ContextVar-sourced state, _error_response / _success_response helpers.
 #
-# TWO tools, not thirty. The 17-tool pocket edit surface was collapsed to one
+# THREE tools, not thirty. The 17-tool pocket edit surface was collapsed to one
 # skill + one merge endpoint for a reason, and a tool per store method would put
 # ten round-trips between "arrange these three clips" and a result. `ops` takes
-# a BATCH instead, applied atomically as one undo step.
+# a BATCH instead, applied atomically as one undo step. `add_motion_graphic` is
+# the one way to CREATE footage here: the agent writes a HyperFrames composition
+# (one self-contained HTML file), this validates it, and the browser renders it
+# to an MP4 and places it. Same one-call dispatch shape as the other two.
 #
 # There is deliberately no read tool. The document lives in the browser, so the
 # server has nothing to read; the /studio/editor preamble carries the timeline
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -35,8 +39,21 @@ SERVER_NAME = "pocketpaw_timeline"
 
 EDIT_TIMELINE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_timeline"
 EXPORT_TIMELINE_TOOL_ID = f"mcp__{SERVER_NAME}__export_timeline"
+ADD_MOTION_GRAPHIC_TOOL_ID = f"mcp__{SERVER_NAME}__add_motion_graphic"
 
-TIMELINE_TOOL_IDS = (EDIT_TIMELINE_TOOL_ID, EXPORT_TIMELINE_TOOL_ID)
+TIMELINE_TOOL_IDS = (EDIT_TIMELINE_TOOL_ID, EXPORT_TIMELINE_TOOL_ID, ADD_MOTION_GRAPHIC_TOOL_ID)
+
+MOTION_GRAPHIC_MAX_CHARS = 200_000
+MOTION_GRAPHIC_MAX_DURATION_S = 120
+MOTION_GRAPHIC_FPS = (24, 25, 30, 60)
+
+_ROOT_TAG_RE = re.compile(r"<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>", re.IGNORECASE)
+_ASSET_TAG_RE = re.compile(r"<(?:script|link|img|source|video|audio)\b[^>]*>", re.IGNORECASE)
+_URL_ATTR_RE = re.compile(
+    r"\b(?:src|href)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.IGNORECASE
+)
+_TIMELINES_RE = re.compile(r"window\.__timelines\s*\[")
+_ABSOLUTE_PREFIXES = ("http://", "https://", "data:", "#", "blob:")
 
 # Mirrors PLATFORM_PRESETS in editor/platform-presets.ts. Closed for the same
 # reason the op vocabulary is — an unknown preset would reach the client and
@@ -63,6 +80,99 @@ def _success_response(body: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": json.dumps(body, separators=(",", ":"), default=str)}]
     }
+
+
+def _root_attr(tag: str, name: str) -> float | None:
+    match = re.search(rf"\b{name}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", tag, re.IGNORECASE)
+    if match is None:
+        return None
+    raw = next(g for g in match.groups() if g is not None).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def validate_motion_graphic(html: Any, fps: Any) -> tuple[dict | None, str | None]:
+    """Check a HyperFrames composition renders in the browser; return its shape.
+
+    Returns ``({durationS, width, height, fps}, None)`` or ``(None, error)``,
+    where the error says what to change.
+    """
+    if not isinstance(html, str) or not html.strip():
+        return None, "`html` is empty. Pass the whole composition as one HTML document."
+    if len(html) > MOTION_GRAPHIC_MAX_CHARS:
+        return None, (
+            f"`html` is {len(html):,} characters; the limit is {MOTION_GRAPHIC_MAX_CHARS:,}. "
+            "Inline less: drop embedded images or fonts, or load them from absolute URLs."
+        )
+
+    try:
+        fps_value = 30 if fps is None or fps == "" else int(float(str(fps).strip()))
+    except (ValueError, OverflowError):
+        fps_value = -1
+    if fps_value not in MOTION_GRAPHIC_FPS:
+        return None, (
+            f"fps {fps!r} is not supported. Use one of "
+            f"{', '.join(str(f) for f in MOTION_GRAPHIC_FPS)}, or omit it for 30."
+        )
+
+    root = _ROOT_TAG_RE.search(html)
+    if root is None:
+        return None, (
+            "No element carries `data-composition-id`. Put it on the root element, "
+            'e.g. <div id="root" data-composition-id="main" data-start="0" '
+            'data-duration="5" data-width="1920" data-height="1080">.'
+        )
+    tag = root.group(0)
+    dims: dict[str, float] = {}
+    for attr in ("data-duration", "data-width", "data-height"):
+        value = _root_attr(tag, attr)
+        if value is None:
+            return None, (
+                f"The root element (the first one with `data-composition-id`) needs a "
+                f"positive numeric `{attr}`. Duration is in seconds; width and height "
+                "are pixels, e.g. 1920 and 1080."
+            )
+        dims[attr] = value
+    duration = dims["data-duration"]
+    if duration > MOTION_GRAPHIC_MAX_DURATION_S:
+        return None, (
+            f"data-duration is {duration:g}s; a motion graphic can run at most "
+            f"{MOTION_GRAPHIC_MAX_DURATION_S}s. Shorten it or split it into several."
+        )
+
+    if not _TIMELINES_RE.search(html):
+        return None, (
+            "No `window.__timelines[...]` assignment found. Build a paused GSAP timeline "
+            "and register it: window.__timelines = window.__timelines || {}; "
+            'window.__timelines["<composition-id>"] = tl;'
+        )
+
+    if re.search(r"<audio\b", html, re.IGNORECASE):
+        return None, (
+            "<audio> is not supported in motion graphics. Leave audio out of the "
+            "composition and lay sound in with place_audio via edit_timeline instead."
+        )
+
+    for asset_tag in _ASSET_TAG_RE.finditer(html):
+        for attr in _URL_ATTR_RE.finditer(asset_tag.group(0)):
+            url = next(g for g in attr.groups() if g is not None).strip()
+            if not url.lower().startswith(_ABSOLUTE_PREFIXES):
+                return None, (
+                    f"Relative URL {url!r} in {asset_tag.group(0)[:80]!r}. The composition "
+                    "renders with no base URL, so every asset must be inline or absolute: "
+                    "use an https:// URL (e.g. a pinned CDN) or a data: URL."
+                )
+
+    width, height = dims["data-width"], dims["data-height"]
+    return {
+        "durationS": duration,
+        "width": int(width) if width.is_integer() else width,
+        "height": int(height) if height.is_integer() else height,
+        "fps": fps_value,
+    }, None
 
 
 def _current_summary():
@@ -159,6 +269,40 @@ async def _export_timeline_handler(args: dict) -> dict:
     )
 
 
+async def _add_motion_graphic_handler(args: dict) -> dict:
+    """Validate a HyperFrames composition and hand it to the editor tab to render."""
+    if not _current_summary().has_timeline:
+        return _error_response(
+            "No timeline is open, so there is nowhere to put a motion graphic. Ask the "
+            "user to open a project in the editor."
+        )
+
+    html = args.get("html")
+    shape, error = validate_motion_graphic(html, args.get("fps"))
+    if error is not None:
+        return _error_response(error)
+    assert shape is not None
+
+    name = str(args.get("name") or "").strip() or "Motion graphic"
+    return _success_response(
+        {
+            "ok": True,
+            "motion_graphic": {
+                "html": html,
+                "name": name,
+                "fps": shape["fps"],
+                "durationS": shape["durationS"],
+                "width": shape["width"],
+                "height": shape["height"],
+            },
+            "note": (
+                "Rendering in the user's browser, then it lands on the timeline. Do "
+                "not claim it is finished; say it is rendering."
+            ),
+        }
+    )
+
+
 EDIT_TIMELINE_DESCRIPTION = """\
 Change the timeline the user has open in the /studio/editor canvas.
 
@@ -175,6 +319,26 @@ Render the open /studio/editor timeline to a video file.
 
 Runs in the user's browser and can take minutes. Never call this in the same
 turn as an edit — it would render a half-built timeline."""
+
+ADD_MOTION_GRAPHIC_DESCRIPTION = """\
+Create a motion graphic — title card, kinetic type, animated stat, logo sting,
+lower third — and put it on the open /studio/editor timeline.
+
+Author it as a HyperFrames composition per the `hyperframes-core` skill: ONE
+self-contained HTML file whose root element carries data-composition-id,
+data-duration (seconds, max 120), data-width and data-height, and whose inline
+script registers a paused GSAP timeline on window.__timelines["<id>"].
+
+It renders with no base URL, so every asset is inline or absolute:
+- GSAP from a pinned CDN URL, e.g.
+  https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js
+- CSS inline in a <style> block
+- fonts via absolute Google Fonts URLs or data: URLs
+- no audio (use place_audio via edit_timeline), no WebGL / three.js, no
+  backdrop-filter
+
+Returns once the composition is validated and dispatched, NOT once it has
+rendered. Tell the user it is rendering, never that it is done."""
 
 
 def _edit_timeline_parameters() -> dict[str, Any]:
@@ -238,6 +402,30 @@ def _export_timeline_parameters() -> dict[str, Any]:
     }
 
 
+def _add_motion_graphic_parameters() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "html": {
+                "type": "string",
+                "description": (
+                    "The whole HyperFrames composition as one self-contained HTML document."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": "Optional short label for the clip, e.g. 'Intro title'.",
+            },
+            "fps": {
+                "type": "integer",
+                "enum": list(MOTION_GRAPHIC_FPS),
+                "description": "Optional render frame rate: 24, 25, 30 (default) or 60.",
+            },
+        },
+        "required": ["html"],
+    }
+
+
 def build_timeline_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server, or None if the SDK is unavailable."""
     try:
@@ -254,15 +442,33 @@ def build_timeline_server() -> tuple[str, Any] | None:
     async def export_timeline(args):  # type: ignore[no-untyped-def]
         return await _export_timeline_handler(args)
 
+    try:
+        from claude_agent_sdk import ToolAnnotations
+
+        inline_result = ToolAnnotations(maxResultSizeChars=MOTION_GRAPHIC_MAX_CHARS * 2)
+    except ImportError:
+        inline_result = None
+
+    @tool(
+        "add_motion_graphic",
+        ADD_MOTION_GRAPHIC_DESCRIPTION,
+        _add_motion_graphic_parameters(),
+        annotations=inline_result,
+    )
+    async def add_motion_graphic(args):  # type: ignore[no-untyped-def]
+        return await _add_motion_graphic_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[edit_timeline, export_timeline],
+        tools=[edit_timeline, export_timeline, add_motion_graphic],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "ADD_MOTION_GRAPHIC_DESCRIPTION",
+    "ADD_MOTION_GRAPHIC_TOOL_ID",
     "EDIT_TIMELINE_TOOL_ID",
     "EXPORT_FORMATS",
     "EXPORT_PRESETS",
@@ -270,4 +476,5 @@ __all__ = [
     "SERVER_NAME",
     "TIMELINE_TOOL_IDS",
     "build_timeline_server",
+    "validate_motion_graphic",
 ]

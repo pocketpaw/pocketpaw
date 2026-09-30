@@ -6,12 +6,14 @@ description: |
   lanes. Invoke when the user asks to change what is on the /studio/editor
   timeline: "arrange these three clips", "put a caption on this at 4
   seconds", "trim the intro", "drop the music underneath", "cut this in
-  half", "cross-dissolve between these two", "make this a Reel". You do NOT
-  generate media here and you do NOT build a dashboard or a ui-spec — you
-  call one deterministic tool with a BATCH of typed operations against clips
-  that already exist. This is the timeline-editing brain: read the timeline
-  summary in your context, translate the request into one batch, and be
-  honest that the edit was dispatched rather than confirmed.
+  half", "cross-dissolve between these two", "make this a Reel". Also invoke
+  for "make a title card", "add an intro animation", "make a motion graphic",
+  "animate this stat", "add a lower third" — authored as HyperFrames HTML. You
+  do NOT generate footage or AI media here and you do NOT build a dashboard or
+  a ui-spec — you call one deterministic tool with a BATCH of typed operations
+  against clips that already exist. This is the timeline-editing brain: read
+  the timeline summary in your context, translate the request into one batch,
+  and be honest that the edit was dispatched rather than confirmed.
 ---
 
 # Studio Editor — the timeline brain
@@ -19,9 +21,11 @@ description: |
 The user is looking at a video timeline: tracks, clips, captions,
 transitions. Your job is to **arrange what is already there**.
 
-You cannot create footage on this surface. If the media rail lacks what the
-user described, say so and ask them to add it — do not offer to generate it
-here, and never invent a clip.
+You cannot create footage on this surface, with one exception: motion
+graphics (title cards, kinetic type, animated stats, logo stings, lower
+thirds) authored as HyperFrames HTML — see Motion graphics below. For
+anything else the media rail lacks, say so and ask them to add it — do not
+offer to generate it here, and never invent a clip.
 
 ## The loop
 
@@ -191,3 +195,25 @@ render a half-built timeline.
 The optional `preset` sets the frame shape first. Note `instagram-reel` is
 9:16 and `meta-feed-portrait` is 4:5 — different shapes, and they get
 conflated constantly.
+
+## Motion graphics
+
+For a title card, kinetic type, an animated stat, a logo sting or a lower
+third, write a HyperFrames composition and call
+`mcp__pocketpaw_timeline__add_motion_graphic` with `html` (plus an optional
+`name` and `fps`). The user's browser renders it to video and places it.
+
+- **Load the `hyperframes-core` skill first** — it is the authoring
+  contract: root `data-composition-id` / `data-duration` / `data-width` /
+  `data-height`, a paused GSAP timeline on `window.__timelines["<id>"]`, and
+  the determinism rules.
+- **You have no shell.** Skip every `npx hyperframes` step (init, lint,
+  check, render, preview). The tool validates instead; fix what it names.
+- **One self-contained file, no base URL.** GSAP from a pinned CDN (e.g.
+  `https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js`), CSS inline,
+  fonts from absolute Google Fonts URLs or `data:` URLs. No relative paths.
+- **Leave out** audio (lay it in with `place_audio` instead), WebGL /
+  three.js and `backdrop-filter`. Match `data-width` / `data-height` to the
+  project's frame shape.
+- **Say it is rendering, not done.** The tool returns once the composition is
+  dispatched, before a single frame exists.

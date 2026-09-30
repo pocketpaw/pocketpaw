@@ -839,7 +839,7 @@ def _first_json_object(text: str) -> Any:
 
 
 def _timeline_payload(output: Any, marker: str) -> dict[str, Any] | None:
-    """Extract a ``timeline_edit`` / ``timeline_export`` envelope from a tool result.
+    """Extract a ``timeline_edit`` / ``timeline_export`` / ``motion_graphic`` envelope.
 
     Same job as ``_studio_flow_payload`` and the same reason: ``tool_result``
     fans to the client as a 200-char chip, which a 50-op batch does not fit in.
@@ -2287,7 +2287,7 @@ async def _drive_agent_loop(
                 # Same treatment for the /studio/editor tools: the op batch is
                 # far past the tool_result chip's 200 chars, and the browser tab
                 # holding the document is the only thing that can apply it.
-                for _marker in ("timeline_edit", "timeline_export"):
+                for _marker in ("timeline_edit", "timeline_export", "motion_graphic"):
                     _tl_payload = _timeline_payload(output, _marker)
                     if _tl_payload is not None:
                         yield (_marker, _tl_payload)
