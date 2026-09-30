@@ -1,0 +1,110 @@
+[
+  {
+    "label": "join: drop the workspace check",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if doc.workspace != workspace_id or not room_id:",
+    "replace": "    if not room_id:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: grant membership before the budget gate",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    result = await livekit_service.create_room(\n        room_id, workspace_id, user_id, record_meeting=False\n    )\n    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n",
+    "replace": "    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n    result = await livekit_service.create_room(\n        room_id, workspace_id, user_id, record_meeting=False\n    )\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: skip the membership check on a chat-room meeting",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if not meeting_room:\n        await livekit_service.require_call_group(room_id, user_id, workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: stop extending the link",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "        doc.link_expires_at = now + LINK_TTL\n    # no-event",
+    "replace": "        pass\n    # no-event",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "closed: forget link expiry",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    return expires is not None and expires <= now",
+    "replace": "    return False",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "lookup: ignore room presence",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    return bool(info and info.get(\"active\"))",
+    "replace": "    return bool(info)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "lookup: dashes not stripped",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    c = code.replace(\"-\", \"\").strip().lower()",
+    "replace": "    c = code.strip().lower()",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: emit meeting.started on every join",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if call_started:\n        # Same realtime-only",
+    "replace": "    if True:\n        # Same realtime-only",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "for later: start a call at create",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    try:\n        doc = await _create_meeting_row(workspace_id, user_id, body, meeting_room_id)\n",
+    "replace": "    try:\n        doc = await _create_meeting_row(workspace_id, user_id, body, meeting_room_id)\n        if meeting_room_id:\n            from pocketpaw_ee.cloud.livekit import service as _lk\n\n            await _lk.create_room(meeting_room_id, workspace_id, user_id, record_meeting=False)\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "rate limit: no per-IP bucket",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    if not _meeting_lookup_limiter.check(f\"meeting-lookup:{_client_ip(request)}\").allowed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "membership: any room type joinable by code",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if group.type != MEETING_GROUP_TYPE:\n        raise Forbidden(\"group.not_joinable\", \"Only meeting rooms are joined by meeting code\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py::test_add_meeting_room_member_refuses_other_rooms"
+    ]
+  },
+  {
+    "label": "self-heal: expired undated rows stay scheduled",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "            \"link_expires_at\": {\"$lt\": now_utc.replace(tzinfo=None)},",
+    "replace": "            \"link_expires_at\": {\"$lt\": datetime(1970, 1, 1)},",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  }
+]

@@ -8,10 +8,14 @@
 # ``access``, ``host_user_id`` and ``description``. ``guest_emails`` is kept
 # off the wire for now (nothing writes it yet; the host-only view comes with
 # the invite slice).
+#
+# 2026-10-01 (feat/meetings-by-code, MC-2): ``MeetingLookupResponse`` (the
+# public ``GET /meetings/by-code/{code}`` shape — six fields, nothing that
+# identifies a person, room or workspace) and ``JoinMeetingByCodeResponse``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_serializer
@@ -126,6 +130,37 @@ class MeetingResponse(BaseModel):
         if v is None:
             return None
         return v.isoformat() + "Z"
+
+
+class MeetingLookupResponse(BaseModel):
+    """GET /meetings/by-code/{code} — public, so only what the join page shows.
+
+    ``status``: ``not_started`` (nobody in the call yet), ``live`` (someone
+    other than the call-bot is in it) or ``ended`` (ended, cancelled or the
+    link has expired). No ids, emails, members or room names — ever.
+    """
+
+    code: str
+    title: str | None
+    scheduled_start: datetime | None
+    host_name: str | None
+    access: Literal["ask", "open"]
+    status: Literal["not_started", "live", "ended"]
+
+    @field_serializer("scheduled_start")
+    def _serialize_start(v: datetime | None) -> str | None:
+        if v is None:
+            return None
+        if v.tzinfo is not None:
+            v = v.astimezone(UTC).replace(tzinfo=None)
+        return v.isoformat() + "Z"
+
+
+class JoinMeetingByCodeResponse(BaseModel):
+    """POST /meetings/by-code/{code}/join — feed these to the call token flow."""
+
+    room_group_id: str
+    room_name: str
 
 
 class MeetingDetailResponse(MeetingResponse):

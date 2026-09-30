@@ -2,11 +2,16 @@
 # Created: 2026-05-19. Mounted at /api/v1/meetings via mount_cloud().
 # See docs/plans/2026-05-19-meetings-integration-design.md.
 # 2026-10-01 (feat/meetings-instant, MC-1): POST /meetings/instant.
+# 2026-10-01 (feat/meetings-by-code, MC-2): POST /meetings with source=livekit
+# and no group_id creates a meeting for later; GET /meetings/by-code/{code}
+# (public, per-IP rate limit) and POST /meetings/by-code/{code}/join.
 #
 # Routes:
 #   GET    /meetings                          — list workspace meetings
 #   POST   /meetings                          — create a meeting
 #   POST   /meetings/instant                  — start a meeting now (code + link)
+#   GET    /meetings/by-code/{code}           — PUBLIC join-page lookup (6 fields)
+#   POST   /meetings/by-code/{code}/join      — member joins by code, call starts
 #   GET    /meetings/search/                  — cross-provider search
 #   GET    /meetings/{meeting_id}             — get one meeting
 #   DELETE /meetings/{meeting_id}             — cancel a meeting
@@ -36,6 +41,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, field_serializer
 
+from pocketpaw_ee.cloud._core.rate_limit import rate_limit_meeting_lookup
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.dto import (
@@ -45,8 +51,10 @@ from pocketpaw_ee.cloud.meetings.dto import (
     DisconnectResponse,
     GoogleMeetAuthUrlResponse,
     GoogleMeetRedirectUriResponse,
+    JoinMeetingByCodeResponse,
     ListMeetingsRequest,
     MeetingDetailResponse,
+    MeetingLookupResponse,
     MeetingResponse,
     MeetingsSettingsResponse,
     StartInstantMeetingRequest,
@@ -91,7 +99,11 @@ async def create_meeting(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> MeetingResponse:
-    """Create a meeting via the configured provider adapter."""
+    """Create a meeting via the configured provider adapter.
+
+    ``source="livekit"`` with no ``group_id`` creates a meeting for later: a
+    hidden meeting room plus a code and link, no call started.
+    """
     return await meetings_service.create_meeting(workspace_id, user_id, body)
 
 
@@ -107,6 +119,34 @@ async def start_instant_meeting(
     nothing is created.
     """
     return await meetings_service.start_instant_meeting(workspace_id, user_id, body)
+
+
+@router.get(
+    "/by-code/{code}",
+    response_model=MeetingLookupResponse,
+    dependencies=[Depends(rate_limit_meeting_lookup)],
+)
+async def lookup_meeting_by_code(code: str) -> MeetingLookupResponse:
+    """PUBLIC — no sign-in. What the ``/m/<code>`` page shows before joining.
+
+    Accepts the code with or without dashes, any case. 404 for an unknown code;
+    429 ``meetings.lookup_rate_limited`` past 30 lookups a minute per IP.
+    """
+    return await meetings_service.lookup_meeting_by_code(code)
+
+
+@router.post("/by-code/{code}/join", response_model=JoinMeetingByCodeResponse)
+async def join_meeting_by_code(
+    code: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> JoinMeetingByCodeResponse:
+    """Join a meeting by code as a member of its workspace; starts the call if needed.
+
+    403 ``livekit.room_forbidden`` (another workspace, or a chat-room meeting you
+    aren't in), 410 ``meeting.ended``, 402 ``billing.call_limit``, 404 unknown.
+    """
+    return await meetings_service.join_meeting_by_code(workspace_id, user_id, code)
 
 
 # ---------------------------------------------------------------------------

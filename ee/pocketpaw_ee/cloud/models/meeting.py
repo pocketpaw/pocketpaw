@@ -9,6 +9,12 @@
 # ``access`` ("ask" | "open"), ``guest_emails``, ``description`` and
 # ``link_expires_at``.
 #
+# 2026-10-01 (feat/meetings-by-code, MC-2): no schema change. A LiveKit
+# meeting "for later" is ``status="scheduled"`` with ``scheduled_start=None``
+# (no date; the reminder/auto-start jobs skip it). ``link_expires_at`` is 30
+# days out for undated meetings (pushed out on each join) and ``scheduled_end``
+# for dated ones; see meetings/service.py.
+#
 # Two documents:
 #   * Meeting — one row per provider meeting we know about.
 #   * MeetingTranscript — one row per transcript session. Transcript entries
