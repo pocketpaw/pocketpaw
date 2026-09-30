@@ -180,6 +180,8 @@ If no LiveKit room is running, the join starts one through the daily call-time b
 
 Meeting rooms can only be joined this way. `POST /chat/groups/{id}/join` refuses them.
 
+`POST /livekit/rooms` on a meeting room (the call engine calls it every time a member joins a call) follows the same rules as the join above: it never adds an "Instant call" row, it restarts the call on the meeting's own row after LiveKit has closed an empty room, it returns 410 `meeting.ended` for an ended or expired meeting, and it goes through the call budget (402). For any other room it works as before. The recommended order for a code join is still `POST /meetings/by-code/{code}/join`, then the usual `POST /livekit/rooms` and `POST /livekit/token`.
+
 ## Soul Memory Integration
 
 PR #1112 wired soul memory recall into the meeting agent path. When an agent joins a call (via the subprocess agent lifecycle managed in `service.py`'s `_SubprocessAgentRef`), the agent's bootstrap pulls relevant soul memories into context:

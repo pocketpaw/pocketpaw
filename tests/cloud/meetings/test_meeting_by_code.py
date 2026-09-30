@@ -8,6 +8,10 @@
 # workspace into the room and makes sure the call is running (budget gate,
 # one room, one Meeting row). LiveKitAPI and the call-bot are mocked; the
 # LiveKit "server" keeps a list of rooms so a second join sees the first room.
+#
+# Also: ``POST /livekit/rooms`` (which the desktop call engine ALWAYS calls in
+# joinCall) on a ``type="meeting"`` room goes through the same meeting-row
+# logic as a by-code join, so it never inserts an "Instant call" twin row.
 
 from __future__ import annotations
 
@@ -217,11 +221,17 @@ async def test_join_group_refuses_a_meeting_room(mongo_db, lk) -> None:
 
 @pytest_asyncio.fixture
 async def client(monkeypatch, mongo_db):  # noqa: ARG001 — mongo_db forces Beanie init
+    import importlib
+
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.meetings.router import router
     from pocketpaw_ee.guards import deps as guards_deps
+
+    livekit_router_mod = importlib.import_module("pocketpaw_ee.cloud.livekit.router")
+    monkeypatch.setattr(livekit_router_mod, "require_license", AsyncMock())
 
     monkeypatch.setattr(guards_deps, "check_workspace_action", AsyncMock(return_value=None))
     state = SimpleNamespace(user=None)
@@ -236,6 +246,7 @@ async def client(monkeypatch, mongo_db):  # noqa: ARG001 — mongo_db forces Bea
     def act_as(user_id: str, ws_id: str) -> None:
         state.user = SimpleNamespace(
             id=user_id,
+            full_name=user_id,
             active_workspace=ws_id,
             workspaces=[SimpleNamespace(workspace=ws_id, role="member")],
         )
@@ -245,6 +256,7 @@ async def client(monkeypatch, mongo_db):  # noqa: ARG001 — mongo_db forces Bea
     app.dependency_overrides[require_license] = lambda: None
     app.dependency_overrides[current_active_user] = _user
     app.include_router(router, prefix="/api/v1")
+    app.include_router(livekit_router, prefix="/api/v1")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         c.act_as = act_as
         c.log_out = lambda: setattr(state, "user", None)
@@ -525,3 +537,121 @@ async def test_add_meeting_room_member_refuses_other_rooms(mongo_db, lk) -> None
         await group_service.add_meeting_room_member(str(chat.id), "u2")
 
     assert (await Group.get(str(chat.id))).members == ["u1"]
+
+
+# ---------------------------------------------------------------------------
+# POST /livekit/rooms on a meeting room (the call engine's joinCall)
+# ---------------------------------------------------------------------------
+
+
+async def _rooms(client, group_id: str):
+    return await client.post("/api/v1/livekit/rooms", json={"group_id": group_id})
+
+
+async def test_rooms_route_on_a_meeting_room_adds_no_meeting_row(client, lk, recording_bus) -> None:
+    ws_id = await _workspace("enterprise")
+    host = await _host()
+    out = await _meeting(ws_id, host)
+    client.act_as(host, ws_id)
+
+    first = await _rooms(client, out.room_group_id)
+    second = await _rooms(client, out.room_group_id)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200
+    assert first.json()["room_name"] == f"group-call-{out.room_group_id}"
+    assert await Meeting.find_all().count() == 1  # no "Instant call" twin
+    row = await Meeting.find_one()
+    assert row.status == "in_progress"
+    assert row.actual_start is not None
+    assert row.provider_meeting_id == f"group-call-{out.room_group_id}"
+    assert lk.svc.create_room.await_count == 1
+    started = [e for e in recording_bus.events if e.type == "meeting.started"]
+    assert len(started) == 1
+
+
+async def test_rooms_route_after_an_instant_start_adds_no_row(client, lk) -> None:
+    from pocketpaw_ee.cloud.meetings.dto import StartInstantMeetingRequest
+
+    ws_id = await _workspace("enterprise")
+    host = await _host()
+    out = await meetings_service.start_instant_meeting(ws_id, host, StartInstantMeetingRequest())
+    client.act_as(host, ws_id)
+
+    resp = await _rooms(client, out.room_group_id)
+
+    assert resp.status_code == 200
+    assert await Meeting.find_all().count() == 1
+    assert lk.svc.create_room.await_count == 1
+
+
+async def test_rooms_route_restarts_after_the_empty_timeout_on_the_same_row(
+    client, lk, recording_bus
+) -> None:
+    ws_id = await _workspace("go")
+    host = await _host()
+    out = await _meeting(ws_id, host)
+    client.act_as(host, ws_id)
+    await _rooms(client, out.room_group_id)
+    first = await Meeting.find_one()
+    stale = datetime(2026, 1, 1)
+    first.call_budget_deadline = stale  # the old call's deadline
+    await first.save()
+    lk.rooms.clear()  # everyone left; LiveKit closed the empty room
+
+    resp = await _rooms(client, out.room_group_id)
+
+    assert resp.status_code == 200
+    assert lk.svc.create_room.await_count == 2
+    assert await Meeting.find_all().count() == 1
+    row = await Meeting.find_one()
+    assert (row.id, row.status, row.actual_start) == (first.id, "in_progress", first.actual_start)
+    assert row.call_budget_deadline not in (None, stale)  # the new call got its own deadline
+    assert len([e for e in recording_bus.events if e.type == "meeting.started"]) == 2
+
+
+@pytest.mark.parametrize("how", ["ended", "expired"])
+async def test_rooms_route_on_an_ended_meeting_is_410(client, lk, how) -> None:
+    ws_id = await _workspace("enterprise")
+    host = await _host()
+    out = await _meeting(ws_id, host)
+    row = await Meeting.find_one()
+    if how == "expired":
+        row.link_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    else:
+        row.status = "ended"
+    await row.save()
+    client.act_as(host, ws_id)
+
+    resp = await _rooms(client, out.room_group_id)
+
+    assert resp.status_code == 410
+    assert resp.json()["error"]["code"] == "meeting.ended"
+    lk.svc.create_room.assert_not_called()
+    assert await Meeting.find_all().count() == 1
+
+
+async def test_rooms_route_on_a_meeting_room_hits_the_budget(client, lk) -> None:
+    ws_id = await _workspace("free")
+    host = await _host()
+    out = await _meeting(ws_id, host)
+    client.act_as(host, ws_id)
+
+    resp = await _rooms(client, out.room_group_id)
+
+    assert resp.status_code == 402
+    assert resp.json()["error"]["code"] == "billing.call_limit"
+    assert (await Meeting.find_one()).status == "scheduled"
+
+
+async def test_rooms_route_on_a_chat_room_still_records_an_instant_call(client, lk) -> None:
+    ws_id = await _workspace("enterprise")
+    chat = Group(workspace=ws_id, name="Team", owner="u1", members=["u1"], type="public")
+    await chat.insert()
+    client.act_as("u1", ws_id)
+
+    resp = await _rooms(client, str(chat.id))
+
+    assert resp.status_code == 200
+    rows = await Meeting.find_all().to_list()
+    assert [r.title for r in rows] == ["Instant call"]

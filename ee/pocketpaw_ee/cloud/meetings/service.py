@@ -34,6 +34,9 @@
 #   * ``join_meeting_by_code``: same-workspace members only; adds the caller to
 #     a meeting room (never to a chat room — those still need membership) and
 #     makes sure the call is running through ``create_room`` (budget gate).
+#   * ``start_meeting_room_call`` backs ``POST /livekit/rooms`` for a hidden
+#     meeting room (the call engine always calls it on join): same
+#     ``_run_meeting_call`` as a by-code join, so no "Instant call" twin row.
 
 from __future__ import annotations
 
@@ -766,6 +769,88 @@ async def lookup_meeting_by_code(code: str) -> MeetingLookupResponse:
     )
 
 
+async def _run_meeting_call(
+    doc: _MeetingDoc, room_id: str, workspace_id: str, user_id: str
+) -> dict:
+    """Make sure the meeting's call is running and its own row says so.
+
+    410 ``meeting.ended`` when the meeting is closed. ``create_room`` runs with
+    ``record_meeting=False`` (so no "Instant call" twin row) and applies the
+    daily budget to a NEW room (402 ``billing.call_limit``). The row then takes
+    the room name and budget deadline, goes ``in_progress`` (``actual_start``
+    kept if already set), and an undated meeting's link moves 30 days out.
+    ``meeting.started`` (realtime) goes to the room only when the room is new.
+    Returns ``create_room``'s result.
+    """
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    now = datetime.now(UTC)
+    if _is_closed(doc, now):
+        raise CloudError(410, "meeting.ended", "This meeting has ended.")
+
+    result = await livekit_service.create_room(room_id, workspace_id, user_id, record_meeting=False)
+
+    call_started = bool(result.get("is_new"))
+    if call_started or doc.status != "in_progress":
+        doc.status = "in_progress"
+        doc.actual_start = doc.actual_start or now
+        # end_room and the budget watchdog find the call's row by room name.
+        doc.provider_meeting_id = result["room_name"]
+        if result.get("call_budget_deadline") is not None:
+            doc.call_budget_deadline = result["call_budget_deadline"]
+    if doc.scheduled_end is None:
+        doc.link_expires_at = now + LINK_TTL
+    # no-event unless the call started (below): nothing listens for a
+    # link-expiry refresh.
+    await doc.save()
+
+    if call_started:
+        # Same realtime-only event the instant path sends; audience is the room.
+        try:
+            from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+            from pocketpaw_ee.cloud.meetings.events import MeetingStarted
+
+            await _emit_realtime(
+                MeetingStarted(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(doc.id),
+                        "source": "livekit",
+                        "group_id": room_id,
+                        "join_url": doc.join_url,
+                    }
+                )
+            )
+        except Exception:
+            logger.exception("Failed to emit realtime meeting.started for %s", doc.id)
+    return result
+
+
+async def start_meeting_room_call(workspace_id: str, user_id: str, group_id: str) -> dict | None:
+    """``POST /livekit/rooms`` for a hidden meeting room; None for any other room.
+
+    The call engine always calls ``POST /livekit/rooms`` when joining, including
+    a host re-joining after LiveKit closed the empty room and the instant flow
+    right after it started. For a meeting room that must not insert an
+    "Instant call" row, so it runs the meeting's own row through
+    ``_run_meeting_call`` like a by-code join. The caller has already passed
+    ``require_call_group`` (member of the room, same workspace).
+    """
+    from pocketpaw_ee.cloud.chat import group_service
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    if not await group_service.is_meeting_room(group_id):
+        return None
+    doc = await _MeetingDoc.find_one({"workspace": workspace_id, "room_group_id": group_id})
+    if doc is None:
+        # Every meeting room is made with its row; if one is missing, still
+        # don't mint an "Instant call" twin for a hidden room.
+        return await livekit_service.create_room(
+            group_id, workspace_id, user_id, record_meeting=False
+        )
+    return await _run_meeting_call(doc, group_id, workspace_id, user_id)
+
+
 async def join_meeting_by_code(
     workspace_id: str, user_id: str, code: str
 ) -> JoinMeetingByCodeResponse:
@@ -797,51 +882,13 @@ async def join_meeting_by_code(
         )
         raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
 
-    now = datetime.now(UTC)
-    if _is_closed(doc, now):
-        raise CloudError(410, "meeting.ended", "This meeting has ended.")
-
     meeting_room = await group_service.is_meeting_room(room_id)
     if not meeting_room:
         await livekit_service.require_call_group(room_id, user_id, workspace_id)
 
-    result = await livekit_service.create_room(room_id, workspace_id, user_id, record_meeting=False)
+    result = await _run_meeting_call(doc, room_id, workspace_id, user_id)
     if meeting_room:
         await group_service.add_meeting_room_member(room_id, user_id)
-
-    call_started = bool(result.get("is_new"))
-    if call_started or doc.status != "in_progress":
-        doc.status = "in_progress"
-        doc.actual_start = doc.actual_start or now
-        # end_room and the budget watchdog find the call's row by room name.
-        doc.provider_meeting_id = result["room_name"]
-        if result.get("call_budget_deadline") is not None:
-            doc.call_budget_deadline = result["call_budget_deadline"]
-    if doc.scheduled_end is None:
-        doc.link_expires_at = now + LINK_TTL
-    # no-event unless this join started the call (below): nothing listens for a
-    # link-expiry refresh, and a membership in a hidden room has no sidebar.
-    await doc.save()
-
-    if call_started:
-        # Same realtime-only event the instant path sends; audience is the room.
-        try:
-            from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
-            from pocketpaw_ee.cloud.meetings.events import MeetingStarted
-
-            await _emit_realtime(
-                MeetingStarted(
-                    data={
-                        "workspace_id": workspace_id,
-                        "meeting_id": str(doc.id),
-                        "source": "livekit",
-                        "group_id": room_id,
-                        "join_url": doc.join_url,
-                    }
-                )
-            )
-        except Exception:
-            logger.exception("Failed to emit realtime meeting.started for %s", doc.id)
 
     return JoinMeetingByCodeResponse(room_group_id=room_id, room_name=result["room_name"])
 

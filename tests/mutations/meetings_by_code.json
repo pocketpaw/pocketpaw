@@ -11,8 +11,8 @@
   {
     "label": "join: grant membership before the budget gate",
     "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
-    "find": "    result = await livekit_service.create_room(\n        room_id, workspace_id, user_id, record_meeting=False\n    )\n    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n",
-    "replace": "    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n    result = await livekit_service.create_room(\n        room_id, workspace_id, user_id, record_meeting=False\n    )\n",
+    "find": "    result = await _run_meeting_call(doc, room_id, workspace_id, user_id)\n    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n",
+    "replace": "    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n    result = await _run_meeting_call(doc, room_id, workspace_id, user_id)\n",
     "tests": [
       "tests/cloud/meetings/test_meeting_by_code.py"
     ]
@@ -103,6 +103,51 @@
     "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
     "find": "            \"link_expires_at\": {\"$lt\": now_utc.replace(tzinfo=None)},",
     "replace": "            \"link_expires_at\": {\"$lt\": datetime(1970, 1, 1)},",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "rooms route: meeting rooms back on the Instant-call path",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    result = await meetings_service.start_meeting_room_call(\n        workspace_id, str(user.id), body.group_id\n    )\n",
+    "replace": "    result = None\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "meeting call: record_meeting=True (twin row)",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    result = await livekit_service.create_room(room_id, workspace_id, user_id, record_meeting=False)\n\n    call_started",
+    "replace": "    result = await livekit_service.create_room(room_id, workspace_id, user_id)\n\n    call_started",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "meeting call: no ended check",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if _is_closed(doc, now):\n        raise CloudError(410, \"meeting.ended\", \"This meeting has ended.\")\n\n    result",
+    "replace": "    result",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "meeting call: keep the old budget deadline on a restart",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if call_started or doc.status != \"in_progress\":",
+    "replace": "    if doc.status != \"in_progress\":",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "rooms route: every room treated as a meeting room",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if not await group_service.is_meeting_room(group_id):\n        return None\n",
+    "replace": "",
     "tests": [
       "tests/cloud/meetings/test_meeting_by_code.py"
     ]

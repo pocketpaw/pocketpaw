@@ -38,7 +38,13 @@ workspace + membership check as ``/token`` (``service.require_call_group``;
 ``test_room_routes_guard.py``). The public invite join
 takes an optional ``email`` and the server enforces the invite's allow-list;
 validate returns ``requires_email`` instead of the list
-(``test_invite_email_allowlist.py``)."""
+(``test_invite_email_allowlist.py``).
+
+2026-10-01 (feat/meetings-by-code, MC-2): ``POST /rooms`` on a hidden
+``type="meeting"`` room goes through ``meetings.service.start_meeting_room_call``:
+no "Instant call" row, the meeting's own row takes the room name, budget
+deadline and ``in_progress``, and an ended/expired meeting is 410
+``meeting.ended``. Other rooms are unchanged."""
 
 from __future__ import annotations
 
@@ -218,7 +224,15 @@ async def create_room(
     # The group must be in the caller's workspace and have them as a member.
     await livekit_service.require_call_group(body.group_id, str(user.id), workspace_id)
 
-    result = await livekit_service.create_room(body.group_id, workspace_id, str(user.id))
+    # A hidden meeting room runs its meeting's own row (no "Instant call" twin;
+    # 410 meeting.ended once the meeting is over). Any other room as before.
+    from pocketpaw_ee.cloud.meetings import service as meetings_service
+
+    result = await meetings_service.start_meeting_room_call(
+        workspace_id, str(user.id), body.group_id
+    )
+    if result is None:
+        result = await livekit_service.create_room(body.group_id, workspace_id, str(user.id))
 
     # Only emit call.started when the room was actually created (not when
     # someone joins an existing room). The is_new flag is set atomically
