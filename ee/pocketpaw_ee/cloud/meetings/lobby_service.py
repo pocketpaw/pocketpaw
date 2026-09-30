@@ -314,8 +314,16 @@ async def _member_meeting(workspace_id: str, user_id: str, meeting_id: str) -> _
 
 
 async def _require_in_call(meeting: _MeetingDoc, user_id: str) -> None:
-    """403 ``meeting.not_in_call`` unless the caller is in the call right now."""
-    if user_id not in await _call_identities(meetings_service._room_of(meeting) or ""):
+    """403 ``meeting.not_in_call`` unless the caller is in the call right now;
+    503 ``livekit.unavailable`` when LiveKit can't be asked."""
+    try:
+        identities = await _call_identities(meetings_service._room_of(meeting) or "")
+    except Exception:
+        logger.warning("LiveKit presence check failed for meeting %s", meeting.id, exc_info=True)
+        raise CloudError(
+            503, "livekit.unavailable", "Calls are unavailable right now. Try again."
+        ) from None
+    if user_id not in identities:
         raise Forbidden("meeting.not_in_call", "Join the call to see who's waiting.")
 
 

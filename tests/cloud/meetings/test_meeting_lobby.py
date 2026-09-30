@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import jwt
 import pytest
@@ -683,6 +683,22 @@ async def test_decisions_are_audited(client, lk, action) -> None:
         meeting_id=s.m.id,
         decision="admitted" if action == "admit" else "denied",
     )
+
+
+async def test_a_livekit_outage_is_503_not_500(client, lk, monkeypatch) -> None:
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    monkeypatch.setattr(livekit_service, "get_room_info", AsyncMock(side_effect=OSError("down")))
+
+    admit = await _decide(client, s, knock["knock_id"], "admit")
+    listed = await client.get(f"/api/v1/meetings/{s.m.id}/knocks")
+
+    for resp in (admit, listed):
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "livekit.unavailable"
+    assert (await MeetingKnock.find_one()).status == "waiting"
 
 
 async def test_unknown_knock_is_404(client, lk) -> None:

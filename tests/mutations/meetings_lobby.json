@@ -416,8 +416,17 @@
   {
     "label": "in-call: any participant will do",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "    if user_id not in await _call_identities(meetings_service._room_of(meeting) or \"\"):",
-    "replace": "    if not await _call_identities(meetings_service._room_of(meeting) or \"\"):",
+    "find": "    if user_id not in identities:",
+    "replace": "    if not identities:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "outage: LiveKit error escapes as 500",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    except Exception:\n        logger.warning(\"LiveKit presence check failed",
+    "replace": "    except ZeroDivisionError:\n        logger.warning(\"LiveKit presence check failed",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
