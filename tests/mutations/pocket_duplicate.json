@@ -56,5 +56,14 @@
       "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_deep",
       "tests/cloud/pockets/test_duplicate_site.py::test_copy_site_snapshot_does_not_alias_its_input"
     ]
+  },
+  {
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "tests": [
+      "tests/cloud/pockets/test_duplicate_site.py::test_copy_is_faithful_per_track"
+    ],
+    "label": "duplicate no longer mints the draft Site row",
+    "find": "    await sites_service.create_draft_site(\n        workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name\n    )\n",
+    "replace": ""
   }
 ]

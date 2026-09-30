@@ -4,9 +4,9 @@
 # (engine, pattern, rippleSpec, source, keeps_client_bundle) plus the
 # ``source_gated`` cohort stamp into a new site pocket the caller owns, through
 # ``copy_site_snapshot``. These tests pin, per site track, that the copy is
-# faithful and independent, that nothing else rides along (no Site row, no
-# sharing), and the three refusals: cross-tenant (404), unreadable private (403),
-# not a site (422). Mutation plan: tests/mutations/pocket_duplicate.json.
+# faithful and independent, that the copy gets its own draft Site row and nothing
+# else rides along (no sharing), and the three refusals: cross-tenant (404),
+# unreadable private (403), not a site (422). Mutation plan: tests/mutations/pocket_duplicate.json.
 from __future__ import annotations
 
 from typing import Any
@@ -97,7 +97,11 @@ async def test_copy_is_faithful_per_track(track: str) -> None:
     # Nothing outside the snapshot rides along.
     assert copy.shared_with == [] and copy.team == [] and copy.tool_specs == []
     assert copy.share_link_token is None
-    assert await Site.find_all().count() == 0
+    # The copy lists in the gallery through a fresh DRAFT Site of its own.
+    sites = await Site.find_all().to_list()
+    assert len(sites) == 1
+    assert sites[0].pocket_id == wire["_id"]
+    assert sites[0].deployed is False
 
 
 @pytest.mark.asyncio

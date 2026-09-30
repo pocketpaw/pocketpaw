@@ -2245,8 +2245,9 @@ async def copy_site_snapshot(
 
     The snapshot is deep-copied, so the new pocket shares no mutable state with
     whatever it came from. It is written as-is: no ripple normalization or catalog
-    gate, because it is a copy of content that was already accepted once. No Site
-    doc is created; publishing the copy is a separate step.
+    gate, because it is a copy of content that was already accepted once. A fresh
+    DRAFT Site doc is minted so the copy lists in the gallery; nothing of the
+    source's Site (slug, domains, D1, deploy) is copied, and nothing is published.
 
     ``source_gated`` defaults to the create-time stamp. A duplicate passes the
     source pocket's value so copying never moves a pocket across the SF-2 cohort.
@@ -2276,6 +2277,14 @@ async def copy_site_snapshot(
     )
     await doc.insert()
     await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    # The /sites gallery lists Site docs, not pockets, so the copy needs its own
+    # DRAFT Site (no build, no deploy) to be visible, the same as every other
+    # create path. Function-local import: sites.service reads pockets (cycle).
+    from pocketpaw_ee.sites import service as sites_service
+
+    await sites_service.create_draft_site(
+        workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name
+    )
     return await _resolved_wire_dict(doc, owner)
 
 
