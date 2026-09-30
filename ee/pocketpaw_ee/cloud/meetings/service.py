@@ -56,6 +56,13 @@
 #     joining-info`` and ``/ics``: open to the meeting's workspace, the same
 #     visibility as ``GET /meetings/{id}`` (which already carries code + link).
 #     ``MeetingResponse.joining_info`` carries the same text. Formatting is in ics.py.
+#   * Everyone leaving a meeting-room call (no "End for everyone") puts its row
+#     back to ``scheduled``: ``release_meeting_room`` runs when the call-bot exits
+#     on the empty room (livekit ``_reap_agent_process``), and ``list_meetings``
+#     self-heals an ``in_progress`` meeting-room row whose room has no humans once
+#     the call is past ``LIVE_GRACE``. Code, link, link expiry and ``actual_start``
+#     stay; the next join restarts the call on the same row. ``end_room`` still
+#     ends it. Chat-room call rows are untouched.
 
 from __future__ import annotations
 
@@ -117,6 +124,9 @@ INSTANT_MEETING_TITLE = "Instant meeting"
 # How long an undated meeting's link lives, counted from creation and then
 # from each join.
 LINK_TTL = timedelta(days=30)
+# A call younger than this may simply not have its first human connected yet
+# (create_room runs before the host's client joins), so the list doesn't heal it.
+LIVE_GRACE = timedelta(minutes=2)
 
 
 def _new_code() -> str:
@@ -321,6 +331,16 @@ async def list_meetings(workspace_id: str, body: ListMeetingsRequest) -> list[Me
         doc.status = "ended"
         await doc.save()
         logger.info("Hydrated meeting %s: scheduled → ended (link expired)", doc.id)
+
+    # in_progress → scheduled (a meeting room everyone left; its link lives on)
+    # ponytail: one LiveKit lookup per such row per list; they are few.
+    live_rooms = await _MeetingDoc.find(
+        {"workspace": workspace_id, "status": "in_progress", "room_group_id": {"$ne": None}}
+    ).to_list()
+    for doc in live_rooms:
+        if _call_started(doc) + LIVE_GRACE < now_utc and not await _room_is_live(doc.room_group_id):
+            await _release(doc)
+            logger.info("Hydrated meeting %s: in_progress → scheduled (room empty)", doc.id)
 
     # ── Main query ────────────────────────────────────────────────────
     query: dict = {"workspace": workspace_id}
@@ -841,6 +861,11 @@ async def _run_meeting_call(
     result = await livekit_service.create_room(room_id, workspace_id, user_id, record_meeting=False)
 
     call_started = bool(result.get("is_new"))
+    if call_started:
+        doc.raw_provider_payload = {
+            **(doc.raw_provider_payload or {}),
+            "call_started_at": now.isoformat(),
+        }
     if call_started or doc.status != "in_progress":
         doc.status = "in_progress"
         doc.actual_start = doc.actual_start or now
@@ -874,6 +899,57 @@ async def _run_meeting_call(
         except Exception:
             logger.exception("Failed to emit realtime meeting.started for %s", doc.id)
     return result
+
+
+def _call_started(doc: _MeetingDoc) -> datetime:
+    """When the current call started: the latest start we recorded, else actual_start."""
+    payload = doc.raw_provider_payload or {}
+    for key in ("call_started_at", "started_at"):  # our joins; LiveKitProvider.start
+        if payload.get(key):
+            try:
+                return _aware(datetime.fromisoformat(payload[key]))  # type: ignore[return-value]
+            except ValueError:
+                pass
+    return _aware(doc.actual_start) or datetime.min.replace(tzinfo=UTC)
+
+
+async def _release(doc: _MeetingDoc) -> None:
+    """Back to ``scheduled`` after everyone left; the room's members are told."""
+    doc.status = "scheduled"
+    doc.call_budget_deadline = None  # belonged to the call that just ended
+    await doc.save()
+    from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+    from pocketpaw_ee.cloud._core.realtime.events import MeetingUpdated
+
+    try:
+        await _emit_realtime(
+            MeetingUpdated(
+                data={
+                    "workspace_id": doc.workspace,
+                    "meeting_id": str(doc.id),
+                    "group_id": doc.room_group_id,
+                    "fields": ["status"],
+                }
+            )
+        )
+    except Exception:
+        logger.exception("Failed to emit realtime meeting.updated for %s", doc.id)
+
+
+async def release_meeting_room(workspace_id: str, group_id: str) -> None:
+    """A meeting room's call ended because everyone left: its meeting goes back to
+    ``scheduled`` so the list stops showing it live and the link starts a new call.
+
+    Only meeting-room rows (``room_group_id``); a chat-room call row is left as it
+    is. Skipped while a human is still (or again) in the room.
+    """
+    docs = await _MeetingDoc.find(
+        {"workspace": workspace_id, "room_group_id": group_id, "status": "in_progress"}
+    ).to_list()
+    if not docs or await _room_is_live(group_id):
+        return
+    for doc in docs:
+        await _release(doc)
 
 
 async def start_meeting_room_call(workspace_id: str, user_id: str, group_id: str) -> dict | None:

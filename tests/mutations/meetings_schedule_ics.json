@@ -223,5 +223,86 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_schedule.py::test_calendar_registers_edit_listener"
     ]
+  },
+  {
+    "label": "left: reaper never releases the meeting room",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "await meetings_service.release_meeting_room(workspace_id, group_id)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: released while someone is still in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if not docs or await _room_is_live(group_id):",
+    "replace": "if not docs:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: chat-room call rows released too",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "{\"workspace\": workspace_id, \"room_group_id\": group_id, \"status\": \"in_progress\"}",
+    "replace": "{\"workspace\": workspace_id, \"status\": \"in_progress\"}",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: marked ended instead of scheduled",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    doc.status = \"scheduled\"\n    doc.call_budget_deadline = None",
+    "replace": "    doc.status = \"ended\"\n    doc.call_budget_deadline = None",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: budget deadline kept",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    doc.call_budget_deadline = None  # belonged to the call that just ended\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: list not told",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "\"group_id\": doc.room_group_id,",
+    "replace": "\"group_id\": None,",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "list heal: no grace",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if _call_started(doc) + LIVE_GRACE < now_utc and not await _room_is_live(doc.room_group_id):",
+    "replace": "if not await _room_is_live(doc.room_group_id):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "list heal: ignores people in the room",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if _call_started(doc) + LIVE_GRACE < now_utc and not await _room_is_live(doc.room_group_id):",
+    "replace": "if _call_started(doc) + LIVE_GRACE < now_utc:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "list heal: grace from the first call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "doc.raw_provider_payload = {\n            **(doc.raw_provider_payload or {}),\n            \"call_started_at\": now.isoformat(),\n        }",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
   }
 ]

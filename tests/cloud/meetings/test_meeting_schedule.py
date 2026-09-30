@@ -10,13 +10,20 @@
 # (RFC 5545) are open to the meeting's workspace, same as ``GET /meetings/{id}``.
 # The APScheduler is real (one per test, see conftest); LiveKit is the stateful
 # mock from conftest.
+#
+# Also (live-check finding on #2314): a meeting-room call that everyone simply
+# LEFT goes back to ``scheduled`` (link still joins, same row) when the call-bot
+# exits on the empty room, and the list self-heals a meeting-room row that says
+# ``in_progress`` with no humans in its room. "End for everyone" still ends it
+# (410 on the link). Chat-room call rows keep today's behaviour.
 
 from __future__ import annotations
 
 import os
 import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pocketpaw_ee.cloud.meetings.providers.livekit  # noqa: F401,I001 — registers provider
@@ -25,12 +32,15 @@ from pocketpaw_ee.cloud.chat import group_service
 from pocketpaw_ee.cloud.livekit import service as livekit_service
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.bridges import calendar as calendar_bridge
-from pocketpaw_ee.cloud.meetings.dto import CreateMeetingRequest
+from pocketpaw_ee.cloud.meetings.dto import CreateMeetingRequest, ListMeetingsRequest
 from pocketpaw_ee.cloud.meetings.scheduling import reminders
 from pocketpaw_ee.cloud.models.meeting import Meeting
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.models.workspace import Workspace
 from pocketpaw_ee.cloud.shared.events import EventBus
+
+# The real reaper: the ``lk`` fixture swaps it for a mock, so keep a handle first.
+_REAP = livekit_service._reap_agent_process
 
 # Wednesday 9 January 2030, 14:00 UTC — far enough out that no job fires mid-test.
 START = datetime(2030, 1, 9, 14, 0, tzinfo=UTC)
@@ -676,3 +686,159 @@ def test_calendar_registers_edit_listener(monkeypatch):
 
     assert bus._handlers["meeting.edited"] == [calendar_bridge._on_meeting_edited]
     assert "meeting.updated" not in bus._handlers  # the Recall webhook upsert stays out
+
+
+# ---------------------------------------------------------------------------
+# Everyone leaves vs. end for everyone
+# ---------------------------------------------------------------------------
+
+
+async def _joined(client, lk, *, human: bool = True):
+    """A for-later meeting the host joined by code; the host is in the call."""
+    ws_id = await _workspace()
+    host = await _user("Hana Host")
+    out = await _meeting(ws_id, host)
+    client.act_as(host, ws_id)
+    resp = await client.post(f"/api/v1/meetings/by-code/{out.code}/join")
+    assert resp.status_code == 200, resp.text
+    if human:
+        lk.participants.append(SimpleNamespace(identity=host, name=host, joined_at=0, kind=0))
+    return ws_id, host, out
+
+
+async def _bot_exits_on_empty_room(lk, room: str, ws_id: str) -> None:
+    """The call-bot leaves 5 s after the last human; its reaper runs."""
+    lk.participants.clear()
+    livekit_service._active_agents[room] = MagicMock()
+    proc = SimpleNamespace(wait=AsyncMock(return_value=0), returncode=0)
+    await _REAP(room, proc, ws_id)
+
+
+async def test_everyone_leaving_puts_the_meeting_back_to_scheduled(client, lk, recording_bus):
+    ws_id, host, out = await _joined(client, lk)
+    before = await Meeting.get(out.id)
+    assert before.status == "in_progress"
+    started, expires = before.actual_start, before.link_expires_at
+    before.call_budget_deadline = datetime.now(UTC) + timedelta(hours=1)  # a capped plan's
+    await before.save()
+
+    await _bot_exits_on_empty_room(lk, out.room_group_id, ws_id)
+
+    row = await Meeting.get(out.id)
+    assert row.status == "scheduled"
+    assert row.code and row.code.replace("-", "") == out.code.replace("-", "")
+    assert row.actual_start == started  # history kept
+    assert row.link_expires_at == expires
+    assert row.call_budget_deadline is None
+    updates = [e.data for e in recording_bus.events if e.type == "meeting.updated"]
+    assert updates and updates[-1]["group_id"] == out.room_group_id
+    assert updates[-1]["meeting_id"] == out.id
+
+    resp = await client.post(f"/api/v1/meetings/by-code/{out.code}/join")  # link still works
+
+    assert resp.status_code == 200
+    assert (await Meeting.get(out.id)).status == "in_progress"
+    assert await Meeting.find_all().count() == 1
+
+
+async def test_bot_exit_leaves_the_meeting_live_if_someone_is_back(client, lk):
+    ws_id, host, out = await _joined(client, lk)
+    livekit_service._active_agents[out.room_group_id] = MagicMock()
+    proc = SimpleNamespace(wait=AsyncMock(return_value=0), returncode=0)
+
+    await _REAP(out.room_group_id, proc, ws_id)  # host still in
+
+    assert (await Meeting.get(out.id)).status == "in_progress"
+
+
+async def test_end_for_everyone_ends_it_and_the_link_is_gone(client, lk):
+    ws_id, host, out = await _joined(client, lk)
+    lk.svc.delete_room = AsyncMock()
+
+    resp = await client.delete(f"/api/v1/livekit/rooms/{out.room_group_id}")
+
+    assert resp.status_code == 200, resp.text
+    assert (await Meeting.get(out.id)).status == "ended"
+    # A late reaper run (the bot was already stopped) must not revive it.
+    proc = SimpleNamespace(wait=AsyncMock(return_value=0), returncode=0)
+    await _REAP(out.room_group_id, proc, ws_id)
+    assert (await Meeting.get(out.id)).status == "ended"
+    join = await client.post(f"/api/v1/meetings/by-code/{out.code}/join")
+    assert join.status_code == 410
+    assert join.json()["error"]["code"] == "meeting.ended"
+
+
+async def test_everyone_leaving_a_chat_room_call_keeps_todays_behaviour(mongo_db, lk):
+    ws_id = await _workspace()
+    row = Meeting(
+        workspace=ws_id,
+        source="livekit",
+        provider_meeting_id="group-call-chat1",
+        title="Team call",
+        join_url="",
+        status="in_progress",
+        actual_start=datetime.now(UTC) - timedelta(hours=1),
+        raw_provider_payload={"group_id": "chat1"},
+    )
+    await row.insert()
+
+    await _bot_exits_on_empty_room(lk, "chat1", ws_id)
+    await meetings_service.list_meetings(ws_id, ListMeetingsRequest())
+
+    assert (await Meeting.get(row.id)).status == "in_progress"
+
+
+async def _stale_live_row(client, lk, *, started_ago: timedelta):
+    ws_id, host, out = await _joined(client, lk, human=False)
+    row = await Meeting.get(out.id)
+    row.raw_provider_payload = {
+        **row.raw_provider_payload,
+        "call_started_at": (datetime.now(UTC) - started_ago).isoformat(),
+    }
+    await row.save()
+    return ws_id, out
+
+
+async def test_list_self_heals_a_meeting_room_with_nobody_in_it(client, lk, recording_bus):
+    ws_id, out = await _stale_live_row(client, lk, started_ago=timedelta(minutes=10))
+
+    listed = await meetings_service.list_meetings(ws_id, ListMeetingsRequest())
+
+    assert [m.status for m in listed] == ["scheduled"]
+    assert (await Meeting.get(out.id)).status == "scheduled"
+    assert any(e.type == "meeting.updated" for e in recording_bus.events)
+
+
+async def test_list_leaves_a_just_started_call_alone(client, lk):
+    """Between create_room and the host's client connecting, nobody is in the room yet."""
+    ws_id, out = await _stale_live_row(client, lk, started_ago=timedelta(seconds=20))
+
+    listed = await meetings_service.list_meetings(ws_id, ListMeetingsRequest())
+
+    assert [m.status for m in listed] == ["in_progress"]
+
+
+async def test_list_leaves_a_meeting_room_with_someone_in_it(client, lk):
+    ws_id, out = await _stale_live_row(client, lk, started_ago=timedelta(minutes=10))
+    lk.participants.append(SimpleNamespace(identity="u", name="u", joined_at=0, kind=0))
+
+    listed = await meetings_service.list_meetings(ws_id, ListMeetingsRequest())
+
+    assert [m.status for m in listed] == ["in_progress"]
+
+
+async def test_list_times_the_grace_from_the_latest_call_not_the_first(client, lk):
+    """A meeting used an hour ago and rejoined just now keeps its old actual_start;
+    the new call's start is what the grace counts from."""
+    ws_id = await _workspace()
+    host = await _user("Hana Host")
+    out = await _meeting(ws_id, host)
+    row = await Meeting.get(out.id)
+    row.actual_start = datetime.now(UTC) - timedelta(hours=1)
+    await row.save()
+    client.act_as(host, ws_id)
+    assert (await client.post(f"/api/v1/meetings/by-code/{out.code}/join")).status_code == 200
+
+    listed = await meetings_service.list_meetings(ws_id, ListMeetingsRequest())
+
+    assert [m.status for m in listed] == ["in_progress"]

@@ -146,7 +146,7 @@ Only a dated meeting sends the "Meeting scheduled" notification, worded "<title>
 
 A meeting past its link expiry, or one that is `ended`, `cancelled` or `failed`, can't be joined. An undated meeting whose link expires before anyone joins is marked `ended` the next time the workspace's meetings are listed.
 
-When everyone leaves a call, LiveKit closes the empty room after 5 minutes and the meeting stays `in_progress`; the next join starts a fresh call on the same meeting. Ending the call for everyone (`DELETE /livekit/rooms/{group_id}`) marks the meeting `ended`, and its link stops working.
+When everyone leaves a meeting-room call, the call-bot leaves 5 seconds later and the meeting goes back to `scheduled`. Its code, link, link expiry and `actual_start` stay, members of the room get `meeting.updated`, and the next join starts a fresh call on the same meeting row. If the bot never ran, `GET /meetings` does the same for an `in_progress` meeting-room meeting whose room has nobody in it, once its current call is more than 2 minutes old (so a call whose host is still connecting isn't caught). Ending the call for everyone (`DELETE /livekit/rooms/{group_id}`) marks the meeting `ended`, and its link stops working (410 `meeting.ended`). Calls on an ordinary chat room are unchanged: their meeting row stays `in_progress` when everyone leaves.
 
 ## Joining by Code
 
