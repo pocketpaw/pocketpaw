@@ -30,7 +30,10 @@ carries the same guard as its siblings; see
 2026-09-30 (fix/livekit-call-security): ``/token`` now refuses any room name
 that isn't ``group-call-<id>`` for a group the caller belongs to in their
 workspace (it used to check only ``group-call-*`` names). See
-``tests/cloud/livekit/test_token_room_access.py``."""
+``tests/cloud/livekit/test_token_room_access.py``. The public invite join
+takes an optional ``email`` and the server enforces the invite's allow-list;
+validate returns ``requires_email`` instead of the list
+(``test_invite_email_allowlist.py``)."""
 
 from __future__ import annotations
 
@@ -569,6 +572,7 @@ class ValidateInviteResponse(BaseModel):
     group_id: str
     workspace_id: str
     display_name: str
+    requires_email: bool = False
     is_call_active: bool = False
     participant_count: int = 0
     expires_at: str
@@ -579,6 +583,11 @@ class ValidateInviteResponse(BaseModel):
 class JoinInviteRequest(BaseModel):
     display_name: str = Field(
         ..., min_length=1, max_length=80, description="Display name shown to other participants"
+    )
+    email: str | None = Field(
+        default=None,
+        max_length=320,
+        description="Guest email; required when the invite has an email allow-list",
     )
 
 
@@ -689,7 +698,7 @@ async def join_via_invite(token: str, body: JoinInviteRequest):
     """
     from pocketpaw_ee.cloud.livekit import invites as invite_service
 
-    result = await invite_service.accept_meeting_invite(token, body.display_name)
+    result = await invite_service.accept_meeting_invite(token, body.display_name, body.email)
     return JoinInviteResponse(**result)
 
 
