@@ -889,6 +889,53 @@ When the pocket already matches its template the write is **skipped**
 preview route, plus `403` when the caller lacks edit access — enforced even on
 the skipped no-write path so a non-editor cannot probe sync state.
 
+## Pockets — Duplicate a Site
+
+### `POST /pockets/{pocket_id}/duplicate`
+
+Copy a site pocket (`type: "site"`) into a new, independent site pocket owned by
+the caller. The original is not modified. Read access is enough: the caller must
+be able to read the source pocket under the same within-workspace rule as
+`GET /pockets/{id}`.
+
+The copy carries exactly the authored site: `engine`, `pattern`, `rippleSpec`,
+`source` (the whole map, including `paw.dependencies.json` and a dynamic site's
+`objects` / `sources` / `actions` / `auth` keys) and `keepsClientBundle`. Nothing else is copied: no sharing, team,
+agents, widgets, tools, connector allowlist (the copy allows none), surface
+profile or project, and nothing from the source's Site row (slug, domains, D1
+database, deployment).
+
+The copy gets its own fresh DRAFT Site row so it lists in the sites gallery. That
+row is never built or deployed and nothing is billed. Visibility: a private
+source gives a private copy; any other source (workspace or public) gives a
+workspace-visible copy, so a public site is never re-published. Emits
+`PocketCreated` and `site.created`.
+
+Source gate: the copy is never less gated than a new pocket. It is gated if the
+source is gated or if the source gate is on at copy time, so an older exempt
+pocket does not pass its exemption to a copy.
+
+Audit: a successful copy writes one `pocket.duplicated` workspace audit event
+(`actorId` = caller, `targetId` = new pocket id, metadata `source_pocket_id` and
+`source_visibility`). The write is best-effort; a refused duplicate writes none.
+
+Request body (optional):
+
+```json
+{ "name": "Spring launch" }
+```
+
+`name` defaults to `"<source name> (copy)"`, with the source name trimmed so the
+result fits the 100-character limit.
+
+Response `200`: the new pocket's wire dict, the same shape `POST /pockets`
+returns.
+
+Returns `404` for a missing or cross-tenant pocket, `403` when the caller can't
+read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site,
+and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
+Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in
