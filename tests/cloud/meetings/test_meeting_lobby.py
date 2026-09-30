@@ -329,8 +329,11 @@ async def test_guest_token_never_outlives_the_admission(client, lk) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("how", ["missing", "wrong", "other_code", "bad_id"])
+@pytest.mark.parametrize(
+    "how", ["missing", "wrong", "other_code", "bad_id", "unknown_code", "junk_code"]
+)
 async def test_status_needs_the_right_secret(client, lk, how) -> None:
+    """Every miss is the same 404, so poll/cancel can't probe which codes exist."""
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
     code = s.m.code
@@ -346,6 +349,10 @@ async def test_status_needs_the_right_secret(client, lk, how) -> None:
         code = other.code
     elif how == "bad_id":
         knock = {**knock, "knock_id": "not-an-id"}
+    elif how == "unknown_code":
+        code = "abc-defg-hjk"
+    elif how == "junk_code":
+        code = "not-a-code"
 
     resp = await _poll(client, code, knock, secret=secret)
     sent = {} if secret is False else {"x-knock-secret": secret or knock["secret"]}
@@ -354,8 +361,12 @@ async def test_status_needs_the_right_secret(client, lk, how) -> None:
         headers={**GUEST_IP, **sent},
     )
 
-    assert resp.status_code == 404
-    assert cancel.status_code == 404
+    for r in (resp, cancel):
+        assert r.status_code == 404
+        assert r.json()["error"] == {
+            "code": "meeting_knock.not_found",
+            "message": "meeting_knock not found",
+        }
     assert (await MeetingKnock.find_one()).status == "waiting"
 
 

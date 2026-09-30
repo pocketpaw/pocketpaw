@@ -394,5 +394,14 @@
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
+  },
+  {
+    "label": "guest knock: unknown code answers differently",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "    except NotFound:\n        raise miss from None  # don't tell",
+    "replace": "    except KeyError:\n        raise miss from None  # don't tell",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
   }
 ]

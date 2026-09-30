@@ -160,7 +160,10 @@ async def _guest_knock(
         oid = PydanticObjectId(knock_id)
     except Exception:
         raise miss from None
-    meeting = await meetings_service._find_by_code(code)
+    try:
+        meeting = await meetings_service._find_by_code(code)
+    except NotFound:
+        raise miss from None  # don't tell a knock-id prober which codes exist
     knock = await _KnockDoc.find_one(
         {"_id": oid, "meeting": str(meeting.id), "workspace": meeting.workspace}
     )
