@@ -650,6 +650,25 @@ async def test_deciding_twice_is_409(client, lk) -> None:
     assert (await MeetingKnock.find_one()).status == "admitted"
 
 
+async def test_concurrent_admit_and_deny_over_http_one_wins(client, lk, recording_bus) -> None:
+    import asyncio
+
+    s = await _setup(lk)
+    knock = (await _knock(client, s.m.code)).json()
+    client.act_as(s.host, s.ws)
+    base = f"/api/v1/meetings/{s.m.id}/knocks/{knock['knock_id']}"
+
+    results = await asyncio.gather(
+        client.post(f"{base}/admit"), client.post(f"{base}/deny"), client.post(f"{base}/admit")
+    )
+
+    codes = sorted(r.status_code for r in results)
+    assert codes == [200, 409, 409]
+    winner = next(r.json()["status"] for r in results if r.status_code == 200)
+    assert (await MeetingKnock.find_one()).status == winner
+    assert [e["status"] for e in _events(recording_bus, "meeting.knock_resolved")] == [winner]
+
+
 async def test_two_members_racing_only_one_decision_lands(client, lk, recording_bus) -> None:
     s = await _setup(lk)
     knock = (await _knock(client, s.m.code)).json()
