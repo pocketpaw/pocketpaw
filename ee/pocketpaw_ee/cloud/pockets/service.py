@@ -2240,8 +2240,13 @@ async def copy_site_snapshot(
     template_id: str | None = None,
     template_version: int | None = None,
     source_gated: bool | None = None,
+    visibility: str = "private",
 ) -> dict:
     """Create a new site pocket owned by ``owner`` from a ``SITE_SNAPSHOT_FIELDS`` dict.
+
+    No authorization happens here: the caller has already decided ``owner`` may
+    have this content, and picks ``visibility`` (default ``"private"``, the safe
+    choice for a caller that forgets).
 
     The snapshot is deep-copied, so the new pocket shares no mutable state with
     whatever it came from. It is written as-is: no ripple normalization or catalog
@@ -2263,6 +2268,7 @@ async def copy_site_snapshot(
         name=name,
         type="site",
         owner=owner,
+        visibility=visibility,
         engine=snap["engine"] or "ripple",
         pattern=snap["pattern"],
         rippleSpec=snap["rippleSpec"],
@@ -2321,8 +2327,12 @@ async def duplicate_pocket(
         snapshot,
         workspace_id=workspace_id,
         owner=user_id,
-        name=body.name or f"{source.name} (copy)",
+        # ``name`` is capped at 100 like the request body; trim the source name to fit.
+        name=body.name or f"{source.name[:93]} (copy)",
         source_gated=source.source_gated,
+        # A private site stays private; anything else lands workspace-visible,
+        # so duplicating a public site never publishes a second one.
+        visibility="private" if source.visibility == "private" else "workspace",
     )
 
 

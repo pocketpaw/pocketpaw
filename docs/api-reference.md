@@ -895,16 +895,22 @@ the skipped no-write path so a non-editor cannot probe sync state.
 
 Copy a site pocket (`type: "site"`) into a new, independent site pocket owned by
 the caller. The original is not modified. Read access is enough: the caller must
-be able to read the source pocket under the same rule as `GET /pockets/{id}`.
+be able to read the source pocket under the same within-workspace rule as
+`GET /pockets/{id}`.
 
 The copy carries exactly the authored site: `engine`, `pattern`, `rippleSpec`,
 `source` (the whole map, including `paw.dependencies.json` and a dynamic site's
 `objects` / `sources` / `actions` / `auth` keys) and `keepsClientBundle`, plus
-the source pocket's source-gate cohort. Nothing else is copied: no Site row
-(slug, domains, database, deployment), no sharing, team, agents, widgets, tools,
-connector allowlist, surface profile or project. The copy starts unpublished,
-with default visibility and no connectors allowed, and a `PocketCreated` event
-fires.
+the source pocket's source-gate cohort. Nothing else is copied: no sharing, team,
+agents, widgets, tools, connector allowlist (the copy allows none), surface
+profile or project, and nothing from the source's Site row (slug, domains, D1
+database, deployment).
+
+The copy gets its own fresh DRAFT Site row so it lists in the sites gallery. That
+row is never built or deployed and nothing is billed. Visibility: a private
+source gives a private copy; any other source (workspace or public) gives a
+workspace-visible copy, so a public site is never re-published. Emits
+`PocketCreated` and `site.created`.
 
 Request body (optional):
 
@@ -912,7 +918,8 @@ Request body (optional):
 { "name": "Spring launch" }
 ```
 
-`name` defaults to `"<source name> (copy)"`.
+`name` defaults to `"<source name> (copy)"`, with the source name trimmed so the
+result fits the 100-character limit.
 
 Response `200`: the new pocket's wire dict, the same shape `POST /pockets`
 returns.

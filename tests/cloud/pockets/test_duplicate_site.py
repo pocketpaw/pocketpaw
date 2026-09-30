@@ -5,8 +5,9 @@
 # ``source_gated`` cohort stamp into a new site pocket the caller owns, through
 # ``copy_site_snapshot``. These tests pin, per site track, that the copy is
 # faithful and independent, that the copy gets its own draft Site row and nothing
-# else rides along (no sharing), and the three refusals: cross-tenant (404),
-# unreadable private (403), not a site (422). Mutation plan: tests/mutations/pocket_duplicate.json.
+# else rides along (no sharing, no connectors), that a private site stays
+# private, and the refusals: cross-tenant (404), unreadable private (403), not a
+# site (422), plan cap (402). Mutation plan: tests/mutations/pocket_duplicate.json.
 from __future__ import annotations
 
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core.errors import PocketLimitError
 from pocketpaw_ee.cloud.models.pocket import Pocket as PocketDoc
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.cloud.pockets import service as pockets_service
@@ -97,6 +99,7 @@ async def test_copy_is_faithful_per_track(track: str) -> None:
     # Nothing outside the snapshot rides along.
     assert copy.shared_with == [] and copy.team == [] and copy.tool_specs == []
     assert copy.share_link_token is None
+    assert copy.allowed_connectors == []
     # The copy lists in the gallery through a fresh DRAFT Site of its own.
     sites = await Site.find_all().to_list()
     assert len(sites) == 1
@@ -105,10 +108,53 @@ async def test_copy_is_faithful_per_track(track: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_gated_false_is_inherited_too() -> None:
+async def test_source_gated_false_is_inherited_too(monkeypatch) -> None:
+    # Gate ON, so the create-time stamp would be True: only inheritance keeps False.
+    from pocketpaw.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "sites_source_gate_enabled", True)
     src = await _site(source_gated=False, **SITES["svelte"])
     wire = await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
     assert (await PocketDoc.get(wire["_id"])).source_gated is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_visibility", "caller", "expected"),
+    [
+        ("private", OWNER, "private"),
+        ("private", STRANGER, "private"),  # a shared_with collaborator
+        ("workspace", OWNER, "workspace"),
+        ("public", OWNER, "workspace"),  # never re-publicize
+    ],
+)
+async def test_copy_visibility(source_visibility: str, caller: str, expected: str) -> None:
+    src = await _site(visibility=source_visibility, shared_with=[STRANGER], **SITES["svelte"])
+    wire = await pockets_service.duplicate_pocket(WS, caller, str(src.id), {})
+    copy = await PocketDoc.get(wire["_id"])
+    assert copy.visibility == expected
+    assert copy.owner == caller
+
+
+@pytest.mark.asyncio
+async def test_default_name_fits_the_name_cap() -> None:
+    src = await _site(**{**SITES["svelte"], "name": "x" * 100})
+    wire = await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+    assert wire["name"] == "x" * 93 + " (copy)"
+
+
+@pytest.mark.asyncio
+async def test_at_pocket_cap_writes_nothing(monkeypatch) -> None:
+    src = await _site(**SITES["svelte"])
+
+    async def _exceeded(workspace_id: str) -> tuple[bool, int, int | None]:
+        return (True, 5, 5)
+
+    monkeypatch.setattr(pockets_service, "_pocket_cap_exceeded", _exceeded)
+    with pytest.raises(PocketLimitError):
+        await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+    assert await PocketDoc.find_all().count() == 1
+    assert await Site.find_all().count() == 0
 
 
 @pytest.mark.asyncio
