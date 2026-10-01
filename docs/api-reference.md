@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-01 (feat/discover-index) — Site templates gain `kind`,
+  `audiences` (accepted on save and PATCH) and `live_url` (the source site's
+  deployed URL) on every response; public, unhidden templates are mirrored into
+  the Discover index.
 Updated: 2026-10-01 (feat/atlas-canonical) — added "Atlas — Surfaces, Verbs and
   Search" (GET /api/v1/atlas/{surfaces,verbs,search}), and `open_surface`'s
   route list now comes from atlas (`agent_openable` surfaces). Review pass: the
@@ -998,6 +1002,9 @@ the owner:
   "is_mine": false,
   "hidden": false,
   "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
+  "kind": "site",
+  "audiences": ["shop"],
+  "live_url": "https://bakery.pawsites.workers.dev",
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
@@ -1012,6 +1019,13 @@ best-effort: no screenshot yet, no public asset bucket on the deployment, or a
 file that isn't a PNG, JPEG, GIF or WebP image leaves it `null` and the save
 still succeeds. Deleting the template removes the image.
 
+`kind` (`site`, the default, `tool` or `game`) and `audiences` (any of `shop`,
+`design`, `everyone`, `fun`; default `[]`) describe the template for the
+Discover index. `live_url` is the source site's live URL when that site is
+deployed, else `null`; it is re-read on save and on every `PATCH`. A public
+template that reports have not hidden is listed in Discover; making it private,
+hiding it or deleting it removes the listing.
+
 Events: `site_template.saved`, `site_template.updated`, `site_template.deleted`
 (to the owner) and `site_template.used` (to the user who used it, with the new
 `pocket_id`). Nothing fans out to a workspace or to all users. Audit,
@@ -1025,7 +1039,7 @@ workspace; `site_template.used` and `.reported` in the acting user's workspace
 Save a site pocket as a template the caller owns.
 
 ```json
-{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private" }
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [] }
 ```
 
 `name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
@@ -1059,7 +1073,7 @@ One template's metadata, if you can see it; otherwise `404`.
 
 ### `PATCH /site-templates/{template_id}`
 
-Change any of `name`, `description`, `visibility`. Owner only (`404` for anyone
+Change any of `name`, `description`, `visibility`, `kind`, `audiences`. Owner only (`404` for anyone
 else). Setting `visibility` to `public` runs the publish checks. `version` does
 not change. Response `200`: the metadata.
 
