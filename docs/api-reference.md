@@ -1044,16 +1044,21 @@ renewal_date, partner_client_id, subscription_status}`.
   its plan.
 - Selling the sku a site already holds and pays for is a no-op apart from the
   client stamp: no second debit, no redeploy.
-- **409** `partners.site_on_plan` for a site carried by the workspace plan, and
-  `partners.foreign_site` for a concierge-only (foreign) site.
+- **409** `partners.site_on_plan` when the site is carried by the workspace
+  plan; **409** `partners.foreign_site` when it is a concierge-only (foreign)
+  site.
 - A site already on a monthly paid plan pays the full year price (no credit for
   the rest of the month) and its year starts today. **409**
-  `sites.plan_already_bought_today` if the site already bought that plan today.
+  `sites.plan_already_bought_today` if that same change was already charged today.
 - The same rules apply to `POST /sites/publish`: moving a site whose year is still
   running to a monthly plan is **409** `sites.period_downgrade_refused`.
+- Re-buying a partner plan on a lapsed site goes through the same checks as a new
+  sale: **403** `sites.partner_plan_only` if the partner is no longer active.
 - Renewals happen on their own: the site-renewal sweep debits the partner price
   when `renewal_date` passes and steps it 12 months, or lapses the site to the
-  free tier (still published) when the wallet is short.
+  free tier (still published) when the wallet is short. If the partner profile has
+  been removed, the renewal reuses the price last paid only when that is a real
+  price of the plan; otherwise it is retried, never charged at a guessed price.
 
 ### `GET /partners/sites`
 

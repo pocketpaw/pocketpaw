@@ -358,9 +358,15 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
   `partner_price_usd(tier, country)`; the country is the partner profile's
   `billing_country`. `billing.service.site_plan_price_usd` is what every charge
   site calls, and for a monthly rung it is still `monthly_price_usd`.
-- The rungs are **not** in the public catalog (`list_site_plans`). A publish or a
-  plan request naming one outside an active partner workspace is refused
-  (`sites.partner_plan_only`). They are never carried by the workspace plan.
+- The rungs are **not** in the public catalog (`list_site_plans`). A publish
+  naming one outside an active partner workspace is refused with **403**
+  `sites.partner_plan_only` — and so is re-buying one on a lapsed site once the
+  partner is suspended. The member plan-request door never takes them: `POST
+  /sites/plan-requests` answers **422** `sites.unknown_plan_tier`, and the propose
+  step refuses them too. They are never carried by the workspace plan.
+- Re-buying the tier a LAPSED (or pending) site still names is a purchase, so it
+  needs `sites.buy_plan` like any other (`sites.plan_purchase_forbidden` for a
+  member). This applies to every workspace, not only partners.
 - `monthly_price_usd` on these rows is display-only (year price / 12, rounded
   down). Nothing charges it.
 - **Renewals ride the same sweep.** A due `site_year` site is debited the partner
@@ -374,14 +380,30 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
   before `renewal_date` is refused with `sites.period_downgrade_refused` ("This
   site is paid through <date>. Switch plans when it renews."), with no charge and
   no change. After the date it is a fresh monthly purchase.
-- A same-day re-buy of a tier the site already paid for that day is refused
-  (`sites.plan_already_bought_today`): the debit key is per (site, tier, day), so
-  the charge would replay as a no-op and hand out a new period for nothing.
+- **Tier-change debits have their own key** (`site_plan:<site>:<tier>:<date>:change`).
+  Purchases and renewals keep `site_plan:<site>:<tier>:<date>`. Before this, an
+  upgrade made on a renewal's due date shared that renewal's key, the renewal
+  replayed as a no-op, and the whole next period was free (monthly too).
+- A period change that would replay a `:change` debit already made today is
+  refused (`sites.plan_already_bought_today`) rather than restarting the period
+  for nothing.
 - Changes within the same period length keep the old rule: pay the difference
-  against `period_paid_usd`, keep the date.
-- If a partner's profile is removed, its yearly sites renew at the price they
-  last paid (`period_paid_usd`). With no price to keep, the renewal fails and is
-  retried (and logged) rather than charging a guessed default.
+  against `period_paid_usd`, keep the date. The rule is
+  `billing.service.site_plan_change_terms` (pure; unit-tested).
+- If a partner's profile is removed, its yearly sites renew at `period_paid_usd`
+  **only when that is a real price of the tier** (17 or 29 for `site_year`, 56 or
+  89 for `staff_year`). `period_paid_usd` is a high-water mark, so after a
+  mid-year `staff_year` → `site_year` downgrade it reads 89; that renewal fails
+  and is retried (logged) instead of charging $89. An operator restores the
+  profile or fixes the price by hand.
+- **Save race at the yearly → monthly boundary.** Both the renewal sweep and a
+  publish tier change write the whole Site document with `save()`. If an admin
+  moves a site to monthly in the same few seconds the sweep is renewing its year,
+  the later save wins and can drop the other's `plan_tier` / `renewal_date` /
+  `period_paid_usd`. The debits themselves stay idempotent, so money is not taken
+  twice, but the row can disagree with the ledger. If a site's tier and its last
+  `site_plan` ledger row disagree around a renewal, trust the ledger and fix the
+  row.
 - The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
   not from the 1st of the month.
 
