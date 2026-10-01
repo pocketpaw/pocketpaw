@@ -11,6 +11,10 @@
 # no longer refuses svelte/react effects with `needs`; it returns them with a
 # `dependencies` list and a note pointing at set_site_dependencies. Dynamic
 # svelte (pattern=dynamic) still refuses with engine_unsupported.
+# Updated: 2026-10-01 (CN-7, H9) — fixture items take the shape paw-fx's
+# build-registry.mjs emits (neutral files + engines + targets.<engine>); tests
+# cover html/svelte target flattening, an engine with no target, and the path
+# check over target files.
 """MCP server registration + handler tests for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -44,8 +48,28 @@ def _item(name: str, category: str, tags: list[str], summary: str, needs: list[s
         "options": {},
         "files": [{"path": f"_fx/effects/{name}/index.js", "content": "export {}"}]
         + [{"path": f"_fx/vendor/{n}.js", "content": ""} for n in needs],
-        "snippet": f"<section data-fx='{name}'></section>",
-        "usage": "place the snippet",
+        # The shape paw-fx's build-registry.mjs emits: delivery lives under
+        # targets.<engine>. Here (as with paw-fx's non-bundler-safe vendors) an
+        # effect with `needs` ships no svelte target.
+        "engines": ["html"] if needs else ["html", "svelte"],
+        "targets": {
+            "html": {
+                "files": [],
+                "snippet": f"<section data-fx='{name}'></section>",
+                "usage": "place the snippet",
+                "demo": [],
+            },
+            **(
+                {}
+                if needs
+                else {
+                    "svelte": {
+                        "files": [{"path": f"_fx/effects/{name}/Fx.svelte", "content": "<div/>"}],
+                        "usage": "import Fx from '$lib/_fx/...'",
+                    }
+                }
+            ),
+        },
     }
 
 
@@ -179,10 +203,26 @@ class TestGetEffect:
         assert body["engine"] == "html"
         assert body["needs"] == ["paper"]
         assert body["snippet"].startswith("<section")
+        assert body["usage"] == "place the snippet"
+        assert "targets" not in body
         assert {f["path"] for f in body["files"]} == {
             "_fx/effects/paper-waves/index.js",
             "_fx/vendor/paper.js",
         }
+        assert "note" not in body
+
+    @pytest.mark.asyncio
+    async def test_svelte_target_is_flattened_into_the_body(self, registry) -> None:
+        body = _decode(await fx_mcp._get_handler({"name": "aurora-css", "engine": "svelte"}))
+        assert body["engine"] == "svelte"
+        assert body["engines"] == ["html", "svelte"]
+        assert body["usage"].startswith("import Fx")
+        assert "snippet" not in body  # html delivery stays out of a svelte answer
+        assert "targets" not in body
+        assert [f["path"] for f in body["files"]] == [
+            "_fx/effects/aurora-css/index.js",
+            "_fx/effects/aurora-css/Fx.svelte",
+        ]
         assert "note" not in body
 
     @pytest.mark.asyncio
@@ -211,7 +251,9 @@ class TestGetEffect:
         body = _decode(await fx_mcp._get_handler({"name": "aurora-css", "engine": "react"}))
         assert body["engine"] == "react"
         assert "dependencies" not in body
-        assert body["note"].startswith("svelte/react shells not yet available")
+        assert "snippet" not in body and "usage" not in body
+        assert "no react target (it ships: html, svelte)" in body["note"]
+        assert "not yet available" not in body["note"]
 
     @pytest.mark.asyncio
     async def test_dynamic_svelte_refuses_needs(self, registry) -> None:
@@ -250,6 +292,17 @@ class TestGetEffect:
         body = _decode(await fx_mcp._get_handler({"name": "evil"}))
         assert body["error"] == "unsafe_item_paths"
         assert set(body["paths"]) == {"_fx/../../etc/passwd", "index.html"}
+
+    @pytest.mark.asyncio
+    async def test_unsafe_target_file_rejected(self, registry) -> None:
+        """Target files get written into the site too, so the path check covers them."""
+        evil = _item("evil-svelte", "cursor", [], "bad", [])
+        evil["targets"]["svelte"]["files"] = [{"path": "src/routes/+page.svelte", "content": ""}]
+        _write_registry(registry, [evil])
+        os.utime(registry / "registry.json", (0, 4_000_000_002))
+        body = _decode(await fx_mcp._get_handler({"name": "evil-svelte", "engine": "svelte"}))
+        assert body["error"] == "unsafe_item_paths"
+        assert body["paths"] == ["src/routes/+page.svelte"]
 
 
 class TestCategories:

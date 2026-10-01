@@ -22,14 +22,22 @@
 # registry (fail-open, the surface never crashes). Item file paths must start
 # with ``_fx/`` and contain no ``..`` (registry is trusted, the check is cheap).
 #
-# Engines: ``get_effect`` accepts html|svelte|react. Only html has real shells
-# today; svelte/react return the same engine-neutral files with a note.
+# Engines: ``get_effect`` accepts html|svelte|react (see the 2026-10-01 update).
 # Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — svelte and
 # react sites take npm packages now (set_site_dependencies), so an effect with
 # ``needs`` is no longer refused there: it comes back with a ``dependencies`` list
 # ready to declare and a note saying to import it client-side. Only a DYNAMIC
 # svelte site (optional ``pattern="dynamic"``) still refuses, with the same
 # ``engine_unsupported`` code set_site_dependencies returns.
+# Updated: 2026-10-01 (CN-7, H9) — reads the registry item the way paw-fx builds it
+# (scripts/build-registry.mjs since paw-fx #24): identity + engine-neutral
+# ``files`` at the top, per-engine delivery under ``targets.<engine>``
+# (html: snippet/usage/demo; svelte: a generated component + usage). get_effect
+# flattens ``targets[engine]`` into the body and appends its files after the
+# neutral ones; the path check covers both. An engine the item has no target for
+# (react today, and svelte for effects whose vendor bundle is not bundler-safe)
+# gets the neutral files and a note naming the engines it does ship. The stale
+# "svelte/react shells not yet available" note is gone.
 """Agent-side MCP surface for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -217,6 +225,12 @@ async def _get_handler(args: dict) -> dict:
         logger.warning("fx: item %s is unreadable", item_path)
         return _structured_error({"error": "unknown_effect", "name": name, "suggestions": []})
 
+    targets = item.pop("targets", None)
+    target = targets.get(engine) if isinstance(targets, dict) else None
+    if isinstance(target, dict):
+        item.update({k: v for k, v in target.items() if k != "files"})
+        item["files"] = [*(item.get("files") or []), *(target.get("files") or [])]
+
     bad = [f.get("path") for f in item.get("files") or [] if not _safe_path(f.get("path"))]
     if bad:
         logger.warning("fx: item %s has unsafe file paths %r", name, bad)
@@ -229,16 +243,23 @@ async def _get_handler(args: dict) -> dict:
             {"error": "engine_unsupported", "needs": needs, "engine": engine, "pattern": pattern}
         )
     item["engine"] = engine
+    notes = []
     if engine != "html" and needs:
         item["dependencies"] = [{"name": n} for n in needs]
         mount = "onMount" if engine == "svelte" else "a useEffect dynamic import()"
-        item["note"] = (
+        notes.append(
             "Declare `dependencies` with set_site_dependencies before using this effect, "
             f"import them inside {mount} (never at top level), and skip the _fx/vendor "
-            "copies. Files are engine-neutral."
+            "copies."
         )
-    elif engine != "html":
-        item["note"] = "svelte/react shells not yet available; files are engine-neutral"
+    if not isinstance(target, dict):
+        shipped = ", ".join(item.get("engines") or []) or "none"
+        notes.append(
+            f"This effect has no {engine} target (it ships: {shipped}). The files are "
+            "engine-neutral: load its index.js and call mount(el, options) client-side."
+        )
+    if notes:
+        item["note"] = " ".join(notes)
     return _success_response(item)
 
 
@@ -293,11 +314,14 @@ def build_fx_server() -> tuple[str, Any] | None:
     @tool(
         "get_effect",
         (
-            "Fetch one paw-fx effect by `name`: its files (write each `path` "
-            "verbatim into the site, all live under `_fx/`), the HTML `snippet` "
-            "to place, `usage` notes and `options`. Optional `engine` "
-            "(html|svelte|react, default html) and `pattern` (pass 'dynamic' for a "
-            "dynamic svelte site). On svelte/react an effect with `needs` returns "
+            "Fetch one paw-fx effect by `name` for an `engine` (html|svelte|react, "
+            "default html): its files (write each `path` verbatim into the site, all "
+            "live under `_fx/`), `options`, and that engine's delivery: on html the "
+            "`snippet` to place plus `usage`; on svelte a component file plus `usage` "
+            "showing the import. `engines` lists what the effect ships; an engine "
+            "without a target gets the neutral files and a `note`. Optional "
+            "`pattern` (pass 'dynamic' for a dynamic svelte site). On svelte/react an "
+            "effect with `needs` returns "
             "`dependencies` to declare via set_site_dependencies plus a `note`. "
             "Errors are structured: {error:'unknown_effect', suggestions} or, on a "
             "dynamic svelte site, {error:'engine_unsupported', needs}."
