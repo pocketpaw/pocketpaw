@@ -265,7 +265,10 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
-from pocketpaw_ee.cloud.models.notification_outbox import NotificationOutboxItem
+from pocketpaw_ee.cloud.models.notification_outbox import (
+    NotificationOutboxItem,
+    NotificationRateMarker,
+)
 from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -454,6 +457,7 @@ __all__ = [
     "Notification",
     "NotificationDeliveryConfig",
     "NotificationOutboxItem",
+    "NotificationRateMarker",
     "SiteNotificationSettings",
     "NotificationSource",
     "OAuthAccount",
@@ -529,6 +533,7 @@ def get_all_documents():
         # External-delivery outbox (email / signed webhook / Slack). Only
         # ``ee.cloud.notifications.outbox`` reads or writes it.
         NotificationOutboxItem,
+        NotificationRateMarker,
         # Per-site owner-notification settings. Only
         # ``ee.cloud.leads.notification_settings`` writes it.
         SiteNotificationSettings,

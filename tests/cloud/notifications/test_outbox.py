@@ -651,3 +651,153 @@ async def test_s8_cloudflare_auth_failure_retries_and_rings_admins_once(net, ema
     assert {r.status for r in rows} == {"pending"}  # retried, not dropped
     notes = await _NotificationDoc.find({"type": outbox.EMAIL_FAILING_KIND}).to_list()
     assert [n.recipient for n in notes] == [str(admin.id)]  # once, deduped
+
+
+# ---------------------------------------------------------------------------
+# Re-review fixes
+# ---------------------------------------------------------------------------
+
+
+async def test_two_hosts_on_one_ip_never_share_a_connection(monkeypatch) -> None:
+    """Pinned requests go to the same IP; a shared pool would reuse host A's
+    TLS session for host B. Each host gets its own client (pool), and every
+    request carries its own SNI name."""
+    used: list[tuple[int, str, str]] = []
+
+    real = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        transport_box: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            used.append(
+                (
+                    id(transport_box["t"]),
+                    request.headers["host"],
+                    request.extensions["sni_hostname"],
+                )
+            )
+            return httpx.Response(200)
+
+        transport_box["t"] = httpx.MockTransport(handler)
+        kwargs["transport"] = transport_box["t"]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    a, b = "https://hooks.a.example.com/x", "https://hooks.b.example.com/x"
+    for _ in range(2):
+        for url in (a, b):
+            await outbox.enqueue(
+                workspace="w1",
+                kind="k",
+                sink="webhook",
+                target=url,
+                payload={"data": {}},
+                webhook_ref=f"test:{url}",
+            )
+
+    async def _target(item):
+        return item.target, ["s3cret"]
+
+    monkeypatch.setattr(outbox, "_webhook_target", _target)
+    await outbox.process_due()
+
+    assert len(used) == 4
+    assert all(host == sni for _t, host, sni in used)
+    pools_for = {host: {t for t, h, _s in used if h == host} for _t, host, _s in used}
+    assert pools_for["hooks.a.example.com"].isdisjoint(pools_for["hooks.b.example.com"])
+
+
+def test_safe_fetcher_pools_are_per_host_and_posts_never_keep_alive() -> None:
+    from pocketpaw_ee.sites.safe_fetch import SafeFetcher
+
+    fetcher = SafeFetcher(total_byte_cap=1)
+    a = fetcher._client_for("a.example.com")
+    assert fetcher._client_for("A.example.com") is a
+    assert fetcher._client_for("b.example.com") is not a
+    oneshot = fetcher._client_for("a.example.com", keepalive=False)
+    assert oneshot is not a
+    assert oneshot._transport._pool._max_keepalive_connections == 0
+
+
+async def test_webhook_on_a_non_standard_port_delivers(net) -> None:
+    network = net(httpx.Response(200))
+    url = "https://x.example.com:8443/hook"
+    saved = await notifications_service.set_delivery_config("w1", webhook_url=url, enabled=True)
+    assert saved["webhook_url"] == url
+    await notifications_service.create(workspace_id="w1", recipient="u2", kind="m", title="x")
+    await outbox.process_due()
+    row = await NotificationOutboxItem.find_one({})
+    assert row.status == "sent"
+    req = network.requests[0]
+    assert (req.url.host, req.url.port) == ("93.184.216.34", 8443)
+    assert req.headers["host"] == "x.example.com:8443"
+
+
+@pytest.mark.parametrize("url", ["https://x.example.com:0/h", "https://x.example.com:70000/h"])
+async def test_invalid_ports_are_refused_at_save(url) -> None:
+    with pytest.raises(Forbidden):
+        await notifications_service.set_delivery_config("w1", webhook_url=url, enabled=True)
+
+
+async def test_a_reply_over_the_cap_is_still_a_success(net, slack_config, monkeypatch) -> None:
+    monkeypatch.setattr(outbox, "_WEBHOOK_RESPONSE_CAP", 1024)
+    net(httpx.Response(200, content=b"x" * 5000))
+    await outbox.enqueue(**_slack_row())
+    await outbox.process_due()
+    assert (await NotificationOutboxItem.find_one({})).status == "sent"
+
+
+async def test_email_failing_notice_is_once_even_with_concurrent_workers(email_on) -> None:
+    import uuid
+
+    from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
+    from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
+
+    admin = User(
+        email=f"a{uuid.uuid4().hex[:6]}@x.io",
+        hashed_password="x",
+        is_active=True,
+        is_verified=True,
+        full_name="A",
+        workspaces=[WorkspaceMembership(workspace="w1", role="admin")],
+    )
+    await admin.insert()
+    await asyncio.gather(*(outbox._warn_email_failing("w1", "http 401") for _ in range(8)))
+    notes = await _NotificationDoc.find({"type": outbox.EMAIL_FAILING_KIND}).to_list()
+    assert len(notes) == 1
+    assert "platform team has been alerted" in notes[0].body
+
+
+async def test_claim_marker_gates_once_per_interval() -> None:
+    hour = timedelta(hours=1)
+    now = _t0()
+    assert await outbox.claim_marker("k", hour, now=now) is True
+    assert await outbox.claim_marker("k", hour, now=now + timedelta(minutes=5)) is False
+    assert await outbox.claim_marker("k", hour, now=now + timedelta(hours=2)) is True
+
+
+async def test_saving_the_config_does_not_overwrite_a_concurrent_rotation(monkeypatch) -> None:
+    from pocketpaw_ee.cloud.notifications import service as svc
+
+    await svc.set_delivery_config("w1", webhook_url=WEBHOOK_URL, enabled=True)
+    stale = await svc._find_config("w1")  # read before the rotation lands
+    rotated = await svc.rotate_webhook_secret("w1")
+
+    real_find = svc._find_config
+    calls = {"n": 0}
+
+    async def stale_first(workspace_id):
+        calls["n"] += 1
+        return stale if calls["n"] == 1 else await real_find(workspace_id)
+
+    monkeypatch.setattr(svc, "_find_config", stale_first)
+    await svc.set_delivery_config(
+        "w1", webhook_url=WEBHOOK_URL, enabled=True, routes={"m": ["webhook"]}
+    )
+    monkeypatch.setattr(svc, "_find_config", real_find)
+    doc = await real_find("w1")
+    assert doc.routes == {"m": ["webhook"]}
+    assert doc.webhook_secret_rotated_at is not None and doc.webhook_secret_prev_enc
+    _url, secrets_now = await svc.webhook_target("w1")
+    assert secrets_now[0] == rotated["webhook_secret"]

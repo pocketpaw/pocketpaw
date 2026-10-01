@@ -60,7 +60,27 @@ class NotificationOutboxItem(Document):
             # status + lease_until (lapsed ``sending`` leases).
             IndexModel([("status", 1), ("next_at", 1)]),
             IndexModel([("status", 1), ("lease_until", 1)]),
+            # Rate-limit counts ("confirm emails this workspace sent today").
+            IndexModel([("workspace", 1), ("kind", 1), ("created_at", 1)]),
             # Finished rows expire after 30 days; pending/sending rows have no
             # ``finished_at`` and are never reaped by this index.
             IndexModel([("finished_at", 1)], expireAfterSeconds=86400 * 30),
+        ]
+
+
+class NotificationRateMarker(Document):
+    """A "last done at" marker for one rate-limited action, keyed by an opaque
+    string (``confirm:<ws>:<site>:<email>``, ``email_failing:<ws>``). The unique
+    key makes ``outbox.claim_marker`` an atomic test-and-set, so concurrent
+    workers can't both pass the same once-per-interval gate. It is not tied to
+    a recipient row, so removing and re-adding an address doesn't reset it."""
+
+    key: str
+    at: datetime
+
+    class Settings:
+        name = "notification_rate_markers"
+        indexes = [
+            IndexModel([("key", 1)], unique=True),
+            IndexModel([("at", 1)], expireAfterSeconds=86400 * 2),
         ]

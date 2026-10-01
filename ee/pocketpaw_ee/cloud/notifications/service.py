@@ -202,15 +202,6 @@ async def create_many(
     return created
 
 
-async def has_recent(workspace_id: str, kind: str, since: datetime) -> bool:
-    """Whether a ``kind`` notification was created in ``workspace_id`` since
-    ``since`` (dedupe for once-a-day operational notices)."""
-    doc = await _NotificationDoc.find_one(
-        {"workspace": workspace_id, "type": kind, "createdAt": {"$gte": since}}
-    )
-    return doc is not None
-
-
 async def count_unread(user_id: str) -> int:
     """Return the total count of unread notifications for a user."""
     return await _NotificationDoc.find({"recipient": user_id, "read": False}).count()
@@ -347,24 +338,38 @@ async def set_delivery_config(
     if generic is not None:
         await validate_webhook_url(generic)
 
-    doc = await _find_config(workspace_id)
-    if doc is None:
-        doc = NotificationDeliveryConfig(workspace=workspace_id)
+    current = await _find_config(workspace_id)
+    current_url = current.webhook_url if current is not None else None
+    current_secret = current.webhook_secret_enc if current is not None else ""
+    update: dict = {
+        "slack_webhook_url": slack,
+        "webhook_url": generic,
+        "enabled": enabled,
+        "routes": dict(routes or {}),
+        "webhook_failure_count": 0,
+        "webhook_disabled_at": None,
+        "updatedAt": datetime.now(UTC),
+    }
     new_secret: str | None = None
     if generic is None:
-        doc.webhook_secret_enc = ""
-        doc.webhook_secret_prev_enc = ""
-    elif generic != doc.webhook_url or not doc.webhook_secret_enc:
+        update["webhook_secret_enc"] = ""
+        update["webhook_secret_prev_enc"] = ""
+    elif generic != current_url or not current_secret:
         new_secret = mint_secret()
-        doc.webhook_secret_enc = crypto.encrypt(new_secret)
-        doc.webhook_secret_prev_enc = ""
-    doc.webhook_failure_count = 0
-    doc.webhook_disabled_at = None
-    doc.slack_webhook_url = slack
-    doc.webhook_url = generic
-    doc.enabled = enabled
-    doc.routes = dict(routes or {})
-    await doc.save()
+        update["webhook_secret_enc"] = crypto.encrypt(new_secret)
+        update["webhook_secret_prev_enc"] = ""
+    # Targeted $set (not a whole-document save) so a concurrent secret rotation
+    # or failure-counter update isn't overwritten by a stale copy. The secret
+    # fields are only touched when this save actually changes them.
+    defaults = NotificationDeliveryConfig(workspace=workspace_id).model_dump(
+        exclude={"id", "revision_id", "workspace", *update.keys()}
+    )
+    await _config_collection().update_one(
+        {"workspace": workspace_id},
+        {"$set": update, "$setOnInsert": defaults},
+        upsert=True,
+    )
+    doc = await _find_config(workspace_id)
     return _config_to_dict(doc, webhook_secret=new_secret)
 
 
@@ -461,7 +466,6 @@ __all__ = [
     "count_unread",
     "create",
     "delete_notification",
-    "has_recent",
     "get_delivery_config",
     "list_for_user",
     "list_for_user_dicts",

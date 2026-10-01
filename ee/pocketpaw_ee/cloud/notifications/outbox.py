@@ -18,8 +18,8 @@
 # non-2xx from a webhook, a Cloudflare 401/403) -> back to ``pending`` after 1 m,
 # 5 m, 30 m, 2 h, 6 h, then ``dead``; ``dead`` straight away for a permanent
 # failure (bad request, unsafe or removed webhook, unconfirmed recipient,
-# permanent bounce). A Cloudflare 401/403 also rings the workspace admins once a
-# day ("owner email is failing").
+# permanent bounce). A Cloudflare 401/403 is logged at error level and rings the
+# workspace admins once a day (an atomic marker, ``claim_marker``).
 #
 # Webhooks and Slack go out through ``sites.safe_fetch.SafeFetcher.post``: DNS is
 # resolved and checked at send time (failing closed), and the connection is
@@ -121,6 +121,27 @@ async def count_recent(*, workspace: str, kind: str, since: datetime) -> int:
     return await NotificationOutboxItem.find(
         {"workspace": workspace, "kind": kind, "created_at": {"$gte": since}}
     ).count()
+
+
+async def claim_marker(key: str, interval: timedelta, *, now: datetime | None = None) -> bool:
+    """Atomic once-per-``interval`` gate: True (and the marker is stamped) when
+    ``key`` wasn't done within ``interval``; False otherwise. The unique key
+    means two concurrent callers can't both get True."""
+    from pymongo.errors import DuplicateKeyError
+
+    from pocketpaw_ee.cloud.models.notification_outbox import NotificationRateMarker
+
+    now = now or _now()
+    coll = NotificationRateMarker.get_pymongo_collection()
+    try:
+        await coll.find_one_and_update(
+            {"key": key, "at": {"$lt": now - interval}},
+            {"$set": {"at": now}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -392,25 +413,32 @@ def _site_settings():
     return notification_settings
 
 
-async def _warn_email_failing(workspace_id: str) -> None:
-    """Ring the workspace owner/admins, at most once a day, that owner email is
-    failing on Cloudflare auth. Never raises."""
+async def _warn_email_failing(workspace_id: str, error: str) -> None:
+    """Cloudflare refused our credentials. That's a platform problem, not the
+    workspace's: log it at error level for operators, and tell the workspace's
+    owner/admins (at most once a day, race-safe across workers) that lead email
+    is failing and the platform team knows. Never raises."""
+    logger.error(
+        "owner email: Cloudflare rejected the send credentials (%s); check "
+        "POCKETPAW_CF_EMAIL_API_TOKEN and that sending is enabled for the domain",
+        error,
+    )
     try:
+        if not await claim_marker(f"email_failing:{workspace_id}", timedelta(days=1)):
+            return
         from pocketpaw_ee.cloud.notifications import service as notifications_service
         from pocketpaw_ee.cloud.workspace import service as workspace_service
 
-        since = _now() - timedelta(days=1)
-        if await notifications_service.has_recent(workspace_id, EMAIL_FAILING_KIND, since):
-            return
         admins = await workspace_service.list_admin_ids(workspace_id)
         if admins:
             await notifications_service.create_many(
                 workspace_id=workspace_id,
                 recipients=admins,
                 kind=EMAIL_FAILING_KIND,
-                title="Owner email is failing",
-                body="Cloudflare refused to send lead email. Check the Cloudflare token "
-                "and that email sending is enabled for the domain.",
+                title="Lead email is delayed",
+                body="Lead notification email can't be delivered right now. The platform "
+                "team has been alerted, and queued email will be retried. Leads are "
+                "still saved and shown in the app.",
                 deliver_external=False,
             )
     except Exception:
@@ -445,7 +473,7 @@ async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -
         client=client,
     )
     if result.auth_failure:
-        await _warn_email_failing(item.workspace)
+        await _warn_email_failing(item.workspace, result.error)
     if result.outcome == "retry":
         return Outcome("retry", result.error)
     if result.outcome == "permanent":
@@ -567,6 +595,7 @@ __all__ = [
     "SEND_DEADLINE_SECONDS",
     "WEBHOOK_DISABLE_THRESHOLD",
     "backoff_after",
+    "claim_marker",
     "claim_one",
     "count_recent",
     "deliver",
