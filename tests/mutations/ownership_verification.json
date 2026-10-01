@@ -89,8 +89,8 @@
   {
     "label": "the caller's user_agent is ignored and every fetch wears the importer's UA, undoing the parameter entirely",
     "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
-    "find": "            headers={\"User-Agent\": user_agent, \"Accept\": \"*/*\"},",
-    "replace": "            headers={\"User-Agent\": USER_AGENT, \"Accept\": \"*/*\"},",
+    "find": "                headers={\"User-Agent\": self._user_agent, \"Accept\": \"*/*\"},",
+    "replace": "                headers={\"User-Agent\": USER_AGENT, \"Accept\": \"*/*\"},",
     "tests": [
       "tests/ee/sites/test_domain_ownership.py::test_the_probe_sends_the_verifier_user_agent_not_the_importers"
     ]
