@@ -9,7 +9,9 @@
 # Two layers. The PURE parsers (``parse_shopify_products``, ``parse_woo_products``,
 # ``parse_jsonld_products``, ``parse_og_product``, ``detect_platform``) take bytes
 # or dicts and do no I/O; every product they find goes through ONE normaliser
-# (``_normalise``), which strips HTML, caps lengths, keeps only https images and
+# (``_normalise``), which converts the decimal price to ISO 4217 minor units of
+# its currency (``pocketpaw.money.to_minor``; an unknown currency is "" and
+# converts as 2 decimals), strips HTML, caps lengths, keeps only https images and
 # on-host links (stored as site paths, the form ``concierge_runtime`` matches the
 # visitor's page against), and drops a product with no parseable price. The
 # ORCHESTRATOR fetches: Shopify's ``/products.json`` or WooCommerce's Store API
@@ -47,7 +49,7 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit
@@ -57,6 +59,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from pocketpaw.api.v1.unfurl import MetaParser
+from pocketpaw.money import normalize_currency, to_minor
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.foreign_grounding import GROUNDING_USER_AGENT, crawlable_origin
 from pocketpaw_ee.sites.safe_fetch import (
@@ -111,7 +114,7 @@ class ImportedProduct(BaseModel):
 
     id: str  # "shopify:<id>" | "woo:<id>" | "web:<sha1(path)[:16]>"
     name: str
-    price_cents: int = Field(ge=0)
+    price_cents: int = Field(ge=0)  # ISO 4217 minor units of currency (2 places if unknown)
     currency: str = ""  # ISO 4217, upper-case; "" when unknown
     image_url: str = ""  # https only
     url: str = ""  # site path on the verified host, else ""
@@ -284,13 +287,16 @@ def _normalise(raws: Iterable[_Raw], *, base: str = "", host: str = "") -> Parse
             out.skipped_no_price += 1
             continue
         try:
-            cents = int((raw.price * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+            currency = normalize_currency(raw.currency)
+        except ValueError:
+            currency = ""
+        try:
+            cents = to_minor(raw.price, currency)
         except (ArithmeticError, ValueError):
             cents = -1
         if not 0 <= cents <= _MAX_PRICE_MINOR:
             out.skipped_bad_price += 1
             continue
-        currency = raw.currency.strip().upper() if isinstance(raw.currency, str) else ""
         url = _site_path(raw.url, base, host) if host else ""
         if not url and isinstance(raw.url, str) and raw.url.startswith("/"):
             url = "/" + raw.url.lstrip("/")
@@ -300,7 +306,7 @@ def _normalise(raws: Iterable[_Raw], *, base: str = "", host: str = "") -> Parse
                 id=product_id,
                 name=name,
                 price_cents=cents,
-                currency=currency if re.fullmatch(r"[A-Z]{3}", currency) else "",
+                currency=currency,
                 image_url=_image_url(raw.image, base),
                 url=url if len(url) <= _URL_CHARS else "",
                 description=_clean_text(raw.description, _DESCRIPTION_CHARS),
@@ -379,9 +385,10 @@ def parse_shopify_products(payload: Any, currency: str) -> ParsedProducts:
 def parse_woo_products(payload: Any, host: str = "") -> ParsedProducts:
     """WooCommerce Store API ``/wp-json/wc/store/v1/products`` → products.
 
-    ``prices.price`` is in the currency's minor units; it is converted to the
-    catalog's hundredths (``price / 10**minor_unit * 100``), so a zero-decimal
-    currency keeps the stack-wide hundredths convention."""
+    ``prices.price`` is in the store's own minor units (``currency_minor_unit``
+    places, which a shop can configure). It is turned into the major amount here
+    and ``_normalise`` re-expresses it in ISO 4217 minor units, so the shop's
+    setting never leaks into the catalog."""
     raws: list[_Raw] = []
     for product in payload if isinstance(payload, list) else []:
         if not isinstance(product, dict) or product.get("id") in (None, ""):

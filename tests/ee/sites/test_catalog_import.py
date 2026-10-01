@@ -192,6 +192,17 @@ def test_a_sold_out_shopify_product_keeps_a_price_and_reads_out_of_stock():
     assert item.currency == ""
 
 
+@pytest.mark.parametrize(
+    ("price", "currency", "cents"),
+    [("1500", "JPY", 1500), ("1500.00", "jpy", 1500), ("1.25", "KWD", 1250), ("8", "", 800)],
+)
+def test_shopify_decimal_prices_become_iso_minor_units(price: str, currency: str, cents: int):
+    payload = {"products": [_shopify_product(1, price=price)]}
+    [item] = ci.parse_shopify_products(payload, currency).items
+    assert item.price_cents == cents
+    assert item.currency == currency.upper()
+
+
 def test_a_shopify_product_with_no_price_is_skipped_and_counted():
     payload = {"products": [{"id": 1, "title": "Gift", "variants": [{"price": "n/a"}]}]}
     parsed = ci.parse_shopify_products(payload, "USD")
@@ -252,14 +263,23 @@ def _woo(pid: int, price: str, minor: int, code: str, **ov: Any) -> dict:
     return product
 
 
-def test_woo_converts_minor_units_to_hundredths_for_two_and_zero_decimal_currencies():
+def test_woo_converts_store_minor_units_to_iso_minor_units():
     parsed = ci.parse_woo_products(
-        [_woo(1, "1999", 2, "USD"), _woo(2, "1500", 0, "JPY", is_in_stock=False)], _HOST
+        [
+            _woo(1, "1999", 2, "USD"),
+            _woo(2, "1500", 0, "JPY", is_in_stock=False),
+            _woo(3, "1250", 3, "KWD"),
+            # A shop configured with 2 decimals for yen: the major amount is 15.00,
+            # and ISO says yen has none, so the catalog holds 15.
+            _woo(4, "1500", 2, "JPY"),
+        ],
+        _HOST,
     )
-    usd, jpy = parsed.items
+    usd, jpy, kwd, jpy2 = parsed.items
     assert (usd.price_cents, usd.currency) == (1999, "USD")
-    # Zero-decimal: ¥1500 stored as hundredths, the stack-wide convention.
-    assert (jpy.price_cents, jpy.currency) == (150000, "JPY")
+    assert (jpy.price_cents, jpy.currency) == (1500, "JPY")  # ¥1,500
+    assert (kwd.price_cents, kwd.currency) == (1250, "KWD")  # 1.250 KWD
+    assert jpy2.price_cents == 15
     assert usd.name == "Café beans & filters"
     assert usd.id == "woo:1"
     assert usd.url == "/product/beans-1/"
@@ -331,6 +351,19 @@ def test_jsonld_reads_graph_list_roots_aggregate_offers_and_image_objects():
     assert filters.image_url == "https://cdn.example/f.jpg"
     assert filters.url == "/products/filters"
     assert parsed.currency == "GBP"
+
+
+def test_jsonld_and_og_prices_use_the_currency_exponent():
+    node = {"@type": "Product", "name": "Tea", "offers": {"price": "1,500", "priceCurrency": "JPY"}}
+    [tea] = ci.parse_jsonld_products(_ld(json.dumps(node)), _PAGE, _HOST).items
+    assert (tea.price_cents, tea.currency) == (1500, "JPY")
+    html = (
+        '<meta property="og:type" content="product"><meta property="og:title" content="Dates">'
+        '<meta property="product:price:amount" content="2.5">'
+        '<meta property="product:price:currency" content="KWD">'
+    )
+    [dates] = ci.parse_og_product(html, _PAGE, _HOST).items
+    assert (dates.price_cents, dates.currency) == (2500, "KWD")
 
 
 def test_url_less_products_on_one_listing_page_get_distinct_ids():

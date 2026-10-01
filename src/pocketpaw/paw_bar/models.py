@@ -10,7 +10,9 @@
 # imported from the store's site: text truncated to its cap, a non-http(s) image
 # url or a ``url`` that is neither http(s) nor a single-slash site path blanked,
 # a bad currency read as USD. Cleaned, not rejected, because a stored spec is
-# re-validated on every load and must never become unloadable.
+# re-validated on every load and must never become unloadable. Every amount
+# (``price_cents`` …) is ISO 4217 minor units of its currency (see
+# ``pocketpaw.money``); a cart holds one currency only.
 #
 # Also here: the widget row (``PawBarWidget``; ``PawBarWidgetPublic`` is its
 # token-free projection for reads, so the per-widget access token only leaves the
@@ -33,6 +35,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw.fabric.models import _gen_id
+from pocketpaw.money import normalize_currency
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,6 @@ _MAX_CATALOG_ITEMS = 200
 _MAX_CATALOG_NAME_CHARS = 200
 _MAX_CATALOG_DESCRIPTION_CHARS = 300
 _MAX_CATALOG_URL_CHARS = 2048
-_CURRENCY_RE = re.compile(r"[A-Z]{3}")
 # Currency values already warned about, so a bad stored spec logs once, not per load.
 _WARNED_CURRENCIES: set[str] = set()
 _MAX_CART_ITEMS = 50
@@ -191,9 +193,11 @@ class PawBarActionSpec(BaseModel):
 class PawBarCatalogItem(BaseModel):
     """One product the concierge can add to a cart / render on a card.
 
-    ``url`` is the product's page: an absolute http(s) URL or a site path
-    (``/products/mug``), which is how imported items store it. ``in_stock`` is
-    None when the stock is unknown; False marks the item sold out in the prompt.
+    ``price_cents`` is ISO 4217 minor units of ``currency`` (¥1,500 is 1500,
+    $3.50 is 350, 1.250 KWD is 1250); the name is historical. ``url`` is the
+    product's page: an absolute http(s) URL or a site path (``/products/mug``),
+    which is how imported items store it. ``in_stock`` is None when the stock is
+    unknown; False marks the item sold out in the prompt.
     """
 
     id: str
@@ -240,9 +244,10 @@ class PawBarCatalogItem(BaseModel):
     def _currency_code(cls, value: Any) -> Any:
         if not isinstance(value, str):
             return value
-        code = value.strip().upper()
-        if _CURRENCY_RE.fullmatch(code):
-            return code
+        try:
+            return normalize_currency(value)
+        except ValueError:
+            pass
         if value not in _WARNED_CURRENCIES and len(_WARNED_CURRENCIES) < 256:
             _WARNED_CURRENCIES.add(value)
             logger.warning("paw_bar: catalog currency %r is not a 3-letter code; using USD", value)
@@ -713,7 +718,10 @@ class OwnerMessage(BaseModel):
 
 
 class PawBarCartItem(BaseModel):
-    """One line in a visitor's cart — a catalog snapshot plus a quantity."""
+    """One line in a visitor's cart — a catalog snapshot plus a quantity.
+
+    ``price_cents`` is ISO 4217 minor units of ``currency``; the name is historical.
+    """
 
     id: str
     name: str
@@ -721,13 +729,31 @@ class PawBarCartItem(BaseModel):
     currency: str = "USD"
     qty: int = 1
 
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _currency_code(cls, value: Any) -> Any:
+        return _cart_currency(value)
+
+
+def _cart_currency(value: Any) -> Any:
+    """Upper-case a stored cart currency; a malformed one reads as USD (rows
+    written before normalisation must stay loadable)."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return normalize_currency(value)
+    except ValueError:
+        return "USD"
+
 
 class PawBarCart(BaseModel):
     """A visitor's cart summary — what GET /paw-bar/cart returns.
 
     Keyed by ``(widget_id, customer_ref)`` in the store; this value object is the
     read model the endpoint + the executor return. ``total_cents`` is derived
-    from the items so callers never re-sum.
+    from the items so callers never re-sum. A cart holds ONE currency: the store
+    refuses a line in another currency (``cart_currency_mismatch``), so the total
+    is always ISO 4217 minor units of ``currency`` (the name is historical).
     """
 
     widget_id: str
@@ -736,6 +762,11 @@ class PawBarCart(BaseModel):
     currency: str = "USD"
     checkout_url: str = ""
     updated_at: datetime = Field(default_factory=datetime.now)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _currency_code(cls, value: Any) -> Any:
+        return _cart_currency(value)
 
     @property
     def total_cents(self) -> int:
