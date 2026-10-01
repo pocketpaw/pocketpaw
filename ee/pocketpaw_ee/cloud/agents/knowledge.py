@@ -1,9 +1,20 @@
 # knowledge.py — agent knowledge service over the kb-go binary.
 #
-# Every ingest funnels through ``KnowledgeService.ingest_text_to_scope``; the
-# caller decides the scope string (``agent:{id}``, ``workspace:{id}``,
-# ``pocket:{id}``). File extraction runs through ``ee.cloud.extraction`` and URL
-# extraction through trafilatura; kb-go does compile, search, index and storage.
+# Every ingest funnels through ``KnowledgeService.ingest_text_to_scope`` (one
+# document, one article) or ``ingest_document_to_scope`` (a long document, one
+# article per section); the caller decides the scope string (``agent:{id}``,
+# ``workspace:{id}``, ``pocket:{id}``). File extraction runs through
+# ``ee.cloud.extraction`` and URL extraction through trafilatura; kb-go does
+# compile, search, index and storage.
+#
+# kb-go searches compiled articles only, so a fact a compile drops cannot be
+# found. Without an API key, ``ingest_document_to_scope`` splits a document over
+# ``_SECTION_HARD_MAX_CHARS`` (``knowledge_sections``) and compiles each section
+# with a restructure-not-compress prompt, three at a time under one deadline;
+# the receipt lists every article id. Concierge sources, site sync, the kb REST
+# routes and agent knowledge use it. Upload indexing and its reingest routes stay
+# on one article because hide-from-AI tracks a single ``kb_article_id`` per file;
+# the book agent does too, because it ingests inside a request.
 #
 # Invariants a reader must not break:
 #   * A document is NEVER stored verbatim. With ANTHROPIC_API_KEY, kb compiles
@@ -18,7 +29,11 @@
 #     verbatim echo of a large input. An echo is judged by how much of the
 #     content is COPIED from the input (8-word shingles), not by length alone:
 #     a fact-dense document's honest compile keeps every fact and can be about
-#     as long as its source. A hard length ceiling still applies.
+#     as long as its source. A hard length ceiling still applies. A SECTION is
+#     checked only for empty fields and runaway output
+#     (``_validate_section_article``): it is small and the owner's own text.
+#   * Section titles lead with the document name and "part i of n": kb-go keys
+#     an article by its title's slug, so two sections must never share one.
 #   * Chat-turn search (``search_context_for_scope``) fails soft: a 5s timeout
 #     or a kb error returns "" with a warning, so the KB never stalls a turn.
 #   * ``extract_ingest_article_id`` is the one place that knows the receipt's
@@ -43,6 +58,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+from pocketpaw_ee.cloud.agents.knowledge_sections import Section, split_into_sections
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +105,29 @@ _MAX_COMPILED_CEILING = 1.25
 
 # kb-go's marker for "compile failed, stored verbatim". We never accept it.
 _FALLBACK_COMPILED_WITH = "none (fallback)"
+
+# Sectioned ingest (``ingest_document_to_scope``). kb-go's ``search --context``
+# prints an article's body only while it is under 2,000 bytes (past that it
+# prints the summary), and the concierge keeps 2,000 chars of each hit, so a
+# compiled section must land under that. Restructuring adds markdown, so the
+# raw section target leaves headroom. A document no longer than the hard max is
+# one section and keeps the whole-document compile.
+_SECTION_TARGET_CHARS = 1_500
+_SECTION_HARD_MAX_CHARS = 2_000
+# Compiles in flight at once for one document.
+_SECTION_CONCURRENCY = 3
+# The whole document's budget. It must end well inside the concierge source
+# route's 15-minute stale window (``knowledge_routes._STALE_AFTER``); a section
+# not compiled by then counts as failed.
+_SECTIONED_INGEST_DEADLINE_S = 600
+# Runaway output: a section's article may restructure and add markdown, but
+# content past either limit is not the section any more.
+_SECTION_MAX_GROWTH = 3
+_SECTION_MAX_CONTENT_CHARS = 8_000
+# A document name is clipped to this in a section's title, so the title's
+# "part i of n" stays inside the 80 characters kb-go keeps of the slug (the
+# slug is the article id; two sections must never share one).
+_SECTION_TITLE_DOC_CHARS = 40
 
 # Mirror of kb-go's detectLanguage: source-filename suffixes whose stdin
 # ingest should carry a ``--lang`` hint so kb-go runs its AST parse
@@ -261,6 +301,22 @@ def extract_ingest_article_id(result: dict | list | str | None) -> str | None:
     return None
 
 
+def count_document_sections(text: str) -> int:
+    """How many sections ``ingest_document_to_scope`` would split ``text`` into."""
+    return len(
+        split_into_sections(text, target=_SECTION_TARGET_CHARS, hard_max=_SECTION_HARD_MAX_CHARS)
+    )
+
+
+def extract_ingest_article_ids(result: dict | list | str | None) -> list[str]:
+    """Every article id a receipt names: the ``articles`` list of a sectioned
+    ingest, else the single id ``extract_ingest_article_id`` finds."""
+    if isinstance(result, dict) and isinstance(result.get("articles"), list):
+        return [a for a in result["articles"] if isinstance(a, str) and a]
+    article_id = extract_ingest_article_id(result)
+    return [article_id] if article_id else []
+
+
 def _parse_article_json(raw: str) -> dict:
     """Extract the article JSON object from an LLM response.
 
@@ -343,12 +399,16 @@ def _validate_compiled_article(article: dict, *, compile_input: str, source: str
                     f"copied verbatim (limits {_MAX_COMPILED_RATIO:.0%} length, "
                     f"{_ECHO_COPIED_FRACTION:.0%} copied) — looks like a verbatim echo"
                 )
-    summary = str(article.get("summary") or "").strip()
+    return _normalized_article(article, title=title, content=content, source=source)
+
+
+def _normalized_article(article: dict, *, title: str, content: str, source: str) -> dict:
+    """The ``--article-json`` article fields, trimmed, from a parsed compile."""
     concepts = [str(c).strip() for c in article.get("concepts") or [] if str(c).strip()]
     categories = [str(c).strip() for c in article.get("categories") or [] if str(c).strip()]
     return {
         "title": title,
-        "summary": summary,
+        "summary": str(article.get("summary") or "").strip(),
         "content": content,
         "concepts": concepts,
         "categories": categories,
@@ -379,13 +439,7 @@ async def _compile_article_with_agent(text: str, source: str, lang: str | None =
 
     excerpt = text[:_COMPILE_INPUT_CAP_CHARS]
     truncated = len(text) > len(excerpt)
-    code_rule = (
-        f"- The document is {lang} source code: in the content, document its "
-        "structure — the module's purpose, key functions and classes with their "
-        "signatures, and exports — rather than summarizing it as prose.\n"
-        if lang
-        else ""
-    )
+    code_rule = _code_rule(lang)
     prompt = (
         "Compile the document below into a knowledge-base article. Respond with "
         "ONLY one JSON object, no prose and no markdown fences:\n"
@@ -431,12 +485,286 @@ async def _compile_article_with_agent(text: str, source: str, lang: str | None =
     return article
 
 
+def _code_rule(lang: str | None) -> str:
+    """The compile-prompt rule for a recognized code file, or ``""``."""
+    if not lang:
+        return ""
+    return (
+        f"- The document is {lang} source code: in the content, document its "
+        "structure — the module's purpose, key functions and classes with their "
+        "signatures, and exports — rather than summarizing it as prose.\n"
+    )
+
+
+def _section_title(topic: str, doc_source: str, index: int, total: int) -> str:
+    """``<document> — part i of n: <topic>``. The document name and part number
+    lead, so the slug kb-go keys the article by is unique per section."""
+    doc = (Path(doc_source).name or doc_source).strip() or "document"
+    if len(doc) > _SECTION_TITLE_DOC_CHARS:
+        doc = doc[: _SECTION_TITLE_DOC_CHARS - 1].rstrip() + "…"
+    return f"{doc} — part {index} of {total}: {topic}"
+
+
+def _validate_section_article(article: dict, *, section_text: str, source: str) -> dict:
+    """Normalize a compiled section. Rejects only an empty title or content, or
+    runaway output (content past ``_SECTION_MAX_GROWTH`` times the section or
+    ``_SECTION_MAX_CONTENT_CHARS``). There is no echo or compression check: a
+    section is small and is the owner's own text, so a near-verbatim article
+    is an acceptable one."""
+    title = str(article.get("title") or "").strip()
+    content = str(article.get("content") or "").strip()
+    if not title or not content:
+        raise ValueError("compiled section is missing a title or content")
+    limit = min(_SECTION_MAX_GROWTH * len(section_text), _SECTION_MAX_CONTENT_CHARS)
+    if len(content) > limit:
+        raise ValueError(
+            f"compiled section runs away: content is {len(content)} chars against a "
+            f"{len(section_text)}-char section (limit {limit})"
+        )
+    return _normalized_article(article, title=title, content=content, source=source)
+
+
+async def _compile_section_with_agent(
+    section: Section,
+    doc_source: str,
+    index: int,
+    total: int,
+    lang: str | None = None,
+    *,
+    retry: bool = False,
+    timeout: float = _AGENT_COMPILE_TIMEOUT_S,
+) -> dict:
+    """Compile one section into a kb article with PocketPaw's agent backend.
+
+    The prompt RESTRUCTURES, it does not compress: every name, number, price,
+    date, quantity, condition and contact detail stays as written. ``retry``
+    adds a JSON-only reminder for the second attempt. The returned title is
+    ``_section_title`` around the compiler's topic. Raises ``RuntimeError`` on
+    a timeout or an unusable article; backend errors propagate.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.kb.backend_adapter import PocketPawCompilerBackend
+
+    where = f"Section {index} of {total}" + (
+        f', under the heading "{section.title_hint}"' if section.title_hint else ""
+    )
+    prompt = (
+        (
+            "Your previous reply could not be used. Reply with the JSON object "
+            "ONLY: no prose before or after it, no markdown fences.\n\n"
+            if retry
+            else ""
+        )
+        + "Restructure ONE section of a business document into a knowledge-base "
+        "article. Respond with ONLY one JSON object, no prose and no markdown fences:\n"
+        '{"title": "...", "summary": "...", "content": "...", '
+        '"concepts": ["..."], "categories": ["..."]}\n\n'
+        "Rules:\n"
+        "- title: the section's topic in a few words (the document name is added "
+        "for you).\n"
+        "- summary: one sentence saying what the section covers.\n"
+        "- content: the section as compact markdown (headings, lists, tables). "
+        "Keep every name, number, price, date, quantity, condition and contact "
+        "detail exactly as written. Restructure, do not compress: you may merge "
+        "duplicates, but do not drop facts and do not invent anything.\n"
+        + _code_rule(lang)
+        + "- concepts: 3-10 key concepts.\n"
+        "- categories: 1-3 broad categories.\n\n"
+        f"Document: {doc_source}\n{where}:\n"
+        f'"""\n{section.text}\n"""'
+    )
+    backend = PocketPawCompilerBackend()
+    try:
+        raw = await asyncio.wait_for(
+            backend.complete(
+                prompt,
+                system_prompt=(
+                    "You are a knowledge-base article compiler. "
+                    "Output ONLY a single valid JSON object."
+                ),
+            ),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        raise RuntimeError(f"section {index} of {total} compile timed out after {timeout:.0f}s")
+    try:
+        article = _validate_section_article(
+            _parse_article_json(raw), section_text=section.text, source=doc_source
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"section {index} of {total} compile failed: {exc}")
+    article["title"] = _section_title(article["title"], doc_source, index, total)
+    article["compiled_with"] = f"pocketpaw-agent:{get_settings().agent_backend}"
+    return article
+
+
+async def _ingest_compiled_article(scope: str, raw_text: str, article: dict) -> dict:
+    """``kb ingest --article-json`` for one pre-compiled article, with the
+    old-binary and verbatim-fallback checks."""
+    payload = json.dumps({"raw_text": raw_text, "article": article})
+    try:
+        result = await asyncio.to_thread(
+            _kb,
+            "ingest",
+            "--article-json",
+            "--scope",
+            scope,
+            input_text=payload,
+            timeout=_ARTICLE_JSON_INGEST_TIMEOUT_S,
+        )
+    except RuntimeError as exc:
+        # Belt-and-braces only: current kb-go parses flags by hand and
+        # silently IGNORES unknown ones, so an old binary never produces
+        # a flag error. The PRIMARY old-binary detector is the missing
+        # ``compiled_with`` key below (require_compiled_with).
+        msg = str(exc)
+        if "unknown flag" in msg or "flag provided but not defined" in msg:
+            raise KnowledgeEngineUnavailable(
+                "kb binary does not support `ingest --article-json` — it predates "
+                "the pre-compiled-article contract. Deploy the paired kb-go build "
+                f"(binary: {KB_BIN}). Original error: {msg}"
+            ) from exc
+        raise
+    # The paired binary ALWAYS emits compiled_with on this path; a result
+    # without it means the flag was silently ignored (old binary) and the
+    # payload was stored verbatim — reject loudly, naming the article.
+    return _check_ingest_result(result, scope, require_compiled_with=True)
+
+
+async def _ingest_sections(
+    scope: str, sections: list[Section], source: str, lang: str | None
+) -> dict:
+    """Compile and ingest each section as its own article.
+
+    At most ``_SECTION_CONCURRENCY`` compiles run at once, and the kb writes
+    are serialized (each ``kb ingest`` rebuilds the scope's indexes from the
+    articles on disk, so two at once could each write an index missing the
+    other's article). A failed compile is retried once with a JSON-only
+    reminder. Everything shares one ``_SECTIONED_INGEST_DEADLINE_S`` budget: a
+    section still waiting or compiling when it runs out fails with
+    ``deadline``. A missing or outdated kb binary stops the document and
+    raises ``KnowledgeEngineUnavailable``; if no section landed, raises
+    ``RuntimeError``.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _SECTIONED_INGEST_DEADLINE_S
+    total = len(sections)
+    gate = asyncio.Semaphore(_SECTION_CONCURRENCY)
+    kb_write = asyncio.Lock()
+    receipts: dict[int, dict] = {}
+    failures: dict[int, str] = {}
+    engine_error: list[KnowledgeEngineUnavailable] = []
+
+    async def compile_one(index: int, section: Section) -> dict:
+        for retry in (False, True):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError("deadline")
+            try:
+                return await _compile_section_with_agent(
+                    section,
+                    source,
+                    index,
+                    total,
+                    lang,
+                    retry=retry,
+                    timeout=min(_AGENT_COMPILE_TIMEOUT_S, remaining),
+                )
+            except Exception as exc:  # noqa: BLE001 — any failure earns one retry
+                if retry:
+                    raise
+                logger.info(
+                    "kb section %d of %d of %r failed once, retrying: %s",
+                    index,
+                    total,
+                    source,
+                    exc,
+                )
+        raise AssertionError("unreachable")
+
+    async def run(index: int, section: Section) -> None:
+        try:
+            await asyncio.wait_for(gate.acquire(), max(deadline - loop.time(), 0))
+        except TimeoutError:
+            failures[index] = "deadline"
+            return
+        try:
+            if engine_error:
+                failures[index] = "kb_unavailable"
+                return
+            article = await compile_one(index, section)
+        except TimeoutError:
+            failures[index] = "deadline"
+            return
+        except Exception as exc:  # noqa: BLE001 — one section's failure is that section's
+            failures[index] = str(exc) or type(exc).__name__
+            return
+        finally:
+            gate.release()
+        async with kb_write:
+            if engine_error:
+                failures[index] = "kb_unavailable"
+                return
+            try:
+                receipts[index] = await _ingest_compiled_article(scope, section.text, article)
+            except KnowledgeEngineUnavailable as exc:
+                engine_error.append(exc)
+                failures[index] = "kb_unavailable"
+            except Exception as exc:  # noqa: BLE001
+                failures[index] = str(exc) or type(exc).__name__
+
+    await asyncio.gather(*(run(i, s) for i, s in enumerate(sections, start=1)))
+
+    ids: list[str] = []
+    titles: list[str] = []
+    compiled_with = ""
+    for index in sorted(receipts):
+        article_id = extract_ingest_article_id(receipts[index])
+        if not article_id:
+            failures[index] = "no article id in the kb receipt"
+            continue
+        ids.append(article_id)
+        titles.append(str(receipts[index].get("title") or ""))
+        compiled_with = compiled_with or str(receipts[index].get("compiled_with") or "")
+    for index in sorted(failures):
+        logger.warning(
+            "kb sectioned ingest: section %d of %d of %r (scope=%s, heading=%r) failed: %s",
+            index,
+            total,
+            source,
+            scope,
+            sections[index - 1].title_hint,
+            failures[index],
+        )
+    if engine_error:
+        raise engine_error[0]
+    if not ids:
+        raise RuntimeError(
+            f"every section of {source!r} failed to ingest ({total} sections): "
+            + "; ".join(f"{i}: {failures[i]}" for i in sorted(failures))
+        )
+    return {
+        "article": ids[0],
+        "title": titles[0],
+        "articles": ids,
+        "titles": titles,
+        "compiled_with": compiled_with,
+        "sections_total": total,
+        "sections_failed": len(failures),
+        "failures": [
+            {"section": i, "heading": sections[i - 1].title_hint, "reason": failures[i]}
+            for i in sorted(failures)
+        ],
+    }
+
+
 class KnowledgeService:
     """Knowledge operations via the kb Go binary.
 
-    All ingest paths funnel through :meth:`ingest_text_to_scope` so the
-    scope shape (``agent:{id}``, ``workspace:{id}``, ``pocket:{id}``) is
-    decided by the caller, not by this class.
+    All ingest paths funnel through :meth:`ingest_text_to_scope` or its
+    sectioned twin :meth:`ingest_document_to_scope`, so the scope shape
+    (``agent:{id}``, ``workspace:{id}``, ``pocket:{id}``) is decided by the
+    caller, not by this class.
     """
 
     @staticmethod
@@ -471,45 +799,51 @@ class KnowledgeService:
             return _check_ingest_result(result, scope)
 
         article = await _compile_article_with_agent(text, source, lang=lang)
-        payload = json.dumps({"raw_text": text, "article": article})
-        try:
-            result = await asyncio.to_thread(
-                _kb,
-                "ingest",
-                "--article-json",
-                "--scope",
-                scope,
-                input_text=payload,
-                timeout=_ARTICLE_JSON_INGEST_TIMEOUT_S,
+        return await _ingest_compiled_article(scope, text, article)
+
+    @staticmethod
+    async def ingest_document_to_scope(scope: str, text: str, source: str = "manual") -> dict:
+        """Ingest a document so that every fact in it stays searchable.
+
+        The sectioned twin of :meth:`ingest_text_to_scope`, for callers whose
+        documents can be long and dense (price lists, policies, spec sheets).
+        Without ``ANTHROPIC_API_KEY``, a document over ``_SECTION_HARD_MAX_CHARS``
+        is split by ``split_into_sections`` and each section is compiled and
+        ingested as its own article (``_ingest_sections``); the receipt lists
+        every article id under ``articles``. A short document, and every
+        document on the API-key path, goes through :meth:`ingest_text_to_scope`
+        unchanged, and its receipt gains a one-element ``articles`` list.
+
+        Raises when nothing was ingested. A partial result returns with
+        ``sections_failed`` > 0 and a ``failures`` list.
+        """
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            sections = split_into_sections(
+                text, target=_SECTION_TARGET_CHARS, hard_max=_SECTION_HARD_MAX_CHARS
             )
-        except RuntimeError as exc:
-            # Belt-and-braces only: current kb-go parses flags by hand and
-            # silently IGNORES unknown ones, so an old binary never produces
-            # a flag error. The PRIMARY old-binary detector is the missing
-            # ``compiled_with`` key below (require_compiled_with).
-            msg = str(exc)
-            if "unknown flag" in msg or "flag provided but not defined" in msg:
-                raise KnowledgeEngineUnavailable(
-                    "kb binary does not support `ingest --article-json` — it predates "
-                    "the pre-compiled-article contract. Deploy the paired kb-go build "
-                    f"(binary: {KB_BIN}). Original error: {msg}"
-                ) from exc
-            raise
-        # The paired binary ALWAYS emits compiled_with on this path; a result
-        # without it means the flag was silently ignored (old binary) and the
-        # payload was stored verbatim — reject loudly, naming the article.
-        return _check_ingest_result(result, scope, require_compiled_with=True)
+            if len(sections) > 1:
+                return await _ingest_sections(scope, sections, source, _lang_for_source(source))
+        result = await KnowledgeService.ingest_text_to_scope(scope, text, source)
+        if isinstance(result, dict):
+            article_id = extract_ingest_article_id(result)
+            result = {
+                **result,
+                "articles": [article_id] if article_id else [],
+                "sections_total": 1,
+                "sections_failed": 0,
+            }
+        return result
 
     @staticmethod
     async def ingest_text(agent_id: str, text: str, source: str = "manual") -> dict:
-        return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, source)
+        return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, source)
 
     @staticmethod
     async def ingest_url(agent_id: str, url: str) -> dict:
         """Fetch URL with trafilatura (Python), pipe text to kb."""
         try:
             text = await _extract_url(url)
-            return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, url)
+            return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, url)
         except Exception as exc:
             return {"error": str(exc), "url": url}
 
@@ -524,12 +858,12 @@ class KnowledgeService:
         label = source or path.name
         if path.suffix.lower() in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"):
             text = await _extract_file(file_path)
-            return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, label)
+            return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, label)
         # Text/code files: read in Python and route through the common ingest
         # path so they get the same compile guarantees (agent-backend compile
         # without an API key, verbatim-fallback rejection) as every other doc.
         text = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
-        return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, label)
+        return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, label)
 
     @staticmethod
     async def list_articles(agent_id: str) -> list[dict]:
