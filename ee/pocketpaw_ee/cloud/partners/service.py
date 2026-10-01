@@ -137,7 +137,13 @@ def _ours(obj: FabricObject | None) -> bool:
 
 async def _load(fabric: FabricJournalStore, workspace_id: str, client_id: str) -> FabricObject:
     # Scope-filtered: another workspace's id is indistinguishable from not-found.
-    obj = await fabric.get(client_id, requester_scopes=_scope(workspace_id))
+    # Typed query (like people.get_person), not ``fabric.get``: ``get`` scans every
+    # object in the scope under a 10k limit, so a busy workspace would 404 its own client.
+    result = await fabric.query(
+        FabricQuery(type_id=CUSTOMER_TYPE_ID, limit=10_000),
+        requester_scopes=_scope(workspace_id),
+    )
+    obj = next((o for o in result.objects if o.id == client_id), None)
     if not _ours(obj):
         raise NotFound("partner_client", client_id)
     return obj  # type: ignore[return-value]
