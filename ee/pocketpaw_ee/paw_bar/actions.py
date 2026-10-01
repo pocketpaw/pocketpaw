@@ -12,7 +12,8 @@
 #     * validates the verb is declared on the spec and every arg key is declared,
 #       coerces each arg to its flat type (str/int/float/bool), caps string args
 #       at 256 chars and clamps qty to 1..99;
-#     * auto + add_to_cart: the product_id must exist in the catalog; upserts the
+#     * auto + add_to_cart: the product_id must exist in the widget's catalog (the
+#       catalog store, ``store.get_catalog_items``); upserts the
 #       visitor's cart and returns the updated cart summary. A cart holds one
 #       currency: a product priced in another one is refused with 409
 #       ``cart_currency_mismatch`` and the cart is left as it was;
@@ -262,6 +263,7 @@ async def execute_action(
                 spec=spec,
                 result=outcome.result,
                 cart=outcome.cart,
+                store=store,
             )
         return outcome
 
@@ -279,8 +281,8 @@ async def _do_add_to_cart(
     product_id = str(args.get("product_id", "") or "")
     if not product_id:
         return _fail("missing_product_id", 422)
-    catalog = {item.id: item for item in (getattr(spec, "catalog", []) or [])}
-    product = catalog.get(product_id)
+    found = await store.get_catalog_items(widget_id, [product_id])
+    product = found[0] if found else None
     if product is None:
         return _fail("unknown_product", 422)
 

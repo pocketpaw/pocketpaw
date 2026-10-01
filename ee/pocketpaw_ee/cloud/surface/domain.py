@@ -273,8 +273,9 @@ class SurfaceMeta:
     # onto the per-stream ContextVar the pawbar_actions MCP server builds from.
     # Absent on every other surface — the concierge stays deny-all.
     pawbar_actions: list[dict[str, Any]] | None = None
-    # Concierge catalog hint (C1). The widget's product catalog (capped, JSON of
-    # {id, name, price_cents, currency}) so the preamble can name real products
+    # Concierge catalog hint (C1). This turn's catalog items, retrieved from the
+    # catalog store (JSON of {id, name, price_cents, currency, in_stock};
+    # ``concierge_runtime.catalog_for_turn``) so the preamble can name real products
     # and the agent emits pawbar-card fences with real ids. Only for the preamble;
     # the tools re-load the live widget, so this never feeds an effect.
     pawbar_catalog: list[dict[str, Any]] | None = None

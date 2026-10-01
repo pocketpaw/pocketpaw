@@ -17,7 +17,9 @@
 #     from the catalog), unknown ids are dropped, an empty product-card is
 #     dropped. The model never supplies a name, a price, an image or a link. A
 #     legacy ``{"kind": "product"}`` card is repriced the same way; other legacy
-#     cards pass through untouched.
+#     cards pass through untouched. The catalog comes in as a list of the items
+#     the card names (``card_ids`` says which to fetch), so any id in the
+#     widget's catalog hydrates, not only the ones the prompt listed.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
 # app/pawbar-manifest.json (qbtrix/paw-bar PR #26, branch feat/wire-spec-cards,
@@ -35,6 +37,8 @@ from typing import Any, Literal
 MAX_SPEC_CHARS = 32_000
 MAX_SPEC_NODES = 80
 MAX_SPEC_DEPTH = 8
+# Most catalog ids one card may name (a lookup reads no more).
+MAX_CARD_IDS = 200
 # The only host events a card may emit; SpecCard.svelte ignores every other one.
 HOST_EVENTS: tuple[str, ...] = ("add_to_cart", "checkout")
 
@@ -261,6 +265,37 @@ def render_card(
     return f"{_FENCE}pawbar-card\n{body}{_FENCE}"
 
 
+def _ids_in(node: Any, out: dict[str, None], budget: list[int]) -> None:
+    if not isinstance(node, dict) or budget[0] <= 0:
+        return
+    budget[0] -= 1
+    if node.get("type") == _PRODUCT_CARD:
+        props = node.get("props") if isinstance(node.get("props"), dict) else {}
+        for raw in props.get("ids") if isinstance(props.get("ids"), list) else []:
+            if isinstance(raw, str) and raw.strip():
+                out.setdefault(raw.strip(), None)
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        for kid in kids if isinstance(kids, list) else []:
+            _ids_in(kid, out, budget)
+
+
+def card_ids(body: str) -> list[str]:
+    """The catalog ids a fence body names: a Ripple spec's product-card ``ids``,
+    or a legacy product card's item ids. What a lookup must fetch before
+    ``render_card`` can hydrate it; at most ``MAX_CARD_IDS``, first seen first."""
+    raw = _parse(body)
+    out: dict[str, None] = {}
+    if _is_spec(raw):
+        _ids_in(raw["ui"], out, [MAX_SPEC_NODES])
+    elif isinstance(raw, dict):
+        for item in raw.get("items") if isinstance(raw.get("items"), list) else []:
+            pid = item.get("id") if isinstance(item, dict) else None
+            if isinstance(pid, str) and pid.strip():
+                out.setdefault(pid.strip(), None)
+    return list(out)[:MAX_CARD_IDS]
+
+
 def card_verdict(
     body: str, catalog: Iterable[Any] | None, *, verbs: Iterable[str] | None = HOST_EVENTS
 ) -> Literal["accept", "reject", "legacy"]:
@@ -297,8 +332,10 @@ __all__ = [
     "MAX_SPEC_CHARS",
     "MAX_SPEC_DEPTH",
     "MAX_SPEC_NODES",
+    "MAX_CARD_IDS",
     "SPEC_ACTIONS",
     "WIDGET_TYPES",
+    "card_ids",
     "card_verdict",
     "compact_manifest",
     "render_card",

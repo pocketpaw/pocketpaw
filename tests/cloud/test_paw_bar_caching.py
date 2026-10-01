@@ -332,6 +332,7 @@ def spec_widget(monkeypatch):
     from pocketpaw_ee.paw_bar import router as r
 
     widget = SimpleNamespace(
+        id="pp_c",
         allowed_domains=["brewco.com"],
         spec=PawBarSpec(
             widget_id="pp_c",
@@ -343,6 +344,9 @@ def spec_widget(monkeypatch):
     class _Store:
         async def get_widget(self, widget_id):
             return widget if widget_id == "pp_c" else None
+
+        async def list_catalog(self, widget_id, **_kw):
+            return [], 0
 
     monkeypatch.setattr(r, "_store", lambda: _Store())
     r._PUBLIC_IP_LIMITER.cleanup(max_age=0)
