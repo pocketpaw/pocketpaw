@@ -267,6 +267,22 @@ def test_the_vendored_loader_speaks_the_new_bar_additions():
     assert "data.side" in code, "the icon launcher's corner rides on pawbar:resize"
 
 
+def test_the_vendored_loader_follows_spa_navigation():
+    """The concierge answers about the visitor's page from ``pawbar:page``. On a
+    client-routed store the frame never reloads, so a loader that posts the page
+    only on load leaves the concierge on the first page forever: a visitor on a
+    product asks "should I buy it?" and is asked which product (paw-bar #32).
+    The loader re-posts on back/forward and polls for path or title changes."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:page" in code
+    assert '"popstate"' in code, "back/forward re-sends the page"
+    assert "setInterval" in code, "a pushState navigation is caught by the poll"
+
+
 def test_the_vendored_loader_is_generated_not_hand_edited():
     """A header that says where it came from is the only thing standing between
     this file and the silent drift above. If someone hand-edits it again, the
