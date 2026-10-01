@@ -22,6 +22,11 @@
 #   bonus, and an untagged INR charge grants nothing. Also: concurrent duplicate
 #   deliveries, the conversion source on the Payment row, the sanity-band warning
 #   firing once, and checkout metadata stamping.
+# Updated 2026-10-02 (PH-4 re-check fix): metadata is FORGEABLE (a Dodo static
+#   payment link accepts ``metadata_*`` params), so the INR path now routes on
+#   Dodo's own ``product_cart`` product id and nothing grants from metadata. The
+#   metadata-credits tests are replaced by forged-metadata regressions (the
+#   reviewer's PoC cases), and bodies carry a ``product_cart`` by default.
 
 from __future__ import annotations
 
@@ -58,7 +63,7 @@ def fx(monkeypatch) -> SimpleNamespace:
     """Stub settings at Rs.89/USD; a test may change ``fx.fx_inr_per_usd`` mid-way."""
     import pocketpaw.config as config_mod
 
-    settings = SimpleNamespace(fx_inr_per_usd=89.0)
+    settings = SimpleNamespace(fx_inr_per_usd=89.0, dodo_credit_product_id_inr=PRODUCT_ID_INR)
     monkeypatch.setattr(config_mod, "get_settings", lambda: settings)
     return settings
 
@@ -99,9 +104,11 @@ def _payment_body(
     currency: str = "INR",
     settlement: tuple | None = None,
     meta: dict | None = None,
+    cart: object = "default",
 ) -> str:
-    """A verified ``payment.succeeded``. By default it carries the metadata our
-    INR checkout stamps (``topup_currency=INR``); pass ``meta`` to override."""
+    """A verified ``payment.succeeded``. By default Dodo's ``product_cart`` is the
+    INR credits product and the metadata is our informational tag; override
+    either. ``cart=None`` omits the cart."""
     tags = meta if meta is not None else {"topup_currency": "INR"}
     data = {
         "payment_id": PAYMENT_ID,
@@ -109,6 +116,10 @@ def _payment_body(
         "total_amount": paise,
         "currency": currency,
     }
+    if cart == "default":
+        cart = [{"product_id": PRODUCT_ID_INR, "quantity": 1}]
+    if cart is not None:
+        data["product_cart"] = cart
     if settlement is not None:
         data["settlement_amount"], data["settlement_currency"] = settlement
     return _envelope("payment.succeeded", data)
@@ -189,7 +200,10 @@ async def test_replaying_an_inr_event_grants_nothing_new_on_either_line(mongo_db
 async def test_usd_topup_is_unchanged_and_earns_no_bonus(mongo_db):
     await _deliver(
         _payment_body(
-            paise=5_000_000, currency="USD", meta={"topup_currency": "USD", "credits": "5000000"}
+            paise=5_000_000,
+            currency="USD",
+            meta={"topup_currency": "USD"},
+            cart=[{"product_id": PRODUCT_ID, "quantity": 1}],
         ),
         "evt_usd_big",
     )
@@ -256,41 +270,82 @@ async def test_inr_logs_carry_no_rupee_or_fx_figures(mongo_db, caplog):
     assert "2500000" not in caplog.text and "fx_estimate" not in caplog.text
 
 
-async def test_usd_product_charged_in_inr_grants_what_was_sold_and_no_bonus(mongo_db):
-    # Dodo's local pricing charged a USD-product checkout (30,000 credits) in rupees.
-    body = _payment_body(
-        paise=RS_25K,
-        settlement=(29_500, "USD"),
-        meta={"topup_currency": "USD", "credits": "30000"},
-    )
-    result = await _deliver(body, "evt_usd_in_inr")
+USD_CART = [{"product_id": PRODUCT_ID, "quantity": 1}]
 
-    assert result["granted"] is True
-    assert await _lines("top_up") == [30_000]
+
+async def _assert_nothing_granted(event_id: str) -> None:
+    assert await credits.balance(WS) == 0
+    assert await _lines("top_up") == []
     assert await _lines("bulk_bonus") == []
-    row = await Payment.find_one(Payment.gateway_event_id == "evt_usd_in_inr")
-    assert row.credits_granted == 30_000
-    assert row.conversion == "metadata_credits"
-
-    # Its full refund (stated in the rupees it was charged in) reverses exactly that.
-    refund = await _deliver(_refund(RS_25K, is_partial=False), "evt_usd_in_inr_refund")
-    assert refund["reversed"] == 30_000
-    assert await credits.balance(WS) == 0
+    row = await Payment.find_one(Payment.gateway_event_id == event_id)
+    assert row is not None and row.credits_granted == 0
 
 
-async def test_usd_product_charged_in_inr_without_credits_metadata_grants_nothing(mongo_db):
-    body = _payment_body(paise=RS_25K, meta={"topup_currency": "USD"})
-    assert (await _deliver(body, "evt_usd_no_credits"))["granted"] is False
-    assert await credits.balance(WS) == 0
-
-
-async def test_an_inr_charge_without_our_metadata_grants_nothing(mongo_db):
-    result = await _deliver(_payment_body(paise=RS_1L, meta={}), "evt_inr_untagged")
+async def test_poc_forged_metadata_credits_on_a_usd_product_inr_charge_mints_nothing(mongo_db):
+    # Rs.100 (~112 cents) through a USD-product static link, metadata_credits forged.
+    body = _payment_body(
+        paise=10_000,
+        settlement=(112, "USD"),
+        meta={"topup_currency": "USD", "credits": "1000000"},
+        cart=USD_CART,
+    )
+    result = await _deliver(body, "evt_forged")
 
     assert result == {"ok": True, "granted": False}
+    await _assert_nothing_granted("evt_forged")
+
+
+async def test_poc_forged_huge_metadata_credits_on_a_eur_charge_mints_nothing(mongo_db):
+    body = _payment_body(
+        paise=10_000,
+        currency="EUR",
+        meta={"topup_currency": "USD", "credits": "99999999999"},
+        cart=USD_CART,
+    )
+    assert (await _deliver(body, "evt_huge"))["granted"] is False
+    await _assert_nothing_granted("evt_huge")
+
+
+async def test_poc_unicode_digit_metadata_neither_crashes_nor_grants(mongo_db):
+    body = _payment_body(paise=10_000, meta={"topup_currency": "USD", "credits": "²"})
+    # The INR product charged in INR still grants from money paid — never the
+    # forged figure — and the odd metadata cannot raise.
+    result = await _deliver(body, "evt_sup")
+    assert result["granted"] is True
+    assert await _lines("top_up") == [10_000 // 89]
+
+
+async def test_forged_topup_currency_inr_on_a_usd_product_inr_charge_gets_nothing(mongo_db):
+    body = _payment_body(paise=RS_1L, meta={"topup_currency": "INR"}, cart=USD_CART)
+    assert (await _deliver(body, "evt_forged_inr_tag"))["granted"] is False
+    await _assert_nothing_granted("evt_forged_inr_tag")
+
+
+async def test_inr_product_routes_without_any_metadata_tag(mongo_db):
+    await _deliver(_payment_body(paise=RS_25K, meta={}), "evt_inr_untagged")
+    assert await _lines("top_up") == [28_089]
+    assert await _lines("bulk_bonus") == [2_808]
+
+
+async def test_inr_charge_with_no_or_malformed_cart_grants_nothing(mongo_db):
+    await _deliver(_payment_body(paise=RS_25K, cart=None), "evt_inr_nocart")
+    await _deliver(_payment_body(paise=RS_25K, cart="junk"), "evt_inr_junkcart")
+    await _deliver(
+        _payment_body(paise=RS_25K, cart=[{"product_id": PRODUCT_ID_INR, "quantity": 1}, 7]),
+        "evt_inr_badline",
+    )
     assert await credits.balance(WS) == 0
-    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_untagged")
-    assert row.credits_granted == 0
+
+
+async def test_inr_product_in_a_mixed_cart_grants_nothing(mongo_db):
+    cart = [{"product_id": PRODUCT_ID_INR, "quantity": 1}, {"product_id": "prod_x", "quantity": 1}]
+    await _deliver(_payment_body(paise=RS_25K, cart=cart), "evt_inr_mixed")
+    assert await credits.balance(WS) == 0
+
+
+async def test_inr_product_charged_in_usd_grants_nothing(mongo_db):
+    await _deliver(_payment_body(paise=RS_25K, currency="USD"), "evt_inr_prod_usd")
+    assert await credits.balance(WS) == 0
 
 
 async def test_concurrent_duplicate_inr_deliveries_grant_each_line_once(mongo_db):
@@ -450,7 +505,7 @@ async def test_usd_topup_checkout_does_not_pin_a_currency(mongo_db, monkeypatch)
     assert kwargs["product_cart"][0]["product_id"] == PRODUCT_ID
     assert "billing_currency" not in kwargs
     assert kwargs["metadata"]["topup_currency"] == "USD"
-    assert kwargs["metadata"]["credits"] == "1000"
+    assert "credits" not in kwargs["metadata"]
 
 
 async def test_inr_topup_without_an_inr_product_is_refused(mongo_db):
