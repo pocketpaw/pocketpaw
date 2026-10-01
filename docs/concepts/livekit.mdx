@@ -70,17 +70,20 @@ The Svelte frontend lives in the paw-enterprise repo and consumes this router:
 
 ## API Surface
 
-All routes under `/api/v1/livekit/*` require an active enterprise license, user authentication, and group membership. Recording routes additionally require workspace ownership.
+All routes under `/api/v1/livekit/*` require an active enterprise license, user authentication, and group membership, except the two public guest-invite routes (validate and join). Recording routes additionally require workspace ownership.
 
 | Method + Path | Purpose |
 |---------------|---------|
-| `POST /livekit/rooms` | Create or fetch the room for a group; returns a short-lived admin token for the call bot |
-| `POST /livekit/token` | Mint a participant access token (default TTL 3600s); display name comes from `user.full_name` |
-| `GET /livekit/rooms/{group_id}` | Room state: participant count, list, active flag |
+| `POST /livekit/rooms` | Create or fetch the room for a group. The call-bot's token stays on the server; members get their own from `POST /livekit/token` |
+| `POST /livekit/token` | Mint a participant access token. The LiveKit identity is always the caller's user id (a body `identity` is ignored) and `ttl_seconds` is clamped to 60-3600 (default 3600); display name comes from `user.full_name`. The room must be `group-call-<id>` for a group the caller belongs to in their workspace, otherwise 403 `livekit.room_forbidden` |
+| `GET /livekit/rooms/{group_id}` | Room state: participant count, list, active flag (`active` is true only while someone other than the call-bot is in the room) |
 | `DELETE /livekit/rooms/{group_id}` | End the call; all participants are disconnected; the bot's notes post shortly after |
 | `POST /livekit/rooms/{group_id}/recording/start` | Begin composite recording to S3 (owner only) |
 | `POST /livekit/rooms/{group_id}/recording/stop` | Stop recording; writes a `FileUpload` doc; returns the file id |
 | `GET /livekit/rooms/{group_id}/recording` | Current recording status (mapped from LiveKit `EgressStatus` protobuf) |
+| `POST /livekit/rooms/{group_id}/invite` | Create a guest invite link. An `emails` list inside the `display_name` JSON becomes the invite's server-side allow-list and is removed from `display_name` |
+| `GET /livekit/invites/{token}` | Public. Validate an invite for the join page. Returns `requires_email` (bool); the allow-list itself is never returned |
+| `POST /livekit/invites/{token}/join` | Public. Join as a guest with `display_name` and, when `requires_email` is true, `email` (checked trimmed and case-insensitively; otherwise 403 `meeting_invite.email_not_allowed`). A guest link never starts a call: if no one other than the call-bot is in the room, join returns 403 `meeting_invite.call_ended` |
 
 Events fire on the realtime bus:
 
@@ -88,6 +91,10 @@ Events fire on the realtime bus:
 - `CallEnded` — on room delete
 
 The frontend's realtime channel subscribes to both so participant lists update without polling.
+
+Starting a call goes through the workspace plan's daily call-time budget, whether a member starts it or a scheduled meeting auto-starts. When the budget is spent, a member gets 402 `billing.call_limit`, and a scheduled meeting that reaches its start time is marked `failed` with `raw_provider_payload.start_error = "billing.call_limit"`. Scheduling a LiveKit meeting on a group requires the scheduler to be a member of that group in the same workspace.
+
+A guest invite link never starts a call. Guests of a scheduled meeting can join only after a member has joined the call; until then the join page gets `meeting_invite.call_ended`.
 
 ## Soul Memory Integration
 

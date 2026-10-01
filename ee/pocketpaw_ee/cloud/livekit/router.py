@@ -25,7 +25,20 @@ additionally require workspace ownership.
 no license and no membership check, so any authenticated user could inject a
 fabricated participant-left event into any group in any workspace. It now
 carries the same guard as its siblings; see
-``tests/cloud/livekit/test_leave_route_guard.py``."""
+``tests/cloud/livekit/test_leave_route_guard.py``.
+
+2026-09-30 (fix/livekit-call-security): ``/token`` now refuses any room name
+that isn't ``group-call-<id>`` for a group the caller belongs to in their
+workspace (it used to check only ``group-call-*`` names). See
+``tests/cloud/livekit/test_token_room_access.py``. It also takes the LiveKit
+identity from the authenticated user (the body's ``identity`` is ignored) and
+clamps ``ttl_seconds`` to at most an hour. ``POST /rooms`` no longer returns
+the call-bot's token, and the room and recording routes use the same audited
+workspace + membership check as ``/token`` (``service.require_call_group``;
+``test_room_routes_guard.py``). The public invite join
+takes an optional ``email`` and the server enforces the invite's allow-list;
+validate returns ``requires_email`` instead of the list
+(``test_invite_email_allowlist.py``)."""
 
 from __future__ import annotations
 
@@ -65,20 +78,31 @@ class CreateRoomRequest(BaseModel):
 
 
 class CreateRoomResponse(BaseModel):
+    # No bot_token: the call-bot's 24h token stays on the server, which uses
+    # it to spawn the bot. Handing it to members let them join as call-bot.
     room_name: str
     group_id: str
     url: str
-    bot_token: str
     created_at: str
     is_new: bool = False
 
 
+# Longest token /token will mint. The frontend asks for 3600 and LiveKit keeps
+# a connected participant in the room past the token's expiry, so an hour only
+# bounds how long a leaked token can be used to connect.
+MAX_TOKEN_TTL_SECONDS = 3600
+
+
 class TokenRequest(BaseModel):
     room_name: str = Field(..., description="LiveKit room name")
-    identity: str = Field(..., description="Participant identity (user ID)")
+    # Ignored: the identity is always the authenticated user's id. Kept so
+    # existing clients that still send it don't get a 422.
+    identity: str = Field(default="", description="Ignored; the caller's user id is used")
     can_publish: bool = True
     can_subscribe: bool = True
-    ttl_seconds: int = 3600
+    ttl_seconds: int = Field(
+        default=MAX_TOKEN_TTL_SECONDS, description="Clamped to 60..3600 seconds"
+    )
 
 
 class TokenResponse(BaseModel):
@@ -186,13 +210,13 @@ async def create_room(
     """Create a LiveKit room for a group call.
 
     If a room already exists for this group, returns the existing one.
-    The response includes a short-lived admin token for the call bot.
+    Members get their own token from ``POST /token``; the call-bot's token is
+    never returned.
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(body.group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(body.group_id, str(user.id), workspace_id)
 
     result = await livekit_service.create_room(body.group_id, workspace_id, str(user.id))
 
@@ -233,39 +257,47 @@ async def generate_token(
     """
     await require_license()
 
-    # Verify the caller is a member of the group that owns this room.
+    # Every room name must map to a group the caller belongs to in their
+    # workspace. Until 2026-09-30 only ``group-call-*`` names were checked, so
+    # any other name minted a token with no check at all. One 403 for "not a
+    # call room", "no such group", "other workspace" and "not a member", so the
+    # response is not an existence oracle. The call-bot and guests never come
+    # here: their tokens are minted in create_room and invite accept.
     gid = _group_id_from_room_name(body.room_name)
-    if gid:
-        group = await _get_group_domain_or_404(gid)
-        _require_domain_group_member(group, str(user.id))
+    await livekit_service.require_call_group(gid, str(user.id), workspace_id)
 
-    # Use the user's full_name as the LiveKit participant name
-    display_name = user.full_name or body.identity
+    # The LiveKit identity is the authenticated user, never the request body:
+    # a body-supplied identity let a member join as ``call-bot``, as a
+    # ``guest-*`` or as another member. User ids are ObjectIds, so they can't
+    # collide with those reserved identities.
+    identity = str(user.id)
+    if body.identity and body.identity != identity:
+        logger.debug("Ignoring client-supplied LiveKit identity for user %s", identity)
+    display_name = user.full_name or identity
 
     token = await livekit_service.generate_participant_token(
         room_name=body.room_name,
-        identity=body.identity,
+        identity=identity,
         name=display_name,
         can_publish=body.can_publish,
         can_subscribe=body.can_subscribe,
-        ttl_seconds=body.ttl_seconds,
+        ttl_seconds=min(max(body.ttl_seconds, 60), MAX_TOKEN_TTL_SECONDS),
     )
 
     # Notify group members that someone joined the call.
-    if gid:
-        try:
-            await emit(
-                CallParticipantJoined(
-                    data={
-                        "group_id": gid,
-                        "room_name": body.room_name,
-                        "identity": body.identity,
-                        "name": display_name,
-                    }
-                )
+    try:
+        await emit(
+            CallParticipantJoined(
+                data={
+                    "group_id": gid,
+                    "room_name": body.room_name,
+                    "identity": identity,
+                    "name": display_name,
+                }
             )
-        except Exception:
-            pass
+        )
+    except Exception:
+        pass
 
     return TokenResponse(
         token=token,
@@ -287,9 +319,8 @@ async def get_room_info(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     info = await livekit_service.get_room_info(group_id)
     if info is None:
@@ -349,9 +380,8 @@ async def end_call(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     result = await livekit_service.end_room(group_id, workspace_id)
 
@@ -389,9 +419,8 @@ async def start_recording(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     # Only workspace owner can record
     await _require_workspace_owner(user=user, workspace_id=workspace_id)
@@ -416,9 +445,8 @@ async def stop_recording(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     # Only workspace owner can stop recording
     await _require_workspace_owner(user=user, workspace_id=workspace_id)
@@ -479,9 +507,8 @@ async def get_recording_status(
     """
     await require_license()
 
-    # Verify the caller is a member of the target group.
-    group = await _get_group_domain_or_404(group_id)
-    _require_domain_group_member(group, str(user.id))
+    # The group must be in the caller's workspace and have them as a member.
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
 
     info = await livekit_service.get_recording_info(group_id)
 
@@ -559,6 +586,7 @@ class ValidateInviteResponse(BaseModel):
     group_id: str
     workspace_id: str
     display_name: str
+    requires_email: bool = False
     is_call_active: bool = False
     participant_count: int = 0
     expires_at: str
@@ -569,6 +597,11 @@ class ValidateInviteResponse(BaseModel):
 class JoinInviteRequest(BaseModel):
     display_name: str = Field(
         ..., min_length=1, max_length=80, description="Display name shown to other participants"
+    )
+    email: str | None = Field(
+        default=None,
+        max_length=320,
+        description="Guest email; required when the invite has an email allow-list",
     )
 
 
@@ -679,7 +712,7 @@ async def join_via_invite(token: str, body: JoinInviteRequest):
     """
     from pocketpaw_ee.cloud.livekit import invites as invite_service
 
-    result = await invite_service.accept_meeting_invite(token, body.display_name)
+    result = await invite_service.accept_meeting_invite(token, body.display_name, body.email)
     return JoinInviteResponse(**result)
 
 

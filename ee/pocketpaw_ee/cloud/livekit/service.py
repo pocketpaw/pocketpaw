@@ -21,6 +21,16 @@ Change log:
   call records its remaining budget as a ``Meeting.call_budget_deadline`` and a
   watchdog task (``_force_end_at_budget``) force-ends it at the deadline, so a
   single over-budget call is cut off rather than merely blocking later starts.
+- ``get_room_info()["active"]`` now means a participant other than the call-bot
+  is in the room (fix/livekit-call-security, 2026-09-30). It was hard-coded True
+  for any existing room, which left invite accept's "call ended" branch dead.
+- ``create_room(..., record_meeting=False)`` (same branch): a scheduled meeting
+  starting through ``meetings/providers/livekit`` now passes its workspace, so
+  the daily budget gate and the watchdog apply, without inserting a duplicate
+  "Instant call" row. The result carries ``call_budget_deadline``.
+- ``require_call_group()`` (same branch): the shared, audited check that a
+  group exists, is in the caller's workspace and has the caller as a member.
+  Used by the LiveKit routes and by scheduling a LiveKit meeting.
 """
 
 from __future__ import annotations
@@ -40,7 +50,7 @@ from livekit.protocol.room import (
     ListRoomsRequest,
 )
 
-from pocketpaw_ee.cloud._core.errors import CallLimitError
+from pocketpaw_ee.cloud._core.errors import CallLimitError, Forbidden
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     CallEnded,
@@ -128,6 +138,29 @@ def _ensure_configured() -> None:
 def room_name_for_group(group_id: str) -> str:
     """Build a deterministic LiveKit room name for a group."""
     return f"group-call-{group_id}"
+
+
+async def require_call_group(group_id: str | None, user_id: str, workspace_id: str) -> None:
+    """Refuse unless ``group_id`` is a group in ``workspace_id`` that ``user_id`` is in.
+
+    The one access check for every group-scoped call operation (token, room,
+    recording, scheduling a LiveKit meeting). A single 403 covers "no such
+    group", "another workspace" and "not a member", so the response doesn't
+    reveal which groups exist, and every refusal is written to the audit log.
+    """
+    from pocketpaw_ee.cloud.chat.group_service import _get_group_domain_or_none
+    from pocketpaw_ee.guards.audit import log_denial
+
+    group = await _get_group_domain_or_none(group_id) if group_id else None
+    if group is None or group.workspace_id != workspace_id or user_id not in group.members:
+        log_denial(
+            actor=user_id,
+            action="group.view",
+            code="livekit.room_forbidden",
+            resource_id=group_id or "",
+            workspace_id=workspace_id,
+        )
+        raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +744,8 @@ async def create_room(
     group_id: str,
     workspace_id: str = "",
     user_id: str = "",
+    *,
+    record_meeting: bool = True,
 ) -> dict[str, Any]:
     """Create a LiveKit room for a group call.
 
@@ -729,6 +764,13 @@ async def create_room(
     room (joining an already-running room is allowed — that call already owns
     its budget). Each new call gets a ``call_budget_deadline`` and a watchdog
     that force-ends it at the deadline so a single over-budget call is cut off.
+
+    ``record_meeting=False`` is for a caller that already owns the call's
+    ``Meeting`` row (a scheduled meeting starting): the budget gate and the
+    watchdog still apply, but no "Instant call" row is inserted and no
+    ``meeting.started`` is emitted. The caller stores the returned
+    ``call_budget_deadline`` and sets ``provider_meeting_id`` to the room name
+    on its own row so ``end_room`` and the watchdog find it.
     """
     _ensure_configured()
 
@@ -772,19 +814,23 @@ async def create_room(
         else:
             logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
 
+    # The new call may run until its remaining daily budget is spent — the
+    # watchdog force-ends it there. Uncapped (Enterprise / no plan context)
+    # calls, and joins to a running room, get no deadline.
+    now = datetime.now(UTC)
+    budget_deadline = None
+    if is_new and budget is not None:
+        cap, remaining = budget
+        if cap is not None and remaining > 0:
+            budget_deadline = now + timedelta(seconds=remaining)
+
+    if budget_deadline is not None and not record_meeting:
+        asyncio.create_task(_force_end_at_budget(group_id, workspace_id, budget_deadline))
+
     # Persist a Meeting document when a new room is created so the
     # call shows up in the scheduled meetings sidebar as "Live".
-    if is_new and workspace_id:
+    if is_new and workspace_id and record_meeting:
         try:
-            now = datetime.now(UTC)
-            # The new call may run until its remaining daily budget is spent —
-            # the watchdog force-ends it there. Uncapped (Enterprise / no plan
-            # context) calls get no deadline.
-            budget_deadline = None
-            if budget is not None:
-                cap, remaining = budget
-                if cap is not None and remaining > 0:
-                    budget_deadline = now + timedelta(seconds=remaining)
             meeting = MeetingDoc(
                 workspace=workspace_id,
                 source="livekit",
@@ -885,6 +931,7 @@ async def create_room(
         "bot_token": bot_token,
         "created_at": datetime.now(UTC).isoformat(),
         "is_new": is_new,
+        "call_budget_deadline": budget_deadline,
     }
 
 
@@ -1018,7 +1065,8 @@ async def end_room(group_id: str, workspace_id: str = "", reason: str = "") -> d
 async def get_room_info(group_id: str) -> dict[str, Any] | None:
     """Get the current state of a LiveKit room.
 
-    Returns None if the room doesn't exist (no active call).
+    Returns None if the room doesn't exist (no active call). ``active`` is
+    True only while a participant other than the call-bot is in the room.
     """
     _ensure_configured()
 
@@ -1048,7 +1096,9 @@ async def get_room_info(group_id: str) -> dict[str, Any] | None:
                     }
                     for p in participants
                 ],
-                "active": True,
+                # A room holding only the call-bot (or nobody) is not a live
+                # call. It used to report True whenever the room existed.
+                "active": any(p.identity != "call-bot" for p in participants),
             }
         except Exception as exc:
             msg = str(exc).lower()
