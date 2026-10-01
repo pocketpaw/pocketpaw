@@ -355,10 +355,9 @@ def _extract_html(html: str) -> str:
       would hide a broken image behind slightly-worse output.
     * trafilatura **returning None** is normal. It is tuned for articles and
       declines boilerplate-only or very short documents. That is a content
-      outcome, not a fault, so fall back to stripping tags rather than returning raw
-      markup —
-      before this branch existed, raw markup with all its tags is precisely
-      what `.html` uploads were indexing into the KB.
+      outcome, not a fault, so fall back to stripping tags rather than
+      returning raw markup — before this branch existed, raw markup with all
+      its tags is precisely what `.html` uploads were indexing into the KB.
     """
     import re
 
