@@ -15,6 +15,8 @@
 # Changes: 2026-10-01 (feat/atlas-canonical) — the allowlist is derived from the
 # atlas surfaces marked agent_openable: pinned as a set here, followed when the
 # atlas changes (a swapped store singleton), and empty when atlas can't load.
+# Review pass: a denylisted or malformed route stays closed even when atlas flags
+# it openable, and no server is built when nothing is openable.
 
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from pocketpaw_ee.agent.mcp_servers.surfaces import (
     SURFACES_TOOL_IDS,
     _open_surface_handler,
     allowed_routes,
+    build_surfaces_server,
     validate_open_surface,
 )
 from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
@@ -72,6 +75,31 @@ def test_allowlist_follows_the_atlas(monkeypatch: pytest.MonkeyPatch) -> None:
     assert validate_open_surface({"route": "/sites"}) == ({"route": "/sites"}, None)
     payload, error = validate_open_surface({"route": "/files"})
     assert payload is None and "Valid routes: /sites." in error
+
+
+@pytest.mark.parametrize(
+    "route", ["/settings", "/settings/billing", "/audit", "/security", "/admin", "//evil.example"]
+)
+def test_denylisted_route_stays_closed_even_if_flagged(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """SECURITY: the code-level denylist holds even if atlas flags the route."""
+    _swap_atlas(monkeypatch, {route: True, "/files": True})
+    assert allowed_routes() == ("/files",)
+    payload, _ = validate_open_surface({"route": route})
+    assert payload is None
+
+
+def test_no_server_when_nothing_is_openable(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("claude_agent_sdk")
+    _swap_atlas(monkeypatch, {"/files": False})
+    assert build_surfaces_server() is None
+
+
+def test_server_built_when_routes_exist() -> None:
+    pytest.importorskip("claude_agent_sdk")
+    built = build_surfaces_server()
+    assert built is not None and built[0] == "pocketpaw_surfaces"
 
 
 def test_allowlist_fails_closed_when_atlas_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

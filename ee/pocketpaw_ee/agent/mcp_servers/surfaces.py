@@ -48,6 +48,9 @@
 # the one place that says which surfaces the agent may open. The atlas is the
 # global compiled artifact (no tenant data), read through its process singleton
 # at call time; a load failure yields no routes, so every open is refused.
+# Review pass (same branch): allowed_routes() also drops malformed routes and the
+# hard denylist (settings, audit, security, admin) whatever the flag says, and
+# build_surfaces_server() registers nothing when no route is openable.
 
 from __future__ import annotations
 
@@ -80,12 +83,17 @@ def allowed_routes() -> tuple[str, ...]:
     loaded, no route is allowed.
     """
     try:
+        from pocketpaw.atlas.model import never_agent_openable
         from pocketpaw.atlas.store import get_atlas_store
 
         return tuple(
             e.surface
             for e in get_atlas_store().entries
-            if e.kind == "surface" and e.agent_openable is True
+            if e.kind == "surface"
+            and e.agent_openable is True
+            # SECURITY: the hard denylist and the route-shape check apply even
+            # if the flag says otherwise (the compiler refuses that too).
+            and not never_agent_openable(e.surface)
         )
     except Exception:  # noqa: BLE001 — fail closed, never open an unvetted route
         logger.warning("open_surface: atlas unavailable, no routes allowed", exc_info=True)
@@ -233,6 +241,11 @@ def build_surfaces_server() -> tuple[str, Any] | None:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except ImportError:
         logger.debug("claude_agent_sdk not installed; pocketpaw_surfaces MCP disabled")
+        return None
+    if not allowed_routes():
+        # Nothing is openable (atlas failed to load, or no surface is flagged):
+        # don't register a tool whose route enum is empty.
+        logger.warning("open_surface: no openable routes, pocketpaw_surfaces MCP disabled")
         return None
 
     @tool("open_surface", OPEN_SURFACE_DESCRIPTION, _open_surface_schema())

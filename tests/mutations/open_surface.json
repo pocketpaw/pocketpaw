@@ -58,8 +58,8 @@
   {
     "label": "open_surface: allowlist ignores atlas agent_openable (every surface openable)",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
-    "find": "if e.kind == \"surface\" and e.agent_openable is True",
-    "replace": "if e.kind == \"surface\"",
+    "find": "            and e.agent_openable is True\n",
+    "replace": "",
     "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
   },
   {
@@ -75,5 +75,47 @@
     "find": "        logger.warning(\"open_surface: atlas unavailable, no routes allowed\", exc_info=True)\n        return ()",
     "replace": "        logger.warning(\"open_surface: atlas unavailable, no routes allowed\", exc_info=True)\n        return (\"/files\", \"/settings\")",
     "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: code-level denylist dropped from allowed_routes",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "            and not never_agent_openable(e.surface)\n",
+    "replace": "",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: server built with an empty route enum",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "    if not allowed_routes():\n",
+    "replace": "    if False:\n",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "atlas compile: agent_openable denylist check dropped",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "e.agent_openable and never_agent_openable(e.surface)",
+    "replace": "False",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  },
+  {
+    "label": "atlas compile: surface route shape check dropped",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "if not is_valid_route(e.surface)]",
+    "replace": "if False]",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  },
+  {
+    "label": "atlas compile: missing slash key accepted",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "if e.get(\"kind\") == \"surface\" and \"slash\" not in e",
+    "replace": "if False",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  },
+  {
+    "label": "atlas: denylist no longer covers /settings sub-pages",
+    "file": "src/pocketpaw/atlas/model.py",
+    "find": "_NEVER_OPENABLE_PREFIXES = (\"/settings/\", ",
+    "replace": "_NEVER_OPENABLE_PREFIXES = (",
+    "tests": ["tests/atlas/test_surfaces_verbs.py", "tests/ee/agent/test_surfaces_mcp_server.py"]
   }
 ]
