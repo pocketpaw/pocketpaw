@@ -512,6 +512,19 @@ async def _source_visible_for_doc(
     return await _workspace_source_entitled(getattr(doc, "workspace", "") or "")
 
 
+async def snapshot_source_visible(workspace_id: str, source_gated: bool) -> bool:
+    """May ``workspace_id`` read a site snapshot carrying this ``source_gated`` stamp? (SF-2)
+
+    The same answer ``_source_visible_for_doc`` gives a pocket with that stamp in
+    that workspace, for callers holding a copied snapshot rather than a pocket
+    (sharing a site template publicly). Not a second rule: it asks the same one.
+    """
+    from types import SimpleNamespace
+
+    probe = SimpleNamespace(workspace=workspace_id, source_gated=bool(source_gated))
+    return await _source_visible_for_doc(probe)  # type: ignore[arg-type]
+
+
 async def _resolved_wire_dict(
     doc: _PocketDoc,
     viewer_user_id: str,
@@ -6496,6 +6509,7 @@ async def list_workspace_pocket_connector_permissions(
 
 
 __all__ = [
+    "snapshot_source_visible",
     "access_via_share_link",
     "add_agent",
     "add_collaborator",

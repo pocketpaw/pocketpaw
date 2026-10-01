@@ -9,8 +9,12 @@
 # ``snapshot`` carries the site's source and rippleSpec, so it never leaves the
 # service: responses and events carry the metadata only.
 #
-# ``visibility`` is "private" only for now (owner-only); the field exists so a
-# workspace-shared visibility can be added without a migration.
+# ``visibility``: "private" (owner only), "workspace" (every member of
+# ``workspace``) or "public" (every user in every workspace). ``reports`` holds at
+# most the service's ``MAX_REPORTS`` ``{user, reason, at}`` entries, one per
+# reporting user;
+# ``hidden`` flips on at the report threshold and takes a public template out of
+# everyone's reach but the owner's. Who-may-see lives in the service, not here.
 #
 # Only ``ee.cloud.site_templates.service`` imports this doc (import-linter
 # "SiteTemplates" contract).
@@ -32,7 +36,9 @@ class SiteTemplate(TimestampedDocument):
     owner: str
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
-    visibility: Literal["private"] = "private"
+    visibility: Literal["private", "workspace", "public"] = "private"
+    hidden: bool = False
+    reports: list[dict[str, Any]] = Field(default_factory=list)
     version: int = 1
     source_pocket_id: str
     engine: str | None = None

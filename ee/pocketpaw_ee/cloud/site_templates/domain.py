@@ -3,7 +3,8 @@
 # Frozen, built in service.py from a SiteTemplate doc. Tenancy (``workspace_id``)
 # and ``owner`` are required at construction, with no defaults. The snapshot is
 # deliberately NOT a field: nothing outside the service may hold a template's
-# source, so the domain object carries the metadata only.
+# source, so the domain object carries the metadata only. It holds the real
+# ``owner`` and ``workspace_id``; the service redacts them per viewer.
 
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ class SiteTemplateMeta:
     version: int
     engine: str | None
     pattern: str | None
+    hidden: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
