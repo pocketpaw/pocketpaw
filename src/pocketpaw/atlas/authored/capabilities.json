@@ -1,5 +1,5 @@
 {
-  "_comment": "capabilities.json — hand-authored capability cards, each role-gated by a role:<tier> marker in requires (WA-3). Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): added the two member-level fabric cards capability:fabric.provenance_read and capability:fabric.conflict_steward. Their names/summaries deliberately avoid the tokens 'fact'+'disputed' together (and only provenance_read says 'Fabric') so the two-content-token eval intents ('is this fact disputed', 'what is fabric') keep the primitives at #1 — a name hit outscores the primitive's keyword ceiling.",
+  "_comment": "capabilities.json — hand-authored capability cards, each role-gated by a role:<tier> marker in requires (WA-3). Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): added the two member-level fabric cards capability:fabric.provenance_read and capability:fabric.conflict_steward. Their names/summaries deliberately avoid the tokens 'fact'+'disputed' together (and only provenance_read says 'Fabric') so the two-content-token eval intents ('is this fact disputed', 'what is fabric') keep the primitives at #1 — a name hit outscores the primitive's keyword ceiling. Updated 2026-09-30 (feat/open-surface-tool): added capability:surface.open, the chat agent's open_surface tool (open /files, /studio/editor, /chat, /pockets or /knowledge on the user's screen). Surface is empty because it is not tied to one page: it is reachable on the generic chat surface and on /studio/editor.",
   "schema": "paw.atlas/v1",
   "entries": [
     {
@@ -448,6 +448,30 @@
         "download the cut",
         "finish the cut",
         "publish the cut"
+      ]
+    },
+    {
+      "id": "capability:surface.open",
+      "kind": "capability",
+      "name": "Open an app surface on the user's screen",
+      "summary": "Bring a page up on the user's screen (Files, the clip editor, a chat room, Pockets, Knowledge) when they need to see or choose something rather than read an answer.",
+      "narrative": "The agent asks the user's browser to open one of five app surfaces: /files to upload or pick files, /studio/editor with a clip handoff (src, name, mime, kind) to edit a video, /chat to read a conversation, /pockets or /knowledge to browse those. The route set is closed and params are a small flat string map; the editor's src must be the file's own /api/v1/uploads/<id> or /api/v1/media/<name> path, never an external URL. It has no side effect on the server: the tool returns once the request is dispatched, and the browser does the opening, so the agent must not claim the page has loaded.",
+      "how": "mcp__pocketpaw_surfaces__open_surface (route: /files | /studio/editor | /chat | /pockets | /knowledge; params: optional flat string map; reason: optional one line shown to the user)",
+      "surface": "",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "open files",
+        "file picker",
+        "pick a file",
+        "open the editor",
+        "take me to",
+        "open surface",
+        "open a page",
+        "navigate",
+        "go to",
+        "bring up"
       ]
     }
   ]

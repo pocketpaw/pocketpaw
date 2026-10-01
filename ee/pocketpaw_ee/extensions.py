@@ -849,6 +849,30 @@ class CloudTimelineMcpProvider:
         return list(TIMELINE_TOOL_IDS)
 
 
+class CloudSurfacesMcpProvider:
+    """`pocketpaw.mcp_servers` — the open-surface server (``pocketpaw_surfaces``).
+    Hosts ``open_surface``, which only returns an envelope run_core promotes to
+    an ``open_surface`` chat event; the browser does the opening.
+
+    Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
+    with no MCP allowlist (the GENERIC / default profile) and on /studio/editor,
+    whose allowlist names it; filtered out of the other allowlisted surfaces.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.surfaces import build_surfaces_server
+
+            return build_surfaces_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.surfaces import SURFACES_TOOL_IDS
+
+        return list(SURFACES_TOOL_IDS)
+
+
 class CloudMediaMcpProvider:
     """`pocketpaw.mcp_servers` — the STUDIO media-generation in-process server
     (``pocketpaw_media``). Hosts ``image_generate`` + ``video_generate``.

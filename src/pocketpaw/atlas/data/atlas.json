@@ -410,6 +410,31 @@
     },
     {
       "gist": "",
+      "how": "mcp__pocketpaw_surfaces__open_surface (route: /files | /studio/editor | /chat | /pockets | /knowledge; params: optional flat string map; reason: optional one line shown to the user)",
+      "id": "capability:surface.open",
+      "keywords": [
+        "open files",
+        "file picker",
+        "pick a file",
+        "open the editor",
+        "take me to",
+        "open surface",
+        "open a page",
+        "navigate",
+        "go to",
+        "bring up"
+      ],
+      "kind": "capability",
+      "name": "Open an app surface on the user's screen",
+      "narrative": "The agent asks the user's browser to open one of five app surfaces: /files to upload or pick files, /studio/editor with a clip handoff (src, name, mime, kind) to edit a video, /chat to read a conversation, /pockets or /knowledge to browse those. The route set is closed and params are a small flat string map; the editor's src must be the file's own /api/v1/uploads/<id> or /api/v1/media/<name> path, never an external URL. It has no side effect on the server: the tool returns once the request is dispatched, and the browser does the opening, so the agent must not claim the page has loaded.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Bring a page up on the user's screen (Files, the clip editor, a chat room, Pockets, Knowledge) when they need to see or choose something rather than read an answer.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "mcp__pocketpaw_timeline__edit_timeline (ops: place_clip / move_clip / trim_clip / split_clip / remove_clip / set_transition / add_text / style_text / add_caption / style_captions / place_audio / set_volume / set_transform / add_keyframe / clear_keyframes / zoom_clip / set_project)",
       "id": "capability:timeline.edit",
       "keywords": [

@@ -17,6 +17,10 @@
 # ``…tail``, and the tool's validator resolves tails back through
 # ``pockets.id_resolve``.
 #
+# Changes: 2026-09-30 (feat/open-surface-tool) — ONLY PLACE WHAT EXISTS now also
+# names ``open_surface``: when the clip is not in their gallery yet, the agent can
+# open /files so the user uploads or picks it.
+#
 # Changes: 2026-09-10 (feat/studio-editor-gallery-attach) — the user can now type
 # ``@`` in the editor's chat rail and pick an item from their /studio gallery,
 # and the page IMPORTS it into the media rail before the message is even sent.
@@ -290,7 +294,9 @@ Rules that matter:
   media from their /studio gallery by typing `@` in the composer, and it is
   imported onto the rail before they even send. So when the rail lacks what they
   described, tell them to attach it with `@` (or drag the file onto the rail) —
-  do not tell them media cannot be brought in here.
+  do not tell them media cannot be brought in here. If the file is not in their
+  gallery at all yet, call `mcp__pocketpaw_surfaces__open_surface` with route
+  /files so they can upload or pick it, then have them attach it here.
 - WHAT THEY JUST ATTACHED IS WHAT THEY MEAN. When ATTACHED THIS TURN appears
   above and the user says "add these", "put this on the timeline" or "use it",
   those assets are the ones — place them in the ORDER LISTED, and place all of
