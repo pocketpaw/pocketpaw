@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-whatsapp-leads, PH-6) — "Partner leads on
+  WhatsApp" under Owner notifications: a lead on a partner-sold site goes to the
+  opted-in shop owner on WhatsApp through the platform MSG91 account
+  (POCKETPAW_MSG91_PLATFORM_*).
 Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
   POST /partners/sell, GET /partners/sites (yearly partner plans paid from the
   partner's credit wallet).
@@ -3811,6 +3815,44 @@ One-time ops step per sending domain, which adds the SPF and DKIM records
 npx wrangler email sending enable example.com
 npx wrangler email sending dns get example.com   # check the records
 ```
+
+### Partner leads on WhatsApp
+
+A lead captured on a site a partner sold to a client (`partner_client_id` set by
+`POST /partners/sell`) also goes to that client, the shop owner, on WhatsApp. The
+shop owner never signs in, so this is how they hear about the lead. It is sent
+only when the client has a `whatsapp` number AND `whatsapp_opt_in_at` is set,
+and only for `lead.captured` (a handoff lead is not routed, as above). The
+site's `events` settings don't control it; the client's consent does, and
+`whatsapp` is not accepted as a sink by `PUT /sites/{site_id}/lead-notifications`.
+
+The message goes out from the PLATFORM's MSG91 account (not the workspace's
+`msg91` connector used by /growth) as the pre-approved template, with this one
+body variable, on one line and cut at 1024 characters:
+
+```text
+New enquiry for {site name} via Paw Sites by PocketPaw: {visitor name} — {message} Contact: {phone or email}
+```
+
+The lead email already carries the visitor's phone and email, so the WhatsApp
+text includes one of them: the shop owner has no other way to reply.
+
+Delivery uses the same outbox and retry schedule as webhooks (sink `whatsapp`,
+worked in the webhook lane). The row holds only the lead id and site id; the text
+is built when it is sent. At send time the client must still be opted in and not
+archived, or the row is dropped. An MSG91 error is retried; only its error code
+is stored. The other sinks never wait on it.
+
+| Variable | Purpose |
+|---|---|
+| `POCKETPAW_MSG91_PLATFORM_AUTHKEY` | Authkey of the platform MSG91 account. Secret, never logged. |
+| `POCKETPAW_MSG91_PLATFORM_INTEGRATED_NUMBER` | The WhatsApp sender number on that account. |
+| `POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE` | Name of the approved new-lead template (one body variable). |
+| `POCKETPAW_MSG91_PLATFORM_LANGUAGE` | Template language code. Default `en`. |
+
+Until the first three are set, nothing is queued: each skipped lead logs one
+warning (lead and site ids only), and the lead, bell, email and webhook go out as
+usual.
 
 ## Ship — Managed Deploys
 
