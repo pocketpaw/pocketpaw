@@ -175,7 +175,9 @@ async def close_arq_pool() -> None:
 
 
 def _reset_for_tests() -> None:
-    global _client, _blocking_client, _arq_pool
+    global _client, _blocking_client, _arq_pool, _arq_pool_lock
     _client = None
     _blocking_client = None
     _arq_pool = None
+    # A contended lock binds to that test's loop; a fresh one per reset.
+    _arq_pool_lock = asyncio.Lock()
