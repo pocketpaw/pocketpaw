@@ -371,3 +371,19 @@ async def test_write_routes_need_a_body(rig, path):
     admin, _member, store = rig
     site, _ = await _seeded(store)
     assert (await admin.post(f"{_CAT.format(sid=site.id)}/{path}", json={})).status_code == 422
+
+
+async def test_widget_create_checks_the_spec_size_and_the_catalog_cap(rig, monkeypatch):
+    from pocketpaw.paw_bar import store as store_module
+
+    admin, _member, store = rig
+    body = {"pocket_id": "pocket-9", "owner": "user:maya", "spec": _huge_spec("w")}
+    res = await admin.post("/paw-bar/widgets", json=body)
+    assert (res.status_code, res.json()["detail"]) == (422, "spec_too_large")
+
+    monkeypatch.setattr(store_module, "catalog_max_items", lambda: 1)
+    spec = {"widget_id": "w", "pocket_id": "pocket-9", "catalog": [_item(1), _item(2)]}
+    res = await admin.post("/paw-bar/widgets", json={**body, "spec": spec})
+    assert res.status_code == 409
+    assert res.json()["detail"] == {"code": "catalog_full", "limit": 1}
+    assert await store.list_widgets(pocket_id="pocket-9") == []

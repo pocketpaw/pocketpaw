@@ -1840,8 +1840,13 @@ async def create_widget(
     )
     # No agent is provisioned here, even on a site's pocket (CR-12): a concierge
     # exists only once its owner creates one via POST .../concierge. A widget is
-    # a bar, not a decision to publish an assistant.
-    return await _store().create_widget(widget)
+    # a bar, not a decision to publish an assistant. The spec is held to the same
+    # size cap as a spec PATCH, and a (deprecated) catalog in it to the item cap.
+    _check_spec_size(req.spec)
+    try:
+        return await _store().create_widget(widget)
+    except CatalogFull as exc:
+        raise _catalog_full(exc) from None
 
 
 @router.get(
