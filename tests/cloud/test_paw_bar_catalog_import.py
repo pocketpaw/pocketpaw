@@ -159,7 +159,8 @@ def test_catalog_urls_that_are_accepted(url):
     ],
 )
 def test_legacy_bad_values_load_cleaned_instead_of_raising(fields, field, cleaned):
-    item = PawBarCatalogItem(id="m", name=fields.pop("name", "M"), **fields)
+    fields = {"name": "M", **fields}  # copy: parametrize dicts are shared across runs
+    item = PawBarCatalogItem(id="m", **fields)
     assert getattr(item, field) == cleaned
 
 
