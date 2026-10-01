@@ -114,16 +114,52 @@ one publish into an unbounded run of article compilations.
 
 ### Every article is LLM-compiled — never stored verbatim
 
-Ingest always compiles the extracted text into a structured article (title, summary,
-compressed wiki-style content) before it is stored. On deployments with an
+Ingest always compiles the extracted text into structured articles (title, summary,
+markdown content) before anything is stored. On deployments with an
 `ANTHROPIC_API_KEY`, the kb binary runs that compilation itself. On deployments
 without one (for example the Claude Code agent-backend cloud box), PocketPaw
-compiles the article with its own agent backend and hands the pre-compiled article
-to the kb binary. If compilation fails on either path, the ingest **fails loudly**
-— the document is never stored verbatim, because uncompiled raw text poisons the
-scope and makes every chat turn pay full-corpus search cost for junk snippets.
+compiles the articles with its own agent backend and hands them pre-compiled to the
+kb binary. If compilation fails, the ingest **fails loudly**. The document is never
+stored verbatim, because uncompiled raw text poisons the scope and makes every chat
+turn pay full-corpus search cost for junk snippets.
 
-Two bounds on the agent-backend path are worth knowing:
+### Long documents are compiled section by section
+
+The knowledge base searches compiled articles only; the raw text it keeps beside them
+is never searched. So a fact the compiler leaves out cannot be found, and owners'
+documents (price lists, policies, contracts, spec sheets) are dense: every line is a
+fact. On the agent-backend path, site pages and knowledge sources go through a
+sectioned ingest:
+
+- **A document over 2,000 characters is split into sections** of about 1,500
+  characters. Cuts fall at headings (markdown headings and heading-like lines in PDF
+  text, such as `2. Caring for your gear`), then blank lines, page breaks and table
+  blocks. A paragraph or table that is too big on its own is cut at line ends, then
+  sentence ends, never in the middle of a sentence; a markdown table's header is
+  repeated on every piece.
+- **Each section is compiled into its own article**, with a prompt that restructures
+  rather than compresses: every name, number, price, date, quantity, condition and
+  contact detail is kept exactly, duplicates may be merged, nothing is dropped or
+  invented. Its title is the document name, `part i of n`, and the section's topic.
+- **A section is rejected only when it is unusable**: an empty title or content,
+  unparseable JSON, or runaway output (more than three times the section, or over
+  8,000 characters). A near-verbatim section is fine; it is the owner's own text. A
+  failed section is retried once with a "JSON only" reminder.
+- **Three sections compile at a time**, under a ten-minute budget for the whole
+  document. A section not done by then counts as failed.
+- **The document is `ready` once one section landed.** The source row lists every
+  article and counts `sections_total`, `sections_failed`, and `sections_truncated`
+  (sections past the plan's character cap, never read). Failed sections are logged
+  with their reason. If no section landed, the row is `failed` / `ingest_failed`.
+
+Sections are sized so each compiled article stays under 2,000 characters: the kb
+binary's context search returns an article's body only below that, and the concierge
+keeps up to 2,000 characters of each retrieved item. One question can pull in
+several sections of the same document.
+
+A document of 2,000 characters or less is still compiled whole, as is everything on
+the `ANTHROPIC_API_KEY` path. For whole-document compiles on the agent backend, two
+bounds apply:
 
 - **The compiler sees at most the first 80,000 characters** of a document. The
   full raw text is still stored alongside the article, but for a very large
@@ -132,11 +168,12 @@ Two bounds on the agent-backend path are worth knowing:
   article is rejected as a verbatim echo when it is at least 60% of the input's
   length *and* at least half of its 8-word runs appear word for word in the input
   (punctuation and whitespace ignored, so adding bullets does not hide a copy).
-  Length alone is not enough: a price list or care guide is all facts, and its
-  honest compile can be nearly as long as the source while rewording every line.
   Separately, an article more than 1.25 times the input's length is rejected.
-  Short documents are exempt from both checks: an article about a two-paragraph
-  note can legitimately be about as long as the note itself.
+  Short documents are exempt from both checks.
+
+Owner uploads in the Files panel and the book agent still compile one article per
+document: hide-from-AI tracks one article per file, and the book agent compiles
+inside the request.
 
 ### When it runs
 
@@ -204,8 +241,8 @@ same way they find a page. The routes live under
 exact contract.
 
 - **Reading happens in the background.** Adding a source returns at once with a row in
-  `processing`; the text is extracted and compiled into an article, and the row flips to
-  `ready`. The dashboard polls the list.
+  `processing`; the text is extracted and compiled into articles (one per section of a
+  long document), and the row flips to `ready`. The dashboard polls the list.
 - **A file's type comes from its bytes.** The extension has to be one of the four
   accepted types *and* agree with what the content actually is. The browser's
   `Content-Type` is never consulted, so a picture renamed `menu.pdf` or a PDF renamed
@@ -218,8 +255,8 @@ exact contract.
   use: the address has to resolve to a public host, and every redirect is checked
   again, so a page that redirects to an internal address is refused rather than
   fetched. HTML is reduced to its visible text. A link can be read again on demand
-  (`…/{source_id}/refetch`); the new article replaces the old one.
-- **Removing a source un-indexes it.** Its article is deleted from the pocket scope,
+  (`…/{source_id}/refetch`); the new articles replace the old ones.
+- **Removing a source un-indexes it.** Every article it produced is deleted from the pocket scope,
   so the concierge stops quoting it on the next turn. The knowledge base names an
   article after its compiled title, so two sources can end up sharing one; an article
   another source or the page sync still holds is kept.
