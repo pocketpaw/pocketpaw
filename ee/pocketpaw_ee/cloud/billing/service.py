@@ -191,6 +191,32 @@
 #   cancel-then-create, and open a SECOND parallel Dodo subscription — the
 #   double-billing defect fixed on 2026-07-08, reintroduced by a status string.
 #   See ``_BILLABLE_STATUSES`` for which question each set answers.
+#
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): INR TOP-UPS GRANT. Paw
+#   Partners (Indian print shops / designers) prepay the wallet in rupees, and a
+#   verified INR ``payment.succeeded`` used to be acked and grant nothing. The
+#   currency gate now admits USD and INR ONLY; every other currency keeps the old
+#   ack-record-grant-nothing behaviour.
+#
+#   THE INR RATE is Dodo's own: a USD ``settlement_amount`` on the verified body
+#   is the auditable USD value of the charge, and credits = those cents. Only
+#   when no USD settlement figure is present does the grant fall back to the
+#   configured ``fx_inr_per_usd`` (credits = floor(paise / rate)). Both figures
+#   are logged on every INR grant so a fee netted into the settlement, or a unit
+#   mismatch, is visible after the fact.
+#
+#   BULK BONUS rides a SEPARATE ledger line, ``cause="bulk_bonus"``, keyed on
+#   ``<event_id>:bulk_bonus`` so it is exactly-once on its own — see
+#   ``_INR_BULK_BONUS``. ``credits_granted`` on the Payment row is base + bonus,
+#   which is the reversal cap.
+#
+#   REVERSALS ARE NOW PROPORTIONAL. ``_handle_reversal_event`` used to take a
+#   same-currency refund's stated amount AS credits, which is exact for USD (one
+#   cent, one credit) and a gross over-reversal for INR (a Rs.100 refund is 10,000
+#   paise, not 10,000 credits). It now takes ``floor(granted * refunded / paid)``,
+#   which reduces to the old figure for USD (granted == paid) and reverses base
+#   and bonus pro rata for INR — exactly base + bonus on a full refund, never
+#   more than was granted, rounding down on every partial.
 from __future__ import annotations
 
 import logging
@@ -323,6 +349,47 @@ _REVERSAL_EVENTS = frozenset({_REFUND_SUCCEEDED, _DISPUTE_LOST})
 # workspace's monthly quota.
 _REVERSAL_CAUSE = "payment_reversal"
 
+# --- INR top-ups (PH-4) ---------------------------------------------------
+# The currencies a top-up GRANTS in. Anything else is acked, recorded with
+# ``credits_granted=0`` and never granted (the 1-credit==1-cent mapping is USD's,
+# and INR has its own conversion below).
+_GRANT_CURRENCIES = frozenset({"USD", "INR"})
+_TOPUP_CAUSE = "top_up"
+# The separate ledger line a bulk INR prepay earns. NOT ``top_up``: it is not
+# money the partner paid, so it must not count as purchased revenue or raise the
+# monthly ceiling the way a bought top-up does.
+_BULK_BONUS_CAUSE = "bulk_bonus"
+# (minimum INR charge in PAISE, bonus percent), highest tier first. Measured on
+# the gross ``total_amount`` the partner paid. Rs.25,000 -> +10%, Rs.1,00,000 -> +20%.
+_INR_BULK_BONUS: tuple[tuple[int, int], ...] = (
+    (10_000_000, 20),
+    (2_500_000, 10),
+)
+
+
+def _inr_bulk_bonus(paid_paise: int, base_credits: int) -> int:
+    """The bonus credits a ``paid_paise`` INR top-up earns on ``base_credits`` (floor)."""
+    for threshold, pct in _INR_BULK_BONUS:
+        if paid_paise >= threshold:
+            return base_credits * pct // 100
+    return 0
+
+
+def _inr_base_credits(event: GatewayEvent) -> tuple[int, str]:
+    """Credits an INR charge is worth, and which figure produced them.
+
+    Dodo's USD ``settlement_amount`` wins when present — it is the gateway's own
+    conversion, auditable against the payout, and needs no rate. Otherwise the
+    configured ``fx_inr_per_usd`` converts the paise: credits are US cents, so
+    ``floor(paise / 100 / rate * 100) == paise // rate``.
+    """
+    if event.settlement_currency.upper() == "USD" and event.settlement_amount > 0:
+        return event.settlement_amount, "settlement"
+    from pocketpaw.config import get_settings
+
+    rate = float(get_settings().fx_inr_per_usd)
+    return int(event.amount_credits // rate), "fx"
+
 
 def _default_provider() -> IPaymentsProvider:
     """Build the v1 provider (Dodo) from runtime settings.
@@ -348,12 +415,15 @@ async def create_topup(
     *,
     customer_email: str | None = None,
     provider: IPaymentsProvider | None = None,
+    currency: str = "USD",
 ) -> dict:
     """Create a one-time top-up and return ``{"checkout_url": ...}``.
 
-    ``amount_credits`` is integer credits (1 credit == $0.01) and must be a
-    positive integer. ``workspace_id`` is stamped onto the gateway metadata so
-    the success webhook can route the grant back to the right wallet.
+    ``amount_credits`` is the charge in ``currency``'s lowest denomination and
+    must be a positive integer: integer credits for USD (1 credit == $0.01), and
+    PAISE for INR (the credits an INR charge buys are settled by the webhook —
+    see ``_inr_base_credits``). ``workspace_id`` is stamped onto the gateway
+    metadata so the success webhook can route the grant back to the right wallet.
     """
     # Rule 6 — validate at entry.
     if (
@@ -364,6 +434,9 @@ async def create_topup(
         raise ValidationError("billing.invalid_amount", "amount_credits must be a positive integer")
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+    currency = (currency or "USD").upper()
+    if currency not in _GRANT_CURRENCIES:
+        raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
 
     prov = provider or _default_provider()
     checkout = await prov.create_one_time(
@@ -371,6 +444,7 @@ async def create_topup(
         workspace_id=workspace_id,
         customer_email=customer_email,
         metadata={"workspace_id": workspace_id, "user_id": user_id or ""},
+        currency=currency,
     )
     return {"checkout_url": checkout.checkout_url}
 
@@ -836,27 +910,57 @@ async def handle_webhook(
             event.event_id,
         )
         return {"ok": True, "granted": False}
-    # USD-ONLY: the 1-credit==1-cent mapping holds only for USD. A verified
-    # non-USD charge would be credited 1:1 against the wrong denomination (a
-    # ¥750 charge wrongly granting 750 credits == $7.50). Until the gateway
-    # carries an FX-normalized amount, gate the grant on currency == USD; any
-    # other currency is acked (200) so Dodo stops retrying, but grants nothing.
-    if event.currency.upper() != "USD":
+    # USD + INR ONLY. The 1-credit==1-cent mapping holds only for USD, and INR
+    # has its own conversion (``_inr_base_credits``). Any other verified charge
+    # would be credited 1:1 against the wrong denomination (a ¥750 charge wrongly
+    # granting 750 credits == $7.50), so it is acked (200) so Dodo stops
+    # retrying, recorded above, and grants nothing.
+    currency = event.currency.upper()
+    if currency not in _GRANT_CURRENCIES:
         # Log the event id + currency only — never the amount (PII / money).
         logger.warning(
-            "billing.webhook: payment.succeeded in non-USD currency=%s (event_id=%s) — "
-            "not granting (USD-only)",
+            "billing.webhook: payment.succeeded in unsupported currency=%s (event_id=%s) — "
+            "not granting (USD/INR only)",
             event.currency,
             event.event_id,
         )
         return {"ok": True, "granted": False}
 
+    bonus = 0
+    if currency == "INR":
+        base, source = _inr_base_credits(event)
+        bonus = _inr_bulk_bonus(event.amount_credits, base)
+        from pocketpaw.config import get_settings
+
+        # Both figures, every time: if Dodo nets a fee into the settlement or
+        # reports it in an unexpected unit, the gap against the FX estimate shows.
+        logger.info(
+            "billing.webhook: INR top-up event_id=%s base=%d credits via %s "
+            "(settlement=%d %s, fx_estimate=%d), bulk_bonus=%d",
+            event.event_id,
+            base,
+            source,
+            event.settlement_amount,
+            event.settlement_currency or "-",
+            int(event.amount_credits // float(get_settings().fx_inr_per_usd)),
+            bonus,
+        )
+        if base <= 0:
+            logger.warning(
+                "billing.webhook: INR payment.succeeded converted to 0 credits "
+                "(event_id=%s) — not granting",
+                event.event_id,
+            )
+            return {"ok": True, "granted": False}
+    else:
+        base = event.amount_credits
+
     # Grant EXACTLY ONCE — idempotency is keyed on the webhook event id. A replay
     # collides on BC-1's unique (workspace, idempotency_key) index and no-ops.
     result = await credits_service.grant(
         workspace=event.workspace_id,
-        amount=event.amount_credits,
-        cause="top_up",
+        amount=base,
+        cause=_TOPUP_CAUSE,
         idempotency_key=event.event_id,
         ref={"gateway": _GATEWAY, "event_id": event.event_id},
     )
@@ -867,11 +971,26 @@ async def handle_webhook(
     # genuine grant as a replay or vice versa).
     applied = result.created
 
+    if bonus > 0:
+        # Its OWN line and its OWN key, derived from the event id, so it is
+        # exactly-once independently of the base grant: a crash between the two
+        # is healed by the redelivery granting just the missing bonus.
+        bonus_result = await credits_service.grant(
+            workspace=event.workspace_id,
+            amount=bonus,
+            cause=_BULK_BONUS_CAUSE,
+            idempotency_key=f"{event.event_id}:{_BULK_BONUS_CAUSE}",
+            ref={"gateway": _GATEWAY, "event_id": event.event_id},
+        )
+        new_balance = bonus_result.balance
+        applied = applied or bonus_result.created
+
     # Stamp what the grant ACTUALLY moved onto the row written above. Done on
     # every delivery, not only a first one: if a prior delivery crashed in the
     # window between recording and granting, its row still reads 0 while the
     # credits exist, and a redelivery is the only thing that can heal it.
-    await _mark_payment_granted(event.event_id, event.amount_credits)
+    # Base + bonus: this is the cap a reversal claws back against.
+    await _mark_payment_granted(event.event_id, base + bonus)
 
     if applied:
         # Rule 9 — emit only on a grant that actually applied (not a replay).
@@ -881,7 +1000,7 @@ async def handle_webhook(
                     "workspace_id": event.workspace_id,
                     "gateway": _GATEWAY,
                     "event_id": event.event_id,
-                    "amount_credits": event.amount_credits,
+                    "amount_credits": base + bonus,
                     "currency": event.currency,
                     "balance_after": new_balance,
                 }
@@ -889,7 +1008,7 @@ async def handle_webhook(
         )
         logger.info(
             "billing.webhook: granted %d credits to workspace=%s (event_id=%s)",
-            event.amount_credits,
+            base + bonus,
             event.workspace_id,
             event.event_id,
         )
@@ -1040,9 +1159,11 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
       * we can never take more credits than we handed out, whatever the gateway
         says the money was.
 
-    THE AMOUNT is the reversal's own stated figure when the gateway named one in
-    the payment's currency — a partial refund returns part of the charge, and
-    taking the whole grant for it would seize credits the buyer still paid for.
+    THE AMOUNT is the grant's share of the reversal's own stated figure when the
+    gateway named one in the payment's currency (``granted * refunded // paid``:
+    the stated cents for USD, base + bulk bonus pro rata for INR) — a partial
+    refund returns part of the charge, and taking the whole grant for it would
+    seize credits the buyer still paid for.
     Otherwise it is the full remaining grant, which is what a completed refund
     and a lost chargeback both mean.
 
@@ -1219,8 +1340,15 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
         return _reversal_ack()
 
     same_currency = bool(event.currency) and event.currency.upper() == (doc.currency or "").upper()
-    if event.amount_credits > 0 and same_currency:
-        amount = min(event.amount_credits, remaining)
+    paid = int(doc.amount_credits or 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        # PRO RATA of what the payment granted, never the refund's money AS
+        # credits. For USD granted == paid, so this is exactly the stated cents.
+        # For INR the refund is in paise and the grant is base + bulk bonus, so a
+        # full refund takes exactly base + bonus and a partial takes its share of
+        # both. Floor: repeated partials can leave a credit un-reversed, which is
+        # the recoverable direction.
+        amount = min(int(granted) * min(event.amount_credits, paid) // paid, remaining)
     elif event.is_partial:
         # A PARTIAL reversal whose amount we could not read. Falling through to
         # the full remaining grant here would seize credits the buyer still paid
@@ -1240,6 +1368,17 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
         return _reversal_ack()
     else:
         amount = remaining
+
+    if amount <= 0:
+        # A refund so small its pro-rata share floors to zero credits.
+        logger.info(
+            "billing.webhook: %s for payment=%s (event_id=%s) is worth 0 credits pro rata — "
+            "nothing to reverse",
+            event.type,
+            event.payment_id,
+            event.event_id,
+        )
+        return _reversal_ack()
 
     # CLAIM the reversal on the payment row BEFORE any money moves. The filter
     # carries two independent guards:
