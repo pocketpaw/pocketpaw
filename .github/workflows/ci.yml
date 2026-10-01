@@ -42,6 +42,10 @@
 # runs `mutate.py --validate`, which counts substrings and exits: no mutation
 # applied, no tests run, no dependency install. A full sweep is deliberately
 # NOT here; see the job's own comment for why.
+# Updated: 2026-10-01 (CN-3) — the test job runs the daily cap and run-start
+# gate tests (metering primitive, per-meter characterization, abuse budgets,
+# comprehension, transcription, guest gates, illustration budget, the chat
+# route's billing leg) with the same addopts escape.
 # Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_faqs.py
 # (concierge pinned FAQs) with the same addopts escape as the v2 runner step.
 # Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_sources.py
@@ -257,6 +261,29 @@ jobs:
         # spot: a dropped filter would be a silent leak between tenants that no
         # other lane runs a test for.
         run: uv run pytest tests/cloud/test_agent_activity.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run daily cap and run-start gate tests
+        # Same addopts escape. Every daily cap (chat turns, uploads, file
+        # comprehension, transcription, illustrations, guest turns) counts
+        # through one metering primitive, and these files are the only proof
+        # that each meter still allows and refuses at its boundaries, fails the
+        # way its caller needs, and that the chat route's billing leg is the
+        # shared credits guard. Mutations: tests/mutations/abuse_budgets.json,
+        # file_comprehension.json, transcription.json, byok_image_key.json.
+        run: >-
+          uv run pytest tests/cloud/metering/test_daily_usage.py
+          tests/cloud/test_daily_caps_characterization.py
+          tests/cloud/uploads/test_abuse_budgets.py
+          tests/cloud/uploads/test_comprehension.py
+          tests/cloud/uploads/test_transcription.py
+          tests/cloud/auth/test_guest_gates.py
+          tests/cloud/other_hand/test_illustrate_endpoint.py
+          tests/cloud/other_hand/test_illustrate_tool.py
+          tests/cloud/test_agent_router_run_start_gates.py
+          tests/cloud/credits/test_enforcement.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
