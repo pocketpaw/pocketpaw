@@ -1,4 +1,4 @@
-<!-- Updated 2026-10-01 (CN-1): added "Canonical primitives — use X, never Y" section. -->
+<!-- Updated 2026-10-01 (CN-1): added "Canonical primitives — use X, never Y" section; hmac rule scoped to outbound signing. -->
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -542,7 +542,7 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 
 These already exist. Don't build a parallel copy; `scripts/dup-ratchet` and the
 import-linter contracts fail CI on new ones (they pin today's count and only shrink).
-Full map: `paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md` §3.
+Why: parallel copies drift (different caps, floors, SSRF checks), so one canonical copy wins.
 
 - **Approvals:** propose through `InstinctStore` (`update_parameters` / `_update_status`).
   Never open `store._db_path` or raw-`UPDATE instinct_actions`; no new `InstinctApproval` writers.
@@ -552,8 +552,9 @@ Full map: `paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md`
   (0 = disabled, None = uncapped). No new `*_DAILY` env cap, `try_spend` copy or inline `check_quota`.
 - **Outbound HTTP to user-supplied URLs:** `pocketpaw.security` pinned fetch
   (`safe_fetch` / `url_validators`). No new `_ip_is_unsafe`.
-- **Webhooks and system email:** the notifications outbox (`cloud/notifications/outbox.py`,
-  signing in `webhook_signing.py`). No `smtplib`, no hand-rolled `hmac.new`.
+- **Webhooks and system email:** the notifications outbox (`cloud/notifications/outbox.py`).
+  Outbound signatures use `webhook_signing.py`, never a hand-rolled `hmac.new`; inbound
+  verifiers for a provider's own scheme (growth, Recall webhooks) are fine. No `smtplib`.
 - **Fabric / people:** no new Fabric type (Customer/Partner/Client) and no Beanie doc for an
   external person until the object-store decision lands. `Project` = work scope only, never a
   client container.

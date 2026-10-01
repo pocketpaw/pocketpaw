@@ -1190,12 +1190,11 @@ forbidden_modules = [
 # Canonicalization Wave 0 guards (CN-1, 2026-10-01). Each lands green with
 # today's violators in ignore_imports; that list is the ratchet and only shrinks.
 # unmatched alerting is off so PRs that remove a violator merge in any order.
-# Plan: paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md §3.
-# Known gap: this checks direct imports of the submodule only. A writer that
-# does `from pocketpaw_ee.cloud.models import InstinctApproval` goes through the
-# models/__init__ re-export and is NOT caught. A grep ratchet can't cover it
-# either, because the domain class shares the name. Nothing uses that path
-# today; review new InstinctApproval imports by hand until the queue is retired.
+# Why: copies of a primitive drift apart, so new code reuses the canonical one.
+# Known gap: this checks direct imports of the submodule only, so
+# `from pocketpaw_ee.cloud.models import InstinctApproval` (the models/__init__
+# re-export) is NOT caught here. scripts/dup-ratchet covers that path with its
+# "InstinctApproval via the models re-export" row (max 0).
 [[tool.importlinter.contracts]]
 name = "InstinctApprovals — no new writers"
 type = "forbidden"
