@@ -97,7 +97,9 @@ surfaces and composer verbs. Surfaces carry `slash` / `presentation` /
 `agent_openable`; a new `verb` kind (`atlas/authored/verbs.json`) lists every
 composer verb with `applies_to` / `triggers` / `risk` / `undo`; `open_surface`
 derives its route allowlist from `agent_openable`; GET /api/v1/atlas/* serves
-the composer; atlas_search cards carry `slash`.
+the composer; atlas_search cards carry `slash`. Review pass: five more
+surfaces (/agents/activity, /fabric, /ship, /growth, /browser), a hard
+open_surface denylist enforced at build and call time, and a role-aware read API.
 -->
 
 # Atlas — the OS self-model
@@ -215,6 +217,11 @@ in its `surface` field:
 | `surface:meetings` | `/meetings` | meetings timeline |
 | `surface:activity` | `/activity` | workspace activity feed |
 | `surface:audit` | `/audit` | audit log |
+| `surface:agents-activity` | `/agents/activity` | which agents are working right now |
+| `surface:fabric` | `/fabric` | browse Fabric's entities and links |
+| `surface:ship` | `/ship` | managed-deploy console |
+| `surface:growth` | `/growth` | outbound engine: prospects, outreach, LinkedIn queue |
+| `surface:browser` | `/browser` | agent-driven web browsing, results only |
 
 Primitives with a natural home route cross-link it in their own `surface`
 field so `atlas_describe` answers include where to see the result:
@@ -230,16 +237,21 @@ field so `atlas_describe` answers include where to see the result:
 Every authored surface also states:
 
 - `slash`: the composer command that navigates there (without the `/`), the
-  route's last segment (`files`, `sites`, `deep-work`, ...), or `null` for
-  settings sub-pages, `/studio/editor` and `/decisions-graph`.
+  route path joined with `-` (`files`, `deep-work`, `agents-activity`, ...), or
+  `null` for settings sub-pages, `/studio/editor` and `/decisions-graph`. The
+  key must be present on every authored surface; the build fails if it's
+  missing.
 - `presentation`: `inline` for the views the no-UI shell renders in the thread
   (`/chat`, `/files`, `/deep-work`, `/pockets`, `/sites`, `/knowledge`,
   `/studio`), `window` otherwise.
 - `agent_openable`: whether the agent's `open_surface` tool may open it
   (`/files`, `/studio/editor`, `/chat`, `/pockets`, `/knowledge`). The tool
   reads this set at call time, so flipping the flag here is the whole change;
-  `tests/atlas/test_surfaces_verbs.py` pins the set so widening it is a
-  deliberate, reviewed edit.
+  `tests/atlas/test_surfaces_verbs.py` pins the set as a security pin so widening
+  it is a deliberate, reviewed edit. Settings pages, `/audit`, `/security`,
+  `/admin*` and any route that isn't a rooted `/...` path can never be openable:
+  `compile_atlas` refuses the build, and `open_surface` filters them again at
+  call time (`model.never_agent_openable`).
 
 ## Verb entries (`kind: "verb"`)
 
@@ -248,9 +260,15 @@ object (send to a channel, rename a file, complete a task, keep a panel as a
 Pocket). Each carries `slash` (the composer command, or `null` when the verb is
 an action on the object rather than a command), `applies_to` (object types:
 `channel`, `file`, `task`, `room`, `message`, `pocket`, `site`, `article`,
-`panel`), `triggers` (`slash`, `verb`, `agent`), `risk` (`read` / `safe` /
-`risky`) and `undo`. Navigation is not a verb; the surface `slash` values cover
-it.
+`panel`), `triggers` (`slash`, `verb`, `agent`), `risk` and `undo`. Navigation
+is not a verb; the surface `slash` values cover it.
+
+`risk` has one definition (`model.VerbRisk`): `read` changes nothing; `safe`
+changes the user's workspace objects in a benign or reversible way; `risky`
+speaks for the user where others read it (send, reply, edit a sent message,
+publish) or deletes with no undo. `undo` is true exactly where the no-UI lab's
+verb catalog returns an inverse. `verb:catch-up` has no slash: it is a chat-panel
+verb, not a composer command.
 
 These fields default to `null` on the model and the compiler drops null keys,
 so other kinds serialize exactly as before; `compile_atlas` fails the build when
@@ -259,7 +277,11 @@ a surface or verb leaves one of its fields unset (`model.KIND_FIELDS`).
 Both lists are served to the composer by `GET /api/v1/atlas/surfaces`,
 `/verbs` and `/search` (see `docs/api-reference.md`), and verb cards come back
 from `atlas_search` with their `slash` so the agent can tell the user the
-command.
+command. The tool description also tells the agent never to run a verb itself;
+risky verbs go through the composer's confirmation or approvals. The read API
+resolves the caller's workspace role, so role-gated entries (the owner-only
+`surface:security`, the admin capability cards) appear only for roles that
+clear them.
 
 ## Source-truth + the verify loop in the self-model (AST-1)
 

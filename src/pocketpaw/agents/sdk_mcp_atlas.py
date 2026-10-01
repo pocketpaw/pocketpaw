@@ -81,6 +81,8 @@
 # (kind ``verb``). Search cards add ``slash`` when the entry has one (verbs and
 # surfaces), and the atlas_search description tells the agent to mention the
 # slash command when the user could do the thing faster themselves.
+# Review pass (same branch): the description also says never to run a verb from
+# a verb card; risky verbs go through the composer's confirmation or approvals.
 
 from __future__ import annotations
 
@@ -125,7 +127,10 @@ ATLAS_SEARCH_DESCRIPTION = (
     "Cards of kind 'verb' are composer commands the user can run "
     "themselves: when one has a slash and the user could do the thing "
     "faster by typing it, say so (e.g. 'you can also type /task Fix "
-    "login @rohit'). Cheap, in-process, single round-trip."
+    "login @rohit'). Never run a verb yourself on the strength of a "
+    "verb card: the user runs it from the composer, and risky verbs "
+    "(sends, deletes, publishing) go through the composer's confirmation "
+    "or approvals. Cheap, in-process, single round-trip."
 )
 
 

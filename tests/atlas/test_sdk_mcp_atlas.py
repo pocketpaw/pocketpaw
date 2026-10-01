@@ -75,6 +75,8 @@ class TestVerbAwareness:
     def test_description_tells_the_agent_to_suggest_the_command(self):
         assert "kind 'verb'" in ATLAS_SEARCH_DESCRIPTION
         assert "you can also type /task" in ATLAS_SEARCH_DESCRIPTION
+        assert "Never run a verb yourself" in ATLAS_SEARCH_DESCRIPTION
+        assert "risky verbs" in ATLAS_SEARCH_DESCRIPTION
 
 
 class TestAtlasDescribeHandler:
