@@ -416,7 +416,11 @@ class ConciergeKnowledgeSource(BaseModel):
     sentence: ``failed`` (``reason`` says why), ``too_large``, ``unsupported`` or
     ``blocked``. ``mime`` is what the server sniffed, never the client's claim.
     ``article_ids`` are the kb articles in ``pocket:<pocket_id>`` this source
-    produced; removing the source deletes them. The file itself is not stored.
+    produced, one per section of a long document; removing the source deletes
+    them all. ``sections_total`` / ``sections_failed`` count the document's
+    sections and the ones that did not compile (a source is ``ready`` once one
+    did); ``sections_truncated`` counts sections past the plan's char cap that
+    were never read. The file itself is not stored.
     """
 
     id: str
@@ -432,6 +436,9 @@ class ConciergeKnowledgeSource(BaseModel):
     chars: int = 0
     truncated: bool = False
     article_ids: list[str] = Field(default_factory=list)
+    sections_total: int = 0
+    sections_failed: int = 0
+    sections_truncated: int = 0
     created_at: datetime
     updated_at: datetime
     indexed_at: datetime | None = None

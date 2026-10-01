@@ -1,0 +1,138 @@
+[
+  {
+    "label": "a long document is compiled whole again — sectioning is bypassed and dense facts are compressed away",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "            if len(sections) > 1:",
+    "replace": "            if len(sections) > 10_000:",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_every_fact_in_the_real_field_guide_lands_in_some_article"
+    ]
+  },
+  {
+    "label": "a short document is sectioned too — the whole-document compile path changes for small docs",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "            if len(sections) > 1:",
+    "replace": "            if len(sections) > 0:",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_short_document_keeps_the_whole_document_compile"
+    ]
+  },
+  {
+    "label": "compiles are unbounded — a long document fans out every section at once",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    gate = asyncio.Semaphore(_SECTION_CONCURRENCY)",
+    "replace": "    gate = asyncio.Semaphore(1_000)",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_at_most_three_compiles_run_at_once_and_kb_writes_never_overlap"
+    ]
+  },
+  {
+    "label": "kb writes overlap — two ingests rebuild the scope index at once and one article drops out of it",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    kb_write = asyncio.Lock()",
+    "replace": "    kb_write = asyncio.Semaphore(1_000)",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_at_most_three_compiles_run_at_once_and_kb_writes_never_overlap"
+    ]
+  },
+  {
+    "label": "the deadline is ignored — a slow backend holds the source in processing past the stale window",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    deadline = loop.time() + _SECTIONED_INGEST_DEADLINE_S",
+    "replace": "    deadline = loop.time() + 3_600",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_sections_past_the_deadline_fail_and_the_rest_land"
+    ]
+  },
+  {
+    "label": "a failed section is never retried",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "        for retry in (False, True):",
+    "replace": "        for retry in (False,):",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_runaway_section_is_rejected_and_retried_once"
+    ]
+  },
+  {
+    "label": "runaway section output is accepted",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    if len(content) > limit:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_section_validation_limits",
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_runaway_section_is_rejected_and_retried_once"
+    ]
+  },
+  {
+    "label": "one failed section fails the whole document",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    if not ids:\n        raise RuntimeError(",
+    "replace": "    if failures:\n        raise RuntimeError(",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_failed_section_is_reported_and_the_rest_land"
+    ]
+  },
+  {
+    "label": "section titles lose the part number — sections with one topic collide on one kb article id",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    return f\"{doc} — part {index} of {total}: {topic}\"",
+    "replace": "    return f\"{doc}: {topic}\"",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_section_titles_are_unique_article_ids"
+    ]
+  },
+  {
+    "label": "a document just over the target is split although it fits the hard max",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge_sections.py",
+    "find": "    if len(text) <= hard_max:",
+    "replace": "    if len(text) <= target:",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_short_document_is_one_section"
+    ]
+  },
+  {
+    "label": "a split table loses its header on every piece after the first",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge_sections.py",
+    "find": " if head else rows_text for rows_text in rows]",
+    "replace": " if False else rows_text for rows_text in rows]",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_a_large_markdown_table_repeats_its_header_on_each_piece"
+    ]
+  },
+  {
+    "label": "a wrapped prose line ending in 'and' is taken for a heading",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge_sections.py",
+    "find": "    if line.rsplit(\" \", 1)[-1] in _CONTINUATION_WORDS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_multi_line_paragraphs_are_cut_at_line_ends"
+    ]
+  },
+  {
+    "label": "a concierge source records only its first section — removal leaves the rest in the pocket",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "            \"article_ids\": article_ids,",
+    "replace": "            \"article_ids\": article_ids[:1],",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_a_long_upload_records_every_section_article"
+    ]
+  },
+  {
+    "label": "a refetch keeps the old section articles beside the new ones",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    stale = [a for a in previous if a not in article_ids]",
+    "replace": "    stale = []",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_refetching_a_long_page_replaces_the_whole_old_set"
+    ]
+  },
+  {
+    "label": "site sync records only a long page's first section — the rest are never pruned",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "        report.article_ids.extend(article_ids)",
+    "replace": "        report.article_ids.append(article_ids[0])",
+    "tests": [
+      "tests/cloud/test_site_kb_ingest.py::test_a_long_page_records_every_section_and_prunes_the_old_set"
+    ]
+  }
+]

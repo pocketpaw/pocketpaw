@@ -1065,3 +1065,123 @@ def test_mount_cloud_serves_the_source_routes():
         ("DELETE", base + "/{source_id}"),
         ("POST", base + "/{source_id}/refetch"),
     } <= served
+
+
+# --------------------------------------------------------------------------- #
+# 10. A long document is ingested section by section
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def sections(monkeypatch):
+    """The REAL sectioned ingest under the routes, faked only at the LLM and the
+    kb binary (``_kb``): ``.kb`` holds the articles, ``.compiler`` the prompts."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import _Compiler, _FakeKb, _install
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    fake = _FakeKb()
+    monkeypatch.setattr(knowledge, "_kb", fake)
+    return SimpleNamespace(kb=fake, compiler=_install(monkeypatch, _Compiler()))
+
+
+def _chapters(count: int, marker: str = "", topic: str = "Chapter") -> bytes:
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import _long_doc
+
+    return _long_doc(count, marker).replace("Chapter", topic).encode()
+
+
+@pytest.mark.asyncio
+async def test_a_long_upload_records_every_section_article(owner, caps, jobs, sections):
+    site = await _site()
+    sid = str(site.id)
+
+    source_id = (await _upload(owner, sid, "prices.md", _chapters(5))).json()["id"]
+    await jobs.run()
+
+    [row] = (await _list(owner, sid))["sources"]
+    assert row["status"] == "ready"
+    assert (row["sections_total"], row["sections_failed"], row["sections_truncated"]) == (5, 0, 0)
+    assert sorted(row["article_ids"]) == sorted(sections.kb.articles)
+    assert len(row["article_ids"]) == 5
+
+    assert (await owner.delete(_BASE.format(sid=sid) + f"/{source_id}")).status_code == 204
+    assert sorted(sections.kb.deleted) == sorted(row["article_ids"])
+    assert sections.kb.articles == {}
+
+
+@pytest.mark.asyncio
+async def test_a_partly_failed_document_is_ready_with_counts(owner, caps, jobs, sections, caplog):
+    import json as _json
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import _restructure
+
+    def fail_marked(section: str, prompt: str) -> str:
+        return "no" if "BROKEN" in section else _json.dumps(_restructure(section))
+
+    sections.compiler.respond = fail_marked
+    site = await _site()
+
+    with caplog.at_level(logging.WARNING):
+        await _upload(owner, str(site.id), "prices.md", _chapters(4, marker="BROKEN"))
+        await jobs.run()
+
+    [row] = (await _list(owner, str(site.id)))["sources"]
+    assert (row["status"], row["reason"]) == ("ready", "")
+    assert (row["sections_total"], row["sections_failed"]) == (4, 1)
+    assert len(row["article_ids"]) == 3
+    assert any("3 of 4 sections" in r.getMessage() for r in _source_logs(caplog))
+
+
+@pytest.mark.asyncio
+async def test_a_document_whose_every_section_fails_is_ingest_failed(owner, caps, jobs, sections):
+    sections.compiler.respond = lambda section, prompt: "no"
+    site = await _site()
+
+    await _upload(owner, str(site.id), "prices.md", _chapters(3))
+    await jobs.run()
+
+    [row] = (await _list(owner, str(site.id)))["sources"]
+    assert (row["status"], row["reason"]) == ("failed", "ingest_failed")
+    assert row["article_ids"] == []
+    assert sections.kb.payloads == []
+
+
+@pytest.mark.asyncio
+async def test_refetching_a_long_page_replaces_the_whole_old_set(owner, caps, jobs, sections, web):
+    web.serve("https://public.example/prices", _chapters(4, topic="Spring").decode())
+    site = await _site()
+    sid = str(site.id)
+    source_id = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    await jobs.run()
+    [before] = (await _list(owner, sid))["sources"]
+    assert len(before["article_ids"]) == 4
+
+    web.serve("https://public.example/prices", _chapters(3, topic="Summer").decode())
+    assert (await owner.post(_BASE.format(sid=sid) + f"/{source_id}/refetch")).status_code == 202
+    await jobs.run()
+
+    [after] = (await _list(owner, sid))["sources"]
+    assert after["status"] == "ready" and len(after["article_ids"]) == 3
+    assert not set(after["article_ids"]) & set(before["article_ids"])
+    assert sorted(sections.kb.deleted) == sorted(before["article_ids"])
+    assert sorted(sections.kb.articles) == sorted(after["article_ids"])
+
+
+@pytest.mark.asyncio
+async def test_sections_past_the_char_cap_are_counted(owner, caps, jobs, sections):
+    doc = _chapters(6)
+    caps(max_chars=len(doc) // 2)
+    site = await _site()
+
+    await _upload(owner, str(site.id), "prices.md", doc)
+    await jobs.run()
+
+    [row] = (await _list(owner, str(site.id)))["sources"]
+    assert row["status"] == "ready" and row["truncated"] is True
+    assert row["sections_truncated"] >= 2
+    ingested = "".join(p["raw_text"] for p in sections.kb.payloads)
+    assert "Chapter 6" not in ingested
