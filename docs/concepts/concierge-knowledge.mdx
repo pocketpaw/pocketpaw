@@ -128,11 +128,15 @@ Two bounds on the agent-backend path are worth knowing:
 - **The compiler sees at most the first 80,000 characters** of a document. The
   full raw text is still stored alongside the article, but for a very large
   document the compiled article reflects that first slice only.
-- **The compression sanity check applies to documents over 4,000 characters.**
-  A compiled article for a large document must be meaningfully shorter than the
-  input the compiler saw, or it is rejected as a verbatim echo. Short documents
-  are exempt — an article about a two-paragraph note can legitimately be about
-  as long as the note itself.
+- **The echo check applies to documents over 4,000 characters.** A compiled
+  article is rejected as a verbatim echo when it is at least 60% of the input's
+  length *and* at least half of its 8-word runs appear word for word in the input
+  (punctuation and whitespace ignored, so adding bullets does not hide a copy).
+  Length alone is not enough: a price list or care guide is all facts, and its
+  honest compile can be nearly as long as the source while rewording every line.
+  Separately, an article more than 1.25 times the input's length is rejected.
+  Short documents are exempt from both checks: an article about a two-paragraph
+  note can legitimately be about as long as the note itself.
 
 ### When it runs
 

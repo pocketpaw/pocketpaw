@@ -67,6 +67,7 @@ from pocketpaw_ee.paw_bar.knowledge_sources import (
     check_link,
     extract_file_text,
     fetch_link_text,
+    missing_parser,
     sniff_upload,
 )
 from pocketpaw_ee.paw_bar.router import (
@@ -390,6 +391,30 @@ async def _read_source(
     return await extract_file_text(data or b"", ext, mime), mime
 
 
+def _log_unreadable(refused: SourceRefused, *, kind: str, source_id: str, mime: str) -> None:
+    """A missing parser is the deployment's fault and every upload of that type
+    fails, so it logs at error; a file the parser cannot read logs at warning."""
+    cause = refused.__cause__
+    if missing_parser(cause):
+        logger.error(
+            "paw_bar.sources: no parser for %s source %s (%s): %s",
+            kind,
+            source_id,
+            mime,
+            cause,
+            exc_info=refused,
+        )
+    else:
+        logger.warning(
+            "paw_bar.sources: %s source %s (%s) is unreadable: %s",
+            kind,
+            source_id,
+            mime,
+            cause,
+            exc_info=refused,
+        )
+
+
 async def _ingest_source(
     site_id: Any,
     scope: str,
@@ -428,13 +453,35 @@ async def _ingest_source(
         try:
             result = await KnowledgeService.ingest_text_to_scope(scope, text, label)
         except KnowledgeEngineUnavailable as exc:
+            logger.warning(
+                "paw_bar.sources: kb engine unavailable for %s source %s: %s",
+                kind,
+                source_id,
+                exc,
+                exc_info=True,
+            )
             raise SourceRefused("failed", "kb_unavailable") from exc
         except Exception as exc:  # noqa: BLE001 — a compile failure is this source's
+            logger.warning(
+                "paw_bar.sources: ingest of %s source %s failed: %s",
+                kind,
+                source_id,
+                exc,
+                exc_info=True,
+            )
             raise SourceRefused("failed", "ingest_failed") from exc
         article_id = extract_ingest_article_id(result)
         if not article_id:
+            logger.warning(
+                "paw_bar.sources: ingest of %s source %s returned no article id: %r",
+                kind,
+                source_id,
+                result,
+            )
             raise SourceRefused("failed", "ingest_failed")
     except SourceRefused as refused:
+        if refused.reason == "unreadable":
+            _log_unreadable(refused, kind=kind, source_id=source_id, mime=mime)
         fields = {"status": refused.status, "reason": refused.reason}
         await _set_source(site_id, source_id, {**fields, "updated_at": datetime.now(UTC)})
         return
