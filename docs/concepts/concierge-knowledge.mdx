@@ -153,6 +153,26 @@ must not become something the concierge quotes to visitors.
 can currently quote, when the last sync ran, and a status: empty for a clean sync,
 otherwise `never_synced`, `no_content`, `pocket_unavailable` or `sync_failed`.
 
+### The catalog follows the site
+
+A product card can only show a product in the widget's catalog, so a sync that
+reached the site (the pocket was read, or the connected site's crawl reached its
+origin) also starts a catalog sync in the background. It runs the same reader as the
+owner's Import button (Shopify, WooCommerce, then JSON-LD and OpenGraph on the product
+pages) and writes what it finds into the catalog, marked as coming from the site. It
+never waits on, fails or changes the knowledge sync, and a site without a concierge
+widget is not read at all.
+
+The owner always wins. A product the sync added is kept in step with the site (name,
+price, currency, image, page, description, stock) until the owner edits it; any edit
+through the catalog routes makes it the owner's, and the sync never touches it again.
+Products the owner made are never touched. A product the owner deletes is remembered
+and not added back. A synced product that disappears from the site is marked sold
+out, never deleted, and only when the import was complete: status `ok`, not cut short
+at the catalog cap, no product page skipped by robots.txt, and no product left out for
+having no currency (those are skipped; the owner can import them by hand and pick the
+currency). New products stop at the catalog cap, in the reader's order.
+
 ### Re-syncing is safe
 
 Article sources are deterministic, so re-ingesting a page updates that article rather

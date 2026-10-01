@@ -295,12 +295,15 @@ class PawBarCatalogItem(BaseModel):
 class PawBarCatalogRow(PawBarCatalogItem):
     """A catalog item as the catalog store holds it: the item plus its place in
     the owner's order, where it came from (``manual`` | ``shopify`` |
-    ``woocommerce`` | ``jsonld`` | ``opengraph`` | ``csv`` | ``site``) and when it
-    was last written."""
+    ``woocommerce`` | ``jsonld`` | ``opengraph`` | ``csv`` | ``site``), when it
+    was last written, and who owns it: ``origin`` is ``site`` while the site
+    sync keeps it in step with the site, ``owner`` once the owner made or edited
+    it (the sync never touches those)."""
 
     position: int = 0
     source: str = "manual"
     updated_at: str = ""
+    origin: Literal["site", "owner"] = "owner"
 
 
 class PawBarSpec(BaseModel):

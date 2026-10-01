@@ -662,6 +662,7 @@ from pocketpaw.paw_bar.models import (
     ConversationState,
     DecisionState,
     OwnerMessageRole,
+    PawBarCatalogItem,
     PawBarEvent,
     PawBarEventMapping,
     PawBarSpec,
@@ -676,6 +677,9 @@ from pocketpaw_ee.paw_bar.admit import admit as admit_event
 from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
 logger = logging.getLogger(__name__)
+# What the frozen public spec carries per catalog item: the item's own fields,
+# never a row's bookkeeping (position, source, origin, updated_at).
+_PUBLIC_CATALOG_FIELDS = set(PawBarCatalogItem.model_fields)
 
 # Role gate for the D2 concierge dashboard reads. ``require_action`` enforces the
 # caller's WORKSPACE ROLE against the ``paw_bar.read`` rule (ADMIN — owner/admin
@@ -2631,6 +2635,12 @@ class ConciergeKnowledgeResponse(BaseModel):
     connection and never finished answering, so the crawl was abandoned on its
     wall clock), ``crawl_failed``, and ``crawl_partial`` (pages were ingested but
     some could not be read, so nothing was pruned).
+
+    ``catalog_*`` is the last background catalog sync a knowledge sync scheduled
+    (``catalog_sync``): when it ran ("" never), how it ended (``catalog_status``:
+    ``ok`` / ``partial`` / ``empty``, the importer's failure reason, or
+    ``sync_failed``) and what it did to the catalog. A manual sync answers before
+    its catalog sync finishes, so these describe the previous one until a re-read.
     """
 
     site_id: str
@@ -2640,6 +2650,11 @@ class ConciergeKnowledgeResponse(BaseModel):
     ingested: int = 0
     removed: int = 0
     skipped: int = 0
+    catalog_synced_at: str = ""
+    catalog_status: str = ""
+    catalog_added: int = 0
+    catalog_updated: int = 0
+    catalog_sold_out: int = 0
 
 
 def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResponse:
@@ -2647,6 +2662,8 @@ def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResp
     status = getattr(site, "kb_sync_error", "") or ""
     if not synced_at and not status:
         status = "never_synced"
+    catalog_at = getattr(site, "catalog_synced_at", None)
+    catalog_counts = getattr(site, "catalog_sync_counts", None) or {}
     return ConciergeKnowledgeResponse(
         site_id=str(site.id),
         article_count=len(getattr(site, "kb_article_ids", None) or []),
@@ -2655,6 +2672,11 @@ def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResp
         ingested=getattr(report, "ingested", 0) or 0,
         removed=getattr(report, "removed", 0) or 0,
         skipped=getattr(report, "skipped", 0) or 0,
+        catalog_synced_at=catalog_at.isoformat() if catalog_at else "",
+        catalog_status=getattr(site, "catalog_sync_status", "") or "",
+        catalog_added=int(catalog_counts.get("added", 0) or 0),
+        catalog_updated=int(catalog_counts.get("updated", 0) or 0),
+        catalog_sold_out=int(catalog_counts.get("sold_out", 0) or 0),
     )
 
 
@@ -5290,9 +5312,8 @@ async def get_spec(
         headers["Access-Control-Allow-Origin"] = origin
     items, _ = await _store().list_catalog(widget.id, limit=_PUBLIC_SPEC_CATALOG)
     body = widget.spec.model_dump()
-    body["catalog"] = [
-        item.model_dump(exclude={"position", "source", "updated_at"}) for item in items
-    ]
+    # The frozen public shape: the item's own fields, none of the row's bookkeeping.
+    body["catalog"] = [item.model_dump(include=_PUBLIC_CATALOG_FIELDS) for item in items]
     return JSONResponse(body, headers=headers)
 
 

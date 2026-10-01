@@ -991,6 +991,14 @@ class Site(TimestampedDocument):
     # is broken". "" means the last sync was clean.
     kb_synced_at: datetime | None = None
     kb_sync_error: str = ""
+    # The catalog sync a knowledge sync schedules (``paw_bar.catalog_sync``): when it
+    # last ran, how it ended (the importer's ``ok`` / ``partial`` / ``empty``, its
+    # failure reason, or ``sync_failed``) and what it did to the rows (added,
+    # updated, sold_out, ...). Unset until a site with a concierge widget first
+    # syncs, so no migration.
+    catalog_synced_at: datetime | None = None
+    catalog_sync_status: str = ""
+    catalog_sync_counts: dict[str, int] = Field(default_factory=dict)
     # SC-1: the stored URL of a screenshot of this site's live page — what the
     # gallery card renders instead of a title and three pills. Written by the
     # best-effort capture ``sites.screenshot`` schedules from the tail of a

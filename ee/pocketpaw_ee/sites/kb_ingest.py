@@ -1,85 +1,39 @@
 # ee/pocketpaw_ee/sites/kb_ingest.py — put a site's own content into the pocket KB
-# its concierge reads from.
+# its concierge reads from, so a dedicated concierge does not start knowledge-empty.
 #
-# Updated 2026-09-28 (feat/concierge-page-aware, CR-3) — the crawl index. A sync now
-#   records which page each article came from, as ``Site.kb_page_index``
-#   (``{page_key: {"id", "title"}}``), written by ``_record_sync`` beside
-#   ``kb_article_ids`` under the same rules: a full sync replaces it, a partial
-#   foreign crawl merges into it, a failed sync leaves it alone. kb-go names an
-#   article after its compiled TITLE, not its ``site-<slug>`` source, and
-#   ``kb list`` does not report the source, so the ingest receipt is the only place
-#   the page-to-article link exists. ``page_key`` folds every spelling of a page
-#   ("about.html", "about/index.html", "src/routes/about/+page.svelte", "/about")
-#   to one key; the v2 concierge's ``resolve_page`` looks the visitor's page up by
-#   the same function. A site synced before this change has an empty index until
-#   its next publish or re-sync, and its pages read as "not indexed" until then.
-# Updated 2026-09-26 (sync crash recorded): ``safe_sync_site_knowledge`` returned
-#   `sync_failed` on a crash WITHOUT writing it to the Site, and the owner's
-#   knowledge route reads status off the Site, so a crashed manual re-sync showed
-#   the previous clean state. The crash now goes through ``_record_sync`` like
-#   every other failure (reason, a fresh `kb_synced_at`, previous ids kept), and
-#   the recording itself never raises.
-# Updated 2026-09-25 (kb engine unavailable): a missing or outdated kb binary
-#   (KnowledgeEngineUnavailable) stops the page loop at the FIRST page and records
-#   `kb_unavailable`. It used to fail every page on its own — one paid agent
-#   compile, one verbatim article from the old binary and one warning per page —
-#   and then report `ingest_failed`, which blamed the save rather than the engine.
-# Created 2026-07-26. A dedicated concierge agent used to start KNOWLEDGE-EMPTY: it
-# was provisioned with a soul and a persona and a KB scope, and nothing was ever put
-# in that scope. Demos only looked grounded because the widget spec happened to
-# carry a catalog. Ask a concierge "what are your opening hours" and the answer was
-# an honest "I don't know" about a business whose own homepage says 8am.
+# A CONCIERGE run reads ``pocket:<pocket_id>`` and ``agent:<its id>`` only
+# (``agent_service._kb_scopes_for_context``); the agent scope holds the owner's
+# attachments, this module owns the pocket scope, so a re-publish can never clobber
+# what an owner attached. The scope is SHARED with owner uploads: a sync never
+# clears it, it only deletes article ids it recorded writing.
 #
-# The concierge's grounding scopes are fixed by
-# ``agent_service._kb_scopes_for_context``: a CONCIERGE run reads
-# ``pocket:<pocket_id>`` and ``agent:<its own agent id>``, and nothing else (no
-# workspace:, no user: — a public caller must never read the whole tenant's KB).
-# The second scope is the owner's own attachments on the site's agent; this module
-# owns the FIRST one, so "the concierge knows the business without anyone uploading
-# anything" reduces to one job: get the site's pages into ``pocket:<pocket_id>``.
-# That is all this module does, and it is why a re-publish can never clobber what an
-# owner attached to the agent — the two scopes have separate writers.
+# SOURCE OF TRUTH. For a site we host it is the POCKET (durable, no network, what a
+# re-publish deploys), read by one extractor per engine (``extract_site_documents``):
+# html (the ``source`` map, also what the URL-import crawler writes), svelte
+# (components, code dropped) and ripple (the rippleSpec walked for copy). A FOREIGN
+# site (``mint_foreign_site``: a concierge on a page we never rendered) has an
+# empty pocket, so ``sites.foreign_grounding`` crawls its verified, fresh origin
+# into a source map the html extractor reads. Its failures each get a status code,
+# a failed crawl ingests nothing, and a partial one ingests but never prunes. A
+# crawl that reached the origin also schedules the site's first card screenshot
+# when it has none. Crawls run at bind and on the owner's re-sync, never on a
+# visitor's turn.
 #
-# SOURCE OF TRUTH — for a site WE HOST it is the POCKET, not the built artifact and
-# not the live URL:
-#   * the pocket is durable, so this works at publish time, at agent-provision time
-#     for a site published months ago, and on an owner's manual re-sync — a build
-#     directory only exists during a publish;
-#   * it needs no network, so those three lanes have no SSRF surface at all;
-#   * it is what a re-publish would deploy, so the KB never describes a page the
-#     site no longer serves.
+# IDEMPOTENCE. Page sources are deterministic (``site-<path-slug>``), so kb-go
+# versions an article instead of duplicating it, and ids this site produced before
+# but not now are pruned (only after a trustworthy, complete sync).
 #
-# LANES. Four, one extractor each, and only the first three read the pocket (see
-# ``extract_site_documents``):
-#   * html    — the ``source`` map is the site's real HTML (this is also what the
-#               URL-import crawler writes, so an agency's imported client site is
-#               covered by this path);
-#   * svelte  — the ``source`` map is hand-written components; script/style blocks
-#               and template expressions are dropped, the prose survives;
-#   * ripple  — there is no HTML yet, the copy lives in the rippleSpec, so the spec
-#               is walked for its text-bearing values;
-#   * FOREIGN — a site minted by ``mint_foreign_site``: a concierge embedded on a
-#               page we never rendered, whose pocket therefore holds nothing. Its
-#               truth IS the live origin, so ``sites.foreign_grounding`` crawls that
-#               origin (verified, fresh, one host, through the SSRF-hardened
-#               ``url_crawler``) and hands back a source map the HTML LANE ABOVE
-#               reads — there is no fourth extractor. The pocket stays the truth
-#               for the other three precisely because they have one.
-#               A crawl that reached the origin also schedules the site's first
-#               card screenshot when it has none (it never deploys, so nothing
-#               else would take one).
+# BOOKKEEPING on the Site (``_record_sync``, a targeted ``$set``): article ids,
+# ``kb_page_index`` (``{page_key: {"id", "title"}}``, the only page-to-article link;
+# ``concierge_runtime.resolve_page`` looks the visitor's page up by the same
+# ``page_key``), ``kb_synced_at`` and ``kb_sync_error``. A full sync replaces ids
+# and index, a partial crawl merges, a failure (a crash too: ``sync_failed``) keeps
+# them. A missing or outdated kb binary stops at the first page: ``kb_unavailable``.
 #
-# The crawl happens at bind and on the owner's explicit re-sync, NEVER on a
-# visitor's turn: a concierge run reads this scope out of the KB and fetches
-# nothing, which is what keeps a public caller from aiming a server-side request.
-#
-# IDEMPOTENCE. kb-go derives an article id from ``--source`` and re-ingesting the
-# same source bumps that article's version instead of duplicating it, so the page
-# sources here are deterministic (``site-<path-slug>``). The Site then remembers the
-# ids it produced, and a later sync deletes the ones that stopped being produced —
-# that is how a deleted or renamed page leaves the KB. The pocket scope is SHARED
-# with owner-uploaded files, so this NEVER clears the scope; it only removes ids it
-# is certain it wrote.
+# THE CATALOG FOLLOWS. A sync that reached the site's content (hosted: the pocket
+# was read; foreign: the crawl reached the origin) schedules the fire-and-forget
+# ``paw_bar.catalog_sync``, which imports the site's products into its concierge's
+# catalog. It never waits on, fails or changes this sync.
 
 from __future__ import annotations
 
@@ -539,6 +493,7 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         report.error = "pocket_unavailable"
         await _record_sync(site, report, previous=previous)
         return report
+    _schedule_catalog_sync(site)
 
     docs = extract_site_documents(
         engine=pocket.get("engine") or "ripple",
@@ -630,6 +585,7 @@ async def _sync_foreign_site_knowledge(
         return report
 
     _schedule_first_foreign_screenshot(site)
+    _schedule_catalog_sync(site)
 
     docs = extract_site_documents(engine="html", source=harvest.source)
     if not docs:
@@ -697,6 +653,21 @@ def _schedule_first_foreign_screenshot(site: Any) -> None:
     except Exception:  # noqa: BLE001 — a picture is never a gate on a sync
         logger.warning(
             "sites.kb: could not schedule a first screenshot for foreign site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_catalog_sync(site: Any) -> None:
+    """Have the site's concierge catalog pick up the products the site publishes.
+    Never blocks, never raises: the catalog is never a gate on a knowledge sync."""
+    try:
+        from pocketpaw_ee.paw_bar import catalog_sync
+
+        catalog_sync.schedule_site_catalog_sync(site)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "sites.kb: could not schedule a catalog sync for site %s",
             getattr(site, "id", "?"),
             exc_info=True,
         )
