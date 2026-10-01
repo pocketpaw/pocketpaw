@@ -788,3 +788,32 @@ ignore_imports = [
     # returns None and the request goes out untagged exactly as before.
     "pocketpaw.agents.spend_attribution -> pocketpaw_ee.cloud.chat.agent_service",
 ]
+
+# Canonicalization Wave 0 guards (CN-1, 2026-10-01). Each lands green with
+# today's violators in ignore_imports; that list is the ratchet and only shrinks.
+# unmatched alerting is off so PRs that remove a violator merge in any order.
+# These forbid `pocketpaw.*` submodules, so they live here (both root packages)
+# rather than in ee/pyproject.toml, where `pocketpaw` is external.
+# Plan: paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md §3.
+[[tool.importlinter.contracts]]
+name = "Fabric — object writes through one store"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee.cloud"]
+forbidden_modules = ["pocketpaw.fabric.journal_store"]
+ignore_imports = [
+    "pocketpaw_ee.cloud.people.service -> pocketpaw.fabric.journal_store",
+]
+
+[[tool.importlinter.contracts]]
+name = "Audit — cloud never writes SQLite AuditStore"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee.cloud"]
+forbidden_modules = ["pocketpaw.audit.store"]
+ignore_imports = [
+    "pocketpaw_ee.cloud.audit.listeners -> pocketpaw.audit.store",
+    "pocketpaw_ee.cloud.audit.service -> pocketpaw.audit.store",
+]
