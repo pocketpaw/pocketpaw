@@ -9,6 +9,10 @@
 #     slash trigger has a slash (and vice versa);
 #   * the compiler refuses a surface or verb missing its kind fields;
 #   * the compiled artifact keeps the new keys off every other kind.
+# Review pass (same branch): the slash is the route path joined with "-"
+# (/agents/activity -> agents-activity); the compiler refuses a missing slash
+# key, a non-rooted route, and an agent_openable denylisted route; risk and undo
+# are pinned per verb against the lab's verb catalog.
 
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ import pytest
 
 from pocketpaw.atlas import compile as compile_mod
 from pocketpaw.atlas.compile import AUTHORED_FILES
-from pocketpaw.atlas.model import AtlasEntry
+from pocketpaw.atlas.model import AtlasEntry, never_agent_openable
 from pocketpaw.atlas.store import _DATA_PATH, AtlasStore
 
 _SURFACES_PATH = next(p for p in AUTHORED_FILES if p.name == "surfaces.json")
@@ -53,15 +57,16 @@ class TestSurfaceFields:
         assert inline == INLINE_ROUTES
 
     def test_agent_openable_set_is_exact(self):
-        """The open_surface allowlist is derived from this set — widening it is a
-        security decision, so it has to show up as a failing pin."""
+        """SECURITY PIN. The open_surface allowlist is derived from this set:
+        widening it lets the agent navigate the user's browser somewhere new, so
+        it must show up here as a failing, reviewed change."""
         openable = {e.surface for e in _store_entries("surface") if e.agent_openable}
         assert openable == AGENT_OPENABLE_ROUTES
 
-    def test_surface_slash_is_the_route_tail(self):
+    def test_surface_slash_is_the_route_path(self):
         for e in _store_entries("surface"):
             if e.slash is not None:
-                assert e.slash == (e.surface.rstrip("/").rsplit("/", 1)[-1] or "home"), e.id
+                assert e.slash == (e.surface.strip("/").replace("/", "-") or "home"), e.id
 
     def test_settings_subpages_have_no_slash(self):
         for e in _store_entries("surface"):
@@ -80,6 +85,34 @@ class TestSlashes:
             assert _SLASH_RE.fullmatch(slash), slash
         assert len(slashes) == len(set(slashes)), sorted(slashes)
         assert not set(slashes) & RESERVED_SLASHES
+
+
+# Risk and undo per verb, checked against the lab's verb catalog
+# (paw-enterprise src/lib/components/no-ui-lab/verb-catalog.ts): undo is true
+# exactly where the lab returns an inverse.
+UNDO_VERBS = {
+    "verb:file-rename",
+    "verb:file-move",
+    "verb:file-share-link",
+    "verb:task-complete",
+    "verb:task-reopen",
+    "verb:task-rename",
+    "verb:task-assign",
+    "verb:task-due",
+    "verb:message-edit",
+    "verb:pocket-rename",
+    "verb:panel-keep",
+}
+RISKY_VERBS = {
+    "verb:send",
+    "verb:message-reply",
+    "verb:message-edit",
+    "verb:message-delete",
+    "verb:file-delete",
+    "verb:pocket-delete",
+    "verb:site-delete",
+    "verb:site-publish",
+}
 
 
 class TestVerbFields:
@@ -104,6 +137,18 @@ class TestVerbFields:
     def test_composer_slash_verbs(self, verb_id, slash, risk):
         v = AtlasStore.load().describe(verb_id)
         assert v is not None and v.slash == slash and v.risk == risk
+
+    def test_undo_matches_the_lab(self):
+        assert {v.id for v in _store_entries("verb") if v.undo} == UNDO_VERBS
+
+    def test_risky_set(self):
+        """risky = speaks for the user where others read it, or deletes with no undo."""
+        assert {v.id for v in _store_entries("verb") if v.risk == "risky"} == RISKY_VERBS
+
+    def test_catch_up_has_no_slash(self):
+        """The composer has no /catch-me-up command; it is a chat-panel verb."""
+        v = AtlasStore.load().describe("verb:catch-up")
+        assert v is not None and v.slash is None
 
     def test_destructive_verbs_are_risky_and_final(self):
         for vid in (
@@ -132,6 +177,63 @@ class TestCompileGate:
         monkeypatch.setattr(compile_mod, "load_authored_entries", lambda: [*real(), entry])
         with pytest.raises(ValueError, match=missing):
             compile_mod.compile_atlas()
+
+    def _with_surface(self, monkeypatch, **fields):
+        base = dict(id="surface:x", kind="surface", name="X", summary="s", narrative="n")
+        base.update(presentation="window", agent_openable=False, slash=None)
+        base.update(fields)
+        real = compile_mod.load_authored_entries
+        entry = AtlasEntry(**base)
+        monkeypatch.setattr(compile_mod, "load_authored_entries", lambda: [*real(), entry])
+
+    @pytest.mark.parametrize("route", ["", "x", "//evil.example", "https://evil.example"])
+    def test_non_rooted_route_fails_the_build(self, monkeypatch, route):
+        self._with_surface(monkeypatch, surface=route)
+        with pytest.raises(ValueError, match="start with one"):
+            compile_mod.compile_atlas()
+
+    @pytest.mark.parametrize(
+        "route",
+        ["/settings", "/settings/billing", "/settings/workspace", "/audit", "/security", "/admin"],
+    )
+    def test_denylisted_route_flagged_openable_fails_the_build(self, monkeypatch, route):
+        """SECURITY: settings / audit / security / admin are never agent-openable."""
+        self._with_surface(monkeypatch, surface=route, agent_openable=True)
+        with pytest.raises(ValueError, match="never be agent_openable"):
+            compile_mod.compile_atlas()
+
+    def test_missing_slash_key_fails_the_build(self, monkeypatch, tmp_path):
+        raw = json.loads(_SURFACES_PATH.read_text(encoding="utf-8"))
+        del raw["entries"][0]["slash"]
+        bad = tmp_path / "surfaces.json"
+        bad.write_text(json.dumps(raw), encoding="utf-8")
+        files = tuple(bad if p == _SURFACES_PATH else p for p in AUTHORED_FILES)
+        monkeypatch.setattr(compile_mod, "AUTHORED_FILES", files)
+        with pytest.raises(ValueError, match="missing the slash key"):
+            compile_mod.compile_atlas()
+
+
+class TestDenylist:
+    @pytest.mark.parametrize(
+        "route",
+        [
+            "/settings",
+            "/settings/",
+            "/settings/billing",
+            "/audit",
+            "/security",
+            "/admin",
+            "/admin/x",
+            "//x",
+            "x",
+        ],
+    )
+    def test_never_openable(self, route):
+        assert never_agent_openable(route)
+
+    @pytest.mark.parametrize("route", ["/files", "/chat", "/studio/editor", "/settingsx"])
+    def test_ordinary_routes_are_allowed(self, route):
+        assert not never_agent_openable(route)
 
 
 def test_artifact_keeps_new_keys_off_other_kinds():

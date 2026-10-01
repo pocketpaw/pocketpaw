@@ -35,6 +35,9 @@
 # All new fields default to None and the compiler drops None keys, so entries
 # that don't use them serialize byte-identically to before. ``KIND_FIELDS``
 # names the fields each kind must fill; the compiler enforces it at build time.
+# Review pass (same branch): ``VerbRisk`` spells out what read / safe / risky
+# mean, and ``never_agent_openable`` is the hard denylist (settings, audit,
+# security, admin, malformed routes) the compiler and open_surface both apply.
 
 from __future__ import annotations
 
@@ -61,9 +64,35 @@ Presentation = Literal["inline", "window"]
 # on the thing it acts on), or the agent (the verb's work is done by the agent).
 VerbTrigger = Literal["slash", "verb", "agent"]
 
-# How much a verb changes: "read" changes nothing, "safe" is a benign change,
-# "risky" acts as the user in a way others see or can't easily take back.
+# How much a verb changes:
+#   "read"  changes nothing (open, copy, download, summarize).
+#   "safe"  changes the user's workspace objects in a benign way, or in a way the
+#           composer can put back (rename, move, assign, due date, complete,
+#           react, create a task or note).
+#   "risky" speaks for the user where others read it (send, reply, edit a sent
+#           message, publish a site), or destroys something with no undo
+#           (every delete). The composer asks before running a risky verb.
 VerbRisk = Literal["read", "safe", "risky"]
+
+
+# SECURITY: routes the agent's open_surface tool may never open, whatever a
+# surface's ``agent_openable`` says. The compiler refuses to build an atlas that
+# flags one, and open_surface filters them again at call time.
+_NEVER_OPENABLE_EXACT = frozenset({"/settings", "/audit", "/security"})
+_NEVER_OPENABLE_PREFIXES = ("/settings/", "/audit/", "/security/", "/admin")
+
+
+def is_valid_route(route: str) -> bool:
+    """A rooted app path: starts with "/" but not "//" (no protocol-relative URL)."""
+    return isinstance(route, str) and route.startswith("/") and not route.startswith("//")
+
+
+def never_agent_openable(route: str) -> bool:
+    """True when *route* is malformed or on the hard open_surface denylist."""
+    if not is_valid_route(route):
+        return True
+    path = route.rstrip("/") or "/"
+    return path in _NEVER_OPENABLE_EXACT or route.startswith(_NEVER_OPENABLE_PREFIXES)
 
 
 # Fields a kind must fill (non-None). Enforced by ``compile_atlas`` on the
@@ -167,6 +196,8 @@ __all__ = [
     "AtlasEntry",
     "AtlasKind",
     "KIND_FIELDS",
+    "is_valid_route",
+    "never_agent_openable",
     "AtlasModel",
     "Presentation",
     "VerbRisk",

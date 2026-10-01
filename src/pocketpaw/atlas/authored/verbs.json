@@ -132,7 +132,7 @@
         "verb"
       ],
       "risk": "safe",
-      "undo": false
+      "undo": true
     },
     {
       "id": "verb:file-move",
@@ -157,7 +157,7 @@
         "verb"
       ],
       "risk": "safe",
-      "undo": false
+      "undo": true
     },
     {
       "id": "verb:file-delete",
@@ -306,7 +306,31 @@
         "verb"
       ],
       "risk": "safe",
-      "undo": false
+      "undo": true
+    },
+    {
+      "id": "verb:task-rename",
+      "kind": "verb",
+      "name": "Rename",
+      "summary": "Give a task a new title.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: change its title. Undoable (the old title is put back).",
+      "how": "the Rename verb on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "rename task",
+        "retitle",
+        "change task title"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": true
     },
     {
       "id": "verb:task-reject",
@@ -337,7 +361,7 @@
       "kind": "verb",
       "name": "Snooze",
       "summary": "Snooze a task so it comes back later.",
-      "narrative": "A composer verb in the no-UI shell. An object verb on a task: snooze it out of the way until later.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: snooze it out of the way for a day. The composer offers no undo for it.",
       "how": "the Snooze verb on a task",
       "surface": "",
       "requires": [],
@@ -381,7 +405,7 @@
         "verb"
       ],
       "risk": "safe",
-      "undo": false
+      "undo": true
     },
     {
       "id": "verb:task-due",
@@ -408,7 +432,7 @@
         "verb"
       ],
       "risk": "safe",
-      "undo": false
+      "undo": true
     },
     {
       "id": "verb:message-react",
@@ -440,7 +464,7 @@
       "kind": "verb",
       "name": "Reply to message",
       "summary": "Reply to a chat message in its thread.",
-      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: reply in the thread.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: reply in the thread. Risky: the reply posts as the user where others see it, and it can't be unsent from the composer.",
       "how": "the Reply verb on a message",
       "surface": "",
       "requires": [],
@@ -457,7 +481,7 @@
       "triggers": [
         "verb"
       ],
-      "risk": "safe",
+      "risk": "risky",
       "undo": false
     },
     {
@@ -465,7 +489,7 @@
       "kind": "verb",
       "name": "Edit own message",
       "summary": "Edit a message you sent.",
-      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: edit its text. Undoable.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: edit its text. Risky because others see the change; undoable (the old text is put back).",
       "how": "the Edit verb on your own message",
       "surface": "",
       "requires": [],
@@ -481,7 +505,7 @@
       "triggers": [
         "verb"
       ],
-      "risk": "safe",
+      "risk": "risky",
       "undo": true
     },
     {
@@ -529,7 +553,7 @@
         "verb"
       ],
       "risk": "safe",
-      "undo": false
+      "undo": true
     },
     {
       "id": "verb:pocket-delete",

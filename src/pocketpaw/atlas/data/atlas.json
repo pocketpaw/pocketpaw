@@ -2407,6 +2407,27 @@
       "agent_openable": false,
       "gist": "",
       "how": "",
+      "id": "surface:agents-activity",
+      "keywords": [
+        "agent activity",
+        "agents working",
+        "busy agents",
+        "running agents",
+        "live agents"
+      ],
+      "kind": "surface",
+      "name": "Agent Activity",
+      "narrative": "The /agents/activity board is the member-level, workspace-scoped view of live agent work: which agents are busy, what they are running, and what just finished. Point a user here when they ask what their agents are doing right now; the agent list and editor live at /agents.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "agents-activity",
+      "summary": "Which of the workspace's agents are working right now, and on what.",
+      "surface": "/agents/activity"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
       "id": "surface:audit",
       "keywords": [
         "audit",
@@ -2476,6 +2497,27 @@
       "requires": [],
       "summary": "Workspace billing surface: three tabs — Usage (consumption graph + allowance), Plans (plan cards), and Billing (wallet, top-up, ledger).",
       "surface": "/settings/billing"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:browser",
+      "keywords": [
+        "web browsing",
+        "browse the web",
+        "headless browser",
+        "look it up online",
+        "visit a website"
+      ],
+      "kind": "surface",
+      "name": "Browser",
+      "narrative": "The /browser surface is where the agent drives a headless browser on the server and only the results reach the user; there is no URL bar or live view. Point a user here when they want the agent to look something up or act on a website for them.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "browser",
+      "summary": "Chat-driven web browsing: the agent drives a server-side browser and brings back results.",
+      "surface": "/browser"
     },
     {
       "agent_openable": false,
@@ -2595,6 +2637,28 @@
       "surface": "/decisions-graph"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:fabric",
+      "keywords": [
+        "fabric browser",
+        "entity browser",
+        "ontology view",
+        "object types"
+      ],
+      "kind": "surface",
+      "name": "Fabric",
+      "narrative": "The /fabric page is the human view of Fabric, the workspace's typed knowledge graph of entities and the links between them. Point a user here to browse or inspect the entities Fabric holds; to explain Fabric itself or use it from an agent, see primitive:fabric.",
+      "presentation": "window",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "slash": "fabric",
+      "summary": "Browse the workspace's Fabric: its typed entities, their properties and links.",
+      "surface": "/fabric"
+    },
+    {
       "agent_openable": true,
       "gist": "",
       "how": "",
@@ -2643,12 +2707,34 @@
       ],
       "kind": "surface",
       "name": "Foresight",
-      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
+      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, the Fabric view, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
       "presentation": "window",
       "requires": [],
       "slash": "foresight",
-      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, fabric, aggregate views).",
+      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, aggregate views).",
       "surface": "/foresight"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:growth",
+      "keywords": [
+        "outbound",
+        "prospects",
+        "outreach",
+        "leads",
+        "cold email",
+        "linkedin queue"
+      ],
+      "kind": "surface",
+      "name": "Growth",
+      "narrative": "The /growth surface is where a human runs the outbound engine: the prospect list and detail pages, outreach drafts waiting for approval, and the manual LinkedIn queue. Point a user here for prospecting and outreach work.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "growth",
+      "summary": "The outbound engine's workspace: prospects, outreach drafts and the LinkedIn queue.",
+      "surface": "/growth"
     },
     {
       "agent_openable": false,
@@ -2852,6 +2938,28 @@
       "agent_openable": false,
       "gist": "",
       "how": "",
+      "id": "surface:ship",
+      "keywords": [
+        "deploy",
+        "deployment",
+        "server",
+        "box",
+        "managed deploy",
+        "ship it"
+      ],
+      "kind": "surface",
+      "name": "Ship",
+      "narrative": "The /ship console is the managed-deploy surface: boxes (servers) the workspace deploys to, their apps and deploy status, in a three-pane layout with a chat rail. Point a user here when they want to deploy or check on a deployed app; publishing a website is Sites, not Ship.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "ship",
+      "summary": "Managed-deploy console: provision boxes and ship apps to them.",
+      "surface": "/ship"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
       "id": "surface:sites",
       "keywords": [
         "sites",
@@ -3043,7 +3151,7 @@
       "triggers": [
         "verb"
       ],
-      "undo": false
+      "undo": true
     },
     {
       "applies_to": [
@@ -3068,7 +3176,7 @@
       "triggers": [
         "verb"
       ],
-      "undo": false
+      "undo": true
     },
     {
       "applies_to": [
@@ -3209,9 +3317,9 @@
       ],
       "kind": "verb",
       "name": "Edit own message",
-      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: edit its text. Undoable.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: edit its text. Risky because others see the change; undoable (the old text is put back).",
       "requires": [],
-      "risk": "safe",
+      "risk": "risky",
       "summary": "Edit a message you sent.",
       "surface": "",
       "triggers": [
@@ -3259,9 +3367,9 @@
       ],
       "kind": "verb",
       "name": "Reply to message",
-      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: reply in the thread.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: reply in the thread. Risky: the reply posts as the user where others see it, and it can't be unsent from the composer.",
       "requires": [],
-      "risk": "safe",
+      "risk": "risky",
       "summary": "Reply to a chat message in its thread.",
       "surface": "",
       "triggers": [
@@ -3364,7 +3472,7 @@
       "triggers": [
         "verb"
       ],
-      "undo": false
+      "undo": true
     },
     {
       "applies_to": [
@@ -3597,7 +3705,7 @@
       "triggers": [
         "verb"
       ],
-      "undo": false
+      "undo": true
     },
     {
       "applies_to": [
@@ -3650,7 +3758,7 @@
       "triggers": [
         "verb"
       ],
-      "undo": false
+      "undo": true
     },
     {
       "applies_to": [
@@ -3681,6 +3789,30 @@
         "task"
       ],
       "gist": "",
+      "how": "the Rename verb on a task",
+      "id": "verb:task-rename",
+      "keywords": [
+        "rename task",
+        "retitle",
+        "change task title"
+      ],
+      "kind": "verb",
+      "name": "Rename",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: change its title. Undoable (the old title is put back).",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Give a task a new title.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
       "how": "the Reopen verb on a task",
       "id": "verb:task-reopen",
       "keywords": [
@@ -3698,7 +3830,7 @@
       "triggers": [
         "verb"
       ],
-      "undo": false
+      "undo": true
     },
     {
       "applies_to": [
@@ -3715,7 +3847,7 @@
       ],
       "kind": "verb",
       "name": "Snooze",
-      "narrative": "A composer verb in the no-UI shell. An object verb on a task: snooze it out of the way until later.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: snooze it out of the way for a day. The composer offers no undo for it.",
       "requires": [],
       "risk": "safe",
       "summary": "Snooze a task so it comes back later.",

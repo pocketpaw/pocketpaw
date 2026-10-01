@@ -443,8 +443,8 @@
       "id": "surface:foresight",
       "kind": "surface",
       "name": "Foresight",
-      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, fabric, aggregate views).",
-      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
+      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, aggregate views).",
+      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, the Fabric view, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
       "how": "",
       "surface": "/foresight",
       "requires": [],
@@ -568,6 +568,109 @@
         "protection"
       ],
       "slash": "security",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:agents-activity",
+      "kind": "surface",
+      "name": "Agent Activity",
+      "summary": "Which of the workspace's agents are working right now, and on what.",
+      "narrative": "The /agents/activity board is the member-level, workspace-scoped view of live agent work: which agents are busy, what they are running, and what just finished. Point a user here when they ask what their agents are doing right now; the agent list and editor live at /agents.",
+      "how": "",
+      "surface": "/agents/activity",
+      "requires": [],
+      "keywords": [
+        "agent activity",
+        "agents working",
+        "busy agents",
+        "running agents",
+        "live agents"
+      ],
+      "slash": "agents-activity",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:fabric",
+      "kind": "surface",
+      "name": "Fabric",
+      "summary": "Browse the workspace's Fabric: its typed entities, their properties and links.",
+      "narrative": "The /fabric page is the human view of Fabric, the workspace's typed knowledge graph of entities and the links between them. Point a user here to browse or inspect the entities Fabric holds; to explain Fabric itself or use it from an agent, see primitive:fabric.",
+      "how": "",
+      "surface": "/fabric",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "keywords": [
+        "fabric browser",
+        "entity browser",
+        "ontology view",
+        "object types"
+      ],
+      "slash": "fabric",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:ship",
+      "kind": "surface",
+      "name": "Ship",
+      "summary": "Managed-deploy console: provision boxes and ship apps to them.",
+      "narrative": "The /ship console is the managed-deploy surface: boxes (servers) the workspace deploys to, their apps and deploy status, in a three-pane layout with a chat rail. Point a user here when they want to deploy or check on a deployed app; publishing a website is Sites, not Ship.",
+      "how": "",
+      "surface": "/ship",
+      "requires": [],
+      "keywords": [
+        "deploy",
+        "deployment",
+        "server",
+        "box",
+        "managed deploy",
+        "ship it"
+      ],
+      "slash": "ship",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:growth",
+      "kind": "surface",
+      "name": "Growth",
+      "summary": "The outbound engine's workspace: prospects, outreach drafts and the LinkedIn queue.",
+      "narrative": "The /growth surface is where a human runs the outbound engine: the prospect list and detail pages, outreach drafts waiting for approval, and the manual LinkedIn queue. Point a user here for prospecting and outreach work.",
+      "how": "",
+      "surface": "/growth",
+      "requires": [],
+      "keywords": [
+        "outbound",
+        "prospects",
+        "outreach",
+        "leads",
+        "cold email",
+        "linkedin queue"
+      ],
+      "slash": "growth",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:browser",
+      "kind": "surface",
+      "name": "Browser",
+      "summary": "Chat-driven web browsing: the agent drives a server-side browser and brings back results.",
+      "narrative": "The /browser surface is where the agent drives a headless browser on the server and only the results reach the user; there is no URL bar or live view. Point a user here when they want the agent to look something up or act on a website for them.",
+      "how": "",
+      "surface": "/browser",
+      "requires": [],
+      "keywords": [
+        "web browsing",
+        "browse the web",
+        "headless browser",
+        "look it up online",
+        "visit a website"
+      ],
+      "slash": "browser",
       "presentation": "window",
       "agent_openable": false
     }

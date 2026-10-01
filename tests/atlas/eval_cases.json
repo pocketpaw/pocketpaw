@@ -396,6 +396,66 @@
       "expected_id": "verb:task-assign",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "build me a site for my dentist practice",
+      "expected_id": "verb:site",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the slash verb and the destructive verbs each win their own intent."
+    },
+    {
+      "intent": "delete this file",
+      "expected_id": "verb:file-delete",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the slash verb and the destructive verbs each win their own intent."
+    },
+    {
+      "intent": "delete this site",
+      "expected_id": "verb:site-delete",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the slash verb and the destructive verbs each win their own intent."
+    },
+    {
+      "intent": "delete this pocket",
+      "expected_id": "verb:pocket-delete",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the slash verb and the destructive verbs each win their own intent."
+    },
+    {
+      "intent": "rename this task",
+      "expected_id": "verb:task-rename",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the slash verb and the destructive verbs each win their own intent."
+    },
+    {
+      "intent": "what are my agents doing right now",
+      "expected_id": "surface:agents-activity",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the five surfaces the composer's slash menu offers that atlas lacked."
+    },
+    {
+      "intent": "deploy my app to a server",
+      "expected_id": "surface:ship",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the five surfaces the composer's slash menu offers that atlas lacked."
+    },
+    {
+      "intent": "browse the web for me",
+      "expected_id": "surface:browser",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the five surfaces the composer's slash menu offers that atlas lacked."
+    },
+    {
+      "intent": "show my prospects",
+      "expected_id": "surface:growth",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the five surfaces the composer's slash menu offers that atlas lacked."
+    },
+    {
+      "intent": "open the fabric browser",
+      "expected_id": "surface:fabric",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the five surfaces the composer's slash menu offers that atlas lacked."
     }
   ]
 }

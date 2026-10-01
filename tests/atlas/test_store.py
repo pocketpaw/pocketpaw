@@ -34,7 +34,8 @@
 # EXPECTED_PRIMITIVE_IDS pins the twelve.
 # Updated: 2026-10-01 (feat/atlas-canonical) — COMPILED_KINDS gains "verb"; the
 # two hand-built surface fixtures carry the now-required presentation /
-# agent_openable fields.
+# agent_openable fields. Review pass: five surfaces the composer's slash menu
+# offers (/agents/activity, /fabric, /ship, /growth, /browser) join the set.
 
 import json
 
@@ -94,6 +95,11 @@ EXPECTED_SURFACE_IDS = {
     "surface:activity",
     "surface:audit",
     "surface:security",
+    "surface:agents-activity",
+    "surface:fabric",
+    "surface:ship",
+    "surface:growth",
+    "surface:browser",
 }
 
 # primitive id → the home route its ``surface`` field must carry (AT-3

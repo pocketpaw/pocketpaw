@@ -1,4 +1,8 @@
 # tests/atlas/test_eval.py — intent→capability ranking-regression eval
+# Updated: 2026-10-01 (feat/atlas-canonical, review pass) — baseline 67 → 77: cases
+# for verb:site, the three deletes, task rename and the five new surfaces. The
+# new surface:fabric name damped primitive:fabric on "what is fabric" until a
+# stray "fabric" moved from surface:foresight's summary to its narrative.
 # Updated: 2026-10-01 (feat/atlas-canonical) — baseline 57 → 67: ten cases pin
 # the new composer verbs (verb:send, verb:task, verb:file-rename, ...). Every
 # earlier case kept its rank with the 31 verb entries in the corpus.
@@ -79,7 +83,7 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 67
+STRICT_HIT_BASELINE = 77
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

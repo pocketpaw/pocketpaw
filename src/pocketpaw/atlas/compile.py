@@ -54,7 +54,13 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pocketpaw.atlas.model import KIND_FIELDS, AtlasEntry, AtlasModel
+from pocketpaw.atlas.model import (
+    KIND_FIELDS,
+    AtlasEntry,
+    AtlasModel,
+    is_valid_route,
+    never_agent_openable,
+)
 from pocketpaw.atlas.store import _DATA_PATH
 
 if TYPE_CHECKING:
@@ -99,6 +105,17 @@ def load_authored_entries() -> list[AtlasEntry]:
     entries: list[AtlasEntry] = []
     for path in AUTHORED_FILES:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        # A surface must SAY whether it has a slash: null is a decision, a
+        # missing key is an omission the null default would hide.
+        no_slash = [
+            e.get("id")
+            for e in raw.get("entries", [])
+            if e.get("kind") == "surface" and "slash" not in e
+        ]
+        if no_slash:
+            raise ValueError(
+                f"atlas compile: surfaces missing the slash key: {', '.join(no_slash)}"
+            )
         entries.extend(AtlasModel.model_validate(raw).entries)
     return entries
 
@@ -530,6 +547,18 @@ def compile_atlas(connectors_dir: Path | None = None) -> AtlasModel:
     ]
     if incomplete:
         raise ValueError(f"atlas compile: entries missing kind fields: {'; '.join(incomplete)}")
+    surfaces = [e for e in entries if e.kind == "surface"]
+    bad_routes = [e.id for e in surfaces if not is_valid_route(e.surface)]
+    if bad_routes:
+        raise ValueError(
+            f"atlas compile: surface routes must start with one '/': {', '.join(bad_routes)}"
+        )
+    # SECURITY: settings / audit / security / admin are never agent-openable.
+    denied = [e.id for e in surfaces if e.agent_openable and never_agent_openable(e.surface)]
+    if denied:
+        raise ValueError(
+            f"atlas compile: these surfaces may never be agent_openable: {', '.join(denied)}"
+        )
     return AtlasModel(generated=True, entries=entries)
 
 
