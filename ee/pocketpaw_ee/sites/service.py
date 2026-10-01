@@ -8561,7 +8561,13 @@ async def sell_site_plan(
             "This site is carried by your workspace plan. Move it off the plan "
             "before selling it to a client.",
         )
-    already_sold = doc.subscription_status == "active" and doc.plan_tier == tier_key
+    # A site scheduled to close goes through publish_pocket, whose same-tier
+    # authorized republish is what resumes it.
+    already_sold = (
+        doc.subscription_status == "active"
+        and doc.plan_tier == tier_key
+        and not getattr(doc, "plan_cancels_at_period_end", False)
+    )
     if not already_sold:
         doc = await publish_pocket(
             workspace_id=workspace_id,

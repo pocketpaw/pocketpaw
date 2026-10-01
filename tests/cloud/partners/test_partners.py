@@ -819,7 +819,7 @@ async def test_a_short_wallet_lapses_a_partner_site_and_keeps_it_up(mongo_db) ->
     assert await _balance(wid) == 1000
 
 
-def test_partner_tiers_resolve_their_entitlements() -> None:
+async def test_partner_tiers_resolve_their_entitlements() -> None:
     from pocketpaw_ee.cloud.billing import site_plans
     from pocketpaw_ee.cloud.entitlements import service as ent
 
