@@ -4851,7 +4851,7 @@ the split is the security model:
   them runs the same fail-closed chain — unknown widget 404, rate limit 429,
   bad/revoked key 401, disallowed origin or a key that doesn't own the widget
   403 — and none of them expose owner-private data. Every public data route
-  (everything below except `widget.js` and the frame document) also sits behind
+  (everything below except `widget.js`, `actions.js` and the frame document) also sits behind
   a per-(client IP, widget) limit (429; 10/s sustained, 300 burst, the IP taken
   from the rightmost `X-Forwarded-For` hop, held in process memory so each
   replica counts separately). A `customer_ref` must be 8-128 characters of
@@ -4865,6 +4865,7 @@ the split is the security model:
 | Route | What it does |
 |---|---|
 | `GET /paw-bar/widget.js` | The embed loader a published page includes. `public, max-age=300` with a strong `ETag`; a matching `If-None-Match` gets a 304. |
+| `GET /paw-bar/actions.js` | The opt-in page-actions script an owner adds beside the loader so the concierge can scroll to or highlight something on the page. It acts only on `pawbar:act` messages from a `/paw-bar/frame` iframe on its own endpoint's origin. Same caching as `widget.js`; `PAW_BAR_ACTIONS_JS` overrides the vendored copy. |
 | `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. Every frame document, the shell included, also sends CSP `sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads`, so the browser sandboxes it whoever embeds it; no flag permits top navigation. A rendered frame is `private, max-age=60` (never `public`) and the key lookup behind it is memoised for 30 s, so a revoked key, a disabled concierge or an appearance edit reaches an open frame within about 90 s; the dead shell is `no-store`. Its `pawbar.js`/`pawbar.css` URLs carry `?v=<content hash>` and are served `immutable` for that exact version, `max-age=300` otherwise. |
 | `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. `public, max-age=60`, always with `Vary: Origin`. Its `catalog` is filled from the [catalog store](#catalog-store) (the first 200 products in the owner's order), so that client keeps working. |
 | `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
