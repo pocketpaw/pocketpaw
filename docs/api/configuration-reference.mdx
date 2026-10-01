@@ -12,7 +12,7 @@ tags: ["api", "configuration"]
   Updated 2026-10-02 (feat/partners-inr-topup, PH-4) — Billing & Credits: added
   `dodo_credit_product_id_inr` + `fx_inr_per_usd` and an "INR top-ups" note
   (settlement-first conversion with a 0.5x-2x sanity band, bulk bonus tiers,
-  pro-rata reversals, Rs.100 minimum).
+  pro-rata reversals, Rs.100 minimum; grants route on the product sold).
   Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2/SA-3 section
   below rather than adding a second one, with the one operator fact the variables
   alone do not carry: the READ needs an Account Analytics Read token scope that the
@@ -106,9 +106,14 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 
 ### INR top-ups (Paw Partners)
 
-Indian partners prepay the wallet in rupees. A verified INR `payment.succeeded` grants credits; every other non-USD currency is still acknowledged, recorded on the `Payment` row with `credits_granted = 0`, and granted nothing (the log names the event id and currency, never the amount).
+Indian partners prepay the wallet in rupees. Every top-up checkout stamps the product it sold on its metadata (`topup_currency`, plus `credits` for the USD product), and the verified webhook routes on that, not on the charge currency:
 
-- **Conversion.** Dodo's own USD `settlement_amount` wins when present and sits within 0.5x–2x of the `fx_inr_per_usd` estimate; outside that band it is treated as a unit or field mismatch and the FX rate grants instead (a warning names the event id). The `Payment` row keeps the settlement figure and the rate the base credits were granted at (copied off the ledger entry, so a redelivery after a rate change cannot rewrite either the rate or the reversal cap).
+- **INR product, charged in INR** → converted (below) and eligible for the bulk bonus.
+- **USD product, charged in USD** → `total_amount` cents, exactly as before.
+- **USD product, charged in another currency** (Dodo's local pricing) → the `credits` the checkout sold; no conversion, no bonus.
+- **No top-up metadata and not USD** (an older or foreign checkout) → acknowledged, recorded on the `Payment` row with `credits_granted = 0`, and granted nothing. The log names the event id and currency, never the amount.
+
+- **Conversion.** Dodo's own USD `settlement_amount` wins when present and sits within 0.5x–2x of the `fx_inr_per_usd` estimate; outside that band it is treated as a unit or field mismatch and the FX rate grants instead (a warning names the event id). The `Payment` row keeps the settlement figure, which source won (`conversion`) and the rate the base credits were granted at — the last two copied off the base ledger entry, so a redelivery after a rate change cannot rewrite them. The reversal cap (`credits_granted`) is likewise read from the applied ledger lines, never recomputed.
 - **Bulk bonus.** A separate ledger line with `cause = "bulk_bonus"`, keyed on `<event_id>:bulk_bonus`, so it is exactly-once on its own: **+10%** of the base credits from ₹25,000, **+20%** from ₹1,00,000 (floored, measured on the gross amount paid). A bonus is not `top_up`, so it does not count as purchased revenue and does not raise the monthly ceiling.
 - **Reversals.** `refund.succeeded` / `dispute.lost` against an INR top-up reverse `floor(granted × refunded / paid)`, where `granted` is base + bonus: a full refund takes exactly base + bonus, a partial refund takes its share of both, and the running total can never pass what was granted. For USD `granted == paid`, so this is the same cent-for-credit reversal as before.
 - **Limits.** One INR top-up is ₹100 to ₹10,00,000 (10,000 to 100,000,000 paise); the USD cap stays 1,000,000 credits ($10,000).
