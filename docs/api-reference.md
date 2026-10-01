@@ -997,15 +997,25 @@ the owner:
   "owner": null,
   "is_mine": false,
   "hidden": false,
+  "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
 ```
 
+`preview_image_url` is a screenshot of the source site, or `null`. On save the
+source site's current screenshot is copied to the public Sites asset rail under
+the template's own prefix (`sites-assets/{workspace}/template-{id}/`), so it
+loads for every viewer of a public template and outlives the source site. It is
+never the source site's private `/api/v1/uploads/...` link. The copy is
+best-effort: no screenshot yet, no public asset bucket on the deployment, or a
+file that isn't a PNG, JPEG, GIF or WebP image leaves it `null` and the save
+still succeeds. Deleting the template removes the image.
+
 Events: `site_template.saved`, `site_template.updated`, `site_template.deleted`
 (to the owner) and `site_template.used` (to the user who used it, with the new
 `pocket_id`). Nothing fans out to a workspace or to all users. Audit,
-best-effort: `site_template.saved`, `.updated`, `.deleted` in the owner's
+best-effort: `site_template.saved`, `.updated`, `.preview_refreshed`, `.deleted` in the owner's
 workspace; `site_template.used` and `.reported` in the acting user's workspace
 (`used` names the template's workspace only when it is the same one);
 `site_template.hidden` in the owner's workspace, with actor `system`.
@@ -1057,6 +1067,17 @@ not change. Response `200`: the metadata.
 
 Delete a template you own. Response `200`: `{"id": "...", "deleted": true}`.
 `404` for anyone else's template. Sites made from it are unaffected.
+
+### `POST /site-templates/{template_id}/preview-refresh`
+
+Re-copy the source site's current screenshot onto a template you own, after the
+site has been republished or re-captured. No body. Response `200`: the metadata
+with the new `preview_image_url`; the previous image is deleted. Emits
+`site_template.updated`.
+
+Errors: `404` for anyone but the owner; `409`
+(`site_templates.no_source_preview`) when the source site no longer exists, has
+no screenshot, or the copy fails. The existing image is kept.
 
 ### `POST /site-templates/{template_id}/use`
 

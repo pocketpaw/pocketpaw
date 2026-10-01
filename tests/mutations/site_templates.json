@@ -424,5 +424,89 @@
     "tests": [
       "tests/cloud/site_templates/test_private_assets.py::test_found_anywhere_in_the_ripple_spec"
     ]
+  },
+  {
+    "label": "preview: store under the source pocket prefix",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "            workspace_id=doc.workspace,\n            pocket_id=_template_assets_id(doc),\n        )\n",
+    "replace": "            workspace_id=doc.workspace,\n            pocket_id=doc.source_pocket_id,\n        )\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_save_copies_the_source_screenshot_to_the_public_rail",
+      "tests/cloud/site_templates/test_site_templates.py::test_purging_the_source_site_keeps_the_template_image"
+    ]
+  },
+  {
+    "label": "preview: store the private upload URL instead of the public copy",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        await doc.set({\"preview_image_url\": asset.url})\n",
+    "replace": "        await doc.set(\n            {\n                \"preview_image_url\": await sites_service.preview_image_for_pocket(\n                    workspace_id, body.pocket_id\n                )\n            }\n        )\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_save_copies_the_source_screenshot_to_the_public_rail",
+      "tests/cloud/site_templates/test_site_templates.py::test_public_template_shows_its_image_to_a_stranger"
+    ]
+  },
+  {
+    "label": "delete: skip the template image purge",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        if store is not None:\n            await store.purge_prefix(\n",
+    "replace": "        if False:\n            await store.purge_prefix(\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_delete_purges_the_template_image"
+    ]
+  },
+  {
+    "label": "refresh: let a non-owner refresh",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    doc = await _owned(workspace_id, user_id, template_id)\n    # Re-check the owner can still read the source site, through the same rule\n",
+    "replace": "    doc = await _fetch_visible(workspace_id, user_id, template_id)\n    # Re-check the owner can still read the source site, through the same rule\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_only_the_owner_may_refresh",
+      "tests/cloud/site_templates/test_site_templates.py::test_route_preview_refresh"
+    ]
+  },
+  {
+    "label": "refresh: drop the old image when the source has none",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if asset is None:\n        raise ConflictError(\n",
+    "replace": "    if asset is None:\n        await doc.set({\"preview_image_url\": None})\n        raise ConflictError(\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_refresh_without_a_source_keeps_the_old_image"
+    ]
+  },
+  {
+    "label": "preview: let a failing copy fail the save",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    except Exception:  # noqa: BLE001 — a missing picture never costs a save\n",
+    "replace": "    except ZeroDivisionError:  # noqa: BLE001 — a missing picture never costs a save\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_save_survives_a_failing_copy"
+    ]
+  },
+  {
+    "label": "refresh: delete the new image along with the old ones",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "            if old.key != asset.key:\n",
+    "replace": "            if True:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_refresh_of_an_unchanged_screenshot_keeps_the_object"
+    ]
+  },
+  {
+    "label": "preview: keep a video as the card image",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        if asset.kind != \"image\":\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_save_with_a_video_has_no_image"
+    ]
+  },
+  {
+    "label": "refresh: skip the re-check that the owner can still read the source",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        await pockets_service.read_site_snapshot(doc.workspace, user_id, doc.source_pocket_id)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_refresh_refuses_a_source_the_owner_can_no_longer_read"
+    ]
   }
 ]

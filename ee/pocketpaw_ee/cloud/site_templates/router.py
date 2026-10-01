@@ -2,10 +2,10 @@
 #
 # Thin HTTP surface over ``site_templates.service``: save a site pocket as a
 # template (private, workspace or public), list by scope, get / patch / delete,
-# report a public one, and start a new site pocket from one in the caller's
-# workspace. Tenancy comes from the auth context, never the body. No
-# Beanie doc import here (import-linter "SiteTemplates" contract); errors are
-# CloudError subclasses mapped by the global handler. Mounted under /api/v1
+# refresh its screenshot, report a public one, and start a new site pocket from
+# one in the caller's workspace. Tenancy comes from the auth context, never the
+# body. No Beanie doc import here (import-linter "SiteTemplates" contract);
+# errors are CloudError subclasses mapped by the global handler. Mounted under /api/v1
 # from ``ee/pocketpaw_ee/cloud/__init__.py``.
 
 from __future__ import annotations
@@ -88,6 +88,17 @@ async def report_template(
 ) -> dict:
     """Report a public template. One report per user; a repeat is a no-op."""
     return await site_templates_service.report_template(workspace_id, user_id, template_id, body)
+
+
+@router.post("/{template_id}/preview-refresh", response_model=SiteTemplateResponse)
+async def refresh_preview(
+    template_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Re-copy the source site's current screenshot onto a template you own. 409
+    ``site_templates.no_source_preview`` when there is none; the old image stays."""
+    return await site_templates_service.refresh_preview(workspace_id, user_id, template_id)
 
 
 @router.delete("/{template_id}")

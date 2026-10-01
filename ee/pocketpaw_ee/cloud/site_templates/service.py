@@ -24,10 +24,17 @@
 #   * Caps: a snapshot over ``MAX_SNAPSHOT_BYTES`` of JSON is refused
 #     (``site_templates.too_large``), and so is a workspace's template number
 #     ``MAX_TEMPLATES_PER_WORKSPACE + 1`` (``site_templates.limit``).
+#   * ``preview_image_url`` is ``None`` or a public-rail URL that
+#     ``_copy_source_preview`` minted under ``sites-assets/{ws}/template-{id}/``,
+#     never the source pocket's prefix (a site delete purges that) and never the
+#     source site's private ``/api/v1/uploads/...`` URL. The copy is best-effort
+#     on save; delete purges the template prefix, also best-effort.
 
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -36,7 +43,7 @@ from beanie import PydanticObjectId
 from bson.errors import InvalidId
 from pydantic import BaseModel, Field
 
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     SiteTemplateDeleted,
@@ -68,6 +75,11 @@ HIDE_THRESHOLD = 3
 #: Most reports one template stores; later reports are accepted and dropped.
 MAX_REPORTS = 20
 
+logger = logging.getLogger(__name__)
+
+#: The private URL ``sites/screenshot.py`` stores a site screenshot under.
+_UPLOAD_URL = re.compile(r"/api/v1/uploads/([A-Za-z0-9_-]+)")
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -86,6 +98,7 @@ class _MetaRow(BaseModel):
     engine: str | None = None
     pattern: str | None = None
     hidden: bool = False
+    preview_image_url: str | None = None
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
 
@@ -104,6 +117,7 @@ def _meta(doc: SiteTemplate | _MetaRow, viewer: str) -> dict:
         engine=doc.engine,
         pattern=doc.pattern,
         hidden=doc.hidden,
+        preview_image_url=doc.preview_image_url,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -181,6 +195,56 @@ async def _check_publishable(workspace_id: str, snapshot: dict) -> None:
         )
 
 
+def _template_assets_id(doc: SiteTemplate) -> str:
+    """The ``pocket_id`` slot of the template's own public-rail prefix."""
+    return f"template-{doc.id}"
+
+
+async def _copy_source_preview(doc: SiteTemplate) -> Any | None:
+    """Copy the source site's current screenshot onto the public asset rail under
+    the template's own prefix. Returns the stored ``PublicAsset``, or ``None``
+    (logged) when there is no screenshot, it cannot be read, no public bucket is
+    configured, or the bytes are not an accepted image. Never raises."""
+    from pocketpaw_ee.cloud.uploads import service as uploads_service
+    from pocketpaw_ee.sites import public_assets
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        store = public_assets.public_asset_store()
+        if store is None:
+            logger.info("site_templates: no public asset bucket, template %s has no image", doc.id)
+            return None
+        url = await sites_service.preview_image_for_pocket(doc.workspace, doc.source_pocket_id)
+        match = _UPLOAD_URL.fullmatch(url or "")
+        if match is None:
+            logger.info("site_templates: source of template %s has no screenshot", doc.id)
+            return None
+        data = await uploads_service.read_bytes_scoped(
+            match.group(1), doc.workspace, max_bytes=public_assets.MAX_IMAGE_BYTES
+        )
+        if not data:
+            logger.info("site_templates: screenshot for template %s is unreadable", doc.id)
+            return None
+        asset = await store.put(
+            data,
+            filename="preview.png",
+            workspace_id=doc.workspace,
+            pocket_id=_template_assets_id(doc),
+        )
+        if asset.kind != "image":
+            # A video is valid on the rail but is not a card image.
+            await store.delete(
+                workspace_id=doc.workspace, pocket_id=_template_assets_id(doc), key=asset.key
+            )
+            return None
+        return asset
+    except Exception:  # noqa: BLE001 — a missing picture never costs a save
+        logger.warning(
+            "site_templates: could not copy the screenshot for %s", doc.id, exc_info=True
+        )
+        return None
+
+
 async def _audit(workspace_id: str, user_id: str, action: str, target_id: str, **meta: str) -> None:
     from pocketpaw_ee.cloud.audit import service as audit_service
 
@@ -243,6 +307,9 @@ async def save_template(
         snapshot=snapshot,
     )
     await doc.insert()
+    asset = await _copy_source_preview(doc)
+    if asset is not None:
+        await doc.set({"preview_image_url": asset.url})
     await emit(SiteTemplateSaved(data=_event_data(doc, user_id, workspace_id)))
     await _audit(
         workspace_id, user_id, "site_template.saved", str(doc.id), source_pocket_id=body.pocket_id
@@ -329,7 +396,57 @@ async def delete_template(workspace_id: str, user_id: str, template_id: str) -> 
     await doc.delete()
     await emit(SiteTemplateDeleted(data=data))
     await _audit(workspace_id, user_id, "site_template.deleted", template_id)
+    try:
+        from pocketpaw_ee.sites import public_assets
+
+        store = public_assets.public_asset_store()
+        if store is not None:
+            await store.purge_prefix(
+                public_assets.prefix_for(doc.workspace, _template_assets_id(doc))
+            )
+    except Exception:  # noqa: BLE001 — the row is gone; an orphan image is a cleanup job
+        logger.warning("site_templates: could not purge images of %s", template_id, exc_info=True)
     return {"id": template_id, "deleted": True}
+
+
+async def refresh_preview(workspace_id: str, user_id: str, template_id: str) -> dict:
+    """Re-copy the source site's CURRENT screenshot onto the template (owner only;
+    anyone else gets NotFound). With no usable source screenshot (the site is
+    gone, never captured, or the copy failed) raises ConflictError
+    ``site_templates.no_source_preview`` and keeps the stored image; so does a
+    source the owner can no longer read. Otherwise the
+    new image replaces it and every other object under the template prefix is
+    deleted (keys are content-addressed, so an unchanged screenshot keeps its key
+    and nothing is deleted)."""
+    doc = await _owned(workspace_id, user_id, template_id)
+    # Re-check the owner can still read the source site, through the same rule
+    # save used: access granted at save time may since have been withdrawn, and a
+    # public template would publish whatever the copy picks up.
+    try:
+        await pockets_service.read_site_snapshot(doc.workspace, user_id, doc.source_pocket_id)
+    except (NotFound, Forbidden, ValidationError):
+        asset = None
+    else:
+        asset = await _copy_source_preview(doc)
+    if asset is None:
+        raise ConflictError(
+            "site_templates.no_source_preview",
+            "The site this template came from has no screenshot to copy",
+        )
+    from pocketpaw_ee.sites import public_assets
+
+    try:
+        store = public_assets.public_asset_store()
+        assets_id = _template_assets_id(doc)
+        for old in await store.list(workspace_id=doc.workspace, pocket_id=assets_id):
+            if old.key != asset.key:
+                await store.delete(workspace_id=doc.workspace, pocket_id=assets_id, key=old.key)
+    except Exception:  # noqa: BLE001 — the new image is stored; an old one is a cleanup job
+        logger.warning("site_templates: could not prune images of %s", template_id, exc_info=True)
+    await doc.set({"preview_image_url": asset.url, "updatedAt": datetime.now(UTC)})
+    await emit(SiteTemplateUpdated(data=_event_data(doc, user_id, workspace_id)))
+    await _audit(workspace_id, user_id, "site_template.preview_refreshed", template_id)
+    return _meta(doc, user_id)
 
 
 async def use_template(
@@ -431,6 +548,7 @@ __all__ = [
     "delete_template",
     "get_template",
     "list_templates",
+    "refresh_preview",
     "report_template",
     "save_template",
     "update_template",

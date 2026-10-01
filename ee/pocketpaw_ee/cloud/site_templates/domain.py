@@ -26,6 +26,7 @@ class SiteTemplateMeta:
     engine: str | None
     pattern: str | None
     hidden: bool = False
+    preview_image_url: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

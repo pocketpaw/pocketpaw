@@ -12,7 +12,8 @@
 # PATCH; reports (one per user, owner refused, the third distinct reporter
 # hides); pagination; the Sites plan gate, size and count caps; that deleting a
 # template leaves its pockets alone; the source refusals; audit rows; and the
-# routes. The asset detector's per-shape tests: test_private_assets.py.
+# routes; and the screenshot copied onto the public asset rail (save, refresh,
+# delete purge, prefix isolation). The asset detector's per-shape tests: test_private_assets.py.
 # Mutation plan: tests/mutations/site_templates.json.
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ META_KEYS = {
     "owner",
     "is_mine",
     "hidden",
+    "preview_image_url",
     "created_at",
     "updated_at",
 }
@@ -991,3 +993,337 @@ async def test_route_publish_refusal_code(client: AsyncClient) -> None:
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"]["code"] == "site_templates.private_assets"
+
+
+# ---------------------------------------------------------------------------
+# Screenshots: the source site's preview copied onto the public asset rail
+# ---------------------------------------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+PNG_2 = b"\x89PNG\r\n\x1a\n" + b"\x01" * 64
+WEBM = b"\x1aE\xdf\xa3" + b"\x00" * 64
+
+
+class _MemAdapter:
+    """A world-readable bucket in a dict: lists (so purge works) and mints
+    ``https://cdn.test/{key}`` URLs."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    async def put(self, key, stream, mime):
+        from pocketpaw.uploads.adapter import StoredObject
+
+        data = b"".join([chunk async for chunk in stream])
+        self.objects[key] = data
+        return StoredObject(key=key, size=len(data), mime=mime)
+
+    async def delete(self, key):
+        self.objects.pop(key, None)
+
+    def public_url(self, key):
+        return f"https://cdn.test/{key}"
+
+    async def browse(self, prefix):
+        from pocketpaw.uploads.adapter import StorageItem
+
+        return [
+            StorageItem(name=k[len(prefix) :], is_dir=False, size=len(v))
+            for k, v in self.objects.items()
+            if k.startswith(prefix) and "/" not in k[len(prefix) :]
+        ]
+
+
+@pytest.fixture
+def rail(monkeypatch, tmp_path) -> _MemAdapter:
+    """A real ``PublicAssetStore`` over ``_MemAdapter``, and a private uploads
+    root under ``tmp_path``."""
+    from pathlib import Path
+
+    from pocketpaw_ee.sites import public_assets
+
+    adapter = _MemAdapter()
+    store = public_assets.PublicAssetStore(adapter)  # type: ignore[arg-type]
+    assert store.can_list()
+    monkeypatch.setattr(public_assets, "public_asset_store", lambda: store)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    return adapter
+
+
+async def _shot(pocket: PocketDoc, image: bytes = PNG) -> Site:
+    """Give ``pocket`` a Site whose screenshot is stored the way sites/screenshot.py
+    stores it: a private upload at ``/api/v1/uploads/{id}``."""
+    from pocketpaw_ee.sites.screenshot import _store_screenshot
+
+    site = Site(workspace=pocket.workspace, pocket_id=str(pocket.id), owner=pocket.owner)
+    await site.insert()
+    url = await _store_screenshot(site, image)
+    assert url.startswith("/api/v1/uploads/")
+    await site.set({"preview_image_url": url})
+    return site
+
+
+def _template_prefix(template_id: str) -> str:
+    return f"sites-assets/{WS}/template-{template_id}/"
+
+
+@pytest.mark.asyncio
+async def test_save_copies_the_source_screenshot_to_the_public_rail(rail: _MemAdapter) -> None:
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+
+    url = meta["preview_image_url"]
+    assert url.startswith("https://cdn.test/" + _template_prefix(meta["id"])), url
+    assert f"/{src.id}/" not in url and "/api/v1/uploads" not in url
+    (key,) = rail.objects
+    assert key.startswith(_template_prefix(meta["id"])) and rail.objects[key] == PNG
+    assert (await SiteTemplate.get(meta["id"])).preview_image_url == url
+    assert (await svc.get_template(WS, OWNER, meta["id"]))["preview_image_url"] == url
+
+
+@pytest.mark.asyncio
+async def test_save_event_carries_the_image(rail: _MemAdapter, recording_bus) -> None:
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    (event,) = [e for e in recording_bus.events if e.type == "site_template.saved"]
+    assert event.data["preview_image_url"] == meta["preview_image_url"] is not None
+
+
+@pytest.mark.asyncio
+async def test_save_without_a_source_screenshot_has_no_image(rail: _MemAdapter) -> None:
+    meta = await _saved()
+    assert meta["preview_image_url"] is None
+    assert rail.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_save_without_a_public_bucket_has_no_image(rail: _MemAdapter, monkeypatch) -> None:
+    from pocketpaw_ee.sites import public_assets
+
+    monkeypatch.setattr(public_assets, "public_asset_store", lambda: None)
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    assert meta["preview_image_url"] is None
+    assert await SiteTemplate.get(meta["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_save_with_non_image_bytes_has_no_image(rail: _MemAdapter, monkeypatch) -> None:
+    from pocketpaw_ee.cloud.uploads import service as uploads_service
+
+    async def _not_an_image(*_a: Any, **_k: Any) -> bytes:
+        return b"<svg onload=alert(1)>" + b" " * 64
+
+    monkeypatch.setattr(uploads_service, "read_bytes_scoped", _not_an_image)
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    assert meta["preview_image_url"] is None
+    assert rail.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_save_with_a_video_has_no_image(rail: _MemAdapter, monkeypatch) -> None:
+    from pocketpaw_ee.cloud.uploads import service as uploads_service
+
+    async def _webm(*_a: Any, **_k: Any) -> bytes:
+        return WEBM
+
+    monkeypatch.setattr(uploads_service, "read_bytes_scoped", _webm)
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    assert meta["preview_image_url"] is None
+    assert rail.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_save_survives_a_failing_copy(rail: _MemAdapter, monkeypatch) -> None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    async def _boom(*_a: Any, **_k: Any) -> str:
+        raise RuntimeError("sites down")
+
+    monkeypatch.setattr(sites_service, "preview_image_for_pocket", _boom)
+    meta = await _saved()
+    assert meta["preview_image_url"] is None
+    assert await SiteTemplate.get(meta["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_screenshot_of_another_workspace_is_not_read(rail: _MemAdapter) -> None:
+    from pocketpaw_ee.cloud.uploads import service as uploads_service
+
+    other = await _site(workspace=OTHER_WS)
+    site = await _shot(other)
+    file_id = site.preview_image_url.rsplit("/", 1)[-1]
+    assert await uploads_service.read_bytes_scoped(file_id, OTHER_WS, max_bytes=1024) == PNG
+    assert await uploads_service.read_bytes_scoped(file_id, WS, max_bytes=1024) is None
+    assert await uploads_service.read_bytes_scoped(file_id, OTHER_WS, max_bytes=8) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_purges_the_template_image(rail: _MemAdapter) -> None:
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    assert rail.objects
+    await svc.delete_template(WS, OWNER, meta["id"])
+    assert rail.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_survives_a_failing_purge(rail: _MemAdapter, monkeypatch) -> None:
+    from pocketpaw_ee.sites import public_assets
+
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+
+    class _Unlistable:
+        async def purge_prefix(self, prefix: str) -> int:
+            raise public_assets.PublicAssetError("cannot list")
+
+    monkeypatch.setattr(public_assets, "public_asset_store", lambda: _Unlistable())
+    assert await svc.delete_template(WS, OWNER, meta["id"]) == {"id": meta["id"], "deleted": True}
+    assert await SiteTemplate.get(meta["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_purging_the_source_site_keeps_the_template_image(rail: _MemAdapter) -> None:
+    from pocketpaw_ee.sites import public_assets
+
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    store = public_assets.public_asset_store()
+    await store.put(PNG_2, filename="hero.png", workspace_id=WS, pocket_id=str(src.id))
+    assert len(rail.objects) == 2
+
+    await store.purge(workspace_id=WS, pocket_id=str(src.id))
+    (key,) = rail.objects
+    assert key.startswith(_template_prefix(meta["id"]))
+
+
+@pytest.mark.asyncio
+async def test_public_template_shows_its_image_to_a_stranger(rail: _MemAdapter) -> None:
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src, visibility="public")
+    seen = await svc.get_template(OTHER_WS, STRANGER, meta["id"])
+    assert seen["preview_image_url"] == meta["preview_image_url"] is not None
+    (listed,) = await _listed(OTHER_WS, STRANGER, scope="public")
+    assert listed["preview_image_url"] == meta["preview_image_url"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_replaces_the_image(rail: _MemAdapter, recording_bus) -> None:
+    src = await _site()
+    site = await _shot(src)
+    meta = await _saved(src)
+    old = meta["preview_image_url"]
+
+    from pocketpaw_ee.sites.screenshot import _store_screenshot
+
+    await site.set({"preview_image_url": await _store_screenshot(site, PNG_2)})
+    fresh = await svc.refresh_preview(WS, OWNER, meta["id"])
+
+    assert fresh["preview_image_url"] not in (None, old)
+    assert fresh["preview_image_url"].startswith("https://cdn.test/" + _template_prefix(meta["id"]))
+    assert list(rail.objects.values()) == [PNG_2]
+    assert (await SiteTemplate.get(meta["id"])).preview_image_url == fresh["preview_image_url"]
+    assert "site_template.updated" in [e.type for e in recording_bus.events]
+    rows = await AuditEvent.find(AuditEvent.action == "site_template.preview_refreshed").to_list()
+    assert len(rows) == 1 and rows[0].target_id == meta["id"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_of_an_unchanged_screenshot_keeps_the_object(rail: _MemAdapter) -> None:
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src)
+    fresh = await svc.refresh_preview(WS, OWNER, meta["id"])
+    assert fresh["preview_image_url"] == meta["preview_image_url"]
+    assert list(rail.objects.values()) == [PNG]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ws", "user"), [(WS, PEER), (OTHER_WS, STRANGER)])
+async def test_only_the_owner_may_refresh(rail: _MemAdapter, ws: str, user: str) -> None:
+    src = await _site()
+    await _shot(src)
+    meta = await _saved(src, visibility="public")
+    with pytest.raises(NotFound):
+        await svc.refresh_preview(ws, user, meta["id"])
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_a_source_keeps_the_old_image(rail: _MemAdapter) -> None:
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+
+    src = await _site()
+    site = await _shot(src)
+    meta = await _saved(src)
+    before = dict(rail.objects)
+    await site.delete()
+
+    with pytest.raises(ConflictError) as err:
+        await svc.refresh_preview(WS, OWNER, meta["id"])
+    assert err.value.code == "site_templates.no_source_preview"
+    assert (await SiteTemplate.get(meta["id"])).preview_image_url == meta["preview_image_url"]
+    assert rail.objects == before
+
+
+@pytest.mark.asyncio
+async def test_refresh_refuses_a_source_the_owner_can_no_longer_read(rail: _MemAdapter) -> None:
+    """Access to a shared private site can be withdrawn after the template was
+    saved. Refresh must not copy that site's newer screenshot, least of all onto
+    a public template."""
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+    from pocketpaw_ee.sites.screenshot import _store_screenshot
+
+    src = await _site(owner=PEER, visibility="private", shared_with=[OWNER])
+    site = await _shot(src)
+    meta = await _saved(src, visibility="public")
+    before = dict(rail.objects)
+
+    await src.set({"shared_with": []})
+    await site.set({"preview_image_url": await _store_screenshot(site, PNG_2)})
+
+    with pytest.raises(ConflictError) as err:
+        await svc.refresh_preview(WS, OWNER, meta["id"])
+    assert err.value.code == "site_templates.no_source_preview"
+    assert (await SiteTemplate.get(meta["id"])).preview_image_url == meta["preview_image_url"]
+    assert rail.objects == before
+    assert PNG_2 not in rail.objects.values()
+
+
+@pytest.mark.asyncio
+async def test_route_preview_refresh(
+    client: AsyncClient, who: dict[str, str], rail: _MemAdapter
+) -> None:
+    src = await _site()
+    site = await _shot(src)
+    resp = await client.post(
+        "/api/v1/site-templates", json={"pocket_id": str(src.id), "name": "Tpl"}
+    )
+    assert resp.status_code == 200, resp.text
+    tid = resp.json()["id"]
+
+    resp = await client.post(f"/api/v1/site-templates/{tid}/preview-refresh")
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) == META_KEYS
+    assert resp.json()["preview_image_url"].startswith("https://cdn.test/")
+
+    who["user"] = PEER
+    resp = await client.post(f"/api/v1/site-templates/{tid}/preview-refresh")
+    assert resp.status_code == 404, resp.text
+
+    who["user"] = OWNER
+    await site.delete()
+    resp = await client.post(f"/api/v1/site-templates/{tid}/preview-refresh")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "site_templates.no_source_preview"
