@@ -308,7 +308,6 @@ def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
     reason). Refresh with scripts/vendor-paw-bar-loader.sh."""
     import hashlib
     import json
-
     from pathlib import Path
 
     import pocketpaw_ee.paw_bar as paw_bar
