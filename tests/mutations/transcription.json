@@ -49,17 +49,17 @@
   {
     "label": "the daily budget is claimed and ignored — the cap counts but never stops anything",
     "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
-    "find": "    allowed, spent, cap = await try_spend(workspace_id)\n    if not allowed:",
-    "replace": "    allowed, spent, cap = await try_spend(workspace_id)\n    if False:",
+    "find": "    if not await metering.try_spend(\n        subject_type=\"workspace\",\n        subject_id=workspace_id,\n        meter=DailyMeter.FILE_TRANSCRIPTION,\n        cap=cap,\n    ):",
+    "replace": "    if await metering.try_spend(\n        subject_type=\"workspace\",\n        subject_id=workspace_id,\n        meter=DailyMeter.FILE_TRANSCRIPTION,\n        cap=cap,\n    ) and False:",
     "tests": [
       "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_an_exhausted_budget_stops_the_spend"
     ]
   },
   {
     "label": "the budget uses the beanie 1.x collection API — every claim lands in the fail-closed except and transcription reads as switched off",
-    "file": "ee/pocketpaw_ee/cloud/uploads/transcription_budget.py",
-    "find": "        coll = FileTranscriptionUsage.get_pymongo_collection()",
-    "replace": "        coll = FileTranscriptionUsage.get_motor_collection()",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        coll = DailyUsage.get_pymongo_collection()\n        doc = await coll.find_one_and_update(\n            key,\n            {\n                \"$inc\": {\"used\": int(amount)},",
+    "replace": "        coll = DailyUsage.get_motor_collection()\n        doc = await coll.find_one_and_update(\n            key,\n            {\n                \"$inc\": {\"used\": int(amount)},",
     "tests": [
       "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_the_counter_uses_the_beanie_2x_collection_api",
       "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_the_cap_refuses_the_next_claim",
@@ -68,17 +68,17 @@
   },
   {
     "label": "the budget fails OPEN — a degraded database becomes an unbounded tab",
-    "file": "ee/pocketpaw_ee/cloud/uploads/transcription_budget.py",
-    "find": "        return False, 0, cap\n\n    if spent > cap:",
-    "replace": "        return True, 0, cap\n\n    if spent > cap:",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        return fail_open\n",
+    "replace": "        return True\n",
     "tests": [
       "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_an_unreadable_counter_fails_CLOSED"
     ]
   },
   {
     "label": "an over-cap claim is not rolled back — the counter runs away and the workspace stays refused long after midnight",
-    "file": "ee/pocketpaw_ee/cloud/uploads/transcription_budget.py",
-    "find": "            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "            await coll.update_one(key, {\"$inc\": {\"used\": -int(amount)}})",
     "replace": "            pass",
     "tests": [
       "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_a_refused_claim_does_not_consume_a_slot"

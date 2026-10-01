@@ -16,8 +16,8 @@
 # Mutations: tests/mutations/abuse_budgets.json.
 #
 # Updated 2026-10-01 (CN-3): the turn and upload counters are the shared
-# ``metering.service`` daily primitive now. ``_turn`` claims exactly the way
-# ``run_core._reject_if_over_daily_turns`` does, the pre-check tests call
+# ``metering.service`` daily primitive now. ``_turn`` drives the real
+# executor seam, ``run_core._reject_if_over_daily_turns``, the pre-check tests call
 # ``agent_router._assert_under_daily_turns`` (``turn_budget.is_over_cap`` is
 # gone), and rows are read through ``metering.used``. Every assertion is the
 # one that held against the old modules.
@@ -36,15 +36,35 @@ from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 from pocketpaw_ee.cloud.uploads import upload_budget
 
 
+class _Transport:
+    async def append_event(self, *_a, **_k):
+        return None
+
+    async def set_ttl(self, *_a, **_k):
+        return None
+
+
 async def _turn(ws: str | None) -> bool:
-    """One run-start claim, exactly as ``run_core`` makes it."""
-    return await metering.try_spend(
-        subject_type="workspace",
-        subject_id=ws,
-        meter=DailyMeter.WORKSPACE_TURNS,
-        cap=metering.workspace_turns_cap(),
-        fail_open=True,
+    """One run start through the real executor gate. True = the run may go."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.chat.runs import run_core
+
+    rejected = await run_core._reject_if_over_daily_turns(
+        SimpleNamespace(run_id="run-test"), SimpleNamespace(workspace_id=ws), _Transport()
     )
+    return not rejected
+
+
+@pytest.fixture(autouse=True)
+def _no_run_doc(monkeypatch):
+    """A refused run marks its run doc failed; there is no run doc here."""
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    async def _noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(run_service, "mark_terminal", _noop)
 
 
 async def _used(ws: str, meter: DailyMeter) -> int:

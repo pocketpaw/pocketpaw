@@ -1,54 +1,54 @@
 [
   {
     "label": "the turn cap never trips \u2014 one workspace can spend the platform's model budget all day",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "    if spent > cap:\n        try:\n            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})",
-    "replace": "    if False:\n        try:\n            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "    if spent > cap:\n        try:\n            await coll.update_one(key, {\"$inc\": {\"used\": -int(amount)}})",
+    "replace": "    if False:\n        try:\n            await coll.update_one(key, {\"$inc\": {\"used\": -int(amount)}})",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_turns_are_refused_once_the_cap_is_reached"
     ]
   },
   {
     "label": "a refused turn keeps its slot \u2014 the counter inflates on every refusal and never recovers",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "        try:\n            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})\n        except Exception:\n            logger.debug(\"could not roll back an over-cap run claim\", exc_info=True)",
-    "replace": "        try:\n            pass\n        except Exception:\n            logger.debug(\"could not roll back an over-cap run claim\", exc_info=True)",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "            await coll.update_one(key, {\"$inc\": {\"used\": -int(amount)}})\n        except Exception:\n            logger.debug(\"could not roll back an over-cap %s claim\", meter, exc_info=True)",
+    "replace": "            pass\n        except Exception:\n            logger.debug(\"could not roll back an over-cap %s claim\", meter, exc_info=True)",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_a_refused_turn_does_not_hold_the_slot"
     ]
   },
   {
     "label": "cap 0 blocks every turn \u2014 an env typo takes chat off the air for every tenant at once",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "    cap = daily_cap()\n    if cap <= 0:\n        return True, 0, 0",
-    "replace": "    cap = daily_cap()\n    if cap <= 0:\n        return False, 0, 0",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "    if zero_means_uncapped:\n        if name not in _logged_legacy_zero:",
+    "replace": "    if False:\n        if name not in _logged_legacy_zero:",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_zero_means_uncapped_not_blocked"
     ]
   },
   {
     "label": "a workspace-less run is charged to nobody and allowed",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "    if not workspace_id:\n        # No tenant means no counter to charge, and an uncharged run is exactly\n        # what this file exists to prevent.\n        logger.warning(\"agent run refused \u2014 no workspace to charge\")\n        return False, 0, cap",
-    "replace": "    if not workspace_id:\n        return True, 0, cap",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        logger.warning(\"daily %s refused \u2014 no %s to charge\", meter, subject_type)\n        return False",
+    "replace": "        logger.warning(\"daily %s refused \u2014 no %s to charge\", meter, subject_type)\n        return True",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_a_run_with_no_workspace_is_refused"
     ]
   },
   {
     "label": "the turn counter fails CLOSED \u2014 every run in any harness without the collection bound is refused with a cap message",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "            workspace_id,\n            exc_info=True,\n        )\n        return True, 0, cap",
-    "replace": "            workspace_id,\n            exc_info=True,\n        )\n        return False, 0, cap",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        fail_open=True,\n    ):\n        return False",
+    "replace": "        fail_open=False,\n    ):\n        return False",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_counter_fails_open"
     ]
   },
   {
     "label": "a bad turn-cap env reads as 0 \u2014 the ceiling silently disappears",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "        logger.warning(\"%s is not an integer (%r) \u2014 using the default\", _ENV_CAP, raw)\n        return _DEFAULT_CAP",
-    "replace": "        logger.warning(\"%s is not an integer (%r) \u2014 using the default\", _ENV_CAP, raw)\n        return 0",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        logger.warning(\"%s is not an integer (%r) \u2014 using the default\", name, raw)\n        return default",
+    "replace": "        logger.warning(\"%s is not an integer (%r) \u2014 using the default\", name, raw)\n        return 0",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_a_bad_env_value_uses_the_default_not_zero"
     ]
@@ -56,8 +56,8 @@
   {
     "label": "the file-count ceiling is dropped \u2014 fifty 25 MiB files a request, all day",
     "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
-    "find": "    if file_cap > 0 and spent_files > file_cap:\n        over = \"files\"",
-    "replace": "    if False:\n        over = \"files\"",
+    "find": "        meter=DailyMeter.UPLOAD_FILES,\n        amount=files,\n        cap=file_cap,",
+    "replace": "        meter=DailyMeter.UPLOAD_FILES,\n        amount=files,\n        cap=None,",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_the_file_count_ceiling_trips"
     ]
@@ -65,8 +65,8 @@
   {
     "label": "the byte ceiling is dropped \u2014 the count cap alone is beaten by big files",
     "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
-    "find": "    elif byte_cap > 0 and spent_bytes > byte_cap:\n        over = \"bytes\"",
-    "replace": "    elif False:\n        over = \"bytes\"",
+    "find": "        meter=DailyMeter.UPLOAD_BYTES,\n        amount=size_bytes,\n        cap=byte_cap,",
+    "replace": "        meter=DailyMeter.UPLOAD_BYTES,\n        amount=size_bytes,\n        cap=None,",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_the_byte_ceiling_trips_independently"
     ]
@@ -74,8 +74,8 @@
   {
     "label": "an over-cap upload batch is not rolled back \u2014 one refused batch eats the day",
     "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
-    "find": "        await coll.update_one(\n            {\"key\": key}, {\"$inc\": {\"used\": -int(files), \"bytes_used\": -int(size_bytes)}}\n        )",
-    "replace": "        pass",
+    "find": "        await release(workspace_id, day, files, 0)\n",
+    "replace": "        pass\n",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_an_over_cap_batch_rolls_back_both_counters"
     ]
@@ -83,8 +83,8 @@
   {
     "label": "the upload counter fails CLOSED \u2014 an unbound collection refuses every upload",
     "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
-    "find": "            workspace_id,\n            exc_info=True,\n        )\n        return True, \"\"",
-    "replace": "            workspace_id,\n            exc_info=True,\n        )\n        return False, \"\"",
+    "find": "        cap=file_cap,\n        fail_open=True,",
+    "replace": "        cap=file_cap,\n        fail_open=False,",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_upload_counter_fails_open"
     ]
@@ -92,7 +92,7 @@
   {
     "label": "a workspace-less upload is charged to nobody and allowed",
     "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
-    "find": "        logger.warning(\"upload refused \u2014 no workspace to charge\")\n        return False, \"workspace\"",
+    "find": "        return False, \"workspace\"",
     "replace": "        return True, \"workspace\"",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_an_upload_with_no_workspace_is_refused"
@@ -145,27 +145,27 @@
   },
   {
     "label": "the HTTP pre-check increments \u2014 a turn costs two and the cap bites at half its number",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "        doc = await WorkspaceTurnUsage.get_pymongo_collection().find_one(\n            {\"key\": f\"{workspace_id}:{_today()}\"}\n        )",
-    "replace": "        await try_spend(workspace_id)\n        doc = await WorkspaceTurnUsage.get_pymongo_collection().find_one(\n            {\"key\": f\"{workspace_id}:{_today()}\"}\n        )",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "    try:\n        spent = await metering.used(",
+    "replace": "    try:\n        await metering.try_spend(\n            subject_type=\"workspace\",\n            subject_id=workspace_id,\n            meter=DailyMeter.WORKSPACE_TURNS,\n            cap=cap,\n        )\n        spent = await metering.used(",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_the_pre_check_does_not_increment"
     ]
   },
   {
     "label": "the HTTP pre-check fails CLOSED \u2014 a database blip refuses every send before the executor can decide",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "        logger.debug(\"turn budget pre-check unavailable for %s\", workspace_id, exc_info=True)\n        return False",
-    "replace": "        logger.debug(\"turn budget pre-check unavailable for %s\", workspace_id, exc_info=True)\n        return True",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "        logger.debug(\"turn budget pre-check unavailable for %s\", workspace_id, exc_info=True)\n        return\n",
+    "replace": "        logger.debug(\"turn budget pre-check unavailable for %s\", workspace_id, exc_info=True)\n        spent = cap\n",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_the_pre_check_fails_open"
     ]
   },
   {
     "label": "the pre-check never reports a full workspace \u2014 the fast-reject is dead code",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "    return int((doc or {}).get(\"used\", 0)) >= cap",
-    "replace": "    return False",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "    if spent >= cap:\n        from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError",
+    "replace": "    if False:\n        from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError",
     "tests": [
       "tests/cloud/uploads/test_abuse_budgets.py::test_the_pre_check_reports_a_capped_workspace"
     ]

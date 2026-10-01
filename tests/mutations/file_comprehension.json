@@ -67,35 +67,35 @@
   {
     "label": "the daily cap is ignored at the call site — a refused claim generates anyway",
     "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
-    "find": "        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)\n        if not allowed:",
-    "replace": "        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)\n        if False:",
+    "find": "        if not await metering.try_spend(\n            subject_type=\"workspace\",\n            subject_id=workspace_id,\n            meter=DailyMeter.FILE_COMPREHENSION,\n            cap=cap,\n        ):",
+    "replace": "        if await metering.try_spend(\n            subject_type=\"workspace\",\n            subject_id=workspace_id,\n            meter=DailyMeter.FILE_COMPREHENSION,\n            cap=cap,\n        ) and False:",
     "tests": [
       "tests/cloud/uploads/test_comprehension.py::TestTheListener::test_an_exhausted_cap_leaves_the_file_indexed_and_tagged"
     ]
   },
   {
     "label": "the counter fails OPEN — a degraded database becomes an open tab at the model",
-    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension_budget.py",
-    "find": "            exc_info=True,\n        )\n        return False, 0, cap",
-    "replace": "            exc_info=True,\n        )\n        return True, 0, cap",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        return fail_open\n",
+    "replace": "        return True\n",
     "tests": [
       "tests/cloud/uploads/test_comprehension.py::TestTheDailyCap::test_an_unreadable_counter_fails_CLOSED"
     ]
   },
   {
     "label": "off by one at the ceiling — a cap of 2 serves 3",
-    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension_budget.py",
-    "find": "    if spent > cap:",
-    "replace": "    if spent > cap + 1:",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "    if spent > cap:\n",
+    "replace": "    if spent > cap + 1:\n",
     "tests": [
       "tests/cloud/uploads/test_comprehension.py::TestTheDailyCap::test_the_cap_refuses_the_next_claim"
     ]
   },
   {
     "label": "a workspace with no tenancy is charged to nobody and served anyway",
-    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension_budget.py",
-    "find": "        logger.warning(\"file comprehension refused — no workspace on the event\")\n        return False, 0, cap",
-    "replace": "        logger.warning(\"file comprehension refused — no workspace on the event\")\n        return True, 0, cap",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        logger.warning(\"daily %s refused — no %s to charge\", meter, subject_type)\n        return False",
+    "replace": "        logger.warning(\"daily %s refused — no %s to charge\", meter, subject_type)\n        return True",
     "tests": [
       "tests/cloud/uploads/test_comprehension.py::TestTheDailyCap::test_no_workspace_is_refused"
     ]
