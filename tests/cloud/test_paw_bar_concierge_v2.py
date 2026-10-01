@@ -427,7 +427,12 @@ async def test_v2_prompt_describes_actions_as_data_not_tools(concierge_client, m
     await _site()
     spec = _spec(
         actions=[PawBarActionSpec(verb="add_to_cart", policy="auto", label="Add to cart")],
-        catalog=[PawBarCatalogItem(id="espresso", name="Espresso", price_cents=350)],
+        catalog=[
+            PawBarCatalogItem(id="espresso", name="Espresso", price_cents=350),
+            # ISO 4217 minor units: yen has no decimals, dinar has three.
+            PawBarCatalogItem(id="matcha", name="Matcha", price_cents=1500, currency="JPY"),
+            PawBarCatalogItem(id="dates", name="Dates", price_cents=1250, currency="KWD"),
+        ],
     )
     widget = await store.create_widget(_widget(spec=spec))
 
@@ -436,6 +441,8 @@ async def test_v2_prompt_describes_actions_as_data_not_tools(concierge_client, m
     prompt = model.user_prompt()
     assert "<catalog>" in prompt
     assert 'id "espresso": Espresso - $3.50' in prompt
+    assert 'id "matcha": Matcha - ¥1,500' in prompt
+    assert 'id "dates": Dates - 1.250 KWD' in prompt
     assert "add_to_cart" in prompt
     # The legacy paragraph's tool instructions must not leak into v2.
     assert "pawbar_add_to_cart" not in prompt
