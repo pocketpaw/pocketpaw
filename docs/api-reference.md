@@ -3828,20 +3828,39 @@ site's `events` settings don't control it; the client's consent does, and
 
 The message goes out from the PLATFORM's MSG91 account (not the workspace's
 `msg91` connector used by /growth) as the pre-approved template, with this one
-body variable, on one line and cut at 1024 characters:
+body variable, on one line and at most 900 characters:
 
 ```text
 New enquiry for {site name} via Paw Sites by PocketPaw: {visitor name} — {message} Contact: {phone or email}
 ```
 
-The lead email already carries the visitor's phone and email, so the WhatsApp
-text includes one of them: the shop owner has no other way to reply.
+The contact is kept whole and the message is cut to fit (the site name is cut at
+80 characters, the visitor name at 120). In the visitor's text, WhatsApp
+formatting marks (`*`, `_`, `~`, backticks) are removed and links are broken
+(`https://` becomes `hxxps://`), so a visitor can't style the message or plant a
+tappable link. The lead email already carries the visitor's phone and email, so
+the WhatsApp text includes one of them: the shop owner has no other way to reply.
+
+Register the template as `{{1}}` plus a short fixed prefix, and end it with an
+opt-out line such as "Reply STOP or ask <partner name> to stop these messages".
+Meta's 1024-character limit covers the whole body, so keep the fixed text under
+about 100 characters. Inbound STOP is not handled yet; for now the partner clears
+the opt-in.
+
+Consent follows the number: a client PATCH that changes `whatsapp` clears
+`whatsapp_opt_in_at` unless the same PATCH sets it again.
 
 Delivery uses the same outbox and retry schedule as webhooks (sink `whatsapp`,
 worked in the webhook lane). The row holds only the lead id and site id; the text
-is built when it is sent. At send time the client must still be opted in and not
-archived, or the row is dropped. An MSG91 error is retried; only its error code
-is stored. The other sinks never wait on it.
+is built when it is sent. At send time the client must still be opted in, on the
+same number, and not archived, or the row is dropped; if that check can't be made
+(the lookup fails) the row is retried. An MSG91 `4xx` (other than `429`) or a
+rejected send is dropped, and a `429`, `5xx` or network error is retried. Only the
+error code and HTTP status are stored. The other sinks never wait on it.
+
+Each message is paid for, so one number gets at most 30 a day per workspace
+(rolling 24 hours, counted on the outbox). Past that, leads are still saved and
+emailed; each skipped one logs one warning (lead and site ids only).
 
 | Variable | Purpose |
 |---|---|
