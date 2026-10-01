@@ -123,6 +123,67 @@ The title defaults to `"Instant meeting"`. The response is the usual meeting obj
 
 The meeting row starts as `status: "in_progress"` with `source: "livekit"`, and there is exactly one row per meeting. The call goes through the daily call-time budget like any other call. When the plan has no call time left, the endpoint returns 402 `billing.call_limit` and neither the room nor the meeting row is created.
 
+## Meetings for Later
+
+`POST /api/v1/meetings` with `source: "livekit"` and no `group_id` creates a meeting without starting a call. It makes the same hidden `meeting` room as an instant meeting (host as only member) and a meeting row with a code and link. No LiveKit room exists until someone joins, so creating one uses no call time.
+
+```json
+{ "source": "livekit", "title": "Planning", "scheduled_start": "2026-10-03T09:00:00Z", "duration_minutes": 45 }
+```
+
+`title` is required. `scheduled_start`, `duration_minutes` (default 30) and `description` (up to 2000 characters, stored trimmed) are optional. The row's status is `scheduled` either way. A null `scheduled_start` means the meeting has no date: no reminder or auto-start job is set for it. A dated one gets the usual reminder, auto-start and auto-end.
+
+Only a dated meeting sends the "Meeting scheduled" notification, worded "<title> is scheduled for Oct 3 at 09:00 UTC". An undated one sends none, though the realtime `meeting.scheduled` event still goes out so meeting lists refresh.
+
+`POST /api/v1/meetings` with `source: "livekit"` and a chat-room `group_id` works as before (the caller must be a member of that room) and now also gets a `code` and `link`. Its `join_url` stays empty and `room_group_id` stays null; the room is in `group_id`. Recall (Zoom / Meet) meetings get no code.
+
+### How long a link works
+
+| Meeting | `link_expires_at` |
+|---------|-------------------|
+| No date (for later, and instant meetings) | 30 days after creation, pushed to 30 days after each join |
+| Dated | The meeting's `scheduled_end` |
+
+A meeting past its link expiry, or one that is `ended`, `cancelled` or `failed`, can't be joined. An undated meeting whose link expires before anyone joins is marked `ended` the next time the workspace's meetings are listed.
+
+When everyone leaves a call, LiveKit closes the empty room after 5 minutes and the meeting stays `in_progress`; the next join starts a fresh call on the same meeting. Ending the call for everyone (`DELETE /livekit/rooms/{group_id}`) marks the meeting `ended`, and its link stops working.
+
+## Joining by Code
+
+`GET /api/v1/meetings/by-code/{code}` is public (no sign-in) and is what the `/m/<code>` page calls first. The code can be sent with or without dashes, in any case. It is limited to 30 lookups a minute per client IP (429 `meetings.lookup_rate_limited`). It returns exactly these fields:
+
+```json
+{
+  "code": "abc-defg-hjk",
+  "title": "Planning",
+  "scheduled_start": null,
+  "host_name": "Hana Host",
+  "access": "ask",
+  "status": "not_started"
+}
+```
+
+`status` is `live` while someone other than the call-bot is in the call, `not_started` when nobody is, and `ended` when the meeting is ended, cancelled, failed or past its link expiry. An unknown code is 404. The response never includes ids, emails, members or room names.
+
+`POST /api/v1/meetings/by-code/{code}/join` is for signed-in members of the meeting's workspace (the caller's active workspace). It adds the caller to the meeting room and makes sure the call is running, then returns what the call token flow needs:
+
+```json
+{ "room_group_id": "66fa…", "room_name": "group-call-66fa…" }
+```
+
+If no LiveKit room is running, the join starts one through the daily call-time budget and marks the meeting `in_progress`, and members of the room get the realtime `meeting.started` event. Joining a running call starts nothing new: there is still one room and one meeting row.
+
+| Status | Code | When |
+|--------|------|------|
+| 403 | `livekit.room_forbidden` | The meeting is in another workspace, or it runs in a chat room the caller isn't a member of. A code only grants entry to a hidden meeting room, never to a chat room |
+| 404 | `meeting.not_found` | Unknown code |
+| 410 | `meeting.ended` | Ended, cancelled, failed or past its link expiry |
+| 402 | `billing.call_limit` | No call time left today, and the call isn't running yet. The caller is not added to the room |
+
+Meeting rooms can only be joined this way. `POST /chat/groups/{id}/join` refuses them.
+
+`POST /livekit/rooms` on a meeting room (the call engine calls it every time a member joins a call) follows the same rules as the join above: it never adds an "Instant call" row, it restarts the call on the meeting's own row after LiveKit has closed an empty room, it returns 410 `meeting.ended` for an ended or expired meeting, and it goes through the call budget (402). For any other room it works as before. The recommended order for a code join is still `POST /meetings/by-code/{code}/join`, then the usual `POST /livekit/rooms` and `POST /livekit/token`.
+
 ## Soul Memory Integration
 
 PR #1112 wired soul memory recall into the meeting agent path. When an agent joins a call (via the subprocess agent lifecycle managed in `service.py`'s `_SubprocessAgentRef`), the agent's bootstrap pulls relevant soul memories into context:

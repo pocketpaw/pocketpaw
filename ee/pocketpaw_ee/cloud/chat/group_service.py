@@ -15,6 +15,12 @@ back meetings. ``create_meeting_room`` / ``delete_meeting_room`` are their only
 writers; the room list (and the workspace message search that reuses it) leaves
 them out, ``get_group`` needs membership, and ``update_group`` refuses them so a
 host can't retype one into a listed room.
+
+Updated: 2026-10-01 (feat/meetings-by-code, MC-2) — ``is_meeting_room`` and
+``add_meeting_room_member`` back ``POST /meetings/by-code/{code}/join``. The
+meetings service checks the caller's workspace first; this only ever adds to a
+``type="meeting"`` room, so a meeting code can't grant entry to a chat room.
+``join_group`` still refuses meeting rooms (only public groups and channels).
 """
 
 from __future__ import annotations
@@ -665,6 +671,28 @@ async def delete_meeting_room(group_id: str) -> None:
     doc = await _GroupDoc.get(PydanticObjectId(group_id))
     if doc is not None and doc.type == MEETING_GROUP_TYPE:
         await doc.delete()  # no-event: its creation emitted none either
+
+
+async def is_meeting_room(group_id: str) -> bool:
+    """True when ``group_id`` is a hidden ``type="meeting"`` room."""
+    group = await _get_group_domain_or_none(group_id)
+    return group is not None and group.type == MEETING_GROUP_TYPE
+
+
+async def add_meeting_room_member(group_id: str, user_id: str) -> None:
+    """Add ``user_id`` to a meeting room (idempotent). Refuses any other room type.
+
+    Only the meetings join-by-code path calls this, after it has checked that the
+    caller belongs to the meeting's workspace and the meeting is still open.
+    """
+    group = await _get_group_domain_or_404(group_id)
+    if group.type != MEETING_GROUP_TYPE:
+        raise Forbidden("group.not_joinable", "Only meeting rooms are joined by meeting code")
+    if user_id in group.members:
+        return
+    await _add_member_doc(group_id, user_id)
+    get_resolver().invalidate_group(group_id)
+    # no-event: hidden room (no sidebar entry to add), same as create_meeting_room
 
 
 async def list_groups(workspace_id: str, user_id: str) -> list[dict]:

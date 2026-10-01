@@ -15,6 +15,10 @@ a per-user bucket (30/min) on ``GET /sites/slug-available``. The check reads Mon
 and the Cloudflare account listing on every keystroke of an address field, and
 it answers "is this name taken" for names in any workspace, so it must not be a
 free enumeration oracle.
+
+Updated: 2026-10-01 (MC-2, feat/meetings-by-code) — added
+``rate_limit_meeting_lookup``, a per-IP bucket (30/min) on the unauthenticated
+``GET /meetings/by-code/{code}`` so the lookup can't be used to sweep codes.
 """
 
 from __future__ import annotations
@@ -49,6 +53,12 @@ _social_exchange_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
 # owner types, so the burst is generous; the refill still stops a script walking the
 # namespace to learn which site addresses exist.
 _slug_check_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+
+
+# 30 meeting-code lookups per minute per IP. The lookup is public (the /m/<code>
+# page calls it before sign-in); a person opening links needs a handful, a script
+# guessing codes gets 30 tries a minute out of ~4e13.
+_meeting_lookup_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 
 
 def _client_ip(request: Request) -> str:
@@ -93,6 +103,15 @@ async def rate_limit_social_exchange(request: Request) -> None:
         raise RateLimited(
             "social.exchange_rate_limited",
             "Too many attempts - try again shortly.",
+        )
+
+
+async def rate_limit_meeting_lookup(request: Request) -> None:
+    """Per-IP bucket guarding GET /meetings/by-code/{code} (unauthenticated)."""
+    if not _meeting_lookup_limiter.check(f"meeting-lookup:{_client_ip(request)}").allowed:
+        raise RateLimited(
+            "meetings.lookup_rate_limited",
+            "Too many meeting lookups - wait a moment and try again.",
         )
 
 
@@ -167,5 +186,6 @@ __all__ = [
     "consume_invite_create_tokens",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
+    "rate_limit_meeting_lookup",
     "rate_limit_slug_check",
 ]
