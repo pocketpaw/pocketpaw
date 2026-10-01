@@ -167,9 +167,7 @@ async def test_an_injection_is_refused_without_a_field(action_client):
 
 @pytest.mark.asyncio
 async def test_the_owner_switch_turns_it_off(action_client):
-    client, _store, _site_doc, widget = await _setup(
-        action_client, concierge_lead_capture=False
-    )
+    client, _store, _site_doc, widget = await _setup(action_client, concierge_lead_capture=False)
     res = await _post(client, widget.id, {"email": "a@b.co"})
     assert res.status_code == 409
     assert await _leads() == []
