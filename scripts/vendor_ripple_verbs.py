@@ -7,6 +7,10 @@ in ``pocketpaw.ripple.manifest`` and it fell behind (``animate`` was rejected as
 unknown verb). This script reads the schema at a git ref of a ripple checkout and
 writes ``src/pocketpaw/ripple/_action_verbs.py``. Nothing fetches at runtime.
 
+Updated 2026-10-02 (CN-8 review): fetches the ref's remote first; ``parse_verbs``
+skips ``//`` comment lines, accepts any quoted literal, and fails unless it found
+exactly one verb per comma-separated entry.
+
 Usage:
     python scripts/vendor_ripple_verbs.py                       # ../ripple @ origin/main
     python scripts/vendor_ripple_verbs.py --ripple PATH --ref REF
@@ -32,9 +36,16 @@ def parse_verbs(source: str) -> tuple[str, ...]:
     match = _ENUM_RE.search(source)
     if not match:
         raise SystemExit(f"EventAction = z.enum([...]) not found in {SOURCE_PATH}")
-    verbs = tuple(re.findall(r"""['"]([a-z_]+)['"]""", match.group(1)))
-    if not verbs:
-        raise SystemExit(f"EventAction in {SOURCE_PATH} parsed to zero verbs")
+    body = "\n".join(
+        line for line in match.group(1).splitlines() if not line.strip().startswith("//")
+    )
+    verbs = tuple(re.findall(r"""['"]([^'"]+)['"]""", body))
+    entries = [e for e in body.split(",") if e.strip()]
+    if not verbs or len(verbs) != len(entries):
+        raise SystemExit(
+            f"EventAction in {SOURCE_PATH}: {len(verbs)} quoted verbs but "
+            f"{len(entries)} entries; the enum has a shape this parser does not know"
+        )
     return verbs
 
 
@@ -76,6 +87,8 @@ def main() -> None:
     ap.add_argument("--ripple", type=Path, default=ROOT.parent / "ripple")
     ap.add_argument("--ref", default="origin/main")
     args = ap.parse_args()
+    if subprocess.run(["git", "-C", str(args.ripple), "fetch", "-q", "origin"]).returncode:
+        print(f"WARN: fetch failed; using the local {args.ref}")
     commit, source = read_source(args.ripple, args.ref)
     OUT.write_text(render(commit, source), encoding="utf-8")
     print(f"wrote {OUT.relative_to(ROOT)}: {len(parse_verbs(source))} verbs @ {commit[:7]}")
