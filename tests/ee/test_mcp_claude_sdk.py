@@ -55,6 +55,10 @@ Updated: 2026-09-29 (feat/open-surface-tool) — ``_strip_builtin_servers`` now
   also drops ``pocketpaw_surfaces`` (``open_surface``, registered always-on via
   ``CloudSurfacesMcpProvider``). Same regime as ``pocketpaw_timeline``.
 
+Updated: 2026-10-01 (feat/rooms-read-tool) — ``_strip_builtin_servers`` now
+  also drops ``pocketpaw_rooms`` (``list_rooms`` / ``read_room``, registered
+  always-on via ``CloudRoomsMcpProvider``). Same regime as ``pocketpaw_timeline``.
+
 Updated: 2026-09-10 (feat/agentic-studio-editor) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_timeline`` (the /studio/editor timeline verbs
   edit_timeline / export_timeline, registered always-on via the
@@ -199,6 +203,7 @@ from pocketpaw_ee.agent.mcp_servers.planner import (
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.refero import SERVER_NAME as _REFERO_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.rooms import SERVER_NAME as _ROOMS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
@@ -371,6 +376,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_surfaces`` is always-on too — ``open_surface`` returns an
     # envelope and touches nothing, registered via ``CloudSurfacesMcpProvider``.
     out.pop(_SURFACES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_rooms`` is always-on too: read-only chat-room reads,
+    # registered via ``CloudRoomsMcpProvider``.
+    out.pop(_ROOMS_MCP_SERVER_NAME, None)
     return out
 
 
