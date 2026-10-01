@@ -26,6 +26,10 @@ public ``POST /meetings/by-code/{code}/knock``) and
 ``rate_limit_meeting_knock_poll`` (per IP 120/min on the guest's knock status
 poll and cancel). ``client_ip`` is public so the knock route can key the
 one-minute re-knock cooldown after a denial on the same address.
+
+Updated: 2026-10-01 (feat/discover-index, DS-1) — added
+``rate_limit_discover_public``, a per-IP bucket (60/min) on the unauthenticated
+``GET /discover`` and ``GET /discover/{id}`` reads.
 """
 
 from __future__ import annotations
@@ -66,6 +70,10 @@ _slug_check_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 # page calls it before sign-in); a person opening links needs a handful, a script
 # guessing codes gets 30 tries a minute out of ~4e13.
 _meeting_lookup_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+
+# 60 public Discover reads per minute per IP. The index is browsed before sign-in;
+# a person paging and opening cards needs a few dozen, a scraper gets 60 a minute.
+_discover_public_limiter = RateLimiter(rate=60.0 / 60.0, capacity=60)
 
 # Knocks (a guest asking to join). Per IP: a guest knocks once, maybe again after
 # a denial. Per code: every knock puts a card in front of the people in the call,
@@ -133,6 +141,15 @@ async def rate_limit_meeting_lookup(request: Request) -> None:
         raise RateLimited(
             "meetings.lookup_rate_limited",
             "Too many meeting lookups - wait a moment and try again.",
+        )
+
+
+async def rate_limit_discover_public(request: Request) -> None:
+    """Per-IP bucket guarding the public Discover reads (unauthenticated)."""
+    if not _discover_public_limiter.check(f"discover-public:{_client_ip(request)}").allowed:
+        raise RateLimited(
+            "discover.rate_limited",
+            "Too many requests - wait a moment and try again.",
         )
 
 
@@ -230,6 +247,7 @@ async def rate_limit_slug_check(ctx: RequestContext = Depends(request_context)) 
 __all__ = [
     "client_ip",
     "consume_invite_create_tokens",
+    "rate_limit_discover_public",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
     "rate_limit_meeting_knock",

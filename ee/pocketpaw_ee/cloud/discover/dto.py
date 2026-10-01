@@ -6,6 +6,8 @@
 # created_at``. Never ``workspace``, ``owner``, ``reports``, ``hidden`` or
 # ``source_id``; ``extra="forbid"`` makes adding one by accident a construction
 # error rather than a leak.
+# Updated 2026-10-01 (feat/discover-index): ``UseListingRequest`` (optional
+# ``name``) for ``POST /discover/{id}/use``.
 
 from __future__ import annotations
 
@@ -41,6 +43,15 @@ class ReportListingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str = Field(min_length=1, max_length=500)
+
+
+class UseListingRequest(BaseModel):
+    """Body for ``POST /discover/{id}/use``. ``name`` defaults to the source
+    item's name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class UpsertListingRequest(BaseModel):
@@ -107,5 +118,6 @@ __all__ = [
     "PublicListingResponse",
     "ReportListingRequest",
     "UpsertListingRequest",
+    "UseListingRequest",
     "UseListingResponse",
 ]
