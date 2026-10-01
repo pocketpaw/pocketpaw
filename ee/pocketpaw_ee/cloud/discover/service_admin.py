@@ -13,6 +13,9 @@
 #     ``$setOnInsert``, so a template re-save never unhides a listing that
 #     Discover reports hid, and never resets its counters.
 #   * Site templates are read through ``site_templates.service_admin`` only.
+#
+# Updated 2026-10-01 (feat/discover-index): unhiding a listing clears its
+# reports, so one new report can't instantly re-hide it. Hiding keeps them.
 
 from __future__ import annotations
 
@@ -249,9 +252,9 @@ async def reindex(source: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _moderate(listing_id: str, field: str, value: bool) -> dict:
+async def _moderate(listing_id: str, fields: dict[str, Any]) -> dict:
     doc = await _any_doc(listing_id)
-    await doc.set({field: value, "updatedAt": datetime.now(UTC)})
+    await doc.set({**fields, "updatedAt": datetime.now(UTC)})
     await emit(
         DiscoverListingModerated(data={**_ref(doc), "featured": doc.featured, "hidden": doc.hidden})
     )
@@ -261,13 +264,16 @@ async def _moderate(listing_id: str, field: str, value: bool) -> dict:
 async def set_featured(listing_id: str, featured: bool) -> dict:
     """Feature or unfeature a listing (hidden ones included)."""
     # admin-cross-tenant: platform moderation acts on any workspace's listing.
-    return await _moderate(listing_id, "featured", featured)
+    return await _moderate(listing_id, {"featured": featured})
 
 
 async def set_hidden(listing_id: str, hidden: bool) -> dict:
-    """Hide or unhide a listing. Reports stay; see ``service.report_listing``."""
+    """Hide or unhide a listing. Unhiding clears its reports so the next single
+    report can't re-hide it (see ``service.report_listing``); hiding keeps them."""
     # admin-cross-tenant: platform moderation acts on any workspace's listing.
-    return await _moderate(listing_id, "hidden", hidden)
+    return await _moderate(
+        listing_id, {"hidden": True} if hidden else {"hidden": False, "reports": []}
+    )
 
 
 __all__ = [
