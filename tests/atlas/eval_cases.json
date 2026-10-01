@@ -498,6 +498,12 @@
       "expected_id": "surface:code",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/atlas-canonical): Code keeps its own intent after its keywords stopped competing with Files on the bare noun ('file tree' -> 'source tree')."
+    },
+    {
+      "intent": "save my site as a template",
+      "expected_id": "capability:sites.save_as_template",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/sites-templates-st2): user-saved site templates. The reverse direction, 'publish this as a website' -> primitive:sites, is pinned above."
     }
   ]
 }
