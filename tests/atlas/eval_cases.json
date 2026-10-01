@@ -504,6 +504,12 @@
       "expected_id": "capability:sites.save_as_template",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/sites-templates-st2): user-saved site templates. The reverse direction, 'publish this as a website' -> primitive:sites, is pinned above."
+    },
+    {
+      "intent": "share my site template with everyone",
+      "expected_id": "capability:sites.save_as_template",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/sites-templates-st3): template sharing (workspace / public) lives on the same capability."
     }
   ]
 }
