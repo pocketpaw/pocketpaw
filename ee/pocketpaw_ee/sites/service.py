@@ -1,6 +1,14 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-02 (feat/partners-cobrand, PH-5): ``_stamp_free_badge`` stamps
+# the partner CO-BRAND mark ("Made by <footer_name> · Paw Sites by PocketPaw" ->
+# the Paw Partners page) on a partner-sold site (``partner_client_id``) riding an
+# active partner-only rung, ahead of the hidden-badge skip; free and paid
+# non-partner sites are unchanged. ``sell_site_plan`` now stamps
+# ``partner_client_id`` BEFORE the redeploy (rolled back if the sale fails) so the
+# sale's own deploy already carries the co-brand mark.
+#
 # Updated 2026-10-02 (feat/partners-sell, PH-2): partner-only yearly rungs. The
 # publish path refuses them outside an ACTIVE partner workspace and never
 # plan-carries them; every charge site prices one period via
@@ -4351,7 +4359,17 @@ async def _stamp_free_badge(
     irrelevant and the posture stays fail-closed. ``getattr`` defaulting to True is
     the legacy contract: a row written before the field existed skips the badge
     exactly as it did before.
+
+    PH-5 adds the PARTNER case, checked before that skip: a partner-sold site
+    (``partner_client_id``) on an ACTIVE partner-only rung, whose workspace profile
+    has a ``footer_name``, carries the co-brand mark instead of nothing. Partner
+    rungs grant badge removal, so without this ordering they would ship unmarked.
+    Same injector, lock and sentinels as the badge — the shop's own CSS cannot hide
+    its credit by accident, and a republish swaps badge <-> co-brand when the site
+    lapses to free or is sold. A lapsed partner site fails the active check and
+    falls through to the free badge.
     """
+    from pocketpaw_ee.cloud.billing import site_plans
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
     from pocketpaw_ee.sites import badge
     from pocketpaw_ee.sites.engines import resolve_static_output_rel
@@ -4368,6 +4386,29 @@ async def _stamp_free_badge(
         subscription_status=getattr(doc, "subscription_status", None),
         concierge_enabled=bool(getattr(doc, "concierge_enabled", True)),
     )
+    root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+
+    if (
+        getattr(doc, "partner_client_id", None)
+        and ent.subscription_active
+        and getattr(site_plans.site_scoped_tier(ent.plan_tier), "partner_only", False)
+    ):
+        from pocketpaw_ee.cloud.partners import service as partners_service
+
+        profile = await partners_service.partner_profile_for_workspace(workspace_id)
+        footer_name = (getattr(profile, "footer_name", "") or "").strip()
+        if footer_name:
+            changed = badge.inject_into_tree(
+                root,
+                text=f"Made by {footer_name} · Paw Sites by PocketPaw",
+                href=badge.PARTNERS_HREF,
+            )
+            logger.info(
+                "sites: stamped the partner co-brand mark onto %d page(s) of site %s",
+                len(changed),
+                site_id,
+            )
+            return
 
     if not ent.badge_required and bool(getattr(doc, "badge_hidden", True)):
         logger.info(
@@ -4378,7 +4419,6 @@ async def _stamp_free_badge(
         )
         return
 
-    root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
     changed = badge.inject_into_tree(root)
     logger.info(
         "sites: stamped the attribution badge onto %d page(s) of site %s",
@@ -8594,14 +8634,23 @@ async def sell_site_plan(
         and doc.plan_tier == tier_key
         and not getattr(doc, "plan_cancels_at_period_end", False)
     )
+    # Stamped BEFORE the redeploy: the badge stamper reads ``partner_client_id``
+    # mid-deploy, so stamping after would ship the sale with the free badge and
+    # the co-brand mark only on the next publish. A refused sale restores it.
+    prior_client_id = getattr(doc, "partner_client_id", None)
+    await doc.set({"partner_client_id": partner_client_id})
     if not already_sold:
-        doc = await publish_pocket(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            pocket_id=doc.pocket_id,
-            site_plan_key=tier_key,
-            purchase_authorized=True,
-        )
+        try:
+            doc = await publish_pocket(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=doc.pocket_id,
+                site_plan_key=tier_key,
+                purchase_authorized=True,
+            )
+        except Exception:
+            await doc.set({"partner_client_id": prior_client_id})
+            raise
     await doc.set({"partner_client_id": partner_client_id})
     return doc
 

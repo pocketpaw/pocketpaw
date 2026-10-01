@@ -29,6 +29,9 @@
 # fresh purchase, so the sweep does not bill a second period; a renewal with no
 # partner price lapses instead of retrying forever; same-day purchase/change
 # sequences charge each thing once.
+# Updated 2026-10-02 (feat/partners-cobrand, PH-5): the sale's OWN redeploy stamps
+# the co-brand mark (``partner_client_id`` lands before the deploy), and a refused
+# sale still leaves ``partner_client_id`` unset.
 # Updated 2026-10-02: the autouse fixture clears the shared
 # ``read_model.default_journal_store`` cache (``service._default_store`` now
 # delegates to it) and points the per-workspace stores at tmp_path.
@@ -652,6 +655,39 @@ async def test_selling_site_year_debits_the_partner_price_and_redeploys(
     assert await _balance(wid) == 5000 - 1700
     assert again.plan_tier == "site_year"
     assert not deploys
+
+
+async def test_the_sale_redeploy_already_carries_the_cobrand_mark(
+    mongo_db, store, monkeypatch
+) -> None:
+    """The stamper re-reads the doc mid-deploy, so the client id must be on it by
+    then. Otherwise the sale ships with NO mark at all (partner rungs remove the
+    badge and ``badge_hidden`` defaults True) until the site's next publish."""
+    from pocketpaw_ee.sites import badge
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    client_id = await _client(ctx, store)
+
+    stamped: list[dict] = []
+    real = badge.inject_into_tree
+
+    def _spy(root, **kw):
+        stamped.append(kw)
+        return real(root, **kw)
+
+    monkeypatch.setattr(badge, "inject_into_tree", _spy)
+
+    await service.sell(
+        ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
+    )
+
+    assert stamped, "the sale redeploys through the badge stamper"
+    assert stamped[-1].get("text") == "Made by in-shop Prints · Paw Sites by PocketPaw"
+    assert stamped[-1].get("href") == badge.PARTNERS_HREF
 
 
 async def test_selling_a_year_to_a_monthly_site_is_a_fresh_purchase(

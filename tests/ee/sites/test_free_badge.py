@@ -28,6 +28,13 @@
 # somehow holds hidden=True is still stamped, and a legacy doc behaves as before.
 # The mutation that drops ``badge_hidden`` from the stamper's rule fails
 # ``test_an_entitled_site_that_shows_the_badge_is_stamped``.
+#
+# Updated 2026-10-02 (feat/partners-cobrand, PH-5): the partner co-brand mark.
+# ``_Doc`` gains ``partner_client_id`` (absent unless passed). New cases: the
+# default builder call is unchanged, the co-brand text and partners href land
+# (escaped, ASCII-only, never a tag), a paid non-partner site stays clean, a
+# partner rung with no footer name or a lapsed one falls back, and a republish
+# swaps badge <-> co-brand in both directions.
 
 from __future__ import annotations
 
@@ -575,8 +582,10 @@ class _Doc:
         subscription_status="active",
         concierge_enabled=True,
         badge_hidden=_UNSET,
+        partner_client_id=None,
     ):
         self.plan_tier = plan_tier
+        self.partner_client_id = partner_client_id
         self.subscription_status = subscription_status
         self.concierge_enabled = concierge_enabled
         # Absent unless passed, so the default fixture is a LEGACY row: a Site
@@ -795,3 +804,136 @@ def test_the_marks_geometry_survives_a_hostile_stylesheet():
 
     for decl in ("stroke-width:2", "stroke-linecap:round", "stroke-linejoin:round"):
         assert f"{decl}!important" in svg_tag
+
+
+# --------------------------------------------------------------------------- #
+# Layer 6 — the partner co-brand mark (PH-5)
+# --------------------------------------------------------------------------- #
+
+_COBRAND = "Made by Sharma Prints &#183; Paw Sites by PocketPaw"
+
+
+def test_the_default_call_is_still_the_free_badge():
+    """Parameterising the builders must not move a byte of the default badge."""
+    assert badge.build_badge_html() == badge.build_badge_html(
+        text=badge.BADGE_TEXT, href=badge.BADGE_HREF
+    )
+    assert f'aria-label="{badge.BADGE_TEXT}"' in badge.build_badge_anchor()
+    assert f'href="{badge.BADGE_HREF}"' in badge.build_badge_anchor()
+
+
+def test_a_hostile_cobrand_name_is_escaped_and_ascii():
+    out = badge.build_badge_html(
+        text="Made by <script>alert(1)</script> · शर्मा", href=badge.PARTNERS_HREF
+    )
+    out.encode("ascii")  # the latin-1 fallback rests on this
+    assert "<script>" not in out
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
+    assert "&#183;" in out
+
+
+def _partner_profile(monkeypatch, footer_name):
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    async def _profile(_workspace_id):
+        return SimpleNamespace(status="active", footer_name=footer_name)
+
+    monkeypatch.setattr(partners_service, "partner_profile_for_workspace", _profile)
+
+
+def _sold(**kw):
+    return _Doc("site_year", partner_client_id="client-1", **kw)
+
+
+@pytest.mark.asyncio
+async def test_a_partner_sold_site_carries_the_cobrand_mark(tmp_path, monkeypatch):
+    _partner_profile(monkeypatch, "Sharma Prints")
+    page = await _stamp(tmp_path, monkeypatch, _sold())
+
+    assert _COBRAND in page
+    assert f'href="{badge.PARTNERS_HREF}"' in page
+    assert badge.BADGE_TEXT not in page
+    assert page.count(badge.BADGE_OPEN) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_cobrand_mark_ignores_the_hidden_switch(tmp_path, monkeypatch):
+    """Partner rungs grant badge removal; the co-brand is checked first, so a sold
+    site holding ``badge_hidden=True`` still carries its shop's credit."""
+    _partner_profile(monkeypatch, "Sharma Prints")
+    page = await _stamp(tmp_path, monkeypatch, _sold(badge_hidden=True))
+    assert _COBRAND in page
+
+
+@pytest.mark.asyncio
+async def test_a_hostile_footer_name_ships_escaped(tmp_path, monkeypatch):
+    _partner_profile(monkeypatch, "<script>alert(1)</script>")
+    page = await _stamp(tmp_path, monkeypatch, _sold())
+
+    assert "<script>" not in page
+    assert "Made by &lt;script&gt;alert(1)&lt;/script&gt; &#183; Paw Sites" in page
+
+
+@pytest.mark.asyncio
+async def test_a_paid_non_partner_site_still_ships_clean(tmp_path, monkeypatch):
+    _partner_profile(monkeypatch, "Sharma Prints")
+    page = await _stamp(tmp_path, monkeypatch, _Doc("site", badge_hidden=True))
+    assert badge.BADGE_MARKER not in page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "doc",
+    [
+        _Doc("site", partner_client_id="client-1", badge_hidden=False),  # not a partner rung
+        _Doc("site_year", badge_hidden=False),  # partner rung, never sold
+    ],
+)
+async def test_only_a_sold_partner_rung_gets_the_cobrand(tmp_path, monkeypatch, doc):
+    _partner_profile(monkeypatch, "Sharma Prints")
+    page = await _stamp(tmp_path, monkeypatch, doc)
+    assert badge.BADGE_TEXT in page and "Made by" not in page
+
+
+@pytest.mark.asyncio
+async def test_no_footer_name_falls_back_to_the_ordinary_rule(tmp_path, monkeypatch):
+    _partner_profile(monkeypatch, "   ")
+    assert badge.BADGE_MARKER not in await _stamp(tmp_path, monkeypatch, _sold())
+
+
+async def _restamp(tmp_path, monkeypatch, doc) -> str:
+    """Stamp the EXISTING page again (a republish onto the stable working dir)."""
+    _site_doc_returning(monkeypatch, doc)
+    await sites_service._stamp_free_badge(
+        workspace_id="w1",
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        project_dir=str(tmp_path),
+        engine="html",
+    )
+    return (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_partner_site_gets_the_free_badge_back(tmp_path, monkeypatch):
+    _partner_profile(monkeypatch, "Sharma Prints")
+    assert _COBRAND in await _stamp(tmp_path, monkeypatch, _sold())
+
+    page = await _restamp(tmp_path, monkeypatch, _sold(subscription_status="cancelled"))
+
+    assert badge.BADGE_TEXT in page
+    assert "Made by" not in page
+    assert page.count(badge.BADGE_OPEN) == 1
+
+
+@pytest.mark.asyncio
+async def test_selling_a_free_site_swaps_its_badge_for_the_cobrand(tmp_path, monkeypatch):
+    _partner_profile(monkeypatch, "Sharma Prints")
+    assert badge.BADGE_TEXT in await _stamp(tmp_path, monkeypatch, _Doc("free"))
+
+    page = await _restamp(tmp_path, monkeypatch, _sold())
+
+    assert _COBRAND in page
+    assert badge.BADGE_TEXT not in page
+    assert page.count(badge.BADGE_OPEN) == 1
