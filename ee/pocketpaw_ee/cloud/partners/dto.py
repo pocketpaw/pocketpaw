@@ -1,6 +1,7 @@
 # ee/pocketpaw_ee/cloud/partners/dto.py — request/response shapes for Paw Partners.
 # Created 2026-10-01 (feat/partners-foundation, PH-1). Requests and responses are
-# separate classes (ee/cloud rule 4).
+# separate classes (ee/cloud rule 4). Client wire shape unchanged by the Fabric
+# move; ``whatsapp_opt_in_at`` is stored as an ISO string and parsed back here.
 
 from __future__ import annotations
 

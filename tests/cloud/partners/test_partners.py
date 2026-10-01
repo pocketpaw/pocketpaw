@@ -3,6 +3,8 @@
 # Created 2026-10-01 (feat/partners-foundation). Locks the contract: client CRUD
 # round-trip, tenant isolation (404 cross-tenant), 403 for non-partner / non-active
 # workspaces, platform-operator-only admin switch, and per-workspace site billing.
+# Updated the same day: clients are Fabric Customer objects; tests inject a
+# journal-backed store over a tmp journal (same as tests/cloud/people).
 
 from __future__ import annotations
 
@@ -20,6 +22,9 @@ from pocketpaw_ee.cloud.partners import service, service_admin
 from pocketpaw_ee.guards.platform import check_platform_action
 from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
 from pydantic import ValidationError as PydanticValidationError
+from soul_protocol.engine.journal import open_journal
+
+from pocketpaw.fabric.journal_store import FabricJournalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -45,6 +50,13 @@ async def _workspace(slug: str, status: str | None = None) -> WorkspaceDoc:
 
 
 @pytest.fixture
+def store(tmp_path):
+    journal = open_journal(tmp_path / "journal.db")
+    yield FabricJournalStore(journal)
+    journal.close()
+
+
+@pytest.fixture
 def flags_off(monkeypatch):
     monkeypatch.setattr(
         "pocketpaw.config.get_settings",
@@ -55,59 +67,63 @@ def flags_off(monkeypatch):
 # ---------------------------------------------------------------- clients
 
 
-async def test_client_crud_round_trip(mongo_db) -> None:
+async def test_client_crud_round_trip(mongo_db, store) -> None:
     ws = await _workspace("acme", "active")
     ctx = _ctx(str(ws.id))
 
     created = await service.create_client(
-        ctx, body={"name": "Ravi Stores", "whatsapp": PHONE, "gstin": "29ABCDE1234F1Z5"}
+        ctx,
+        body={"name": "Ravi Stores", "whatsapp": PHONE, "gstin": "29ABCDE1234F1Z5"},
+        store=store,
     )
     assert created.workspace_id == str(ws.id)
-    assert (await service.get_client(ctx, client_id=created.id)).name == "Ravi Stores"
-    assert [c.id for c in await service.list_clients(ctx)] == [created.id]
+    assert (await service.get_client(ctx, client_id=created.id, store=store)).name == "Ravi Stores"
+    assert [c.id for c in await service.list_clients(ctx, store=store)] == [created.id]
 
-    updated = await service.update_client(ctx, client_id=created.id, body={"notes": "pays cash"})
+    updated = await service.update_client(
+        ctx, client_id=created.id, body={"notes": "pays cash"}, store=store
+    )
     assert updated.notes == "pays cash"
     assert updated.name == "Ravi Stores"  # PATCH leaves unsent fields alone
 
-    await service.delete_client(ctx, client_id=created.id)
-    assert await service.list_clients(ctx) == []
+    await service.delete_client(ctx, client_id=created.id, store=store)
+    assert await service.list_clients(ctx, store=store) == []
     with pytest.raises(NotFound):
-        await service.get_client(ctx, client_id=created.id)
+        await service.get_client(ctx, client_id=created.id, store=store)
 
 
-async def test_whatsapp_must_be_e164(mongo_db) -> None:
+async def test_whatsapp_must_be_e164(mongo_db, store) -> None:
     ws = await _workspace("acme", "active")
     with pytest.raises(PydanticValidationError):
         await service.create_client(_ctx(str(ws.id)), body={"name": "X", "whatsapp": "98765"})
 
 
-async def test_cross_tenant_client_is_404(mongo_db) -> None:
+async def test_cross_tenant_client_is_404(mongo_db, store) -> None:
     a = await _workspace("a", "active")
     b = await _workspace("b", "active")
     client = await service.create_client(_ctx(str(a.id)), body={"name": "A", "whatsapp": PHONE})
 
     ctx_b = _ctx(str(b.id))
     for call in (
-        service.get_client(ctx_b, client_id=client.id),
-        service.update_client(ctx_b, client_id=client.id, body={"notes": "x"}),
-        service.delete_client(ctx_b, client_id=client.id),
+        service.get_client(ctx_b, client_id=client.id, store=store),
+        service.update_client(ctx_b, client_id=client.id, body={"notes": "x"}, store=store),
+        service.delete_client(ctx_b, client_id=client.id, store=store),
     ):
         with pytest.raises(NotFound) as exc:
             await call
         assert exc.value.status_code == 404
-    assert await service.list_clients(ctx_b) == []
+    assert await service.list_clients(ctx_b, store=store) == []
 
 
 @pytest.mark.parametrize("status", [None, "applied", "suspended"])
-async def test_client_calls_from_non_active_partner_are_403(mongo_db, status) -> None:
+async def test_client_calls_from_non_active_partner_are_403(mongo_db, store, status) -> None:
     ws = await _workspace(f"ws-{status}", status)
     ctx = _ctx(str(ws.id))
     with pytest.raises(Forbidden) as exc:
-        await service.list_clients(ctx)
+        await service.list_clients(ctx, store=store)
     assert exc.value.status_code == 403
     with pytest.raises(Forbidden):
-        await service.create_client(ctx, body={"name": "X", "whatsapp": PHONE})
+        await service.create_client(ctx, body={"name": "X", "whatsapp": PHONE}, store=store)
 
 
 async def test_me_is_404_without_a_profile_and_returns_it_with_one(mongo_db) -> None:
@@ -205,3 +221,30 @@ async def test_global_flag_still_enforces_without_a_read(monkeypatch) -> None:
     )
     # No mongo_db fixture: a DB read here would raise, so True proves the short-circuit.
     assert await enforcement.sites_enforced_for("000000000000000000000000") is True
+
+
+async def test_foreign_customer_objects_are_not_partner_clients(mongo_db, store) -> None:
+    """Another journal writer's bare "customer" object never shows up as a client."""
+    from pocketpaw.fabric.models import FabricObject
+
+    ws = await _workspace("acme", "active")
+    wid = str(ws.id)
+    await store.create(
+        FabricObject(id="crm-1", type_id="customer", properties={"name": "CRM"}),
+        scope=[f"workspace:{wid}"],
+    )
+    ctx = _ctx(wid)
+    assert await service.list_clients(ctx, store=store) == []
+    with pytest.raises(NotFound):
+        await service.get_client(ctx, client_id="crm-1", store=store)
+
+
+async def test_opt_in_timestamp_round_trips(mongo_db, store) -> None:
+    ws = await _workspace("acme", "active")
+    ctx = _ctx(str(ws.id))
+    at = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    out = await service.create_client(
+        ctx, body={"name": "R", "whatsapp": PHONE, "whatsapp_opt_in_at": at}, store=store
+    )
+    assert out.whatsapp_opt_in_at == at
+    assert (await service.get_client(ctx, client_id=out.id, store=store)).whatsapp_opt_in_at == at

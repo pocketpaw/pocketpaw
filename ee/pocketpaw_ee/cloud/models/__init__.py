@@ -280,7 +280,6 @@ from pocketpaw_ee.cloud.models.notification_outbox import (
     NotificationOutboxItem,
     NotificationRateMarker,
 )
-from pocketpaw_ee.cloud.models.partner_client import PartnerClient
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
@@ -634,8 +633,6 @@ def get_all_documents():
         ForesightWorkspaceScenario,
         ChatRunDoc,
         Lead,
-        # Paw Partners (PH-1): a partner's shop-owner client record.
-        PartnerClient,
         Site,
         # User-saved site templates. Only ``ee.cloud.site_templates.service``
         # writes it.
