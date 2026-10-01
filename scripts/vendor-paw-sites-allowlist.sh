@@ -5,10 +5,16 @@
 # dependency rules (src/allowlist.ts: VETTED_DEPENDENCIES, TOOLCHAIN_RESERVED,
 # MAX_AUTHOR_PACKAGES) and prints them with `paw-sites-gen allowlist`. pocketpaw
 # commits that output as ee/pocketpaw_ee/sites/paw-sites-allowlist.json, which
-# vetted_pins and dependency_manifest read. This script runs the command at a ref
-# (default origin/main) in a throwaway worktree, so the shared checkout is never
-# touched, and rewrites the JSON plus paw-sites-allowlist.pin.json (commit + sha256).
+# vetted_pins and dependency_manifest read. This script rewrites the JSON plus
+# paw-sites-allowlist.pin.json (commit + sha256);
 # tests/ee/sites/test_paw_sites_allowlist_vendored.py fails when the two disagree.
+#
+# Updated 2026-10-02 (CN-8 review): no worktree and no `bun install` any more.
+# `git archive <commit> src` goes into a temp dir and bun imports allowlist.ts on its
+# own (its import closure is node:module + errors.ts, no packages), so no ripple
+# checkout is needed. The print below mirrors runAllowlist() in paw-sites
+# src/cli.ts key for key; if that function's output changes, change this too (the
+# reviewer confirmed identical bytes against `paw-sites-gen allowlist` at 057194b).
 #
 # This is the COMMITTED copy. scripts/vendor-paw-sites.sh still writes the deploy
 # copy (deploy/paw-sites/allowlist.json) that the image ships beside the generator.
@@ -16,7 +22,6 @@
 # Usage:
 #   scripts/vendor-paw-sites-allowlist.sh            # ../paw-sites at origin/main
 #   PAW_SITES_DIR=/path/to/paw-sites PAW_SITES_REF=<ref> scripts/vendor-paw-sites-allowlist.sh
-# paw-sites installs file:../ripple deps; RIPPLE_DIR overrides the sibling ../ripple.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,12 +34,32 @@ PIN="$HERE/ee/pocketpaw_ee/sites/paw-sites-allowlist.pin.json"
 git -C "$SRC" fetch -q origin || echo "[vendor-paw-sites-allowlist] WARN: fetch failed; using the local $REF" >&2
 COMMIT="$(git -C "$SRC" rev-parse "$REF")"
 
-WT="$(mktemp -d)/paw-sites"
-trap 'git -C "$SRC" worktree remove --force "$WT" >/dev/null 2>&1 || true' EXIT
-git -C "$SRC" worktree add -q --detach "$WT" "$COMMIT"
-# paw-sites depends on file:../ripple/packages/*, so the worktree needs a ripple beside it.
-ln -s "${RIPPLE_DIR:-$(cd "$SRC/.." && pwd)/ripple}" "$(dirname "$WT")/ripple"
-( cd "$WT" && bun install --frozen-lockfile >/dev/null && bun src/cli.ts allowlist > "$DEST.tmp" )
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP" "$DEST.tmp"' EXIT
+git -C "$SRC" archive "$COMMIT" src | tar -x -C "$TMP"
+cat > "$TMP/print.ts" <<'TS'
+import {
+  AUTHOR_DECLARABLE,
+  ENGINE_TOOLCHAIN_RESERVED,
+  MAX_AUTHOR_PACKAGES,
+  TOOLCHAIN_RESERVED,
+  VETTED_DEPENDENCIES
+} from './src/allowlist.ts';
+
+const pinned: Record<string, string> = {};
+for (const name of AUTHOR_DECLARABLE) pinned[name] = VETTED_DEPENDENCIES[name]!;
+console.log(
+  JSON.stringify({
+    authorDeclarable: AUTHOR_DECLARABLE,
+    pinned,
+    toolchainReserved: TOOLCHAIN_RESERVED,
+    engineToolchainReserved: ENGINE_TOOLCHAIN_RESERVED,
+    maxAuthorPackages: MAX_AUTHOR_PACKAGES,
+    vetted: VETTED_DEPENDENCIES
+  })
+);
+TS
+( cd "$TMP" && bun print.ts ) > "$DEST.tmp"
 python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$DEST.tmp"
 mv "$DEST.tmp" "$DEST"
 
