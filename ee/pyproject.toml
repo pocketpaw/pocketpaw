@@ -313,6 +313,7 @@ sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
 timeline = "pocketpaw_ee.extensions:CloudTimelineMcpProvider"
 surfaces = "pocketpaw_ee.extensions:CloudSurfacesMcpProvider"
+rooms = "pocketpaw_ee.extensions:CloudRoomsMcpProvider"
 site_media = "pocketpaw_ee.extensions:CloudSiteMediaMcpProvider"
 other_hand = "pocketpaw_ee.extensions:CloudOtherHandMcpProvider"
 
