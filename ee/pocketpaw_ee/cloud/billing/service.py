@@ -25,9 +25,10 @@
 # SECURITY: the provider verifies the signature before this module trusts any
 # field. The webhook secret / API key are never logged.
 #
-# CURRENCY: the 1-credit==1-cent mapping is USD-only, so ``handle_webhook`` gates
-# the GRANT on ``currency == "USD"`` — a verified non-USD success event is acked
-# but never granted (it would otherwise credit 1:1 against the wrong denomination).
+# CURRENCY: the 1-credit==1-cent mapping is USD's, and INR converts through
+# ``_inr_base_credits`` (PH-4), so ``handle_webhook`` gates the GRANT on USD or
+# INR — a verified success in ANY OTHER currency is acked but never granted (it
+# would otherwise credit 1:1 against the wrong denomination).
 # It is still RECORDED, with ``credits_granted=0``: the gate stops us handing over
 # credits, not from keeping the receipt a later reversal has to join through.
 #
@@ -274,8 +275,8 @@ SUBSCRIPTION_BILLING_RAIL = "subscription"
 # the population the sweep must NOT touch.
 PLAN_BILLING_RAIL = "plan"
 SITE_PLAN_DEBIT_CAUSE = "site_plan"
-# 1 credit == 1 cent. The same mapping the top-up grant enforces (and gates on
-# USD for), written once here so the site price never gets converted by hand.
+# 1 credit == 1 cent. The same mapping a USD top-up grant uses (INR converts to
+# US cents first), written once here so the site price never gets converted by hand.
 _CENTS_PER_USD = 100
 # Only this event type grants credits. The other one-time families
 # (payment.failed / payment.processing / …) are acknowledged but never grant.
@@ -1152,8 +1153,9 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     already took. It is doing three jobs at once, which is why this path needs no
     currency gate and no partial-refund special case of its own:
 
-      * a non-USD charge granted nothing, so its cap is 0 and refunding it takes
-        no credits — correct, because we never gave any;
+      * a charge in an unsupported currency (anything but USD / INR) granted
+        nothing, so its cap is 0 and refunding it takes no credits — correct,
+        because we never gave any;
       * a payment carrying BOTH a refund and a lost dispute (routine, because
         Verifi RDR resolves disputes by refunding) cannot be clawed twice;
       * we can never take more credits than we handed out, whatever the gateway
