@@ -72,6 +72,9 @@ class CreateTopupRequest(BaseModel):
     amount_credits: int = Field(
         ...,
         gt=0,
+        # The larger (INR) ceiling, so OpenAPI still advertises a maximum; the
+        # per-currency check below is the real bound.
+        le=max(_TOPUP_CEILING.values()),
         description=(
             "USD: credits to buy (1 credit == $0.01), capped at 1,000,000 ($10,000). "
             "INR: the charge in paise, capped at 100,000,000 (Rs.10,00,000); the "

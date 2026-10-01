@@ -86,10 +86,19 @@ def _envelope(event_type: str, data: dict) -> str:
     )
 
 
-def _payment_body(*, paise: int, currency: str = "INR", settlement: tuple | None = None) -> str:
+def _payment_body(
+    *,
+    paise: int,
+    currency: str = "INR",
+    settlement: tuple | None = None,
+    meta: dict | None = None,
+) -> str:
+    """A verified ``payment.succeeded``. By default it carries the metadata our
+    INR checkout stamps (``topup_currency=INR``); pass ``meta`` to override."""
+    tags = meta if meta is not None else {"topup_currency": "INR"}
     data = {
         "payment_id": PAYMENT_ID,
-        "metadata": {"workspace_id": WS},
+        "metadata": {"workspace_id": WS, **tags},
         "total_amount": paise,
         "currency": currency,
     }
@@ -171,7 +180,12 @@ async def test_replaying_an_inr_event_grants_nothing_new_on_either_line(mongo_db
 
 
 async def test_usd_topup_is_unchanged_and_earns_no_bonus(mongo_db):
-    await _deliver(_payment_body(paise=5_000_000, currency="USD"), "evt_usd_big")
+    await _deliver(
+        _payment_body(
+            paise=5_000_000, currency="USD", meta={"topup_currency": "USD", "credits": "5000000"}
+        ),
+        "evt_usd_big",
+    )
 
     assert await _lines("top_up") == [5_000_000]
     assert await _lines("bulk_bonus") == []
@@ -237,7 +251,7 @@ async def test_inr_logs_carry_no_rupee_or_fx_figures(mongo_db, caplog):
 
 async def test_eur_grants_nothing_and_logs_without_the_amount(mongo_db, caplog):
     caplog.set_level(logging.INFO, logger="pocketpaw_ee.cloud.billing.service")
-    result = await _deliver(_payment_body(paise=2_345_678, currency="EUR"), "evt_eur")
+    result = await _deliver(_payment_body(paise=2_345_678, currency="EUR", meta={}), "evt_eur")
 
     assert result == {"ok": True, "granted": False}
     assert await credits.balance(WS) == 0

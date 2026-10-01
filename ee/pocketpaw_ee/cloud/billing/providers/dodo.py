@@ -77,7 +77,9 @@
 #   ``_gateway_failure``) rather than silently converting. The webhook parse also
 #   lifts ``data.settlement_amount`` / ``data.settlement_currency`` onto the
 #   ``GatewayEvent`` so the service can grant an INR charge from Dodo's own USD
-#   settlement figure.
+#   settlement figure. Every top-up checkout also stamps ``topup_currency`` (and,
+#   for USD, ``credits``) on its metadata so the webhook knows which product was
+#   SOLD — a USD-product checkout can be charged in rupees by local pricing.
 #
 # SECURITY: the signature is verified before the payload is parsed. The webhook
 # secret and the API key are NEVER logged.
@@ -413,6 +415,14 @@ class DodoProvider:
         # The provider stamps it authoritatively, overriding any caller value.
         meta = {k: str(v) for k, v in dict(metadata or {}).items()}
         meta["workspace_id"] = str(workspace_id)
+        # WHAT WAS SOLD, stamped authoritatively like workspace_id and returned
+        # inside the verified webhook body. The charge currency cannot say it: a
+        # USD-product checkout is left open to Dodo's local pricing and can come
+        # back charged in INR, and must grant the credits it sold — not the INR
+        # conversion and bulk bonus that only the INR product earns.
+        meta["topup_currency"] = currency
+        if currency == "USD":
+            meta["credits"] = str(amount_credits)
 
         # INR only: pin the charge currency so Dodo refuses rather than converting.
         # The USD path sends nothing here, exactly as before — pinning it would

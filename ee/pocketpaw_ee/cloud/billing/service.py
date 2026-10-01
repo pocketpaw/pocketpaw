@@ -202,9 +202,19 @@
 #   THE INR RATE is Dodo's own: a USD ``settlement_amount`` on the verified body
 #   is the auditable USD value of the charge, and credits = those cents. Only
 #   when no USD settlement figure is present does the grant fall back to the
-#   configured ``fx_inr_per_usd`` (credits = floor(paise / rate)). Both figures
-#   are logged on every INR grant so a fee netted into the settlement, or a unit
-#   mismatch, is visible after the fact.
+#   configured ``fx_inr_per_usd`` (credits = floor(paise / rate)), or when the
+#   settlement figure sits outside 0.5x-2x of that estimate. Neither figure is
+#   logged: Dodo's settlement figure is stored on the Payment row
+#   (``settlement_amount`` / ``settlement_currency``) and the source that won plus
+#   the rate ride on the base ledger entry's ``ref`` (``conversion``,
+#   ``fx_inr_per_usd``) and are copied onto the row, so a fee netted into the
+#   settlement, or a unit mismatch, is auditable after the fact.
+#
+#   WHAT WAS SOLD, NOT THE CHARGE CURRENCY, picks the path. ``create_one_time``
+#   stamps ``topup_currency`` (and, for USD, ``credits``) on the checkout
+#   metadata. A USD-product checkout Dodo prices locally arrives as INR and
+#   grants the credits it sold, no bonus; only the INR product converts and
+#   earns the bulk bonus; an untagged non-USD charge still grants nothing.
 #
 #   BULK BONUS rides a SEPARATE ledger line, ``cause="bulk_bonus"``, keyed on
 #   ``<event_id>:bulk_bonus`` so it is exactly-once on its own — see
@@ -360,9 +370,9 @@ _REVERSAL_EVENTS = frozenset({_REFUND_SUCCEEDED, _DISPUTE_LOST})
 _REVERSAL_CAUSE = "payment_reversal"
 
 # --- INR top-ups (PH-4) ---------------------------------------------------
-# The currencies a top-up GRANTS in. Anything else is acked, recorded with
-# ``credits_granted=0`` and never granted (the 1-credit==1-cent mapping is USD's,
-# and INR has its own conversion below).
+# The credits products a top-up checkout can SELL (``create_topup``'s currency).
+# The webhook routes on which one was sold, read back off the checkout metadata —
+# see ``_topup_base_credits``.
 _GRANT_CURRENCIES = frozenset({"USD", "INR"})
 _TOPUP_CAUSE = "top_up"
 # The separate ledger line a bulk INR prepay earns. NOT ``top_up``: it is not
@@ -389,6 +399,14 @@ def _inr_bulk_bonus(paid_paise: int, base_credits: int) -> int:
 # we stop trusting it. Outside this band it is far more likely a unit or field
 # mismatch than a real exchange rate, so the FX path grants instead.
 _SETTLEMENT_SANITY_BAND = (0.5, 2.0)
+_FX_SETTLEMENT_DISTRUSTED = "fx_settlement_distrusted"
+# What ``create_one_time`` stamps on the checkout metadata (it comes back inside
+# the VERIFIED webhook body): which credits product was sold, and — for the USD
+# product — how many credits were bought. The charge currency alone cannot say
+# which product was sold: a USD-product checkout leaves the currency open so
+# Dodo can price it locally, and arrives as ``currency == "INR"``.
+_META_TOPUP_CURRENCY = "topup_currency"
+_META_CREDITS = "credits"
 
 
 def _inr_base_credits(event: GatewayEvent) -> tuple[int, str, float]:
@@ -400,7 +418,8 @@ def _inr_base_credits(event: GatewayEvent) -> tuple[int, str, float]:
     ``floor(paise / 100 / rate * 100) == paise // rate``.
 
     A settlement figure outside ``_SETTLEMENT_SANITY_BAND`` of the FX estimate is
-    NOT trusted: the FX path grants and a warning names the event (no amounts).
+    NOT trusted: the FX path grants, under source ``fx_settlement_distrusted`` so
+    the caller can warn (once, on the delivery that actually grants).
     """
     from pocketpaw.config import get_settings
 
@@ -410,11 +429,7 @@ def _inr_base_credits(event: GatewayEvent) -> tuple[int, str, float]:
         low, high = _SETTLEMENT_SANITY_BAND
         if low * fx_credits <= event.settlement_amount <= high * fx_credits:
             return event.settlement_amount, "settlement", rate
-        logger.warning(
-            "billing.webhook: INR top-up event_id=%s carried a USD settlement figure outside "
-            "the sanity band of the FX estimate — granting from the FX rate instead",
-            event.event_id,
-        )
+        return fx_credits, _FX_SETTLEMENT_DISTRUSTED, rate
     return fx_credits, "fx", rate
 
 
@@ -853,6 +868,66 @@ async def cancel(
 # ---------------------------------------------------------------------------
 
 
+def _topup_base_credits(
+    event: GatewayEvent, sold: str, charged: str, meta: dict
+) -> tuple[int, dict, bool]:
+    """Decide a verified top-up's BASE grant: ``(credits, conversion_ref, inr_product)``.
+
+    0 credits means "grant nothing" (acked, recorded, logged by id + currency
+    only — never the amount). The cases, keyed on what our checkout SOLD:
+
+      * ``sold == "INR"`` — the INR credits product. Charged in INR, it converts
+        via ``_inr_base_credits`` and earns the bulk bonus. Charged in anything
+        else (cannot happen with ``billing_currency`` pinned) it grants nothing.
+      * ``sold == "USD"`` — the USD credits product. Charged in USD it grants
+        ``total_amount`` exactly as before. Charged in another currency (Dodo's
+        local pricing) it grants the ``credits`` our checkout stamped — what was
+        bought — and never a bonus.
+      * no ``topup_currency`` — a checkout this metadata predates, or not ours.
+        Today's behaviour: USD grants ``total_amount``, anything else nothing.
+    """
+    if sold == "INR":
+        if charged != "INR":
+            logger.warning(
+                "billing.webhook: INR credits product charged in currency=%s (event_id=%s) — "
+                "not granting",
+                event.currency,
+                event.event_id,
+            )
+            return 0, {}, False
+        base, source, rate = _inr_base_credits(event)
+        if base <= 0:
+            logger.warning(
+                "billing.webhook: INR payment.succeeded converted to 0 credits "
+                "(event_id=%s) — not granting",
+                event.event_id,
+            )
+        return max(base, 0), {"conversion": source, "fx_inr_per_usd": rate}, True
+    if charged == "USD":
+        return event.amount_credits, {}, False
+    if sold == "USD":
+        raw = str(meta.get(_META_CREDITS) or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw), {"conversion": "metadata_credits"}, False
+        logger.warning(
+            "billing.webhook: USD credits product charged in currency=%s carried no usable "
+            "credits metadata (event_id=%s) — not granting",
+            event.currency,
+            event.event_id,
+        )
+        return 0, {}, False
+    # Not one of our tagged checkouts, and not USD: the 1-credit==1-cent mapping
+    # would credit it against the wrong denomination (a ¥750 charge granting 750
+    # credits == $7.50), so it is acked and grants nothing.
+    logger.warning(
+        "billing.webhook: payment.succeeded in unsupported currency=%s (event_id=%s) — "
+        "not granting",
+        event.currency,
+        event.event_id,
+    )
+    return 0, {}, False
+
+
 async def handle_webhook(
     *,
     payload: bytes,
@@ -937,66 +1012,50 @@ async def handle_webhook(
             event.event_id,
         )
         return {"ok": True, "granted": False}
-    # USD + INR ONLY. The 1-credit==1-cent mapping holds only for USD, and INR
-    # has its own conversion (``_inr_base_credits``). Any other verified charge
-    # would be credited 1:1 against the wrong denomination (a ¥750 charge wrongly
-    # granting 750 credits == $7.50), so it is acked (200) so Dodo stops
-    # retrying, recorded above, and grants nothing.
-    currency = event.currency.upper()
-    if currency not in _GRANT_CURRENCIES:
-        # Log the event id + currency only — never the amount (PII / money).
-        logger.warning(
-            "billing.webhook: payment.succeeded in unsupported currency=%s (event_id=%s) — "
-            "not granting (USD/INR only)",
-            event.currency,
-            event.event_id,
-        )
-        return {"ok": True, "granted": False}
-
-    conversion: dict = {}
-    if currency == "INR":
-        base, source, rate = _inr_base_credits(event)
-        if base <= 0:
-            logger.warning(
-                "billing.webhook: INR payment.succeeded converted to 0 credits "
-                "(event_id=%s) — not granting",
-                event.event_id,
-            )
-            return {"ok": True, "granted": False}
-        # Rides on the ledger entry itself, so the conversion that ACTUALLY moved
-        # the credits is recorded atomically with them — a redelivery at a
-        # different rate can never rewrite it.
-        conversion = {"conversion": source, "fx_inr_per_usd": rate}
-    else:
-        base = event.amount_credits
+    # WHAT WAS SOLD decides the grant, not the charge currency. Our checkout
+    # metadata names the credits product (``topup_currency``); a USD-product
+    # checkout charged in rupees by Dodo's local pricing must grant the credits
+    # it sold, never the INR conversion + bulk bonus.
+    meta = (event.raw.get("data") or {}).get("metadata") or {}
+    sold = str(meta.get(_META_TOPUP_CURRENCY) or "").upper()
+    charged = event.currency.upper()
+    base, conversion, inr_product = _topup_base_credits(event, sold, charged, meta)
 
     # Grant EXACTLY ONCE — idempotency is keyed on the webhook event id. A replay
     # collides on BC-1's unique (workspace, idempotency_key) index and no-ops.
-    result = await credits_service.grant(
-        workspace=event.workspace_id,
-        amount=base,
-        cause=_TOPUP_CAUSE,
-        idempotency_key=event.event_id,
-        ref={"gateway": _GATEWAY, "event_id": event.event_id, **conversion},
-    )
-    new_balance = result.balance
-    # A genuine first grant reports ``created=True``; a replay reports False. We
-    # gate the capture emit on this authoritative flag, NOT a balance delta — a
-    # delta heuristic mis-fires under concurrency (a racing grant could mask a
-    # genuine grant as a replay or vice versa).
-    moved = base if result.created else 0
+    moved = 0
+    new_balance = None
+    base_created = False
+    if base > 0:
+        result = await credits_service.grant(
+            workspace=event.workspace_id,
+            amount=base,
+            cause=_TOPUP_CAUSE,
+            idempotency_key=event.event_id,
+            # The conversion rides on the ledger entry itself, so what ACTUALLY
+            # moved the credits is recorded atomically with them — a redelivery
+            # at a different rate can never rewrite it.
+            ref={"gateway": _GATEWAY, "event_id": event.event_id, **conversion},
+        )
+        new_balance = result.balance
+        # ``created`` is the authoritative "this grant applied" flag — never a
+        # balance delta, which mis-fires under concurrency.
+        base_created = result.created
+        if base_created:
+            moved = base
 
-    # EVERYTHING BELOW READS THE LEDGER, NOT THIS DELIVERY'S ARITHMETIC. A
-    # redelivery recomputes ``base`` at whatever FX rate is configured NOW, and
-    # its grant no-ops — so trusting that figure would size the bonus, and stamp
-    # the reversal cap, off credits that never moved (a rate halved between
-    # deliveries doubled the cap, and a full refund then drove the wallet
-    # negative by the difference).
+    # EVERYTHING BELOW READS THE LEDGER, NOT THIS DELIVERY'S ARITHMETIC — and it
+    # runs on every delivery, granting or not. A redelivery recomputes ``base``
+    # at whatever FX rate is configured NOW and its grant no-ops, so trusting
+    # that figure would size the bonus, and stamp the reversal cap, off credits
+    # that never moved (a rate halved between deliveries doubled the cap, and a
+    # full refund then drove the wallet negative by the difference). Only
+    # APPLIED entries count: a half-applied grant must not raise the cap.
     base_entry = await credits_service.find_by_key(event.workspace_id, event.event_id)
-    base_moved = base_entry.amount_delta if base_entry is not None else base
+    base_applied = base_entry.amount_delta if base_entry is not None and base_entry.applied else 0
     bonus_key = f"{event.event_id}:{_BULK_BONUS_CAUSE}"
-    if currency == "INR":
-        bonus = _inr_bulk_bonus(event.amount_credits, base_moved)
+    if inr_product and base_applied > 0:
+        bonus = _inr_bulk_bonus(event.amount_credits, base_applied)
         if bonus > 0:
             # Its OWN line and its OWN key, derived from the event id, so it is
             # exactly-once independently of the base grant: a crash between the
@@ -1012,28 +1071,38 @@ async def handle_webhook(
             if bonus_result.created:
                 moved += bonus
     bonus_entry = await credits_service.find_by_key(event.workspace_id, bonus_key)
-    granted_total = base_moved + (bonus_entry.amount_delta if bonus_entry is not None else 0)
+    bonus_applied = (
+        bonus_entry.amount_delta if bonus_entry is not None and bonus_entry.applied else 0
+    )
     applied = moved > 0
 
-    # Stamp what the ledger ACTUALLY holds for this payment onto the row written
-    # above — the cap a reversal claws back against. Done on every delivery, not
-    # only a first one: if a prior delivery crashed in the window between
-    # recording and granting, its row still reads 0 while the credits exist, and
-    # a redelivery is the only thing that can heal it. Reading the ledger makes
-    # the stamp the same figure on every delivery.
-    await _mark_payment_granted(
-        event.event_id,
-        granted_total,
-        fx_inr_per_usd=(base_entry.ref or {}).get("fx_inr_per_usd") if base_entry else None,
-    )
+    if base > 0 and base_entry is None:
+        # The grant returned and yet the ledger holds no entry under its key.
+        # Never stamp a cap from this delivery's arithmetic — leave the row as is.
+        logger.error(
+            "billing.webhook: top-up event_id=%s granted but no ledger entry is readable "
+            "under its key — NOT stamping the reversal cap; needs a human",
+            event.event_id,
+        )
+    else:
+        # Stamp what the ledger ACTUALLY holds for this payment — the cap a
+        # reversal claws back against. On every delivery, so a row left at 0 by a
+        # delivery that crashed between recording and granting is healed; the
+        # same figure every time, because it is read rather than computed.
+        ref = (base_entry.ref or {}) if base_entry is not None else {}
+        await _mark_payment_granted(
+            event.event_id,
+            base_applied + bonus_applied,
+            conversion=ref.get("conversion"),
+            fx_inr_per_usd=ref.get("fx_inr_per_usd"),
+        )
 
     if applied:
-        if currency == "INR":
-            logger.info(
-                "billing.webhook: INR top-up event_id=%s granted %d credits (via %s)",
+        if base_created and conversion.get("conversion") == _FX_SETTLEMENT_DISTRUSTED:
+            logger.warning(
+                "billing.webhook: INR top-up event_id=%s carried a USD settlement figure "
+                "outside the sanity band of the FX estimate — granted from the FX rate",
                 event.event_id,
-                moved,
-                (base_entry.ref or {}).get("conversion", "?") if base_entry else "?",
             )
         # Rule 9 — emit only on a grant that actually applied (not a replay), and
         # report only what moved on THIS delivery.
@@ -1050,12 +1119,13 @@ async def handle_webhook(
             )
         )
         logger.info(
-            "billing.webhook: granted %d credits to workspace=%s (event_id=%s)",
+            "billing.webhook: granted %d credits to workspace=%s (event_id=%s, via %s)",
             moved,
             event.workspace_id,
             event.event_id,
+            conversion.get("conversion", "usd"),
         )
-    else:
+    elif base > 0:
         logger.info(
             "billing.webhook: replay of event_id=%s — grant was a no-op, balance unchanged",
             event.event_id,
@@ -1104,7 +1174,11 @@ async def _record_payment(event: GatewayEvent) -> None:
 
 
 async def _mark_payment_granted(
-    event_id: str, credits_granted: int, *, fx_inr_per_usd: float | None = None
+    event_id: str,
+    credits_granted: int,
+    *,
+    conversion: str | None = None,
+    fx_inr_per_usd: float | None = None,
 ) -> None:
     """Stamp what a payment actually granted onto its recorded row.
 
@@ -1115,6 +1189,8 @@ async def _mark_payment_granted(
     crashed before reaching here is healed by the next one.
     """
     fields: dict = {"credits_granted": int(credits_granted)}
+    if conversion is not None:
+        fields["conversion"] = str(conversion)
     if fx_inr_per_usd is not None:
         # Read off the base ledger entry, so it is the rate the credits were
         # actually granted at — the same value on every delivery.
