@@ -20,6 +20,10 @@
 # — it takes the site's billing fields because ``entitlements`` may not import
 # ``models.site`` (EE cloud rule 2) — so every branch here is exercised by calling
 # it, with no database, no clock and no network.
+#
+# Updated 2026-10-02 (feat/partners-sell, PH-2): the partner-only yearly rungs
+# ``site_year`` / ``staff_year`` carry the same features as ``site`` / ``staff``,
+# so they are paid tiers here too.
 from __future__ import annotations
 
 import pytest
@@ -30,7 +34,7 @@ _SITE = "6512c1f0e4b0a1b2c3d4e5f6"
 _WS = "ws_site_download_test"
 
 # The per-site rungs that sell the download. ``free`` is the floor and is absent.
-PAID_TIERS = ["site", "staff"]
+PAID_TIERS = ["site", "staff", "site_year", "staff_year"]
 
 # Keys that resolve to NO tier: the two org flats retired on 2026-09-06 (still
 # present in stored documents, because nothing rewrites a document on read), a
