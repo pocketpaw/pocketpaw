@@ -14,6 +14,9 @@
 # ``enqueue_deploy`` — the same web-side contract for the deploy pipeline. It
 # inserts a ``queued`` ShipDeploy and dispatches ``deploy_app_job`` positionally,
 # so ``POST /ship/apps/{id}/deploy`` returns immediately with a pollable id.
+#
+# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
+# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
 
 from __future__ import annotations
 
@@ -92,6 +95,6 @@ async def enqueue_deploy(
 async def _resolve_pool(pool_factory):
     if pool_factory is not None:
         return await pool_factory()
-    from pocketpaw_ee.cloud.chat.runs.arq_executor import _get_pool
+    from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 
-    return await _get_pool()
+    return await get_arq_pool()

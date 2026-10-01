@@ -25,6 +25,9 @@ sweep (`POCKETPAW_TEMPORAL_SWEEP_ENABLED`), the 5-minute sweeper (see
 With several web processes (`POCKETPAW_REALTIME_BUS=redis-streams`) the
 scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
 cluster, and the jail GC once per host. `on_shutdown` stops what it started.
+
+Changes (2026-10-01, CN-4): `on_shutdown` closes the shared arq pool via
+`_core.redis_client.close_arq_pool` (was the chat-runs-only `close_pool`).
 """
 
 from __future__ import annotations
@@ -550,12 +553,13 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Paw Sites dev-server stop failed: %s", exc)
 
-        # Close the arq enqueuer pool if this web process ever built one
-        # (POCKETPAW_CLOUD_RUN_EXECUTOR=arq). No-op otherwise.
+        # Close the process-wide arq enqueue pool (chat runs, jobs, site build and
+        # delete, ship, growth all share it) if this web process ever built one.
+        # No-op otherwise.
         try:
-            from pocketpaw_ee.cloud.chat.runs.arq_executor import close_pool
+            from pocketpaw_ee.cloud._core.redis_client import close_arq_pool
 
-            await close_pool()
+            await close_arq_pool()
         except Exception as exc:  # noqa: BLE001
             logger.warning("arq pool close failed: %s", exc)
         return None

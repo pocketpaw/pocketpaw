@@ -1,9 +1,14 @@
 """Tier 2: ArqExecutor enqueues a job for the worker pool instead of
-running the agent inline."""
+running the agent inline.
+
+Changes (2026-10-01, CN-4): the pool now lives in ``_core.redis_client``;
+resets and the ``create_pool`` patch target that module.
+"""
 
 from __future__ import annotations
 
 import pytest
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.chat.runs import arq_executor
 from pocketpaw_ee.cloud.chat.runs.arq_executor import ArqExecutor
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
@@ -49,7 +54,7 @@ async def test_arq_executor_enqueues_execute_run_job(monkeypatch):
         return _FakePool()
 
     monkeypatch.setattr(arq_executor, "_get_pool", _fake_pool)
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     ex = ArqExecutor()
     await ex.submit(_spec())
@@ -76,9 +81,9 @@ async def test_arq_executor_reuses_pool(monkeypatch):
         calls += 1
         return _FakePool()
 
-    monkeypatch.setattr(arq_executor, "create_pool", _make_create_pool(_fake_pool))
+    monkeypatch.setattr(redis_client, "create_pool", _make_create_pool(_fake_pool))
     monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     ex = ArqExecutor()
     await ex.submit(_spec("a"))
