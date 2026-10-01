@@ -4,22 +4,29 @@
 #   them and how risky they are; the paw-enterprise composer reads it here and
 #   the agent reads the same entries through atlas_search.
 #
-# Read-only and signed-in: any user whose JWT the EE auth bridge verified
-#   (request.state.user_id), or a caller holding the "chat" scope (API key,
-#   OAuth token, local dashboard session). Anonymous callers get 403.
+# Read-only. Callers: an ACTIVE signed-in cloud user (the EE auth bridge sets
+#   request.state.user_id after the JWT verifies and ee_user_authenticated only
+#   for active users), or a caller holding the "chat" scope (API key, OAuth
+#   token, local dashboard session). Anyone else gets 403.
 #
 # Workspace overlay: answers go through the atlas EntitlementProvider for the
-#   caller's workspace scope (ws:<id>, "default" outside the cloud). The read
-#   API has no chat-run identity to resolve a workspace role from, so role-gated
-#   entries (the admin capability cards) are always hidden here, fail-closed.
-#   Every capability card is role-gated today, so search returns no capability
-#   results; surfaces, verbs and primitives are ungated.
+#   caller's workspace (ws:<id>, "default" outside the cloud). With a signed-in
+#   user and workspace, the EE role-aware provider (overlay.build_role_aware_
+#   provider, bound to that user) resolves the caller's workspace role, so an
+#   owner sees owner-gated entries such as surface:security and a member
+#   doesn't. Without one, or when the role can't be resolved, role-gated
+#   entries stay hidden (fail-closed).
 #
 # Score: atlas ranks by weighted token overlap (name > keyword > summary >
 #   narrative). ``score`` = raw score / AtlasStore.max_score(q), the score of a
 #   name hit on every distinct query word, clamped to 0..1 and rounded to 3 dp.
+#
+# Review pass (same branch): active-user requirement, role-aware overlay,
+#   ``kinds`` capped at 64 chars.
 
 from __future__ import annotations
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -33,19 +40,29 @@ from pocketpaw.api.v1.schemas.atlas import (
     AtlasVerbsResponse,
 )
 from pocketpaw.atlas.model import AtlasEntry
-from pocketpaw.atlas.overlay import DEFAULT_SCOPE_KEY, AtlasOverlay, DefaultEntitlementProvider
+from pocketpaw.atlas.overlay import (
+    DEFAULT_SCOPE_KEY,
+    AtlasOverlay,
+    DefaultEntitlementProvider,
+    EntitlementProvider,
+    build_role_aware_provider,
+)
 from pocketpaw.atlas.store import get_atlas_store
+
+logger = logging.getLogger(__name__)
 
 MAX_LIMIT = 20
 MAX_QUERY_CHARS = 200
+MAX_KINDS_CHARS = 64
 SEARCH_KINDS = ("surface", "verb", "capability", "primitive")
 
 _chat_scope = require_scope("chat")
 
 
 async def _require_signed_in(request: Request) -> None:
-    """A verified cloud user, or a caller holding the chat scope."""
-    if getattr(request.state, "user_id", None):
+    """An active verified cloud user, or a caller holding the chat scope."""
+    state = request.state
+    if getattr(state, "user_id", None) and getattr(state, "ee_user_authenticated", False):
         return
     await _chat_scope(request)
 
@@ -53,17 +70,32 @@ async def _require_signed_in(request: Request) -> None:
 router = APIRouter(prefix="/atlas", tags=["Atlas"], dependencies=[Depends(_require_signed_in)])
 
 
-def _visible(request: Request, entries: list[AtlasEntry]) -> list[AtlasEntry]:
-    """Entries the caller's workspace overlay grants, in the given order."""
+async def _provider(request: Request) -> EntitlementProvider:
+    """The caller's workspace overlay: role-aware when a user + workspace exist."""
     workspace_id = getattr(request.state, "workspace_id", None)
+    user_id = getattr(request.state, "user_id", None)
     scope = f"ws:{workspace_id}" if workspace_id else DEFAULT_SCOPE_KEY
-    provider = DefaultEntitlementProvider(scope_key=scope)
-    granted = set(AtlasOverlay.visible_ids(get_atlas_store(), provider))
+    if workspace_id and user_id:
+        role_aware = build_role_aware_provider(scope, user_id=str(user_id))
+        if role_aware is not None:
+            prime = getattr(role_aware, "prime", None)
+            if prime is not None:
+                try:
+                    await prime()
+                except Exception:  # noqa: BLE001 — unresolved role hides gated entries
+                    logger.debug("atlas api: role resolution failed", exc_info=True)
+            return role_aware
+    return DefaultEntitlementProvider(scope_key=scope)
+
+
+async def _visible(request: Request, entries: list[AtlasEntry]) -> list[AtlasEntry]:
+    """Entries the caller's workspace overlay grants, in the given order."""
+    granted = set(AtlasOverlay.visible_ids(get_atlas_store(), await _provider(request)))
     return [e for e in entries if e.id in granted]
 
 
-def _of_kind(request: Request, kind: str) -> list[AtlasEntry]:
-    return _visible(request, [e for e in get_atlas_store().entries if e.kind == kind])
+async def _of_kind(request: Request, kind: str) -> list[AtlasEntry]:
+    return await _visible(request, [e for e in get_atlas_store().entries if e.kind == kind])
 
 
 @router.get("/surfaces", response_model=AtlasSurfacesResponse)
@@ -80,7 +112,7 @@ async def list_surfaces(request: Request) -> AtlasSurfacesResponse:
                 agent_openable=bool(e.agent_openable),
                 keywords=e.keywords,
             )
-            for e in _of_kind(request, "surface")
+            for e in await _of_kind(request, "surface")
         ]
     )
 
@@ -100,7 +132,7 @@ async def list_verbs(request: Request) -> AtlasVerbsResponse:
                 undo=bool(e.undo),
                 keywords=e.keywords,
             )
-            for e in _of_kind(request, "verb")
+            for e in await _of_kind(request, "verb")
         ]
     )
 
@@ -110,7 +142,9 @@ async def search(
     request: Request,
     q: str = Query(..., min_length=1, max_length=MAX_QUERY_CHARS),
     kinds: str | None = Query(
-        None, description="Comma-separated: surface,verb,capability,primitive"
+        None,
+        max_length=MAX_KINDS_CHARS,
+        description="Comma-separated: surface,verb,capability,primitive",
     ),
     limit: int = Query(5, ge=1, description=f"Capped at {MAX_LIMIT}."),
 ) -> AtlasSearchResponse:
@@ -126,7 +160,7 @@ async def search(
     store = get_atlas_store()
     ceiling = store.max_score(q)
     scored = [(s, e) for s, e in store.search_scored(q) if e.kind in wanted]
-    visible = {e.id for e in _visible(request, [e for _, e in scored])}
+    visible = {e.id for e in await _visible(request, [e for _, e in scored])}
     results = [
         AtlasSearchResult(
             id=e.id,

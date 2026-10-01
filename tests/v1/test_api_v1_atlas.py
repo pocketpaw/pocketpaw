@@ -3,6 +3,10 @@
 # fixed wire contract, so these pin the exact key sets and value domains, the
 # signed-in requirement, the limit cap, the q cap, the kinds filter, the score
 # range, and that role-gated (admin) capability cards never leave through it.
+# Review pass (same branch): an active user is required (ee_user_authenticated);
+# the overlay is role-aware (owner sees surface:security, member doesn't, an
+# unresolved role fails closed) and gets the request's workspace as ws:<id>;
+# kinds is capped at 64 chars.
 
 from __future__ import annotations
 
@@ -10,7 +14,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from pocketpaw.api.v1 import atlas as atlas_api
 from pocketpaw.api.v1.atlas import MAX_LIMIT, router
+from pocketpaw.atlas.overlay import ROLE_LEVELS, entry_role_requirement
 
 SURFACE_KEYS = {
     "id",
@@ -52,7 +58,7 @@ def _client(**state) -> TestClient:
 
 @pytest.fixture
 def client() -> TestClient:
-    return _client(user_id="u1", workspace_id="w1")
+    return _client(user_id="u1", workspace_id="w1", ee_user_authenticated=True)
 
 
 def _is_str_or_none(v) -> bool:
@@ -64,10 +70,7 @@ class TestShapes:
         body = client.get("/api/v1/atlas/surfaces").json()
         assert set(body) == {"surfaces"}
         surfaces = body["surfaces"]
-        # 24 authored; surface:security is owner-gated (role:owner) and the read
-        # API has no role context, so the overlay hides it (fail-closed).
-        assert len(surfaces) == 23
-        assert "surface:security" not in {s["id"] for s in surfaces}
+        assert len(surfaces) >= 28
         for s in surfaces:
             assert set(s) == SURFACE_KEYS
             assert s["id"].startswith("surface:") and s["route"].startswith("/")
@@ -149,6 +152,11 @@ class TestSearchParams:
             kinds = {r["kind"] for r in body["results"]}
             assert kinds <= {"surface", "verb", "capability", "primitive"}, (q, kinds)
 
+    def test_kinds_over_64_chars_is_422(self, client):
+        kinds = ",".join(["surface"] * 9)  # 71 chars, every value valid
+        resp = client.get("/api/v1/atlas/search", params={"q": "file", "kinds": kinds})
+        assert resp.status_code == 422
+
     def test_unknown_kind_is_422(self, client):
         resp = client.get("/api/v1/atlas/search", params={"q": "file", "kinds": "widget"})
         assert resp.status_code == 422
@@ -177,10 +185,88 @@ class TestSearchParams:
         assert client.get("/api/v1/atlas/search", params={"q": ""}).status_code == 422
 
 
+class _FakeRoleProvider:
+    """Stands in for the EE role-aware provider: a fixed role, primed or not."""
+
+    def __init__(self, role: str | None, *, prime_raises: bool = False):
+        self.role = role
+        self.prime_raises = prime_raises
+        self._level: int | None = None
+
+    async def prime(self) -> None:
+        self._level = None
+        if self.prime_raises:
+            raise RuntimeError("db down")
+        self._level = ROLE_LEVELS.get(self.role) if self.role else None
+
+    def connected_connector_names(self) -> set[str]:
+        return set()
+
+    def is_granted(self, entry) -> bool:
+        tier = entry_role_requirement(entry)
+        if tier is None:
+            return True
+        return self._level is not None and self._level >= ROLE_LEVELS.get(tier, 99)
+
+
+def _with_role(monkeypatch, role, **kw):
+    calls: list[tuple[str, str | None]] = []
+
+    def factory(scope_key, user_id=None):
+        calls.append((scope_key, user_id))
+        return _FakeRoleProvider(role, **kw)
+
+    monkeypatch.setattr(atlas_api, "build_role_aware_provider", factory)
+    return calls
+
+
+def _surface_ids(client) -> set[str]:
+    return {s["id"] for s in client.get("/api/v1/atlas/surfaces").json()["surfaces"]}
+
+
 class TestOverlay:
-    def test_role_gated_capabilities_never_leave(self, client):
-        """Admin capability cards carry role:* markers; the read API has no role
-        context, so they stay hidden — even for an exact-name query."""
+    def test_owner_sees_owner_gated_surface(self, client, monkeypatch):
+        _with_role(monkeypatch, "owner")
+        ids = _surface_ids(client)
+        assert "surface:security" in ids and len(ids) == 29
+
+    def test_member_does_not(self, client, monkeypatch):
+        _with_role(monkeypatch, "member")
+        ids = _surface_ids(client)
+        assert "surface:security" not in ids and len(ids) == 28
+
+    @pytest.mark.parametrize("kw", [{"role": None}, {"role": "owner", "prime_raises": True}])
+    def test_unresolved_role_fails_closed(self, client, monkeypatch, kw):
+        role = kw.pop("role")
+        _with_role(monkeypatch, role, **kw)
+        assert "surface:security" not in _surface_ids(client)
+
+    def test_no_role_aware_provider_fails_closed(self, client, monkeypatch):
+        monkeypatch.setattr(atlas_api, "build_role_aware_provider", lambda *a, **k: None)
+        assert "surface:security" not in _surface_ids(client)
+
+    def test_request_workspace_reaches_the_provider_as_ws_scope(self, monkeypatch):
+        calls = _with_role(monkeypatch, "member")
+        c = _client(user_id="u7", workspace_id="w42", ee_user_authenticated=True)
+        assert c.get("/api/v1/atlas/verbs").status_code == 200
+        assert calls == [("ws:w42", "u7")]
+
+    def test_admin_capabilities_follow_the_role(self, client, monkeypatch):
+        _with_role(monkeypatch, "member")
+        member = client.get(
+            "/api/v1/atlas/search", params={"q": "remove a user", "kinds": "capability"}
+        ).json()["results"]
+        _with_role(monkeypatch, "owner")
+        owner = client.get(
+            "/api/v1/atlas/search", params={"q": "remove a user", "kinds": "capability"}
+        ).json()["results"]
+        assert "capability:admin.member_remove" not in {r["id"] for r in member}
+        assert owner[0]["id"] == "capability:admin.member_remove"
+
+    def test_role_gated_capabilities_hidden_without_a_role(self, client, monkeypatch):
+        """Admin capability cards carry role:* markers; with no resolvable role
+        they stay hidden, even for an exact-name query."""
+        monkeypatch.setattr(atlas_api, "build_role_aware_provider", lambda *a, **k: None)
         for q in ("remove a user", "delete the workspace", "change a member's role"):
             body = client.get(
                 "/api/v1/atlas/search", params={"q": q, "kinds": "capability", "limit": 20}
@@ -194,8 +280,14 @@ class TestAuth:
     def test_anonymous_caller_is_refused(self, path):
         assert _client().get(f"/api/v1/atlas/{path}").status_code == 403
 
-    def test_signed_in_cloud_member_is_allowed(self):
-        assert _client(user_id="u1").get("/api/v1/atlas/surfaces").status_code == 200
+    def test_active_signed_in_user_is_allowed(self):
+        c = _client(user_id="u1", ee_user_authenticated=True)
+        assert c.get("/api/v1/atlas/surfaces").status_code == 200
+
+    @pytest.mark.parametrize("path", ["surfaces", "verbs", "search?q=file"])
+    def test_inactive_or_guest_user_is_refused(self, path):
+        """user_id alone (a verified JWT for an inactive user) is not enough."""
+        assert _client(user_id="u1").get(f"/api/v1/atlas/{path}").status_code == 403
 
     def test_api_key_without_chat_scope_is_refused(self):
         class _Key:

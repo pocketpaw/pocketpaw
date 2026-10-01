@@ -4,41 +4,83 @@
     "file": "src/pocketpaw/api/v1/atlas.py",
     "find": "    await _chat_scope(request)",
     "replace": "    return None",
-    "tests": ["tests/v1/test_api_v1_atlas.py"]
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
   },
   {
     "label": "atlas api: limit cap dropped",
     "file": "src/pocketpaw/api/v1/atlas.py",
     "find": "    limit = min(limit, MAX_LIMIT)",
     "replace": "    pass",
-    "tests": ["tests/v1/test_api_v1_atlas.py"]
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
   },
   {
     "label": "atlas api: q length cap dropped",
     "file": "src/pocketpaw/api/v1/atlas.py",
     "find": "min_length=1, max_length=MAX_QUERY_CHARS)",
     "replace": "min_length=1)",
-    "tests": ["tests/v1/test_api_v1_atlas.py"]
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
   },
   {
     "label": "atlas api: kinds filter dropped (widgets, connectors, skills leak)",
     "file": "src/pocketpaw/api/v1/atlas.py",
     "find": "store.search_scored(q) if e.kind in wanted]",
     "replace": "store.search_scored(q)]",
-    "tests": ["tests/v1/test_api_v1_atlas.py"]
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
   },
   {
     "label": "atlas api: unknown kinds accepted",
     "file": "src/pocketpaw/api/v1/atlas.py",
     "find": "    if unknown or not wanted:",
     "replace": "    if False:",
-    "tests": ["tests/v1/test_api_v1_atlas.py"]
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
   },
   {
     "label": "atlas api: overlay grant dropped (role-gated entries leak)",
     "file": "src/pocketpaw/api/v1/atlas.py",
     "find": "    return [e for e in entries if e.id in granted]",
     "replace": "    return list(entries)",
-    "tests": ["tests/v1/test_api_v1_atlas.py"]
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas api: inactive users let through (active-user check dropped)",
+    "file": "src/pocketpaw/api/v1/atlas.py",
+    "find": "getattr(state, \"user_id\", None) and getattr(state, \"ee_user_authenticated\", False)",
+    "replace": "getattr(state, \"user_id\", None)",
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas api: role provider not bound to the request user",
+    "file": "src/pocketpaw/api/v1/atlas.py",
+    "find": "build_role_aware_provider(scope, user_id=str(user_id))",
+    "replace": "build_role_aware_provider(scope)",
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas api: scope built from the user id instead of the workspace",
+    "file": "src/pocketpaw/api/v1/atlas.py",
+    "find": "scope = f\"ws:{workspace_id}\" if workspace_id",
+    "replace": "scope = f\"ws:{user_id}\" if workspace_id",
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas api: role never resolved (prime not awaited)",
+    "file": "src/pocketpaw/api/v1/atlas.py",
+    "find": "                    await prime()\n",
+    "replace": "                    pass\n",
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas api: kinds length cap dropped",
+    "file": "src/pocketpaw/api/v1/atlas.py",
+    "find": "        max_length=MAX_KINDS_CHARS,\n",
+    "replace": "",
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas provider: role check dropped (member sees owner-only security)",
+    "file": "ee/pocketpaw_ee/agent/atlas_provider.py",
+    "find": "return self._role_level >= required_level",
+    "replace": "return True",
+    "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
   }
 ]

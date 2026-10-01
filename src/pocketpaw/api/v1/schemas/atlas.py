@@ -3,12 +3,13 @@
 #   GET /api/v1/atlas/{surfaces,verbs,search}. paw-enterprise's composer builds
 #   its slash commands, verb chips and command search from these, so shapes are
 #   fixed: every key is always present (nullable ones as null).
+# Review pass (same branch): ``score`` is validated to 0..1.
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AtlasSurface(BaseModel):
@@ -48,7 +49,7 @@ class AtlasSearchResult(BaseModel):
     name: str
     route: str | None
     slash: str | None
-    score: float
+    score: float = Field(ge=0, le=1)
 
 
 class AtlasSearchResponse(BaseModel):
