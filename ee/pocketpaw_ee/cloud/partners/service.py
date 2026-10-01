@@ -85,7 +85,9 @@ def _to_out(doc: _ClientDoc) -> PartnerClientOut:
 
 async def _load(workspace_id: str, client_id: str) -> _ClientDoc:
     oid = _oid(client_id)
-    doc = None if oid is None else await _ClientDoc.find_one({"_id": oid, "workspace": workspace_id})
+    doc = (
+        None if oid is None else await _ClientDoc.find_one({"_id": oid, "workspace": workspace_id})
+    )
     if doc is None:
         raise NotFound("partner_client", client_id)
     return doc

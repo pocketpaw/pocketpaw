@@ -262,7 +262,6 @@ from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
-from pocketpaw_ee.cloud.models.partner_client import PartnerClient
 from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
@@ -281,6 +280,7 @@ from pocketpaw_ee.cloud.models.notification_outbox import (
     NotificationOutboxItem,
     NotificationRateMarker,
 )
+from pocketpaw_ee.cloud.models.partner_client import PartnerClient
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent

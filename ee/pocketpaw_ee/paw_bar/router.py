@@ -1101,6 +1101,8 @@ async def frame(
     # reason is surfaced to the OWNER through the dashboard, and to logs, never here.
     from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
 
+    # ponytail: one un-memoised workspace read per frame load (PH-1 partner billing);
+    # fold it into ``_frame_site_lookup``'s TTL cache if frame traffic makes it show.
     partner = await partner_profile_for_workspace(site.workspace)
     if not concierge_available(site, partner=partner):
         return _dead_frame_response(po, site.allowed_origins)
