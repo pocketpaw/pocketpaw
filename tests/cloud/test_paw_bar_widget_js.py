@@ -16,6 +16,9 @@
 # The vendored default is also syntax-relevant: it is served raw to a foreign page,
 # so the last test asserts it stays wrapped in one IIFE and keeps its globals to
 # window.PawBar.
+# Updated 2026-10-02 (CN-8, fix/canon-cross-repo-pins): the vendored loader is now
+#   hash-pinned to a paw-bar build (paw-bar-loader.pin.json), so drift from
+#   paw-bar fails here; the re-vendor picked up the microphone iframe permission.
 # Updated 2026-09-27 (new Paw Bar): the vendored loader must speak the two
 #   additions the rebuilt bar relies on, pawbar:viewport and a corner `side` on
 #   pawbar:resize.
@@ -293,6 +296,30 @@ def test_the_vendored_loader_is_generated_not_hand_edited():
 
     assert "GENERATED, DO NOT EDIT BY HAND" in header
     assert "loader/src/loader.ts" in header
+
+
+def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
+    """The header names the source; this proves the body IS that build. The pin
+    records the paw-bar commit and the sha256 of loader/dist/loader.readable.js
+    built there, so a hand edit or a stale copy fails here instead of shipping
+    (the copy missed paw-bar e50b593's microphone permission for exactly that
+    reason). Refresh with scripts/vendor-paw-bar-loader.sh."""
+    import hashlib
+    import json
+
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    path = paw_bar_widget_file()
+    pin = json.loads((path.parent.parent / "paw-bar-loader.pin.json").read_text("utf-8"))
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    body = text[text.index('"use strict";') :]
+
+    assert hashlib.sha256(body.encode()).hexdigest() == pin["sha256"], (
+        "static/paw-bar.js drifted from paw-bar-loader.pin.json; "
+        "run scripts/vendor-paw-bar-loader.sh"
+    )
+    assert pin["source_repo"] == "qbtrix/paw-bar" and len(pin["source_commit"]) == 40
+    assert 'iframe.setAttribute("allow", "clipboard-write; microphone")' in body
 
 
 # --------------------------------------------------------------------------- #
