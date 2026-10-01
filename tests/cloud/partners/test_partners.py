@@ -21,6 +21,10 @@
 # year restarting a year free; year -> cheaper monthly staff for nothing) now
 # fail closed; a lapsed year moves as a fresh purchase; a renewal with the
 # partner profile gone keeps the price last paid, or refuses.
+# Review fix 2 (R1-R3): an upgrade on renewal day no longer makes the renewal free
+# (tier-change debits have their own key); a profile-less renewal never charges
+# the high-water mark; a lapsed partner tier cannot be re-bought past the gates;
+# unit tests for the pure ``site_plan_change_terms``.
 # Updated 2026-10-02: the autouse fixture clears the shared
 # ``read_model.default_journal_store`` cache (``service._default_store`` now
 # delegates to it) and points the per-workspace stores at tmp_path.
@@ -1010,27 +1014,105 @@ async def test_a_lapsed_year_moves_and_comes_back_only_by_paying(
     assert (yearly.plan_tier, yearly.period_paid_usd) == ("site_year", 29)
 
 
-async def test_a_same_day_rebuy_cannot_replay_the_debit_into_a_new_period(
+async def test_a_same_day_rebuy_after_a_change_is_charged_in_full(
     mongo_db, store, monkeypatch
 ) -> None:
-    """The debit key is per (site, tier, day), so buying the year back on the day it
-    was first bought would replay the debit as a silent no-op. The period must not
-    restart for that: the re-buy is refused."""
-    from pocketpaw_ee.cloud._core.errors import ConflictError
+    """A year bought today (purchase key), then — once past due — moved to monthly
+    and back. The move back is a TIER-CHANGE debit with its own ``:change`` key, so
+    it does not collide with this morning's purchase: it is charged in full."""
     from pocketpaw_ee.cloud.models.site import Site
 
     wid, ctx, site_id, cid, balance = await _sold_year(monkeypatch, store, renewal_in_days=-1)
     await _republish(wid, site_id, "site")  # past due, so a fresh $7 month
     assert await _balance(wid) == balance - 700
 
-    with pytest.raises(ConflictError) as exc:
-        await service.sell(
-            ctx, body={"client_id": cid, "site_id": site_id, "sku": "site_year"}, store=store
-        )
-    assert exc.value.code == "sites.plan_already_bought_today"
+    await service.sell(
+        ctx, body={"client_id": cid, "site_id": site_id, "sku": "site_year"}, store=store
+    )
     doc = await Site.get(site_id)
-    assert await _balance(wid) == balance - 700
-    assert (doc.plan_tier, doc.period_paid_usd) == ("site", 7)
+    assert await _balance(wid) == balance - 700 - 2900
+    assert (doc.plan_tier, doc.period_paid_usd) == ("site_year", 29)
+    year_out = datetime.now(UTC) + relativedelta(months=12)
+    assert abs((_aware(doc.renewal_date) - year_out).total_seconds()) < 3600
+
+
+async def _paying_site(wid: str, *, tier: str, paid: int, renewal: datetime) -> str:
+    from pocketpaw_ee.cloud.models.site import Site
+
+    site_id = await _free_site(wid)
+    doc = await Site.get(site_id)
+    doc.plan_tier, doc.subscription_status, doc.billing_rail = tier, "active", "credits"
+    doc.period_paid_usd = paid
+    doc.renewal_date = renewal
+    await doc.save()
+    return site_id
+
+
+@pytest.mark.parametrize(
+    ("held", "paid", "new", "gap", "renewal_price"),
+    [("site_year", 29, "staff_year", 6000, 8900), ("site", 7, "staff", 1200, 1900)],
+)
+async def test_an_upgrade_on_renewal_day_does_not_make_the_renewal_free(
+    mongo_db, store, monkeypatch, held, paid, new, gap, renewal_price
+) -> None:
+    """R1. A same-period upgrade on the renewal's UTC date used to share the
+    renewal's debit key, so the renewal replayed as a no-op and the next period
+    was free. Both the yearly partner case and the monthly baseline."""
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("us-shop", country="US")
+    await _fund(wid, 100_000)
+    now = datetime.now(UTC)
+    site_id = await _paying_site(wid, tier=held, paid=paid, renewal=now + timedelta(minutes=1))
+    start = await _balance(wid)
+
+    await _republish(wid, site_id, new)
+    assert await _balance(wid) == start - gap
+
+    counts = await sweep_site_renewals(now=now + timedelta(minutes=2))
+    assert counts["renewed"] == 1
+    assert await _balance(wid) == start - gap - renewal_price
+
+
+async def test_a_lapsed_partner_tier_cannot_be_rebought_past_the_gates(
+    mongo_db, store, monkeypatch
+) -> None:
+    """R3. Re-buying the tier a LAPSED site still names is a purchase: a suspended
+    partner is refused, and so is a caller without ``sites.buy_plan``."""
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    await _fund(wid, 50_000)
+    site_id = await _free_site(wid)
+    doc = await Site.get(site_id)
+    doc.plan_tier, doc.subscription_status, doc.billing_rail = "staff_year", "cancelled", "credits"
+    doc.renewal_date, doc.period_paid_usd = None, 0
+    await doc.save()
+
+    async def rebuy(authorized: bool):
+        return await sites_service.publish_pocket(
+            workspace_id=wid,
+            user_id="u1",
+            pocket_id=doc.pocket_id,
+            site_plan_key="staff_year",
+            purchase_authorized=authorized,
+        )
+
+    with pytest.raises(Forbidden) as exc:  # a member, partner still active
+        await rebuy(False)
+    assert exc.value.code == "sites.plan_purchase_forbidden"
+
+    ws = await WorkspaceDoc.get(wid)
+    ws.partner.status = "suspended"
+    await ws.save()
+    with pytest.raises(Forbidden) as exc:  # an admin, partner suspended
+        await rebuy(True)
+    assert exc.value.code == "sites.partner_plan_only"
+    assert await _balance(wid) == 50_000
+    assert (await Site.get(site_id)).subscription_status == "cancelled"
 
 
 async def test_a_renewal_without_a_partner_profile_keeps_the_last_price(mongo_db) -> None:
@@ -1047,6 +1129,27 @@ async def test_a_renewal_without_a_partner_profile_keeps_the_last_price(mongo_db
     assert (await sweep_site_renewals())["renewed"] == 1
     assert await _balance(wid) == 5000 - 1700, "the price last paid, not the $29 default"
     assert (await Site.get(kept.id)).period_paid_usd == 17
+
+
+async def test_a_renewal_after_a_downgrade_never_charges_the_high_water_mark(mongo_db) -> None:
+    """R2. staff_year ($89) downgraded mid-year to site_year leaves
+    ``period_paid_usd`` at 89. With the profile gone that is not a site_year price,
+    so the renewal refuses (retried) instead of charging $89."""
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+
+    ws = WorkspaceDoc(name="gone", slug="gone-partner-3", owner="u1", plan="go")
+    await ws.insert()
+    wid = str(ws.id)
+    await _fund(wid, 50_000)
+    doc = await _sold_site(
+        wid, tier="site_year", renewal_date=datetime.now(UTC) - timedelta(days=1)
+    )
+    doc.period_paid_usd = 89
+    await doc.save()
+
+    counts = await sweep_site_renewals()
+    assert counts["failed"] == 1 and counts["renewed"] == 0
+    assert await _balance(wid) == 50_000
 
 
 async def test_a_renewal_with_no_price_to_keep_is_refused_not_guessed(mongo_db) -> None:
@@ -1079,3 +1182,103 @@ async def test_a_partner_tier_cannot_be_requested_through_the_plan_request_door(
         await propose_site_plan_request(
             workspace_id="ws", pocket_id="pk", site_plan_key="site_year", requested_by="u1"
         )
+
+
+# ------------------------------------------- the pure tier-change rule (no DB)
+
+
+def _tier(key: str):
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    return site_plans.site_scoped_tier(key)
+
+
+_NOW = datetime(2026, 10, 2, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("held", "new", "price", "paid", "through", "expected"),
+    [
+        # same period: the gap, date kept; a downgrade pays nothing
+        ("site", "staff", 19, 7, _NOW + timedelta(days=9), (12, None)),
+        ("staff", "site", 7, 19, _NOW + timedelta(days=9), (0, None)),
+        ("site_year", "staff_year", 89, 29, _NOW + timedelta(days=9), (60, None)),
+        # longer period: a fresh purchase, new period from now
+        (
+            "site",
+            "site_year",
+            17,
+            7,
+            _NOW + timedelta(days=9),
+            (17, _NOW + relativedelta(months=12)),
+        ),
+        # shorter period after the year ran out: a fresh month
+        ("site_year", "site", 7, 29, _NOW - timedelta(days=1), (7, _NOW + relativedelta(months=1))),
+    ],
+)
+async def test_change_terms(held, new, price, paid, through, expected) -> None:
+    from pocketpaw_ee.cloud.billing.service import site_plan_change_terms
+
+    assert (
+        site_plan_change_terms(
+            held_tier=_tier(held),
+            new_tier=_tier(new),
+            new_price_usd=price,
+            already_paid_usd=paid,
+            paid_through=through,
+            now=_NOW,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("through", [_NOW + timedelta(days=30), None])
+async def test_change_terms_refuse_a_running_year_moving_to_monthly(through) -> None:
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+    from pocketpaw_ee.cloud.billing.service import site_plan_change_terms
+
+    with pytest.raises(ConflictError) as exc:
+        site_plan_change_terms(
+            held_tier=_tier("staff_year"),
+            new_tier=_tier("staff"),
+            new_price_usd=19,
+            already_paid_usd=89,
+            paid_through=through,
+            now=_NOW,
+        )
+    assert exc.value.code == "sites.period_downgrade_refused"
+
+
+async def test_change_terms_refuse_a_same_day_period_rebuy() -> None:
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+    from pocketpaw_ee.cloud.billing.service import site_plan_change_terms
+
+    with pytest.raises(ConflictError) as exc:
+        site_plan_change_terms(
+            held_tier=_tier("site"),
+            new_tier=_tier("site_year"),
+            new_price_usd=17,
+            already_paid_usd=7,
+            paid_through=_NOW + timedelta(days=9),
+            now=_NOW,
+            already_bought_today=True,
+        )
+    assert exc.value.code == "sites.plan_already_bought_today"
+    # Same-period changes ignore the flag: their gap is idempotent per day anyway.
+    assert site_plan_change_terms(
+        held_tier=_tier("site"),
+        new_tier=_tier("staff"),
+        new_price_usd=19,
+        already_paid_usd=7,
+        paid_through=None,
+        now=_NOW,
+        already_bought_today=True,
+    ) == (12, None)
+
+
+async def test_the_change_key_is_its_own_namespace() -> None:
+    from pocketpaw_ee.cloud.billing.service import site_plan_debit_key
+
+    plain = site_plan_debit_key("s", "staff", _NOW)
+    assert plain == "site_plan:s:staff:2026-10-02"
+    assert site_plan_debit_key("s", "staff", _NOW, change=True) == plain + ":change"
