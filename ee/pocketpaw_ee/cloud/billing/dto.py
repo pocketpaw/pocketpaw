@@ -42,10 +42,20 @@
 #   PR #2071 made for the history rows (``LedgerEntryResponse.amount_delta_micro``);
 #   the chart did not get it at the time. Additive — the existing fields keep their
 #   names and meaning, so no client breaks.
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): ``CreateTopupRequest`` gained
+#   ``currency`` ("USD" default | "INR"). For INR ``amount_credits`` is the charge
+#   in PAISE, so the ceiling is per currency: unchanged 1,000,000 for USD ($10,000),
+#   100,000,000 paise for INR (Rs.10,00,000) — the flat USD cap would 422 every
+#   partner prepay above Rs.10,000.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+# Per-currency ceiling on one top-up, in that currency's lowest denomination.
+_TOPUP_CEILING = {"USD": 1_000_000, "INR": 100_000_000}
 
 
 class CreateTopupRequest(BaseModel):
@@ -59,9 +69,22 @@ class CreateTopupRequest(BaseModel):
     amount_credits: int = Field(
         ...,
         gt=0,
-        le=1_000_000,
-        description="Credits to buy (1 credit == $0.01). Capped at 1,000,000 credits ($10,000).",
+        description=(
+            "USD: credits to buy (1 credit == $0.01), capped at 1,000,000 ($10,000). "
+            "INR: the charge in paise, capped at 100,000,000 (Rs.10,00,000); the "
+            "credits it buys are settled when the payment lands."
+        ),
     )
+    currency: Literal["USD", "INR"] = "USD"
+
+    @model_validator(mode="after")
+    def _within_ceiling(self) -> CreateTopupRequest:
+        if self.amount_credits > _TOPUP_CEILING[self.currency]:
+            raise ValueError(
+                f"amount_credits exceeds the {self.currency} top-up ceiling "
+                f"({_TOPUP_CEILING[self.currency]})"
+            )
+        return self
 
 
 class CreateTopupResponse(BaseModel):
