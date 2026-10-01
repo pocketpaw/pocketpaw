@@ -1317,6 +1317,16 @@ class Settings(BaseSettings):
             "reply and no model call is made. 0 turns the cap off."
         ),
     )
+    # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan
+    # split can come later the way the knowledge-source caps do it.
+    pawbar_catalog_max_items: int = Field(
+        default=5000,
+        ge=1,
+        description=(
+            "Most products one site's concierge catalog may hold. An import preview "
+            "returns at most this many, and a catalog write past it is refused."
+        ),
+    )
 
     # LLM Configuration
     llm_provider: str = Field(

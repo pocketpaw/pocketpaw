@@ -4,7 +4,9 @@
 #
 # Each migration test builds a populated DB the way an older build left it
 # (amounts as major × 100 for every currency), opens the store twice, and checks
-# the non-2-decimal rows converted exactly once while USD stayed untouched.
+# the non-2-decimal rows converted exactly once while USD stayed untouched. The
+# catalog then leaves the spec for the catalog table (catalog_to_table_v1, after
+# the money migration), so converted catalog prices are read from the store.
 
 from __future__ import annotations
 
@@ -75,7 +77,8 @@ async def test_paw_bar_migration_converts_once_and_leaves_usd(tmp_path: Path) ->
         widget = await store.get_widget("w1")
         assert widget is not None
 
-    by_id = {c.id: c for c in widget.spec.catalog}
+    assert widget.spec.catalog == []  # moved to the catalog table, already converted
+    by_id = {c.id: c for c in await store.get_catalog_items("w1", ["mug", "tea", "dates"])}
     assert by_id["mug"].price_cents == 1250  # USD untouched
     assert by_id["tea"].price_cents == 1500  # ¥1,500
     assert by_id["dates"].price_cents == 1250  # 1.250 KWD
@@ -86,9 +89,9 @@ async def test_paw_bar_migration_converts_once_and_leaves_usd(tmp_path: Path) ->
     assert _prices(rev) == {"tea": 1500}
     [(bad,)] = db.execute("SELECT spec FROM paw_bar_widgets WHERE id = 'w2'").fetchall()
     assert bad == "not json"  # unparseable rows are left exactly as found
-    markers = db.execute("SELECT name FROM schema_migrations").fetchall()
+    markers = db.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()
     db.close()
-    assert markers == [("money_minor_units_v1",)]
+    assert markers == [("catalog_to_table_v1",), ("money_minor_units_v1",)]
 
     jpy_cart = await store.get_cart("w1", "c1")
     usd_cart = await store.get_cart("w1", "c2")
@@ -102,8 +105,9 @@ async def test_paw_bar_fresh_db_records_the_marker(tmp_path: Path) -> None:
     store = PawBarStore(tmp_path / "fresh.db")
     assert await store.get_widget("nope") is None
     db = sqlite3.connect(tmp_path / "fresh.db")
-    assert db.execute("SELECT name FROM schema_migrations").fetchall() == [
-        ("money_minor_units_v1",)
+    assert db.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall() == [
+        ("catalog_to_table_v1",),
+        ("money_minor_units_v1",),
     ]
     db.close()
 
@@ -134,9 +138,9 @@ async def test_a_failed_migration_rolls_back_and_writes_no_marker(
     db.close()
 
     monkeypatch.setattr(store_mod, "_convert_lines", real)
-    widget = await PawBarStore(path).get_widget("w1")
-    assert widget is not None
-    assert {c.id: c.price_cents for c in widget.spec.catalog}["tea"] == 1500
+    store = PawBarStore(path)
+    [tea] = await store.get_catalog_items("w1", ["tea"])
+    assert tea.price_cents == 1500
 
 
 async def test_cart_refuses_a_second_currency(tmp_path: Path) -> None:
