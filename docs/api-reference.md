@@ -1198,7 +1198,8 @@ or hidden listing.
 
 Response `204`, no body. One report per user counts; a repeat changes nothing.
 Three different reporters hide the listing from both public reads, `use` and
-`report`. Staff unhiding a listing clears its reports. Errors: `404` for a
+`report`. There is no unhide endpoint yet; when staff unhide a listing its
+reports are cleared. Errors: `404` for a
 missing or hidden listing; `403` (`discover.own_listing`) for the owner
 reporting their own.
 
