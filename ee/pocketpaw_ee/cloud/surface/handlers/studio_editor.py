@@ -15,7 +15,9 @@
 # required clipId / assetId, and tests/cloud/surface/test_entity_id_contract.py
 # derives addressable kinds from the MCP tool schemas). Ids therefore render as
 # ``…tail``, and the tool's validator resolves tails back through
-# ``pockets.id_resolve``.
+# ``pockets.id_resolve``. A MOTION GRAPHICS block carries each authored motion
+# graphic's id and HTML source (capped), so an edit rewrites it in place via
+# ``add_motion_graphic``'s ``replace_asset_id`` instead of adding a second one.
 #
 # Changes: 2026-09-30 (feat/open-surface-tool) — ONLY PLACE WHAT EXISTS now also
 # names ``open_surface``: when the clip is not in their gallery yet, the agent can
@@ -63,6 +65,9 @@ _MAX_ROWS = 40
 # hundred failed attaches say nothing the first ten do not. Same number the
 # ``last_edit.failures`` block has used since it shipped.
 _MAX_FAILURES = 10
+
+# Total motion-graphic HTML carried into the prompt. Matches the client's budget.
+_MAX_MOTION_SOURCE_CHARS = 100_000
 
 
 def _fmt_ms(value: Any) -> str:
@@ -143,8 +148,40 @@ def _attached_block(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> l
     return lines
 
 
+def _motion_graphics_block(timeline: dict[str, Any]) -> list[str]:
+    """MOTION GRAPHICS: each one's id and HTML source, so the agent edits in place.
+
+    Newest first, as the client sends them. Source is included while the running
+    total stays within ``_MAX_MOTION_SOURCE_CHARS`` (the client caps the same way;
+    this guards a client that does not).
+    """
+    graphics = [g for g in (timeline.get("motion_graphics") or []) if isinstance(g, dict)]
+    if not graphics:
+        return []
+
+    lines = [
+        "",
+        "MOTION GRAPHICS (ones you authored — edit with add_motion_graphic and replace_asset_id):",
+    ]
+    budget = _MAX_MOTION_SOURCE_CHARS
+    for graphic in graphics[:_MAX_ROWS]:
+        lines.append(entity_line(graphic.get("name"), graphic.get("asset_id")))
+        html = graphic.get("html")
+        if isinstance(html, str) and html and len(html) <= budget:
+            budget -= len(html)
+            lines.extend(["```html", html, "```"])
+        else:
+            lines.append(
+                "  Source too large to include. To change it, write a fresh composition "
+                "and still pass this replace_asset_id."
+            )
+    if len(graphics) > _MAX_ROWS:
+        lines.append(f"  …and {len(graphics) - _MAX_ROWS} more")
+    return lines
+
+
 def _timeline_block(timeline: dict[str, Any]) -> str:
-    """Render the open timeline as ids + times. Never the whole document."""
+    """Render the open timeline as ids + times, plus motion-graphic source."""
     lines: list[str] = []
 
     name = timeline.get("name") or "Untitled timeline"
@@ -183,6 +220,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
         )
 
     lines.extend(_attached_block(timeline, assets))
+    lines.extend(_motion_graphics_block(timeline))
 
     clips = [c for c in (timeline.get("clips") or []) if isinstance(c, dict)]
     lines.append("")
@@ -296,7 +334,13 @@ Rules that matter:
   described, tell them to attach it with `@` (or drag the file onto the rail) —
   do not tell them media cannot be brought in here. If the file is not in their
   gallery at all yet, call `mcp__pocketpaw_surfaces__open_surface` with route
-  /files so they can upload or pick it, then have them attach it here.
+  /files so they can upload or pick it, then have them attach it here. The one
+  thing you make yourself is a motion graphic (title card, kinetic type,
+  animated stat, lower third), authored with
+  `mcp__pocketpaw_timeline__add_motion_graphic`.
+- EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
+  edit its source from that block and call add_motion_graphic with
+  replace_asset_id set to its id — never add a second one alongside it.
 - WHAT THEY JUST ATTACHED IS WHAT THEY MEAN. When ATTACHED THIS TURN appears
   above and the user says "add these", "put this on the timeline" or "use it",
   those assets are the ones — place them in the ORDER LISTED, and place all of
@@ -333,6 +377,11 @@ Honesty (this surface has burned people before):
 
 To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
 Never batch an export with edits — it would render a half-built timeline.
+
+For a motion graphic, load the `hyperframes-core` skill and call
+`mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
+composition (plus `replace_asset_id` when editing one that exists). It renders
+in the browser after the call returns: say it is rendering, never that it is done.
 </studio-editor-procedure>"""
 
 _NO_TIMELINE = """\
@@ -357,7 +406,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "lay things out across lanes — opening new ones when the arrangement "
         "needs a row that is not there. This is NOT a dashboard: do not build widgets, "
         "charts, a pocket or a ui-spec. It is also NOT the generation surface: "
-        "you cannot make new footage here. Talk about 'clips', 'tracks', "
+        "you cannot make new footage here, except motion graphics you author as "
+        "HyperFrames HTML. Talk about 'clips', 'tracks', "
         "'captions' and 'the timeline'.\n"
         "</studio-editor-orientation>"
     )

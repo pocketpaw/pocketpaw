@@ -773,11 +773,12 @@ def _studio_editor_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     # reason /studio is — the deliverable is a cut, not a dashboard. Scoped to
     # the timeline verbs, which deliberately EXCLUDES the media-generation tools:
     # this surface arranges what exists, and generating here would answer
-    # "arrange these clips" with a new clip.
+    # "arrange these clips" with a new clip. The one thing it creates is a
+    # HyperFrames motion graphic (add_motion_graphic), hence hyperframes-core.
     return SurfaceProfile(
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().timeline_allow,
-        skill_names=frozenset({"studio-editor"}),
+        skill_names=frozenset({"studio-editor", "hyperframes-core"}),
     )
 
 
