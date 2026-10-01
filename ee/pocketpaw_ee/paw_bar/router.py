@@ -1924,9 +1924,11 @@ async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str)
     between the caller's lookup and this write is a 404.
 
     422 ``spec_too_large`` past ``MAX_SPEC_BYTES`` (catalog excluded). A body that
-    still carries a non-empty ``catalog`` (an older editor) replaces the catalog
-    store's rows and is stored without it; an empty or absent one leaves the
-    catalog alone. 409 ``catalog_full`` when that catalog is past the cap."""
+    still carries a non-empty ``catalog`` (an older editor) has those items ADDED
+    to the catalog store (upserted by id, nothing deleted, so an editor that
+    loaded an empty catalog cannot wipe it) and is stored without it; an empty or
+    absent one leaves the catalog alone. 409 ``catalog_full`` when the added
+    items would pass the cap. Callers run ``_refuse_outdated_money_client`` first."""
     _check_spec_size(spec)
     try:
         updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)

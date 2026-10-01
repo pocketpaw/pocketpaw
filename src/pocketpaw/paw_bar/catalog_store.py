@@ -293,6 +293,41 @@ async def replace_rows(
     return len(cleaned)
 
 
+async def upsert_rows(
+    db: aiosqlite.Connection,
+    widget_id: str,
+    cleaned: Sequence[tuple[PawBarCatalogItem, str]],
+    now: str,
+    cap: int,
+) -> tuple[int, int]:
+    """Create or update ``cleaned`` by id on the caller's transaction, never
+    deleting: an existing item keeps its position, a new one is appended.
+    Returns ``(upserted, total)``; ``CatalogFull`` (nothing written) when the new
+    ids would take the widget past ``cap``."""
+    async with db.execute(
+        "SELECT item_id FROM paw_bar_catalog_items WHERE widget_id = ?", (widget_id,)
+    ) as cur:
+        existing = {r[0] for r in await cur.fetchall()}
+    new = [item for item, _ in cleaned if item.id not in existing]
+    total = len(existing) + len(new)
+    if total > cap:
+        raise CatalogFull(cap)
+    async with db.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM paw_bar_catalog_items WHERE widget_id = ?",
+        (widget_id,),
+    ) as cur:
+        row = await cur.fetchone()
+        next_position = int(row[0]) if row else 0
+    params = []
+    for item, source in cleaned:
+        position = 0
+        if item.id not in existing:
+            position, next_position = next_position, next_position + 1
+        params.append(_row_params(widget_id, item, position, source, now))
+    await db.executemany(_UPSERT_SQL, params)
+    return len(cleaned), total
+
+
 class CatalogStoreMixin:
     """The catalog methods of ``PawBarStore``. The host class provides
     ``_ensure_schema``, ``_conn``, ``_widget_in_scope`` and ``_catalog_fts``."""
@@ -486,29 +521,7 @@ class CatalogStoreMixin:
         cap = max_items if max_items is not None else catalog_max_items()
 
         async def write(db: aiosqlite.Connection, now: str) -> tuple[int, int]:
-            async with db.execute(
-                "SELECT item_id FROM paw_bar_catalog_items WHERE widget_id = ?", (widget_id,)
-            ) as cur:
-                existing = {r[0] for r in await cur.fetchall()}
-            new = [item for item, _ in cleaned if item.id not in existing]
-            total = len(existing) + len(new)
-            if total > cap:
-                raise CatalogFull(cap)
-            async with db.execute(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM paw_bar_catalog_items"
-                " WHERE widget_id = ?",
-                (widget_id,),
-            ) as cur:
-                row = await cur.fetchone()
-                next_position = int(row[0]) if row else 0
-            params = []
-            for item, source in cleaned:
-                position = 0
-                if item.id not in existing:
-                    position, next_position = next_position, next_position + 1
-                params.append(_row_params(widget_id, item, position, source, now))
-            await db.executemany(_UPSERT_SQL, params)
-            return len(cleaned), total
+            return await upsert_rows(db, widget_id, cleaned, now, cap)
 
         return await self._catalog_write(widget_id, workspace_id, write)
 
@@ -676,4 +689,5 @@ __all__ = [
     "migrate_catalog_out_of_specs",
     "replace_rows",
     "source_for",
+    "upsert_rows",
 ]

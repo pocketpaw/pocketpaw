@@ -7,8 +7,9 @@
 #     and the 500-item bulk bound.
 #   * The CSV preview route (multipart ``file``, 413 past 2 MB).
 #   * The spec routes: 422 spec_too_large on both PATCHes and on rollback,
-#     measured without the catalog; a PATCH body with a non-empty catalog replaces
-#     the catalog, one without leaves it.
+#     measured without the catalog; a PATCH body with a non-empty catalog adds its
+#     items (never deletes), one without leaves the catalog; the old-client money
+#     refusal (409 currency_units_client_outdated) runs first.
 #   * Reads: the overview carries ``catalog_count`` and no catalog; the frozen
 #     public spec endpoint fills ``spec.catalog`` from the store.
 
@@ -261,7 +262,7 @@ async def test_the_cap_does_not_count_the_catalog(rig):
     assert await store.catalog_count(widget.id) == 200
 
 
-async def test_a_spec_patch_replaces_the_catalog_only_when_it_carries_one(rig):
+async def test_a_spec_patch_adds_its_catalog_items_and_never_deletes(rig):
     admin, _member, store = rig
     site, widget = await _seeded(store)
     url = f"/paw-bar/admin/site/{site.id}/widget/spec"
@@ -272,11 +273,35 @@ async def test_a_spec_patch_replaces_the_catalog_only_when_it_carries_one(rig):
     assert (await admin.patch(url, json={"spec": {**absent, "catalog": []}})).status_code == 200
     assert await store.catalog_count(widget.id) == 3
 
+    # An older editor loaded an empty catalog, added one product and saved.
     res = await admin.patch(url, json={"spec": {**absent, "catalog": [_item(8)]}})
     assert res.status_code == 200
     items, _ = await store.list_catalog(widget.id)
-    assert [i.id for i in items] == ["p8"]
+    assert [i.id for i in items] == ["p0", "p1", "p2", "p8"]
     assert (await store.get_widget(widget.id)).spec.blocks[0].content == "Hello"
+
+    # An item already there is updated in place: still 4.
+    res = await admin.patch(url, json={"spec": {**absent, "catalog": [_item(1, name="New")]}})
+    assert res.status_code == 200
+    items, _ = await store.list_catalog(widget.id)
+    assert [(i.id, i.name) for i in items][:2] == [("p0", "Product 0"), ("p1", "New")]
+    assert len(items) == 4
+
+
+async def test_the_old_client_money_refusal_runs_before_the_catalog_write(rig):
+    admin, _member, store = rig
+    site, widget = await _seeded(store)
+    url = f"/paw-bar/admin/site/{site.id}/widget/spec"
+    yen = {**_item(9), "currency": "JPY"}
+    body = {"spec": {"widget_id": widget.id, "pocket_id": "pocket-1", "catalog": [yen]}}
+
+    res = await admin.patch(url, json=body)
+    assert (res.status_code, res.json()["detail"]) == (409, "currency_units_client_outdated")
+    assert await store.catalog_count(widget.id) == 3  # nothing written
+
+    res = await admin.patch(url, json=body, headers={"X-Paw-Money-Units": "iso4217"})
+    assert res.status_code == 200
+    assert await store.catalog_count(widget.id) == 4
 
 
 async def test_rollback_refuses_a_revision_past_the_cap(rig, tmp_path):

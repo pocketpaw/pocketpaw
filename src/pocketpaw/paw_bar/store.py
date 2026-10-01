@@ -20,10 +20,12 @@
 #     ISO 4217 minor units; catalog_to_table_v1 (after it, and only once it is
 #     recorded) moved spec catalogs into rows. A cart holds one currency
 #     (CartCurrencyMismatch).
-#   * A spec is stored WITHOUT a catalog: create_widget / update_spec move a
-#     non-empty ``spec.catalog`` into the catalog table in the same transaction
-#     (replacing it); an empty or absent one leaves the table alone. A rollback
-#     never restores a revision's catalog. delete_widget removes its rows.
+#   * A spec is stored WITHOUT a catalog: create_widget / update_spec ADD a
+#     non-empty ``spec.catalog`` to the catalog table in the same transaction
+#     (upsert by id, never a delete: an older editor that loaded an empty catalog
+#     and saved one product must not wipe the rest); an empty or absent one
+#     leaves the table alone. A rollback never restores a revision's catalog.
+#     delete_widget removes its rows.
 #   * Tenancy is in-row: the *_workspace_scope helpers match the caller's
 #     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
 #     column holds the widget OWNER, so widget-keyed decision reads filter on
@@ -57,10 +59,11 @@ from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent, no
 from pocketpaw.paw_bar.catalog_store import (
     CATALOG_SCHEMA_SQL,
     CatalogStoreMixin,
+    catalog_max_items,
     clean_items,
     ensure_catalog_search,
     migrate_catalog_out_of_specs,
-    replace_rows,
+    upsert_rows,
 )
 from pocketpaw.paw_bar.models import (
     MAX_CART_ITEMS,
@@ -793,7 +796,7 @@ class PawBarStore(CatalogStoreMixin):
             return spec, None
         logger.info(
             "paw_bar: spec write for widget %s carried %d catalog item(s); "
-            "moved to the catalog store (spec.catalog is deprecated)",
+            "added to the catalog store (spec.catalog is deprecated)",
             widget_id,
             len(spec.catalog),
         )
@@ -832,7 +835,9 @@ class PawBarStore(CatalogStoreMixin):
                 ),
             )
             if catalog is not None:
-                await replace_rows(db, widget.id, catalog, datetime.now().isoformat())
+                await upsert_rows(
+                    db, widget.id, catalog, datetime.now().isoformat(), catalog_max_items()
+                )
             await db.commit()
         return widget
 
@@ -926,7 +931,7 @@ class PawBarStore(CatalogStoreMixin):
             )
             await db.execute(sql, params)
             if catalog is not None:
-                await replace_rows(db, widget_id, catalog, now)
+                await upsert_rows(db, widget_id, catalog, now, catalog_max_items())
             await db.commit()
         return await self.get_widget(widget_id, workspace_id=workspace_id)
 

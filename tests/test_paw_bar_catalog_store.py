@@ -7,9 +7,10 @@
 #   * Lookups: ids in the order asked, the page lookup (url-less items name no
 #     page; an absolute url on another host does not count), search through FTS5
 #     and through the LIKE fallback (the probe monkeypatched off).
-#   * Spec back-compat: a spec write with a non-empty catalog replaces the rows and
-#     stores the spec without it; an empty or absent catalog leaves the rows; a
-#     rollback never restores a revision's catalog.
+#   * Spec back-compat: a spec write with a non-empty catalog ADDS its items to the
+#     rows (upsert by id, never a delete) and stores the spec without it; an empty
+#     or absent catalog leaves the rows; a rollback never restores a revision's
+#     catalog.
 #   * The ``catalog_to_table_v1`` migration on a DB an older build left behind,
 #     opened twice, after the money migration.
 
@@ -261,7 +262,7 @@ async def test_create_widget_moves_a_spec_catalog_into_rows(store):
     assert await _ids(store, w.id) == ["p1", "p2"]
 
 
-async def test_a_spec_write_with_a_catalog_replaces_it_and_without_one_leaves_it(store):
+async def test_a_spec_write_adds_its_catalog_and_without_one_leaves_it(store):
     w = await _widget(store, [_item(1), _item(2)])
 
     # No catalog key at all, and an explicit empty one: the rows stay.
@@ -269,10 +270,23 @@ async def test_a_spec_write_with_a_catalog_replaces_it_and_without_one_leaves_it
     await store.update_spec(w.id, _spec([]))
     assert await _ids(store, w.id) == ["p1", "p2"]
 
-    # A non-empty catalog (an older editor's save) replaces the rows.
+    # A non-empty catalog (an older editor that loaded an empty catalog and added
+    # one product) is upserted: nothing it left out is deleted.
     updated = await store.update_spec(w.id, _spec([_item(7)]))
     assert updated is not None and updated.spec.catalog == []
-    assert await _ids(store, w.id) == ["p7"]
+    assert await _ids(store, w.id) == ["p1", "p2", "p7"]
+    await store.update_spec(w.id, _spec([_item(1, name="Renamed")]))
+    items, total = await store.list_catalog(w.id)
+    assert total == 3 and (items[0].id, items[0].name) == ("p1", "Renamed")
+
+    # Past the cap the whole write is refused, spec included.
+    from pocketpaw.paw_bar import catalog_store as cs
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("pocketpaw.paw_bar.store.catalog_max_items", lambda: 3)
+        with pytest.raises(cs.CatalogFull):
+            await store.update_spec(w.id, _spec([_item(9)]))
+    assert await store.catalog_count(w.id) == 3
 
 
 async def test_rollback_never_restores_a_revisions_catalog(store, tmp_path):

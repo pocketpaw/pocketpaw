@@ -7,11 +7,11 @@
 # ``gated`` to an Instinct proposal) and an http(s) ``checkout_url``. The product
 # catalog lives in its own table (``paw_bar.catalog_store``, rows read back as
 # ``PawBarCatalogRow``); ``PawBarSpec.catalog`` is DEPRECATED, kept one release so
-# an older editor's spec PATCH still works: the store moves a non-empty one into
-# the table on write and never stores it in the spec. Its 200-item validator stays,
-# since only those older clients send it. ``spec_bytes`` is what the 64 KB spec cap
-# (``MAX_SPEC_BYTES``) measures: the spec without its catalog. Catalog items are
-# the ONLY source of product data on a
+# an older editor's spec PATCH still works: the store adds a non-empty one to the
+# table on write (upsert by id, never a delete) and never stores it in the spec.
+# Its 200-item validator stays, since only those older clients send it.
+# ``spec_bytes`` is what the 64 KB spec cap (``MAX_SPEC_BYTES``) measures: the
+# spec without its catalog. Catalog items are the ONLY source of product data on a
 # card, so they are cleaned as untrusted input whether typed by the owner or
 # imported from the store's site: text truncated to its cap, a non-http(s) image
 # url or a ``url`` that is neither http(s) nor a single-slash site path blanked,

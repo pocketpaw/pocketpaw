@@ -889,7 +889,10 @@ async def test_admin_spec_save_needs_the_money_units_header_for_odd_exponents(
         assert res.json()["detail"] == "currency_units_client_outdated"
         assert stored == _spec()  # untouched
     else:
-        assert stored.catalog[0].price_cents == 450  # stored as sent
+        # Stored as sent, in the catalog store (the spec no longer holds it).
+        assert stored.catalog == []
+        [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+        assert item.price_cents == 450
 
 
 @pytest.mark.asyncio
