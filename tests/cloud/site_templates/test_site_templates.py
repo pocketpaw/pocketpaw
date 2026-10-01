@@ -1278,6 +1278,30 @@ async def test_refresh_without_a_source_keeps_the_old_image(rail: _MemAdapter) -
 
 
 @pytest.mark.asyncio
+async def test_refresh_refuses_a_source_the_owner_can_no_longer_read(rail: _MemAdapter) -> None:
+    """Access to a shared private site can be withdrawn after the template was
+    saved. Refresh must not copy that site's newer screenshot, least of all onto
+    a public template."""
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+    from pocketpaw_ee.sites.screenshot import _store_screenshot
+
+    src = await _site(owner=PEER, visibility="private", shared_with=[OWNER])
+    site = await _shot(src)
+    meta = await _saved(src, visibility="public")
+    before = dict(rail.objects)
+
+    await src.set({"shared_with": []})
+    await site.set({"preview_image_url": await _store_screenshot(site, PNG_2)})
+
+    with pytest.raises(ConflictError) as err:
+        await svc.refresh_preview(WS, OWNER, meta["id"])
+    assert err.value.code == "site_templates.no_source_preview"
+    assert (await SiteTemplate.get(meta["id"])).preview_image_url == meta["preview_image_url"]
+    assert rail.objects == before
+    assert PNG_2 not in rail.objects.values()
+
+
+@pytest.mark.asyncio
 async def test_route_preview_refresh(
     client: AsyncClient, who: dict[str, str], rail: _MemAdapter
 ) -> None:

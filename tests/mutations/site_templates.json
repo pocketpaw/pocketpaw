@@ -499,5 +499,14 @@
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_save_with_a_video_has_no_image"
     ]
+  },
+  {
+    "label": "refresh: skip the re-check that the owner can still read the source",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        await pockets_service.read_site_snapshot(doc.workspace, user_id, doc.source_pocket_id)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_refresh_refuses_a_source_the_owner_can_no_longer_read"
+    ]
   }
 ]

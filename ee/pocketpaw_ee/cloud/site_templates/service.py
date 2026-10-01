@@ -413,12 +413,21 @@ async def refresh_preview(workspace_id: str, user_id: str, template_id: str) -> 
     """Re-copy the source site's CURRENT screenshot onto the template (owner only;
     anyone else gets NotFound). With no usable source screenshot (the site is
     gone, never captured, or the copy failed) raises ConflictError
-    ``site_templates.no_source_preview`` and keeps the stored image. Otherwise the
+    ``site_templates.no_source_preview`` and keeps the stored image; so does a
+    source the owner can no longer read. Otherwise the
     new image replaces it and every other object under the template prefix is
     deleted (keys are content-addressed, so an unchanged screenshot keeps its key
     and nothing is deleted)."""
     doc = await _owned(workspace_id, user_id, template_id)
-    asset = await _copy_source_preview(doc)
+    # Re-check the owner can still read the source site, through the same rule
+    # save used: access granted at save time may since have been withdrawn, and a
+    # public template would publish whatever the copy picks up.
+    try:
+        await pockets_service.read_site_snapshot(doc.workspace, user_id, doc.source_pocket_id)
+    except (NotFound, Forbidden, ValidationError):
+        asset = None
+    else:
+        asset = await _copy_source_preview(doc)
     if asset is None:
         raise ConflictError(
             "site_templates.no_source_preview",

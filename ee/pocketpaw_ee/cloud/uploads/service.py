@@ -1,4 +1,7 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Module-level helpers for other entities: ``get_records_scoped`` (metadata only)
+#   and ``read_bytes_scoped`` (server-internal byte read pinned to a workspace,
+#   size-capped, NO per-user ACL; callers must authorise upstream).
 # Updated: 2026-09-27 — fix/chat-attachment-name-backfill. Added module-level
 #   ``get_records_scoped(file_ids, workspace)``, a metadata-only batch lookup
 #   (no blob I/O) other entities call instead of reaching into the store, so
