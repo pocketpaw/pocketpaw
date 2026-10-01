@@ -13,8 +13,9 @@
 # svelte (pattern=dynamic) still refuses with engine_unsupported.
 # Updated: 2026-10-01 (CN-7, H9) — fixture items take the shape paw-fx's
 # build-registry.mjs emits (neutral files + engines + targets.<engine>); tests
-# cover html/svelte target flattening, an engine with no target, and the path
-# check over target files.
+# cover html/svelte target flattening, svelte paths under src/lib/, an engine
+# with no target (neutral files + html snippet as `markup`), a pre-#24 item, no
+# `demo` in the answer, and the path check over target files.
 """MCP server registration + handler tests for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -219,11 +220,41 @@ class TestGetEffect:
         assert body["usage"].startswith("import Fx")
         assert "snippet" not in body  # html delivery stays out of a svelte answer
         assert "targets" not in body
+        # A svelte site only takes writes under src/, and the usage imports $lib/_fx.
         assert [f["path"] for f in body["files"]] == [
-            "_fx/effects/aurora-css/index.js",
-            "_fx/effects/aurora-css/Fx.svelte",
+            "src/lib/_fx/effects/aurora-css/index.js",
+            "src/lib/_fx/effects/aurora-css/Fx.svelte",
         ]
         assert "note" not in body
+
+    @pytest.mark.asyncio
+    async def test_html_answer_leaves_out_demo_pages(self, registry) -> None:
+        body = _decode(await fx_mcp._get_handler({"name": "aurora-css"}))
+        assert "demo" not in body
+        assert all(f["path"].startswith("_fx/") for f in body["files"])
+
+    @pytest.mark.asyncio
+    async def test_engine_without_target_gets_the_html_markup(self, registry) -> None:
+        """confetti ships html only; svelte gets the neutral files plus the markup."""
+        body = _decode(await fx_mcp._get_handler({"name": "confetti", "engine": "svelte"}))
+        assert body["markup"] == "<section data-fx='confetti'></section>"
+        assert "no svelte target (it ships: html)" in body["note"]
+        assert "render `markup`" in body["note"]
+        assert all(f["path"].startswith("src/lib/_fx/") for f in body["files"])
+
+    @pytest.mark.asyncio
+    async def test_pre_targets_registry_item_reads_as_html_only(self, registry) -> None:
+        old = _item("legacy-glow", "backgrounds", [], "Old shape", [])
+        del old["targets"], old["engines"]
+        old.update(snippet="<section data-fx='legacy-glow'></section>", usage="u", demo=[])
+        _write_registry(registry, [old])
+        os.utime(registry / "registry.json", (0, 4_000_000_003))
+        html = _decode(await fx_mcp._get_handler({"name": "legacy-glow"}))
+        assert html["snippet"].startswith("<section") and html["engines"] == ["html"]
+        assert "note" not in html and "demo" not in html
+        react = _decode(await fx_mcp._get_handler({"name": "legacy-glow", "engine": "react"}))
+        assert react["markup"].startswith("<section") and "snippet" not in react
+        assert "no react target (it ships: html)" in react["note"]
 
     @pytest.mark.asyncio
     async def test_unknown_name_gives_suggestions(self, registry) -> None:

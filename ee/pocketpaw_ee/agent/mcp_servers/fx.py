@@ -36,8 +36,12 @@
 # flattens ``targets[engine]`` into the body and appends its files after the
 # neutral ones; the path check covers both. An engine the item has no target for
 # (react today, and svelte for effects whose vendor bundle is not bundler-safe)
-# gets the neutral files and a note naming the engines it does ship. The stale
-# "svelte/react shells not yet available" note is gone.
+# gets the neutral files, the html snippet as ``markup``, and a note naming the
+# engines it does ship. The stale "svelte/react shells not yet available" note is
+# gone. ``demo`` pages are never returned. On svelte every path is prefixed with
+# ``src/lib/`` (a svelte site only takes writes under ``src/``, and the component
+# usage imports ``$lib/_fx/...``). A pre-#24 item (top-level snippet/usage, no
+# ``targets``) is read as an html-only item.
 """Agent-side MCP surface for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -226,10 +230,22 @@ async def _get_handler(args: dict) -> dict:
         return _structured_error({"error": "unknown_effect", "name": name, "suggestions": []})
 
     targets = item.pop("targets", None)
-    target = targets.get(engine) if isinstance(targets, dict) else None
+    if not isinstance(targets, dict):
+        # Pre-#24 registry: delivery sat at the top level and only html existed.
+        targets = {"html": {k: item.pop(k) for k in ("snippet", "usage") if k in item}}
+        item.pop("demo", None)
+    engines = item.get("engines")
+    item["engines"] = list(engines) if isinstance(engines, list) else list(targets)
+    target = targets.get(engine)
+    markup = None
     if isinstance(target, dict):
-        item.update({k: v for k, v in target.items() if k != "files"})
+        item.update({k: v for k, v in target.items() if k not in ("files", "demo")})
         item["files"] = [*(item.get("files") or []), *(target.get("files") or [])]
+    else:
+        html = targets.get("html")
+        markup = html.get("snippet") if isinstance(html, dict) else None
+        if markup:
+            item["markup"] = markup
 
     bad = [f.get("path") for f in item.get("files") or [] if not _safe_path(f.get("path"))]
     if bad:
@@ -253,13 +269,19 @@ async def _get_handler(args: dict) -> dict:
             "copies."
         )
     if not isinstance(target, dict):
-        shipped = ", ".join(item.get("engines") or []) or "none"
+        shipped = ", ".join(str(e) for e in item["engines"]) or "none"
+        render = "render `markup`, then " if markup else ""
         notes.append(
             f"This effect has no {engine} target (it ships: {shipped}). The files are "
-            "engine-neutral: load its index.js and call mount(el, options) client-side."
+            f"engine-neutral: {render}load its index.js and call mount(el, options) "
+            "client-side."
         )
     if notes:
         item["note"] = " ".join(notes)
+    if engine == "svelte":
+        # A svelte site only accepts writes under src/, and the component usage
+        # imports $lib/_fx/..., so the whole effect lives under src/lib/_fx/.
+        item["files"] = [{**f, "path": f"src/lib/{f['path']}"} for f in item.get("files") or []]
     return _success_response(item)
 
 
@@ -315,11 +337,12 @@ def build_fx_server() -> tuple[str, Any] | None:
         "get_effect",
         (
             "Fetch one paw-fx effect by `name` for an `engine` (html|svelte|react, "
-            "default html): its files (write each `path` verbatim into the site, all "
-            "live under `_fx/`), `options`, and that engine's delivery: on html the "
-            "`snippet` to place plus `usage`; on svelte a component file plus `usage` "
-            "showing the import. `engines` lists what the effect ships; an engine "
-            "without a target gets the neutral files and a `note`. Optional "
+            "default html): its files (write each `path` verbatim into the site: "
+            "under `_fx/` on html/react, under `src/lib/_fx/` on svelte), `options`, "
+            "and that engine's delivery: on html the `snippet` to place plus `usage`; "
+            "on svelte a component file plus `usage` showing the `$lib/_fx` import. "
+            "`engines` lists what the effect ships; an engine without a target gets "
+            "the neutral files, the html snippet as `markup`, and a `note`. Optional "
             "`pattern` (pass 'dynamic' for a dynamic svelte site). On svelte/react an "
             "effect with `needs` returns "
             "`dependencies` to declare via set_site_dependencies plus a `note`. "
