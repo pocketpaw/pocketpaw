@@ -488,16 +488,12 @@ def _lead_fields(args: Any) -> tuple[dict[str, str] | None, ActionOutcome | None
     for name, raw in args.items():
         cap = LEAD_FIELD_CAPS.get(name)
         if cap is None:
-            return None, _lead_refusal(
-                "unknown_field", "Something went wrong. Please try again."
-            )
+            return None, _lead_refusal("unknown_field", "Something went wrong. Please try again.")
         if not isinstance(raw, str):
             return None, _lead_refusal("not_text", "Enter text here.", name)
         value = _LEAD_CONTROL_CHARS.sub("", raw).strip()
         if len(value) > cap:
-            return None, _lead_refusal(
-                "too_long", f"Keep this under {cap} characters.", name
-            )
+            return None, _lead_refusal("too_long", f"Keep this under {cap} characters.", name)
         if value:
             fields[name] = value
     email, phone = fields.get("email"), fields.get("phone")

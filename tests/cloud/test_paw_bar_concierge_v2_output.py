@@ -405,15 +405,16 @@ def test_card_parity_bounds_match_the_server_constants():
 
 
 # Refreshing the vendored manifest. The source is paw-bar's
-# app/pawbar-manifest.json, generated there by `bun run manifest`. It was vendored
-# from qbtrix/paw-bar PR #26 (branch feat/wire-spec-cards, commit f0c8c12), which
-# had not merged when this was written. When paw-bar changes it:
+# app/pawbar-manifest.json, generated there by `bun run manifest`. Last vendored
+# from paw-bar branch feat/lead-and-booking-cards (commit 3cd56e0: the form's
+# prefill ``value``, the send_to_team lead form, and book_slot, which
+# card_spec.DEFERRED_WIDGETS keeps out until booking ships). When paw-bar changes it:
 #   1. copy the file over ee/pocketpaw_ee/paw_bar/pawbar-manifest.json unchanged;
 #   2. set _MANIFEST_SHA256 below to the new hash (LF line endings);
 #   3. if the widget types or actions changed, update the two sets below AND
 #      re-check card_spec's server-only rules (host events, the product-card
 #      hydration) and the parity fixtures in both repos.
-_MANIFEST_SHA256 = "890019e19051dc756c8e1dd93a3146466fdd10f0908a310ac7292c9d950afde5"
+_MANIFEST_SHA256 = "c03905ddfa40564f6cf74c376a6e4b1515f8646e0db0ce5e495bea0f6f950c20"
 
 
 def test_the_vendored_manifest_has_not_drifted():
@@ -720,7 +721,9 @@ async def test_v2_doc_code_flag_picks_the_frame_and_the_filter(
     res = await _chat(client, widget.id, message="how do I list my orders with the SDK?")
     assert res.status_code == 200, res.text
     text = "".join(d["content"] for e, d in _frames(res.text) if e == "chunk")
-    expected_frame = concierge_runtime.FRAME_DOC_CODE if allow else concierge_runtime.FRAME
+    expected_frame = (
+        concierge_runtime.FRAME_DOC_CODE_LEADS if allow else concierge_runtime.FRAME_LEADS
+    )
     assert model.last["info"].instructions == expected_frame
     shown = fence if allow else _CODE_LINE
     assert text == f"You can do it like this:\n{shown}\nHappy brewing."

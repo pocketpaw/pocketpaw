@@ -398,7 +398,9 @@ async def test_owner_fields_reach_the_data_half_and_never_the_frame(
     res = await _chat(client, widget.id)
     assert res.status_code == 200, res.text
 
-    expected = concierge_runtime.FRAME_DOC_CODE if allow_doc_code else concierge_runtime.FRAME
+    expected = (
+        concierge_runtime.FRAME_DOC_CODE_LEADS if allow_doc_code else concierge_runtime.FRAME_LEADS
+    )
     info = model.last["info"]
     assert info.instructions == expected
     assert model.last["messages"][0].instructions == expected
@@ -463,6 +465,9 @@ async def test_prompt_snapshot_for_a_fully_set_site(admin_client):
     site = await _site()
     assert (await admin_client.patch(_settings_url(site), json=_FULL)).status_code == 200
     stored = await Site.get(site.id)
+    # This snapshot pins the owner block; the lead card's own lines are pinned in
+    # test_paw_bar_lead_cards.py, so it is off here.
+    stored.concierge_lead_capture = False
 
     kb = KnowledgeItem(
         id="hours", source="pocket:pocket-1", text="Hours\nWe open at 7:30am.", score=1.0

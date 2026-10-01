@@ -8,12 +8,15 @@
 # toolsets and NO capabilities, relaying ``chunk`` / ``sources`` / ``stream_end`` /
 # ``error`` frames exactly as the legacy relay does.
 #
-# The request has two halves. The instructions are ``FRAME`` (or ``FRAME_DOC_CODE``
-# when the owner allows quoting code from their docs): module constants and the
-# cache-stable prefix of every request. Nothing an owner or visitor writes ever
-# reaches them. The frame claims no fixed identity: it tells the model to take its
-# name, tone and manner from the <owner-settings> block, and to call itself the
-# site's assistant when no name is set. The rest is the DATA half
+# The request has two halves. The instructions are one of four module constants
+# picked by ``frame_for(site)``: ``FRAME``, plus the doc-code rule 2 when the owner
+# allows quoting code from their docs, plus the lead rule in rule 5 when the
+# site's ``concierge_lead_capture`` is on (offer a prefilled send_to_team form,
+# never claim it was sent). They are the cache-stable prefix of every request.
+# Nothing an owner or visitor writes ever reaches them. The frame claims no fixed
+# identity: it tells the model to take its name, tone and manner from the
+# <owner-settings> block, and to call itself the site's assistant when no name is
+# set. The rest is the DATA half
 # (``build_prompt``): <owner-settings> (``concierge_prompt.render_owner_block``),
 # <page>, <knowledge>, <catalog>, <history>, <visitor-message>. Those tags are
 # neutralized inside every block, so nothing can forge or close another block.
@@ -34,7 +37,8 @@
 #
 # Output passes through ``FenceFilter``: a ```pawbar-card fence is validated and
 # hydrated from the catalog store (any id in it, not only the ids the prompt
-# listed, looked up per card); any other code fence becomes
+# listed, looked up per card; a lead card only with lead capture on); any other
+# code fence becomes
 # ``CODE_REPLACEMENT`` unless the site allows doc code and ``is_grounded_code``
 # finds the fence verbatim in this turn's knowledge.
 #
@@ -116,6 +120,35 @@ _RULE_2_DOC_CODE = (
 if FRAME.count(_RULE_2) != 1:
     raise RuntimeError("FRAME's rule 2 changed; update _RULE_2 to match it")
 FRAME_DOC_CODE = FRAME.replace(_RULE_2, _RULE_2_DOC_CODE)
+
+# Leads from conversation (``Site.concierge_lead_capture``, on by default): rule 5
+# gains the lead card. Still constants; the site flag only picks one.
+_RULE_5 = "or to contacting the business.\n"
+_LEAD_RULE = (
+    "When the visitor shares contact details or asks to be contacted, offer a "
+    "send_to_team form prefilled with what they said. Never claim it was sent."
+)
+if FRAME.count(_RULE_5) != 1:
+    raise RuntimeError("FRAME's rule 5 changed; update _RULE_5 to match it")
+FRAME_LEADS = FRAME.replace(_RULE_5, f"or to contacting the business. {_LEAD_RULE}\n")
+FRAME_DOC_CODE_LEADS = FRAME_DOC_CODE.replace(
+    _RULE_5, f"or to contacting the business. {_LEAD_RULE}\n"
+)
+
+
+def lead_capture_on(site: Any) -> bool:
+    """The owner's lead-capture switch. Only an explicit False turns it off: an old
+    row, or a Site-like object without the field, reads as the default (on)."""
+    return getattr(site, "concierge_lead_capture", True) is not False
+
+
+def frame_for(site: Any) -> str:
+    """The frame constant for this site's doc-code and lead-capture switches."""
+    doc_code = getattr(site, "concierge_allow_doc_code", False) is True
+    if lead_capture_on(site):
+        return FRAME_DOC_CODE_LEADS if doc_code else FRAME_LEADS
+    return FRAME_DOC_CODE if doc_code else FRAME
+
 
 # Low and fixed: a concierge restates the site's own facts, it does not riff.
 _TEMPERATURE = 0.2
@@ -615,7 +648,9 @@ def _knowledge_block(items: Sequence[KnowledgeItem]) -> str:
     return "\n".join(lines)
 
 
-def _catalog_and_actions_block(widget: Any, catalog_items: Sequence[Any] = ()) -> str:
+def _catalog_and_actions_block(
+    widget: Any, catalog_items: Sequence[Any] = (), *, lead_capture: bool = False
+) -> str:
     """This turn's catalog items (``catalog_for_turn``) and the widget's declared
     actions, as data.
 
@@ -624,7 +659,9 @@ def _catalog_and_actions_block(widget: Any, catalog_items: Sequence[Any] = ()) -
     It does NOT reuse ``_actions_paragraph``'s declared-actions text: that tells the
     model to call ``pawbar_<verb>`` tools, and v2 has none. The actions are listed
     as plain data instead; the widget's own buttons and forms trigger them. Cards
-    are taught by ``_cards_paragraph`` (the vendored paw-bar manifest).
+    are taught by ``_cards_paragraph`` (the vendored paw-bar manifest). With
+    ``lead_capture`` the block is written even with no catalog and no actions,
+    since the lead card is a card every such site can offer.
     """
     from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
 
@@ -634,7 +671,7 @@ def _catalog_and_actions_block(widget: Any, catalog_items: Sequence[Any] = ()) -
         {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
         for a in (getattr(spec, "actions", None) or [])
     ]
-    if not catalog and not declared:
+    if not catalog and not declared and not lead_capture:
         return ""
     parts = ["<catalog>"]
     products = _catalog_block(catalog)
@@ -653,17 +690,22 @@ def _catalog_and_actions_block(widget: Any, catalog_items: Sequence[Any] = ()) -
                 else "sent to the business for a person to approve"
             )
             parts.append(f"   - {a['verb']} ({label}): {behavior}.")
-    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog)))
+    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog), lead_capture=lead_capture))
     parts.append("</catalog>")
     return _data_block(parts)
 
 
-def _cards_paragraph(declared: Sequence[dict[str, Any]], *, has_catalog: bool = False) -> str:
+def _cards_paragraph(
+    declared: Sequence[dict[str, Any]], *, has_catalog: bool = False, lead_capture: bool = False
+) -> str:
     """How to write a ```pawbar-card: the compact manifest (one line per widget),
     the host events a button may emit, and each gated verb's form fields. With a
     catalog it also makes the product-card mandatory for any product the reply
     names: the widget renders GFM tables, so without this the model lists
     products as a table and the visitor gets no Add to cart buttons.
+
+    With ``lead_capture`` it teaches the lead card (a ``send_to_team`` form
+    prefilled from the conversation); without it, it says not to offer one.
 
     This replaces the legacy ``_form_block``, which teaches the old
     ``{"kind": "form"}`` card and tells the model to call an action tool."""
@@ -698,10 +740,21 @@ def _cards_paragraph(declared: Sequence[dict[str, Any]], *, has_catalog: bool = 
         for a in declared
         if a.get("policy") != "auto" and isinstance(a.get("args"), dict) and a["args"]
     ]
+    if lead_capture:
+        lines.append(
+            "   A lead card is a form with verb send_to_team and fields chosen from "
+            "name (text), email (email), phone (tel) and message (textarea), with email "
+            "or phone among them. Set each field's value (at most 500 characters) to "
+            "what the visitor said, and leave out a field they did not give rather "
+            "than guess. The visitor checks it and taps Send; nothing is sent before "
+            "that."
+        )
+    else:
+        lines.append("   Do not offer a send_to_team form on this site.")
     if gated:
         lines.append(
-            "   A form's verb must be one of these gated actions, and each field name "
-            "one of its args (type text, tel, email, number or textarea):"
+            "   Any other form's verb must be one of these gated actions, and each field "
+            "name one of its args (type text, tel, email, number or textarea):"
         )
         for a in gated:
             args = ", ".join(f"{name} ({typ})" for name, typ in a["args"].items())
@@ -787,7 +840,9 @@ def build_prompt(
     if page is not None:
         blocks.append(_page_block(page))
     blocks.append(_knowledge_block(items))
-    catalog_block = _catalog_and_actions_block(widget, catalog)
+    catalog_block = _catalog_and_actions_block(
+        widget, catalog, lead_capture=site is not None and lead_capture_on(site)
+    )
     if catalog_block:
         blocks.append(catalog_block)
     past = _history_block(history)
@@ -936,7 +991,8 @@ class FenceFilter:
     becomes ``CODE_REPLACEMENT``, unless the site allows documentation code
     (``allow_doc_code``) and the block is copied from this turn's ``knowledge``
     (``is_grounded_code``) within the reply's ``doc_code_chars`` budget; then it
-    passes unchanged. A fence still open at ``close()`` is dropped.
+    passes unchanged. A lead card (a send_to_team form) passes only with
+    ``lead_capture``. A fence still open at ``close()`` is dropped.
 
     Fences are found the way paw-bar's markdown finds them, which is not
     line-anchored: any ``` opens one, its tag runs to the end of the line, and the
@@ -954,8 +1010,10 @@ class FenceFilter:
         allow_doc_code: bool = False,
         doc_code_chars: int = _DOC_CODE_CHARS,
         lookup: Any = None,
+        lead_capture: bool = False,
     ) -> None:
         self._catalog = list(catalog or ())
+        self._lead_capture = lead_capture is True
         self._lookup = lookup
         self._verbs = list(verbs or ())
         self._knowledge = list(knowledge or ())
@@ -1031,13 +1089,16 @@ class FenceFilter:
         except Exception:  # noqa: BLE001 — an unreadable catalog drops the card
             logger.warning("concierge: catalog lookup for a card failed", exc_info=True)
             return ""
-        return render_card(body, items, verbs=self._verbs) or ""
+        return render_card(body, items, verbs=self._verbs, lead_capture=self._lead_capture) or ""
 
     def _finish(self, tag: str, body: str) -> str:
         if tag == _CARD_LANG:
             from pocketpaw_ee.paw_bar.card_spec import render_card
 
-            return render_card(body, self._catalog, verbs=self._verbs) or ""
+            return (
+                render_card(body, self._catalog, verbs=self._verbs, lead_capture=self._lead_capture)
+                or ""
+            )
         if (
             self._allow_doc_code
             and len(body) <= self._doc_code_left
@@ -1062,6 +1123,7 @@ def _fence_filter_for(
     knowledge: Sequence[KnowledgeItem] = (),
     allow_doc_code: bool = False,
     doc_code_chars: int = _DOC_CODE_CHARS,
+    lead_capture: bool = False,
 ) -> FenceFilter:
     """A filter hydrating cards from this widget's catalog in ``store`` and its
     declared verbs, and grounding code in ``knowledge`` when the site allows
@@ -1080,6 +1142,7 @@ def _fence_filter_for(
         allow_doc_code=allow_doc_code,
         doc_code_chars=doc_code_chars,
         lookup=lookup,
+        lead_capture=lead_capture,
     )
 
 
@@ -1342,9 +1405,10 @@ async def run_concierge_v2(
         model = _build_model(settings)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
-        # is one of two constants; the owner's doc-code switch only picks which.
+        # is one of four constants; the owner's doc-code and lead-capture switches
+        # only pick which.
         allow_doc_code = _allows_doc_code(site)
-        frame = FRAME_DOC_CODE if allow_doc_code else FRAME
+        frame = frame_for(site)
         agent = Agent(model, instructions=frame, output_type=str)
         # What the model writes is filtered before the visitor (or the owner's
         # transcript) sees it: code becomes a fixed line, cards are checked and
@@ -1357,6 +1421,7 @@ async def run_concierge_v2(
             doc_code_chars=int(
                 getattr(settings, "pawbar_concierge_doc_code_chars", _DOC_CODE_CHARS)
             ),
+            lead_capture=lead_capture_on(site),
         )
         # Spend attribution: the proxy's spend row names the site and the widget.
         tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
@@ -1431,6 +1496,10 @@ __all__ = [
     "DEGRADE_LEAVE_MESSAGE",
     "DEGRADE_REASONS",
     "FRAME",
+    "FRAME_DOC_CODE_LEADS",
+    "FRAME_LEADS",
+    "frame_for",
+    "lead_capture_on",
     "FRAME_DOC_CODE",
     "FenceFilter",
     "KnowledgeItem",

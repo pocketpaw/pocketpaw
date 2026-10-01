@@ -522,11 +522,12 @@ async def test_v2_frame_is_the_first_and_constant_part_of_the_prompt(
     first, last = model.calls[0], model.calls[-1]
     for call in (first, last):
         # The frame rides as the request's instructions — the first thing the
-        # provider mapping emits — and it is the module constant, byte for byte.
-        assert call["info"].instructions == concierge_runtime.FRAME
+        # provider mapping emits — and it is the module constant, byte for byte
+        # (the lead-capture variant: a Site has concierge_lead_capture on by default).
+        assert call["info"].instructions == concierge_runtime.FRAME_LEADS
         request = call["messages"][0]
         assert isinstance(request, ModelRequest)
-        assert request.instructions == concierge_runtime.FRAME
+        assert request.instructions == concierge_runtime.FRAME_LEADS
     # Different knowledge, different message — same frame.
     assert first["info"].instructions == last["info"].instructions
     assert model.user_prompt(first) != model.user_prompt(last)
@@ -1001,7 +1002,7 @@ async def test_the_real_model_request_carries_no_tools_and_leads_with_the_frame(
     assert body["temperature"] <= 0.3
     assert body["user"] == "ws-1"  # spend attributed to the paying workspace
     assert body["stream"] is True
-    assert body["messages"][0] == {"role": "system", "content": concierge_runtime.FRAME}
+    assert body["messages"][0] == {"role": "system", "content": concierge_runtime.FRAME_LEADS}
     assert _SEEDED_FACT in body["messages"][-1]["content"]
 
 

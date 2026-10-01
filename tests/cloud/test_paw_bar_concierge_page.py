@@ -490,7 +490,7 @@ async def test_an_injection_in_the_title_stays_inside_the_page_block(
     assert prompt.count("</knowledge>") == 1
     # Folded to one line: the title cannot start a line of its own.
     assert not any(line.startswith("Rules:") for line in prompt.splitlines())
-    assert model.last["info"].instructions == concierge_runtime.FRAME
+    assert model.last["info"].instructions == concierge_runtime.FRAME_LEADS
 
 
 @pytest.mark.asyncio
