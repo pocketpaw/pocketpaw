@@ -58,6 +58,7 @@ from pocketpaw.atlas.model import (
     KIND_FIELDS,
     AtlasEntry,
     AtlasModel,
+    expected_slash,
     is_valid_route,
     never_agent_openable,
 )
@@ -552,6 +553,17 @@ def compile_atlas(connectors_dir: Path | None = None) -> AtlasModel:
     if bad_routes:
         raise ValueError(
             f"atlas compile: surface routes must start with one '/': {', '.join(bad_routes)}"
+        )
+    # The composer's slash command is the route minus its leading "/" (or a
+    # listed alias); anything else drifts from what the frontend ships.
+    bad_slash = [
+        f"{e.id} ({e.slash!r}, expected {expected_slash(e.surface)!r})"
+        for e in surfaces
+        if e.slash is not None and e.slash != expected_slash(e.surface)
+    ]
+    if bad_slash:
+        raise ValueError(
+            f"atlas compile: surface slash must match its route: {'; '.join(bad_slash)}"
         )
     # SECURITY: settings / audit / security / admin are never agent-openable.
     denied = [e.id for e in surfaces if e.agent_openable and never_agent_openable(e.surface)]

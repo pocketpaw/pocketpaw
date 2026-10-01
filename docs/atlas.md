@@ -236,11 +236,11 @@ field so `atlas_describe` answers include where to see the result:
 
 Every authored surface also states:
 
-- `slash`: the composer command that navigates there (without the `/`), the
-  route path joined with `-` (`files`, `deep-work`, `agents-activity`, ...), or
-  `null` for settings sub-pages, `/studio/editor` and `/decisions-graph`. The
-  key must be present on every authored surface; the build fails if it's
-  missing.
+- `slash`: the composer command that navigates there, the route without its
+  leading `/` (`files`, `deep-work`, `agents/activity`, `studio/editor`), the
+  alias `home` for `/` (`model.SLASH_ALIASES`), or `null` for settings sub-pages
+  and `/decisions-graph`. The key must be present on every authored surface, and
+  `compile_atlas` fails when a slash doesn't match its route or alias.
 - `presentation`: `inline` for the views the no-UI shell renders in the thread
   (`/chat`, `/files`, `/deep-work`, `/pockets`, `/sites`, `/knowledge`,
   `/studio`), `window` otherwise.

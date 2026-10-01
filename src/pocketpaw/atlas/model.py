@@ -38,6 +38,8 @@
 # Review pass (same branch): ``VerbRisk`` spells out what read / safe / risky
 # mean, and ``never_agent_openable`` is the hard denylist (settings, audit,
 # security, admin, malformed routes) the compiler and open_surface both apply.
+# Follow-up: ``expected_slash`` / ``SLASH_ALIASES`` pin a surface's slash to its
+# route minus the leading "/" (or a listed alias), matching the shipped composer.
 
 from __future__ import annotations
 
@@ -73,6 +75,17 @@ VerbTrigger = Literal["slash", "verb", "agent"]
 #           message, publish a site), or destroys something with no undo
 #           (every delete). The composer asks before running a risky verb.
 VerbRisk = Literal["read", "safe", "risky"]
+
+
+# A surface's slash is its route without the leading "/" (the convention the
+# composer ships: /agents/activity -> "agents/activity"), except for the routes
+# listed here, whose path is empty or not a usable command.
+SLASH_ALIASES: dict[str, str] = {"/": "home"}
+
+
+def expected_slash(route: str) -> str:
+    """The slash a surface at *route* must use when it has one."""
+    return SLASH_ALIASES.get(route, route[1:])
 
 
 # SECURITY: routes the agent's open_surface tool may never open, whatever a
@@ -196,6 +209,8 @@ __all__ = [
     "AtlasEntry",
     "AtlasKind",
     "KIND_FIELDS",
+    "SLASH_ALIASES",
+    "expected_slash",
     "is_valid_route",
     "never_agent_openable",
     "AtlasModel",

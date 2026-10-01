@@ -414,7 +414,7 @@
         "lane",
         "sequence"
       ],
-      "slash": null,
+      "slash": "studio/editor",
       "presentation": "window",
       "agent_openable": true
     },
@@ -587,7 +587,7 @@
         "running agents",
         "live agents"
       ],
-      "slash": "agents-activity",
+      "slash": "agents/activity",
       "presentation": "window",
       "agent_openable": false
     },

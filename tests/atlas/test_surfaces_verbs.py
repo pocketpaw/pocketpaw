@@ -9,10 +9,12 @@
 #     slash trigger has a slash (and vice versa);
 #   * the compiler refuses a surface or verb missing its kind fields;
 #   * the compiled artifact keeps the new keys off every other kind.
-# Review pass (same branch): the slash is the route path joined with "-"
-# (/agents/activity -> agents-activity); the compiler refuses a missing slash
+# Review pass (same branch): the compiler refuses a missing slash
 # key, a non-rooted route, and an agent_openable denylisted route; risk and undo
 # are pinned per verb against the lab's verb catalog.
+# Follow-up: the slash is the route minus its leading "/" (agents/activity,
+# studio/editor) or a listed alias (home), as the composer ships; the compiler
+# refuses one that drifts.
 
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ INLINE_ROUTES = {"/chat", "/files", "/deep-work", "/pockets", "/sites", "/knowle
 AGENT_OPENABLE_ROUTES = {"/files", "/studio/editor", "/chat", "/pockets", "/knowledge"}
 # Lab composer commands that are not surfaces or verbs; a slash must not shadow them.
 RESERVED_SLASHES = {"clear", "help", "history", "tray", "new-task"}
-_SLASH_RE = re.compile(r"[a-z][a-z0-9-]*")
+_SLASH_RE = re.compile(r"[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)*")
 
 _NEW_KEYS = {"slash", "presentation", "agent_openable", "applies_to", "triggers", "risk", "undo"}
 
@@ -66,7 +68,19 @@ class TestSurfaceFields:
     def test_surface_slash_is_the_route_path(self):
         for e in _store_entries("surface"):
             if e.slash is not None:
-                assert e.slash == (e.surface.strip("/").replace("/", "-") or "home"), e.id
+                assert e.slash == (e.surface[1:] or "home"), e.id
+
+    @pytest.mark.parametrize(
+        ("surface_id", "slash"),
+        [
+            ("surface:agents-activity", "agents/activity"),
+            ("surface:studio_editor", "studio/editor"),
+        ],
+    )
+    def test_nested_routes_keep_the_slash(self, surface_id, slash):
+        """Matches the composer's shipped commands (paw-enterprise #1094)."""
+        e = AtlasStore.load().describe(surface_id)
+        assert e is not None and e.slash == slash
 
     def test_settings_subpages_have_no_slash(self):
         for e in _store_entries("surface"):
@@ -200,6 +214,12 @@ class TestCompileGate:
         """SECURITY: settings / audit / security / admin are never agent-openable."""
         self._with_surface(monkeypatch, surface=route, agent_openable=True)
         with pytest.raises(ValueError, match="never be agent_openable"):
+            compile_mod.compile_atlas()
+
+    @pytest.mark.parametrize(("route", "slash"), [("/x/y", "x-y"), ("/x", "y"), ("/", "x")])
+    def test_slash_that_drifts_from_the_route_fails_the_build(self, monkeypatch, route, slash):
+        self._with_surface(monkeypatch, surface=route, slash=slash)
+        with pytest.raises(ValueError, match="slash must match its route"):
             compile_mod.compile_atlas()
 
     def test_missing_slash_key_fails_the_build(self, monkeypatch, tmp_path):

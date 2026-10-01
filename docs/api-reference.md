@@ -1978,9 +1978,10 @@ every role-gated entry stays hidden.
   "agent_openable": true, "keywords": ["files", "..."] } ] }
 ```
 
-- `slash` is the composer command without the `/` (the route path joined with
-  `-`, e.g. `deep-work`, `agents-activity`), or `null` (settings sub-pages,
-  `/studio/editor`, `/decisions-graph`).
+- `slash` is the composer command: the route without its leading `/`
+  (`files`, `deep-work`, `agents/activity`, `studio/editor`), `home` for `/`, or
+  `null` (settings sub-pages, `/decisions-graph`). The atlas build refuses a
+  slash that doesn't match its route.
 - `presentation` is `"inline"` for the views the no-UI shell renders in the
   thread (`/chat`, `/files`, `/deep-work`, `/pockets`, `/sites`, `/knowledge`,
   `/studio`) and `"window"` otherwise.

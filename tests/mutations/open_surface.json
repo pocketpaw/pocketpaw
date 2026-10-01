@@ -117,5 +117,12 @@
     "find": "_NEVER_OPENABLE_PREFIXES = (\"/settings/\", ",
     "replace": "_NEVER_OPENABLE_PREFIXES = (",
     "tests": ["tests/atlas/test_surfaces_verbs.py", "tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "atlas compile: slash/route match check dropped",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "if e.slash is not None and e.slash != expected_slash(e.surface)",
+    "replace": "if False",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
   }
 ]
