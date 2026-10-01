@@ -1,69 +1,23 @@
-# ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
-# Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the OUT-OF-BAND
-#   thread vocabulary: ``OwnerMessageRole`` (owner | system | visitor) and
-#   ``OwnerMessage``, the rows of ``paw_bar_owner_messages``. These are the thread
-#   lines that have no ChatRunDoc: the owner's own replies, the system's
-#   explanations (the bot handing itself back), and a visitor line that arrived
-#   while the bot was muted and therefore never dispatched a run. They are NOT run
-#   docs on purpose — ``metering.sweeper.sweep_unbilled_runs`` bills every unbilled
-#   terminal run, so an owner reply shaped as one would charge the owner credits
-#   for typing their own sentence and count as agent compute that never happened.
-#   ``created_at`` is an ISO string in UTC (aware), matching ChatRunDoc.createdAt,
-#   so the transcript reader can merge both sources on one comparable clock.
-# Updated: 2026-07-30 (owner inbox, slice 1) — the conversation STATE vocabulary:
-#   ``ConversationState`` (open | needs_human | snoozed | closed),
-#   ``ConversationNote`` (an owner's private {author, text, at}) and
-#   ``Conversation`` — a thin lifecycle row over the concierge run docs, keyed by
-#   (widget_id, customer_ref). It stores NO messages: the transcript stays derived
-#   from ChatRunDoc and this row adds only lifecycle + operator metadata, so the
-#   queue and the log never disagree about what was said.
-# Updated: 2026-07-30 (async decision delivery) — DecisionStatus gains an
-#   optional ``contact_email`` (empty default). A visitor who leaves the page
-#   while their request is PENDING can leave an email; when the owner decides,
-#   the delivery hook sends the same customer-facing reply there. PII posture:
-#   the email lives ONLY on this row — see the field comment.
-# Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor-commerce
-#   vocabulary. PawBarSpec gains three optional fields: ``actions`` (declared
-#   verbs: {verb, policy in {auto,gated}, args flat-type-map, label}), ``catalog``
-#   (products: {id, name, price_cents>=0, currency, image_url, url}) and
-#   ``checkout_url`` (http(s), may carry a ``{cart_ref}`` placeholder). New
-#   validators reject a malformed declaration with a clear error (unique
-#   snake_case verbs, policy allowlist, flat arg types, unique catalog ids,
-#   non-negative int prices, http(s) checkout url). ``PawBarCartItem`` /
-#   ``PawBarCart`` are the visitor-scoped cart the store persists per
-#   (widget_id, customer_ref). All additive — a spec with none of these fields
-#   is byte-identical to today. SS-2 alignment lives in the executor, not here.
-# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — PawBarWidget +
-#   PawBarWidgetPublic gain `agent_id: str = ""`, mirroring the workspace_id
-#   column right beside it (same nullability/default). It binds a concierge
-#   widget to the agent that answers its chats; "" = unbound (legacy / no agent).
-#   The KB scope is NOT stored — it is derived where needed (as of D5, the union
-#   of `pocket:<pocket_id>` and `agent:<the widget's own agent_id>`, never a
-#   `workspace:` or `user:` scope) — so this is the only new tenancy-adjacent
-#   field.
-# Updated: 2026-07-11 (W4a tenancy seam) — PawBarWidget + PawBarWidgetPublic
-#   gain `workspace_id: str = ""` (in-row tenancy, same model as DecisionStatus).
-#   Empty string = legacy/single-tenant row; the store's scoped reads match it.
-# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawPrint*→PawBar* models).
-#   The separate one-word audit feed (past-tense record) is a DIFFERENT feature, untouched.
-# Created: 2026-04-13 (Move 3 PR-A) — Minimal, secure-by-design render vocabulary
-# (text / image / list / button / form / divider). No raw HTML, no script
-# injection paths. The widget.js bundle consumes PawBarSpec; the backend
-# consumes PawBarEvent on the ingest side.
-# Updated: 2026-06-10 (W0b security fix) — Added PawBarWidgetPublic, a
-# token-free projection of PawBarWidget used as the response model for
-# list/read endpoints so the per-widget access_token never leaves the server
-# in those payloads. The token is now only returned by the explicit,
-# authenticated create + rotate-token paths.
-# Updated: 2026-06-11 (gap2 — close the customer decision loop) — Added
-# DecisionStatus + DecisionState. An inbound customer event no longer dead-ends
-# at a Fabric object: it can raise an Instinct proposal, and the human's
-# decision (reply text + state) is recorded here as the deliverable the
-# customer surface polls back. DecisionStatus is keyed by (widget_id,
-# customer_ref) so a rendered widget can fetch "what did the owner decide about
-# my request?" without any owner credential. State machine: pending → delivered
-# (approved) | declined (rejected). This is the back-half of the loop the
-# module docstring promised since 2026-04-13 but never wired.
+# src/pocketpaw/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+#
+# The render vocabulary the widget bundle draws (``PawBarBlock``: text / image /
+# list / button / form / divider, no raw HTML, no script paths) inside a
+# ``PawBarSpec``, plus the visitor-commerce declarations on that spec: ``actions``
+# (unique snake_case verbs; only the cart verbs may be ``auto``, everything else is
+# ``gated`` to an Instinct proposal), ``catalog`` (``PawBarCatalogItem``) and an
+# http(s) ``checkout_url``. Catalog items are the ONLY source of product data on a
+# card, so they are validated as untrusted input whether typed by the owner or
+# imported from the store's site: length caps on text, http(s) image urls, and a
+# ``url`` that is empty, http(s) or a single-slash site path.
+#
+# Also here: the widget row (``PawBarWidget``; ``PawBarWidgetPublic`` is its
+# token-free projection for reads, so the per-widget access token only leaves the
+# server on create / rotate), ingest events and their Fabric mappings, the
+# visitor cart, ``DecisionStatus`` (the owner's decision a visitor polls back,
+# keyed by widget + customer_ref; an optional contact email lives only on that
+# row), and the owner-inbox rows: ``Conversation`` (lifecycle over run docs, no
+# messages) and ``OwnerMessage`` (owner / system / muted-visitor lines that are
+# deliberately NOT run docs, so metering never bills them).
 
 from __future__ import annotations
 
@@ -88,6 +42,9 @@ _MAX_SPEC_BYTES = 64 * 1024
 _MAX_ACTIONS_PER_SPEC = 16
 _MAX_ARGS_PER_ACTION = 12
 _MAX_CATALOG_ITEMS = 200
+_MAX_CATALOG_NAME_CHARS = 200
+_MAX_CATALOG_DESCRIPTION_CHARS = 300
+_MAX_CATALOG_URL_CHARS = 2048
 _MAX_CART_ITEMS = 50
 # The arg-type names an action may declare — a FLAT map of {name: type-name}.
 # Nested/object args are rejected so the tool input schema stays simple and the
@@ -224,7 +181,12 @@ class PawBarActionSpec(BaseModel):
 
 
 class PawBarCatalogItem(BaseModel):
-    """One product the concierge can add to a cart / render on a card."""
+    """One product the concierge can add to a cart / render on a card.
+
+    ``url`` is the product's page: an absolute http(s) URL or a site path
+    (``/products/mug``), which is how imported items store it. ``in_stock`` is
+    None when the stock is unknown; False marks the item sold out in the prompt.
+    """
 
     id: str
     name: str
@@ -232,6 +194,8 @@ class PawBarCatalogItem(BaseModel):
     currency: str = "USD"
     image_url: str = ""
     url: str = ""
+    description: str = ""
+    in_stock: bool | None = None
 
     @field_validator("id")
     @classmethod
@@ -240,12 +204,57 @@ class PawBarCatalogItem(BaseModel):
             raise ValueError("catalog item id is required")
         return value.strip()
 
+    @field_validator("name")
+    @classmethod
+    def _cap_name(cls, value: str) -> str:
+        if len(value) > _MAX_CATALOG_NAME_CHARS:
+            raise ValueError(f"catalog item name is at most {_MAX_CATALOG_NAME_CHARS} characters")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _cap_description(cls, value: str) -> str:
+        if len(value) > _MAX_CATALOG_DESCRIPTION_CHARS:
+            raise ValueError(
+                f"catalog item description is at most {_MAX_CATALOG_DESCRIPTION_CHARS} characters"
+            )
+        return value
+
     @field_validator("price_cents")
     @classmethod
     def _non_negative_price(cls, value: int) -> int:
         if value < 0:
             raise ValueError("catalog item price_cents must be a non-negative integer")
         return value
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_code(cls, value: str) -> str:
+        v = value.strip().upper()
+        if len(v) > 3:
+            raise ValueError("catalog item currency must be a 3-letter code")
+        return v
+
+    @field_validator("image_url")
+    @classmethod
+    def _http_image_url(cls, value: str) -> str:
+        v = value.strip()
+        if len(v) > _MAX_CATALOG_URL_CHARS:
+            raise ValueError(f"catalog image_url is at most {_MAX_CATALOG_URL_CHARS} characters")
+        if v and not v.lower().startswith(("http://", "https://")):
+            raise ValueError("catalog image_url must be an http(s) URL")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def _http_or_path_url(cls, value: str) -> str:
+        v = value.strip()
+        if len(v) > _MAX_CATALOG_URL_CHARS:
+            raise ValueError(f"catalog url is at most {_MAX_CATALOG_URL_CHARS} characters")
+        is_path = v.startswith("/") and not v.startswith("//")
+        if v and not is_path and not v.lower().startswith(("http://", "https://")):
+            raise ValueError("catalog url must be an http(s) URL or a site path starting with /")
+        return v
 
 
 class PawBarSpec(BaseModel):
@@ -731,6 +740,9 @@ MAX_SPEC_BYTES = _MAX_SPEC_BYTES
 MAX_ACTIONS_PER_SPEC = _MAX_ACTIONS_PER_SPEC
 MAX_ARGS_PER_ACTION = _MAX_ARGS_PER_ACTION
 MAX_CATALOG_ITEMS = _MAX_CATALOG_ITEMS
+MAX_CATALOG_NAME_CHARS = _MAX_CATALOG_NAME_CHARS
+MAX_CATALOG_DESCRIPTION_CHARS = _MAX_CATALOG_DESCRIPTION_CHARS
+MAX_CATALOG_URL_CHARS = _MAX_CATALOG_URL_CHARS
 MAX_CART_ITEMS = _MAX_CART_ITEMS
 ACTION_ARG_TYPES = _ACTION_ARG_TYPES
 ACTION_POLICIES = _ACTION_POLICIES

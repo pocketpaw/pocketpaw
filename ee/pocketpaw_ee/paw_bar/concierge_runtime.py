@@ -556,7 +556,8 @@ def _knowledge_block(items: Sequence[KnowledgeItem]) -> str:
 def _catalog_and_actions_block(widget: Any) -> str:
     """The widget's catalog and declared actions, as data.
 
-    Reuses the legacy preamble's ``_catalog_block`` (ids, names, formatted prices).
+    Reuses the legacy preamble's ``_catalog_block`` (ids, names, formatted prices,
+    sold-out marks).
     It does NOT reuse ``_actions_paragraph``'s declared-actions text: that tells the
     model to call ``pawbar_<verb>`` tools, and v2 has none. The actions are listed
     as plain data instead; the widget's own buttons and forms trigger them. Cards
@@ -567,7 +568,13 @@ def _catalog_and_actions_block(widget: Any) -> str:
 
     spec = getattr(widget, "spec", None)
     catalog = [
-        {"id": c.id, "name": c.name, "price_cents": c.price_cents, "currency": c.currency}
+        {
+            "id": c.id,
+            "name": c.name,
+            "price_cents": c.price_cents,
+            "currency": c.currency,
+            "in_stock": c.in_stock,
+        }
         for c in (getattr(spec, "catalog", None) or [])[:_MAX_PREAMBLE_CATALOG]
     ]
     declared = [
