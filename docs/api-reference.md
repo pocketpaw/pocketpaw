@@ -3322,7 +3322,9 @@ POST /paw-bar/action
 
 `args` carries only those four names; empty fields are left out. Rules: `name` at
 most 120 characters, `message` at most 2000, and an `email` and/or `phone` that
-look valid. Limits: 3 per visitor per 10 minutes, 30 per site per hour. The
+look valid. Limits: 3 per visitor per 10 minutes, 30 per site per hour, taken
+atomically before the lead is written. A taken slot is never given back, so an
+attempt the injection screen drops still counts. The
 text goes through the same HIGH injection screen as site forms. `send_to_team`
 is reserved. Saving a spec that declares it (the spec PATCH routes and widget
 create) is `422 reserved_verb`. A spec already stored with it loads with that
@@ -3334,6 +3336,7 @@ action dropped and a warning logged.
 | `422 {"detail": {"code", "field", "message"}}` | `field` names the form field to mark: `too_long` (name, message), `not_text`, `invalid_email`, `invalid_phone`, `contact_required` (field `email`). `field: null` (`unknown_field`, or `rejected` by the injection screen) is a generic retry. |
 | `429` | A lead limit. |
 | `409 lead_capture_off` | The owner turned lead capture off. |
+| `503 lead_unavailable` | The limit or the lead write couldn't be checked; nothing was stored. |
 
 ## Owner notifications — email, signed webhooks, per-site recipients
 
