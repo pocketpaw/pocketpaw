@@ -5696,6 +5696,7 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
     # workspace's entitlements to another.
     doc = await _load(workspace_id, site_id)
 
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_plan_entitled
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
     resolved = entitlements_service.resolve_site_entitlements(
@@ -5725,7 +5726,10 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         # here — unlike the domain slot, whose plan grant and this site's hostname room
         # are two different questions, analytics has no per-workspace count to exhaust.
         analytics=resolved.analytics,
-        concierge_entitled=resolved.concierge_entitled,
+        # NOT echoed off the resolver: the owner page reads this to decide whether a
+        # concierge may be created, so it must give the answer the public seams
+        # give, which honours ``sites_enforced()`` (off = every plan sells it).
+        concierge_entitled=concierge_plan_entitled(doc),
         concierge_enabled=resolved.concierge_enabled,
         # Echoed off the resolver like analytics, and for the same reason there is
         # nothing to AND in: the download spends no per-workspace allowance. Note this

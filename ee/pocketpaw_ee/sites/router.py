@@ -1825,21 +1825,30 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
     The snippet comes from ``embed.concierge_snippet`` rather than being formatted
     here, so the five gates that decide whether a site has earned a bar keep
     exactly one definition. Its ``concierge_entitled`` half is asked of
-    ``site_keys.concierge_available`` — the predicate the public seams use — so
-    this panel and the visitor's first message cannot disagree about the plan.
+    ``site_keys.concierge_plan_entitled`` — the plan half of the predicate the
+    public seams use — so this panel and the visitor's first message cannot
+    disagree about the plan. The response carries that half, the switch and the
+    create marker separately, so the panel can say which one is missing.
 
     FAILURE-SOFT ON THE BAR, NOT ON THE ROW. paw_bar is imported lazily (the
     sites service must load in a deployment that does not carry it) and anything
     escaping the widget lookup leaves the snippet empty with a log line, because a
     row that is paid for and readable matters more than the panel's copy button.
     """
-    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_exists
+    from pocketpaw_ee.cloud.auth.site_keys import (
+        concierge_available,
+        concierge_exists,
+        concierge_plan_entitled,
+    )
     from pocketpaw_ee.sites import foreign_grounding
 
     workspace_id = str(getattr(site, "workspace", "") or "")
     pocket_id = str(getattr(site, "pocket_id", "") or "")
     site_key = str(getattr(site, "signed_key", "") or "")
     available = bool(concierge_available(site))
+    entitled = bool(concierge_plan_entitled(site))
+    enabled = bool(getattr(site, "concierge_enabled", False))
+    exists = concierge_exists(site)
 
     snippet = ""
     widget_id = ""
@@ -1856,13 +1865,13 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
             pocket_id=pocket_id,
             site_key=site_key,
             api_base=sites_service._capture_base(),
-            concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
-            # The plan half, from the one predicate that owns the rule (it also
+            concierge_enabled=enabled,
+            # The plan half, from the one helper that owns the rule (it also
             # honours the sites-billing flag, which a re-expression here would
             # have to remember).
-            concierge_entitled=available,
+            concierge_entitled=entitled,
             # CR-12: a bought connection has no concierge until its owner creates one.
-            concierge_exists=concierge_exists(site),
+            concierge_exists=exists,
         )
     except Exception:  # noqa: BLE001 — the row is real whether or not the bar is
         import logging
@@ -1902,6 +1911,9 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
         subscription_status=str(getattr(site, "subscription_status", "") or "none"),
         renewal_date=getattr(site, "renewal_date", None),
         concierge_available=available,
+        concierge_entitled=entitled,
+        concierge_enabled=enabled,
+        concierge_exists=exists,
     )
 
 

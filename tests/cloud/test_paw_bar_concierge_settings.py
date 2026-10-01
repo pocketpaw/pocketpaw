@@ -1068,10 +1068,34 @@ async def test_settings_snippet_is_empty_when_the_plan_lacks_the_concierge(owner
     c, store = owner_client
     site = await _site()
     await store.create_widget(_widget())
-    with patch("pocketpaw_ee.cloud.auth.site_keys.concierge_available", return_value=False):
+    with patch("pocketpaw_ee.cloud.auth.site_keys.concierge_plan_entitled", return_value=False):
         res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
     assert res.status_code == 200, res.text
     assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_asks_the_plan_and_the_switch_separately(owner_client):
+    """The snippet's ``concierge_entitled`` is the PLAN half, not "available".
+
+    A switched-off concierge on a plan that sells one is entitled; passing
+    ``concierge_available`` there would report it as unsold.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    await store.create_widget(_widget())
+    spy = AsyncMock(return_value="")
+    with (
+        patch("pocketpaw_ee.cloud.auth.site_keys.concierge_plan_entitled", return_value=True),
+        patch("pocketpaw_ee.paw_bar.embed.concierge_snippet", new=spy),
+    ):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert spy.await_count == 1
+    assert spy.await_args.kwargs["concierge_entitled"] is True
+    assert spy.await_args.kwargs["concierge_enabled"] is False
 
 
 @pytest.mark.asyncio

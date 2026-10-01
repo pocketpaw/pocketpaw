@@ -2197,7 +2197,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
     still opens; the snippet is a convenience, the settings are the point.
     """
     try:
-        from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_exists
+        from pocketpaw_ee.cloud.auth.site_keys import concierge_exists, concierge_plan_entitled
         from pocketpaw_ee.cloud.pockets import service as pockets_service
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.service import _capture_base
@@ -2211,7 +2211,8 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
             site_key=str(getattr(site, "signed_key", "") or ""),
             api_base=_capture_base(),
             concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
-            concierge_entitled=bool(concierge_available(site)),
+            # The PLAN half only; the switch is passed on its own just above.
+            concierge_entitled=bool(concierge_plan_entitled(site)),
             concierge_exists=concierge_exists(site),
         )
     except Exception:  # noqa: BLE001 — the settings response must not 500 on the bar

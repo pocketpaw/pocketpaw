@@ -336,6 +336,30 @@ async def test_a_lapsed_paid_site_loses_the_capability_and_says_so(mongo_db, mon
     assert ent.plan_tier == "site", "the tier is still recorded; only the payment stopped"
 
 
+async def _concierge_entitled(monkeypatch, *, enforced: bool, plan_tier: str, status: str) -> bool:
+    _enforce(monkeypatch, on=enforced)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(
+        workspace_id=ws, pocket_id=pocket_id, plan_tier=plan_tier, subscription_status=status
+    )
+    ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+    return ent.concierge_entitled
+
+
+async def test_concierge_entitled_follows_the_sites_billing_flag(mongo_db, monkeypatch):
+    """``concierge_entitled`` answers the same rule the public seams apply
+    (``site_keys.concierge_plan_entitled``). With sites billing off, every seam
+    serves a concierge on any plan, so the owner page must not read "not
+    included" and block creating one."""
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    free = site_plans.BASE_SITE_PLAN_KEY
+    assert await _concierge_entitled(monkeypatch, enforced=False, plan_tier=free, status="none")
+    assert not await _concierge_entitled(monkeypatch, enforced=True, plan_tier=free, status="none")
+    assert await _concierge_entitled(monkeypatch, enforced=True, plan_tier="staff", status="active")
+
+
 async def test_another_workspace_cannot_read_this_site_s_entitlements(mongo_db, monkeypatch):
     """Entitlements describe what someone is paying for. The read is tenant-scoped
     through ``_load`` like every other site read; a raw ``find_one`` on the id

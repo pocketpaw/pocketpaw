@@ -2859,9 +2859,27 @@ Response (all four endpoints share it):
   "plan_tier": "staff",
   "subscription_status": "active",
   "renewal_date": "2026-10-19T00:00:00",
-  "concierge_available": true
+  "concierge_available": true,
+  "concierge_entitled": true,
+  "concierge_enabled": true,
+  "concierge_exists": true
 }
 ```
+
+`concierge_available` is the public seams' answer: created **and** switched on
+**and** sold by the plan. Because it is an AND it cannot say which half is
+missing, so the response also carries each half on its own:
+
+| Field | Means |
+|-------|-------|
+| `concierge_entitled` | the site's plan sells a concierge (always `true` when sites billing is not enforced) |
+| `concierge_enabled` | the owner's switch; a concierge is created switched off |
+| `concierge_exists` | the owner has created the concierge |
+
+A panel explaining an empty snippet reads these, not `concierge_available`: a
+paid concierge that is created but not switched on is `concierge_entitled: true,
+concierge_enabled: false, concierge_available: false`, and it must not be told
+its plan does not include one. Servers older than these fields omit them.
 
 **The timestamps are UTC and carry no zone suffix.** Mongo stores UTC and hands
 back naive datetimes, so `verified_at` and `renewal_date` have no trailing `Z` —
@@ -2873,7 +2891,7 @@ enforces, so a panel never has to do that arithmetic itself.
 the one definition of the five gates a site must pass to earn a bar (plan,
 owner's kill switch, a key, a widget, a bound agent). `widget_id` / `agent_id`
 say **why** it is empty: an empty snippet beside a bound agent is the plan or the
-kill switch, an empty snippet beside an empty `agent_id` is provisioning that has
+kill switch (`concierge_entitled` / `concierge_enabled` say which), an empty snippet beside an empty `agent_id` is provisioning that has
 not completed yet — retry the bind, which re-runs the funnel.
 
 `site_key` is not a secret. It ships inside the snippet on a public page and is

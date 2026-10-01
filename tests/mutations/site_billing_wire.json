@@ -49,8 +49,8 @@
   {
     "label": "the entitlements read drops its tenant scope — any workspace can read any site's plan",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc = await _load(workspace_id, site_id)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
-    "replace": "    from bson import ObjectId\n\n    doc = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "find": "    doc = await _load(workspace_id, site_id)\n\n    from pocketpaw_ee.cloud.auth.site_keys import concierge_plan_entitled",
+    "replace": "    from bson import ObjectId\n\n    doc = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n\n    from pocketpaw_ee.cloud.auth.site_keys import concierge_plan_entitled",
     "tests": [
       "tests/cloud/sites/test_billing_state_on_the_wire.py::test_another_workspace_cannot_read_this_site_s_entitlements"
     ]

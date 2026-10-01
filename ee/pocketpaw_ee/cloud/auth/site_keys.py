@@ -209,7 +209,21 @@ def concierge_available(site: _SiteDoc) -> bool:
     """
     if not concierge_exists(site) or not site.concierge_enabled:
         return False
+    return concierge_plan_entitled(site)
 
+
+def concierge_plan_entitled(site: _SiteDoc) -> bool:
+    """Does this site's PLAN sell a concierge? The plan half of
+    ``concierge_available`` and nothing else: not created, not switched on.
+
+    Owner-facing surfaces need this half on its own so they can tell "your plan
+    does not include it" from "you have not switched it on". Asking
+    ``concierge_available`` for that answers False for a paid concierge that is
+    merely off, which is how a paying customer was told to restore their plan.
+
+    With ``sites_enforced()`` off (OSS, self-host) every site is entitled, the
+    same fail-open direction ``concierge_available`` takes.
+    """
     from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
     if not sites_enforced():
@@ -222,7 +236,7 @@ def concierge_available(site: _SiteDoc) -> bool:
         workspace_id=site.workspace,
         plan_tier=site.plan_tier,
         subscription_status=site.subscription_status,
-        concierge_enabled=True,  # already checked above; this asks the PLAN
+        concierge_enabled=True,  # this asks the PLAN; the switch is not its business
     )
     return ent.concierge_entitled
 
