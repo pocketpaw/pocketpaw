@@ -2307,6 +2307,42 @@ async def copy_site_snapshot(
     return await _resolved_wire_dict(doc, owner)
 
 
+async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) -> dict:
+    """Read a site pocket's ``SITE_SNAPSHOT_FIELDS`` for a copy, after authorizing it.
+
+    The one read path behind ``duplicate_pocket`` and saving a site as a template.
+    Returns the five snapshot fields plus the source's raw ``source_gated`` stamp,
+    ``name`` and ``visibility``. The values are the document's own, not copies;
+    ``copy_site_snapshot`` deep-copies on write.
+
+    A pocket outside ``workspace_id`` (or a malformed id) is NotFound, never
+    Forbidden, so this is not an existence oracle across tenants; a private pocket
+    the caller cannot read is Forbidden, as on ``get``; a non-site pocket is a
+    ValidationError (``pocket.not_a_site``).
+    """
+    try:
+        oid = PydanticObjectId(pocket_id)
+    except (InvalidId, TypeError, ValueError):
+        raise NotFound("pocket", pocket_id) from None
+    source = await _PocketDoc.find_one(_PocketDoc.id == oid, _PocketDoc.workspace == workspace_id)
+    if source is None:
+        raise NotFound("pocket", pocket_id)
+    _check_read_access(source, user_id)
+    if source.type != "site":
+        raise ValidationError("pocket.not_a_site", "Only site pockets can be copied")
+
+    return {
+        "engine": source.engine,
+        "pattern": source.pattern,
+        "rippleSpec": source.rippleSpec,
+        "source": source.source,
+        "keeps_client_bundle": source.keeps_client_bundle,
+        "source_gated": source.source_gated,
+        "name": source.name,
+        "visibility": source.visibility,
+    }
+
+
 async def duplicate_pocket(
     workspace_id: str, user_id: str, pocket_id: str, body: DuplicatePocketRequest
 ) -> dict:
@@ -2317,9 +2353,9 @@ async def duplicate_pocket(
     copy, and an SF-2-exempt source (``source_gated=False``, kept so old pockets
     don't lose source they already had) gives a copy stamped like any new pocket.
 
-    A pocket outside ``workspace_id`` is NotFound (never Forbidden, so this is not
-    an existence oracle across tenants); a private pocket the caller cannot read is
-    Forbidden, as on ``get``; a non-site pocket is a ValidationError.
+    Reads and authorizes the source through ``read_site_snapshot``: another
+    tenant's pocket is NotFound, an unreadable private one Forbidden, a non-site
+    one a ValidationError.
 
     A successful copy writes one ``pocket.duplicated`` workspace audit row (actor,
     new pocket id, source pocket id and visibility). ``audit_service.record`` is
@@ -2327,34 +2363,17 @@ async def duplicate_pocket(
     refused duplicate writes nothing.
     """
     body = DuplicatePocketRequest.model_validate(body)
-    try:
-        oid = PydanticObjectId(pocket_id)
-    except (InvalidId, TypeError, ValueError):
-        raise NotFound("pocket", pocket_id) from None
-    source = await _PocketDoc.find_one(_PocketDoc.id == oid, _PocketDoc.workspace == workspace_id)
-    if source is None:
-        raise NotFound("pocket", pocket_id)
-    _check_read_access(source, user_id)
-    if source.type != "site":
-        raise ValidationError("pocket.not_a_site", "Only site pockets can be duplicated")
-
-    snapshot = {
-        "engine": source.engine,
-        "pattern": source.pattern,
-        "rippleSpec": source.rippleSpec,
-        "source": source.source,
-        "keeps_client_bundle": source.keeps_client_bundle,
-    }
+    source = await read_site_snapshot(workspace_id, user_id, pocket_id)
     wire = await copy_site_snapshot(
-        snapshot,
+        source,
         workspace_id=workspace_id,
         owner=user_id,
         # ``name`` is capped at 100 like the request body; trim the source name to fit.
-        name=body.name or f"{source.name[:93]} (copy)",
-        source_gated=source.source_gated or _source_gated_at_create(),
+        name=body.name or f"{source['name'][:93]} (copy)",
+        source_gated=source["source_gated"] or _source_gated_at_create(),
         # A private site stays private; anything else lands workspace-visible,
         # so duplicating a public site never publishes a second one.
-        visibility="private" if source.visibility == "private" else "workspace",
+        visibility="private" if source["visibility"] == "private" else "workspace",
     )
     from pocketpaw_ee.cloud.audit import service as audit_service
 
@@ -2364,7 +2383,7 @@ async def duplicate_pocket(
         action="pocket.duplicated",
         target_type="pocket",
         target_id=wire["_id"],
-        metadata={"source_pocket_id": pocket_id, "source_visibility": source.visibility},
+        metadata={"source_pocket_id": pocket_id, "source_visibility": source["visibility"]},
     )
     return wire
 

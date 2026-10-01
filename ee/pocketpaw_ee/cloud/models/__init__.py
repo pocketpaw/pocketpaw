@@ -286,6 +286,7 @@ from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 from pocketpaw_ee.cloud.models.subscription import Subscription
@@ -470,6 +471,7 @@ __all__ = [
     "SiteDomain",
     "SiteOriginClaim",
     "SiteRateCounter",
+    "SiteTemplate",
     "SpendReconciliation",
     "StudioGeneration",
     "Subscription",
@@ -619,6 +621,9 @@ def get_all_documents():
         ChatRunDoc,
         Lead,
         Site,
+        # User-saved site templates. Only ``ee.cloud.site_templates.service``
+        # writes it.
+        SiteTemplate,
         SiteDesignBrief,
         SiteExport,
         # SF-8 — the proof that a workspace controls an origin. The later
