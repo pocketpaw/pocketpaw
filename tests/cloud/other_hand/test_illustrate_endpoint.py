@@ -5,6 +5,11 @@
 # validated `path` ops out — WITHOUT calling the paid generator. Everything
 # except fal is real: the route, the body validation, the SVG conversion, the
 # box fitting.
+#
+# Updated 2026-10-01 (CN-3): the daily budget is the shared
+# ``metering.service.try_spend`` primitive (``illustration_budget`` is gone).
+# The fakes patch that one function and answer a bool; the assertions are
+# unchanged.
 
 from __future__ import annotations
 
@@ -99,7 +104,7 @@ class TestTheRoundTrip:
 # The tests above call `ill.illustrate_as_ops` DIRECTLY, which is why they all
 # passed while the route itself spent money with no ceiling: the REST handler
 # hard-wired `allowed=True` and never claimed the daily budget, so
-# `illustration_budget.try_spend` had exactly one caller in the whole repo —
+# the illustration budget's `try_spend` had exactly one caller in the whole repo —
 # the MCP tool. A signed-up user (guest accounts included) could script the
 # wand button into an unmetered bill at roughly $0.08 a call.
 #
@@ -115,13 +120,13 @@ class TestTheRouteHonoursTheDailyBudget:
     @pytest.mark.asyncio
     async def test_the_route_refuses_once_the_day_is_spent(self, monkeypatch):
         from pocketpaw_ee.cloud._core.errors import CloudError
-        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.metering import service as metering
         from pocketpaw_ee.cloud.other_hand import router as oh_router
 
-        async def _refuse(_workspace_id=None):
-            return False, 20, 20
+        async def _refuse(**_k):
+            return False
 
-        monkeypatch.setattr(illustration_budget, "try_spend", _refuse)
+        monkeypatch.setattr(metering, "try_spend", _refuse)
 
         # If the handler reaches the generator at all, that is the bug.
         async def _must_not_run(*_a, **_k):
@@ -139,16 +144,16 @@ class TestTheRouteHonoursTheDailyBudget:
 
     @pytest.mark.asyncio
     async def test_the_route_claims_one_unit_before_it_draws(self, monkeypatch):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.metering import service as metering
         from pocketpaw_ee.cloud.other_hand import router as oh_router
 
         claimed: list[str | None] = []
 
-        async def _allow(workspace_id=None):
-            claimed.append(workspace_id)
-            return True, 1, 20
+        async def _allow(**kw):
+            claimed.append(kw["subject_id"])
+            return True
 
-        monkeypatch.setattr(illustration_budget, "try_spend", _allow)
+        monkeypatch.setattr(metering, "try_spend", _allow)
 
         async def _draw(*_a, **_k):
             assert claimed, "the generator ran before the budget was claimed"
@@ -179,7 +184,7 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
     async def test_the_route_refuses_a_guest_before_claiming_budget(self, monkeypatch):
         from pocketpaw_ee.cloud._core.errors import GuestIllustrateForbidden
         from pocketpaw_ee.cloud.auth import guest_budget
-        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.metering import service as metering
         from pocketpaw_ee.cloud.other_hand import router as oh_router
 
         async def _is_a_guest(_user_id):
@@ -187,10 +192,10 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
 
         monkeypatch.setattr(guest_budget, "load_guest", _is_a_guest)
 
-        async def _budget_must_not_be_touched(_workspace_id=None):
+        async def _budget_must_not_be_touched(**_k):
             raise AssertionError("a refused guest still consumed the daily budget")
 
-        monkeypatch.setattr(illustration_budget, "try_spend", _budget_must_not_be_touched)
+        monkeypatch.setattr(metering, "try_spend", _budget_must_not_be_touched)
 
         async def _must_not_run(*_a, **_k):
             raise AssertionError("the route paid the generator for a guest")
@@ -209,7 +214,7 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
     @pytest.mark.asyncio
     async def test_a_real_account_still_draws(self, monkeypatch):
         from pocketpaw_ee.cloud.auth import guest_budget
-        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.metering import service as metering
         from pocketpaw_ee.cloud.other_hand import router as oh_router
 
         async def _not_a_guest(_user_id):
@@ -217,10 +222,10 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
 
         monkeypatch.setattr(guest_budget, "load_guest", _not_a_guest)
 
-        async def _allow(_workspace_id=None):
-            return True, 1, 20
+        async def _allow(**_k):
+            return True
 
-        monkeypatch.setattr(illustration_budget, "try_spend", _allow)
+        monkeypatch.setattr(metering, "try_spend", _allow)
 
         async def _draw(*_a, **_k):
             return [{"t": "path", "d": "M0 0 L1 1"}]
@@ -237,8 +242,8 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
         from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
         from pocketpaw_ee.cloud.auth import guest_budget
         from pocketpaw_ee.cloud.chat import agent_service
+        from pocketpaw_ee.cloud.metering import service as budget
         from pocketpaw_ee.cloud.other_hand import illustrate as ill_mod
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
         from pocketpaw_ee.cloud.studio import fal_edit
 
         monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
@@ -267,8 +272,8 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
         """No identity resolves to a refusal, not to a free drawing."""
         from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
         from pocketpaw_ee.cloud.chat import agent_service
+        from pocketpaw_ee.cloud.metering import service as budget
         from pocketpaw_ee.cloud.other_hand import illustrate as ill_mod
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
         from pocketpaw_ee.cloud.studio import fal_edit
 
         monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
@@ -316,15 +321,15 @@ class TestAWorkspaceOnItsOwnKey:
 
     @pytest.fixture
     def budget_spy(self, monkeypatch):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.metering import service as metering
 
         claimed: list[str | None] = []
 
-        async def _spend(workspace_id=None):
-            claimed.append(workspace_id)
-            return True, 1, 20
+        async def _spend(**kw):
+            claimed.append(kw["subject_id"])
+            return True
 
-        monkeypatch.setattr(illustration_budget, "try_spend", _spend)
+        monkeypatch.setattr(metering, "try_spend", _spend)
         return claimed
 
     @pytest.mark.asyncio

@@ -3,8 +3,8 @@
 #
 # Created 2026-10-01 (fix/canon-daily-caps, CN-3). Written against the six
 # per-meter budgets BEFORE they were folded into one ``metering`` primitive, and
-# run green there first. The refactor may change only the ``_METERS`` adapter
-# table below; every assertion has to pass unchanged on both sides. That is
+# run green there first. The refactor changed only the adapters (``_spend`` and
+# ``_docs``); every assertion passes unchanged on both sides. That is
 # what "behaviour must not change for any existing deployment" means here.
 #
 # Pinned per meter: the claim that EXCEEDS the cap is refused; a refused claim
@@ -37,12 +37,11 @@ class Meter:
 
 
 async def _spend(meter: Meter, subject: Any, cap: int, monkeypatch) -> bool:
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
     if meter.env:
         monkeypatch.setenv(meter.env, str(cap))
-    if meter.name == "workspace_turns":
-        from pocketpaw_ee.cloud.chat.runs import turn_budget
-
-        return (await turn_budget.try_spend(subject))[0]
     if meter.name == "upload_files":
         monkeypatch.setenv("POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY", str(10**15))
         from pocketpaw_ee.cloud.uploads import upload_budget
@@ -53,41 +52,28 @@ async def _spend(meter: Meter, subject: Any, cap: int, monkeypatch) -> bool:
         from pocketpaw_ee.cloud.uploads import upload_budget
 
         return (await upload_budget.try_spend(subject, 0, 1))[0]
-    if meter.name == "file_comprehension":
-        from pocketpaw_ee.cloud.uploads import comprehension_budget
-
-        return (await comprehension_budget.try_spend(subject))[0]
-    if meter.name == "file_transcription":
-        from pocketpaw_ee.cloud.uploads import transcription_budget
-
-        return (await transcription_budget.try_spend(subject))[0]
-    if meter.name == "illustration":
-        from pocketpaw_ee.cloud.other_hand import illustration_budget
-
-        return (await illustration_budget.try_spend(subject))[0]
-    if meter.name == "guest_turns":
-        from pocketpaw_ee.cloud.auth import guest_budget
-
-        return (await guest_budget.try_spend_turn(subject, cap))[0]
-    raise AssertionError(meter.name)
+    # Every other meter is called exactly the way its production caller calls
+    # the primitive: its own cap resolver, subject type and failure mode.
+    resolved = {
+        "workspace_turns": metering.workspace_turns_cap,
+        "file_comprehension": metering.file_comprehension_cap,
+        "file_transcription": metering.file_transcription_cap,
+        "illustration": metering.illustration_cap,
+        "guest_turns": lambda: cap,  # guest_gates passes limits_for(...) as-is
+    }[meter.name]()
+    return await metering.try_spend(
+        subject_type="user" if meter.name == "guest_turns" else "workspace",
+        subject_id=subject,
+        meter=DailyMeter(meter.name),
+        cap=resolved,
+        fail_open=meter.name == "workspace_turns",
+    )
 
 
 def _docs() -> list[type]:
-    from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
-    from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
-    from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
-    from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
-    from pocketpaw_ee.cloud.models.workspace_turn_usage import WorkspaceTurnUsage
-    from pocketpaw_ee.cloud.models.workspace_upload_usage import WorkspaceUploadUsage
+    from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
-    return [
-        FileComprehensionUsage,
-        FileTranscriptionUsage,
-        GuestTurnUsage,
-        IllustrationUsage,
-        WorkspaceTurnUsage,
-        WorkspaceUploadUsage,
-    ]
+    return [DailyUsage]
 
 
 # ── the adapter table ends here; nothing below may change in the refactor ──

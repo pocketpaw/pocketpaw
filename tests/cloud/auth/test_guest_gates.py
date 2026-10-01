@@ -9,6 +9,10 @@
 # switched-off gate ships green. The sessions-service test drives the REAL
 # ``sessions_service.create`` so the lazy-import wiring is exercised, not just
 # the helper.
+# Updated 2026-10-01 (CN-3): guest turns are counted by the shared
+# ``metering.service`` daily primitive; ``_spend_turn`` / ``_turns_used_today``
+# below stand in for the removed ``guest_budget.try_spend_turn`` /
+# ``turns_used_today`` with the same claim the gate makes.
 
 from __future__ import annotations
 
@@ -22,6 +26,25 @@ from pocketpaw_ee.cloud.auth import guest_gates
 from pocketpaw_ee.cloud.models.user import GuestLimits, User
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _spend_turn(user_id: str, cap: int) -> bool:
+    """One guest turn claim, exactly as ``guest_gates`` makes it."""
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.try_spend(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS, cap=cap
+    )
+
+
+async def _turns_used_today(user_id: str) -> int:
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.used(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS
+    )
 
 
 async def _mk_guest(*, sessions=2, turns=40, workspace="w_g") -> User:
@@ -134,13 +157,12 @@ class TestTurnGateCheckOnly:
             await guest_gates.assert_guest_turn_allowed(str(guest.id), "w_g")
 
     async def test_a_guest_at_the_turn_cap_is_refused(self, mongo_db):
-        from pocketpaw_ee.cloud.auth import guest_budget
 
         guest = await _mk_guest(turns=2)
         await _store_key("w_g")
         # EXCEED the line: two real spends land the guest at cap 2.
-        assert (await guest_budget.try_spend_turn(str(guest.id), 2))[0] is True
-        assert (await guest_budget.try_spend_turn(str(guest.id), 2))[0] is True
+        assert (await _spend_turn(str(guest.id), 2)) is True
+        assert (await _spend_turn(str(guest.id), 2)) is True
         with pytest.raises(GuestLimitError) as exc:
             await guest_gates.assert_guest_turn_allowed(str(guest.id), "w_g")
         assert exc.value.kind == "turns"
@@ -148,13 +170,12 @@ class TestTurnGateCheckOnly:
     async def test_the_check_does_NOT_increment(self, mongo_db):
         """The executor owns the single spend; a checking route must not make
         every turn cost two."""
-        from pocketpaw_ee.cloud.auth import guest_budget
 
         guest = await _mk_guest(turns=5)
         await _store_key("w_g")
         await guest_gates.assert_guest_turn_allowed(str(guest.id), "w_g")
         await guest_gates.assert_guest_turn_allowed(str(guest.id), "w_g")
-        assert await guest_budget.turns_used_today(str(guest.id)) == 0
+        assert await _turns_used_today(str(guest.id)) == 0
 
     async def test_a_guest_under_cap_with_a_key_passes(self, mongo_db):
         guest = await _mk_guest(turns=5)
@@ -258,14 +279,13 @@ class TestChatRouteFastReject:
             return await c.post("/cloud/chat/session/s1/agent", json={"content": "x"})
 
     async def test_a_guest_at_the_cap_gets_the_frozen_402_body(self, mongo_db, monkeypatch):
-        from pocketpaw_ee.cloud.auth import guest_budget
 
         guest = await _mk_guest(turns=2)
         await _store_key("w_g")
         uid = str(guest.id)
         # EXCEED the line before asking.
-        assert (await guest_budget.try_spend_turn(uid, 2))[0] is True
-        assert (await guest_budget.try_spend_turn(uid, 2))[0] is True
+        assert (await _spend_turn(uid, 2)) is True
+        assert (await _spend_turn(uid, 2)) is True
 
         resp = await self._post(uid, monkeypatch)
 
@@ -274,7 +294,7 @@ class TestChatRouteFastReject:
         assert body["code"] == "guest_limit_reached"
         assert body["kind"] == "turns"
         # The check must not have SPENT anything — the executor owns the spend.
-        assert await guest_budget.turns_used_today(uid) == 2
+        assert await _turns_used_today(uid) == 2
 
     async def test_a_keyless_guest_gets_guest_key_required(self, mongo_db, monkeypatch):
         guest = await _mk_guest()  # no stored key
