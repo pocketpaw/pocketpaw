@@ -9,7 +9,9 @@
 # Updated 2026-10-01 (CN-3): the daily budget is the shared
 # ``metering.service.try_spend`` primitive (``illustration_budget`` is gone).
 # The fakes patch that one function and answer a bool; the assertions are
-# unchanged.
+# unchanged. An autouse fixture now gives every test a platform fal key: the
+# route tests that need one used to pass only on a machine with FAL_KEY set,
+# and with it present the "tool ignores the stored key" mutation is caught.
 
 from __future__ import annotations
 
@@ -96,6 +98,15 @@ class TestTheRoundTrip:
         # A raster model here would silently break the whole premise: the
         # result would be a picture, and svg_to_ink would find no geometry.
         assert "text-to-vector" in fake_generator.last_endpoint
+
+
+@pytest.fixture(autouse=True)
+def _platform_fal_key(monkeypatch):
+    """A platform key, so a test reaches the budget instead of the no-key
+    refusal, whatever the machine's env holds."""
+    from pocketpaw_ee.cloud.studio import fal_edit
+
+    monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "platform-key")
 
 
 # ---------------------------------------------------------------------------
