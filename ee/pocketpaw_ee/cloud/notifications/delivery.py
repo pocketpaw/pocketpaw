@@ -149,7 +149,8 @@ def _slack_payload(notification: Notification) -> dict:
 
 
 def _generic_data(notification: Notification) -> dict:
-    """``data`` of a ``notification.created`` webhook event."""
+    """``data`` of a ``notification.created`` webhook event, also sent flat at
+    the top level of the body for consumers of the pre-envelope shape."""
     return {
         "id": notification.id,
         "workspace_id": notification.workspace_id,
@@ -206,7 +207,14 @@ def _rows_for(config, notification: Notification) -> list[dict[str, Any]]:
             payload = _slack_payload(notification)
             ref = ""
         else:
-            payload = new_event_envelope(EVENT_NOTIFICATION, data=_generic_data(notification))
+            data = _generic_data(notification)
+            # Back-compat: the workspace webhook used to receive the flat
+            # notification fields at the top level. They ride along (deprecated)
+            # beside the envelope. ``id`` is the notification id in both shapes,
+            # so the event id IS the notification id here (one delivery per
+            # notification per sink, so it is still a stable dedupe key).
+            payload = new_event_envelope(EVENT_NOTIFICATION, data=data, legacy=data)
+            payload["event_id"] = notification.id
             ref = f"workspace:{notification.workspace_id}"
         rows.append(
             {

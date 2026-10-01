@@ -262,7 +262,9 @@ async def test_workspace_webhook_secret_shown_once_and_signature_verifies(net) -
     assert sig.startswith("v1=")
     assert webhook_signing.verify_signature(secret, ts, req.content, sig)
     event = json.loads(req.content)
-    assert set(event) == {"id", "type", "created_at", "data"}
+    # Envelope plus the deprecated flat notification fields (back-compat).
+    assert {"id", "type", "created_at", "data"} <= set(event)
+    assert event["kind"] == "mention" and event["id"] == event["data"]["id"]
 
 
 async def test_webhook_auto_disables_after_ten_dead_deliveries(net) -> None:

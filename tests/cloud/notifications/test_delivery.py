@@ -108,7 +108,7 @@ async def test_create_fans_out_to_both_sinks(monkeypatch, recording_bus) -> None
     # Generic webhook: a typed event envelope around the notification.
     generic = payloads[WEBHOOK_URL]
     assert generic["type"] == "notification.created"
-    assert generic["id"].startswith("evt_")
+    assert generic["id"] == out.id  # the notification id, as in the legacy shape
     assert generic["data"]["kind"] == "mention"
     assert generic["data"]["workspace_id"] == "w1"
     assert generic["data"]["recipient_id"] == "u2"
@@ -292,3 +292,32 @@ def test_is_safe_webhook_url_rejects_encoded_ssrf(url) -> None:
 
 def test_is_safe_webhook_url_allows_normal_https_host() -> None:
     assert delivery_mod.is_safe_webhook_url("https://hooks.slack.com/services/T0/B0/xxx") is True
+
+
+async def test_workspace_webhook_keeps_the_legacy_flat_shape(monkeypatch) -> None:
+    """Existing consumers read the flat notification fields at the top level;
+    they stay there (deprecated) beside the envelope, and ``id`` keeps meaning
+    the notification id in both shapes."""
+    rec = _Recorder()
+    _install_transport(monkeypatch, rec)
+    await _set_config(slack_webhook_url="")
+
+    out = await notifications_service.create(
+        workspace_id="w1", recipient="u2", kind="mention", title="Hi", body="b", actor_id="u9"
+    )
+    await outbox.process_due()
+
+    (body,) = [b for u, b in rec.requests if u == WEBHOOK_URL]
+    legacy = {
+        "id": out.id,
+        "workspace_id": "w1",
+        "recipient_id": "u2",
+        "actor_id": "u9",
+        "kind": "mention",
+        "title": "Hi",
+        "body": "b",
+    }
+    assert {k: body[k] for k in legacy} == legacy
+    assert body["data"] == legacy
+    assert body["type"] == "notification.created" and body["created_at"]
+    assert set(body) == set(legacy) | {"type", "created_at", "data"}

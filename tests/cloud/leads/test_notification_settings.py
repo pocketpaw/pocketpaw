@@ -339,6 +339,8 @@ async def test_site_webhook_is_signed_and_carries_the_lead(net) -> None:
     )
     event = json.loads(req.content)
     assert event["type"] == "lead.captured"
+    # New event types are envelope-only: no legacy flat keys.
+    assert set(event) == {"id", "type", "created_at", "data"}
     data = event["data"]
     assert (data["id"], data["name"], data["email"], data["phone"], data["message"]) == (
         lead_id,

@@ -20,7 +20,9 @@
 # leads.notification_settings) and the URL is SSRF-checked again (DNS
 # included). A dead webhook row bumps that config's failure counter, which
 # switches the webhook off at 10; a sent row resets it. Lead events carry only
-# ``lead_id``: the lead is loaded and serialized when the row is sent.
+# ``lead_id``: the lead is loaded and serialized when the row is sent. A
+# ``notification.created`` row also carries ``legacy``: the deprecated flat
+# fields, merged into the body's top level for pre-envelope consumers.
 #
 # The sweeper is an app-lifespan task started from ``extensions`` beside the run
 # sweeper. ``enqueue_many`` wakes it, so a fresh row goes out in well under the
@@ -247,6 +249,11 @@ async def _send_webhook(item: NotificationOutboxItem, client: httpx.AsyncClient)
         created_at=str(payload.get("created_at") or item.created_at.isoformat()),
         data=data,
     )
+    legacy = payload.get("legacy")
+    if isinstance(legacy, dict):
+        # ``notification.created`` only: the deprecated flat fields, never
+        # overriding an envelope key (``id`` already equals the legacy id).
+        event = {**event, **{k: v for k, v in legacy.items() if k not in event}}
     body = webhook_signing.encode_event(event)
     try:
         resp = await client.post(

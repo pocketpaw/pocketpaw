@@ -3345,8 +3345,29 @@ per sink, not once per admin.
 webhook the same way. The `PUT` response carries `webhook_secret` once, when a
 new URL is saved; reads return `has_webhook_secret` instead.
 `POST /notifications/delivery-config/webhook-secret` rotates it (returned once).
-Plain notifications arrive as `type: "notification.created"` with `data` =
-`{id, workspace_id, recipient_id, actor_id, kind, title, body}`.
+Plain notifications arrive as `type: "notification.created"`. For
+compatibility with receivers built before the envelope, the old flat fields are
+also kept at the top level of the body:
+
+```json
+{
+  "id": "68f0c2…",
+  "type": "notification.created",
+  "created_at": "2026-10-01T09:30:00+00:00",
+  "data": {"id": "68f0c2…", "workspace_id": "…", "recipient_id": "…", "actor_id": null,
+           "kind": "mention", "title": "…", "body": "…"},
+  "workspace_id": "…", "recipient_id": "…", "actor_id": null,
+  "kind": "mention", "title": "…", "body": "…"
+}
+```
+
+The top-level `workspace_id`, `recipient_id`, `actor_id`, `kind`, `title` and
+`body` are **deprecated**: read them from `data`. They will be removed in a
+later release. There is no key clash: `id` is the notification id in both
+shapes (it is also the event id for this type, since each notification is
+delivered once per webhook). Every other event type (`lead.captured`,
+`concierge.handoff`, `notification.test`), and everything sent to a site
+webhook, uses the envelope only: `{id, type, created_at, data}`.
 
 ### Webhook payload and signing
 
