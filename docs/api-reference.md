@@ -2,6 +2,8 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-cobrand, PH-5) — "Hide the PocketPaw badge":
+  partner-sold sites carry the partner co-brand mark instead of the badge.
 Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
   POST /partners/sell, GET /partners/sites (yearly partner plans paid from the
   partner's credit wallet).
@@ -3362,6 +3364,16 @@ pay for. A lapsed paid site gets its badge back on its next publish whatever the
 Every site response (`GET /sites`, `GET /sites/{site_id}`, the publish response, and so
 on) now carries `badge_hidden: bool`. It defaults to `true`, and a site written before the
 field existed reads `true`, which is how an entitled site behaved before the switch.
+
+**Partner-sold sites carry a co-brand mark instead.** A site a Paw Partner sold
+(`POST /partners/sell`, so `partner_client_id` is set) on an active partner-only plan
+(`site_year` / `staff_year`) publishes with "Made by <footer_name> · Paw Sites by
+PocketPaw", linking to `https://pocketpaw.xyz/partners`. `footer_name` comes from the
+partner's profile. It sits in the same place as the badge with the same lock, so the
+shop's own stylesheet cannot hide it, and `badge_hidden` does not remove it. The sale's
+own redeploy already carries it. If the partner plan lapses, the next publish puts the
+standard badge back. A partner profile with no `footer_name` falls back to the rules
+above.
 
 ### `PATCH /sites/{site_id}/branding`
 
