@@ -4,6 +4,10 @@ Updated 2026-10-01 (feat/discover-index): ``mount_cloud`` registers the Discover
 sources and the site-template -> listing sync after ``init_realtime``, and mounts
 the Discover router (``/api/v1/discover``) next to site templates.
 
+Updated 2026-10-02 (feat/discover-index, hardening): behind
+``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` a leased loop reindexes Discover from site
+templates every 30 minutes.
+
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
 ``pocketpaw.routes`` entry-point). It mounts every domain router under
 ``/api/v1`` (each domain keeps a thin router over a service that owns its
@@ -1290,6 +1294,30 @@ def mount_cloud(app: FastAPI) -> None:
         @on_shutdown
         async def _stop_websandbox_reaper() -> None:
             await _websandbox_reaper.stop()
+
+    # Discover reindex (DS-1 hardening). Every 30 minutes it re-syncs the public
+    # Discover index from site templates: repairs a missed or failed event sync
+    # and refreshes ``live_url`` (sites emit no rename / unpublish / delete
+    # events). Same scheduler gate and lease as the loops above.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.discover.listeners import (
+            start_discover_reindex,
+            stop_discover_reindex,
+        )
+
+        _discover_reindex = leased(
+            "discover_reindex",
+            lambda: start_discover_reindex(app),
+            lambda: stop_discover_reindex(app),
+        )
+
+        @on_startup
+        async def _start_discover_reindex() -> None:
+            await _discover_reindex.start()
+
+        @on_shutdown
+        async def _stop_discover_reindex() -> None:
+            await _discover_reindex.stop()
 
     # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
     # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a

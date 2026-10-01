@@ -273,6 +273,30 @@ def test_register_discover_listeners_subscribes_the_three_events(monkeypatch) ->
     assert set(subscribed) == SYNCED
 
 
+@pytest.mark.asyncio
+async def test_periodic_reindex_starts_once_runs_and_stops(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    ran = asyncio.Event()
+
+    async def _reindex(source: str) -> dict:
+        assert source == "site_template"
+        ran.set()
+        return {}
+
+    monkeypatch.setattr(listeners, "REINDEX_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(service_admin, "reindex", _reindex)
+    app = SimpleNamespace(state=SimpleNamespace())
+    await listeners.start_discover_reindex(app)
+    task = app.state.discover_reindex_task
+    await listeners.start_discover_reindex(app)
+    assert app.state.discover_reindex_task is task  # second start is a no-op
+    await asyncio.wait_for(ran.wait(), 1)
+    await listeners.stop_discover_reindex(app)
+    assert app.state.discover_reindex_task is None and task.cancelled()
+
+
 # ---------------------------------------------------------------------------
 # Public reads
 # ---------------------------------------------------------------------------
