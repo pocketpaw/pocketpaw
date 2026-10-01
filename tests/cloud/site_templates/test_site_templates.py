@@ -15,6 +15,7 @@
 # routes; and the screenshot copied onto the public asset rail (save, refresh,
 # delete purge, prefix isolation). The asset detector's per-shape tests: test_private_assets.py.
 # Mutation plan: tests/mutations/site_templates.json.
+# Updated 2026-10-01 (feat/discover-index): META_KEYS gains kind, audiences, live_url.
 from __future__ import annotations
 
 from typing import Any
@@ -41,6 +42,9 @@ STRANGER = "u3"  # another workspace
 SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle")
 LEAKY_KEYS = {"snapshot", "source", "rippleSpec"}
 META_KEYS = {
+    "kind",
+    "audiences",
+    "live_url",
     "id",
     "name",
     "description",
