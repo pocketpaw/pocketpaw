@@ -537,8 +537,9 @@ forbidden_modules = ["pocketpaw_ee.cloud.models.temporal_sweep_state"]
 
 [[tool.importlinter.contracts]]
 # Added 2026-10-01 (CN-3): every daily cap counts through one DailyUsage doc,
-# and only metering.service touches it. These are the modules that each owned
-# a private counter before; none may reach past try_spend again.
+# and only metering.service should touch it. This is a DENY-LIST of the current
+# callers (the modules that each owned a private counter before), not a full
+# allow-list: a new module importing the doc is not caught here.
 name = "DailyUsage — Beanie writes only from metering/service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

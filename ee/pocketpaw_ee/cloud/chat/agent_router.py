@@ -292,31 +292,23 @@ async def post_agent_chat(
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
 
-    # BC-4 run-start hard-block + chunk-3 monthly-quota fast-reject. Sit BOTH
-    # credit gates at the SINGLE run-start chokepoint — BEFORE any DB write (no
+    # The run-start checks, at the SINGLE chokepoint — BEFORE any DB write (no
     # user message, no ChatRunDoc) and BEFORE the executor submit — so a blocked
-    # run leaves no trace and IN-FLIGHT runs (already past this point) are never
-    # killed. Flag-gated: OFF by default (OSS / self-host run no ledger), ON for
-    # the cloud via ``POCKETPAW_BILLING_ENFORCED``. We never raise HTTPException
-    # here; both gates raise a ``CloudError`` the handler maps to the 402 wire.
-    # The credits package is imported locally to keep it off this hot module's
-    # import graph.
+    # run leaves no trace and IN-FLIGHT runs are never killed. Each raises a
+    # ``CloudError`` the handler maps to the wire; never HTTPException.
     #
-    #   * ``check_balance`` (BC-4) — the wallet is empty (balance <= 0): raises
-    #     ``InsufficientCredits`` (402, credits.insufficient). The SECONDARY
-    #     guard; stays first and unchanged.
-    #   * ``check_quota`` (chunk 3) — the wallet may still hold credits but the
-    #     workspace has spent up to its monthly ceiling (plan cap + period
-    #     top-ups): raises ``QuotaExceeded`` (402, credits.quota_exceeded). This
-    #     is the universal monthly cap; the same assertion the run-start gate in
-    #     ``run_core.execute_run`` enforces, mirrored here so the synchronous
-    #     chat HTTP path returns a clean 402 with no DB trace instead of starting
-    #     a run that the executor would only reject afterward.
+    #   * Billing: ``credits.guards.assert_within_billing``, the same gate
+    #     ``run_core.execute_run`` uses. Flag-gated (``POCKETPAW_BILLING_ENFORCED``,
+    #     off for OSS / self-host). Inside it, ``check_balance`` (empty wallet,
+    #     402 credits.insufficient) runs before ``check_quota`` (monthly
+    #     ceiling, 402 credits.quota_exceeded), so the synchronous HTTP path
+    #     answers 402 instead of starting a run the executor would reject.
+    #   * The guest turn gate and the daily turn ceiling (read-only; the
+    #     executor owns the spend).
     #
-    # All four run-start checks (these two, the guest gate and the daily turn
-    # ceiling below) are read-only and independent, so ``_run_start_gates`` runs
-    # them concurrently and then raises the FIRST failure in this declared
-    # order. A turn failing several checks gets the same error it always did.
+    # They are independent, so ``_run_start_gates`` runs them concurrently and
+    # raises the FIRST failure in that declared order. A turn failing several
+    # checks gets the same error it always did.
     await _run_start_gates(workspace_id, user_id, ctx.workspace_id)
 
     transport = get_stream_transport()
