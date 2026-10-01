@@ -172,14 +172,67 @@ async def test_sync_follows_visibility_and_delete(recording_bus) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_removes_a_report_hidden_template(recording_bus) -> None:
+async def test_sync_keeps_a_report_hidden_template_as_a_hidden_listing(recording_bus) -> None:
+    """A /sites report-hide keeps the listing, hidden, so staff can unhide it."""
     meta = await _template(visibility="public")
     await _sync(recording_bus)
     assert await _listing(meta["id"]) is not None
     for user in STRANGERS:
         await templates.report_template(OTHER_WS, user, meta["id"], {"reason": "spam"})
     await _sync(recording_bus)
-    assert await _listing(meta["id"]) is None
+    assert (await _listing(meta["id"])).hidden is True
+    assert (await service_admin.list_public())["items"] == []
+
+
+async def _community_ids() -> list[str]:
+    page = await templates.list_templates(OTHER_WS, "u9", {"scope": "public"})
+    return [t["id"] for t in page["templates"]]
+
+
+@pytest.mark.asyncio
+async def test_discover_hide_reaches_the_template_and_survives_a_republish(
+    recording_bus,
+) -> None:
+    meta = await _template(visibility="public")
+    await _sync(recording_bus)
+    listing_id = str((await _listing(meta["id"])).id)
+    for user in STRANGERS:
+        await service.report_listing(OTHER_WS, user, listing_id, {"reason": "spam"})
+    await _sync(recording_bus)
+    assert (await SiteTemplate.get(meta["id"])).hidden is True
+    assert meta["id"] not in await _community_ids()  # hidden in the /sites tab too
+    with pytest.raises(NotFound):
+        await templates.use_template(OTHER_WS, "u9", meta["id"], {})
+
+    # The owner can't launder the hide by going private and public again.
+    await templates.update_template(WS, OWNER, meta["id"], {"visibility": "private"})
+    await _sync(recording_bus)
+    await templates.update_template(WS, OWNER, meta["id"], {"visibility": "public"})
+    await _sync(recording_bus)
+    assert (await SiteTemplate.get(meta["id"])).hidden is True
+    assert (await service_admin.list_public())["items"] == []
+    relisted = await _listing(meta["id"])
+    assert relisted.hidden is True
+
+    # Staff unhide brings both back, once, with no duplicate row.
+    await service_admin.set_hidden(str(relisted.id), False)
+    await _sync(recording_bus)
+    template = await SiteTemplate.get(meta["id"])
+    assert (template.hidden, template.reports) == (False, [])
+    assert [i["id"] for i in (await service_admin.list_public())["items"]] == [str(relisted.id)]
+    assert await DiscoverListing.find({"source_id": meta["id"]}).count() == 1
+    assert meta["id"] in await _community_ids()
+
+
+@pytest.mark.asyncio
+async def test_staff_hide_reaches_the_template(recording_bus) -> None:
+    meta = await _template(visibility="public")
+    await _sync(recording_bus)
+    listing_id = str((await _listing(meta["id"])).id)
+    await service_admin.set_hidden(listing_id, True)
+    await _sync(recording_bus)
+    assert (await SiteTemplate.get(meta["id"])).hidden is True
+    assert (await _listing(meta["id"])).hidden is True
 
 
 @pytest.mark.asyncio
@@ -363,6 +416,18 @@ async def test_reindex_is_idempotent() -> None:
     assert [(r.id, r.source_id) for r in again] == [(rows[0].id, public["id"])]
     with pytest.raises(ValidationError):
         await service_admin.reindex("nope")
+
+
+@pytest.mark.asyncio
+async def test_reindex_keeps_a_hidden_public_template_as_a_hidden_listing() -> None:
+    meta = await _template(visibility="public")
+    doc = await SiteTemplate.get(meta["id"])
+    await doc.set({"hidden": True})
+
+    await service_admin.reindex("site_template")
+    listing = await _listing(meta["id"])
+    assert listing is not None and listing.hidden is True
+    assert (await service_admin.list_public())["items"] == []
 
 
 @pytest.mark.asyncio

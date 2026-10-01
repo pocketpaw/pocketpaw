@@ -12,6 +12,10 @@
 #   * Reports: one per user (the conditional ``$push``), at most ``MAX_REPORTS``
 #     stored, ``HIDE_THRESHOLD`` distinct reporters set ``hidden``. The owner
 #     cannot report their own listing. Mirrors ``site_templates.report_template``.
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): the auto-hide at
+# ``HIDE_THRESHOLD`` also hides the source item (``sources.hide_at_source``), so
+# toggling the template private -> public can't bring the listing back.
 
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.discover import service_admin
 from pocketpaw_ee.cloud.discover.dto import ReportListingRequest, UseListingResponse
-from pocketpaw_ee.cloud.discover.sources import get_source
+from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 
 #: Distinct reporters that hide a listing.
@@ -107,6 +111,7 @@ async def report_listing(
         )
         hidden = bool(hid.modified_count)
         if hidden:
+            await hide_at_source(doc.source, doc.source_id, True)
             # Actor "system": the reporters are other tenants' users, and their
             # ids must not land in the owner's audit log.
             await _audit(

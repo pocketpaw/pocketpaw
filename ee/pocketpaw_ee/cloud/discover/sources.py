@@ -6,6 +6,11 @@
 # caller their own copy and returns the source's result dict. Registration is
 # by name and idempotent: registering a name again replaces it.
 # ``register_builtin_sources`` runs from ``mount_cloud``.
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): optional
+# ``set_hidden(source_id, hidden)`` so a Discover hide / unhide reaches the
+# source item (site templates: ``service_admin.set_hidden_from_discover``);
+# ``hide_at_source`` calls it when the source has one.
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ from dataclasses import dataclass
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.site_templates import service as site_templates_service
+from pocketpaw_ee.cloud.site_templates import service_admin as site_templates_admin
 
 
 @dataclass(frozen=True)
@@ -21,6 +27,7 @@ class DiscoverSource:
     name: str
     kinds: frozenset[str]
     use: Callable[[str, str, str, str | None], Awaitable[dict]]
+    set_hidden: Callable[[str, bool], Awaitable[None]] | None = None
 
 
 _SOURCES: dict[str, DiscoverSource] = {}
@@ -35,6 +42,13 @@ def get_source(name: str) -> DiscoverSource:
         return _SOURCES[name]
     except KeyError:
         raise NotFound("discover_source", name) from None
+
+
+async def hide_at_source(source: str, source_id: str, hidden: bool) -> None:
+    """Carry a Discover hide / unhide to the source item, when the source can."""
+    setter = get_source(source).set_hidden
+    if setter is not None:
+        await setter(source_id, hidden)
 
 
 def registered_sources() -> tuple[DiscoverSource, ...]:
@@ -55,6 +69,7 @@ def register_builtin_sources() -> None:
             name="site_template",
             kinds=frozenset({"site", "tool", "game"}),
             use=_use_site_template,
+            set_hidden=site_templates_admin.set_hidden_from_discover,
         )
     )
 
@@ -62,6 +77,7 @@ def register_builtin_sources() -> None:
 __all__ = [
     "DiscoverSource",
     "get_source",
+    "hide_at_source",
     "register_builtin_sources",
     "register_source",
     "registered_sources",
