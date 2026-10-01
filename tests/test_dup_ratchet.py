@@ -2,6 +2,8 @@
 # against the tree (fails only on growth), proves the ratchet trips on a new
 # copy, and pins the "OSS core may not import from EE" ignore list so it can
 # only shrink.
+# Updated 2026-10-01: the ignore list is frozen as a set (swapping an entry
+# fails too, not just growing the count).
 from __future__ import annotations
 
 import importlib.util
@@ -14,8 +16,52 @@ _loader = SourceFileLoader("dup_ratchet", str(REPO / "scripts" / "dup-ratchet"))
 ratchet = importlib.util.module_from_spec(importlib.util.spec_from_loader("dup_ratchet", _loader))
 _loader.exec_module(ratchet)
 
-# Today's size of the OSS->EE ignore list. Lower it when you remove an entry.
-OSS_EE_IGNORE_MAX = 40
+# Today's OSS->EE ignore entries. Remove an entry here when you remove it from
+# pyproject.toml; never add one.
+OSS_EE_IGNORE_FROZEN = frozenset(
+    {
+        "pocketpaw.tools.cli -> pocketpaw_ee.cloud",
+        "pocketpaw.tools.cli -> pocketpaw_ee.cloud.shared.db",
+        "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.service",
+        "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.agent_context",
+        "pocketpaw.tools.cli -> pocketpaw_ee.agent.pocket_specialist.cli_tool",
+        "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+        "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud._core.request_log",
+        "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.client",
+        "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.store",
+        "pocketpaw.atlas.fabric -> pocketpaw_ee.fabric",
+        "pocketpaw.atlas.overlay -> pocketpaw_ee.agent.atlas_provider",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.chat.agent_service",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.mongo_store",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.paths",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.folder_store",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.context",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.errors",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.emit",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.events",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.file_versions.service",
+        "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.agents.knowledge",
+        "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.chat.agent_service",
+        "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud._core.context",
+        "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud._core.errors",
+        "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.file_versions.service",
+        "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.file_versions.dto",
+        "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.chat.agent_service",
+        "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud._core.context",
+        "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud._core.errors",
+        "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.file_versions.service",
+        "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.file_versions.dto",
+        "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.chat.agent_service",
+        "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.context",
+        "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.errors",
+        "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.service",
+        "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.dto",
+        "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.chat.agent_service",
+        "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.schemas",
+        "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.service",
+        "pocketpaw.agents.spend_attribution -> pocketpaw_ee.cloud.chat.agent_service",
+    }
+)
 
 
 def test_no_new_duplicate_primitives():
@@ -40,6 +86,8 @@ def test_oss_ee_boundary_ignore_list_only_shrinks():
         for c in data["tool"]["importlinter"]["contracts"]
         if c["name"] == "OSS core may not import from EE"
     ]
-    assert len(contract["ignore_imports"]) <= OSS_EE_IGNORE_MAX, (
-        "new OSS->EE import exemption — reach EE through the extension registry instead"
+    new = set(contract["ignore_imports"]) - OSS_EE_IGNORE_FROZEN
+    assert not new, (
+        f"new OSS->EE import exemption {sorted(new)} — reach EE through the extension "
+        "registry instead"
     )
