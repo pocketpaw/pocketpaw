@@ -444,6 +444,14 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
+        # --- Site templates (user-saved, private to their owner) ----------------
+        # Owner-only: a private template's name must not reach the rest of the
+        # workspace, so this never fans out on ``workspace_id``.
+        if t in {"site_template.saved", "site_template.deleted", "site_template.used"}:
+            if owner := d.get("owner"):
+                return [owner]
+            return []
+
         # --- Workspace jobs (durable ARQ job lifecycle) -------------------------
         # Workspace-scoped: a dynamic site's provisioning runs as a durable job
         # that completes well after the publish, in the ARQ worker. Fan out the

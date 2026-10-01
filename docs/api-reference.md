@@ -946,6 +946,90 @@ read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
 
+## Site templates
+
+Save a site pocket as a template, then start new sites from it. A template is a
+frozen copy of the site's authored content (the same five fields a duplicate
+copies, plus the source's source-gate stamp), stored on its own. Editing or
+deleting the source site does not change the template, and deleting the template
+does not touch sites made from it.
+
+Templates are private: only the owner can list, read, use or delete one. A
+template that is not yours, or is in another workspace, is `404`, never `403`.
+
+Every response and event carries the template's metadata only, never its
+content:
+
+```json
+{
+  "id": "665f1c...",
+  "name": "Bakery",
+  "description": "",
+  "visibility": "private",
+  "version": 1,
+  "engine": "svelte",
+  "pattern": "landing",
+  "owner": "u1",
+  "created_at": "2026-10-01T09:00:00Z",
+  "updated_at": "2026-10-01T09:00:00Z"
+}
+```
+
+Events: `site_template.saved`, `site_template.deleted`, `site_template.used`
+(the last also carries the new `pocket_id`), delivered to the owner only. Audit:
+one workspace audit event per save, use and delete (`site_template.saved`,
+`site_template.used`, `site_template.deleted`), best-effort.
+
+### `POST /site-templates`
+
+Save a site pocket as a private template the caller owns.
+
+```json
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars" }
+```
+
+`name` is 1 to 100 characters. The caller needs read access to the pocket, as
+for a duplicate. Response `200`: the template's metadata.
+
+Errors: `403` (`plan.feature_denied`) when the plan does not include Sites; `404`
+for a missing or cross-tenant pocket; `403` (`pocket.access_denied`) for a
+private pocket the caller can't read; `422` for `pocket.not_a_site`,
+`site_templates.too_large` (the content is over 2 MB as JSON) and
+`site_templates.limit` (the workspace already has 50 templates). Nothing is
+written on any error.
+
+### `GET /site-templates`
+
+The caller's own templates in this workspace, newest first. Response `200`: a
+list of metadata objects.
+
+### `GET /site-templates/{template_id}`
+
+One template's metadata. `404` unless it is in this workspace and yours.
+
+### `DELETE /site-templates/{template_id}`
+
+Delete a template you own. Response `200`: `{"id": "...", "deleted": true}`.
+`404` for anyone else's template. Sites made from it are unaffected.
+
+### `POST /site-templates/{template_id}/use`
+
+Start a new private site pocket, owned by the caller, from the template.
+
+```json
+{ "name": "Second bakery" }
+```
+
+The body is optional; `name` defaults to the template's name. The new pocket
+gets the template's content, records `template_id` and `template_version`, and a
+fresh draft Site row so it lists in the sites gallery (nothing is built or
+deployed). It is source-gated if the template's source was, or if the source
+gate is on now. Response `200`: `{"pocket_id": "..."}`.
+
+Errors: `404` for a template that is not yours or not in this workspace; `403`
+(`plan.feature_denied`) when the plan does not include Sites; `402`
+(`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in

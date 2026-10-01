@@ -565,6 +565,33 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "SiteTemplates — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Only ``site_templates.service`` owns the SiteTemplate Beanie writes;
+    # dto/domain/router go through it.
+    "pocketpaw_ee.cloud.site_templates.dto",
+    "pocketpaw_ee.cloud.site_templates.domain",
+    "pocketpaw_ee.cloud.site_templates.router",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.site_template"]
+
+[[tool.importlinter.contracts]]
+name = "SiteTemplates — reads pockets only through the pockets service"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # A template reads its source pocket through ``pockets.service`` (workspace
+    # filter, read access, site check) and never touches the Pocket doc itself.
+    "pocketpaw_ee.cloud.site_templates.dto",
+    "pocketpaw_ee.cloud.site_templates.domain",
+    "pocketpaw_ee.cloud.site_templates.router",
+    "pocketpaw_ee.cloud.site_templates.service",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.pocket"]
+
+[[tool.importlinter.contracts]]
 name = "AutomationsStatus — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

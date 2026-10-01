@@ -1011,6 +1011,25 @@ class RuleArchived(Event):
     EVENT_TYPE: ClassVar[str] = "instinct.rule.archived"
 
 
+# Site templates (``site_templates.service``). Payload is the template's meta
+# (id, name, description, visibility, version, engine, pattern, owner, timestamps)
+# plus ``workspace_id``; ``SiteTemplateUsed`` adds the new ``pocket_id``. Never the
+# snapshot: it carries the site's source.
+@dataclass
+class SiteTemplateSaved(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.saved"
+
+
+@dataclass
+class SiteTemplateDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.deleted"
+
+
+@dataclass
+class SiteTemplateUsed(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.used"
+
+
 # Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write
 # action's ``run_action`` returns ``ok:true`` on the HTTP 2xx success
 # path AND the action's ``outcomes_emitted[]`` declares one or more

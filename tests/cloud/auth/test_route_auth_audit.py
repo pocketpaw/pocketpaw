@@ -137,6 +137,7 @@ ROUTER_MODULES = [
     ("pocket_chat", "pocketpaw_ee.cloud.pockets.chat_router"),
     ("projects", "pocketpaw_ee.cloud.projects.router"),
     ("sessions", "pocketpaw_ee.cloud.sessions.router"),
+    ("site_templates", "pocketpaw_ee.cloud.site_templates.router"),
     ("workspace", "pocketpaw_ee.cloud.workspace.router"),
 ]
 

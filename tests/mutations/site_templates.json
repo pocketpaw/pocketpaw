@@ -1,0 +1,131 @@
+[
+  {
+    "label": "meta: put the snapshot into the response",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    return SiteTemplateResponse.model_validate(meta, from_attributes=True).model_dump(mode=\"json\")\n",
+    "replace": "    return {\n        **SiteTemplateResponse.model_validate(meta, from_attributes=True).model_dump(mode=\"json\"),\n        \"snapshot\": doc.snapshot,\n    }\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_save_list_get_use_round_trip",
+      "tests/cloud/site_templates/test_site_templates.py::test_events_carry_meta_never_the_snapshot",
+      "tests/cloud/site_templates/test_site_templates.py::test_routes_happy_path"
+    ]
+  },
+  {
+    "label": "list: drop the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        SiteTemplate.workspace == workspace_id,\n        SiteTemplate.owner == user_id,\n        SiteTemplate.visibility == \"private\",\n",
+    "replace": "        SiteTemplate.owner == user_id,\n        SiteTemplate.visibility == \"private\",\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_list_excludes_another_workspaces_templates"
+    ]
+  },
+  {
+    "label": "list: drop the owner filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        SiteTemplate.owner == user_id,\n        SiteTemplate.visibility == \"private\",\n",
+    "replace": "        SiteTemplate.visibility == \"private\",\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_list_excludes_another_users_templates"
+    ]
+  },
+  {
+    "label": "get: let a non-owner read a private template",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    return doc.owner == user_id\n",
+    "replace": "    return True\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_peer_cannot_get_or_use"
+    ]
+  },
+  {
+    "label": "get: drop the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        SiteTemplate.id == _oid(template_id), SiteTemplate.workspace == workspace_id\n",
+    "replace": "        SiteTemplate.id == _oid(template_id)\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_other_workspace_is_not_found"
+    ]
+  },
+  {
+    "label": "save: skip the Sites plan gate",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    await sites_service.require_sites_plan(workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_free_plan_cannot_save",
+      "tests/cloud/site_templates/test_site_templates.py::test_routes_refusals"
+    ]
+  },
+  {
+    "label": "save: skip the size cap",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if len(json.dumps(snapshot, default=str).encode(\"utf-8\")) > MAX_SNAPSHOT_BYTES:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_oversized_snapshot_is_refused"
+    ]
+  },
+  {
+    "label": "save: skip the count cap",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if count >= MAX_TEMPLATES_PER_WORKSPACE:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_fifty_first_template_is_refused"
+    ]
+  },
+  {
+    "label": "save: count templates across every workspace",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    count = await SiteTemplate.find(SiteTemplate.workspace == workspace_id).count()\n",
+    "replace": "    count = await SiteTemplate.find_all().count()\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_fifty_first_template_is_refused"
+    ]
+  },
+  {
+    "label": "delete: let a non-owner delete",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        SiteTemplate.owner == user_id,\n    )\n    if doc is None:\n",
+    "replace": "    )\n    if doc is None:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_peer_cannot_delete"
+    ]
+  },
+  {
+    "label": "use: drop the template id from the new pocket",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        template_id=str(doc.id),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_save_list_get_use_round_trip"
+    ]
+  },
+  {
+    "label": "use: drop the template's source_gated stamp",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        source_gated=doc.snapshot.get(\"source_gated\") or None,\n",
+    "replace": "        source_gated=None,\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_use_is_never_less_gated_than_a_new_pocket"
+    ]
+  },
+  {
+    "label": "save: write the audit row under the wrong action",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        workspace_id, user_id, \"site_template.saved\", str(doc.id), source_pocket_id=body.pocket_id\n",
+    "replace": "        workspace_id, user_id, \"site_template.other\", str(doc.id), source_pocket_id=body.pocket_id\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_one_audit_row_per_save_use_delete"
+    ]
+  },
+  {
+    "label": "events: fan template events out to the workspace",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            if owner := d.get(\"owner\"):\n                return [owner]\n",
+    "replace": "            if owner := d.get(\"owner\"):\n                return [owner, \"someone-else\"]\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_template_events_reach_only_the_owner"
+    ]
+  }
+]
