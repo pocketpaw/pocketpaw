@@ -1,6 +1,8 @@
 # tests/ee/sites/test_catalog_import.py — the concierge catalog import
-# (ee.pocketpaw_ee.paw_bar.catalog_import): reading a connected store's products
-# off its own site for the owner to review.
+# (ee.pocketpaw_ee.paw_bar.catalog_import): reading a store's products off its own
+# site for the owner to review: a connected site on its verified origin, a hosted
+# Paw Site on its live domain or deployed host (generic reader only), with
+# Shopify and WooCommerce paged up to the catalog cap.
 #
 # Two halves. The PURE parsers get payloads straight (Shopify /products.json, the
 # WooCommerce Store API, JSON-LD, OpenGraph, platform detection, sitemaps). The
@@ -679,12 +681,109 @@ async def test_a_stale_origin_is_never_fetched(beanie_test_db):
     assert seen == []
 
 
-async def test_a_hosted_site_is_not_connected_and_never_fetched(beanie_test_db):
-    await _claim()
+@pytest.mark.parametrize(
+    "url", ["", "http://localhost:8787", "http://127.0.0.1:9000/", "http://site-1.localhost"]
+)
+async def test_a_hosted_site_that_is_not_deployed_is_never_fetched(beanie_test_db, url):
     seen: list[httpx.Request] = []
-    preview = await _preview({}, seen, site=_FakeSite(foreign_origin=False))
-    assert (preview.status, preview.reason) == ("failed", "not_connected_site")
+    preview = await _preview({}, seen, site=_FakeSite(foreign_origin=False, url=url))
+    assert (preview.status, preview.reason) == ("failed", "site_not_deployed")
     assert seen == []
+
+
+def test_a_hosted_sites_host_is_its_live_custom_domain_else_its_deployed_host():
+    from types import SimpleNamespace
+
+    pending = SimpleNamespace(hostname="www.pending.example", status="pending")
+    live = SimpleNamespace(hostname="Shop.Example.", status="live")
+    site = _FakeSite(foreign_origin=False, url="https://abc.pawsites.example", domains=[pending])
+    assert ci.hosted_host(site) == "abc.pawsites.example"
+    site.domains = [pending, live]
+    assert ci.hosted_host(site) == "shop.example"
+
+
+async def test_a_hosted_site_is_read_with_the_generic_reader_only(beanie_test_db):
+    # No ownership claim: we deployed it. A Shopify-looking homepage is not
+    # trusted on a hosted site, so /products.json is never asked for.
+    seen: list[httpx.Request] = []
+    live = type("D", (), {"hostname": _HOST, "status": "live"})()
+    site = _FakeSite(foreign_origin=False, url="https://abc.pawsites.example", domains=[live])
+    home = _SHOPIFY_HOME.replace(
+        "<body>Welcome</body>", '<body><a href="/products/kettle">K</a></body>'
+    )
+    preview = await _preview(
+        {
+            "/": _html(home),
+            "/products.json": _json({"products": [_shopify_product(1)]}),
+            "/products/kettle": _html(_jsonld_page("Kettle", "30")),
+        },
+        seen,
+        site=site,
+    )
+    assert (preview.status, preview.source, preview.host) == ("ok", "jsonld", _HOST)
+    assert [i.name for i in preview.items] == ["Kettle"]
+    assert "/products.json" not in _paths(seen)
+
+
+def _paged(pages: dict[int, Any], seen_pages: list[int]):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        seen_pages.append(page)
+        return _json(pages.get(page, [] if "wp-json" in request.url.path else {"products": []}))
+
+    return handler
+
+
+async def test_shopify_pages_until_a_short_page(beanie_test_db):
+    await _claim()
+    seen_pages: list[int] = []
+    pages = {
+        1: {"products": [_shopify_product(i) for i in range(1, 251)]},
+        2: {"products": [_shopify_product(i) for i in range(251, 261)]},
+    }
+    preview = await _preview(
+        {"/": _html(_SHOPIFY_HOME), "/products.json": _paged(pages, seen_pages)}
+    )
+    assert seen_pages == [1, 2]
+    assert (preview.status, preview.total_found, len(preview.items)) == ("ok", 260, 260)
+
+
+async def test_woocommerce_pages_until_a_short_page(beanie_test_db):
+    await _claim()
+    home = '<html><link rel="stylesheet" href="/wp-content/plugins/woocommerce/x.css"></html>'
+    seen_pages: list[int] = []
+    pages = {
+        1: [_woo(i, "100", 2, "USD") for i in range(100)],
+        2: [_woo(i, "100", 2, "USD") for i in range(100, 200)],
+        3: [_woo(i, "100", 2, "USD") for i in range(200, 205)],
+    }
+    preview = await _preview(
+        {"/": _html(home), "/wp-json/wc/store/v1/products": _paged(pages, seen_pages)}
+    )
+    assert seen_pages == [1, 2, 3]
+    assert preview.total_found == 205
+
+
+async def test_paging_stops_at_the_soft_deadline_with_what_was_read(beanie_test_db, monkeypatch):
+    await _claim()
+    # Page 1 answers at once; page 2 would start after the deadline can no longer
+    # fit a fetch, so it is never asked for and page 1 stands as a partial.
+    monkeypatch.setattr(ci, "IMPORT_WALL_CLOCK_SEC", 1.0)
+    monkeypatch.setattr(ci, "_FETCH_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(ci, "_DEADLINE_MARGIN_SEC", 0.05)
+    seen_pages: list[int] = []
+    pages = {p: {"products": [_shopify_product(p * 1000 + i) for i in range(250)]} for p in (1, 2)}
+    paged = _paged(pages, seen_pages)
+
+    async def slow_first(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "1":
+            await asyncio.sleep(0.7)
+        return await paged(request)
+
+    preview = await _preview({"/": _html(_SHOPIFY_HOME), "/products.json": slow_first})
+    assert seen_pages == [1]
+    assert (preview.status, preview.source, preview.total_found) == ("partial", "shopify", 250)
+    assert "deadline_reached" in preview.warnings
 
 
 async def test_an_offsite_redirect_is_refused(beanie_test_db):
@@ -758,14 +857,18 @@ async def test_one_absurd_price_is_a_warning_not_a_failed_import(beanie_test_db)
     assert "skipped_bad_price:1" in preview.warnings
 
 
-async def test_more_than_200_products_are_capped_with_the_total_reported(beanie_test_db):
+async def test_products_past_the_catalog_cap_are_capped_with_the_total_reported(
+    beanie_test_db, monkeypatch
+):
     await _claim()
+    monkeypatch.setattr(ci, "catalog_max_items", lambda: 200)
     products = [_shopify_product(i) for i in range(1, 231)]
     preview = await _preview(
         {"/": _html(_SHOPIFY_HOME), "/products.json": _json({"products": products})}
     )
     assert preview.total_found == 230
-    assert len(preview.items) == ci.IMPORT_MAX_ITEMS == 200
+    assert len(preview.items) == 200
+    assert ci.IMPORT_MAX_ITEMS == 5000  # the default cap
 
 
 async def test_a_store_with_no_products_is_empty_not_failed(beanie_test_db):
