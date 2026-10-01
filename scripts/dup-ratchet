@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+# Created 2026-10-01 (canonicalization Wave 0, CN-1): grep-count ratchet for
+# function-level duplicates that import-linter can't see. Each row pins today's
+# count; the check fails only when a count GROWS. Consolidating copies is
+# welcome: lower max_count in the same PR. Stdlib only.
+# Plan: paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md §3.
+"""Fail on new copies of primitives we already have.
+
+Usage: scripts/dup-ratchet [repo_root]   (exit 1 on growth)
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from fnmatch import fnmatch
+from pathlib import Path
+
+# Only production code is scanned; root tests/ is excluded by construction.
+SCAN_ROOTS = ("src", "ee/pocketpaw_ee")
+
+# (name, regex, include globs, exclude globs, max_count, canonical)
+# Globs match the repo-relative posix path. Counts are matching LINES.
+ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
+    (
+        "raw UPDATE instinct_actions",
+        r"UPDATE instinct_actions",
+        ("*",),
+        ("src/pocketpaw/instinct/store.py",),
+        27,
+        "InstinctStore.update_parameters / _update_status (src/pocketpaw/instinct/store.py)",
+    ),
+    (
+        "daily try_spend counter",
+        r"def try_spend",
+        ("*",),
+        (),
+        6,
+        "one try_spend(meter) in cloud/metering, caps via resolve_entitlements",
+    ),
+    (
+        "env-read daily cap",
+        r"[\"']POCKETPAW_\w*DAILY\w*[\"']",
+        ("*",),
+        (),
+        6,
+        "caps from entitlements.resolve_entitlements (0 = disabled, None = uncapped)",
+    ),
+    (
+        "inline check_quota call",
+        r"(?<!def )check_quota\(",
+        ("*",),
+        ("ee/pocketpaw_ee/cloud/credits/guards.py",),
+        2,
+        "credits/guards.over_billing_limit",
+    ),
+    (
+        "private-IP check",
+        r"def _ip_is_unsafe",
+        ("*",),
+        (),
+        2,
+        "pocketpaw.security pinned fetch (safe_fetch / url_validators)",
+    ),
+    (
+        "raw httpx client in audit webhooks",
+        r"httpx\.AsyncClient\(",
+        ("ee/pocketpaw_ee/cloud/audit/webhooks.py",),
+        (),
+        1,
+        "the notifications outbox delivery path",
+    ),
+    (
+        "hand-rolled HMAC in cloud",
+        r"hmac\.new\(",
+        ("ee/pocketpaw_ee/cloud/*",),
+        ("ee/pocketpaw_ee/cloud/notifications/webhook_signing.py",),
+        4,
+        "cloud/notifications/webhook_signing",
+    ),
+    (
+        "hand-rolled /v1/chat/completions call",
+        r"/v1/chat/completions",
+        ("*",),
+        ("ee/pocketpaw_ee/catalog/litellm_client.py",),
+        10,
+        "a completion helper beside ee/pocketpaw_ee/catalog/litellm_client.py",
+    ),
+    (
+        "direct AsyncAnthropic client",
+        r"AsyncAnthropic\(",
+        ("*",),
+        ("ee/pocketpaw_ee/catalog/litellm_client.py", "src/pocketpaw/llm/providers/*"),
+        6,
+        "the catalog/litellm_client helper (metered) or pocketpaw.llm.providers",
+    ),
+    (
+        "arq create_pool getter",
+        r"create_pool\(",
+        ("*",),
+        (),
+        4,
+        "a shared get_arq_pool() in cloud/_core/redis_client.py",
+    ),
+    (
+        "periodic-loop interval reader",
+        r"def _\w*interval_seconds",
+        ("*",),
+        (),
+        10,
+        "a cloud/_core periodic-loop helper, or register in extensions._sweeps",
+    ),
+    (
+        "direct env read of base URL / Redis URL",
+        r"os\.(environ\.get\(|getenv\(|environ\[)\s*[\"']POCKETPAW_"
+        r"(FRONTEND_BASE_URL|PUBLIC_BASE_URL|REDIS_URL)",
+        ("*",),
+        (),
+        24,
+        "cloud/_core/redis_client for Redis; one settings accessor for base URLs",
+    ),
+    (
+        "ee require_scope",
+        r"def require_scope",
+        ("ee/pocketpaw_ee/*",),
+        (),
+        1,
+        "pocketpaw.api.deps.require_scope (fail-closed)",
+    ),
+    (
+        "direct Soul.awaken/Soul.birth",
+        r"Soul\.(awaken|birth)\(",
+        ("*",),
+        ("src/pocketpaw/soul/*",),
+        6,
+        "pocketpaw.soul (SoulManager / a per-path open helper)",
+    ),
+    (
+        "rippleSpec tree walker",
+        r"def _walk_",
+        ("*ripple*",),
+        (),
+        11,
+        "one iter_nodes(spec) generator in src/pocketpaw/ripple",
+    ),
+]
+
+
+def _match(rel: str, globs: tuple[str, ...]) -> bool:
+    return any(fnmatch(rel, g) for g in globs)
+
+
+def count(root: Path, regex: str, include: tuple[str, ...], exclude: tuple[str, ...]) -> int:
+    rx = re.compile(regex)
+    n = 0
+    for base in SCAN_ROOTS:
+        for path in (root / base).rglob("*.py"):
+            rel = path.relative_to(root).as_posix()
+            if not _match(rel, include) or _match(rel, exclude):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            n += sum(1 for line in text.splitlines() if rx.search(line))
+    return n
+
+
+def main(root: Path, verbose: bool = False) -> list[str]:
+    """Return one failure message per row whose count grew past max_count."""
+    failures = []
+    for name, regex, include, exclude, max_count, canonical in ROWS:
+        n = count(root, regex, include, exclude)
+        if verbose:
+            print(f"{'FAIL' if n > max_count else 'ok  '} {n:>3}/{max_count:<3} {name}")
+        if n > max_count:
+            failures.append(
+                f"{name}: {n} > {max_count}. new copy of {name} — use {canonical}; "
+                "if you consolidated copies, lower max_count"
+            )
+    return failures
+
+
+if __name__ == "__main__":
+    repo = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
+    errors = main(repo, verbose=True)
+    for e in errors:
+        print(e, file=sys.stderr)
+    sys.exit(1 if errors else 0)
