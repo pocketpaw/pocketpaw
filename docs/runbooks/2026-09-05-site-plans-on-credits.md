@@ -366,13 +366,34 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
 - **Renewals ride the same sweep.** A due `site_year` site is debited the partner
   price again and its `renewal_date` steps 12 months from the due date; a short
   wallet lapses it to the free floor and the site stays up, like any other.
-- A move from a monthly rung to a yearly one charges the gap against
-  `period_paid_usd` and starts the year today. A move to a shorter period keeps
-  the date: the year already paid runs out first.
+- **Changing to a different period length is a fresh purchase**, not a re-price.
+  Monthly to yearly charges the FULL year price, sets `period_paid_usd` to it and
+  starts the year today. The unused part of the month is not credited; nothing on
+  this rail prorates.
+- **A running year cannot move to a monthly plan.** Yearly to any monthly rung
+  before `renewal_date` is refused with `sites.period_downgrade_refused` ("This
+  site is paid through <date>. Switch plans when it renews."), with no charge and
+  no change. After the date it is a fresh monthly purchase.
+- A same-day re-buy of a tier the site already paid for that day is refused
+  (`sites.plan_already_bought_today`): the debit key is per (site, tier, day), so
+  the charge would replay as a no-op and hand out a new period for nothing.
+- Changes within the same period length keep the old rule: pay the difference
+  against `period_paid_usd`, keep the date.
+- If a partner's profile is removed, its yearly sites renew at the price they
+  last paid (`period_paid_usd`). With no price to keep, the renewal fails and is
+  retried (and logged) rather than charging a guessed default.
 - The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
   not from the 1st of the month.
-- A refused charge on a site that was already live now puts its billing fields
-  back. Before this it was left "pending" on the tier nobody paid for.
+
+### Behaviour change for EVERY workspace: a refused upgrade no longer strands a live site
+
+Upgrading a live free site to a paid tier first rewrites the row to "pending" on
+the new tier, then debits the wallet. When the wallet was short, the row used to
+stay that way: still deployed, but `pending` on a tier nobody paid for. Since
+2026-10-02 the purchase puts back the site's previous `plan_tier`,
+`subscription_status`, `billing_rail`, `pending_deploy_inputs`, `owner` and `name`
+when the charge fails. A brand-new site that was never live still stays pending
+and undeployed, as before.
 
 ## A site that was charged and never went live
 

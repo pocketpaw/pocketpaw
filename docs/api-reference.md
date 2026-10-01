@@ -1046,6 +1046,11 @@ renewal_date, partner_client_id, subscription_status}`.
   client stamp: no second debit, no redeploy.
 - **409** `partners.site_on_plan` for a site carried by the workspace plan, and
   `partners.foreign_site` for a concierge-only (foreign) site.
+- A site already on a monthly paid plan pays the full year price (no credit for
+  the rest of the month) and its year starts today. **409**
+  `sites.plan_already_bought_today` if the site already bought that plan today.
+- The same rules apply to `POST /sites/publish`: moving a site whose year is still
+  running to a monthly plan is **409** `sites.period_downgrade_refused`.
 - Renewals happen on their own: the site-renewal sweep debits the partner price
   when `renewal_date` passes and steps it 12 months, or lapses the site to the
   free tier (still published) when the wallet is short.
