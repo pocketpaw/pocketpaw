@@ -3280,8 +3280,8 @@ routes is the site's `script_name`, as on the Lead itself.
 | `PATCH /sites/{site_id}/leads/{lead_id}` | `{"status"?: "new" \| "contacted" \| "won" \| "lost" \| "booked", "read"?: bool}` → the updated lead. `read: true` keeps the first read time; `false` marks it unread. Unknown status → 422. |
 | `POST /sites/{site_id}/leads/read-all` | Marks every unread lead on the site read → `{"updated": n}`. |
 
-All three need the `sites` plan feature and `fabric.read`, and are scoped to the
-caller's workspace: another workspace's lead (or one on another site) is a 404,
+All three need the `sites` plan feature. The GET needs `fabric.read`; the PATCH
+and read-all need `fabric.write`. All are scoped to the caller's workspace: another workspace's lead (or one on another site) is a 404,
 and read-all touches nothing there.
 
 A list item:
@@ -3324,7 +3324,9 @@ POST /paw-bar/action
 most 120 characters, `message` at most 2000, and an `email` and/or `phone` that
 look valid. Limits: 3 per visitor per 10 minutes, 30 per site per hour. The
 text goes through the same HIGH injection screen as site forms. `send_to_team`
-is reserved: a widget spec that declares it is refused.
+is reserved. Saving a spec that declares it (the spec PATCH routes and widget
+create) is `422 reserved_verb`. A spec already stored with it loads with that
+action dropped and a warning logged.
 
 | Response | Meaning |
 |---|---|
