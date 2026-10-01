@@ -4,7 +4,8 @@
 # template's metadata only: it has no snapshot, source or rippleSpec field, and
 # ``extra="forbid"`` makes adding one by accident a construction error rather
 # than a leak. ``owner`` is ``None`` for anyone but the owner, so a public
-# template does not reveal who made it or where.
+# template does not reveal who made it or where. ``preview_image_url`` is a
+# public-rail https URL or ``None``, safe to show to any viewer.
 
 from __future__ import annotations
 
@@ -91,6 +92,7 @@ class SiteTemplateResponse(BaseModel):
     owner: str | None = None
     is_mine: bool
     hidden: bool = False
+    preview_image_url: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

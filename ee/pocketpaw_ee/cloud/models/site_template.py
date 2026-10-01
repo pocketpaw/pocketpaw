@@ -16,6 +16,11 @@
 # ``hidden`` flips on at the report threshold and takes a public template out of
 # everyone's reach but the owner's. Who-may-see lives in the service, not here.
 #
+# ``preview_image_url`` is ``None`` or a public https URL on the Sites public
+# asset rail under ``sites-assets/{workspace}/template-{id}/`` (a copy of the
+# source site's screenshot), never an auth-gated ``/api/v1/uploads/...`` URL:
+# public templates are shown to every workspace.
+#
 # Only ``ee.cloud.site_templates.service`` imports this doc (import-linter
 # "SiteTemplates" contract).
 
@@ -44,6 +49,7 @@ class SiteTemplate(TimestampedDocument):
     engine: str | None = None
     pattern: str | None = None
     snapshot: dict[str, Any] = Field(default_factory=dict)
+    preview_image_url: str | None = None
 
     class Settings(TimestampedDocument.Settings):
         name = "site_templates"

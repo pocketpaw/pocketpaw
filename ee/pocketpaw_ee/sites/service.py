@@ -5957,6 +5957,18 @@ async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteD
     return await _canonical_site_doc(workspace_id, pocket_id)
 
 
+async def preview_image_for_pocket(workspace_id: str, pocket_id: str) -> str | None:
+    """Public: the stored screenshot URL of the pocket's canonical Site, or None.
+
+    The same value ``pocket_status`` surfaces (an auth-gated
+    ``/api/v1/uploads/{id}`` today). Tenant-scoped; None when the pocket has no
+    Site doc or no capture has landed. Site templates read it to copy the
+    screenshot onto the public rail without importing the Site model.
+    """
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
+    return (getattr(doc, "preview_image_url", "") or None) if doc is not None else None
+
+
 # ---------------------------------------------------------------------------
 # DP0-3 — durable ``provision_site`` job seams.
 #
