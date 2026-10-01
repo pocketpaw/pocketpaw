@@ -1,11 +1,11 @@
 # tests/cloud/notifications/test_delivery.py
-# Created: 2026-07-08 (feat/external-alerting-delivery) — proves the external
-# fan-out (Slack + generic webhook) that ``notifications.service.create`` now
-# performs. Tests drive the REAL ``create`` path with a stubbed httpx transport
-# (spy on the POST, don't mock the seam under test) so the whole seam is
-# exercised end-to-end: config load -> routing -> httpx POST -> per-sink payload.
-# Fire-and-forget is proven directly: a sink whose transport RAISES does not
-# propagate out of ``create`` and the notification still inserts + still emits.
+# The workspace external fan-out that ``notifications.service.create`` performs:
+# create ENQUEUES one outbox row per configured sink, and ``outbox.process_due``
+# sends them. Tests drive the REAL create + outbox path with a stubbed httpx
+# transport (spy on the POST, don't mock the seam under test), so config load ->
+# routing -> enqueue -> claim -> signed POST all run. A sink whose transport
+# RAISES never propagates out of ``create`` or ``process_due``; the notification
+# still inserts and emits, and the row is left for a retry.
 
 from __future__ import annotations
 
@@ -16,10 +16,24 @@ import pytest
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud._core.realtime.events import NotificationNew
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.notification_outbox import NotificationOutboxItem
 from pocketpaw_ee.cloud.notifications import delivery as delivery_mod
+from pocketpaw_ee.cloud.notifications import outbox
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 
-pytestmark = pytest.mark.usefixtures("mongo_db")
+pytestmark = pytest.mark.usefixtures("mongo_db", "public_dns")
+
+
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Every hostname resolves to a public address: no real DNS in unit tests."""
+    from pocketpaw_ee.cloud.audit import webhooks as audit_webhooks
+
+    async def _resolve(_hostname):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(audit_webhooks, "_resolve_addresses", _resolve)
+
 
 SLACK_URL = "https://hooks.slack.com/services/T000/B000/xxx"
 WEBHOOK_URL = "https://alerts.example.com/ingest"
@@ -82,18 +96,23 @@ async def test_create_fans_out_to_both_sinks(monkeypatch, recording_bus) -> None
     out = await notifications_service.create(
         workspace_id="w1", recipient="u2", kind="mention", title="Hi", body="you were mentioned"
     )
+    # create only enqueues; nothing has been POSTed yet.
+    assert rec.requests == []
+    assert await NotificationOutboxItem.find({"status": "pending"}).count() == 2
 
-    # Both sinks POSTed.
+    assert await outbox.process_due() == 2
     assert set(rec.urls()) == {SLACK_URL, WEBHOOK_URL}
     payloads = {u: b for u, b in rec.requests}
     # Slack incoming-webhook shape: {"text": ...} carrying title + body.
     assert payloads[SLACK_URL] == {"text": "Hi\nyou were mentioned"}
-    # Generic webhook: full notification payload.
+    # Generic webhook: a typed event envelope around the notification.
     generic = payloads[WEBHOOK_URL]
-    assert generic["kind"] == "mention"
-    assert generic["workspace_id"] == "w1"
-    assert generic["recipient_id"] == "u2"
-    assert generic["title"] == "Hi"
+    assert generic["type"] == "notification.created"
+    assert generic["id"].startswith("evt_")
+    assert generic["data"]["kind"] == "mention"
+    assert generic["data"]["workspace_id"] == "w1"
+    assert generic["data"]["recipient_id"] == "u2"
+    assert generic["data"]["title"] == "Hi"
 
     # The insert + realtime emit still happened.
     assert out.id
@@ -102,8 +121,9 @@ async def test_create_fans_out_to_both_sinks(monkeypatch, recording_bus) -> None
 
 
 async def test_dead_sink_never_breaks_create(monkeypatch, recording_bus) -> None:
-    """A sink whose transport RAISES must not propagate out of create; the
-    notification still inserts and still emits (fire-and-forget)."""
+    """A sink whose transport RAISES must not propagate out of create or the
+    sweep; the notification still inserts and emits, and the rows wait for a
+    retry instead of being lost."""
 
     def responder(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)
@@ -112,14 +132,15 @@ async def test_dead_sink_never_breaks_create(monkeypatch, recording_bus) -> None
     _install_transport(monkeypatch, rec)
     await _set_config()
 
-    # Must not raise even though every sink's POST blows up.
     out = await notifications_service.create(
         workspace_id="w1", recipient="u2", kind="mention", title="Hi"
     )
+    await outbox.process_due()
 
-    # Delivery was attempted (both sinks tried) ...
     assert set(rec.urls()) == {SLACK_URL, WEBHOOK_URL}
-    # ... but the insert + emit survived the dead sinks.
+    rows = await NotificationOutboxItem.find_all().to_list()
+    assert {r.status for r in rows} == {"pending"}
+    assert all(r.attempts == 1 for r in rows)
     assert out.id
     assert len(await notifications_service.list_for_user("u2")) == 1
     assert any(isinstance(e, NotificationNew) for e in recording_bus.events)
@@ -132,6 +153,7 @@ async def test_no_config_means_no_delivery(monkeypatch) -> None:
     out = await notifications_service.create(
         workspace_id="w1", recipient="u2", kind="mention", title="Hi"
     )
+    await outbox.process_due()
     assert out.id
     assert rec.requests == []
 
@@ -143,6 +165,7 @@ async def test_disabled_config_means_no_delivery(monkeypatch) -> None:
     await notifications_service.create(
         workspace_id="w1", recipient="u2", kind="mention", title="Hi"
     )
+    await outbox.process_due()
     assert rec.requests == []
 
 
@@ -153,12 +176,14 @@ async def test_routes_narrow_kind_to_named_sink(monkeypatch) -> None:
     await _set_config(routes={"mention": ["slack"]})
 
     await notifications_service.create(workspace_id="w1", recipient="u2", kind="mention", title="M")
+    await outbox.process_due()
     assert rec.urls() == [SLACK_URL]
 
     rec.requests.clear()
     await notifications_service.create(
         workspace_id="w1", recipient="u2", kind="task_assigned", title="T"
     )
+    await outbox.process_due()
     assert set(rec.urls()) == {SLACK_URL, WEBHOOK_URL}
 
 
@@ -172,6 +197,7 @@ async def test_delivery_scoped_per_workspace(monkeypatch) -> None:
     await notifications_service.create(
         workspace_id="w2", recipient="u2", kind="mention", title="Hi"
     )
+    await outbox.process_due()
     assert rec.requests == []
 
 

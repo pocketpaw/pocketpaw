@@ -1,12 +1,13 @@
 """Notification service — CRUD + realtime fan-out.
 
 Besides the in-app realtime ``emit(NotificationNew(...))``, new notifications
-fan OUT of the app to the workspace's Slack / generic webhook
-(``notifications/delivery.py``, never-raise, so a dead sink can't roll back the
-insert). ``create`` awaits that inline; ``create_many`` schedules it in a
-bounded background task. This service is the SOLE writer of the
-``NotificationDeliveryConfig`` doc (upsert), fronted by the PUT
-/notifications/delivery-config route.
+fan OUT of the app to the workspace's Slack / signed generic webhook. ``create``
+only ENQUEUES those deliveries in the ``notification_outbox``
+(``notifications/delivery.py`` + ``outbox.py``), so the request path never waits
+on a remote endpoint; ``create_many`` enqueues in a bounded background task.
+This service is the SOLE writer of the ``NotificationDeliveryConfig`` doc,
+fronted by the PUT /notifications/delivery-config route; the webhook signing
+secret is minted there and returned once.
 
 Sole owner of writes to the ``Notification`` Beanie document. Writes are
 inline; there is no separate repository layer. Tests use the shared
@@ -24,6 +25,8 @@ Public API is module-level ``async def`` functions:
 - ``clear_all(user_id)`` — bulk mark unread → read for a user, emit
 - ``get_delivery_config(workspace_id)`` — read the external-delivery config
 - ``set_delivery_config(workspace_id, ...)`` — upsert the external-delivery config
+- ``webhook_target`` / ``record_webhook_result`` — the outbox's view of the
+  workspace webhook (url + decrypted secret; failure counter, auto-disable)
 
 Cross-module fan-out callers (``chat/message_service.py``,
 ``workspace/service.py``) call ``notifications_service.create(...)``
@@ -47,9 +50,9 @@ from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
 from pocketpaw_ee.cloud.models.notification import NotificationSource as _NotificationSourceDoc
 from pocketpaw_ee.cloud.notifications.delivery import (
-    _deliver_external,
-    is_safe_webhook_url,
+    enqueue_external,
     schedule_external_many,
+    validate_webhook_url,
 )
 from pocketpaw_ee.cloud.notifications.domain import Notification, NotificationSource
 from pocketpaw_ee.cloud.notifications.dto import notification_to_dto
@@ -127,7 +130,11 @@ async def create(
     body: str = "",
     source: _NotificationSourceDoc | NotificationSource | None = None,
     actor_id: str | None = None,
+    deliver_external: bool = True,
 ) -> Notification:
+    """Insert, emit ``NotificationNew`` (bell + push), and enqueue the workspace's
+    external deliveries. A caller that routes the event to external sinks itself
+    (the lead bridge, once per event) passes ``deliver_external=False``."""
     doc = _NotificationDoc(
         workspace=workspace_id,
         recipient=recipient,
@@ -141,9 +148,10 @@ async def create(
     await doc.insert()
     created = _to_domain(doc)
     await emit(NotificationNew(data=notification_to_dto(created).model_dump()))
-    # External fan-out (Slack / generic webhook). Never-raise: a dead sink must
-    # not roll back the insert or the emit above. See notifications/delivery.py.
-    await _deliver_external(created)
+    # External fan-out (Slack / signed webhook) goes through the outbox.
+    # Never-raise: a broken enqueue can't roll back the insert or the emit.
+    if deliver_external:
+        await enqueue_external(created)
     return created
 
 
@@ -256,26 +264,38 @@ async def delete_notification(notification_id: str, user_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _config_to_dict(doc) -> dict:
-    """Wire shape for the delivery config. Returns the workspace's own config,
-    so the URLs are returned as-stored (the admin who set them may see them)."""
+_WEBHOOK_DISABLE_THRESHOLD = 10
+
+
+def _config_to_dict(doc, *, webhook_secret: str | None = None) -> dict:
+    """Wire shape for the delivery config. The URLs are returned as stored (the
+    admin who set them may see them); the signing secret only when
+    ``webhook_secret`` is passed, i.e. once, right after it was minted."""
     return {
         "workspace_id": doc.workspace,
         "slack_webhook_url": doc.slack_webhook_url,
         "webhook_url": doc.webhook_url,
         "enabled": doc.enabled,
         "routes": dict(doc.routes or {}),
+        "has_webhook_secret": bool(doc.webhook_secret_enc),
+        "webhook_secret": webhook_secret,
+        "webhook_disabled_at": doc.webhook_disabled_at,
+        "webhook_failure_count": doc.webhook_failure_count,
     }
+
+
+async def _find_config(workspace_id: str):
+    from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+
+    return await NotificationDeliveryConfig.find_one(
+        NotificationDeliveryConfig.workspace == workspace_id
+    )
 
 
 async def get_delivery_config(workspace_id: str) -> dict | None:
     """Return the workspace's external-delivery config as a wire dict, or
     ``None`` when unset."""
-    from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
-
-    doc = await NotificationDeliveryConfig.find_one(
-        NotificationDeliveryConfig.workspace == workspace_id
-    )
+    doc = await _find_config(workspace_id)
     return _config_to_dict(doc) if doc is not None else None
 
 
@@ -289,38 +309,90 @@ async def set_delivery_config(
 ) -> dict:
     """Upsert the workspace's external-delivery config and return the wire dict.
 
-    A non-empty URL that fails the SSRF safety check is rejected up front with a
-    ``Forbidden`` so a bad value never reaches storage (and later the delivery
-    hot path). Empty / ``None`` clears that sink. This is the only write path to
-    ``NotificationDeliveryConfig``.
+    A non-empty URL that fails the SSRF check (DNS included) is rejected with
+    ``Forbidden`` before anything is stored. Empty / ``None`` clears that sink.
+    Saving a NEW webhook URL (or the first one) mints a signing secret, returned
+    in this response only, and re-arms a webhook that was switched off.
     """
-    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud.audit.webhooks import mint_secret
+    from pocketpaw_ee.cloud.auth.sso import crypto
     from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
 
     slack = (slack_webhook_url or "").strip() or None
     generic = (webhook_url or "").strip() or None
-    if slack is not None and not is_safe_webhook_url(slack):
-        raise Forbidden(
-            "notifications.invalid_webhook_url",
-            "Slack webhook URL must be an https:// URL to a public host.",
-        )
-    if generic is not None and not is_safe_webhook_url(generic):
-        raise Forbidden(
-            "notifications.invalid_webhook_url",
-            "Webhook URL must be an https:// URL to a public host.",
-        )
+    if slack is not None:
+        await validate_webhook_url(slack)
+    if generic is not None:
+        await validate_webhook_url(generic)
 
-    doc = await NotificationDeliveryConfig.find_one(
-        NotificationDeliveryConfig.workspace == workspace_id
-    )
+    doc = await _find_config(workspace_id)
     if doc is None:
         doc = NotificationDeliveryConfig(workspace=workspace_id)
+    new_secret: str | None = None
+    url_changed = generic != doc.webhook_url
+    if generic is None:
+        doc.webhook_secret_enc = ""
+    elif url_changed or not doc.webhook_secret_enc:
+        new_secret = mint_secret()
+        doc.webhook_secret_enc = crypto.encrypt(new_secret)
+    if url_changed:
+        doc.webhook_failure_count = 0
+        doc.webhook_disabled_at = None
     doc.slack_webhook_url = slack
     doc.webhook_url = generic
     doc.enabled = enabled
     doc.routes = dict(routes or {})
     await doc.save()
-    return _config_to_dict(doc)
+    return _config_to_dict(doc, webhook_secret=new_secret)
+
+
+async def rotate_webhook_secret(workspace_id: str) -> dict | None:
+    """Mint a new signing secret for the workspace webhook, returned once, and
+    re-arm a webhook that was switched off. None when no webhook is set."""
+    from pocketpaw_ee.cloud.audit.webhooks import mint_secret
+    from pocketpaw_ee.cloud.auth.sso import crypto
+
+    doc = await _find_config(workspace_id)
+    if doc is None or not doc.webhook_url:
+        return None
+    secret = mint_secret()
+    doc.webhook_secret_enc = crypto.encrypt(secret)
+    doc.webhook_failure_count = 0
+    doc.webhook_disabled_at = None
+    await doc.save()
+    return _config_to_dict(doc, webhook_secret=secret)
+
+
+async def webhook_target(workspace_id: str) -> tuple[str, str] | None:
+    """(url, secret) of the workspace webhook while it is configured, enabled
+    and not switched off; None otherwise. Read by the outbox at send time."""
+    from pocketpaw_ee.cloud.auth.sso import crypto
+
+    doc = await _find_config(workspace_id)
+    if doc is None or not doc.enabled or not doc.webhook_url or not doc.webhook_secret_enc:
+        return None
+    if doc.webhook_disabled_at is not None:
+        return None
+    return doc.webhook_url, crypto.decrypt(doc.webhook_secret_enc)
+
+
+async def record_webhook_result(workspace_id: str, *, ok: bool) -> None:
+    """Reset the consecutive-failure counter on success; on a dead delivery bump
+    it, switching the webhook off at ``_WEBHOOK_DISABLE_THRESHOLD``."""
+    from datetime import UTC, datetime
+
+    doc = await _find_config(workspace_id)
+    if doc is None:
+        return
+    if ok:
+        if doc.webhook_failure_count:
+            doc.webhook_failure_count = 0
+            await doc.save()
+        return
+    doc.webhook_failure_count += 1
+    if doc.webhook_failure_count >= _WEBHOOK_DISABLE_THRESHOLD and doc.webhook_disabled_at is None:
+        doc.webhook_disabled_at = datetime.now(UTC)
+    await doc.save()
 
 
 __all__ = [
@@ -334,5 +406,8 @@ __all__ = [
     "list_for_user_dicts",
     "mark_read",
     "clear_all",
+    "record_webhook_result",
+    "rotate_webhook_secret",
     "set_delivery_config",
+    "webhook_target",
 ]

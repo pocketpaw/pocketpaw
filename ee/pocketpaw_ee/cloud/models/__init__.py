@@ -264,6 +264,7 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.notification_outbox import NotificationOutboxItem
 from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -451,6 +452,7 @@ __all__ = [
     "Message",
     "Notification",
     "NotificationDeliveryConfig",
+    "NotificationOutboxItem",
     "NotificationSource",
     "OAuthAccount",
     "Payment",
@@ -522,6 +524,9 @@ def get_all_documents():
         # Per-workspace external-delivery config (Slack + generic webhook).
         # Only ``ee.cloud.notifications`` service/delivery import it.
         NotificationDeliveryConfig,
+        # External-delivery outbox (email / signed webhook / Slack). Only
+        # ``ee.cloud.notifications.outbox`` reads or writes it.
+        NotificationOutboxItem,
         FileObj,
         FileUpload,
         FileFolder,

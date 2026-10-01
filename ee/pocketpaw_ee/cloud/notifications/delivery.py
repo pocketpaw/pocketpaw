@@ -1,24 +1,27 @@
 # ee/pocketpaw_ee/cloud/notifications/delivery.py
-# External fan-out for cloud notifications: POSTs a notification to the
-# workspace's configured Slack incoming-webhook and/or generic HTTPS webhook.
-# A per-workspace kill switch (``enabled``) and per-kind routing live on
-# ``NotificationDeliveryConfig``.
+# Workspace-level external fan-out for cloud notifications: decides which of the
+# workspace's sinks (Slack incoming-webhook, signed generic webhook) a
+# notification goes to, and ENQUEUES one ``notification_outbox`` row per sink.
+# Nothing here does HTTP; ``notifications.outbox`` sends, retries and gives up.
 #
-# Contract: delivery is NEVER-RAISE. ``_deliver_external`` is awaited inline by
-# ``service.create`` right after the realtime emit; ``schedule_external_many``
-# runs a same-workspace batch (``service.create_many``, the chat message
-# fan-out) in a background task capped at ``_MAX_CONCURRENT_BATCHES``, reading
-# the config once per batch. Every POST has a short timeout, so a dead, slow or
-# malicious sink can neither roll back an insert nor raise out of the service.
+# Contract: NEVER-RAISE. ``enqueue_external`` is awaited by ``service.create``
+# after the realtime emit and only writes outbox rows, so the request path never
+# waits on a remote endpoint and a Mongo hiccup can't roll back the insert.
+# ``schedule_external_many`` does the same for a same-workspace batch in a
+# bounded background task, reading the config once. ``enqueue_workspace_event``
+# is the lead/handoff path: one delivery per EVENT (not per recipient), with a
+# typed webhook event whose data the outbox loads at send time.
 #
-# SSRF: the URLs are workspace-admin-supplied. ``is_safe_webhook_url`` requires
-# https://, rejects known-internal hostnames, and normalizes the host the way
-# the OS resolver would (strict literal -> ``int(host, 0)`` -> ``inet_aton``) so
-# decimal / hex / octal / short-dotted encodings of loopback or metadata IPs are
-# caught. It runs at write time (the PUT route) and again at delivery. A
-# hostname that RESOLVES to a private IP is not caught here (no DNS in the hot
-# path); ``audit.webhooks._validate_url_safety`` is the model for that
-# follow-up.
+# Routing lives on ``NotificationDeliveryConfig``: ``enabled`` master switch,
+# per-kind ``routes`` narrowing, and a webhook that the outbox switches off
+# (``webhook_disabled_at``) after 10 consecutive dead deliveries.
+#
+# SSRF: URLs are admin-supplied. ``is_safe_webhook_url`` is the sync baseline
+# (https only, forbidden hostnames, literal IPs normalized the way the OS
+# resolver would so decimal/hex/octal/short-dotted encodings are caught).
+# ``validate_webhook_url`` adds the DNS-resolving check from
+# ``audit.webhooks.validate_url_safety`` (every resolved address must be public).
+# Both run on save and again before every send (DNS rebinding).
 
 from __future__ import annotations
 
@@ -26,34 +29,33 @@ import asyncio
 import ipaddress
 import logging
 import socket
-from typing import TYPE_CHECKING
+import uuid
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-import httpx
+from pocketpaw_ee.cloud._core.errors import Forbidden
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.notifications.domain import Notification
 
 logger = logging.getLogger(__name__)
 
-# Bounded so a hung endpoint can't stall the notification insert response.
-_DELIVERY_TIMEOUT_SECONDS = 5.0
-
-# Batch deliveries (``schedule_external_many``) run as background tasks. At most
-# this many run at once; the rest wait on the semaphore. Strong refs live in
-# ``_inflight`` so a task isn't garbage-collected mid-flight.
+# Batch enqueues (``schedule_external_many``) run as background tasks. At most
+# this many run at once; strong refs live in ``_inflight`` so a task isn't
+# garbage-collected mid-flight.
 _MAX_CONCURRENT_BATCHES = 8
 _batch_slots: asyncio.Semaphore | None = None
 _batch_slots_loop: asyncio.AbstractEventLoop | None = None
 _inflight: set[asyncio.Task[None]] = set()
 
-# Sink names. Kept as constants so ``routes`` values and future sinks stay
-# consistent. A third sink ("email") layers on here + a new URL field.
 SINK_SLACK = "slack"
 SINK_WEBHOOK = "webhook"
+SINK_EMAIL = "email"
 
-# Hostnames that point at internal infrastructure on common cloud platforms /
-# dev boxes. Rejected even before any IP check (mirrors audit.webhooks).
+# The webhook ``type`` for a plain notification (not a lead/booking event).
+EVENT_NOTIFICATION = "notification.created"
+
 _FORBIDDEN_HOSTNAMES = frozenset(
     {
         "localhost",
@@ -81,37 +83,22 @@ def _ip_is_unsafe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 def _host_as_literal_ip(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """Interpret ``hostname`` as an IP the way the OS resolver / httpx would, or None.
 
-    ``ipaddress.ip_address`` only accepts the strict dotted-quad (and IPv6) form,
-    so it MISSES the alternate encodings an SSRF payload uses — a decimal integer
-    (``2852039166`` == 169.254.169.254 cloud metadata), a hex/octal integer
-    (``0x7f000001`` / ``017700000001`` == 127.0.0.1), or a short-dotted form
-    (``127.1``). ``getaddrinfo`` / httpx DO resolve those to the loopback / metadata
-    address, so the guard must normalize them before deciding. We try, in order:
-
-      1. the strict literal (also the ONLY IPv6 path);
-      2. a bare integer via ``int(host, 0)`` (decimal / ``0x`` hex / ``0o`` octal);
-      3. ``socket.inet_aton`` — the liberal C parser ``getaddrinfo`` shares, which
-         covers ``a`` / ``a.b`` / ``a.b.c`` / ``a.b.c.d`` with decimal, leading-zero
-         octal, or ``0x`` hex parts (this is what catches ``127.1`` and the bare
-         leading-zero octal ``017700000001`` that ``int(host, 0)`` rejects).
-
-    Returns None for a genuine DNS hostname (``hooks.slack.com``) so it stays allowed;
-    hostnames that RESOLVE to a private IP are still not caught here (no DNS lookup in
-    the hot path) — that is the documented follow-up. This only closes the alternate-
-    ENCODING bypass, which needs no DNS control.
+    ``ipaddress.ip_address`` only takes the strict form, so it misses the
+    encodings an SSRF payload uses: a decimal integer (``2852039166`` is
+    169.254.169.254), hex/octal integers (``0x7f000001``), short-dotted
+    (``127.1``). In order: the strict literal (the only IPv6 path), a bare
+    integer via ``int(host, 0)``, then ``socket.inet_aton`` (the liberal parser
+    ``getaddrinfo`` shares, which also catches leading-zero octal). Returns None
+    for a real DNS name.
     """
-    # 1. Strict literal (dotted-quad IPv4 or any IPv6).
     try:
         return ipaddress.ip_address(hostname)
     except ValueError:
         pass
-    # 2. Bare integer form: decimal / 0x-hex / 0o-octal. ``int(host, 0)`` rejects a
-    #    bare leading-zero octal (e.g. "017700000001"); step 3 covers that.
     try:
         return ipaddress.IPv4Address(int(hostname, 0))
     except (ValueError, OverflowError):
         pass
-    # 3. inet_aton — liberal short-dotted / leading-zero-octal / hex parsing.
     try:
         packed = socket.inet_aton(hostname)
     except OSError:
@@ -120,14 +107,9 @@ def _host_as_literal_ip(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6
 
 
 def is_safe_webhook_url(url: str | None) -> bool:
-    """True when ``url`` is a plausible-safe external https webhook target.
-
-    Baseline SSRF guard for workspace-admin-supplied URLs: requires https://,
-    a hostname, a non-forbidden hostname, and — when the host is a literal IP —
-    a public address. A hostname that resolves to a private IP is NOT caught
-    here (no DNS lookup in the hot path); that DNS-resolution hardening is a
-    follow-up. ``None`` / empty is "no sink", which is safe (returns False).
-    """
+    """Sync SSRF baseline: https, a non-forbidden host, no private literal IP in
+    any encoding. ``None`` / empty means "no sink" and returns False. DNS is
+    checked separately by ``validate_webhook_url``."""
     if not url:
         return False
     if not url.startswith("https://"):
@@ -139,28 +121,35 @@ def is_safe_webhook_url(url: str | None) -> bool:
     hostname = (parsed.hostname or "").lower()
     if not hostname or hostname in _FORBIDDEN_HOSTNAMES:
         return False
-    # Normalize the host to the IP the OS resolver would use BEFORE deciding — this
-    # catches the alternate-encoding SSRF bypasses (decimal/hex/octal integer,
-    # short-dotted) that a naive ``ipaddress.ip_address`` parse silently lets
-    # through while ``getaddrinfo`` / httpx resolve them to metadata / loopback.
     literal_ip = _host_as_literal_ip(hostname)
     if literal_ip is not None and _ip_is_unsafe(literal_ip):
         return False
     return True
 
 
+async def validate_webhook_url(url: str) -> None:
+    """Raise ``Forbidden`` unless ``url`` is safe, including where its host
+    RESOLVES to. Reuses the audit webhooks' DNS check rather than a copy."""
+    from pocketpaw_ee.cloud.audit.webhooks import validate_url_safety
+
+    if not is_safe_webhook_url(url):
+        raise Forbidden(
+            "notifications.invalid_webhook_url",
+            "Webhook URL must be an https:// URL to a public host.",
+        )
+    await validate_url_safety(url)
+
+
 def _slack_payload(notification: Notification) -> dict:
-    """Slack incoming-webhook shape. Slack renders ``text`` as the message body;
-    we lead with the title and append the body when present."""
+    """Slack incoming-webhook shape: ``text`` = title, then body when present."""
     text = notification.title
     if notification.body:
         text = f"{text}\n{notification.body}"
     return {"text": text}
 
 
-def _generic_payload(notification: Notification) -> dict:
-    """Full notification payload for a generic consumer. Field names mirror the
-    domain object so a receiver can key off ``kind`` / ``workspace_id``."""
+def _generic_data(notification: Notification) -> dict:
+    """``data`` of a ``notification.created`` webhook event."""
     return {
         "id": notification.id,
         "workspace_id": notification.workspace_id,
@@ -172,13 +161,20 @@ def _generic_payload(notification: Notification) -> dict:
     }
 
 
-async def _load_config(workspace_id: str):
-    """Load the workspace's delivery config, or ``None`` when unset.
+def new_event_envelope(event_type: str, **fields: Any) -> dict[str, Any]:
+    """The stored half of a webhook event: a stable id + type + created_at.
+    ``fields`` is either ``data`` (sent as-is) or ``lead_id`` (the outbox loads
+    the lead at send time)."""
+    return {
+        "event_id": f"evt_{uuid.uuid4().hex}",
+        "event_type": event_type,
+        "created_at": datetime.now(UTC).isoformat(),
+        **fields,
+    }
 
-    Best-effort: a missing doc (the common case) or a read failure returns
-    ``None`` so a Mongo hiccup can never take down ``create``. Imported inside
-    the function to keep the module-import graph light (same lazy-import style
-    the belt service uses for its config doc)."""
+
+async def _load_config(workspace_id: str):
+    """The workspace's delivery config, or None."""
     from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
 
     return await NotificationDeliveryConfig.find_one(
@@ -187,16 +183,14 @@ async def _load_config(workspace_id: str):
 
 
 def _resolve_sinks(config, kind: str) -> list[tuple[str, str]]:
-    """Return the ``(sink_name, url)`` pairs to deliver ``kind`` to.
-
-    A sink is eligible when its URL is set AND passes the safety check. Routing:
-    if ``config.routes`` has an entry for ``kind``, only the named sinks are
-    used; otherwise every configured+safe sink is used (deliver-all default).
-    """
+    """``(sink_name, url)`` pairs for ``kind``. A sink is eligible when its URL
+    passes the sync safety check (and, for the webhook, it isn't switched off);
+    a ``routes`` entry for ``kind`` narrows to the named sinks."""
     available: dict[str, str] = {}
     if is_safe_webhook_url(config.slack_webhook_url):
         available[SINK_SLACK] = config.slack_webhook_url
-    if is_safe_webhook_url(config.webhook_url):
+    webhook_off = getattr(config, "webhook_disabled_at", None) is not None
+    if is_safe_webhook_url(config.webhook_url) and not webhook_off:
         available[SINK_WEBHOOK] = config.webhook_url
 
     allowed = config.routes.get(kind) if config.routes else None
@@ -205,57 +199,85 @@ def _resolve_sinks(config, kind: str) -> list[tuple[str, str]]:
     return list(available.items())
 
 
-async def _post_one(
-    client: httpx.AsyncClient,
-    sink_name: str,
-    url: str,
-    notification: Notification,
-) -> None:
-    """POST the notification to one sink. Raises on failure — the caller
-    swallows it per-sink so one dead sink never blocks the others."""
-    payload = (
-        _slack_payload(notification) if sink_name == SINK_SLACK else _generic_payload(notification)
-    )
-    resp = await client.post(url, json=payload, timeout=_DELIVERY_TIMEOUT_SECONDS)
-    # 2xx is success; anything else is logged but not retried in v1.
-    if not (200 <= resp.status_code < 300):
-        logger.warning(
-            "notification external delivery: %s returned http %s", sink_name, resp.status_code
+def _rows_for(config, notification: Notification) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sink, url in _resolve_sinks(config, notification.kind):
+        if sink == SINK_SLACK:
+            payload = _slack_payload(notification)
+            ref = ""
+        else:
+            payload = new_event_envelope(EVENT_NOTIFICATION, data=_generic_data(notification))
+            ref = f"workspace:{notification.workspace_id}"
+        rows.append(
+            {
+                "workspace": notification.workspace_id,
+                "kind": notification.kind,
+                "sink": sink,
+                "target": url,
+                "payload": payload,
+                "webhook_ref": ref,
+            }
         )
+    return rows
 
 
-async def _deliver_external(notification: Notification) -> None:
-    """Fan a freshly-created notification out to the workspace's external sinks.
+async def enqueue_external(notification: Notification) -> None:
+    """Queue a fresh notification for the workspace's external sinks. Never raises."""
+    from pocketpaw_ee.cloud.notifications import outbox
 
-    NEVER raises — every failure mode (no config, disabled, unsafe URL, dead
-    endpoint, Mongo hiccup) is swallowed so the notification insert + realtime
-    emit that preceded this call can never be rolled back by a delivery problem.
-    """
     try:
         config = await _load_config(notification.workspace_id)
         if config is None or not config.enabled:
             return
-        sinks = _resolve_sinks(config, notification.kind)
-        if not sinks:
-            return
-        # Explicit timeout, same reasoning as audit/webhooks.py: the sink URL
-        # is workspace-supplied and the sinks are delivered serially, so an
-        # unhurried endpoint holds up the ones after it.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            for sink_name, url in sinks:
-                try:
-                    await _post_one(client, sink_name, url, notification)
-                except Exception:
-                    logger.warning(
-                        "notification external delivery to %s failed", sink_name, exc_info=True
-                    )
+        rows = _rows_for(config, notification)
+        if rows:
+            await outbox.enqueue_many(rows)
     except Exception:
-        logger.warning("notification external delivery fan-out crashed", exc_info=True)
+        logger.warning("notification external enqueue crashed", exc_info=True)
+
+
+async def enqueue_workspace_event(
+    *,
+    workspace_id: str,
+    kind: str,
+    slack_text: str,
+    webhook_event: dict[str, Any],
+    include_webhook: bool = True,
+) -> None:
+    """Queue ONE delivery of a site event (lead, handoff) to the workspace's
+    Slack and webhook sinks, honouring ``enabled`` and ``routes``. Pass
+    ``include_webhook=False`` when a site-level webhook already carries it.
+    Never raises."""
+    from pocketpaw_ee.cloud.notifications import outbox
+
+    try:
+        config = await _load_config(workspace_id)
+        if config is None or not config.enabled:
+            return
+        rows: list[dict[str, Any]] = []
+        for sink, url in _resolve_sinks(config, kind):
+            row: dict[str, Any] = {
+                "workspace": workspace_id,
+                "kind": kind,
+                "sink": sink,
+                "target": url,
+            }
+            if sink == SINK_SLACK:
+                row["payload"] = {"text": slack_text}
+            elif include_webhook:
+                row["payload"] = dict(webhook_event)
+                row["webhook_ref"] = f"workspace:{workspace_id}"
+            else:
+                continue
+            rows.append(row)
+        if rows:
+            await outbox.enqueue_many(rows)
+    except Exception:
+        logger.warning("workspace event enqueue crashed", exc_info=True)
 
 
 def _get_batch_slots() -> asyncio.Semaphore:
-    """The module semaphore, rebuilt when the running loop changes (a semaphore
-    that ever had a waiter is bound to its loop, and tests run many loops)."""
+    """The module semaphore, rebuilt when the running loop changes."""
     global _batch_slots, _batch_slots_loop
     loop = asyncio.get_running_loop()
     if _batch_slots is None or _batch_slots_loop is not loop:
@@ -264,37 +286,28 @@ def _get_batch_slots() -> asyncio.Semaphore:
     return _batch_slots
 
 
-async def _deliver_external_many(notifications: list[Notification]) -> None:
-    """Deliver a batch that shares one workspace: ONE config read for the whole
-    batch, then the same per-notification sink posts ``_deliver_external`` makes.
-    Never raises."""
+async def _enqueue_external_many(notifications: list[Notification]) -> None:
+    """Enqueue a same-workspace batch with ONE config read. Never raises."""
+    from pocketpaw_ee.cloud.notifications import outbox
+
     async with _get_batch_slots():
         try:
             config = await _load_config(notifications[0].workspace_id)
             if config is None or not config.enabled:
                 return
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-                for notification in notifications:
-                    for sink_name, url in _resolve_sinks(config, notification.kind):
-                        try:
-                            await _post_one(client, sink_name, url, notification)
-                        except Exception:
-                            logger.warning(
-                                "notification external delivery to %s failed",
-                                sink_name,
-                                exc_info=True,
-                            )
+            rows = [row for n in notifications for row in _rows_for(config, n)]
+            if rows:
+                await outbox.enqueue_many(rows)
         except Exception:
-            logger.warning("notification batch external delivery crashed", exc_info=True)
+            logger.warning("notification batch external enqueue crashed", exc_info=True)
 
 
 def schedule_external_many(notifications: list[Notification]) -> None:
-    """Fire-and-forget external delivery for a same-workspace batch, so a slow
-    sink never holds up the request that created the notifications."""
+    """Fire-and-forget enqueue for a same-workspace batch."""
     if not notifications:
         return
     try:
-        task = asyncio.create_task(_deliver_external_many(notifications))
+        task = asyncio.create_task(_enqueue_external_many(notifications))
     except RuntimeError:
         logger.debug("notification batch delivery: no running loop")
         return
@@ -302,4 +315,15 @@ def schedule_external_many(notifications: list[Notification]) -> None:
     task.add_done_callback(_inflight.discard)
 
 
-__all__ = ["_deliver_external", "is_safe_webhook_url", "schedule_external_many"]
+__all__ = [
+    "EVENT_NOTIFICATION",
+    "SINK_EMAIL",
+    "SINK_SLACK",
+    "SINK_WEBHOOK",
+    "enqueue_external",
+    "enqueue_workspace_event",
+    "is_safe_webhook_url",
+    "new_event_envelope",
+    "schedule_external_many",
+    "validate_webhook_url",
+]

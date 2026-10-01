@@ -356,4 +356,42 @@ async def count_for_site(workspace_id: str, site_id: str) -> int:
     return await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).count()
 
 
-__all__ = ["Lead", "capture", "list_for_site", "count_for_site"]
+async def lead_payload(workspace_id: str, lead_id: str) -> dict[str, Any] | None:
+    """The full lead as the owner-notification sinks see it (email body, webhook
+    ``data``), or None when it doesn't exist in this workspace. Loaded at send
+    time by the notification outbox so the queue never stores visitor data."""
+    from beanie import PydanticObjectId
+
+    try:
+        oid = PydanticObjectId(lead_id)
+    except Exception:  # noqa: BLE001 — a malformed id is simply not found
+        return None
+    doc = await _LeadDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        return None
+    site = await _SiteDoc.find_one({"workspace": workspace_id, "script_name": doc.site_id})
+    contact = contact_form.normalize(dict(doc.properties or {}))
+    src = doc.source
+    created = getattr(doc, "createdAt", None)
+    return {
+        "id": str(doc.id),
+        "site_id": str(site.id) if site is not None else doc.site_id,
+        "site_name": (site.name if site is not None else "") or "",
+        "form_type": doc.form_type,
+        "name": str(contact.get(contact_form.FULL_NAME) or ""),
+        "email": str(contact.get(contact_form.EMAIL) or ""),
+        "phone": str(contact.get(contact_form.PHONE) or ""),
+        "message": str(contact.get(contact_form.MESSAGE) or ""),
+        "properties": dict(doc.properties or {}),
+        "source": {
+            "kind": str(getattr(src, "kind", "") or "form"),
+            "form_type": getattr(src, "form_type", doc.form_type),
+            "origin": getattr(src, "origin", ""),
+            "origin_unrecognized": bool(getattr(src, "origin_unrecognized", False)),
+            "conversation_ref": str(getattr(src, "conversation_ref", "") or ""),
+        },
+        "created_at": created.isoformat() if created is not None else None,
+    }
+
+
+__all__ = ["Lead", "capture", "count_for_site", "lead_payload", "list_for_site"]

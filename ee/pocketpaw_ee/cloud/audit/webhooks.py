@@ -196,6 +196,10 @@ async def _validate_url_safety(url: str) -> None:
 # Back-compat alias for any external caller that imported the private helper.
 _require_https = _validate_url_safety
 
+# Public name for the DNS-resolving SSRF check. ``notifications.delivery`` reuses
+# it for the notification webhooks rather than keeping a second copy.
+validate_url_safety = _validate_url_safety
+
 
 def _resolve_id(webhook_id: str) -> PydanticObjectId:
     try:
@@ -393,4 +397,5 @@ __all__ = [
     "rotate_secret",
     "schedule_delivery",
     "update_webhook",
+    "validate_url_safety",
 ]

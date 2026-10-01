@@ -5,11 +5,11 @@ returns ``NotificationOut`` DTOs at the boundary. FastAPI serializes to
 JSON. The wire shape matches the legacy ``_to_wire`` output byte-for-byte
 (verified by ``tests/cloud/notifications/test_router_golden.py``).
 
-Updated: 2026-07-08 (feat/external-alerting-delivery) — added the
-external-delivery config surface: ``GET`` / ``PUT /notifications/delivery-config``
-(workspace-scoped, ``notifications.manage`` = ADMIN) so a workspace admin can
-paste a Slack incoming-webhook / generic HTTPS webhook URL. The router never
-touches the Beanie doc — it delegates to the service (sole writer).
+Also the workspace external-delivery config: ``GET`` / ``PUT
+/notifications/delivery-config`` and ``POST .../webhook-secret`` (rotate),
+workspace-scoped and ADMIN-gated (``notifications.manage``). A PUT that sets a
+new webhook URL returns its signing secret once (``webhook_secret``); reads
+never do. The router never touches the Beanie doc; the service is sole writer.
 """
 
 from __future__ import annotations
@@ -127,6 +127,10 @@ async def get_delivery_config(
             "webhook_url": None,
             "enabled": False,
             "routes": {},
+            "has_webhook_secret": False,
+            "webhook_secret": None,
+            "webhook_disabled_at": None,
+            "webhook_failure_count": 0,
         }
     return config
 
@@ -145,3 +149,17 @@ async def put_delivery_config(
         enabled=body.enabled,
         routes=body.routes,
     )
+
+
+@router.post("/delivery-config/webhook-secret")
+async def rotate_delivery_webhook_secret(
+    _user=Depends(require_action_any_workspace("notifications.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """Mint a new signing secret for the workspace webhook; returned once."""
+    from fastapi import HTTPException
+
+    config = await notifications_service.rotate_webhook_secret(workspace_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="No webhook configured")
+    return config
