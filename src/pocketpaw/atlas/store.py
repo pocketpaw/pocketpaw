@@ -71,6 +71,10 @@
 # join the corpus and tie-break with surfaces (both below every other kind), and
 # ``max_score(query)`` exposes the score ceiling so the read API can normalize a
 # raw score to 0..1 without reaching into the private weights.
+# Follow-up (same branch): ties are fully deterministic (score, then verbs last,
+# then how much of the name the query covers, then kind, then id), and a verb that matches ONLY on
+# its object noun ("files" for file-delete) is scaled by 0.4, so a navigational
+# query lands on the surface by a clear margin instead of tying with a delete.
 
 from __future__ import annotations
 
@@ -213,6 +217,13 @@ _KIND_TIEBREAK: dict[str, int] = {
     "verb": 0,
 }
 
+# A verb whose only matching query words are its OBJECT nouns (its
+# ``applies_to``: "file", "task", ...) has matched where it acts, not what it
+# does: "show me my files" hits verb:file-delete only on "file". Such a match is
+# scaled down so the surface for that object wins navigational queries by a
+# clear margin; any action word ("delete", "download") lifts the damping.
+_VERB_OBJECT_ONLY_SCALE = 0.4
+
 
 def _tokenize(text: str) -> list[str]:
     return [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS]
@@ -280,6 +291,10 @@ class AtlasStore:
             )
             for entry in model.entries
         ]
+        # Verb object nouns (stems of ``applies_to``), for the object-only damper.
+        self._verb_objects: dict[str, set[str]] = {
+            e.id: _stem_set(" ".join(e.applies_to or [])) for e in model.entries if e.kind == "verb"
+        }
         # Name-field IDF weights (relevance fix, 2026-07-05). A generic token
         # that shows up in many entry NAMES ("workspace", "connector") carries
         # little discriminating signal, yet each name hit scored the full
@@ -358,11 +373,21 @@ class AtlasStore:
         if not tokens:
             return []
 
-        scored: list[tuple[float, AtlasEntry]] = []
+        scored: list[tuple[float, int, AtlasEntry]] = []
         for entry, name_t, keyword_t, summary_t, narrative_t in self._index:
             score = 0.0
+            matched: set[str] = set()
+            name_hit_tokens: set[str] = set()
             for token in tokens:
+                if (
+                    token in name_t
+                    or token in keyword_t
+                    or token in summary_t
+                    or token in narrative_t
+                ):
+                    matched.add(token)
                 if token in name_t:
+                    name_hit_tokens.add(token)
                     # Damp the name hit by the token's name-IDF (relevance fix,
                     # 2026-07-05): a generic token in many names is worth less
                     # than a name-unique one, so a discriminating keyword can
@@ -380,16 +405,29 @@ class AtlasStore:
                 # surface / capability at equal overlap. Small enough to leave a
                 # real margin untouched.
                 score *= _KIND_SCALE.get(entry.kind, _KIND_SCALE_DEFAULT)
-                scored.append((score, entry))
+                objects = self._verb_objects.get(entry.id)
+                if objects and matched <= objects:
+                    score *= _VERB_OBJECT_ONLY_SCALE
+                # Share of the entry's NAME the query covers: "Files" is fully
+                # named by "my files", "CSV Files" only half.
+                coverage = len(name_hit_tokens) / len(name_t) if name_t else 0.0
+                scored.append((score, coverage, entry))
 
-        # Primary key: score (desc). Secondary: kind priority (desc) so an EXACT
-        # tie resolves toward the primitive instead of seed order — the
-        # ``atlas_search steered to /agents instead of Instinct`` class of miss.
+        # Primary key: score (desc). Then, for an EXACT tie: a verb goes last
+        # (navigation is the safe default; a delete must never tie-win "my
+        # files"), then the entry whose name the query covers more ("Files" over
+        # "CSV Files"), then kind priority (primitive first), then seed order
+        # (stable sort; the compiled artifact is id-sorted, so that is the id).
         scored.sort(
-            key=lambda pair: (pair[0], _KIND_TIEBREAK.get(pair[1].kind, 0)),
-            reverse=True,
+            key=lambda t: (
+                -t[0],
+                t[2].kind == "verb",
+                -t[1],
+                -_KIND_TIEBREAK.get(t[2].kind, 0),
+            )
         )
-        return scored if limit is None else scored[:limit]
+        pairs = [(score, entry) for score, _, entry in scored]
+        return pairs if limit is None else pairs[:limit]
 
     def max_score(self, query: str) -> float:
         """Highest raw score any entry could get for *query*: a name hit on

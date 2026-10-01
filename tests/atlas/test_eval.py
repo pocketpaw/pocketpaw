@@ -1,4 +1,9 @@
 # tests/atlas/test_eval.py — intent→capability ranking-regression eval
+# Updated: 2026-10-01 (feat/atlas-canonical, live tie fix) — baseline 77 → 83: six
+# navigational cases ("show me my files", "go to chat", "show tasks", ...) land on
+# their surface now that a verb matching only its object noun is damped, plus
+# "download this file". Keyword tightening, no case repointed: task-complete and
+# surface:belt dropped the bare "task" token, Deep Work gained "tasks".
 # Updated: 2026-10-01 (feat/atlas-canonical, review pass) — baseline 67 → 77: cases
 # for verb:site, the three deletes, task rename and the five new surfaces. The
 # new surface:fabric name damped primitive:fabric on "what is fabric" until a
@@ -83,7 +88,7 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 77
+STRICT_HIT_BASELINE = 83
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

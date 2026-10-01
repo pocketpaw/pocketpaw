@@ -7,6 +7,9 @@
 # the overlay is role-aware (owner sees surface:security, member doesn't, an
 # unresolved role fails closed) and gets the request's workspace as ws:<id>;
 # kinds is capped at 64 chars.
+# Live tie fix: navigational queries land on their surface with a clear margin
+# over every verb ("show me my files" used to tie files / file-delete /
+# file-download at 0.656), and the action words still pick their verb.
 
 from __future__ import annotations
 
@@ -136,6 +139,46 @@ class TestShapes:
     def test_no_match_is_an_empty_list(self, client):
         body = client.get("/api/v1/atlas/search", params={"q": "zzqx"}).json()
         assert body == {"query": "zzqx", "results": []}
+
+
+class TestNavigationBeatsVerbs:
+    @pytest.mark.parametrize(
+        ("q", "surface_id"),
+        [
+            ("show me my files", "surface:files"),
+            ("open my files", "surface:files"),
+            ("my files", "surface:files"),
+            ("go to chat", "surface:chat"),
+            ("show tasks", "surface:mission-control"),
+        ],
+    )
+    def test_surface_wins_with_a_clear_margin(self, client, q, surface_id):
+        results = client.get(
+            "/api/v1/atlas/search", params={"q": q, "kinds": "surface,verb", "limit": 20}
+        ).json()["results"]
+        top = results[0]
+        assert top["id"] == surface_id
+        verb_scores = [r["score"] for r in results if r["kind"] == "verb"]
+        assert all(v <= top["score"] - 0.15 for v in verb_scores), (q, results[:4])
+
+    def test_show_me_my_files_no_longer_ties_a_delete(self, client):
+        results = client.get(
+            "/api/v1/atlas/search", params={"q": "show me my files", "kinds": "surface,verb"}
+        ).json()["results"]
+        scores = {r["id"]: r["score"] for r in results}
+        assert results[0]["id"] == "surface:files"
+        assert scores.get("verb:file-delete", 0) <= scores["surface:files"] / 2
+
+    @pytest.mark.parametrize(
+        ("q", "verb_id"),
+        [("delete this file", "verb:file-delete"), ("download this file", "verb:file-download")],
+    )
+    def test_action_word_still_picks_the_verb(self, client, q, verb_id):
+        results = client.get(
+            "/api/v1/atlas/search", params={"q": q, "kinds": "surface,verb"}
+        ).json()["results"]
+        assert results[0]["id"] == verb_id
+        assert results[0]["score"] >= results[1]["score"] + 0.15
 
 
 class TestSearchParams:

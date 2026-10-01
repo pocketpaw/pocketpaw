@@ -1743,7 +1743,7 @@
         "what is a verdict",
         "outcome",
         "did it work",
-        "did the task actually get done",
+        "actually get done",
         "solved",
         "not solved",
         "partial",
@@ -2453,7 +2453,7 @@
       "id": "surface:belt",
       "keywords": [
         "belt",
-        "coding task",
+        "coding work",
         "diff",
         "station",
         "develop",
@@ -2847,7 +2847,10 @@
         "plan",
         "analytics",
         "in flight",
-        "mission control"
+        "mission control",
+        "tasks",
+        "my tasks",
+        "task list"
       ],
       "kind": "surface",
       "name": "Deep Work",
@@ -3716,11 +3719,11 @@
       "how": "the Complete verb on a task",
       "id": "verb:task-complete",
       "keywords": [
-        "complete task",
+        "complete",
         "mark done",
         "check off",
-        "finish task",
-        "close task"
+        "finish",
+        "close out"
       ],
       "kind": "verb",
       "name": "Mark done",

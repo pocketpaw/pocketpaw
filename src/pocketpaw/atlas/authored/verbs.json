@@ -268,11 +268,11 @@
       "surface": "",
       "requires": [],
       "keywords": [
-        "complete task",
+        "complete",
         "mark done",
         "check off",
-        "finish task",
-        "close task"
+        "finish",
+        "close out"
       ],
       "slash": null,
       "applies_to": [

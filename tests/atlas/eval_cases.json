@@ -456,6 +456,42 @@
       "expected_id": "surface:fabric",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/atlas-canonical, review pass): the five surfaces the composer's slash menu offers that atlas lacked."
+    },
+    {
+      "intent": "show me my files",
+      "expected_id": "surface:files",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
+    },
+    {
+      "intent": "open my files",
+      "expected_id": "surface:files",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
+    },
+    {
+      "intent": "my files",
+      "expected_id": "surface:files",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
+    },
+    {
+      "intent": "go to chat",
+      "expected_id": "surface:chat",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
+    },
+    {
+      "intent": "show tasks",
+      "expected_id": "surface:mission-control",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
+    },
+    {
+      "intent": "download this file",
+      "expected_id": "verb:file-download",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
     }
   ]
 }

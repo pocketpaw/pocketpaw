@@ -340,6 +340,13 @@ routes. Routine refactors and bug fixes don't. A CI hint (new
 
 ## Search ranking rules (`atlas/store.py`)
 
+Verb safety (feat/atlas-canonical): a `verb` that matches a query only on its
+object nouns (its `applies_to`, e.g. "file") is scaled by 0.4, so "show me my
+files" ranks `surface:files` well above `verb:file-delete`; any action word
+lifts the damping. Exact ties sort verbs last, then by how much of the entry's
+name the query covers ("Files" over "CSV Files"), then kind priority, then id
+(the compiled artifact's seed order).
+
 Search is deliberately simple lexical scoring — no embeddings, no external
 deps, fully deterministic:
 

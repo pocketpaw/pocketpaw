@@ -82,5 +82,26 @@
     "find": "return self._role_level >= required_level",
     "replace": "return True",
     "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
+  },
+  {
+    "label": "atlas search: verb object-noun damper dropped (delete ties 'my files')",
+    "file": "src/pocketpaw/atlas/store.py",
+    "find": "if objects and matched <= objects:",
+    "replace": "if False:",
+    "tests": ["tests/atlas/test_store.py", "tests/atlas/test_eval.py", "tests/v1/test_api_v1_atlas.py"]
+  },
+  {
+    "label": "atlas search: verbs no longer last on an exact tie",
+    "file": "src/pocketpaw/atlas/store.py",
+    "find": "                t[2].kind == \"verb\",\n",
+    "replace": "                False,\n",
+    "tests": ["tests/atlas/test_store.py", "tests/atlas/test_eval.py", "tests/v1/test_api_v1_atlas.py"]
+  },
+  {
+    "label": "atlas search: name-coverage tie-break dropped",
+    "file": "src/pocketpaw/atlas/store.py",
+    "find": "                -t[1],\n",
+    "replace": "                0,\n",
+    "tests": ["tests/atlas/test_store.py", "tests/atlas/test_eval.py", "tests/v1/test_api_v1_atlas.py"]
   }
 ]

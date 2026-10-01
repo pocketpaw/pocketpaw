@@ -2027,6 +2027,11 @@ every role-gated entry stays hidden.
   rounds to 3 places. A name that is the only one in atlas carrying the query
   word scores 1.0 for a primitive and 0.96 for other kinds; a word many names
   share is worth less.
+- A verb that matches only on its object noun ("files" for `verb:file-delete`)
+  scores at 0.4 of its raw match, so a navigational query ("show me my files")
+  lands on the surface with a clear margin; an action word ("delete",
+  "download") lifts that. Exact ties are deterministic: verbs last, then the
+  entry whose name the query covers more, then kind, then id.
 
 ## Sites — Native Editing
 
