@@ -231,6 +231,15 @@ async def test_caps_and_paging(world) -> None:
     assert not {m["id"] for m in older} & {m["id"] for m in msgs}
 
 
+async def test_limit_is_capped_at_100(world) -> None:
+    """Short messages, so the total-chars budget can't be what stops it."""
+    for i in range(150):
+        await _say(world["general"], world["alice"], f"m{i}")
+    with as_user(W1, world["alice"]):
+        out = body(await _read_room_handler({"room": "general", "limit": 10_000}))
+    assert len(out["messages"]) == READ_MAX_LIMIT
+
+
 async def test_default_limit(world) -> None:
     for i in range(40):
         await _say(world["general"], world["alice"], f"m{i}")
