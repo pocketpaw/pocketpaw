@@ -36,6 +36,10 @@ Change log:
   on a running instant call left two rows, and ending the call half-closed
   them. ``_daily_call_usage`` merges overlapping spans per room so those two
   rows count one call's time once.
+- ``_reap_agent_process`` (feat/meetings-ics, 2026-10-01): when the call-bot
+  exits on its own because everyone left, a hidden meeting room's meeting goes
+  back to ``scheduled`` (``meetings.service.release_meeting_room``) instead of
+  staying "live" forever. ``end_room`` still marks it ended.
 """
 
 from __future__ import annotations
@@ -418,6 +422,16 @@ async def _reap_agent_process(
             logger.info("Emitted CallEnded for natural room end (group %s)", group_id)
         except Exception:
             logger.debug("Could not emit CallEnded for natural room end (shutdown?)")
+
+        # A meeting room everyone left goes back to "scheduled" (its link starts a
+        # new call); end_room is what marks a meeting ended.
+        if workspace_id:
+            try:
+                from pocketpaw_ee.cloud.meetings import service as meetings_service
+
+                await meetings_service.release_meeting_room(workspace_id, group_id)
+            except Exception:
+                logger.exception("Could not release meeting room %s after natural end", group_id)
 
 
 # ---------------------------------------------------------------------------

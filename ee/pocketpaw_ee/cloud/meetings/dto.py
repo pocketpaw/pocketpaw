@@ -22,6 +22,13 @@
 # keys). Member side: ``KnockSummaryResponse`` and ``KnockDecisionResponse``.
 # ``UpdateMeetingRequest`` backs PATCH /meetings/{id} (host only; access, title,
 # description; any other field is refused, not ignored).
+#
+# 2026-10-01 (feat/meetings-ics, MC-4): ``UpdateMeetingRequest`` also takes
+# ``scheduled_start`` and ``duration_minutes`` (rescheduling; ``status`` and any
+# other field are still a 422). ``MeetingResponse.joining_info`` is the same text
+# ``GET /meetings/{id}/joining-info`` returns; None for meetings without a code.
+# ``KnockStatusResponse.status`` can also be ``ended`` (the guest's poll once the
+# meeting is over).
 
 from __future__ import annotations
 
@@ -123,6 +130,8 @@ class MeetingResponse(BaseModel):
     access: Literal["ask", "open"] = "ask"
     host_user_id: str | None = None
     description: str | None = None
+    # Title, time (UTC), link, code, description — ready to paste into an invite.
+    joining_info: str | None = None
 
     # ── Force UTC serialization ───────────────────────────────────────
     # Backend stores all datetimes as naive (timezone-unaware) UTC values.
@@ -314,9 +323,10 @@ class KnockCreatedResponse(BaseModel):
 
 class KnockStatusResponse(BaseModel):
     """Guest poll / cancel. The four call fields are set only when the guest may
-    connect now (admitted, meeting open, someone in the call); None otherwise."""
+    connect now (admitted, meeting open, someone in the call); None otherwise.
+    ``ended`` (poll only): the meeting is over, stop polling."""
 
-    status: KnockStatus
+    status: KnockStatus | Literal["ended"]
     token: str | None = None
     room_name: str | None = None
     identity: str | None = None
@@ -344,10 +354,16 @@ class KnockDecisionResponse(BaseModel):
 
 
 class UpdateMeetingRequest(BaseModel):
-    """PATCH /meetings/{id} — host only. Unknown fields are a 422, not a no-op."""
+    """PATCH /meetings/{id} — host only. Unknown fields are a 422, not a no-op.
+
+    ``scheduled_start`` / ``duration_minutes`` reschedule a LiveKit meeting that
+    hasn't started (409 ``meeting.not_reschedulable`` otherwise).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, max_length=300)
     description: str | None = Field(default=None, max_length=2000)
     access: Literal["ask", "open"] | None = None
+    scheduled_start: datetime | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)

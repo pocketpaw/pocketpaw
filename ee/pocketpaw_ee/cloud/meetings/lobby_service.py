@@ -31,6 +31,14 @@
 # Events (realtime, to the meeting room's members): ``meeting.knock`` for a new
 # knock that needs a decision, ``meeting.knock_resolved`` whenever a knock leaves
 # "waiting" (admitted, denied, cancelled, expired).
+#
+# 2026-10-01 (feat/meetings-ics): once the meeting is over (ended, cancelled,
+# failed or past its link expiry) the guest's poll answers ``{"status": "ended"}``
+# for a waiting, admitted or expired knock, so the join page can stop. Before,
+# an admitted guest got ``admitted`` with no token after "End for everyone", the
+# same answer as "no member in the call yet", and kept polling forever. The row
+# itself is unchanged ("ended" is a poll answer, not a stored knock status);
+# denied and cancelled knocks keep their answer.
 
 from __future__ import annotations
 
@@ -280,12 +288,20 @@ async def knock(
 
 async def knock_status(code: str, knock_id: str, secret: str | None) -> KnockStatusResponse:
     """The guest's poll. Carries a fresh LiveKit token while admitted, the meeting
-    is open and a member is in the call; just ``status`` otherwise."""
+    is open and a member is in the call; just ``status`` otherwise. ``ended`` once
+    the meeting is over (stop polling); ``admitted`` without a token means the
+    meeting is open but no member is in the call yet."""
     knock_row, meeting = await _guest_knock(code, knock_id, secret)
     await _age_out(knock_row, meeting)
     await _auto_admit_if_open(knock_row, meeting)
+    if meetings_service._is_closed(meeting, _now()) and knock_row.status in (
+        "waiting",
+        "admitted",
+        "expired",
+    ):
+        return KnockStatusResponse(status="ended")
     out = KnockStatusResponse(status=knock_row.status)
-    if knock_row.status != "admitted" or meetings_service._is_closed(meeting, _now()):
+    if knock_row.status != "admitted":
         return out
     room_id = meetings_service._room_of(meeting) or ""
     if not await _member_in_call(room_id):

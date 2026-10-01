@@ -3,6 +3,10 @@
 Notifications: meeting.* events on shared.events.event_bus → in-app
 notifications. Calendar: calendar.event.created → auto-create a Meeting
 when the event description has a Zoom/Meet URL.
+
+2026-10-01 (feat/meetings-ics, MC-4): the notification source ``type`` is the
+notification kind (``meeting_scheduled``), which the bridge sets on purpose so the
+frontend can deep-link; the old ``== "meeting"`` assertion predated that.
 """
 
 from __future__ import annotations
@@ -80,7 +84,7 @@ async def test_meeting_scheduled_notification_fired(patched_notifications):
     assert kw["kind"] == "meeting_scheduled"
     assert kw["title"] == "Meeting scheduled"
     assert "Zoom" in kw["body"]
-    assert kw["source"].type == "meeting"
+    assert kw["source"].type == "meeting_scheduled"  # the frontend deep-links on kind
     assert kw["source"].id == "m-1"
 
 

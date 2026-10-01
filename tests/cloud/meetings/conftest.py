@@ -6,6 +6,12 @@
 # meetings + livekit routers on a bare FastAPI app with a switchable signed-in
 # user) moved here from test_meeting_by_code.py so the lobby suite shares them.
 # A test module that defines its own ``lk`` (test_instant_meeting.py) still wins.
+#
+# 2026-10-01 (feat/meetings-ics, MC-4): ``_fresh_meeting_scheduler`` (autouse) gives
+# every test its own APScheduler. The module-level singleton in
+# scheduling/reminders.py used to outlive the test that created it and stay bound
+# to that test's closed event loop, so the next test that scheduled a job failed
+# with "Event loop is closed" (test_router::test_create_meeting_with_scheduled_start).
 
 from __future__ import annotations
 
@@ -18,6 +24,20 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud.chat import group_service
 from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+
+@pytest.fixture(autouse=True)
+def _fresh_meeting_scheduler():
+    from pocketpaw_ee.cloud.meetings.scheduling import reminders
+
+    reminders._scheduler = None
+    yield
+    if reminders._scheduler is not None:
+        try:
+            reminders._scheduler.shutdown(wait=False)
+        except Exception:  # noqa: BLE001 — its loop may already be closed
+            pass
+        reminders._scheduler = None
 
 
 @pytest.fixture

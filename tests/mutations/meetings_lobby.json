@@ -65,8 +65,8 @@
   {
     "label": "token: minted after the meeting closed",
     "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
-    "find": "if knock_row.status != \"admitted\" or meetings_service._is_closed(meeting, _now()):",
-    "replace": "if knock_row.status != \"admitted\":",
+    "find": "if meetings_service._is_closed(meeting, _now()) and knock_row.status in (",
+    "replace": "if False and knock_row.status in (",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
@@ -182,8 +182,8 @@
   {
     "label": "patch: not workspace-filtered",
     "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
-    "find": "    doc = await _MeetingDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    if (doc.host_user_id",
-    "replace": "    doc = await _MeetingDoc.find_one({\"_id\": oid})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    if (doc.host_user_id",
+    "find": "    doc = await _MeetingDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    return doc",
+    "replace": "    doc = await _MeetingDoc.find_one({\"_id\": oid})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    return doc",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
@@ -353,8 +353,8 @@
   {
     "label": "secret: poll reads ?secret= again",
     "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
-    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC \u2014 the guest's poll",
-    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC \u2014 the guest's poll",
+    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC — the guest's poll",
+    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC — the guest's poll",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
@@ -362,8 +362,8 @@
   {
     "label": "secret: cancel reads ?secret= again",
     "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
-    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC \u2014 the guest stops",
-    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC \u2014 the guest stops",
+    "find": "    x_knock_secret: str | None = Header(default=None),\n) -> KnockStatusResponse:\n    \"\"\"PUBLIC — the guest stops",
+    "replace": "    x_knock_secret: str | None = Header(default=None),\n    secret: str | None = None,\n) -> KnockStatusResponse:\n    x_knock_secret = x_knock_secret or secret\n    \"\"\"PUBLIC — the guest stops",
     "tests": [
       "tests/cloud/meetings/test_meeting_lobby.py"
     ]
