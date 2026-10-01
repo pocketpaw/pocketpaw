@@ -2,7 +2,9 @@
 #
 # Created 2026-10-01 (feat/partners-foundation, PH-1). Sets or clears
 # ``Workspace.partner`` on ANY workspace. Reached only through the
-# ``require_platform("platform.partners.write")`` route in ``partners/router.py``.
+# ``require_platform("platform.partners.write")`` route in ``partners/router.py``,
+# which wraps the write in a platform audit row (``partner_profile_audit_dict``
+# supplies its ``before``).
 
 from __future__ import annotations
 
@@ -16,6 +18,15 @@ from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.partners.dto import PartnerProfileIn, PartnerProfileOut
 from pocketpaw_ee.cloud.partners.service import _oid
+
+
+async def partner_profile_audit_dict(workspace_id: str) -> dict:
+    """The current profile as a JSON dict for an audit ``before`` — {} if none."""
+    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+
+    # admin-cross-tenant: audit snapshot for the operator write below.
+    profile = await partner_profile_for_workspace(workspace_id)
+    return profile.model_dump(mode="json") if profile is not None else {}
 
 
 async def set_partner_profile(

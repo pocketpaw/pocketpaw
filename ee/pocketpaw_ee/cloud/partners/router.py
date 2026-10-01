@@ -2,13 +2,15 @@
 #
 # Created 2026-10-01 (feat/partners-foundation, PH-1).
 #   /partners/me, /partners/clients[/{client_id}]  — tenant routes
-#   /admin/partners/{workspace_id}                 — platform-operator set / clear
+#   PUT /admin/partners/{workspace_id}             — platform-operator set / clear
+#     (body ``null`` clears). Audited with ``platform.audit.begin/settle`` like
+#     every other operator write.
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.platform_deps import require_platform
@@ -21,6 +23,7 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerProfileIn,
     PartnerProfileOut,
 )
+from pocketpaw_ee.cloud.platform import audit
 
 router = APIRouter(prefix="/partners", tags=["partners"])
 admin_router = APIRouter(prefix="/admin/partners", tags=["partners-admin"])
@@ -59,17 +62,25 @@ async def delete_client(client_id: str, ctx: Ctx) -> Response:
 
 @admin_router.put("/{workspace_id}", response_model=PartnerProfileOut | None)
 async def set_partner(
-    workspace_id: str, body: PartnerProfileIn | None, operator: Operator
+    workspace_id: str, body: PartnerProfileIn | None, request: Request, operator: Operator
 ) -> PartnerProfileOut | None:
-    """Set the profile; send ``null`` (or use DELETE) to clear it."""
-    return await service_admin.set_partner_profile(
-        workspace_id=workspace_id, body=body, operator_id=str(operator.id)
+    """Set the profile; send ``null`` to clear it."""
+    after = body.model_dump(mode="json") if body is not None else {}
+    event = await audit.begin(
+        operator=operator,
+        action="platform.partners.write",
+        reason="clear partner profile" if body is None else f"partner status={body.status}",
+        target_type="workspace_partner",
+        target_workspace=workspace_id,
+        before=await service_admin.partner_profile_audit_dict(workspace_id),
+        request=request,
     )
-
-
-@admin_router.delete("/{workspace_id}", status_code=204)
-async def clear_partner(workspace_id: str, operator: Operator) -> Response:
-    await service_admin.set_partner_profile(
-        workspace_id=workspace_id, body=None, operator_id=str(operator.id)
-    )
-    return Response(status_code=204)
+    ok = False
+    try:
+        out = await service_admin.set_partner_profile(
+            workspace_id=workspace_id, body=body, operator_id=str(operator.id)
+        )
+        ok = True
+    finally:
+        await audit.settle(event, ok=ok, after=after if ok else {})
+    return out

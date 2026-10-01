@@ -5,6 +5,10 @@
 # workspaces, platform-operator-only admin switch, and per-workspace site billing.
 # Updated the same day: clients are Fabric Customer objects; tests inject a
 # journal-backed store over a tmp journal (same as tests/cloud/people).
+# Review fixes: every client call passes the tmp store; an autouse fixture points
+# SOUL_DATA_DIR at tmp_path and clears the default-store cache so nothing can
+# reach a real journal; cross-tenant writes and reads share ONE store; admin PUT
+# writes an audit row; a seam test proves partner billing at site_entitlements.
 
 from __future__ import annotations
 
@@ -47,6 +51,19 @@ async def _workspace(slug: str, status: str | None = None) -> WorkspaceDoc:
         ws.partner = PartnerProfile(status=status, footer_name=f"{slug} Prints")
     await ws.insert()
     return ws
+
+
+@pytest.fixture(autouse=True)
+def _no_real_journal(tmp_path, monkeypatch):
+    """No test here may open the developer's real ~/.soul journal."""
+    from pocketpaw.journal_dep import reset_journal_cache
+
+    monkeypatch.setenv("SOUL_DATA_DIR", str(tmp_path / "soul"))
+    service._default_store.cache_clear()
+    reset_journal_cache()
+    yield
+    service._default_store.cache_clear()
+    reset_journal_cache()
 
 
 @pytest.fixture
@@ -95,13 +112,18 @@ async def test_client_crud_round_trip(mongo_db, store) -> None:
 async def test_whatsapp_must_be_e164(mongo_db, store) -> None:
     ws = await _workspace("acme", "active")
     with pytest.raises(PydanticValidationError):
-        await service.create_client(_ctx(str(ws.id)), body={"name": "X", "whatsapp": "98765"})
+        await service.create_client(
+            _ctx(str(ws.id)), body={"name": "X", "whatsapp": "98765"}, store=store
+        )
 
 
 async def test_cross_tenant_client_is_404(mongo_db, store) -> None:
     a = await _workspace("a", "active")
     b = await _workspace("b", "active")
-    client = await service.create_client(_ctx(str(a.id)), body={"name": "A", "whatsapp": PHONE})
+    ctx_a = _ctx(str(a.id))
+    client = await service.create_client(ctx_a, body={"name": "A", "whatsapp": PHONE}, store=store)
+    # Same store: A sees its client, so B's 404s below are tenancy, not an empty store.
+    assert (await service.get_client(ctx_a, client_id=client.id, store=store)).name == "A"
 
     ctx_b = _ctx(str(b.id))
     for call in (
@@ -113,6 +135,8 @@ async def test_cross_tenant_client_is_404(mongo_db, store) -> None:
             await call
         assert exc.value.status_code == 404
     assert await service.list_clients(ctx_b, store=store) == []
+    # B's failed delete did not touch A's record.
+    assert [c.id for c in await service.list_clients(ctx_a, store=store)] == [client.id]
 
 
 @pytest.mark.parametrize("status", [None, "applied", "suspended"])
@@ -248,3 +272,75 @@ async def test_opt_in_timestamp_round_trips(mongo_db, store) -> None:
     )
     assert out.whatsapp_opt_in_at == at
     assert (await service.get_client(ctx, client_id=out.id, store=store)).whatsapp_opt_in_at == at
+
+
+async def test_admin_put_writes_an_audit_row_and_null_clears(mongo_db) -> None:
+    from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
+    from pocketpaw_ee.cloud.models.user import User as UserDoc
+    from pocketpaw_ee.cloud.partners.dto import PartnerProfileIn
+    from starlette.datastructures import Headers
+    from starlette.requests import Request
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "PUT",
+            "path": "/api/v1/admin/partners/x",
+            "headers": Headers(raw=[(b"user-agent", b"test")]).raw,
+            "query_string": b"",
+            "client": ("10.0.0.5", 1234),
+        }
+    )
+    operator = UserDoc(email="op@paw.test", hashed_password="x", platform_role="operator")
+    await operator.insert()
+    ws = await _workspace("shop")
+    wid = str(ws.id)
+
+    body = PartnerProfileIn(status="active", footer_name="Shop Prints")
+    out = await partners_router.set_partner(wid, body, request, operator)
+    assert out is not None and out.status == "active"
+    assert await partners_router.set_partner(wid, None, request, operator) is None
+    assert (await WorkspaceDoc.get(ws.id)).partner is None
+
+    rows = await PlatformAuditEvent.find_all().to_list()
+    assert [r.action for r in rows] == ["platform.partners.write"] * 2
+    assert all(r.target_workspace == wid and r.status == "applied" for r in rows)
+
+
+async def test_partner_billing_reaches_the_site_entitlements_seam(mongo_db, monkeypatch) -> None:
+    """Both global flags off: a free site in an ACTIVE partner workspace is refused the
+    concierge at ``site_entitlements``; the same site in a plain workspace is not."""
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: SimpleNamespace(
+            billing_enforced=False, sites_billing_enforced=False, dodo_site_products=None
+        ),
+    )
+
+    async def free_site(ws: WorkspaceDoc) -> str:
+        doc = Site(
+            workspace=str(ws.id),
+            pocket_id=f"pk_{ws.slug}",
+            owner="u1",
+            name="Shop",
+            plan_tier=site_plans.BASE_SITE_PLAN_KEY,
+            subscription_status="none",
+            deployed=True,
+        )
+        await doc.insert()
+        return str(doc.id)
+
+    partner = await _workspace("partner", "active")
+    plain = await _workspace("plain")
+    p_ent = await sites_service.site_entitlements(
+        workspace_id=str(partner.id), site_id=await free_site(partner)
+    )
+    n_ent = await sites_service.site_entitlements(
+        workspace_id=str(plain.id), site_id=await free_site(plain)
+    )
+    assert p_ent.concierge_entitled is False  # enforced: the free floor sells no concierge
+    assert n_ent.concierge_entitled is True  # unchanged: no billing, everything entitled

@@ -1,6 +1,10 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-02 (feat/partners-foundation, PH-1): per-site billing gates ask
+# ``sites_enforced_for(workspace)`` (active partner = enforced); the four entitlement
+# helpers are async for that read, and ``site_entitlements`` passes the profile.
+#
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): no path here creates
 #   a concierge any more (captain rule). Publish no longer mints a widget + agent
 #   in ``_embed_concierge_bar`` (the transient first-publish doc is gone with it),
@@ -5740,6 +5744,9 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         concierge_enabled=bool(getattr(doc, "concierge_enabled", False)),
     )
     exceeded, _hosts, _limit = await _hostname_cap_exceeded(doc)
+    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+
+    partner = await partner_profile_for_workspace(workspace_id)  # PH-1: match the public seams
 
     return SiteEntitlementsResponse(
         site_id=site_id,
@@ -5762,7 +5769,7 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         # NOT echoed off the resolver: the owner page reads this to decide whether a
         # concierge may be created, so it must give the answer the public seams
         # give, which honours ``sites_enforced()`` (off = every plan sells it).
-        concierge_entitled=concierge_plan_entitled(doc),
+        concierge_entitled=concierge_plan_entitled(doc, partner=partner),
         concierge_enabled=resolved.concierge_enabled,
         # Echoed off the resolver like analytics, and for the same reason there is
         # nothing to AND in: the download spends no per-workspace allowance. Note this

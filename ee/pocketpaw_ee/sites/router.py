@@ -3,6 +3,9 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-10-02 (feat/partners-foundation, PH-1): the foreign-concierge
+# response passes the workspace partner profile to the concierge gates.
+#
 # ORIGIN OWNERSHIP: POST ``/sites/origins/claims`` issues a token bound to
 # (workspace, host) and POST ``/sites/origins/verify`` reads it back off the
 # claimed domain. They are the gate the foreign-concierge routes ask before

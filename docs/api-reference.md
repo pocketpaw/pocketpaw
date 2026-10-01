@@ -4,7 +4,7 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
 Updated: 2026-10-01 (feat/partners-foundation, PH-1) — added "Paw Partners —
   profile and clients": GET /partners/me, client CRUD under /partners/clients,
-  and the platform-operator PUT/DELETE /admin/partners/{workspace_id}. An active
+  and the platform-operator PUT /admin/partners/{workspace_id}. An active
   partner profile turns site billing on for that workspace.
 Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
   startup (and then every 30 minutes with the cloud scheduler on); the owner
@@ -995,13 +995,13 @@ the client (`id`, `workspace_id`, fields, `created_at`, `updated_at`); create is
 Partial update (only sent fields change) or delete (**204**). Same 403 rule; a
 client from another workspace is **404**.
 
-### `PUT /admin/partners/{workspace_id}` · `DELETE /admin/partners/{workspace_id}`
+### `PUT /admin/partners/{workspace_id}`
 
 Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
 session cookie). PUT body: `status`, `footer_name`, optional `tier` (default
 `bronze`), `billing_country` (default `IN`, upper-cased), `founding`,
-`joined_at` (kept from the previous profile when omitted). PUT `null` or DELETE
-clears the profile. **Billing effect:** while the profile is `active`, the
+`joined_at` (kept from the previous profile when omitted). A `null` body clears
+the profile. Every call writes a platform audit row (`platform.partners.write`). **Billing effect:** while the profile is `active`, the
 per-site billing seams (`billing.enforcement.sites_enforced`) enforce for that
 workspace even with `billing_enforced` and `sites_billing_enforced` off.
 

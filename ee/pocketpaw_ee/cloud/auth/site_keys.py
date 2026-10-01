@@ -1,6 +1,9 @@
 # ee/pocketpaw_ee/cloud/auth/site_keys.py — resolve a public Paw Bar embed key
 # (Site.signed_key) into a scoped RequestContext.
 #
+# Updated 2026-10-02 (feat/partners-foundation, PH-1): ``concierge_available`` /
+# ``concierge_plan_entitled`` take ``partner=`` (an active profile = enforced).
+#
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a site with no
 # concierge (``Site.concierge_created_at`` unset) is OFF at every public seam.
 # ``concierge_exists`` is the new predicate; ``concierge_available`` is now
