@@ -8170,7 +8170,9 @@ async def publish_pocket(
     if (
         requested_tier is not None
         and requested_tier.partner_only
-        and requested_tier.key != _held_tier_key
+        # A LAPSED or pending site re-buying the tier it still names is a purchase
+        # too, not a content edit.
+        and (requested_tier.key != _held_tier_key or not already_paying)
     ):
         from pocketpaw_ee.cloud.partners import service as _partners_service
 
@@ -8220,7 +8222,9 @@ async def publish_pocket(
     if (
         requested_tier is not None
         and (is_paid or already_paying)
-        and requested_tier.key != _held_tier_key
+        # ``or not already_paying``: re-buying the tier a LAPSED site still names
+        # charges the wallet exactly like a new purchase, so it needs an admin too.
+        and (requested_tier.key != _held_tier_key or not already_paying)
         and not purchase_authorized
         and not (_plan_carries or _on_plan_rail)
     ):
@@ -8344,47 +8348,26 @@ async def publish_pocket(
         # a monthly rung, the partner's country price for a partner-only one.
         price_usd = await _billing_service.site_plan_price_usd(tier, workspace_id)
         _now = datetime.now(UTC)
-        _held_months = _existing_tier.period_months if _existing_tier is not None else 1
-        # A DIFFERENT PERIOD LENGTH IS NOT A RE-PRICE (PH-2). ``period_paid_usd`` is a
-        # high-water mark for ONE period; comparing a year's price against a
-        # month's hands out time (year -> month -> year restarted a year for free,
-        # year -> a cheaper monthly rung got the concierge for nothing).
-        #
-        #   * Shorter period while the longer one is still running: REFUSED. The
-        #     year was bought; it runs out first, then the site can move.
-        #   * Any other period change is a FRESH PURCHASE: the full new price, a
-        #     new ``period_paid_usd`` and a new period starting today. An unused
-        #     monthly remainder is not credited (no proration, as everywhere here).
-        #   * Same period: today's rule — pay the gap, keep the date.
-        _period_change = tier.period_months != _held_months
-        if _period_change and tier.period_months < _held_months:
-            _paid_through = existing_doc.renewal_date
-            if _paid_through is None or _as_utc(_paid_through) > _now:
-                _through = (
-                    _as_utc(_paid_through).date().isoformat()
-                    if _paid_through is not None
-                    else "the end of its current period"
-                )
-                raise ConflictError(
-                    "sites.period_downgrade_refused",
-                    f"This site is paid through {_through}. Switch plans when it renews. "
-                    "Nothing has been charged.",
-                )
-        delta_usd = price_usd if _period_change else price_usd - already_paid_usd
-        # A replayed debit is a silent no-op, and a fresh purchase grants a whole
-        # new period — so a same-day re-buy of a tier this site already paid for
-        # today would restart the period for nothing. Refuse it.
-        if _period_change and await _billing_service.site_plan_charged(
-            workspace_id=workspace_id,
-            site_id=str(existing_doc.id),
-            tier_key=tier.key,
-            period_start=_now,
-        ):
-            raise ConflictError(
-                "sites.plan_already_bought_today",
-                "This site already bought this plan today. Try again tomorrow. "
-                "Nothing has been charged.",
-            )
+        # THE RULE lives in ``billing.service.site_plan_change_terms`` (pure, unit
+        # tested): same period pays the gap and keeps the date; a different period
+        # is a fresh purchase with a new period; a running longer period cannot
+        # move to a shorter one. A tier-change debit has its own key namespace, so
+        # a change on a renewal's due date never replays that renewal's debit.
+        delta_usd, _new_renewal = _billing_service.site_plan_change_terms(
+            held_tier=_existing_tier,
+            new_tier=tier,
+            new_price_usd=price_usd,
+            already_paid_usd=already_paid_usd,
+            paid_through=existing_doc.renewal_date,
+            now=_now,
+            already_bought_today=await _billing_service.site_plan_charged(
+                workspace_id=workspace_id,
+                site_id=str(existing_doc.id),
+                tier_key=tier.key,
+                period_start=_now,
+                change=True,
+            ),
+        )
         if delta_usd > 0:
             await _billing_service.charge_site_plan_credits(
                 workspace_id=workspace_id,
@@ -8393,12 +8376,12 @@ async def publish_pocket(
                 amount_usd=delta_usd,
                 period_start=_now,
                 member_id=user_id,
+                change=True,
             )
             existing_doc.period_paid_usd = price_usd
-            # The period restarts ONLY on a fresh purchase that was charged —
-            # never on a change that cost nothing.
-            if _period_change:
-                existing_doc.renewal_date = _now + relativedelta(months=tier.period_months)
+            # The period restarts ONLY together with a charge.
+            if _new_renewal is not None:
+                existing_doc.renewal_date = _new_renewal
         _previous_tier = existing_doc.plan_tier
         existing_doc.plan_tier = tier.key
         # Moving to a different paid tier is a decision to keep paying, so it
@@ -9014,28 +8997,12 @@ async def _publish_credits_site(
     from pocketpaw_ee.cloud.billing import service as billing_service
 
     # A LIVE SITE KEEPS ITS STATE ON A REFUSED CHARGE (PH-2). ``_publish_pending_site``
-    # rewrites these fields on an existing row BEFORE the debit; for a site that
-    # is already deployed (an upgrade of a live free site) a refusal must leave it
-    # exactly as it was, not "pending" on a tier nobody paid for. A brand-new site
-    # keeps the old behaviour: pending and undeployed, ready for a retry.
-    _restore_fields = (
-        "owner",
-        "name",
-        "plan_tier",
-        "subscription_status",
-        "billing_rail",
-        "pending_deploy_inputs",
-    )
-    _prior = await _SiteDoc.find_one(
-        {"_id": await _resolve_live_site_oid(workspace_id, pocket_id), "workspace": workspace_id}
-    )
-    _prior_state = (
-        {f: getattr(_prior, f) for f in _restore_fields}
-        if _prior is not None and _prior.deployed
-        else None
-    )
-
-    doc = await _publish_pending_site(
+    # rewrites an existing row BEFORE the debit and hands back what it overwrote
+    # when that row was already deployed; a refusal puts it back, so an upgrade of
+    # a live free site is never left "pending" on a tier nobody paid for. A
+    # brand-new site gets None and keeps the old behaviour: pending and
+    # undeployed, ready for a retry.
+    doc, _prior_state = await _publish_pending_site(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
@@ -9155,7 +9122,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     rail: str = _CREDITS_RAIL,
-) -> _SiteDoc:
+) -> tuple[_SiteDoc, dict[str, Any] | None]:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
 
@@ -9185,6 +9152,11 @@ async def _publish_pending_site(
          have moved on);
       5. stashes the checkout_url on the returned doc's transient ``_checkout_url``
          for the router to surface.
+
+    Returns ``(doc, prior)``. ``prior`` is the fields this call overwrote on an
+    ALREADY-DEPLOYED row, snapshotted right before the overwrite so the list
+    cannot drift from the writes; None for a new or undeployed row. The caller
+    restores it if the charge that follows is refused (PH-2).
 
     It does NOT run the generator, does NOT deploy, does NOT promote the pocket's
     draft to published (the site is not live yet), and does NOT emit
@@ -9291,12 +9263,22 @@ async def _publish_pending_site(
             event_mapping=_DEFAULT_EVENT_MAPPING,
         )
         await doc.insert()
+        prior = None
     else:
         # Re-publish of a pocket onto a paid tier: refresh the pending intent in
         # place. A previously-live site is taken back to pending until the new
         # annual sub confirms — but the deploy fields are LEFT as-is until the
         # activation re-deploys (we don't tear down a live site before payment).
         doc = existing
+        _overwritten = (
+            "owner",
+            "name",
+            "plan_tier",
+            "subscription_status",
+            "billing_rail",
+            "pending_deploy_inputs",
+        )
+        prior = {f: getattr(doc, f) for f in _overwritten} if doc.deployed else None
         doc.owner = user_id
         doc.name = site_name
         doc.plan_tier = plan_key
@@ -9305,7 +9287,7 @@ async def _publish_pending_site(
         doc.pending_deploy_inputs = pending_inputs
         await doc.save()
 
-    return doc
+    return doc, prior
 
 
 async def _mark_subscription_active(doc: _SiteDoc) -> None:

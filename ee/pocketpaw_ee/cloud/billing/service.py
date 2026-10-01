@@ -35,9 +35,16 @@
 # Updated 2026-10-02 (feat/partners-sell, PH-2): ``site_plan_price_usd`` — what one
 #   period of a site tier costs THIS workspace. Monthly rungs return
 #   ``monthly_price_usd`` unchanged; partner-only rungs return
-#   ``site_plans.partner_price_usd`` for the partner's billing country. The three
-#   site charge sites (publish purchase, tier change, renewal) read it. With no
-#   partner profile a renewal keeps the price last paid; otherwise it refuses.
+#   ``site_plans.partner_price_usd`` for the partner's billing country. The wallet
+#   charge sites for site plans (``sites.service`` purchase and tier change, the
+#   renewal sweeper) read it; the foreign-concierge mint stays on its fixed
+#   monthly rung. With no partner profile a renewal keeps the price last paid only
+#   when that is a real price of the tier; otherwise it refuses.
+#   ``site_plan_change_terms`` is the pure tier-change rule (same period: pay the
+#   gap, keep the date; different period: full price, new period; a running
+#   longer period cannot move to a shorter one). Tier-change debits use their own
+#   key namespace (``site_plan_debit_key(..., change=True)``) so a change on a
+#   renewal's due date can never replay that renewal's debit.
 # Updated 2026-06-24 (security): enforce USD before granting; correct the
 #   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
 # Updated 2026-06-24 (BC-7, the Subscription primitive): added ``subscribe`` (open
@@ -502,25 +509,35 @@ def _dunning_grace_days() -> int:
     return max(int(get_settings().billing_dunning_grace_days), 0)
 
 
-def site_plan_debit_key(site_id: str, tier_key: str, period_start: datetime) -> str:
-    """The idempotency key for one site-month bought from the credit wallet.
+def site_plan_debit_key(
+    site_id: str, tier_key: str, period_start: datetime, *, change: bool = False
+) -> str:
+    """The idempotency key for one site-plan debit from the credit wallet.
 
-    ANCHORED ON A DATE, not a timestamp, and that is the whole design. The key is
-    what stops the same month being charged twice, so it has to be identical
-    across every call that means "this month" and different across calls that
-    mean different months. A timestamp is unique per call, which makes a
-    double-submitted purchase two charges; a bare ``site_id`` is identical
-    forever, which makes the second month free.
+    ANCHORED ON A DATE, not a timestamp. The key is what stops the same period
+    being charged twice, so it has to be identical across every call that means
+    "this period" and different across calls that mean different ones. A
+    timestamp is unique per call, which makes a double-submitted purchase two
+    charges; a bare ``site_id`` is identical forever, which makes the second
+    period free.
 
     The date is UTC and comes from the caller: a PURCHASE passes now, a RENEWAL
-    passes the ``renewal_date`` it is consuming. Since renewals step a month at a
-    time the two can never collide.
+    passes the ``renewal_date`` it is consuming. Those two meet only if a site is
+    bought on the very day an earlier period of the same tier renews, which the
+    purchase path cannot reach (a paying site takes the tier-change branch).
+
+    A TIER CHANGE IS ITS OWN NAMESPACE (``change=True`` appends ``:change``). A
+    change made on a renewal's due date would otherwise share that renewal's key,
+    and whichever ran second would replay as a no-op — an upgrade on renewal day
+    made the whole next period free. Purchases and renewals keep the unsuffixed
+    key so nothing already in the ledger changes meaning.
 
     The tier is in the key because an upgrade is a genuinely new charge on the
     same day. The consequence — buying back down to a tier already bought today
     is free — is the correct reading of a same-day flip-flop rather than a gap.
     """
-    return f"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}"
+    key = f"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}"
+    return f"{key}:change" if change else key
 
 
 async def charge_site_plan_credits(
@@ -531,8 +548,11 @@ async def charge_site_plan_credits(
     amount_usd: int,
     period_start: datetime,
     member_id: str | None = None,
+    change: bool = False,
 ) -> int:
     """Debit the workspace credit wallet for a paid site tier.
+
+    ``change=True`` for a TIER CHANGE debit — see ``site_plan_debit_key``.
 
     ``amount_usd`` IS NOT ALWAYS THE TIER'S STICKER PRICE, which is why the
     parameter is not called ``monthly_price_usd`` any more. It is a full month on
@@ -573,7 +593,7 @@ async def charge_site_plan_credits(
         workspace=workspace_id,
         amount=amount,
         cause=SITE_PLAN_DEBIT_CAUSE,
-        idempotency_key=site_plan_debit_key(site_id, tier_key, period_start),
+        idempotency_key=site_plan_debit_key(site_id, tier_key, period_start, change=change),
         member_id=member_id,
         ref={"site_id": site_id, "plan_tier": tier_key, "kind": "site_plan"},
         # A purchase, so the wallet must actually cover it. ``allow_negative`` is
@@ -583,13 +603,69 @@ async def charge_site_plan_credits(
 
 
 async def site_plan_charged(
-    *, workspace_id: str, site_id: str, tier_key: str, period_start: datetime
+    *, workspace_id: str, site_id: str, tier_key: str, period_start: datetime, change: bool = False
 ) -> bool:
-    """Has this (site, tier, day) already been debited? A replayed debit is a silent
-    no-op, so a caller that grants a NEW period on the charge asks first."""
+    """Has this (site, tier, day) debit already been recorded? A replayed debit is
+    a silent no-op, so a caller that grants a NEW period on the charge asks first.
+    ``change`` picks the namespace, exactly as ``charge_site_plan_credits`` does."""
     return await credits_service.is_recorded(
-        workspace_id, site_plan_debit_key(site_id, tier_key, period_start)
+        workspace_id, site_plan_debit_key(site_id, tier_key, period_start, change=change)
     )
+
+
+def site_plan_change_terms(
+    *,
+    held_tier: Any,
+    new_tier: Any,
+    new_price_usd: int,
+    already_paid_usd: int,
+    paid_through: datetime | None,
+    now: datetime,
+    already_bought_today: bool = False,
+) -> tuple[int, datetime | None]:
+    """What moving a PAYING site from ``held_tier`` to ``new_tier`` costs. PURE.
+
+    Returns ``(amount_usd, new_renewal)``: charge ``amount_usd`` (0 = charge
+    nothing) and, when ``new_renewal`` is not None, start a new period ending
+    then. ``period_paid_usd`` becomes ``new_price_usd`` exactly when
+    ``amount_usd > 0``.
+
+      * SAME period length: pay the gap against ``already_paid_usd`` (a
+        high-water mark for this period), keep the date. A downgrade pays nothing.
+      * A SHORTER period while the longer one is still running (``paid_through``
+        in the future, or unknown): ``sites.period_downgrade_refused``.
+      * Any other period change is a FRESH PURCHASE: the full new price and a new
+        period from ``now``. No proration of what is left of the old period.
+        Refused with ``sites.plan_already_bought_today`` when that debit already
+        exists today — the charge would replay as a no-op and the period would
+        restart for nothing.
+
+    The period restarts only together with a charge, never on its own.
+    """
+    held_months = getattr(held_tier, "period_months", 1) if held_tier is not None else 1
+    new_months = new_tier.period_months
+    if new_months == held_months:
+        return max(new_price_usd - already_paid_usd, 0), None
+    if new_months < held_months:
+        through = None if paid_through is None else _as_utc(paid_through)
+        if through is None or through > now:
+            when = through.date().isoformat() if through is not None else "the end of its period"
+            raise ConflictError(
+                "sites.period_downgrade_refused",
+                f"This site is paid through {when}. Switch plans when it renews. "
+                "Nothing has been charged.",
+            )
+    if already_bought_today:
+        raise ConflictError(
+            "sites.plan_already_bought_today",
+            "This site already bought this plan today. Try again tomorrow. "
+            "Nothing has been charged.",
+        )
+    if new_price_usd <= 0:
+        return 0, None
+    from dateutil.relativedelta import relativedelta
+
+    return new_price_usd, now + relativedelta(months=new_months)
 
 
 async def site_plan_price_usd(
@@ -603,9 +679,10 @@ async def site_plan_price_usd(
     whenever the global flags enforce.
 
     NO PROFILE (the partner was removed) never guesses a country. A renewal passes
-    ``last_paid_usd`` — what the site paid for this same tier last period — and
-    keeps that price; with nothing to keep, this refuses rather than charging a
-    default the partner never agreed to.
+    ``last_paid_usd`` (the site's ``period_paid_usd``), and it is kept ONLY when it
+    is one of this tier's real prices. ``period_paid_usd`` is a per-period
+    HIGH-WATER mark, so after a mid-period downgrade it holds the dearer tier's
+    price; renewing at that would overcharge. Anything else refuses.
     """
     if not getattr(tier, "partner_only", False):
         return int(tier.monthly_price_usd)
@@ -614,7 +691,7 @@ async def site_plan_price_usd(
 
     profile = await partners_service.partner_profile_for_workspace(workspace_id)
     if profile is None:
-        if last_paid_usd and last_paid_usd > 0:
+        if last_paid_usd and int(last_paid_usd) in site_plans.partner_prices_usd(tier.key):
             return int(last_paid_usd)
         raise ConflictError(
             "billing.partner_price_unknown",

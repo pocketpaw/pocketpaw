@@ -602,6 +602,11 @@ def partner_price_usd(tier_key: str, country: str) -> int:
     return row.get((country or "").upper(), row["default"])
 
 
+def partner_prices_usd(tier_key: str) -> frozenset[int]:
+    """Every price ``tier_key`` is sold at, across countries (empty if not partner-only)."""
+    return frozenset(_PARTNER_PRICE_USD.get(tier_key, {}).values())
+
+
 def list_site_scoped_plans() -> list[SitePlanTier]:
     """The per-site rungs only — the tiers a single site may actually be put on.
 
@@ -684,6 +689,7 @@ __all__ = [
     "free_max_hostnames_per_site",
     "get_site_plan",
     "partner_price_usd",
+    "partner_prices_usd",
     "list_partner_plans",
     "list_site_plans",
     "list_site_scoped_plans",

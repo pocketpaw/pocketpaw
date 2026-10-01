@@ -5,8 +5,9 @@
 # tier — ``tier.period_months`` (1 for every monthly rung, 12 for the partner-only
 # yearly rungs) — priced by ``billing.service.site_plan_price_usd`` (the partner's
 # country price for partner rungs, ``monthly_price_usd`` otherwise).
-# ``period_paid_usd`` records the amount actually charged, and is the price kept
-# if a partner's profile has since been removed. Monthly behaviour is
+# ``period_paid_usd`` records the amount actually charged; for a partner whose
+# profile has since been removed it is the renewal price only if it is a real
+# price of the tier (otherwise the renewal fails and is retried). Monthly behaviour is
 # unchanged; partner sites ride this same sweep.
 #
 # Created 2026-09-05 (fix/sites-plan-credits). A paid site now bills against the
@@ -229,8 +230,11 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # partner's country price.
         price_usd = 0
         try:
-            # The tier is unchanged at renewal, so what this site paid last period
-            # is the price to keep if a partner's profile has since gone.
+            # ``period_paid_usd`` is a per-period HIGH-WATER mark, not this tier's
+            # price (a mid-period downgrade leaves the dearer tier's number). It is
+            # offered only as a fallback for a partner whose profile is gone, and
+            # ``site_plan_price_usd`` keeps it only if it is a real price of this
+            # tier; otherwise the renewal fails and is retried, never guessed.
             price_usd = await billing_service.site_plan_price_usd(
                 tier, doc.workspace, last_paid_usd=getattr(doc, "period_paid_usd", 0) or 0
             )
@@ -238,8 +242,9 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
                 workspace_id=doc.workspace,
                 site_id=site_id,
                 tier_key=tier.key,
-                # A RENEWAL BUYS THE WHOLE MONTH. The publish path is the one that
-                # charges a difference, and only when a tier changes mid-period.
+                # A RENEWAL BUYS ONE WHOLE PERIOD of the tier (a month, or a year
+                # for a partner rung). The publish path is the one that charges a
+                # difference, and only when a tier changes mid-period.
                 amount_usd=price_usd,
                 period_start=period,
                 member_id=None,

@@ -11,8 +11,8 @@
   {
     "label": "the debit key drops the period (every month charges as month one)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "    return f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
-    "replace": "    return f\"site_plan:{site_id}:{tier_key}\"",
+    "find": "    key = f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
+    "replace": "    key = f\"site_plan:{site_id}:{tier_key}\"",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_month_two_is_a_separate_charge_from_month_one"
     ]
@@ -20,8 +20,8 @@
   {
     "label": "the debit key uses now instead of the period (a replay charges twice)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "    return f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
-    "replace": "    import uuid as _uuid\n\n    return f\"site_plan:{site_id}:{tier_key}:{_uuid.uuid4().hex}\"",
+    "find": "    key = f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
+    "replace": "    import uuid as _uuid\n\n    key = f\"site_plan:{site_id}:{tier_key}:{_uuid.uuid4().hex}\"",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_replayed_sweep_does_not_charge_the_month_twice"
     ]
@@ -109,9 +109,9 @@
   },
   {
     "label": "a tier change is priced at the new tier's full month again",
-    "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        delta_usd = price_usd if _period_change else price_usd - already_paid_usd",
-    "replace": "        delta_usd = price_usd",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        return max(new_price_usd - already_paid_usd, 0), None",
+    "replace": "        return new_price_usd, None",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing",
       "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
@@ -147,8 +147,8 @@
   {
     "label": "the paid high-water mark falls on a downgrade",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            if _period_change:\n                existing_doc.renewal_date = _now + relativedelta(months=tier.period_months)\n",
-    "replace": "            if _period_change:\n                existing_doc.renewal_date = _now + relativedelta(months=tier.period_months)\n        existing_doc.period_paid_usd = price_usd\n",
+    "find": "            # The period restarts ONLY together with a charge.\n",
+    "replace": "        existing_doc.period_paid_usd = price_usd\n            # The period restarts ONLY together with a charge.\n",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_returning_to_a_tier_already_bought_this_period_is_free",
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing"
