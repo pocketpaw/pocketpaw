@@ -13,7 +13,10 @@
 #     schema setup runs once per process behind _schema_lock.
 #   * Schema changes are additive: SCHEMA_SQL for fresh files, _migrate_columns
 #     ALTERs (run BEFORE SCHEMA_SQL) for deployed ones, so an old file never
-#     fails on an index over a missing column.
+#     fails on an index over a missing column. Row rewrites are one-shot data
+#     migrations (pocketpaw.sqlite_migrations.run_once, recorded in
+#     schema_migrations): money_minor_units_v1 moved non-2-decimal amounts to
+#     ISO 4217 minor units. A cart holds one currency (CartCurrencyMismatch).
 #   * Tenancy is in-row: the *_workspace_scope helpers match the caller's
 #     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
 #     column holds the widget OWNER, so widget-keyed decision reads filter on
@@ -34,13 +37,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import weakref
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent, normalize_currency
 from pocketpaw.paw_bar.models import (
     MAX_CART_ITEMS,
     Conversation,
@@ -59,6 +65,93 @@ from pocketpaw.paw_bar.models import (
     _gen_owner_message_id,
     _gen_token,
 )
+from pocketpaw.sqlite_migrations import run_once
+
+logger = logging.getLogger(__name__)
+
+# The money data migration's marker in ``schema_migrations``.
+MONEY_MIGRATION = "money_minor_units_v1"
+
+
+class CartCurrencyMismatch(ValueError):
+    """A cart line's currency differs from the (non-empty) cart's currency."""
+
+    code = "cart_currency_mismatch"
+
+    def __init__(self, cart_currency: str, item_currency: str) -> None:
+        super().__init__(
+            f"cart is in {cart_currency}; cannot add an item priced in {item_currency}"
+        )
+        self.cart_currency = cart_currency
+        self.item_currency = item_currency
+
+
+def _convert_lines(lines: Any, default_currency: Any, table: str, counts: Counter) -> bool:
+    """Re-express ``price_cents`` on each dict line from the old ×100 rule.
+
+    Lines whose currency has exponent 2 (or no integer price) are left alone.
+    Returns True when any line changed; ``counts`` gains ``(table, CODE)`` hits.
+    """
+    if not isinstance(lines, list):
+        return False
+    changed = False
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        code = line.get("currency") or default_currency or "USD"
+        price = line.get("price_cents")
+        if not isinstance(price, int) or isinstance(price, bool):
+            continue
+        if exponent(code) == DEFAULT_EXPONENT:
+            continue
+        line["price_cents"] = convert_legacy_minor(price, code)
+        counts[(table, str(code).strip().upper())] += 1
+        changed = True
+    return changed
+
+
+async def _migrate_money_minor_units(db: aiosqlite.Connection) -> None:
+    """Old amounts were "major × 100" for every currency; make them ISO minor units.
+
+    Covers widget-spec catalogs, archived spec revisions (so a rollback restores
+    correct units) and cart lines. Totals are derived, so nothing else stores
+    money here. A row whose JSON does not parse is left exactly as found.
+    """
+    counts: Counter = Counter()
+    for table, key in (("paw_bar_widgets", "id"), ("paw_bar_spec_revisions", "id")):
+        async with db.execute(f"SELECT {key}, spec FROM {table}") as cur:  # noqa: S608
+            rows = await cur.fetchall()
+        for row_id, raw in rows:
+            try:
+                spec = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            if _convert_lines(spec.get("catalog"), "USD", table, counts):
+                await db.execute(
+                    f"UPDATE {table} SET spec = ? WHERE {key} = ?",  # noqa: S608
+                    (json.dumps(spec), row_id),
+                )
+    async with db.execute(
+        "SELECT widget_id, customer_ref, items, currency FROM paw_bar_carts"
+    ) as cur:
+        carts = await cur.fetchall()
+    for widget_id, customer_ref, raw, currency in carts:
+        try:
+            items = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            continue
+        if _convert_lines(items, currency, "paw_bar_carts", counts):
+            await db.execute(
+                "UPDATE paw_bar_carts SET items = ? WHERE widget_id = ? AND customer_ref = ?",
+                (json.dumps(items), widget_id, customer_ref),
+            )
+    if counts:
+        for (table, code), n in sorted(counts.items()):
+            logger.info("paw_bar money migration: %s %s: %d amount(s) converted", table, code, n)
+    else:
+        logger.info("paw_bar money migration: no non-2-decimal amounts to convert")
 
 
 def _as_note(value: Any) -> ConversationNote:
@@ -465,6 +558,13 @@ class PawBarStore:
             await self._migrate_columns(db)
             await db.executescript(SCHEMA_SQL)
             await db.commit()
+            # One-shot data migrations, recorded in schema_migrations. A failure
+            # rolls the file back untouched and is retried on the next process
+            # start; it must not take the whole Paw Bar down with it.
+            try:
+                await run_once(db, MONEY_MIGRATION, _migrate_money_minor_units)
+            except Exception:
+                logger.exception("paw_bar: %s failed; data left unmigrated", MONEY_MIGRATION)
         self._initialized = True
 
     @staticmethod
@@ -2036,12 +2136,20 @@ class PawBarStore:
         If the product id is already in the cart the quantities add (capped at
         the model's per-line qty ceiling by the caller); a new id appends, up to
         ``MAX_CART_ITEMS`` distinct lines (an over-cap add is dropped rather than
-        raising — the visitor keeps the cart they have). The cart currency tracks
-        the first line added. Idempotent per call; the executor owns the qty caps.
+        raising — the visitor keeps the cart they have). A cart holds ONE currency:
+        an empty cart takes the line's currency, and a line in any other currency
+        raises :class:`CartCurrencyMismatch` with the cart unchanged, so
+        ``total_cents`` never adds yen to dollars. Idempotent per call; the
+        executor owns the qty caps.
         """
+        item_currency = normalize_currency(item.currency)
         cart = await self.get_cart(widget_id, customer_ref) or PawBarCart(
-            widget_id=widget_id, customer_ref=customer_ref, currency=item.currency
+            widget_id=widget_id, customer_ref=customer_ref, currency=item_currency
         )
+        if not cart.items:
+            cart.currency = item_currency
+        elif cart.currency != item_currency:
+            raise CartCurrencyMismatch(cart.currency, item_currency)
         merged = False
         for line in cart.items:
             if line.id == item.id:

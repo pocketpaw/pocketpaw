@@ -152,7 +152,11 @@ async def _run_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
         args = {}
     outcome = await execute_action(widget, workspace_id, customer_ref, verb, args, store=store)
     if not outcome.ok:
-        return _error(outcome.error or "action_failed")
+        # A refusal may carry a visitor-facing explanation (e.g. a cart currency
+        # mismatch); hand it to the model so it can relay it.
+        message = str((outcome.result or {}).get("message") or "")
+        error = outcome.error or "action_failed"
+        return _error(f"{error}: {message}" if message else error)
     return _ok({"ok": True, "result": outcome.result, "cart": outcome.cart})
 
 
