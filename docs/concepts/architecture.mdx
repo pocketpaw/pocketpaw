@@ -14,6 +14,8 @@ tags: ["architecture", "design"]
   enforce mode ladder, the divergence report as the enforce gate, PIN/IGNORE
   + the stewardship queue, and freshness decay. The section documents the
   FST-1..8 chain in src/pocketpaw/fabric/ for devs who haven't read it.
+  Updated 2026-10-01 (CN-6) — added "Write path and read model": the journal
+  is the Fabric object write path, the per-workspace FabricStore the read model.
 */}
 
 # PocketPaw Architecture: Event-Driven Message Bus
@@ -89,6 +91,10 @@ The AgentLoop is the central coordinator:
 ## Fabric Source Truth
 
 Fabric is PocketPaw's typed workspace ontology — objects like `Customer` or `Deal` with a flat `properties` dict that connectors, agents, and humans all write to. By default those writes are **last-writer-wins (LWW)**: whoever writes last owns the value, regardless of how trustworthy they are. The source-truth chain (`src/pocketpaw/fabric/`) fixes that without changing the read path.
+
+### Write path and read model
+
+Fabric objects have one write path and one read model. `FabricJournalStore` (`journal_store.py`) appends `fabric.object.*` events to the org journal; that is how domain code such as the people service writes. The per-workspace SQLite `FabricStore` (`get_fabric_store(workspace_id=...)`, one file per workspace) is the read model: the Fabric API router, the agents' Fabric MCP and Ripple sources read only from it. The journal store built by `pocketpaw.fabric.default_journal_store()` projects every write into the store for each `workspace:<id>` in the event scope (`read_model.py`), and backfills earlier journal objects on first use. Readers never read the journal directly. Projected rows are written straight to the flat cache, so the statement layer below does not see them.
 
 ### The statement model
 

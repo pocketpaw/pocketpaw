@@ -88,7 +88,7 @@ def _default_store() -> FabricJournalStore:
     :func:`materialize_person_from_invite`; they should not poke this cache.
     """
 
-    from pocketpaw.fabric.read_model import default_journal_store
+    from pocketpaw.fabric import default_journal_store
 
     return default_journal_store()
 
