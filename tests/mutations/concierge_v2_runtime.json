@@ -223,7 +223,7 @@
   {
     "label": "the compact manifest leaves the prompt — the model is never told how to write a card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    parts.append(_cards_paragraph(declared))",
+    "find": "    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog)))",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"

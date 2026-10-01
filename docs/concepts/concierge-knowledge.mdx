@@ -326,7 +326,10 @@ backticks) until it closes:
 - A block still open when the reply ends is dropped.
 
 The model learns the card format from the Paw Bar's own widget manifest, one line per
-widget, inside the catalog section of its prompt.
+widget, inside the catalog section of its prompt. When the widget has a catalog, the
+prompt also tells it to show any product it names, compares or recommends in one
+`product-card` (so the visitor gets the Add to cart buttons), never as a markdown table
+or a list of names and prices.
 
 ### Code examples from your docs
 
