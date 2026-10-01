@@ -1,3 +1,6 @@
+# 2026-10-01 (CN-2): the fail-open ee ``_core.context.require_scope`` is gone.
+#   The scope probe now uses the canonical fail-closed
+#   ``pocketpaw.api.deps.require_scope``; a guard test keeps the ee copy deleted.
 """Tests for workspace API keys + bearer resolver (Wave 3 Task 8)."""
 
 from __future__ import annotations
@@ -14,14 +17,17 @@ import pytest
 import pytest_asyncio
 from fastapi import APIRouter, Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core import context as context_module
 from pocketpaw_ee.cloud._core import redis_client
-from pocketpaw_ee.cloud._core.context import RequestContext, request_context, require_scope
+from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.auth import api_keys as api_keys_service
 from pocketpaw_ee.cloud.auth.core import UserCreate, UserManager, get_user_db
 from pocketpaw_ee.cloud.auth.router import router as auth_router
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
+
+from pocketpaw.api.deps import require_scope
 
 _EMAIL_OWNER = "owner@example.com"
 _EMAIL_OUTSIDER = "outsider@example.com"
@@ -42,7 +48,8 @@ def _build_app() -> FastAPI:
 
     @probe.get("/probe/chat-send")
     async def probe_chat_send(
-        ctx: RequestContext = Depends(require_scope("chat.send")),
+        _scope: None = Depends(require_scope("chat.send")),
+        ctx: RequestContext = Depends(request_context),
     ) -> dict:
         return {"ok": True, "user_id": ctx.user_id, "scopes": ctx.scopes}
 
@@ -256,15 +263,29 @@ async def test_expired_key_rejected(env) -> None:
     assert resp.status_code == 401
 
 
+def test_ee_context_has_no_require_scope() -> None:
+    """The ee copy let every JWT caller through (``ctx.scopes is None``). It is
+    deleted; ``pocketpaw.api.deps.require_scope`` is the only scope gate."""
+    assert not hasattr(context_module, "require_scope")
+    assert "require_scope" not in context_module.__all__
+
+
+@pytest.mark.enforce_scope
 @pytest.mark.asyncio
-async def test_require_scope_blocks_missing_and_allows_jwt(env) -> None:
+async def test_require_scope_fails_closed_for_api_key_and_plain_jwt(env) -> None:
+    """The canonical ``require_scope`` passes only ``full_access`` callers
+    (platform superusers, via the EE auth bridge), OSS API keys and OAuth
+    tokens carrying the scope. A workspace ``paw_`` API key never sets
+    ``request.state.api_key`` and a non-superuser JWT never gets
+    ``full_access``, so both are refused, whatever scopes the key holds."""
     client = env["client"]
     cookie = await _login(client, _EMAIL_OWNER)
-    # JWT auth — scopes is None → pass.
-    via_jwt = await client.get("/api/v1/probe/chat-send", cookies={"paw_auth": cookie})
-    assert via_jwt.status_code == 200
 
-    # API key without chat.send → 403.
+    # Plain JWT session (workspace owner, not a platform superuser) -> 403.
+    via_jwt = await client.get("/api/v1/probe/chat-send", cookies={"paw_auth": cookie})
+    assert via_jwt.status_code == 403
+
+    # API key missing the scope -> 403.
     created = await client.post(
         f"/api/v1/workspaces/{_WORKSPACE_ID}/api-keys",
         json={"name": "no-send", "scopes": ["chat.read"]},
@@ -277,18 +298,18 @@ async def test_require_scope_blocks_missing_and_allows_jwt(env) -> None:
     )
     assert blocked.status_code == 403
 
-    # API key with chat.send → pass.
+    # Even a key that lists the scope is refused: fail closed.
     created2 = await client.post(
         f"/api/v1/workspaces/{_WORKSPACE_ID}/api-keys",
         json={"name": "with-send", "scopes": ["chat.read", "chat.send"]},
         cookies={"paw_auth": cookie},
     )
     full2 = created2.json()["fullKey"]
-    allowed = await client.get(
+    also_blocked = await client.get(
         "/api/v1/probe/chat-send",
         headers={"Authorization": f"Bearer {full2}"},
     )
-    assert allowed.status_code == 200
+    assert also_blocked.status_code == 403
 
 
 @pytest.mark.asyncio
