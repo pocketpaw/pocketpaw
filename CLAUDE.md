@@ -287,10 +287,10 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   because they all happen inside a run: the reply, plus image generation,
   speech, OCR, translate, research and web search when a run calls them.
   `POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY` (default `2000`) and
-  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — both
-  ceilings on the same daily row, because a file count alone is beaten by fifty
-  25 MiB files and a byte total alone is beaten by a hundred thousand one-byte
-  ones.
+  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — two
+  ceilings checked together on every upload, because a file count alone is
+  beaten by fifty 25 MiB files and a byte total alone is beaten by a hundred
+  thousand one-byte ones.
   `POCKETPAW_MAX_OWNED_WORKSPACES` (default `10`) — the one that makes the other
   three mean anything. Every ceiling above is keyed on the workspace, so an
   account that can mint workspaces in a loop gets a fresh empty counter each
@@ -310,6 +310,12 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   `runs.daily_limit`, `uploads.daily_limit` and `workspace.owned_limit` —
   deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
   for sale here and the answer is to wait, not to upgrade.
+  Every daily cap (turns, uploads, the comprehension, transcription and illustration
+  caps, and the guest turn cap) counts through ONE primitive:
+  `metering.service.try_spend` on the `daily_usage` collection, one row per
+  (subject, meter, UTC day). Inside it a cap is `None` = uncapped, `0` =
+  disabled, `n` = cap; each meter's resolver maps its env var onto that, so the
+  `0` meanings above are unchanged.
   Crude flood protection belongs at the proxy (Traefik on Coolify), not here.
 - **Social sign-in needs two URLs set, and returns to the face it started on**:
   `POCKETPAW_PUBLIC_BASE_URL` (no default beyond `http://localhost:8888`) builds
