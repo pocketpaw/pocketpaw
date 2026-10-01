@@ -210,11 +210,14 @@
 #   ``fx_inr_per_usd``) and are copied onto the row, so a fee netted into the
 #   settlement, or a unit mismatch, is auditable after the fact.
 #
-#   WHAT WAS SOLD, NOT THE CHARGE CURRENCY, picks the path. ``create_one_time``
-#   stamps ``topup_currency`` (and, for USD, ``credits``) on the checkout
-#   metadata. A USD-product checkout Dodo prices locally arrives as INR and
-#   grants the credits it sold, no bonus; only the INR product converts and
-#   earns the bulk bonus; an untagged non-USD charge still grants nothing.
+#   DODO'S PRODUCT ID, NOT METADATA AND NOT THE CHARGE CURRENCY, picks the INR
+#   path: conversion + bulk bonus run only when the verified body's
+#   ``product_cart`` is exactly the INR credits product AND the charge is INR.
+#   Metadata NEVER gates or sizes a grant — Dodo static payment links accept
+#   ``metadata_*`` query params, so a buyer can write any metadata they like
+#   and the webhook signature only proves Dodo sent it, not that we wrote it.
+#   Every INR grant is derived from money actually paid. A USD-product checkout
+#   that Dodo charges in another currency grants nothing (origin/dev behaviour).
 #
 #   BULK BONUS rides a SEPARATE ledger line, ``cause="bulk_bonus"``, keyed on
 #   ``<event_id>:bulk_bonus`` so it is exactly-once on its own — see
@@ -371,8 +374,8 @@ _REVERSAL_CAUSE = "payment_reversal"
 
 # --- INR top-ups (PH-4) ---------------------------------------------------
 # The credits products a top-up checkout can SELL (``create_topup``'s currency).
-# The webhook routes on which one was sold, read back off the checkout metadata —
-# see ``_topup_base_credits``.
+# The webhook routes on Dodo's own product id, never on metadata — see
+# ``_topup_base_credits``.
 _GRANT_CURRENCIES = frozenset({"USD", "INR"})
 _TOPUP_CAUSE = "top_up"
 # The separate ledger line a bulk INR prepay earns. NOT ``top_up``: it is not
@@ -400,13 +403,6 @@ def _inr_bulk_bonus(paid_paise: int, base_credits: int) -> int:
 # mismatch than a real exchange rate, so the FX path grants instead.
 _SETTLEMENT_SANITY_BAND = (0.5, 2.0)
 _FX_SETTLEMENT_DISTRUSTED = "fx_settlement_distrusted"
-# What ``create_one_time`` stamps on the checkout metadata (it comes back inside
-# the VERIFIED webhook body): which credits product was sold, and — for the USD
-# product — how many credits were bought. The charge currency alone cannot say
-# which product was sold: a USD-product checkout leaves the currency open so
-# Dodo can price it locally, and arrives as ``currency == "INR"``.
-_META_TOPUP_CURRENCY = "topup_currency"
-_META_CREDITS = "credits"
 
 
 def _inr_base_credits(event: GatewayEvent) -> tuple[int, str, float]:
@@ -868,25 +864,36 @@ async def cancel(
 # ---------------------------------------------------------------------------
 
 
-def _topup_base_credits(
-    event: GatewayEvent, sold: str, charged: str, meta: dict
-) -> tuple[int, dict, bool]:
+def _is_inr_credit_product(event: GatewayEvent) -> bool:
+    """Whether Dodo says this payment bought exactly the INR credits product.
+
+    ``product_ids`` comes off the verified body's ``product_cart``, which Dodo
+    fills from what was actually bought — unlike metadata, the buyer cannot
+    write it. Exactly ONE line of that product, as ``create_one_time`` builds
+    it: a mixed cart would convert the whole total as credits.
+    """
+    from pocketpaw.config import get_settings
+
+    inr_product = str(getattr(get_settings(), "dodo_credit_product_id_inr", None) or "")
+    return bool(inr_product) and event.product_ids == (inr_product,)
+
+
+def _topup_base_credits(event: GatewayEvent) -> tuple[int, dict, bool]:
     """Decide a verified top-up's BASE grant: ``(credits, conversion_ref, inr_product)``.
 
-    0 credits means "grant nothing" (acked, recorded, logged by id + currency
-    only — never the amount). The cases, keyed on what our checkout SOLD:
+    0 credits means "grant nothing" (acked, recorded, logged by event id +
+    currency only — never the amount). NOTHING here reads metadata:
 
-      * ``sold == "INR"`` — the INR credits product. Charged in INR, it converts
-        via ``_inr_base_credits`` and earns the bulk bonus. Charged in anything
-        else (cannot happen with ``billing_currency`` pinned) it grants nothing.
-      * ``sold == "USD"`` — the USD credits product. Charged in USD it grants
-        ``total_amount`` exactly as before. Charged in another currency (Dodo's
-        local pricing) it grants the ``credits`` our checkout stamped — what was
-        bought — and never a bonus.
-      * no ``topup_currency`` — a checkout this metadata predates, or not ours.
-        Today's behaviour: USD grants ``total_amount``, anything else nothing.
+      * the INR credits product (Dodo's ``product_cart``), charged in INR —
+        converted via ``_inr_base_credits`` from the money actually paid, and
+        eligible for the bulk bonus. Charged in anything else: nothing.
+      * any other USD charge — ``total_amount`` cents, exactly as before.
+      * anything else (a USD-product checkout Dodo priced in rupees, a foreign
+        charge) — nothing. The 1-credit==1-cent mapping would credit it against
+        the wrong denomination (a ¥750 charge granting 750 credits == $7.50).
     """
-    if sold == "INR":
+    charged = event.currency.upper()
+    if _is_inr_credit_product(event):
         if charged != "INR":
             logger.warning(
                 "billing.webhook: INR credits product charged in currency=%s (event_id=%s) — "
@@ -905,20 +912,6 @@ def _topup_base_credits(
         return max(base, 0), {"conversion": source, "fx_inr_per_usd": rate}, True
     if charged == "USD":
         return event.amount_credits, {}, False
-    if sold == "USD":
-        raw = str(meta.get(_META_CREDITS) or "").strip()
-        if raw.isdigit() and int(raw) > 0:
-            return int(raw), {"conversion": "metadata_credits"}, False
-        logger.warning(
-            "billing.webhook: USD credits product charged in currency=%s carried no usable "
-            "credits metadata (event_id=%s) — not granting",
-            event.currency,
-            event.event_id,
-        )
-        return 0, {}, False
-    # Not one of our tagged checkouts, and not USD: the 1-credit==1-cent mapping
-    # would credit it against the wrong denomination (a ¥750 charge granting 750
-    # credits == $7.50), so it is acked and grants nothing.
     logger.warning(
         "billing.webhook: payment.succeeded in unsupported currency=%s (event_id=%s) — "
         "not granting",
@@ -1012,14 +1005,9 @@ async def handle_webhook(
             event.event_id,
         )
         return {"ok": True, "granted": False}
-    # WHAT WAS SOLD decides the grant, not the charge currency. Our checkout
-    # metadata names the credits product (``topup_currency``); a USD-product
-    # checkout charged in rupees by Dodo's local pricing must grant the credits
-    # it sold, never the INR conversion + bulk bonus.
-    meta = (event.raw.get("data") or {}).get("metadata") or {}
-    sold = str(meta.get(_META_TOPUP_CURRENCY) or "").upper()
-    charged = event.currency.upper()
-    base, conversion, inr_product = _topup_base_credits(event, sold, charged, meta)
+    # Dodo's own product id decides the INR path — never metadata, which a buyer
+    # can forge through a static payment link's ``metadata_*`` params.
+    base, conversion, inr_product = _topup_base_credits(event)
 
     # Grant EXACTLY ONCE — idempotency is keyed on the webhook event id. A replay
     # collides on BC-1's unique (workspace, idempotency_key) index and no-ops.

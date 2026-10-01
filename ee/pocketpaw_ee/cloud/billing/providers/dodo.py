@@ -77,9 +77,11 @@
 #   ``_gateway_failure``) rather than silently converting. The webhook parse also
 #   lifts ``data.settlement_amount`` / ``data.settlement_currency`` onto the
 #   ``GatewayEvent`` so the service can grant an INR charge from Dodo's own USD
-#   settlement figure. Every top-up checkout also stamps ``topup_currency`` (and,
-#   for USD, ``credits``) on its metadata so the webhook knows which product was
-#   SOLD — a USD-product checkout can be charged in rupees by local pricing.
+#   settlement figure, and lifts ``data.product_cart`` product ids onto
+#   ``GatewayEvent.product_ids`` — Dodo's own record of what was bought, which is
+#   what the INR path routes on. ``topup_currency`` is stamped on checkout
+#   metadata as an informational tag only: a static payment link lets a buyer set
+#   ``metadata_*`` params, so metadata never gates or sizes a grant.
 #
 # SECURITY: the signature is verified before the payload is parsed. The webhook
 # secret and the API key are NEVER logged.
@@ -234,6 +236,24 @@ def _reversal_amount(raw: Any, *, event_type: str, event_id: str) -> int:
             )
         return 0
     return max(value, 0)
+
+
+def _cart_product_ids(cart: Any) -> tuple[str, ...]:
+    """Product ids from a verified payment's ``product_cart``, strictly.
+
+    Anything malformed — not a list, a non-dict line, a non-string id — yields
+    an empty tuple rather than an exception, so a strange body is a no-grant
+    ack, never a 500 that Dodo retries forever.
+    """
+    if not isinstance(cart, list):
+        return ()
+    ids: list[str] = []
+    for line in cart:
+        pid = line.get("product_id") if isinstance(line, dict) else None
+        if not isinstance(pid, str) or not pid:
+            return ()
+        ids.append(pid)
+    return tuple(ids)
 
 
 class DodoProvider:
@@ -415,14 +435,10 @@ class DodoProvider:
         # The provider stamps it authoritatively, overriding any caller value.
         meta = {k: str(v) for k, v in dict(metadata or {}).items()}
         meta["workspace_id"] = str(workspace_id)
-        # WHAT WAS SOLD, stamped authoritatively like workspace_id and returned
-        # inside the verified webhook body. The charge currency cannot say it: a
-        # USD-product checkout is left open to Dodo's local pricing and can come
-        # back charged in INR, and must grant the credits it sold — not the INR
-        # conversion and bulk bonus that only the INR product earns.
+        # Informational tag only. It NEVER gates or sizes a grant: a static
+        # payment link accepts ``metadata_*`` query params, so a buyer can write
+        # any value here. The webhook routes on Dodo's ``product_cart`` instead.
         meta["topup_currency"] = currency
-        if currency == "USD":
-            meta["credits"] = str(amount_credits)
 
         # INR only: pin the charge currency so Dodo refuses rather than converting.
         # The USD path sends nothing here, exactly as before — pinning it would
@@ -733,6 +749,7 @@ class DodoProvider:
                 else 0
             ),
             settlement_currency=str(data.get("settlement_currency") or ""),
+            product_ids=_cart_product_ids(data.get("product_cart")),
         )
 
 

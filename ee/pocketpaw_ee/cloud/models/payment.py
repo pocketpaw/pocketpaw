@@ -93,8 +93,8 @@ class Payment(TimestampedDocument):
     # AUDIT for a converted top-up. ``settlement_*`` is Dodo's own settlement
     # figure as the verified body stated it (None when it sent none).
     # ``conversion`` is which figure the base grant came from (``settlement`` /
-    # ``fx`` / ``fx_settlement_distrusted`` / ``metadata_credits``; None for a
-    # plain USD charge) and ``fx_inr_per_usd`` the configured rate in force at
+    # ``fx`` / ``fx_settlement_distrusted``; None for a plain USD charge) and
+    # ``fx_inr_per_usd`` the configured rate in force at
     # that grant — both copied off the base LEDGER entry's ref, so a redelivery
     # at a different rate cannot rewrite them. Informational — the cap is
     # ``credits_granted``.
