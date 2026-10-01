@@ -362,6 +362,11 @@ class SiteInvoice(BaseModel):
     are integer ISO 4217 minor units of ``currency`` (the ``_cents`` name is
     historical) so a receipt cannot drift through float arithmetic on its way to
     and from the wire.
+
+    ``amount_unit`` says which convention ``amount_cents`` is in: "iso4217" for
+    minor units, stamped on every write since 2026-10-01; "" for a legacy row a
+    client wrote as major × 100, which the invoice minor-units migration converts
+    and stamps. A stamped row is never converted again.
     """
 
     id: str
@@ -370,6 +375,7 @@ class SiteInvoice(BaseModel):
     currency: str = "USD"
     paid: bool = True
     note: str = ""
+    amount_unit: str = ""
 
 
 class ConciergeFaq(BaseModel):

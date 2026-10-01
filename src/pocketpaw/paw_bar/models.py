@@ -9,8 +9,9 @@
 # card, so they are cleaned as untrusted input whether typed by the owner or
 # imported from the store's site: text truncated to its cap, a non-http(s) image
 # url or a ``url`` that is neither http(s) nor a single-slash site path blanked,
-# a bad currency read as USD. Cleaned, not rejected, because a stored spec is
-# re-validated on every load and must never become unloadable. Every amount
+# a bad currency read as USD, a price past ``MAX_CATALOG_PRICE_MINOR`` read as 0.
+# Cleaned, not rejected, because a stored spec is re-validated on every load
+# and must never become unloadable. Every amount
 # (``price_cents`` …) is ISO 4217 minor units of its currency (see
 # ``pocketpaw.money``); a cart holds one currency only.
 #
@@ -53,6 +54,7 @@ _MAX_CATALOG_ITEMS = 200
 _MAX_CATALOG_NAME_CHARS = 200
 _MAX_CATALOG_DESCRIPTION_CHARS = 300
 _MAX_CATALOG_URL_CHARS = 2048
+MAX_CATALOG_PRICE_MINOR = 10**12  # past this a price is a typo or a parse accident
 # Currency values already warned about, so a bad stored spec logs once, not per load.
 _WARNED_CURRENCIES: set[str] = set()
 _MAX_CART_ITEMS = 50
@@ -237,6 +239,14 @@ class PawBarCatalogItem(BaseModel):
     def _non_negative_price(cls, value: int) -> int:
         if value < 0:
             raise ValueError("catalog item price_cents must be a non-negative integer")
+        if value > MAX_CATALOG_PRICE_MINOR:
+            # Coerced like the text fields: a stored spec must stay loadable.
+            logger.warning(
+                "paw_bar: catalog price_cents %d is past %d; reading it as 0",
+                value,
+                MAX_CATALOG_PRICE_MINOR,
+            )
+            return 0
         return value
 
     @field_validator("currency", mode="before")

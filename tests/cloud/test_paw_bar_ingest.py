@@ -206,6 +206,47 @@ class TestWidgetCRUDEndpoints:
         assert res.status_code == 401
 
 
+class TestSpecMoneyUnits:
+    """PATCH /paw-bar/widgets/{id}/spec refuses a catalog with a non-2-decimal
+    currency from a client that does not send ``X-Paw-Money-Units: iso4217``:
+    that client writes major × 100, and re-sends minor-unit prices it read, so
+    the server can neither store nor convert what it sends."""
+
+    @staticmethod
+    def _save(client: TestClient, currency: str, **headers: str):
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        spec = _spec(widget_id=created["id"]).model_dump()
+        spec["catalog"] = [{"id": "tea", "name": "Tea", "price_cents": 1500, "currency": currency}]
+        res = client.patch(
+            f"/paw-bar/widgets/{created['id']}/spec",
+            json=spec,
+            headers={"X-Paw-Bar-Token": created["access_token"], **headers},
+        )
+        return res, created
+
+    def test_a_yen_catalog_from_an_old_client_is_409_and_not_written(
+        self, client: TestClient
+    ) -> None:
+        res, created = self._save(client, "JPY")
+        assert res.status_code == 409
+        assert res.json()["detail"] == "currency_units_client_outdated"
+        stored = client.get(
+            f"/paw-bar/widgets/{created['id']}",
+            headers={"X-Paw-Bar-Token": created["access_token"]},
+        ).json()
+        assert stored["spec"]["catalog"] == []
+
+    def test_a_yen_catalog_with_the_header_is_stored_as_sent(self, client: TestClient) -> None:
+        res, _ = self._save(client, "JPY", **{"X-Paw-Money-Units": "iso4217"})
+        assert res.status_code == 200, res.text
+        assert res.json()["spec"]["catalog"][0]["price_cents"] == 1500  # not converted
+
+    def test_a_usd_catalog_from_an_old_client_still_saves(self, client: TestClient) -> None:
+        res, _ = self._save(client, "USD")
+        assert res.status_code == 200, res.text
+        assert res.json()["spec"]["catalog"][0]["price_cents"] == 1500
+
+
 # ---------------------------------------------------------------------------
 # Public spec serving
 # ---------------------------------------------------------------------------

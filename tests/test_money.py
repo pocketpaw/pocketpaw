@@ -13,6 +13,7 @@ import pytest
 
 from pocketpaw.money import (
     CURRENCY_EXPONENTS,
+    client_sends_minor_units,
     convert_legacy_minor,
     exponent,
     format_minor,
@@ -66,6 +67,17 @@ def test_to_minor_rejects_non_numbers(bad: str) -> None:
         to_minor(bad, "USD")
 
 
+@pytest.mark.parametrize("huge", ["1e30", "1" * 30, Decimal("9e40")])
+def test_to_minor_out_of_range_is_a_value_error(huge: object) -> None:
+    with pytest.raises(ValueError):  # not decimal.InvalidOperation
+        to_minor(huge, "USD")  # type: ignore[arg-type]
+
+
+def test_from_minor_out_of_range_is_a_value_error() -> None:
+    with pytest.raises(ValueError):
+        from_minor(10**40, "USD")
+
+
 def test_from_minor_round_trips() -> None:
     assert from_minor(350, "USD") == Decimal("3.50")
     assert from_minor(1500, "JPY") == Decimal("1500")
@@ -96,6 +108,19 @@ def test_format_minor(amount: object, code: str, expected: str) -> None:
 def test_format_minor_non_integer_is_blank() -> None:
     assert format_minor(None, "USD") == ""
     assert format_minor("abc", "USD") == ""
+
+
+@pytest.mark.parametrize("absurd", [10**40, float("inf"), float("nan")])
+def test_format_minor_out_of_range_is_blank_not_an_error(absurd: object) -> None:
+    assert format_minor(absurd, "USD") == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("iso4217", True), (" ISO4217 ", True), (None, False), ("", False), ("legacy", False)],
+)
+def test_client_sends_minor_units(value: object, expected: bool) -> None:
+    assert client_sends_minor_units(value) is expected
 
 
 @pytest.mark.parametrize(

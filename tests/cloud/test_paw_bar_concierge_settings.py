@@ -863,6 +863,34 @@ async def test_admin_spec_save_needs_no_widget_token_and_archives(owner_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("currency", "headers", "status"),
+    [
+        ("KWD", {}, 409),  # an old client: refused, nothing converted
+        ("KWD", {"X-Paw-Money-Units": "iso4217"}, 200),
+        ("USD", {}, 200),  # two decimals: the same in both conventions
+    ],
+)
+async def test_admin_spec_save_needs_the_money_units_header_for_odd_exponents(
+    owner_client, currency, headers, status
+):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    body = _new_spec_body(widget.id)
+    body["spec"]["catalog"][0]["currency"] = currency
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body, headers=headers)
+    assert res.status_code == status, res.text
+    stored = (await store.get_widget(widget.id)).spec
+    if status == 409:
+        assert res.json()["detail"] == "currency_units_client_outdated"
+        assert stored == _spec()  # untouched
+    else:
+        assert stored.catalog[0].price_cents == 450  # stored as sent
+
+
+@pytest.mark.asyncio
 async def test_admin_spec_save_pins_widget_and_pocket_ids(owner_client):
     """A body naming another widget / pocket inside ``spec`` saves with the
     RESOLVED widget's own id and pocket_id; every other field lands as sent.

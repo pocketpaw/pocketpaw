@@ -640,6 +640,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from pocketpaw.money import (
+    DEFAULT_EXPONENT,
+    MONEY_UNITS_HEADER,
+    client_sends_minor_units,
+    exponent,
+)
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw.paw_bar.concierge_fields import (
     ConciergeAbout,
@@ -1868,6 +1874,7 @@ async def update_spec(
     widget_id: str,
     spec: PawBarSpec,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidgetPublic:
     # W4a — the lookup is workspace-scoped: another tenant's widget id resolves
@@ -1876,8 +1883,23 @@ async def update_spec(
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    _refuse_outdated_money_client(spec, x_paw_money_units)
     updated = await _save_widget_spec(widget_id, spec, workspace_id)
     return PawBarWidgetPublic.from_widget(updated)
+
+
+def _refuse_outdated_money_client(spec: PawBarSpec, money_units: str | None) -> None:
+    """409 ``currency_units_client_outdated`` when a client that predates ISO 4217
+    minor units (no ``X-Paw-Money-Units: iso4217``) saves a catalog holding a
+    currency whose exponent is not 2. Such a client writes major × 100, so its
+    yen and dinar prices would be stored 100× / 10× off. Refused, not converted:
+    an old client also re-sends prices it READ in minor units, and converting
+    those would shift them a second time. Two-decimal catalogs are the same in
+    both conventions and pass."""
+    if client_sends_minor_units(money_units):
+        return
+    if any(exponent(item.currency) != DEFAULT_EXPONENT for item in spec.catalog):
+        raise HTTPException(status_code=409, detail="currency_units_client_outdated")
 
 
 async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str) -> PawBarWidget:
@@ -2464,6 +2486,7 @@ async def _purge_concierge_runs(pocket_id: str, workspace_id: str) -> None:
 async def update_site_widget_spec(
     site_id: str,
     req: AdminWidgetSpecUpdate,
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     workspace_id: str = Depends(current_workspace_id),
 ) -> AdminWidgetSpecResponse:
     """Save the site's concierge widget spec from the owner dashboard.
@@ -2475,10 +2498,13 @@ async def update_site_widget_spec(
     malformed site id and a site with no concierge widget are both 404. The write
     is the shared ``_save_widget_spec``, so the prior spec is archived as a
     revision exactly as the token route does. The token routes are unchanged.
+    A catalog with a non-2-decimal currency needs ``X-Paw-Money-Units: iso4217``
+    (409 ``currency_units_client_outdated`` otherwise), as on the token route.
     """
     _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
         raise HTTPException(status_code=404, detail="no_concierge_widget")
+    _refuse_outdated_money_client(req.spec, x_paw_money_units)
     # The widget is chosen by the SITE, so the spec's own identity keys are pinned
     # to that widget's row, not taken from the body. Overwritten, not rejected: the
     # editor spreads the spec it loaded, and a provisioned spec was minted with

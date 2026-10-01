@@ -1111,6 +1111,7 @@ class SiteInvoiceOut(BaseModel):
     currency: str
     paid: bool
     note: str = ""
+    amount_unit: str = ""  # "iso4217", or "" for a legacy row not yet migrated
 
 
 class SiteEntitlementsResponse(BaseModel):
@@ -1226,7 +1227,9 @@ class SiteInvoiceCreate(BaseModel):
     """POST body for recording one manual receipt against the client record.
 
     ``amount_cents`` is a non-negative integer in ISO 4217 minor units of
-    ``currency`` (the name is historical). It is bounded on BOTH
+    ``currency`` (the name is historical) when the request carries
+    ``X-Paw-Money-Units: iso4217``; without it the service reads major × 100, the
+    pre-2026-10-01 client convention, and converts. It is bounded on BOTH
     ends on purpose: negative would let a receipt reverse the running total, and the
     upper bound stops a typo (or a paste of an id into an amount field) from writing
     a number no currency has a use for. ``currency`` is normalized to upper case and

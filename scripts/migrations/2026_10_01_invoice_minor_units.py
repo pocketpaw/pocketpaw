@@ -2,16 +2,22 @@
 
 Until 2026-10-01 every client sent ``amount_cents`` as major × 100 whatever the
 currency, so ¥1,500 was stored as 150000 and 1.250 KWD as 125. Amounts now mean
-ISO 4217 minor units of the invoice's currency (``pocketpaw.money``). This
-rewrites the invoices whose currency exponent is not 2 with
-``round(old × 10^(e−2))`` (÷100 for yen, ×10 for dinar). USD/EUR/… rows are not
-touched, and most databases have none to convert.
+ISO 4217 minor units of the invoice's currency (``pocketpaw.money``).
 
-One-shot: a successful ``--apply`` records ``invoice_minor_units_v1`` in the
-``schema_migrations`` collection and a second ``--apply`` refuses. Each site is
-updated with a filter on its CURRENT invoice array, so an invoice recorded while
-the script runs is never overwritten (that site is reported as skipped; run
-again with ``--force`` after checking it).
+Each invoice says which convention it is in: ``amount_unit`` is "iso4217" once
+it is in minor units, "" (or missing) for a legacy row. The server stamps every
+invoice it records ("iso4217"), converting a legacy client's amount on the way
+in. This script converts ONLY unstamped invoices, with ``round(old × 10^(e−2))``
+(÷100 for yen, ×10 for dinar, unchanged for USD/EUR/…), and stamps each one in
+the same write. Each site is updated atomically with a filter on its CURRENT
+invoice array, so an invoice recorded while the script runs is never
+overwritten (that site is reported as skipped; just run it again).
+
+SAFE TO RUN AT ANY TIME, any number of times, before or after any client
+release: a stamped invoice is never converted again, so a re-run, a ``--force``
+run, or a run after a partial one converts nothing twice. A successful
+``--apply`` also records ``invoice_minor_units_v1`` in ``schema_migrations`` as
+a convenience; a later ``--apply`` stops there unless ``--force`` is passed.
 
 Usage (the URI comes from the environment so it stays out of shell history):
 
@@ -33,9 +39,15 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
-from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent
+from pocketpaw.money import (
+    DEFAULT_EXPONENT,
+    MONEY_UNITS_ISO4217,
+    convert_legacy_minor,
+    exponent,
+)
 
 MIGRATION = "invoice_minor_units_v1"
+AMOUNT_UNIT = MONEY_UNITS_ISO4217  # the stamp; SiteInvoice.amount_unit
 
 
 def _db_label(uri: str) -> tuple[str, str]:
@@ -53,29 +65,32 @@ def _db_label(uri: str) -> tuple[str, str]:
 
 
 def convert_invoices(invoices: Any, counts: Counter) -> list[Any] | None:
-    """The converted invoice list, or None when nothing in it changes."""
+    """The list with every unstamped invoice converted and stamped, or None when
+    every invoice is already stamped. ``counts`` tallies the invoices whose amount
+    actually changes (exponent not 2), per currency."""
     if not isinstance(invoices, list):
         return None
     out: list[Any] = []
     changed = False
     for inv in invoices:
-        if isinstance(inv, dict):
+        if isinstance(inv, dict) and not inv.get("amount_unit"):
             code = inv.get("currency") or "USD"
             amount = inv.get("amount_cents")
+            inv = {**inv, "amount_unit": AMOUNT_UNIT}
             if (
                 isinstance(amount, int)
                 and not isinstance(amount, bool)
                 and exponent(code) != DEFAULT_EXPONENT
             ):
-                inv = {**inv, "amount_cents": convert_legacy_minor(amount, code)}
+                inv["amount_cents"] = convert_legacy_minor(amount, code)
                 counts[str(code).strip().upper()] += 1
-                changed = True
+            changed = True
         out.append(inv)
     return out if changed else None
 
 
 async def run(db: Any, *, apply: bool, force: bool = False) -> dict[str, Any]:
-    """Count (and with ``apply``, convert) every non-2-decimal invoice amount."""
+    """Count (and with ``apply``, convert and stamp) every unstamped invoice."""
     markers = db["schema_migrations"]
     already = await markers.find_one({"_id": MIGRATION})
     if apply and already and not force:
@@ -121,12 +136,12 @@ async def run(db: Any, *, apply: bool, force: bool = False) -> dict[str, Any]:
 def _render(result: dict[str, Any], *, db_name: str, host_class: str) -> None:
     if result.get("refused"):
         print(f"{MIGRATION} already applied at {result.get('at')}; nothing done.")
-        print("Pass --force to run it again (only after checking why).")
+        print("Pass --force to run it again; stamped invoices are never converted twice.")
         return
     mode = "APPLIED" if result["applied"] else "DRY RUN — nothing was written"
     print(f"invoice minor-unit migration — {mode}")
     print(f"  database : {db_name} ({host_class})")
-    print(f"  sites    : {result['sites_affected']} with invoices to convert")
+    print(f"  sites    : {result['sites_affected']} with unstamped invoices")
     if not result["invoices_by_currency"]:
         print("  no non-2-decimal invoice amounts found — nothing to migrate.")
     for code, n in result["invoices_by_currency"].items():
@@ -134,7 +149,7 @@ def _render(result: dict[str, Any], *, db_name: str, host_class: str) -> None:
     if result["applied"]:
         print(f"  updated  : {result['sites_updated']} site(s)")
         if result["sites_skipped"]:
-            print("  SKIPPED (invoices changed while running; marker not written):")
+            print("  SKIPPED (invoices changed while running; run again):")
             for site_id in result["sites_skipped"]:
                 print(f"    {site_id}")
     elif result["sites_affected"]:
