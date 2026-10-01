@@ -30,6 +30,10 @@ one-minute re-knock cooldown after a denial on the same address.
 Updated: 2026-10-01 (feat/discover-index, DS-1) — added
 ``rate_limit_discover_public``, a per-IP bucket (60/min) on the unauthenticated
 ``GET /discover`` and ``GET /discover/{id}`` reads.
+
+Updated: 2026-10-02 (feat/discover-index, hardening) — added
+``rate_limit_discover_report``, a per-user bucket (10/hour across all listings)
+on ``POST /discover/{id}/report``, so one account can't spray reports.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from fastapi import Depends, Request
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import current_user_id
 from pocketpaw_ee.cloud._core.errors import RateLimited
 
 # 50 invites per workspace per actor per day. Burst capped at 50, refill at
@@ -74,6 +79,11 @@ _meeting_lookup_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 # 60 public Discover reads per minute per IP. The index is browsed before sign-in;
 # a person paging and opening cards needs a few dozen, a scraper gets 60 a minute.
 _discover_public_limiter = RateLimiter(rate=60.0 / 60.0, capacity=60)
+
+# 10 Discover reports per hour per user, across every listing. Three reporters
+# hide a listing, so a person reporting what they see needs a handful; a sock
+# account sweeping the index gets 10 an hour.
+_discover_report_limiter = RateLimiter(rate=10.0 / 3600.0, capacity=10)
 
 # Knocks (a guest asking to join). Per IP: a guest knocks once, maybe again after
 # a denial. Per code: every knock puts a card in front of the people in the call,
@@ -150,6 +160,15 @@ async def rate_limit_discover_public(request: Request) -> None:
         raise RateLimited(
             "discover.rate_limited",
             "Too many requests - wait a moment and try again.",
+        )
+
+
+async def rate_limit_discover_report(user_id: str = Depends(current_user_id)) -> None:
+    """Per-user bucket guarding POST /discover/{id}/report (10/hour)."""
+    if not _discover_report_limiter.check(f"discover-report:{user_id}").allowed:
+        raise RateLimited(
+            "discover.report_rate_limited",
+            "Too many reports - try again later.",
         )
 
 
@@ -248,6 +267,7 @@ __all__ = [
     "client_ip",
     "consume_invite_create_tokens",
     "rate_limit_discover_public",
+    "rate_limit_discover_report",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
     "rate_limit_meeting_knock",

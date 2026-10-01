@@ -22,6 +22,8 @@
 # a Discover hide by toggling the template private -> public. A public but
 # hidden template keeps a HIDDEN listing (``upsert_from_source(hide=True)``)
 # instead of losing it, so staff can unhide by listing id; reindex does the same.
+# Unhiding moves the reporters into ``dismissed_reporters`` (their later reports
+# on that listing are ignored), so the same accounts can't re-hide it at once.
 
 from __future__ import annotations
 
@@ -198,6 +200,7 @@ async def upsert_from_source(
         "featured": False,
         "hidden": False,
         "reports": [],
+        "dismissed_reporters": [],
         "remix_count": 0,
         "createdAt": now,
     }
@@ -284,12 +287,18 @@ async def set_featured(listing_id: str, featured: bool) -> dict:
 async def set_hidden(listing_id: str, hidden: bool) -> dict:
     """Hide or unhide a listing, and its source item (``hide_at_source``), so
     the owner can't re-list a hidden item by re-publishing it. Unhiding clears
-    the reports so the next single report can't re-hide it (see
+    the reports so the next single report can't re-hide it, and moves their
+    authors to ``dismissed_reporters`` so they can't re-hide it either (see
     ``service.report_listing``); hiding keeps them. The listing is written first,
     so the source's own re-sync event finds it already in the new state."""
     # admin-cross-tenant: platform moderation acts on any workspace's listing.
     doc = await _any_doc(listing_id)
-    result = await _moderate(doc, {"hidden": True} if hidden else {"hidden": False, "reports": []})
+    if hidden:
+        fields: dict[str, Any] = {"hidden": True}
+    else:
+        dismissed = set(doc.dismissed_reporters) | {r["user"] for r in doc.reports}
+        fields = {"hidden": False, "reports": [], "dismissed_reporters": sorted(dismissed)}
+    result = await _moderate(doc, fields)
     await hide_at_source(doc.source, doc.source_id, hidden)
     return result
 

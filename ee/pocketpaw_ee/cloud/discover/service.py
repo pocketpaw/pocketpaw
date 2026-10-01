@@ -15,7 +15,9 @@
 #
 # Updated 2026-10-02 (feat/discover-index, hardening): the auto-hide at
 # ``HIDE_THRESHOLD`` also hides the source item (``sources.hide_at_source``), so
-# toggling the template private -> public can't bring the listing back.
+# toggling the template private -> public can't bring the listing back. A
+# report from a ``dismissed_reporters`` user (staff unhid over their reports)
+# is a no-op.
 
 from __future__ import annotations
 
@@ -94,12 +96,14 @@ async def report_listing(
         {
             "_id": doc.id,
             "reports.user": {"$ne": user_id},
+            "dismissed_reporters": {"$ne": user_id},
             f"reports.{MAX_REPORTS - 1}": {"$exists": False},
         },
         {"$push": {"reports": report}},
     )
     if not pushed.modified_count:
-        # no-event: a repeat report (or one past MAX_REPORTS) changes nothing.
+        # no-event: a repeat report, a dismissed reporter's, or one past
+        # MAX_REPORTS changes nothing.
         return {"id": listing_id, "reported": True}
 
     await _audit(workspace_id, user_id, "discover.listing_reported", listing_id)
