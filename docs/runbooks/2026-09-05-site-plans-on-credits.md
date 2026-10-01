@@ -393,17 +393,31 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
 - If a partner's profile is removed, its yearly sites renew at `period_paid_usd`
   **only when that is a real price of the tier** (17 or 29 for `site_year`, 56 or
   89 for `staff_year`). `period_paid_usd` is a high-water mark, so after a
-  mid-year `staff_year` → `site_year` downgrade it reads 89; that renewal fails
-  and is retried (logged) instead of charging $89. An operator restores the
-  profile or fixes the price by hand.
-- **Save race at the yearly → monthly boundary.** Both the renewal sweep and a
-  publish tier change write the whole Site document with `save()`. If an admin
-  moves a site to monthly in the same few seconds the sweep is renewing its year,
-  the later save wins and can drop the other's `plan_tier` / `renewal_date` /
-  `period_paid_usd`. The debits themselves stay idempotent, so money is not taken
-  twice, but the row can disagree with the ledger. If a site's tier and its last
-  `site_plan` ledger row disagree around a renewal, trust the ledger and fix the
-  row.
+  mid-year `staff_year` → `site_year` downgrade it reads 89. With no real price
+  to keep, the site **lapses at renewal** exactly like a short wallet: free floor,
+  site stays up, logged by site id. **An operator removing a partner profile
+  therefore lapses that partner's yearly sites at their next renewal unless the
+  profile is restored first.**
+- **A change after the paid period has ENDED** (renewal date passed, sweep not yet
+  run) is a fresh purchase of the new tier with a new period from now, whatever
+  the period lengths. The sweep then finds the date moved forward and skips the
+  site. Before this, an upgrade billed the gap on the ended period and the sweep
+  billed a whole new one ($60 + $89 instead of $89).
+- **Save race at a renewal.** Both the renewal sweep and a publish tier change
+  write the whole Site document with `save()`. If an admin changes a site's plan
+  in the same few seconds the sweep is renewing it, the later save wins. A
+  change debit can then be in the ledger with nothing delivered (the sweep's save
+  put the old tier back), or a renewal debit can be recorded against a row the
+  change rewrote. The same key is never charged twice, but money **can be taken
+  without the change being delivered**. If a site's tier and its latest
+  `site_plan` ledger rows disagree around a renewal, trust the ledger: fix the row
+  to what was paid, or refund the change debit.
+- **Deploy-day edge for the `:change` keys.** Tier-change debits written BEFORE
+  this deploy used the plain key. On the deploy day D only, a change made before
+  the deploy and a renewal of the same site and tier falling due later on D share
+  that plain key, so the renewal replays as a no-op (the old R1 bug, once). To
+  avoid it, deploy right after a sweep tick, and check D's renewals for a debit
+  marked as a replay.
 - The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
   not from the 1st of the month.
 
