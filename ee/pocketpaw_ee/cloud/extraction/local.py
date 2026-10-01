@@ -7,6 +7,9 @@
 # event loop and must never block it. Every branch carries a size ceiling
 # checked BEFORE the library is handed the file, and the raw-text fallback reads
 # at most `_MAX_TEXT_BYTES` so an unknown binary is never slurped whole.
+#
+# Changes (2026-10-01, CN-7): two docstring pointers at the deleted
+# src/pocketpaw/knowledge/ingest.py no longer cite it.
 """LocalExtractor — wraps the traditional extraction libraries.
 
 The PDF, DOCX, image and VTT branches remain a behavior-preserving port of the
@@ -50,7 +53,8 @@ Two different over-limit behaviours, deliberately:
   mid-parse, where partial text is strictly more useful than none, and the
   output carries a visible ``[truncated: ...]`` marker so a reader can tell
   a cap from a short document. ``_MAX_EXTRACTED_CHARS`` (100_000) matches the
-  existing precedent in `pocketpaw/knowledge/ingest.py`. The raw-text read
+  cap the old file-wiki ingest used (removed 2026-10-01; kb-go is the
+  KB). The raw-text read
   (VTT and the unmatched-suffix fallback) stops at ``_MAX_TEXT_BYTES`` (10 MB)
   the same way: a big ``.csv`` still yields its first 10 MB of text.
 
@@ -351,8 +355,8 @@ def _extract_html(html: str) -> str:
       would hide a broken image behind slightly-worse output.
     * trafilatura **returning None** is normal. It is tuned for articles and
       declines boilerplate-only or very short documents. That is a content
-      outcome, not a fault, so fall back to stripping tags (the idiom from
-      `pocketpaw/knowledge/ingest.py`) rather than returning raw markup —
+      outcome, not a fault, so fall back to stripping tags rather than returning raw
+      markup —
       before this branch existed, raw markup with all its tags is precisely
       what `.html` uploads were indexing into the KB.
     """
