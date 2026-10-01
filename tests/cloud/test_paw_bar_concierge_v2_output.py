@@ -189,6 +189,8 @@ def test_a_card_spec_is_hydrated_with_the_catalog_price_not_the_models():
                         "price_cents": 350,
                         "currency": "USD",
                         "image_url": "https://brewco.example/espresso.jpg",
+                        "url": "",
+                        "description": "",
                         "actions": ["add_to_cart", "checkout"],
                     }
                 ]
@@ -295,8 +297,10 @@ def test_only_ui_and_state_survive():
 
 
 def test_a_card_that_hydrates_past_the_char_bound_is_dropped():
-    big = [PawBarCatalogItem(id=f"p{i}", name="N" * 900) for i in range(40)]
-    spec = {"ui": _pc(*[f"p{i}" for i in range(40)])}
+    # Names at the catalog's 200-char cap; enough of them that the hydrated card,
+    # not the model's fence, crosses the bound.
+    big = [PawBarCatalogItem(id=f"p{i}", name="N" * 200) for i in range(160)]
+    spec = {"ui": _pc(*[f"p{i}" for i in range(160)])}
     assert len(json.dumps(spec)) < 32_000
     assert _vh(spec, catalog=big) is None
 

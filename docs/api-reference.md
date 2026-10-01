@@ -4526,6 +4526,7 @@ the split is the security model:
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
 | `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code` and the guided fields below. |
 | `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Catalog & Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec. |
+| `POST /paw-bar/admin/site/{site_id}/catalog/import/preview` | Read the products a connected store publishes on its own site, for the owner to review. Writes nothing: the owner saves the products they pick through `PATCH …/widget/spec`. Behind `paw_bar.manage`; 404 for a site outside your workspace. Body `{}`. Always a 200 with `{"status", "reason", "source", "host", "items", "total_found", "warnings"}`; see [Catalog import](#catalog-import). |
 | `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. One row per CONVERSATION, not per visitor — a visitor who asked four separate questions is four rows, each carrying its own `conversation_id` and its own last sentence. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
 | `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. Pass `conversation_id` to read ONE thread; without it the visitor's whole history is merged into a single transcript. Both sources narrow together — narrowing only the runs would interleave one thread's questions with every reply a human ever sent that visitor. Narrowing reads each turn's own session-key token rather than rebuilding a key from the conversation id and the widget's current agent, so a conversation that predates conversation identity — or one answered before its widget was bound to a dedicated agent — opens instead of 404-ing. A conversation the visitor really holds returns an empty transcript rather than a 404 when it has nothing in it yet. |
 | `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. Send `conversation_id` to file the thread you are READING; omit it and the visitor's conversation in progress is filed instead. |
@@ -4537,6 +4538,75 @@ the split is the security model:
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge/faqs`, `PATCH/DELETE …/knowledge/faqs/{faq_id}` | Pinned answers: question/answer pairs a v2 concierge reads ahead of every KB hit, on every turn. GET returns `{site_id, faqs, max_count, max_chars}`; POST takes `{question, answer}` and returns the new FAQ (201); PATCH takes either field; DELETE is a 204. Both texts are stripped and must not be blank. Caps come from config (`POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT`, default 15, and `…_FAQ_MAX_CHARS`, default 500 for question and answer together): 409 `faq_limit_reached`, 422 `faq_too_long`. GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `faq_id`, is a 404. The text is treated as data, never as instructions to the model. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge/sources`, `POST …/knowledge/sources/{source_id}/refetch`, `DELETE …/knowledge/sources/{source_id}` | Uploaded files and single links the concierge answers from, read into the site pocket KB. GET returns `{site_id, sources, plan, max_count, max_bytes, max_chars, accepted_types}`. POST is a form (multipart, or urlencoded for a link alone; a JSON body is a 422) with exactly one of `file` (`.pdf`, `.docx`, `.md`, `.txt`) or `url`, otherwise 422 `one_source_required` (a `url` over 2,048 characters is 422 `url_too_long`), and returns the new row with status `processing` (202); poll GET until it changes. A row is `{id, kind: "file"|"link", name, url, mime, size_bytes, status, reason, chars, truncated, article_ids, created_at, updated_at, indexed_at}`; `status` is `processing`, `ready`, `failed` (`reason`: `unreadable`, `unreachable`, `no_content`, `ingest_failed`, `kb_unavailable`, `interrupted`), `too_large`, `unsupported` or `blocked`. Refusals write nothing and carry the code as `detail`: 409 `over_limit`, 413 `too_large`, 415 `unsupported` (the type is sniffed from the bytes and must match the extension; the client `Content-Type` is ignored), 422 `blocked` (not a public http(s) address). Refetch re-reads a link (409 `not_a_link` for a file, 409 `already_processing`), DELETE un-indexes and is a 204. Links are fetched through the SSRF-safe fetcher, which re-checks every redirect hop. The file bytes are not stored. Caps come from config: `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_COUNT_FREE`/`_SITE`/`_STAFF` (3/20/50, by the site plan), `…_SOURCE_MAX_BYTES` (10 MiB), `…_SOURCE_MAX_CHARS` (100,000). GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `source_id`, is a 404. |
 | `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP `sandbox` directive as the public frame. |
+
+#### Catalog items
+
+`spec.catalog` holds at most 200 products with unique ids. Product cards and the
+concierge's product list are filled from it, never from what the model writes.
+Only a blank `id` or a negative `price_cents` is a 422; the other fields are cleaned
+rather than rejected, so a spec saved before these rules still loads.
+
+| Field | Type | Rules |
+|---|---|---|
+| `id` | string | Required, unique within the catalog. Imported items use `shopify:<id>`, `woo:<id>` or `web:<hash of the page path>`; ids the editor mints start `item-`. |
+| `name` | string | Trimmed and cut to 200 characters. |
+| `price_cents` | int | Non-negative, in hundredths of the currency for every currency (zero-decimal currencies such as JPY included). |
+| `currency` | string | Trimmed and upper-cased. Anything that isn't then 3 letters (including `""`) is stored as `USD`. |
+| `image_url` | string | An `http(s)://` URL of at most 2048 characters; anything else is stored as `""`. |
+| `url` | string | The product's page: an `http(s)://` URL or a site path starting with a single `/`, at most 2048 characters; anything else is stored as `""`. A product card links to it. |
+| `description` | string | Trimmed and cut to 300 characters. Shown on the product card. |
+| `in_stock` | bool or `null` | `null` when unknown. `false` marks the product sold out in the list the concierge reads, so it stops recommending it. |
+
+The concierge's prompt carries the first 50 items.
+
+#### Catalog import
+
+`POST /paw-bar/admin/site/{site_id}/catalog/import/preview` works on connected
+(foreign-origin) sites only, and fetches from one host: the first of the site's origins
+this workspace has verified within the last 30 days, the same rule as the knowledge
+crawl. It sends the concierge crawler's user agent (`PawSitesConcierge/1.0`), checks
+robots.txt for every URL, follows redirects only on that host, and stops at 30 product
+pages, 8 MB or 45 seconds. At the 45-second mark it starts no new fetch and returns
+what it has read as `partial` with `deadline_reached`; `timeout` is reserved for a run
+that read no products by then. Sitemaps are read only as UTF-8 (a UTF-8 BOM is fine);
+one that is not UTF-8, declares another encoding, or carries a DOCTYPE or entity
+declaration is ignored.
+
+A price is read from a number or a string. A single comma followed by one or two digits
+and no dot is a decimal comma (`"19,99"` is 19.99); any other comma is a thousands
+separator (`"1,500"`, `"1,299.00"`). A product whose price does not fit (over
+10^12 minor units, or too large to compute) is skipped and counted in
+`skipped_bad_price:<n>`; the rest of the import stands.
+
+It reads Shopify's `/products.json` or the WooCommerce Store API when the homepage looks
+like one of them, and otherwise (or when that endpoint is refused, missing or
+robots-disallowed) the store's sitemap and product pages: schema.org `Product` JSON-LD
+first, then `og:type=product` tags. One item per product: a Shopify product's price is
+its cheapest available variant. Products are sorted in stock first, then in the store's
+order, and capped at 200; `total_found` is the count before the cap.
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Products found and every page read. |
+| `partial` | Products found, but some pages could not be read, or the byte budget or the 45-second deadline ran out. |
+| `empty` | Nothing with a name and a price was found. |
+| `failed` | Nothing was read; `reason` says why. |
+
+`reason` is `""` or one of `not_connected_site` (a hosted site; nothing is fetched),
+`origin_missing`, `origin_unverified`, `origin_verification_stale`, `blocked_by_robots`
+(robots.txt disallows the homepage for our crawler), `timeout` or `fetch_failed`.
+`source` is `shopify`, `woocommerce`, `jsonld`, `opengraph` or `""`. `warnings` can hold
+`currency_unknown`, `skipped_no_price:<n>`, `skipped_bad_price:<n>`,
+`skipped_by_robots:<n>`, `pages_failed:<n>`, `byte_budget_reached`, `deadline_reached`
+and `robots_unreadable`.
+
+Each item has the catalog fields above. `image_url` is always `https://` or empty, and
+`url` is a site path on the verified host or empty. Re-importing returns the same ids
+for the same products, so the client can update the items it imported before. A `web:` id hashes the
+product's page path together with its name, so products without their own URL on one
+listing page stay distinct. robots.txt is fetched on the verified host only: if it
+redirects elsewhere it counts as unreadable (`robots_unreadable`, everything allowed),
+the knowledge crawl's policy for a robots file it can't read.
 
 #### Guided concierge fields (v2)
 

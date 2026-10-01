@@ -154,13 +154,17 @@ def _cache_put(key: str, value: UnfurlResponse) -> None:
     _cache[key] = (now, value)
 
 
-class _MetaParser(HTMLParser):
+class MetaParser(HTMLParser):
     """Collect Open Graph / Twitter / standard meta + icon links from HTML.
 
     Stdlib only. Tolerant: malformed markup, missing attributes, and the
     parser raising on bad input are all swallowed by the caller. We keep the
     first non-empty value seen for each property (OG tags appear in <head>
-    near the top, so first-wins matches author intent)."""
+    near the top, so first-wins matches author intent).
+
+    Public because the concierge catalog import (``pocketpaw_ee.paw_bar.
+    catalog_import``) reads ``og:*`` / ``product:*`` product tags with it rather
+    than keeping a second meta parser."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -284,7 +288,7 @@ def _parse_metadata(html: str, final_url: str) -> UnfurlResponse:
       large_image twitter:card / og:image:width (see _is_large_image)
     Image and favicon are resolved to absolute URLs against ``final_url``.
     Title and description are whitespace-collapsed and length-capped."""
-    parser = _MetaParser()
+    parser = MetaParser()
     try:
         parser.feed(html)
     except Exception:  # noqa: BLE001 — never let a malformed page 500

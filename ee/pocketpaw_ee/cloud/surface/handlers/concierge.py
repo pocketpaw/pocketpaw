@@ -86,7 +86,8 @@ def _catalog_block(catalog: list[dict] | None) -> str:
 
     Empty string when there is no catalog. Each line names the real product id so
     the agent can put it straight into a pawbar-card fence and the add_to_cart
-    tool call."""
+    tool call. An item whose ``in_stock`` is False is marked sold out, so the
+    agent stops recommending it; unknown stock (None / absent) adds nothing."""
     items = [c for c in (catalog or []) if isinstance(c, dict) and c.get("id")]
     if not items:
         return ""
@@ -95,7 +96,8 @@ def _catalog_block(catalog: list[dict] | None) -> str:
         price = _format_price(c.get("price_cents"), c.get("currency"))
         name = str(c.get("name") or c.get("id"))
         price_part = f" - {price}" if price else ""
-        lines.append(f'   - id "{c["id"]}": {name}{price_part}')
+        stock_part = " (sold out)" if c.get("in_stock") is False else ""
+        lines.append(f'   - id "{c["id"]}": {name}{price_part}{stock_part}')
     catalog_lines = "\n".join(lines)
     return (
         "   Products you can sell (use these exact ids; never invent a product or "

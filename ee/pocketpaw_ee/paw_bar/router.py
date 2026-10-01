@@ -6174,6 +6174,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
                 "name": c.name,
                 "price_cents": c.price_cents,
                 "currency": c.currency,
+                "in_stock": c.in_stock,
             }
             for c in (widget.spec.catalog or [])[:_MAX_PREAMBLE_CATALOG]
         ]

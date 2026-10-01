@@ -487,6 +487,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
+    from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
     from pocketpaw_ee.sites.router import router as sites_router
@@ -730,6 +731,7 @@ def mount_cloud(app: FastAPI) -> None:
     # reach /api/v1/paw-bar/* without a second app setup entry point.
     app.include_router(paw_bar_router, prefix="/api/v1")
     app.include_router(paw_bar_knowledge_router, prefix="/api/v1")
+    app.include_router(paw_bar_catalog_router, prefix="/api/v1")
 
     # Fabric / Fleet / Instinct also live outside ee/cloud/ (pocketpaw_ee.
     # {fabric,fleet,instinct}). Their logic split into the OSS core in Phase 2,

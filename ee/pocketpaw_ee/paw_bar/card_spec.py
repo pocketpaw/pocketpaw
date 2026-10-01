@@ -13,10 +13,11 @@
 #     manifest lists, with ``emit`` limited to the add_to_cart / checkout host
 #     events the widget actually declares (the action endpoint refuses the rest);
 #   * product data comes only from the site catalog: a ``product-card``'s ``ids``
-#     become ``items`` (name, price, currency, image from the catalog), unknown ids
-#     are dropped, an empty product-card is dropped. The model never supplies a
-#     name, a price or an image. A legacy ``{"kind": "product"}`` card is repriced
-#     the same way; other legacy cards pass through untouched.
+#     become ``items`` (name, price, currency, image, page url and description
+#     from the catalog), unknown ids are dropped, an empty product-card is
+#     dropped. The model never supplies a name, a price, an image or a link. A
+#     legacy ``{"kind": "product"}`` card is repriced the same way; other legacy
+#     cards pass through untouched.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
 # app/pawbar-manifest.json (qbtrix/paw-bar PR #26, branch feat/wire-spec-cards,
@@ -100,6 +101,8 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
                 "price_cents": int(_field(product, "price_cents", 0) or 0),
                 "currency": str(_field(product, "currency") or "USD"),
                 "image_url": str(_field(product, "image_url") or ""),
+                "url": str(_field(product, "url") or ""),
+                "description": str(_field(product, "description") or ""),
                 "actions": list(verbs),
             }
         )
