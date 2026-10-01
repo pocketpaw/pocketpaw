@@ -161,6 +161,17 @@ class TestNavigationBeatsVerbs:
         verb_scores = [r["score"] for r in results if r["kind"] == "verb"]
         assert all(v <= top["score"] - 0.15 for v in verb_scores), (q, results[:4])
 
+    @pytest.mark.parametrize("kinds", [None, "surface,verb"])
+    def test_show_me_my_files_leads_every_result_by_the_open_margin(self, client, kinds):
+        """The composer opens a surface at score >= 0.45 with a >= 0.15 lead."""
+        params = {"q": "show me my files", "limit": 20}
+        if kinds:
+            params["kinds"] = kinds
+        results = client.get("/api/v1/atlas/search", params=params).json()["results"]
+        top, rest = results[0], results[1:]
+        assert top["id"] == "surface:files" and top["score"] >= 0.45
+        assert all(r["score"] <= top["score"] - 0.15 for r in rest), results[:3]
+
     def test_show_me_my_files_no_longer_ties_a_delete(self, client):
         results = client.get(
             "/api/v1/atlas/search", params={"q": "show me my files", "kinds": "surface,verb"}

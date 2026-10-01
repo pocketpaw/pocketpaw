@@ -103,5 +103,12 @@
     "find": "                -t[1],\n",
     "replace": "                0,\n",
     "tests": ["tests/atlas/test_store.py", "tests/atlas/test_eval.py", "tests/v1/test_api_v1_atlas.py"]
+  },
+  {
+    "label": "atlas data: Code competes on the bare noun again ('file tree')",
+    "file": "src/pocketpaw/atlas/data/atlas.json",
+    "find": "\"repo tree\",",
+    "replace": "\"file tree\",",
+    "tests": ["tests/v1/test_api_v1_atlas.py"]
   }
 ]

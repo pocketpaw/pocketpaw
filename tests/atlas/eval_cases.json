@@ -492,6 +492,12 @@
       "expected_id": "verb:file-download",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/atlas-canonical, live tie fix): a navigational query lands on the surface, never on a verb that matches only its object noun; the verbs still win when the action word is there."
+    },
+    {
+      "intent": "edit code in the ide",
+      "expected_id": "surface:code",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): Code keeps its own intent after its keywords stopped competing with Files on the bare noun ('file tree' -> 'source tree')."
     }
   ]
 }
