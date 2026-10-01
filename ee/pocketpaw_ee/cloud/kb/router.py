@@ -2,8 +2,9 @@
 #
 # Workspace-scoped REST door onto the kb Go binary. Invariants:
 # - Every kb-go subprocess runs off the event loop: ingest goes through
-#   ``KnowledgeService.ingest_text_to_scope`` (the hardened funnel with the
-#   verbatim-fallback rejection; never call ``_kb`` for ingest here), and every
+#   ``KnowledgeService.ingest_document_to_scope`` (the sectioned ingest over the
+#   hardened funnel with the verbatim-fallback rejection; never call ``_kb`` for
+#   ingest here), and every
 #   read route wraps ``_kb`` in ``asyncio.to_thread``. One process serves every
 #   user, so a sync ``_kb`` call here stalls all of them.
 # - A client ``scope`` override is resolved through
@@ -119,14 +120,15 @@ async def ingest_text(
 ) -> dict:
     """Ingest plain text into the workspace knowledge base.
 
-    Routes through :meth:`KnowledgeService.ingest_text_to_scope` — the
+    Routes through :meth:`KnowledgeService.ingest_document_to_scope`: a long
+    document is compiled section by section, each section through the
     hardened funnel (agent-backend compile on keyless boxes, verbatim-
     fallback rejection, subprocess off the event loop). Never call ``_kb``
     for ingest directly.
     """
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
-        return await KnowledgeService.ingest_text_to_scope(scope, body.text, body.source)
+        return await KnowledgeService.ingest_document_to_scope(scope, body.text, body.source)
     except Exception as exc:
         logger.error("KB text ingest failed: %s", exc, exc_info=True)
         raise CloudError(500, "kb.ingest_failed", str(exc)) from exc
@@ -146,7 +148,7 @@ async def ingest_url(
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
         text = await _extract_url(body.url)
-        return await KnowledgeService.ingest_text_to_scope(scope, text, body.url)
+        return await KnowledgeService.ingest_document_to_scope(scope, text, body.url)
     except Exception as exc:
         logger.error("KB URL ingest failed: %s", exc, exc_info=True)
         raise CloudError(500, "kb.ingest_failed", str(exc)) from exc

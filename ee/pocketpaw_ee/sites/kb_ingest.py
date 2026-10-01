@@ -21,7 +21,9 @@
 #
 # IDEMPOTENCE. Page sources are deterministic (``site-<path-slug>``), so kb-go
 # versions an article instead of duplicating it, and ids this site produced before
-# but not now are pruned (only after a trustworthy, complete sync).
+# but not now are pruned (only after a trustworthy, complete sync). Pages go
+# through ``KnowledgeService.ingest_document_to_scope``: a long page lands as one
+# article per section, every id is recorded, and the first stands for the page.
 #
 # BOOKKEEPING on the Site (``_record_sync``, a targeted ``$set``): article ids,
 # ``kb_page_index`` (``{page_key: {"id", "title"}}``, the only page-to-article link;
@@ -413,11 +415,17 @@ async def _ingest_documents(
     from pocketpaw_ee.cloud.agents.knowledge import (
         KnowledgeEngineUnavailable,
         KnowledgeService,
+        extract_ingest_article_ids,
     )
 
     for doc in docs:
         try:
-            result = await KnowledgeService.ingest_text_to_scope(scope, doc.text, doc.source)
+            result = await KnowledgeService.ingest_document_to_scope(
+                scope,
+                doc.text,
+                doc.source,
+                doc_key=f"site:{getattr(site, 'id', '')}:{page_key(doc.path)}",
+            )
         except KnowledgeEngineUnavailable as exc:
             # The engine, not this page: every remaining page would fail the same
             # way, each after a paid compile. Stop here and name the engine.
@@ -437,16 +445,18 @@ async def _ingest_documents(
                 exc_info=True,
             )
             continue
-        article_id = str((result or {}).get("article") or "").strip()
-        if not article_id:
+        article_ids = extract_ingest_article_ids(result)
+        if not article_ids:
             report.skipped += 1
             continue
         report.ingested += 1
-        report.article_ids.append(article_id)
+        # A long page is several section articles; all of them are this site's.
+        report.article_ids.extend(article_ids)
         # Two spellings of one page (about.html and about/index.html): the first wins.
+        # The page's first article stands for the page.
         report.page_index.setdefault(
             page_key(doc.path),
-            {"id": article_id, "title": str((result or {}).get("title") or "").strip()},
+            {"id": article_ids[0], "title": str((result or {}).get("title") or "").strip()},
         )
 
 

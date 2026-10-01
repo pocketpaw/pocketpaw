@@ -661,3 +661,54 @@ async def test_a_failing_catalog_import_changes_neither_the_report_nor_the_catal
     items, _ = await store.list_catalog(widget.id)
     assert [i.id for i in items] == ["p1"]
     assert site.catalog_sync_status == "fetch_failed"
+
+
+# --------------------------------------------------------------------------- #
+# A long page is several section articles
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_long_page_records_every_section_and_prunes_the_old_set(monkeypatch):
+    """The real sectioned ingest, faked at the LLM and the kb binary: a page past
+    the section size lands as several articles, all recorded on the Site, the
+    first standing for the page; a re-sync that produces a new set prunes every
+    id of the old one."""
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import (
+        _Compiler,
+        _FakeKb,
+        _install,
+        _long_doc,
+    )
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    kb = _FakeKb()
+    monkeypatch.setattr(knowledge, "_kb", kb)
+    _install(monkeypatch, _Compiler())
+
+    def page(topic: str, count: int) -> dict:
+        body = "".join(
+            f"<h2>{line[2:]}</h2>" if line.startswith("# ") else f"<p>{line}</p>"
+            for line in _long_doc(count).replace("Chapter", topic).split("\n\n")
+        )
+        return {"engine": "html", "source": {"pricing.html": body}}
+
+    _patch_pocket(monkeypatch, page("Spring", 4))
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert (report.ingested, report.error) == (1, "")
+    first = list(site.kb_article_ids)
+    assert len(first) > 1 and sorted(first) == sorted(kb.articles)
+    [entry] = site.kb_page_index.values()
+    assert entry["id"] == first[0]
+
+    _patch_pocket(monkeypatch, page("Summer", 3))
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert sorted(kb.deleted) == sorted(first)
+    assert sorted(site.kb_article_ids) == sorted(kb.articles)
+    assert not set(site.kb_article_ids) & set(first)
