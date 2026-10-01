@@ -302,7 +302,9 @@ async def test_every_fact_in_the_real_field_guide_lands_in_some_article(monkeypa
         assert len(payload["article"]["content"].encode()) < 2000
         # raw_text is the section itself: whole lines of the document.
         assert all(line in text for line in payload["raw_text"].split("\n"))
-        assert payload["article"]["title"].startswith("cairn-field-guide.pdf — part ")
+        assert re.match(
+            r"cairn-field-guide\.pdf \[[0-9a-f]{8}\] — part ", payload["article"]["title"]
+        )
         assert payload["article"]["compiled_with"].startswith("pocketpaw-agent:")
     # The prompt restructures rather than compresses.
     assert "do not drop facts" in compiler.prompts[0]
@@ -523,3 +525,64 @@ async def test_several_sections_of_one_document_reach_a_concierge_turn_whole(mon
     assert [i.id for i in chosen] == [h["id"] for h in hits]
     for i, item in enumerate(chosen, start=1):
         assert item.text.endswith(f"Tail fact {i}.")
+
+
+# --------------------------------------------------------------------------- #
+# One file name, many documents
+# --------------------------------------------------------------------------- #
+
+
+async def test_two_documents_with_one_name_keep_separate_articles(monkeypatch, kb):
+    """Owners upload "price-list.pdf" twice; a source and a site page share a
+    label. kb-go keys an article by its title's slug, so without a per-document
+    tag the second would silently overwrite the first's sections."""
+    _install(monkeypatch, _Compiler())
+    doc = _long_doc(4)
+
+    first = await KnowledgeService.ingest_document_to_scope(
+        "pocket:p1", doc, "price-list.pdf", doc_key="source-a"
+    )
+    second = await KnowledgeService.ingest_document_to_scope(
+        "pocket:p1", doc, "price-list.pdf", doc_key="source-b"
+    )
+
+    assert not set(first["articles"]) & set(second["articles"])
+    assert sorted(kb.articles) == sorted(first["articles"] + second["articles"])
+
+
+async def test_the_same_document_key_lands_on_the_same_articles(monkeypatch, kb):
+    _install(monkeypatch, _Compiler())
+    doc = _long_doc(3)
+
+    first = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, "a.md", doc_key="k")
+    again = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, "a.md", doc_key="k")
+
+    assert first["articles"] == again["articles"]
+    assert len(kb.articles) == 3
+
+
+async def test_without_a_document_key_each_ingest_is_its_own_document(monkeypatch, kb):
+    _install(monkeypatch, _Compiler())
+    doc = _long_doc(3)
+
+    first = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, "a.md")
+    again = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, "a.md")
+
+    assert not set(first["articles"]) & set(again["articles"])
+
+
+async def test_the_document_tag_survives_a_very_long_name(monkeypatch, kb):
+    """kb-go cuts the slug at 80 chars; the tag and part number must sit
+    before the cut however long the file name and the topic are."""
+    long_topic = json.dumps({"title": "Topic " * 30, "summary": "s", "content": "c"})
+    _install(monkeypatch, _Compiler(lambda section, prompt: long_topic))
+    name = "supplier-" * 20 + "price-list.pdf"
+    doc = _long_doc(3)
+
+    a = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, name, doc_key="a")
+    b = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, name, doc_key="b")
+
+    assert len(set(a["articles"] + b["articles"])) == 6
+    tag = knowledge._document_tag("pocket:p1", name, "a")
+    assert all(tag in article_id for article_id in a["articles"])
+    assert all(len(article_id) <= 80 for article_id in a["articles"])

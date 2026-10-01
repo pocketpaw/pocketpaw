@@ -442,7 +442,9 @@ async def _ingest_source(
         sections_truncated = count_document_sections(text[max_chars:]) if truncated else 0
         text = text[:max_chars]
         try:
-            result = await KnowledgeService.ingest_document_to_scope(scope, text, label)
+            result = await KnowledgeService.ingest_document_to_scope(
+                scope, text, label, doc_key=f"concierge-source:{source_id}"
+            )
         except KnowledgeEngineUnavailable as exc:
             logger.warning(
                 "paw_bar.sources: kb engine unavailable for %s source %s: %s",

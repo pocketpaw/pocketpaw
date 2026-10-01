@@ -1185,3 +1185,67 @@ async def test_sections_past_the_char_cap_are_counted(owner, caps, jobs, section
     assert row["sections_truncated"] >= 2
     ingested = "".join(p["raw_text"] for p in sections.kb.payloads)
     assert "Chapter 6" not in ingested
+
+
+@pytest.mark.asyncio
+async def test_two_sources_with_one_file_name_both_stay_indexed(owner, caps, jobs, sections):
+    """Each source's id is hashed into its section titles, so a second
+    "price-list.pdf" lands beside the first instead of overwriting it, and
+    removing one leaves the other searchable."""
+    site = await _site()
+    sid = str(site.id)
+    a = (await _upload(owner, sid, "price-list.md", _chapters(3))).json()["id"]
+    await _upload(owner, sid, "price-list.md", _chapters(3))
+    await jobs.run()
+
+    rows = {r["id"]: r for r in (await _list(owner, sid))["sources"]}
+    [ids_a, ids_b] = [rows[k]["article_ids"] for k in sorted(rows, key=lambda k: k != a)]
+    assert len(ids_a) == len(ids_b) == 3 and not set(ids_a) & set(ids_b)
+    assert sorted(sections.kb.articles) == sorted(ids_a + ids_b)
+
+    assert (await owner.delete(_BASE.format(sid=sid) + f"/{a}")).status_code == 204
+    assert sorted(sections.kb.articles) == sorted(ids_b)
+
+
+@pytest.mark.asyncio
+async def test_refetch_with_unchanged_content_keeps_its_article_ids(
+    owner, caps, jobs, sections, web
+):
+    web.serve("https://public.example/prices", _chapters(3).decode())
+    site = await _site()
+    sid = str(site.id)
+    source_id = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    await jobs.run()
+    [before] = (await _list(owner, sid))["sources"]
+
+    await owner.post(_BASE.format(sid=sid) + f"/{source_id}/refetch")
+    await jobs.run()
+
+    [after] = (await _list(owner, sid))["sources"]
+    assert after["article_ids"] == before["article_ids"]
+    assert sections.kb.deleted == []
+    assert len(sections.kb.articles) == 3
+
+
+@pytest.mark.asyncio
+async def test_refetch_replaces_only_its_own_set(owner, caps, jobs, sections, web):
+    """Two link sources reading one URL share a label; refetching one swaps its
+    articles and leaves the other's alone."""
+    web.serve("https://public.example/prices", _chapters(3, topic="Spring").decode())
+    site = await _site()
+    sid = str(site.id)
+    a = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    b = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    await jobs.run()
+    rows = {r["id"]: r for r in (await _list(owner, sid))["sources"]}
+    old_a, kept_b = rows[a]["article_ids"], rows[b]["article_ids"]
+    assert not set(old_a) & set(kept_b)
+
+    web.serve("https://public.example/prices", _chapters(2, topic="Summer").decode())
+    await owner.post(_BASE.format(sid=sid) + f"/{a}/refetch")
+    await jobs.run()
+
+    rows = {r["id"]: r for r in (await _list(owner, sid))["sources"]}
+    assert rows[b]["article_ids"] == kept_b
+    assert sorted(sections.kb.deleted) == sorted(old_a)
+    assert sorted(sections.kb.articles) == sorted(rows[a]["article_ids"] + kept_b)

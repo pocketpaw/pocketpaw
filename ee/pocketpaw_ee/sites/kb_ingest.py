@@ -420,7 +420,12 @@ async def _ingest_documents(
 
     for doc in docs:
         try:
-            result = await KnowledgeService.ingest_document_to_scope(scope, doc.text, doc.source)
+            result = await KnowledgeService.ingest_document_to_scope(
+                scope,
+                doc.text,
+                doc.source,
+                doc_key=f"site:{getattr(site, 'id', '')}:{page_key(doc.path)}",
+            )
         except KnowledgeEngineUnavailable as exc:
             # The engine, not this page: every remaining page would fail the same
             # way, each after a paid compile. Stop here and name the engine.

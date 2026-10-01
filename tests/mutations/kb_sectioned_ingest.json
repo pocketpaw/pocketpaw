@@ -75,8 +75,8 @@
   {
     "label": "section titles lose the part number — sections with one topic collide on one kb article id",
     "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
-    "find": "    return f\"{doc} — part {index} of {total}: {topic}\"",
-    "replace": "    return f\"{doc}: {topic}\"",
+    "find": "    return f\"{doc} [{tag}] — part {index} of {total}: {topic}\"",
+    "replace": "    return f\"{doc} [{tag}]: {topic}\"",
     "tests": [
       "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_section_titles_are_unique_article_ids"
     ]
@@ -133,6 +133,25 @@
     "replace": "        report.article_ids.append(article_ids[0])",
     "tests": [
       "tests/cloud/test_site_kb_ingest.py::test_a_long_page_records_every_section_and_prunes_the_old_set"
+    ]
+  },
+  {
+    "label": "the document tag is dropped from section titles — two documents with one file name overwrite each other's sections",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "    return f\"{doc} [{tag}] — part {index} of {total}: {topic}\"",
+    "replace": "    return f\"{doc} — part {index} of {total}: {topic}\"",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_sectioned_ingest.py::test_two_documents_with_one_name_keep_separate_articles",
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_two_sources_with_one_file_name_both_stay_indexed"
+    ]
+  },
+  {
+    "label": "the concierge source passes no document key — a refetch writes new articles instead of replacing its own",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "                scope, text, label, doc_key=f\"concierge-source:{source_id}\"",
+    "replace": "                scope, text, label",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sources.py::test_refetch_with_unchanged_content_keeps_its_article_ids"
     ]
   }
 ]

@@ -140,7 +140,10 @@ sectioned ingest:
 - **Each section is compiled into its own article**, with a prompt that restructures
   rather than compresses: every name, number, price, date, quantity, condition and
   contact detail is kept exactly, duplicates may be merged, nothing is dropped or
-  invented. Its title is the document name, `part i of n`, and the section's topic.
+  invented. Its title is the document name, a short tag for that document,
+  `part i of n`, and the section's topic. The tag comes from the source (or the site
+  page), so two files both called `price-list.pdf` keep separate articles, and
+  re-reading one source lands on its own articles again.
 - **A section is rejected only when it is unusable**: an empty title or content,
   unparseable JSON, or runaway output (more than three times the section, or over
   8,000 characters). A near-verbatim section is fine; it is the owner's own text. A

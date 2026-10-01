@@ -32,8 +32,10 @@
 #     as long as its source. A hard length ceiling still applies. A SECTION is
 #     checked only for empty fields and runaway output
 #     (``_validate_section_article``): it is small and the owner's own text.
-#   * Section titles lead with the document name and "part i of n": kb-go keys
-#     an article by its title's slug, so two sections must never share one.
+#   * Section titles lead with the document name, a tag hashed from the
+#     caller's ``doc_key`` and "part i of n": kb-go keys an article by its
+#     title's slug (80 chars), so no two sections, and no two documents with
+#     one file name, may share one.
 #   * Chat-turn search (``search_context_for_scope``) fails soft: a 5s timeout
 #     or a kb error returns "" with a warning, so the KB never stalls a turn.
 #   * ``extract_ingest_article_id`` is the one place that knows the receipt's
@@ -49,6 +51,7 @@ configured without touching this file.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -57,6 +60,7 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from pocketpaw_ee.cloud.agents.knowledge_sections import Section, split_into_sections
@@ -125,9 +129,11 @@ _SECTIONED_INGEST_DEADLINE_S = 600
 _SECTION_MAX_GROWTH = 3
 _SECTION_MAX_CONTENT_CHARS = 8_000
 # A document name is clipped to this in a section's title, so the title's
-# "part i of n" stays inside the 80 characters kb-go keeps of the slug (the
+# document tag and "part i of n" stay inside the 80 characters kb-go keeps of the slug (the
 # slug is the article id; two sections must never share one).
 _SECTION_TITLE_DOC_CHARS = 40
+# Hex chars of the per-document tag in a section title (see ``_document_tag``).
+_DOC_TAG_CHARS = 8
 
 # Mirror of kb-go's detectLanguage: source-filename suffixes whose stdin
 # ingest should carry a ``--lang`` hint so kb-go runs its AST parse
@@ -496,13 +502,23 @@ def _code_rule(lang: str | None) -> str:
     )
 
 
-def _section_title(topic: str, doc_source: str, index: int, total: int) -> str:
-    """``<document> — part i of n: <topic>``. The document name and part number
-    lead, so the slug kb-go keys the article by is unique per section."""
+def _document_tag(scope: str, source: str, doc_key: str | None) -> str:
+    """A short stable tag for one document, from the caller's ``doc_key`` (a
+    source id, a site page). Without one, a per-ingest nonce: the document
+    still cannot collide with another, but a re-ingest makes new articles."""
+    basis = f"key:{doc_key}" if doc_key else f"nonce:{scope}:{source}:{uuid.uuid4().hex}"
+    return hashlib.sha256(basis.encode()).hexdigest()[:_DOC_TAG_CHARS]
+
+
+def _section_title(topic: str, doc_source: str, index: int, total: int, tag: str) -> str:
+    """``<document> [tag] — part i of n: <topic>``. The document name, its tag
+    and the part number lead, inside the 80 characters kb-go keeps of the slug
+    it keys the article by, so the id is unique per section AND per document:
+    two documents with one file name never overwrite each other's sections."""
     doc = (Path(doc_source).name or doc_source).strip() or "document"
     if len(doc) > _SECTION_TITLE_DOC_CHARS:
         doc = doc[: _SECTION_TITLE_DOC_CHARS - 1].rstrip() + "…"
-    return f"{doc} — part {index} of {total}: {topic}"
+    return f"{doc} [{tag}] — part {index} of {total}: {topic}"
 
 
 def _validate_section_article(article: dict, *, section_text: str, source: str) -> dict:
@@ -531,6 +547,7 @@ async def _compile_section_with_agent(
     total: int,
     lang: str | None = None,
     *,
+    tag: str = "",
     retry: bool = False,
     timeout: float = _AGENT_COMPILE_TIMEOUT_S,
 ) -> dict:
@@ -593,7 +610,7 @@ async def _compile_section_with_agent(
         )
     except ValueError as exc:
         raise RuntimeError(f"section {index} of {total} compile failed: {exc}")
-    article["title"] = _section_title(article["title"], doc_source, index, total)
+    article["title"] = _section_title(article["title"], doc_source, index, total, tag)
     article["compiled_with"] = f"pocketpaw-agent:{get_settings().agent_backend}"
     return article
 
@@ -632,9 +649,10 @@ async def _ingest_compiled_article(scope: str, raw_text: str, article: dict) -> 
 
 
 async def _ingest_sections(
-    scope: str, sections: list[Section], source: str, lang: str | None
+    scope: str, sections: list[Section], source: str, lang: str | None, tag: str
 ) -> dict:
-    """Compile and ingest each section as its own article.
+    """Compile and ingest each section as its own article, titled with the
+    document's ``tag`` (``_document_tag``).
 
     At most ``_SECTION_CONCURRENCY`` compiles run at once, and the kb writes
     are serialized (each ``kb ingest`` rebuilds the scope's indexes from the
@@ -667,6 +685,7 @@ async def _ingest_sections(
                     index,
                     total,
                     lang,
+                    tag=tag,
                     retry=retry,
                     timeout=min(_AGENT_COMPILE_TIMEOUT_S, remaining),
                 )
@@ -802,7 +821,9 @@ class KnowledgeService:
         return await _ingest_compiled_article(scope, text, article)
 
     @staticmethod
-    async def ingest_document_to_scope(scope: str, text: str, source: str = "manual") -> dict:
+    async def ingest_document_to_scope(
+        scope: str, text: str, source: str = "manual", *, doc_key: str | None = None
+    ) -> dict:
         """Ingest a document so that every fact in it stays searchable.
 
         The sectioned twin of :meth:`ingest_text_to_scope`, for callers whose
@@ -814,6 +835,12 @@ class KnowledgeService:
         document on the API-key path, goes through :meth:`ingest_text_to_scope`
         unchanged, and its receipt gains a one-element ``articles`` list.
 
+        ``doc_key`` is the caller's stable identity for the document (a source
+        id, a site page). It is hashed into every section title, so two
+        documents with the same name never share an article, and the same
+        document re-ingested lands on the same ids. Without it each ingest gets
+        a fresh tag: no collision, but a re-ingest writes new articles.
+
         Raises when nothing was ingested. A partial result returns with
         ``sections_failed`` > 0 and a ``failures`` list.
         """
@@ -822,7 +849,10 @@ class KnowledgeService:
                 text, target=_SECTION_TARGET_CHARS, hard_max=_SECTION_HARD_MAX_CHARS
             )
             if len(sections) > 1:
-                return await _ingest_sections(scope, sections, source, _lang_for_source(source))
+                tag = _document_tag(scope, source, doc_key)
+                return await _ingest_sections(
+                    scope, sections, source, _lang_for_source(source), tag
+                )
         result = await KnowledgeService.ingest_text_to_scope(scope, text, source)
         if isinstance(result, dict):
             article_id = extract_ingest_article_id(result)
