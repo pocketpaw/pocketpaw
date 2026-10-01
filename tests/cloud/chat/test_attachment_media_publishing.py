@@ -3,7 +3,8 @@
 # Created 2026-08-31 (feat/sites-public-asset-uploads). New file.
 # Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — a new test pins that
 # the sites entry lets the model treat a document photo (visiting card, menu) as a
-# SOURCE and drops the unconditional "so the site can show it" wording.
+# SOURCE and drops the unconditional "so the site can show it" wording; a second
+# pins that a video keeps the plain embed text (the clause is image-only).
 #
 # Under test: ``chat.agent_service._publish_media_attachment``.
 #
@@ -49,8 +50,9 @@ class FakeCtx:
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, kind: str = "image") -> None:
         self.calls: list[dict] = []
+        self.kind = kind
 
     async def put(self, data, *, filename, workspace_id, pocket_id):
         self.calls.append(
@@ -59,11 +61,11 @@ class FakeStore:
         return PublicAsset(
             key=f"sites-assets/{workspace_id}/{pocket_id}/abc-{filename}",
             url=f"https://cdn.test/sites-assets/{workspace_id}/{pocket_id}/abc-{filename}",
-            mime="image/png",
+            mime="image/png" if self.kind == "image" else "video/mp4",
             size=len(data),
             filename=filename,
             sha256="a" * 16,
-            kind="image",
+            kind=self.kind,
         )
 
 
@@ -142,9 +144,28 @@ async def test_a_sites_image_may_be_a_source_rather_than_page_content(monkeypatc
     assert "it is a SOURCE, not page content" in out
     assert "exactly as written" in out
     assert "do NOT embed the photo unless the user asks" in out
+    # A storefront/signboard photo is both a source and showable.
+    assert "A storefront photo can be both" in out
     # The embed branch is intact.
     assert "Otherwise (a logo, a product or a shop photo)" in out
     assert "use it VERBATIM as <img src=" in out
+
+
+@pytest.mark.asyncio
+async def test_a_sites_video_keeps_the_plain_embed_instruction(monkeypatch, png) -> None:
+    """A video is never a visiting card, so it gets no document-vs-embed clause."""
+    _install(monkeypatch, FakeStore(kind="video"))
+
+    out = await agent_service._publish_media_attachment(
+        FakeCtx(), FakeRec("hero.mp4", "video/mp4", 40), png, surface="sites"
+    )
+
+    assert out is not None
+    assert "DOCUMENT" not in out
+    assert "visiting card" not in out
+    assert "The user attached this so the site can show it" in out
+    assert "use it VERBATIM as <video src=" in out
+    assert "do not substitute a stock asset" in out
 
 
 @pytest.mark.asyncio
