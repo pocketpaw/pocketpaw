@@ -243,7 +243,11 @@ async def test_every_mutation_writes_an_applied_audit_row(client) -> None:
         await client.post(f"{PLATFORM}/{listing_id}/{verb}", json=REASON)
     await client.post(f"{PLATFORM}/reindex", json=REASON)
 
-    rows = await PlatformAuditEvent.find({"action": "platform.discover.moderate"}).to_list()
+    rows = (
+        await PlatformAuditEvent.find({"action": "platform.discover.moderate"})
+        .sort("_id")
+        .to_list()
+    )
     assert [r.before.get("verb") for r in rows] == [*VERBS, "reindex"]
     assert {r.status for r in rows} == {"applied"}
     assert {r.actor_id for r in rows} == {"op-operator"}
