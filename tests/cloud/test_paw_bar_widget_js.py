@@ -19,6 +19,8 @@
 # Updated 2026-10-02 (CN-8, fix/canon-cross-repo-pins): the vendored loader is now
 #   hash-pinned to a paw-bar build (paw-bar-loader.pin.json), so drift from
 #   paw-bar fails here; the re-vendor picked up the microphone iframe permission.
+#   The pin test reads the package copy directly (not via PAW_BAR_WIDGET_JS) and
+#   relies on the sha alone, with no hardcoded loader strings.
 # Updated 2026-09-27 (new Paw Bar): the vendored loader must speak the two
 #   additions the rebuilt bar relies on, pawbar:viewport and a corner `side` on
 #   pawbar:resize.
@@ -307,10 +309,15 @@ def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
     import hashlib
     import json
 
-    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+    from pathlib import Path
 
-    path = paw_bar_widget_file()
-    pin = json.loads((path.parent.parent / "paw-bar-loader.pin.json").read_text("utf-8"))
+    import pocketpaw_ee.paw_bar as paw_bar
+
+    # The package's own copy, not paw_bar_widget_file(): that follows
+    # PAW_BAR_WIDGET_JS, and the pin is about what we commit.
+    package = Path(paw_bar.__file__).parent
+    path = package / "static" / "paw-bar.js"
+    pin = json.loads((package / "paw-bar-loader.pin.json").read_text("utf-8"))
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
     body = text[text.index('"use strict";') :]
 
@@ -319,7 +326,6 @@ def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
         "run scripts/vendor-paw-bar-loader.sh"
     )
     assert pin["source_repo"] == "qbtrix/paw-bar" and len(pin["source_commit"]) == 40
-    assert 'iframe.setAttribute("allow", "clipboard-write; microphone")' in body
 
 
 # --------------------------------------------------------------------------- #

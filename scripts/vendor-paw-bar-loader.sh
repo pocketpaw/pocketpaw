@@ -9,6 +9,9 @@
 # loader/dist/loader.readable.js, and rewrites ee/pocketpaw_ee/paw_bar/
 # paw-bar-loader.pin.json with the source commit and the body's sha256.
 # tests/cloud/test_paw_bar_widget_js.py fails when the body and the pin disagree.
+# A worktree (not `git archive`) because the build needs paw-bar's esbuild install.
+# Updated 2026-10-02 (CN-8 review): the exit trap also deletes the temp parent and
+# runs `git worktree prune`, so an interrupted run leaves nothing registered.
 #
 # Usage:
 #   scripts/vendor-paw-bar-loader.sh                 # ../paw-bar at origin/main
@@ -25,8 +28,9 @@ PIN="$HERE/ee/pocketpaw_ee/paw_bar/paw-bar-loader.pin.json"
 git -C "$SRC" fetch -q origin || echo "[vendor-paw-bar-loader] WARN: fetch failed; using the local $REF" >&2
 COMMIT="$(git -C "$SRC" rev-parse "$REF")"
 
-WT="$(mktemp -d)/paw-bar"
-trap 'git -C "$SRC" worktree remove --force "$WT" >/dev/null 2>&1 || true' EXIT
+TMP="$(mktemp -d)"
+WT="$TMP/paw-bar"
+trap 'git -C "$SRC" worktree remove --force "$WT" >/dev/null 2>&1 || true; rm -rf "$TMP"; git -C "$SRC" worktree prune' EXIT
 git -C "$SRC" worktree add -q --detach "$WT" "$COMMIT"
 ( cd "$WT" && bun install --frozen-lockfile >/dev/null && node loader/build.mjs >/dev/null )
 
