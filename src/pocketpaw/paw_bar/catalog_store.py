@@ -24,6 +24,14 @@
 # Caps: ``catalog_max_items()`` (config ``pawbar_catalog_max_items``) bounds a
 # widget's rows; a write past it raises ``CatalogFull`` and writes nothing.
 #
+# Provenance: ``origin`` is "site" for a row the site sync wrote and "owner" for
+# everything else (the default, so rows from before the column are the owner's).
+# Every owner write (upsert / replace / spec) stamps "owner", so an owner edit
+# takes a site row over for good. ``sync_site_catalog`` only ever inserts new
+# ids, updates "site" rows and marks missing "site" rows sold out (complete
+# imports only); it never deletes, and skips ids in ``paw_bar_catalog_tombstones``
+# (written by ``delete_catalog_items``), so a product the owner deleted stays gone.
+#
 # ``migrate_catalog_out_of_specs`` moves every widget spec's legacy ``catalog``
 # into rows, one transaction per widget (marker ``catalog_to_table_v1``), archiving
 # the spec first and only ADDING rows (``add_missing_rows``): a row already there
@@ -35,6 +43,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -72,8 +81,15 @@ CREATE TABLE IF NOT EXISTS paw_bar_catalog_items (
     description TEXT NOT NULL DEFAULT '',
     in_stock INTEGER,
     source TEXT NOT NULL DEFAULT 'manual',
+    origin TEXT NOT NULL DEFAULT 'owner',
     updated_at TEXT NOT NULL,
     UNIQUE (widget_id, item_id)
+);
+CREATE TABLE IF NOT EXISTS paw_bar_catalog_tombstones (
+    widget_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (widget_id, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_catalog_page ON paw_bar_catalog_items(widget_id, page_key);
 CREATE INDEX IF NOT EXISTS idx_catalog_pos ON paw_bar_catalog_items(widget_id, position);
@@ -103,18 +119,27 @@ END;
 
 _COLUMNS = (
     "item_id, name, price_cents, currency, image_url, url, description, in_stock,"
-    " position, source, updated_at"
+    " position, source, updated_at, origin"
 )
 _UPSERT_SQL = (
     "INSERT INTO paw_bar_catalog_items (widget_id, item_id, position, name, price_cents,"
-    " currency, image_url, url, page_key, description, in_stock, source, updated_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " currency, image_url, url, page_key, description, in_stock, source, updated_at, origin)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     " ON CONFLICT(widget_id, item_id) DO UPDATE SET name = excluded.name,"
     " price_cents = excluded.price_cents, currency = excluded.currency,"
     " image_url = excluded.image_url, url = excluded.url, page_key = excluded.page_key,"
     " description = excluded.description, in_stock = excluded.in_stock,"
-    " source = excluded.source, updated_at = excluded.updated_at"
+    " source = excluded.source, updated_at = excluded.updated_at, origin = excluded.origin"
 )
+# The site sync's update: only a row the site still owns, so an owner edit that
+# landed first is never overwritten.
+_SITE_UPDATE_SQL = (
+    "UPDATE paw_bar_catalog_items SET name = ?, price_cents = ?, currency = ?, image_url = ?,"
+    " url = ?, page_key = ?, description = ?, in_stock = ?, source = ?, updated_at = ?"
+    " WHERE widget_id = ? AND item_id = ? AND origin = 'site'"
+)
+ORIGIN_SITE = "site"
+ORIGIN_OWNER = "owner"
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 # Dropped from a visitor's question before it is searched: they match every
 # description and only add noise to an OR query.
@@ -233,6 +258,7 @@ def _row_to_item(row: Sequence[Any]) -> PawBarCatalogRow:
         position=int(row[8] or 0),
         source=row[9] or "manual",
         updated_at=row[10] or "",
+        origin=row[11] or ORIGIN_OWNER,
     )
 
 
@@ -260,7 +286,12 @@ _ITEM_FIELDS = set(PawBarCatalogItem.model_fields)
 
 
 def _row_params(
-    widget_id: str, item: PawBarCatalogItem, position: int, source: str, now: str
+    widget_id: str,
+    item: PawBarCatalogItem,
+    position: int,
+    source: str,
+    now: str,
+    origin: str = ORIGIN_OWNER,
 ) -> tuple[Any, ...]:
     return (
         widget_id,
@@ -276,6 +307,7 @@ def _row_params(
         None if item.in_stock is None else int(item.in_stock),
         source,
         now,
+        origin,
     )
 
 
@@ -382,6 +414,139 @@ async def add_missing_rows(
         position += 1
     await db.executemany(_INSERT_MISSING_SQL, params)
     return len(params)
+
+
+@dataclass
+class CatalogSyncCounts:
+    """What one site sync did to a widget's rows."""
+
+    added: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    sold_out: int = 0  # site rows the complete import no longer lists, marked in_stock=False
+    owner_kept: int = 0  # ids the owner has taken over (edited or created): left alone
+    deleted_skipped: int = 0  # ids the owner deleted (tombstoned): not re-added
+    capped: int = 0  # new products past the cap: not added
+
+
+def clean_site_items(items: Iterable[Any]) -> list[tuple[PawBarCatalogItem, str]]:
+    """The importer's products cleaned like any write, in its order. An item the
+    model rejects or a repeated id is skipped, never raised: one odd product on
+    the site must not stop the rest from syncing."""
+    cleaned: list[tuple[PawBarCatalogItem, str]] = []
+    seen: set[str] = set()
+    for raw in items:
+        data = raw.model_dump() if hasattr(raw, "model_dump") else raw
+        try:
+            item = PawBarCatalogItem.model_validate(
+                {k: v for k, v in dict(data).items() if k in _ITEM_FIELDS}
+            )
+        except (ValidationError, TypeError, ValueError):
+            continue
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        cleaned.append((item, source_for(item.id)))
+    return cleaned
+
+
+def _site_values(item: PawBarCatalogItem) -> tuple[Any, ...]:
+    """The fields a site sync owns, as the row holds them (page_key aside)."""
+    in_stock = None if item.in_stock is None else int(item.in_stock)
+    return (
+        item.name,
+        item.price_cents,
+        item.currency,
+        item.image_url,
+        item.url,
+        item.description,
+        in_stock,
+    )
+
+
+async def sync_site_rows(
+    db: aiosqlite.Connection,
+    widget_id: str,
+    cleaned: Sequence[tuple[PawBarCatalogItem, str]],
+    now: str,
+    *,
+    complete: bool,
+    cap: int,
+) -> CatalogSyncCounts:
+    """Apply a site import to a widget's rows on the caller's transaction.
+
+    New id: appended as a "site" row until the widget reaches ``cap`` (the rest
+    counted ``capped``, the importer's order kept). A "site" row: updated when
+    the site changed it. An "owner" row or a tombstoned id: left alone. With
+    ``complete``, a "site" row the import no longer lists is marked sold out.
+    Never deletes."""
+    counts = CatalogSyncCounts()
+    async with db.execute(
+        "SELECT item_id, origin, name, price_cents, currency, image_url, url, description,"
+        " in_stock FROM paw_bar_catalog_items WHERE widget_id = ?",
+        (widget_id,),
+    ) as cur:
+        existing = {r[0]: (r[1], tuple(r[2:])) for r in await cur.fetchall()}
+    async with db.execute(
+        "SELECT item_id FROM paw_bar_catalog_tombstones WHERE widget_id = ?", (widget_id,)
+    ) as cur:
+        tombstones = {r[0] for r in await cur.fetchall()}
+    async with db.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM paw_bar_catalog_items WHERE widget_id = ?",
+        (widget_id,),
+    ) as cur:
+        row = await cur.fetchone()
+        position = int(row[0]) if row else 0
+    room = cap - len(existing)
+    inserts: list[tuple[Any, ...]] = []
+    updates: list[tuple[Any, ...]] = []
+    for item, source in cleaned:
+        if item.id in tombstones:
+            counts.deleted_skipped += 1
+            continue
+        current = existing.get(item.id)
+        if current is None:
+            if room <= 0:
+                counts.capped += 1
+                continue
+            inserts.append(_row_params(widget_id, item, position, source, now, ORIGIN_SITE))
+            position, room = position + 1, room - 1
+            counts.added += 1
+        elif current[0] != ORIGIN_SITE:
+            counts.owner_kept += 1
+        elif current[1] == _site_values(item):
+            counts.unchanged += 1
+        else:
+            name, price, currency, image, url, description, in_stock = _site_values(item)
+            page = url_page_key(url) or ""
+            updates.append(
+                (name, price, currency, image, url, page, description, in_stock, source, now)
+                + (widget_id, item.id)
+            )
+            counts.updated += 1
+    await db.executemany(_INSERT_MISSING_SQL, inserts)
+    await db.executemany(_SITE_UPDATE_SQL, updates)
+    if complete:
+        listed = {item.id for item, _ in cleaned}
+        gone = [
+            item_id
+            for item_id, (origin, values) in existing.items()
+            if origin == ORIGIN_SITE and item_id not in listed and values[-1] != 0
+        ]
+        await db.executemany(
+            "UPDATE paw_bar_catalog_items SET in_stock = 0, updated_at = ?"
+            " WHERE widget_id = ? AND item_id = ? AND origin = 'site'",
+            [(now, widget_id, item_id) for item_id in gone],
+        )
+        counts.sold_out = len(gone)
+    if counts.capped:
+        logger.info(
+            "paw_bar: site sync for widget %s stopped at the catalog cap (%d); %d left out",
+            widget_id,
+            cap,
+            counts.capped,
+        )
+    return counts
 
 
 class CatalogStoreMixin:
@@ -584,13 +749,22 @@ class CatalogStoreMixin:
     async def delete_catalog_items(
         self, widget_id: str, ids: Iterable[str], *, workspace_id: str | None = None
     ) -> tuple[int, int] | None:
-        """Remove items by id. Returns ``(deleted, total)``; None out of scope."""
+        """Remove items by id. Returns ``(deleted, total)``; None out of scope.
+
+        Each id actually deleted is tombstoned, so the site sync never adds it
+        back."""
         wanted = list(dict.fromkeys(str(i) for i in ids))[:MAX_LOOKUP_IDS]
 
-        async def write(db: aiosqlite.Connection, _now: str) -> tuple[int, int]:
+        async def write(db: aiosqlite.Connection, now: str) -> tuple[int, int]:
             deleted = 0
             if wanted:
                 marks = ",".join("?" * len(wanted))
+                await db.execute(
+                    "INSERT OR REPLACE INTO paw_bar_catalog_tombstones"  # noqa: S608
+                    " (widget_id, item_id, deleted_at) SELECT widget_id, item_id, ?"
+                    f" FROM paw_bar_catalog_items WHERE widget_id = ? AND item_id IN ({marks})",
+                    [now, widget_id, *wanted],
+                )
                 cur = await db.execute(
                     "DELETE FROM paw_bar_catalog_items"  # noqa: S608
                     f" WHERE widget_id = ? AND item_id IN ({marks})",
@@ -624,6 +798,26 @@ class CatalogStoreMixin:
                 [(i, widget_id, item_id) for i, item_id in enumerate(order) if was[item_id] != i],
             )
             return len(order)
+
+        return await self._catalog_write(widget_id, workspace_id, write)
+
+    async def sync_site_catalog(
+        self,
+        widget_id: str,
+        items: Iterable[Any],
+        *,
+        complete: bool,
+        workspace_id: str | None = None,
+        max_items: int | None = None,
+    ) -> CatalogSyncCounts | None:
+        """Bring the widget's site-synced rows in step with ``items`` (the site
+        importer's products, in its order) in one transaction; the rules are
+        ``sync_site_rows``'s. None when the widget is not in scope."""
+        cleaned = clean_site_items(items)
+        cap = max_items if max_items is not None else catalog_max_items()
+
+        async def write(db: aiosqlite.Connection, now: str) -> CatalogSyncCounts:
+            return await sync_site_rows(db, widget_id, cleaned, now, complete=complete, cap=cap)
 
         return await self._catalog_write(widget_id, workspace_id, write)
 
@@ -738,16 +932,21 @@ __all__ = [
     "CATALOG_SOURCES",
     "DEFAULT_CATALOG_MAX_ITEMS",
     "MAX_LOOKUP_IDS",
+    "ORIGIN_OWNER",
+    "ORIGIN_SITE",
     "CatalogFull",
     "CatalogStoreMixin",
+    "CatalogSyncCounts",
     "catalog_max_items",
     "add_missing_rows",
     "clean_items",
     "clean_legacy_catalog",
+    "clean_site_items",
     "ensure_catalog_search",
     "fts5_available",
     "migrate_catalog_out_of_specs",
     "replace_rows",
     "source_for",
+    "sync_site_rows",
     "upsert_rows",
 ]

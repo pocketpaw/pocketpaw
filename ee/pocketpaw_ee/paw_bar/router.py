@@ -662,6 +662,7 @@ from pocketpaw.paw_bar.models import (
     ConversationState,
     DecisionState,
     OwnerMessageRole,
+    PawBarCatalogItem,
     PawBarEvent,
     PawBarEventMapping,
     PawBarSpec,
@@ -676,6 +677,9 @@ from pocketpaw_ee.paw_bar.admit import admit as admit_event
 from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
 logger = logging.getLogger(__name__)
+# What the frozen public spec carries per catalog item: the item's own fields,
+# never a row's bookkeeping (position, source, origin, updated_at).
+_PUBLIC_CATALOG_FIELDS = set(PawBarCatalogItem.model_fields)
 
 # Role gate for the D2 concierge dashboard reads. ``require_action`` enforces the
 # caller's WORKSPACE ROLE against the ``paw_bar.read`` rule (ADMIN — owner/admin
@@ -5290,9 +5294,8 @@ async def get_spec(
         headers["Access-Control-Allow-Origin"] = origin
     items, _ = await _store().list_catalog(widget.id, limit=_PUBLIC_SPEC_CATALOG)
     body = widget.spec.model_dump()
-    body["catalog"] = [
-        item.model_dump(exclude={"position", "source", "updated_at"}) for item in items
-    ]
+    # The frozen public shape: the item's own fields, none of the row's bookkeeping.
+    body["catalog"] = [item.model_dump(include=_PUBLIC_CATALOG_FIELDS) for item in items]
     return JSONResponse(body, headers=headers)
 
 

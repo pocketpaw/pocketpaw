@@ -27,7 +27,7 @@
 #     leaves the table alone. update_spec also moves a stored spec's catalog the
 #     migration has not reached yet (rows already there win), so a save cannot
 #     drop it. A rollback never restores a revision's catalog.
-#     delete_widget removes its rows.
+#     delete_widget removes its rows and its catalog tombstones.
 #   * Tenancy is in-row: the *_workspace_scope helpers match the caller's
 #     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
 #     column holds the widget OWNER, so widget-keyed decision reads filter on
@@ -620,6 +620,15 @@ class PawBarStore(CatalogStoreMixin):
         # counting exactly where it did.
         if "paw_bar_events" in existing and "bucket" not in await _columns("paw_bar_events"):
             await db.execute("ALTER TABLE paw_bar_events ADD COLUMN bucket TEXT DEFAULT ''")
+        # paw_bar_catalog_items: origin — who owns a row ('site' while the site
+        # sync keeps it, 'owner' otherwise). Every row written before it existed
+        # is the owner's, so the sync never overwrites one.
+        if "paw_bar_catalog_items" in existing and "origin" not in await _columns(
+            "paw_bar_catalog_items"
+        ):
+            await db.execute(
+                "ALTER TABLE paw_bar_catalog_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'owner'"
+            )
         # paw_bar_widgets: workspace_id (W4a) + agent_id (T3). Column names are
         # literals (never user input), so the f-string ALTER is injection-safe.
         if "paw_bar_widgets" in existing:
@@ -1062,9 +1071,11 @@ class PawBarStore(CatalogStoreMixin):
             cur = await db.execute(sql, params)
             deleted = (cur.rowcount or 0) > 0
             if deleted:
-                await db.execute(
-                    "DELETE FROM paw_bar_catalog_items WHERE widget_id = ?", (widget_id,)
-                )
+                for table in ("paw_bar_catalog_items", "paw_bar_catalog_tombstones"):
+                    await db.execute(
+                        f"DELETE FROM {table} WHERE widget_id = ?",  # noqa: S608 — literal
+                        (widget_id,),
+                    )
             await db.commit()
             return deleted
 

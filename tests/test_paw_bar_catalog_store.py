@@ -13,6 +13,9 @@
 #     catalog.
 #   * The ``catalog_to_table_v1`` migration on a DB an older build left behind,
 #     opened twice, after the money migration.
+#   * The site sync (``sync_site_catalog``): site rows inserted, refreshed and
+#     marked sold out (complete imports only), owner rows and tombstoned ids left
+#     alone, the cap, and a pre-``origin`` DB reading every row as the owner's.
 
 from __future__ import annotations
 
@@ -160,10 +163,13 @@ async def test_another_workspace_reads_nothing_and_writes_nothing(store):
 async def test_deleting_a_widget_deletes_its_rows(store, tmp_path):
     w = await _widget(store, [_item(1), _item(2)])
     keep = await _widget(store, [_item(3)])
+    await store.delete_catalog_items(w.id, ["p2"])  # leaves a tombstone
     assert await store.delete_widget(w.id, workspace_id=_WS)
     with sqlite3.connect(tmp_path / "paw_bar.db") as db:
         rows = db.execute("SELECT widget_id, item_id FROM paw_bar_catalog_items").fetchall()
+        tombstones = db.execute("SELECT COUNT(*) FROM paw_bar_catalog_tombstones").fetchall()
     assert rows == [(keep.id, "p3")]
+    assert tombstones == [(0,)]
 
 
 # --------------------------------------------------------------------------- #
@@ -431,7 +437,9 @@ async def test_a_widget_that_fails_to_move_is_retried_on_the_next_start(tmp_path
 
 def test_catalog_rows_are_catalog_items():
     # Card hydration, the cart and the ledger read rows where they read items.
-    row = catalog_store._row_to_item(("a", "A", 5, "USD", "", "", "", None, 0, "manual", ""))
+    row = catalog_store._row_to_item(
+        ("a", "A", 5, "USD", "", "", "", None, 0, "manual", "", "owner")
+    )
     assert isinstance(row, PawBarCatalogItem)
 
 
@@ -496,3 +504,158 @@ async def test_a_spec_save_moves_an_unmigrated_catalog_instead_of_dropping_it(st
     items, _ = await store.list_catalog(w.id)
     assert [(i.id, i.name) for i in items] == [("p1", "Live"), ("p2", "Product 2")]
     assert (await store.get_widget(w.id)).spec.catalog == []
+
+
+# --------------------------------------------------------------------------- #
+# Site sync: products read off the site kept in step with it (``sync_site_catalog``)
+# --------------------------------------------------------------------------- #
+
+
+def _web(i: int | str, **ov) -> dict:
+    """A product as the site importer hands it over (``ImportedProduct`` shape)."""
+    return {
+        "id": f"web:{i}",
+        "name": f"Site product {i}",
+        "price_cents": 500,
+        "currency": "EUR",
+        "url": f"/products/{i}",
+        **ov,
+    }
+
+
+async def _rows(store: PawBarStore, widget_id: str) -> dict:
+    items, _ = await store.list_catalog(widget_id, limit=200)
+    return {i.id: i for i in items}
+
+
+async def test_a_site_sync_fills_an_empty_catalog_marked_as_from_the_site(store):
+    w = await _widget(store)
+
+    counts = await store.sync_site_catalog(w.id, [_web(1), _web(2)], complete=True)
+
+    assert (counts.added, counts.updated, counts.sold_out) == (2, 0, 0)
+    rows = await _rows(store, w.id)
+    assert list(rows) == ["web:1", "web:2"]
+    assert {r.origin for r in rows.values()} == {"site"}
+    assert rows["web:1"].currency == "EUR"
+    assert rows["web:1"].source == "jsonld"
+
+
+async def test_a_resync_updates_a_site_item_the_owner_never_touched(store):
+    w = await _widget(store)
+    await store.sync_site_catalog(w.id, [_web(1), _web(2)], complete=True)
+    await store.reorder_catalog(w.id, ["web:2"])  # reordering is not an edit
+
+    counts = await store.sync_site_catalog(
+        w.id, [_web(1, price_cents=750, in_stock=False), _web(2)], complete=True
+    )
+
+    assert (counts.added, counts.updated) == (0, 1)
+    rows = await _rows(store, w.id)
+    assert (rows["web:1"].price_cents, rows["web:1"].in_stock) == (750, False)
+    assert rows["web:1"].origin == "site"
+    assert list(rows) == ["web:2", "web:1"]
+
+
+async def test_an_owner_edit_makes_a_site_item_the_owners_for_good(store):
+    w = await _widget(store)
+    await store.sync_site_catalog(w.id, [_web(1)], complete=True)
+    await store.upsert_catalog_items(w.id, [_web(1, name="Owner's name", price_cents=999)])
+
+    counts = await store.sync_site_catalog(w.id, [_web(1, price_cents=750)], complete=True)
+
+    row = (await _rows(store, w.id))["web:1"]
+    assert (row.name, row.price_cents, row.origin) == ("Owner's name", 999, "owner")
+    assert (counts.updated, counts.owner_kept) == (0, 1)
+
+
+async def test_an_owner_created_item_is_never_touched_by_a_sync(store):
+    w = await _widget(store)
+    await store.upsert_catalog_items(w.id, [_item(1), _web(9, name="Owner typed this")])
+
+    await store.sync_site_catalog(w.id, [_web(9, name="Site name")], complete=True)
+    await store.sync_site_catalog(w.id, [_web(2)], complete=True)
+
+    rows = await _rows(store, w.id)
+    assert rows["p1"].origin == "owner" and rows["p1"].in_stock is None
+    assert (rows["web:9"].name, rows["web:9"].in_stock) == ("Owner typed this", None)
+
+
+async def test_a_product_gone_from_a_complete_import_is_sold_out_never_deleted(store):
+    w = await _widget(store)
+    await store.sync_site_catalog(w.id, [_web(1, in_stock=True), _web(2)], complete=True)
+
+    counts = await store.sync_site_catalog(w.id, [_web(2)], complete=True)
+
+    rows = await _rows(store, w.id)
+    assert list(rows) == ["web:1", "web:2"]
+    assert rows["web:1"].in_stock is False
+    assert counts.sold_out == 1
+
+
+async def test_a_partial_import_marks_nothing_sold_out(store):
+    w = await _widget(store)
+    await store.sync_site_catalog(w.id, [_web(1, in_stock=True), _web(2)], complete=True)
+
+    counts = await store.sync_site_catalog(w.id, [_web(2)], complete=False)
+
+    assert (await _rows(store, w.id))["web:1"].in_stock is True
+    assert counts.sold_out == 0
+
+
+async def test_a_deleted_site_item_does_not_come_back(store):
+    w = await _widget(store)
+    await store.sync_site_catalog(w.id, [_web(1), _web(2)], complete=True)
+    await store.delete_catalog_items(w.id, ["web:1"])
+
+    counts = await store.sync_site_catalog(w.id, [_web(1), _web(2), _web(3)], complete=True)
+
+    assert list(await _rows(store, w.id)) == ["web:2", "web:3"]
+    assert counts.deleted_skipped == 1
+
+
+async def test_a_site_sync_stops_at_the_cap_in_the_importers_order(store, caplog):
+    w = await _widget(store)
+    await store.upsert_catalog_items(w.id, [_item(1)])
+    caplog.set_level("INFO", logger="pocketpaw.paw_bar.catalog_store")
+
+    counts = await store.sync_site_catalog(
+        w.id, [_web(1), _web(2), _web(3)], complete=True, max_items=3
+    )
+
+    assert list(await _rows(store, w.id)) == ["p1", "web:1", "web:2"]
+    assert (counts.added, counts.capped) == (2, 1)
+    assert "cap" in caplog.text
+
+
+async def test_a_site_sync_out_of_scope_writes_nothing(store):
+    w = await _widget(store)
+    assert (
+        await store.sync_site_catalog(w.id, [_web(1)], complete=True, workspace_id="ws-x") is None
+    )
+    assert await _rows(store, w.id) == {}
+
+
+async def test_a_db_from_before_the_origin_column_reads_every_row_as_the_owners(tmp_path):
+    path = tmp_path / "paw_bar.db"
+    old = sqlite3.connect(path)
+    old.executescript(SCHEMA_SQL)
+    old.executescript(
+        catalog_store.CATALOG_SCHEMA_SQL.replace("    origin TEXT NOT NULL DEFAULT 'owner',\n", "")
+    )
+    old.execute(
+        "INSERT INTO paw_bar_widgets (id, pocket_id, owner, spec, access_token, workspace_id)"
+        " VALUES ('w1', 'p', 'o', '{\"widget_id\": \"w1\", \"pocket_id\": \"p\"}', 't', 'ws-1')"
+    )
+    old.execute(
+        "INSERT INTO paw_bar_catalog_items (widget_id, item_id, position, name, updated_at)"
+        " VALUES ('w1', 'web:1', 0, 'Old', 'x')"
+    )
+    old.commit()
+    old.close()
+    store = PawBarStore(path)
+
+    await store.sync_site_catalog("w1", [_web(1, name="Site")], complete=True)
+
+    row = (await _rows(store, "w1"))["web:1"]
+    assert (row.name, row.origin) == ("Old", "owner")
