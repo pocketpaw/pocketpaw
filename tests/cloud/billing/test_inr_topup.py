@@ -12,6 +12,10 @@
 # stub ``get_settings`` so the FX rate never comes from a developer's config.json.
 #
 # Created 2026-10-02 (feat/partners-inr-topup, PH-4): new test module.
+# Updated 2026-10-02 (PH-4 review fix): regression for the redelivery-at-a-new-
+#   rate cap inflation, the crash-heal emit reporting only what moved, the
+#   settlement sanity band, the audit fields on the Payment row, and the Rs.100
+#   DTO floor.
 
 from __future__ import annotations
 
@@ -43,10 +47,13 @@ RS_1L = 10_000_000
 
 
 @pytest.fixture(autouse=True)
-def _fx_89(monkeypatch):
+def fx(monkeypatch) -> SimpleNamespace:
+    """Stub settings at Rs.89/USD; a test may change ``fx.fx_inr_per_usd`` mid-way."""
     import pocketpaw.config as config_mod
 
-    monkeypatch.setattr(config_mod, "get_settings", lambda: SimpleNamespace(fx_inr_per_usd=89.0))
+    settings = SimpleNamespace(fx_inr_per_usd=89.0)
+    monkeypatch.setattr(config_mod, "get_settings", lambda: settings)
+    return settings
 
 
 def _provider(**kw) -> DodoProvider:
@@ -168,6 +175,64 @@ async def test_usd_topup_is_unchanged_and_earns_no_bonus(mongo_db):
 
     assert await _lines("top_up") == [5_000_000]
     assert await _lines("bulk_bonus") == []
+
+
+async def test_redelivery_at_a_new_fx_rate_cannot_inflate_the_reversal_cap(mongo_db, fx):
+    body = _payment_body(paise=RS_25K)
+    await _deliver(body, "evt_inr_rate")
+    fx.fx_inr_per_usd = 44.5  # the rate halves before Dodo redelivers
+    await _deliver(body, "evt_inr_rate")
+
+    assert await _lines("top_up") == [28_089]
+    assert await _lines("bulk_bonus") == [2_808]
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_rate")
+    assert row.credits_granted == 30_897
+    assert row.fx_inr_per_usd == 89.0  # the rate the credits moved at, not the new one
+
+    result = await _deliver(_refund(RS_25K, is_partial=False), "evt_inr_rate_refund")
+    assert result["reversed"] == 30_897
+    assert await credits.balance(WS) == 0
+
+
+async def test_crash_heal_redelivery_reports_only_the_bonus_it_moved(mongo_db, recording_bus):
+    # A prior delivery landed the base grant and died before the bonus.
+    await credits.grant(
+        workspace=WS,
+        amount=28_089,
+        cause="top_up",
+        idempotency_key="evt_inr_heal",
+        ref={"gateway": "dodo", "event_id": "evt_inr_heal", "fx_inr_per_usd": 89.0},
+    )
+
+    result = await _deliver(_payment_body(paise=RS_25K), "evt_inr_heal")
+
+    assert result["granted"] is True
+    assert await credits.balance(WS) == 30_897
+    captured = [e for e in recording_bus.events if e.type == "billing.topup.captured"]
+    assert [e.data["amount_credits"] for e in captured] == [2_808]
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_heal")
+    assert row.credits_granted == 30_897
+
+
+async def test_settlement_outside_the_sanity_band_falls_back_to_fx(mongo_db, caplog):
+    caplog.set_level(logging.INFO, logger="pocketpaw_ee.cloud.billing.service")
+    # Paise mislabelled as USD cents: ~89x the FX estimate.
+    body = _payment_body(paise=RS_25K, settlement=(RS_25K, "USD"))
+    await _deliver(body, "evt_inr_insane")
+
+    assert await _lines("top_up") == [28_089]
+    assert "sanity band" in caplog.text and "evt_inr_insane" in caplog.text
+    assert "2500000" not in caplog.text
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_insane")
+    assert (row.settlement_amount, row.settlement_currency) == (RS_25K, "USD")
+
+
+async def test_inr_logs_carry_no_rupee_or_fx_figures(mongo_db, caplog):
+    caplog.set_level(logging.INFO, logger="pocketpaw_ee.cloud.billing.service")
+    await _deliver(_payment_body(paise=RS_25K, settlement=(28_000, "USD")), "evt_inr_log")
+
+    assert "evt_inr_log" in caplog.text
+    assert "2500000" not in caplog.text and "fx_estimate" not in caplog.text
 
 
 async def test_eur_grants_nothing_and_logs_without_the_amount(mongo_db, caplog):
@@ -331,3 +396,11 @@ def test_topup_dto_ceiling_is_per_currency():
         CreateTopupRequest(amount_credits=1_000_001)
     with pytest.raises(ValueError):
         CreateTopupRequest(amount_credits=100, currency="EUR")
+
+
+def test_inr_topup_dto_has_a_rs_100_floor():
+    assert CreateTopupRequest(amount_credits=10_000, currency="INR")
+    with pytest.raises(ValueError):
+        CreateTopupRequest(amount_credits=9_999, currency="INR")
+    # The floor is INR-only; a small USD top-up is still fine.
+    assert CreateTopupRequest(amount_credits=100)
