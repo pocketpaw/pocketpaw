@@ -257,16 +257,19 @@ def _normalize(url: str) -> str:
 
 
 async def load_robots(
-    fetcher: SafeFetcher, seed: Any
+    fetcher: SafeFetcher, seed: Any, *, allowed_host: str | None = None
 ) -> tuple[robotparser.RobotFileParser | None, str | None]:
     """Fetch + parse robots.txt. Missing/failed → (None, warning-or-None): we
     proceed politely, noting the failure on the report when the FETCH errored.
 
     Public with ``allowed_by_robots`` because the concierge catalog import
-    (``paw_bar.catalog_import``) honours robots by the same rule as this crawl."""
+    (``paw_bar.catalog_import``) honours robots by the same rule as this crawl.
+    ``allowed_host`` pins the robots fetch's redirects to one host (the import
+    passes its verified host); a redirect off it is a failed fetch, so allow-all
+    with the warning. The crawl passes None, as it always has."""
     robots_url = urlunparse((seed.scheme, seed.netloc, "/robots.txt", "", "", ""))
     try:
-        result = await fetcher.fetch(robots_url)
+        result = await fetcher.fetch(robots_url, allowed_host=allowed_host)
     except CrawlBudgetExceeded:
         raise
     except (CrawlError, ValidationError, httpx.HTTPError):

@@ -298,6 +298,24 @@ def test_jsonld_reads_graph_list_roots_aggregate_offers_and_image_objects():
     assert parsed.currency == "GBP"
 
 
+def test_url_less_products_on_one_listing_page_get_distinct_ids():
+    graph = json.dumps(
+        {
+            "@graph": [
+                {"@type": "Product", "name": "Mug", "offers": {"price": "12"}},
+                {"@type": "Product", "name": "Kettle", "offers": {"price": "30"}},
+            ]
+        }
+    )
+    listing = f"https://{_HOST}/collections/all"
+    mug, kettle = ci.parse_jsonld_products(_ld(graph), listing, _HOST).items
+    assert mug.url == kettle.url == "/collections/all"
+    assert mug.id != kettle.id
+    # Stable on a re-import: the same page and name give the same id.
+    again = ci.parse_jsonld_products(_ld(graph), listing, _HOST).items
+    assert [i.id for i in again] == [mug.id, kettle.id]
+
+
 def test_a_jsonld_id_is_stable_across_imports_and_falls_back_to_the_page_url():
     page = _ld(json.dumps({"@type": "Product", "name": "Kettle", "offers": {"price": "1"}}))
     first = ci.parse_jsonld_products(page, _PAGE, _HOST).items[0]
@@ -503,6 +521,29 @@ async def test_a_seed_blocked_by_robots_fails_with_its_own_reason(beanie_test_db
     )
     assert (preview.status, preview.reason) == ("failed", "blocked_by_robots")
     assert _paths(seen) == ["/robots.txt"]
+
+
+async def test_a_robots_redirect_off_the_host_is_not_followed_and_reads_as_unreadable(
+    beanie_test_db,
+):
+    """Locked to the verified host: the off-host robots file (which would block
+    everything) is never asked for. Unreadable robots is allow-all with a warning,
+    the crawl's own policy."""
+    await _claim()
+    seen: list[httpx.Request] = []
+    preview = await _preview(
+        {
+            "/robots.txt": httpx.Response(
+                301, headers={"location": "https://evil.example/robots.txt"}
+            ),
+            "/": _html(_SHOPIFY_HOME),
+            "/products.json": _json({"products": [_shopify_product(1)]}),
+        },
+        seen,
+    )
+    assert all(r.headers["host"] == _HOST for r in seen)
+    assert "robots_unreadable" in preview.warnings
+    assert (preview.status, preview.source) == ("ok", "shopify")
 
 
 async def test_an_unverified_origin_is_never_fetched(beanie_test_db):

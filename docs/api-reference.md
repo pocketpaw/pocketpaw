@@ -4306,16 +4306,18 @@ the split is the security model:
 
 `spec.catalog` holds at most 200 products with unique ids. Product cards and the
 concierge's product list are filled from it, never from what the model writes.
+Only a blank `id` or a negative `price_cents` is a 422; the other fields are cleaned
+rather than rejected, so a spec saved before these rules still loads.
 
 | Field | Type | Rules |
 |---|---|---|
 | `id` | string | Required, unique within the catalog. Imported items use `shopify:<id>`, `woo:<id>` or `web:<hash of the page path>`; ids the editor mints start `item-`. |
-| `name` | string | At most 200 characters. |
+| `name` | string | Trimmed and cut to 200 characters. |
 | `price_cents` | int | Non-negative, in hundredths of the currency for every currency (zero-decimal currencies such as JPY included). |
-| `currency` | string | Upper-cased, at most 3 characters. |
-| `image_url` | string | Empty or an `http(s)://` URL, at most 2048 characters. |
-| `url` | string | The product's page: empty, an `http(s)://` URL, or a site path starting with a single `/`. At most 2048 characters. A product card links to it. |
-| `description` | string | At most 300 characters. Shown on the product card. |
+| `currency` | string | Trimmed and upper-cased. Anything that isn't then 3 letters (including `""`) is stored as `USD`. |
+| `image_url` | string | An `http(s)://` URL of at most 2048 characters; anything else is stored as `""`. |
+| `url` | string | The product's page: an `http(s)://` URL or a site path starting with a single `/`, at most 2048 characters; anything else is stored as `""`. A product card links to it. |
+| `description` | string | Trimmed and cut to 300 characters. Shown on the product card. |
 | `in_stock` | bool or `null` | `null` when unknown. `false` marks the product sold out in the list the concierge reads, so it stops recommending it. |
 
 The concierge's prompt carries the first 50 items.
@@ -4352,7 +4354,11 @@ order, and capped at 200; `total_found` is the count before the cap.
 
 Each item has the catalog fields above. `image_url` is always `https://` or empty, and
 `url` is a site path on the verified host or empty. Re-importing returns the same ids
-for the same products, so the client can update the items it imported before.
+for the same products, so the client can update the items it imported before. A `web:` id hashes the
+product's page path together with its name, so products without their own URL on one
+listing page stay distinct. robots.txt is fetched on the verified host only: if it
+redirects elsewhere it counts as unreadable (`robots_unreadable`, everything allowed),
+the knowledge crawl's policy for a robots file it can't read.
 
 #### Guided concierge fields (v2)
 

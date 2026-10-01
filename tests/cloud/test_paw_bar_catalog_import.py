@@ -5,12 +5,14 @@
 #     tenancy (404 for another workspace's site) and a hosted site answered
 #     ``not_connected_site`` without a fetch. The reading itself is covered in
 #     tests/ee/sites/test_catalog_import.py against a mocked origin.
-#   * ``PawBarCatalogItem``'s new fields (description, in_stock) and validators.
+#   * ``PawBarCatalogItem``'s new fields (description, in_stock) and its cleaning
+#     validators: legacy bad values load cleaned, only id and price reject.
 #   * The pass-through: a product card carries the item's url and description,
 #     and a sold-out item is marked in the catalog the concierge prompt sees.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -140,27 +142,59 @@ def test_catalog_urls_that_are_accepted(url):
 
 
 @pytest.mark.parametrize(
-    "fields",
+    ("fields", "field", "cleaned"),
     [
-        {"name": "x" * 201},
-        {"description": "x" * 301},
-        {"image_url": "javascript:alert(1)"},
-        {"image_url": "/relative.jpg"},
-        {"image_url": "https://a/" + "x" * 2048},
-        {"url": "//evil.example/mug"},
-        {"url": "javascript:alert(1)"},
-        {"url": "products/mug"},
-        {"url": "/" + "x" * 2048},
-        {"currency": "USDT"},
+        ({"name": "  " + "x" * 900}, "name", "x" * 200),
+        ({"description": "x" * 301}, "description", "x" * 300),
+        ({"image_url": "javascript:alert(1)"}, "image_url", ""),
+        ({"image_url": "data:image/png;base64,AAAA"}, "image_url", ""),
+        ({"image_url": "/relative.jpg"}, "image_url", ""),
+        ({"image_url": "https://a/" + "x" * 2048}, "image_url", ""),
+        ({"url": "//evil.example/mug"}, "url", ""),
+        ({"url": "javascript:alert(1)"}, "url", ""),
+        ({"url": "products/mug"}, "url", ""),
+        ({"url": "/" + "x" * 2048}, "url", ""),
+        ({"currency": "USDT"}, "currency", "USD"),
+        ({"currency": ""}, "currency", "USD"),
     ],
 )
-def test_catalog_items_that_are_refused(fields):
+def test_legacy_bad_values_load_cleaned_instead_of_raising(fields, field, cleaned):
+    item = PawBarCatalogItem(id="m", name=fields.pop("name", "M"), **fields)
+    assert getattr(item, field) == cleaned
+
+
+@pytest.mark.parametrize("fields", [{"id": "  "}, {"price_cents": -1}])
+def test_the_id_and_price_rules_still_reject(fields):
     with pytest.raises(ValidationError):
-        PawBarCatalogItem(id="m", name=fields.pop("name", "M"), **fields)
+        PawBarCatalogItem(**{"id": "m", "name": "M", **fields})
 
 
 def test_catalog_currency_is_upper_cased():
     assert PawBarCatalogItem(id="m", name="M", currency=" eur ").currency == "EUR"
+
+
+def test_a_stored_spec_with_legacy_values_still_loads_cleaned():
+    """Specs are re-validated from SQLite on every load: one written before the
+    catalog rules existed must load, cleaned, not brick the widget."""
+    raw = json.dumps(
+        {
+            "widget_id": "w",
+            "pocket_id": "p",
+            "catalog": [
+                {
+                    "id": "mug",
+                    "name": "N" * 900,
+                    "image_url": "data:image/png;base64,AAAA",
+                    "currency": "usd ",
+                    "price_cents": 1200,
+                }
+            ],
+        }
+    )
+    [item] = PawBarSpec.model_validate_json(raw).catalog
+    assert len(item.name) == 200
+    assert item.image_url == ""
+    assert item.currency == "USD"
 
 
 # --------------------------------------------------------------------------- #

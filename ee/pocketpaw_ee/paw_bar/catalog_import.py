@@ -21,7 +21,9 @@
 #     (``crawlable_origin``); every fetch is pinned to that host, redirects too;
 #   * every request goes through ``safe_fetch.SafeFetcher`` (SSRF pinning, size
 #     caps); no httpx call lives here;
-#   * robots.txt is checked for EVERY url, under the concierge crawler's UA;
+#   * robots.txt is checked for EVERY url, under the concierge crawler's UA; a
+#     robots.txt that cannot be read (including one redirecting off the host) is
+#     allow-all with a ``robots_unreadable`` warning, the crawl's own policy;
 #   * one wall clock (``IMPORT_WALL_CLOCK_SEC``), ``IMPORT_MAX_PAGES`` product
 #     pages, ``IMPORT_BYTE_CAP`` bytes for the whole run.
 # Never raises: every failure is ``status="failed"`` with a ``reason``.
@@ -235,8 +237,10 @@ def _site_path(value: Any, base: str, host: str) -> str:
     return path if len(path) <= _URL_CHARS else ""
 
 
-def _web_id(path: str) -> str:
-    key = path.rstrip("/").lower() or "/"
+def _web_id(path: str, name: Any) -> str:
+    """Stable id for a product read off a page: its url-or-page path AND its name,
+    so url-less products on one listing page stay distinct across re-imports."""
+    key = (path.rstrip("/").lower() or "/") + "\n" + _clean_text(name, _NAME_CHARS).lower()
     return "web:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]  # noqa: S324 — an id, not a secret
 
 
@@ -254,7 +258,7 @@ def _normalise(raws: Iterable[_Raw], *, base: str = "", host: str = "") -> Parse
         url = _site_path(raw.url, base, host) if host else ""
         if not url and isinstance(raw.url, str) and raw.url.startswith("/"):
             url = "/" + raw.url.lstrip("/")
-        product_id = raw.id or _web_id(url or urlsplit(base).path or "/")
+        product_id = raw.id or _web_id(url or urlsplit(base).path or "/", name)
         out.items.append(
             ImportedProduct(
                 id=product_id,
@@ -503,7 +507,7 @@ def _jsonld_products(blocks: Iterable[str], page_url: str, host: str) -> ParsedP
             path = _site_path(_first_str(node.get("url")) or page_url, page_url, host)
             raws.append(
                 _Raw(
-                    id=_web_id(path or urlsplit(page_url).path or "/"),
+                    id=_web_id(path or urlsplit(page_url).path or "/", node.get("name")),
                     name=node.get("name"),
                     price=price,
                     currency=node_currency,
@@ -532,7 +536,7 @@ def _og_product(meta: Mapping[str, str], page_url: str, host: str) -> ParsedProd
 
     path = _site_path(first("og:url") or page_url, page_url, host)
     raw = _Raw(
-        id=_web_id(path or urlsplit(page_url).path or "/"),
+        id=_web_id(path or urlsplit(page_url).path or "/", first("og:title")),
         name=first("og:title"),
         price=_price(first("product:price:amount", "og:price:amount")),
         currency=first("product:price:currency", "og:price:currency"),
@@ -746,7 +750,9 @@ def _failed(reason: str, host: str = "") -> CatalogImportPreview:
 
 
 async def _preview(run: _Run) -> CatalogImportPreview:
-    run.robots, robots_warning = await load_robots(run.fetcher, urlsplit(run.base))
+    run.robots, robots_warning = await load_robots(
+        run.fetcher, urlsplit(run.base), allowed_host=run.host
+    )
     if robots_warning:
         run.warnings.append("robots_unreadable")
     if not run.allowed(run.base):

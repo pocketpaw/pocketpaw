@@ -297,10 +297,10 @@ def test_only_ui_and_state_survive():
 
 
 def test_a_card_that_hydrates_past_the_char_bound_is_dropped():
-    # Names past the catalog's 200-char cap, built without validation: the card
-    # bound must hold even for a row stored before that cap existed.
-    big = [PawBarCatalogItem.model_construct(id=f"p{i}", name="N" * 900) for i in range(40)]
-    spec = {"ui": _pc(*[f"p{i}" for i in range(40)])}
+    # Names at the catalog's 200-char cap; enough of them that the hydrated card,
+    # not the model's fence, crosses the bound.
+    big = [PawBarCatalogItem(id=f"p{i}", name="N" * 200) for i in range(160)]
+    spec = {"ui": _pc(*[f"p{i}" for i in range(160)])}
     assert len(json.dumps(spec)) < 32_000
     assert _vh(spec, catalog=big) is None
 

@@ -6,9 +6,11 @@
 # (unique snake_case verbs; only the cart verbs may be ``auto``, everything else is
 # ``gated`` to an Instinct proposal), ``catalog`` (``PawBarCatalogItem``) and an
 # http(s) ``checkout_url``. Catalog items are the ONLY source of product data on a
-# card, so they are validated as untrusted input whether typed by the owner or
-# imported from the store's site: length caps on text, http(s) image urls, and a
-# ``url`` that is empty, http(s) or a single-slash site path.
+# card, so they are cleaned as untrusted input whether typed by the owner or
+# imported from the store's site: text truncated to its cap, a non-http(s) image
+# url or a ``url`` that is neither http(s) nor a single-slash site path blanked,
+# a bad currency read as USD. Cleaned, not rejected, because a stored spec is
+# re-validated on every load and must never become unloadable.
 #
 # Also here: the widget row (``PawBarWidget``; ``PawBarWidgetPublic`` is its
 # token-free projection for reads, so the per-widget access token only leaves the
@@ -21,6 +23,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from datetime import datetime
@@ -30,6 +33,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw.fabric.models import _gen_id
+
+logger = logging.getLogger(__name__)
 
 _MAX_BLOCKS_PER_SPEC = 64
 _MAX_ITEMS_PER_LIST = 50
@@ -45,6 +50,9 @@ _MAX_CATALOG_ITEMS = 200
 _MAX_CATALOG_NAME_CHARS = 200
 _MAX_CATALOG_DESCRIPTION_CHARS = 300
 _MAX_CATALOG_URL_CHARS = 2048
+_CURRENCY_RE = re.compile(r"[A-Z]{3}")
+# Currency values already warned about, so a bad stored spec logs once, not per load.
+_WARNED_CURRENCIES: set[str] = set()
 _MAX_CART_ITEMS = 50
 # The arg-type names an action may declare — a FLAT map of {name: type-name}.
 # Nested/object args are rejected so the tool input schema stays simple and the
@@ -204,20 +212,20 @@ class PawBarCatalogItem(BaseModel):
             raise ValueError("catalog item id is required")
         return value.strip()
 
-    @field_validator("name")
-    @classmethod
-    def _cap_name(cls, value: str) -> str:
-        if len(value) > _MAX_CATALOG_NAME_CHARS:
-            raise ValueError(f"catalog item name is at most {_MAX_CATALOG_NAME_CHARS} characters")
-        return value
+    # The text and link fields SANITISE rather than reject: specs are re-validated
+    # from SQLite on every load, so a strict rule here would make a widget saved
+    # before the rule existed unloadable. Only the id and price stay hard rules.
 
-    @field_validator("description")
+    @field_validator("name", mode="before")
     @classmethod
-    def _cap_description(cls, value: str) -> str:
-        if len(value) > _MAX_CATALOG_DESCRIPTION_CHARS:
-            raise ValueError(
-                f"catalog item description is at most {_MAX_CATALOG_DESCRIPTION_CHARS} characters"
-            )
+    def _cap_name(cls, value: Any) -> Any:
+        return value.strip()[:_MAX_CATALOG_NAME_CHARS] if isinstance(value, str) else value
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _cap_description(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()[:_MAX_CATALOG_DESCRIPTION_CHARS]
         return value
 
     @field_validator("price_cents")
@@ -227,33 +235,39 @@ class PawBarCatalogItem(BaseModel):
             raise ValueError("catalog item price_cents must be a non-negative integer")
         return value
 
-    @field_validator("currency")
+    @field_validator("currency", mode="before")
     @classmethod
-    def _currency_code(cls, value: str) -> str:
-        v = value.strip().upper()
-        if len(v) > 3:
-            raise ValueError("catalog item currency must be a 3-letter code")
+    def _currency_code(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        code = value.strip().upper()
+        if _CURRENCY_RE.fullmatch(code):
+            return code
+        if value not in _WARNED_CURRENCIES and len(_WARNED_CURRENCIES) < 256:
+            _WARNED_CURRENCIES.add(value)
+            logger.warning("paw_bar: catalog currency %r is not a 3-letter code; using USD", value)
+        return "USD"
+
+    @field_validator("image_url", mode="before")
+    @classmethod
+    def _http_image_url(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        v = value.strip()
+        if len(v) > _MAX_CATALOG_URL_CHARS or not v.lower().startswith(("http://", "https://")):
+            return ""
         return v
 
-    @field_validator("image_url")
+    @field_validator("url", mode="before")
     @classmethod
-    def _http_image_url(cls, value: str) -> str:
+    def _http_or_path_url(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
         v = value.strip()
-        if len(v) > _MAX_CATALOG_URL_CHARS:
-            raise ValueError(f"catalog image_url is at most {_MAX_CATALOG_URL_CHARS} characters")
-        if v and not v.lower().startswith(("http://", "https://")):
-            raise ValueError("catalog image_url must be an http(s) URL")
-        return v
-
-    @field_validator("url")
-    @classmethod
-    def _http_or_path_url(cls, value: str) -> str:
-        v = value.strip()
-        if len(v) > _MAX_CATALOG_URL_CHARS:
-            raise ValueError(f"catalog url is at most {_MAX_CATALOG_URL_CHARS} characters")
         is_path = v.startswith("/") and not v.startswith("//")
-        if v and not is_path and not v.lower().startswith(("http://", "https://")):
-            raise ValueError("catalog url must be an http(s) URL or a site path starting with /")
+        is_http = v.lower().startswith(("http://", "https://"))
+        if len(v) > _MAX_CATALOG_URL_CHARS or not (is_path or is_http):
+            return ""
         return v
 
 
