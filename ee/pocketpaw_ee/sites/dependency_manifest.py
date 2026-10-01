@@ -5,7 +5,8 @@
 # (``vetted_pins.VENDORED_ALLOWLIST``, i.e. ``paw-sites-gen allowlist`` at a pinned
 # commit) instead of being hand copies of paw-sites' ``TOOLCHAIN_RESERVED`` /
 # ``MAX_AUTHOR_PACKAGES``. Same values today; paw-sites' ``@scope/*`` spelling is
-# turned into this module's ``@scope/``. Still network-free: the file is package data.
+# turned into this module's ``@scope/``, and import fails on any other ``*`` pattern.
+# Still network-free: the file is package data.
 #
 # Created: 2026-09-24 (feat/sites-author-dependencies, PP-1). Authors can now
 # declare npm packages on the svelte, react and html tracks. The resolved set rides
@@ -83,9 +84,12 @@ _BLOCKED_NAMES = frozenset(
 #: ``TOOLCHAIN_RESERVED``. A string ending in ``/`` reserves the whole scope (paw-sites
 #: writes ``@scope/*``). paw-sites' ``engineToolchainReserved`` (motion, ripple only)
 #: needs no twin here: ripple is not in ``DEPENDENCY_ENGINES``.
-TOOLCHAIN_RESERVED: tuple[str, ...] = tuple(
-    entry.removesuffix("*") for entry in VENDORED_ALLOWLIST["toolchainReserved"]
-)
+_RESERVED_RAW: list[str] = VENDORED_ALLOWLIST["toolchainReserved"]
+# A '*' anywhere but a trailing '/*' would be a pattern this module cannot honour.
+# A raise, not an assert, so it still fires under python -O.
+if any("*" in e and not (e.endswith("/*") and e.count("*") == 1) for e in _RESERVED_RAW):
+    raise ValueError(f"unsupported toolchainReserved pattern in allowlist: {_RESERVED_RAW}")
+TOOLCHAIN_RESERVED: tuple[str, ...] = tuple(entry.removesuffix("*") for entry in _RESERVED_RAW)
 
 #: Every spelling of the Vite config the generator reserves (paw-sites PS-1).
 VITE_CONFIG_FILES: tuple[str, ...] = tuple(
