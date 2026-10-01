@@ -2,8 +2,8 @@
   {
     "label": "the purchase debit becomes overdraftable (an empty wallet buys a paid site)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "        allow_negative=False,\n    )\n\n\nasync def subscribe(",
-    "replace": "        allow_negative=True,\n    )\n\n\nasync def subscribe(",
+    "find": "        allow_negative=False,\n    )\n\n\nasync def site_plan_price_usd(",
+    "replace": "        allow_negative=True,\n    )\n\n\nasync def site_plan_price_usd(",
     "tests": [
       "tests/cloud/sites/test_credits_publish.py::test_an_empty_wallet_leaves_the_site_unpaid_and_undeployed"
     ]
@@ -56,8 +56,8 @@
   {
     "label": "the renewal steps from now, walking the billing day forward",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "        doc.renewal_date = period + relativedelta(months=1)",
-    "replace": "        doc.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
+    "find": "        doc.renewal_date = period + relativedelta(months=tier.period_months)",
+    "replace": "        doc.renewal_date = datetime.now(UTC) + relativedelta(months=tier.period_months)",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_renewals_do_not_walk_the_billing_day_forward"
     ]
@@ -175,7 +175,7 @@
   {
     "label": "a renewal does not record the month it just bought",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "        doc.period_paid_usd = int(tier.monthly_price_usd)",
+    "find": "        doc.period_paid_usd = int(price_usd)",
     "replace": "        doc.period_paid_usd = 0",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_renewed_month_is_recorded_as_paid_for"

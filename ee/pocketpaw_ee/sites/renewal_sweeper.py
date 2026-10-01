@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/sites/renewal_sweeper.py — the RENEWAL for site plans bought
 # from the workspace credit wallet.
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): a renewal buys ONE PERIOD of the
+# tier — ``tier.period_months`` (1 for every monthly rung, 12 for the partner-only
+# yearly rungs) — priced by ``billing.service.site_plan_price_usd`` (the partner's
+# country price for partner rungs, ``monthly_price_usd`` otherwise).
+# ``period_paid_usd`` records the amount actually charged. Monthly behaviour is
+# unchanged; partner sites ride this same sweep.
+#
 # Created 2026-09-05 (fix/sites-plan-credits). A paid site now bills against the
 # workspace's own credit balance rather than a Dodo subscription, and a Dodo
 # subscription is the thing that used to make a MONTHLY plan actually recur. With
@@ -216,14 +223,19 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # before the save re-reads the same due date next tick, computes the same
         # idempotency key, and no-ops instead of charging a second time.
         period = doc.renewal_date or at
+        # ONE PERIOD of the tier, priced for this workspace. For a monthly rung
+        # this IS ``monthly_price_usd``; a partner-only rung is a year at the
+        # partner's country price.
+        price_usd = 0
         try:
+            price_usd = await billing_service.site_plan_price_usd(tier, doc.workspace)
             await billing_service.charge_site_plan_credits(
                 workspace_id=doc.workspace,
                 site_id=site_id,
                 tier_key=tier.key,
                 # A RENEWAL BUYS THE WHOLE MONTH. The publish path is the one that
                 # charges a difference, and only when a tier changes mid-period.
-                amount_usd=tier.monthly_price_usd,
+                amount_usd=price_usd,
                 period_start=period,
                 member_id=None,
             )
@@ -243,7 +255,7 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
                 site_id,
                 doc.workspace,
                 tier.key,
-                tier.monthly_price_usd,
+                price_usd,
             )
             continue
         except Exception:
@@ -260,12 +272,12 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # Step from the DUE date, not from now. Stepping from now would let each
         # sweep's few seconds of lateness accumulate, walking every customer's
         # billing day slowly forward through the calendar.
-        doc.renewal_date = period + relativedelta(months=1)
+        doc.renewal_date = period + relativedelta(months=tier.period_months)
         # A NEW PERIOD RESETS WHAT IT HAS BEEN PAID FOR. The high-water mark is
         # per-period by definition, so carrying last month's across would let a
         # customer who upgraded in March take the April upgrade for free forever.
         # Set to the tier just charged, which is exactly what this month bought.
-        doc.period_paid_usd = int(tier.monthly_price_usd)
+        doc.period_paid_usd = int(price_usd)
         await doc.save()
         counts["renewed"] += 1
 

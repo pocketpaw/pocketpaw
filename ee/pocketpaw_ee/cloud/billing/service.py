@@ -32,6 +32,11 @@
 # credits, not from keeping the receipt a later reversal has to join through.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): ``site_plan_price_usd`` — what one
+#   period of a site tier costs THIS workspace. Monthly rungs return
+#   ``monthly_price_usd`` unchanged; partner-only rungs return
+#   ``site_plans.partner_price_usd`` for the partner's billing country. The three
+#   site charge sites (publish purchase, tier change, renewal) read it.
 # Updated 2026-06-24 (security): enforce USD before granting; correct the
 #   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
 # Updated 2026-06-24 (BC-7, the Subscription primitive): added ``subscribe`` (open
@@ -195,6 +200,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from beanie.operators import In
 from pymongo import ReturnDocument
@@ -573,6 +579,24 @@ async def charge_site_plan_credits(
         # for spend that already happened and can only be recorded.
         allow_negative=False,
     )
+
+
+async def site_plan_price_usd(tier: Any, workspace_id: str | None) -> int:
+    """Whole USD for one PERIOD of ``tier``, as charged to ``workspace_id``.
+
+    A monthly rung costs its ``monthly_price_usd`` — byte-identical to before. A
+    partner-only rung is priced per the partner's ``billing_country``. Read the
+    profile directly, not via ``enforcement.load_partner``: that one returns None
+    whenever the global flags enforce. No profile (partner since removed) prices
+    at the default country rather than failing a renewal.
+    """
+    if not getattr(tier, "partner_only", False):
+        return int(tier.monthly_price_usd)
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    profile = await partners_service.partner_profile_for_workspace(workspace_id)
+    return site_plans.partner_price_usd(tier.key, getattr(profile, "billing_country", "") or "")
 
 
 async def subscribe(
