@@ -353,10 +353,12 @@ async def emit_handoff_resolved(
 # ---------------------------------------------------------------------------
 
 
-def _catalog_value(spec: Any, result: dict[str, Any]) -> tuple[int | None, str | None, str]:
-    """``(value_cents, currency, product_id)`` for one add_to_cart, from the SPEC.
+async def _catalog_value(
+    store: Any, widget_id: str, result: dict[str, Any]
+) -> tuple[int | None, str | None, str]:
+    """``(value_cents, currency, product_id)`` for one add_to_cart, from the catalog.
 
-    Priced off the widget spec's catalog row — the owner's declared price — and
+    Priced off the widget's catalog row in the store — the owner's declared price — and
     multiplied by the quantity that was actually added, because the cart merges
     quantities and the row should say what THIS add was worth. A product that is
     not in the catalog cannot be priced, and an unpriced row is the honest answer
@@ -365,8 +367,12 @@ def _catalog_value(spec: Any, result: dict[str, Any]) -> tuple[int | None, str |
     product_id = str(result.get("added", "") or "")
     if not product_id:
         return None, None, ""
-    catalog = {item.id: item for item in (getattr(spec, "catalog", []) or [])}
-    product = catalog.get(product_id)
+    found = (
+        await store.get_catalog_items(widget_id, [product_id])
+        if store is not None and widget_id
+        else []
+    )
+    product = found[0] if found else None
     if product is None:
         return None, None, product_id
     try:
@@ -386,6 +392,7 @@ async def emit_visitor_action(
     spec: Any,
     result: dict[str, Any] | None = None,
     cart: dict[str, Any] | None = None,
+    store: Any = None,
 ) -> bool:
     """One auto (visitor-scoped) verb the agent executed directly.
 
@@ -441,7 +448,7 @@ async def emit_visitor_action(
         # The cart's money is still recorded, as ``cart_value_cents`` in attrs, so
         # a "value in flight" reading stays possible later without ever being
         # mistaken for revenue.
-        cart_value, cart_currency, product_id = _catalog_value(spec, result or {})
+        cart_value, cart_currency, product_id = await _catalog_value(store, widget_id, result or {})
         if cart_value is not None:
             attrs[ATTR_CART_VALUE_CENTS] = cart_value
             if cart_currency:

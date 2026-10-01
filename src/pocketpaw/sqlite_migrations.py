@@ -9,6 +9,10 @@
 #
 # Stores call it from their schema setup, after the DDL. Schema (DDL) changes
 # stay additive in each store's SCHEMA_SQL; this is only for rewriting rows.
+#
+# ``is_applied`` / ``mark_applied`` serve a migration that commits per row (one
+# transaction per widget, say) and records its marker only once every row moved;
+# such a migration must be idempotent row by row, since a partial run is retried.
 
 from __future__ import annotations
 
@@ -54,3 +58,21 @@ async def run_once(
         await db.rollback()
         raise
     return True
+
+
+async def is_applied(db: aiosqlite.Connection, name: str) -> bool:
+    """Whether ``name`` is recorded in this file's ``schema_migrations``."""
+    await db.execute(SCHEMA_MIGRATIONS_SQL)
+    await db.commit()
+    async with db.execute("SELECT 1 FROM schema_migrations WHERE name = ?", (name,)) as cur:
+        return await cur.fetchone() is not None
+
+
+async def mark_applied(db: aiosqlite.Connection, name: str) -> None:
+    """Record ``name`` as applied (idempotent) and commit."""
+    await db.execute(SCHEMA_MIGRATIONS_SQL)
+    await db.execute(
+        "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (name, datetime.now(UTC).isoformat()),
+    )
+    await db.commit()

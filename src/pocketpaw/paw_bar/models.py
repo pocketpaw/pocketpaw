@@ -4,8 +4,14 @@
 # list / button / form / divider, no raw HTML, no script paths) inside a
 # ``PawBarSpec``, plus the visitor-commerce declarations on that spec: ``actions``
 # (unique snake_case verbs; only the cart verbs may be ``auto``, everything else is
-# ``gated`` to an Instinct proposal), ``catalog`` (``PawBarCatalogItem``) and an
-# http(s) ``checkout_url``. Catalog items are the ONLY source of product data on a
+# ``gated`` to an Instinct proposal) and an http(s) ``checkout_url``. The product
+# catalog lives in its own table (``paw_bar.catalog_store``, rows read back as
+# ``PawBarCatalogRow``); ``PawBarSpec.catalog`` is DEPRECATED, kept one release so
+# an older editor's spec PATCH still works: the store adds a non-empty one to the
+# table on write (upsert by id, never a delete) and never stores it in the spec.
+# Its 200-item validator stays, since only those older clients send it.
+# ``spec_bytes`` is what the 64 KB spec cap (``MAX_SPEC_BYTES``) measures: the
+# spec without its catalog. Catalog items are the ONLY source of product data on a
 # card, so they are cleaned as untrusted input whether typed by the owner or
 # imported from the store's site: text truncated to its cap, a non-http(s) image
 # url or a ``url`` that is neither http(s) nor a single-slash site path blanked,
@@ -286,8 +292,23 @@ class PawBarCatalogItem(BaseModel):
         return v
 
 
+class PawBarCatalogRow(PawBarCatalogItem):
+    """A catalog item as the catalog store holds it: the item plus its place in
+    the owner's order, where it came from (``manual`` | ``shopify`` |
+    ``woocommerce`` | ``jsonld`` | ``opengraph`` | ``csv`` | ``site``) and when it
+    was last written."""
+
+    position: int = 0
+    source: str = "manual"
+    updated_at: str = ""
+
+
 class PawBarSpec(BaseModel):
-    """The payload the widget fetches and renders."""
+    """The payload the widget fetches and renders.
+
+    ``catalog`` is deprecated: the catalog is stored in ``paw_bar_catalog_items``.
+    A stored spec carries an empty one; the frozen public spec endpoint fills it
+    from the store on the way out."""
 
     widget_id: str
     pocket_id: str
@@ -296,6 +317,7 @@ class PawBarSpec(BaseModel):
     blocks: list[PawBarBlock] = Field(default_factory=list)
     # C1 action registry — all optional; a spec without them is unchanged.
     actions: list[PawBarActionSpec] = Field(default_factory=list)
+    # Deprecated (see the class docstring); only an older client's PATCH sets it.
     catalog: list[PawBarCatalogItem] = Field(default_factory=list)
     checkout_url: str = ""
 
@@ -781,6 +803,12 @@ class PawBarCart(BaseModel):
     @property
     def total_cents(self) -> int:
         return sum(item.price_cents * item.qty for item in self.items)
+
+
+def spec_bytes(spec: PawBarSpec) -> int:
+    """The size the spec cap measures: the serialized spec WITHOUT its catalog,
+    which lives in its own table and has its own item cap."""
+    return len(spec.model_copy(update={"catalog": []}).model_dump_json().encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------

@@ -850,11 +850,13 @@ async def test_admin_spec_save_needs_no_widget_token_and_archives(owner_client):
     body = res.json()
     assert set(body) == {"id", "spec"}
     assert body["id"] == widget.id
-    assert body["spec"]["catalog"][0]["id"] == "cold-brew"
     assert body["spec"]["checkout_url"] == "https://brewco.com/checkout"
 
+    # A catalog in the body (an older editor) lands in the catalog store, not the spec.
     stored = await store.get_widget(widget.id)
-    assert stored.spec.catalog[0].name == "Cold brew"
+    assert body["spec"]["catalog"] == [] and stored.spec.catalog == []
+    [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+    assert item.name == "Cold brew"
     revision = await store.latest_spec_revision(widget.id)
     assert revision is not None
     number, archived = revision
@@ -887,7 +889,10 @@ async def test_admin_spec_save_needs_the_money_units_header_for_odd_exponents(
         assert res.json()["detail"] == "currency_units_client_outdated"
         assert stored == _spec()  # untouched
     else:
-        assert stored.catalog[0].price_cents == 450  # stored as sent
+        # Stored as sent, in the catalog store (the spec no longer holds it).
+        assert stored.catalog == []
+        [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+        assert item.price_cents == 450
 
 
 @pytest.mark.asyncio
@@ -911,9 +916,11 @@ async def test_admin_spec_save_pins_widget_and_pocket_ids(owner_client):
 
     stored = (await store.get_widget(widget.id)).spec
     expected = PawBarSpec.model_validate(
-        {**body["spec"], "widget_id": widget.id, "pocket_id": "pocket-1"}
+        {**body["spec"], "widget_id": widget.id, "pocket_id": "pocket-1", "catalog": []}
     )
-    assert stored == expected  # nothing but the two ids differs from the body
+    # Nothing but the two ids differs from the body; its catalog went to the store.
+    assert stored == expected
+    assert await store.catalog_count(widget.id) == 1
     # The widget the body named is untouched.
     assert await store.latest_spec_revision(other.id) is None
     assert (await store.get_widget(other.id)).spec == _spec()

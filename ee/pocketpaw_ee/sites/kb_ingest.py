@@ -88,6 +88,8 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
 
+from pocketpaw.paw_bar.pages import page_key
+
 logger = logging.getLogger(__name__)
 
 # Max pages ingested in one sync. A large site is truncated rather than allowed to
@@ -348,26 +350,6 @@ def _path_slug(path: str) -> str:
     if cleaned in ("", "index", "src-routes-page"):
         cleaned = "home"
     return f"site-{cleaned}"[:120]
-
-
-def page_key(path: str) -> str:
-    """The crawl-index key for a page: its path with the file extension, SvelteKit
-    route scaffolding, a trailing ``index`` and the outer slashes removed, lowercased.
-
-    The sync keys a document by it and the v2 concierge keys the visitor's URL path
-    by it, so "about.html", "about/index.html" (the foreign crawler's spelling),
-    "src/routes/about/+page.svelte" and "/about/" are one page, and every spelling of
-    the homepage is "". Unlike ``_path_slug`` it keeps slashes, so "blog/post" and
-    "blog-post" stay two pages. ``_path_slug`` itself is left alone: it is the
-    article SOURCE, and changing it would re-mint every page's article.
-    """
-    key = path.strip().lower().lstrip("/")
-    key = re.sub(r"^src/routes/", "", key)
-    key = re.sub(r"\.(html?|svelte|md|svx)$", "", key)
-    key = re.sub(r"(^|/)\+(page|layout)$", "", key)
-    key = key.rstrip("/")
-    key = re.sub(r"(^|/)index$", "", key)
-    return key.strip("/")
 
 
 def _page_text(path: str, body: str, engine: str) -> str:

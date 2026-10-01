@@ -9,13 +9,14 @@
 # ``_concierge_profile`` and the ``ScopeKind.CONCIERGE`` KB lock).
 #
 # Conditional parts, all driven by ``meta`` (stamped by ``concierge_chat`` from
-# the widget spec; this handler does no I/O):
+# the widget spec and the catalog store; this handler does no I/O):
 #   * actions declared (``meta.pawbar_actions``): lists the ``pawbar_<verb>``
-#     tools (auto vs gated), a compact catalog block (real ids, names, prices
-#     formatted from ISO 4217 minor units by ``pocketpaw.money.format_minor``,
-#     sold-out marks) and the exact ```pawbar-card product-fence contract; gated
-#     actions with args also teach the ``kind: "form"`` card. A widget with no
-#     actions keeps the original "you answer questions; you don't act" text.
+#     tools (auto vs gated), a compact catalog block (the turn's retrieved items:
+#     real ids, names, prices formatted from ISO 4217 minor units by
+#     ``pocketpaw.money.format_minor``, sold-out items last and marked) and the
+#     exact ```pawbar-card product-fence contract; gated actions with args also
+#     teach the ``kind: "form"`` card. A widget with no actions keeps the
+#     original "you answer questions; you don't act" text.
 #   * ``meta.widget_id`` set: the escape-hatch step — a request for a human is
 #     always honored and the agent calls ``pawbar_request_human``.
 #
@@ -34,9 +35,12 @@ def _catalog_block(catalog: list[dict] | None) -> str:
 
     Empty string when there is no catalog. Each line names the real product id so
     the agent can put it straight into a pawbar-card fence and the add_to_cart
-    tool call. An item whose ``in_stock`` is False is marked sold out, so the
-    agent stops recommending it; unknown stock (None / absent) adds nothing."""
+    tool call. An item whose ``in_stock`` is False is listed after the others and
+    marked sold out, so the agent stops recommending it; unknown stock (None /
+    absent) adds nothing. Otherwise the order given (the owner's, or relevance) is
+    kept."""
     items = [c for c in (catalog or []) if isinstance(c, dict) and c.get("id")]
+    items.sort(key=lambda c: c.get("in_stock") is False)
     if not items:
         return ""
     lines = []

@@ -2,9 +2,9 @@
 # concierge catalog import.
 #
 #   * POST /paw-bar/admin/site/{id}/catalog/import/preview: the role gate (403),
-#     tenancy (404 for another workspace's site) and a hosted site answered
-#     ``not_connected_site`` without a fetch. The reading itself is covered in
-#     tests/ee/sites/test_catalog_import.py against a mocked origin.
+#     tenancy (404 for another workspace's site) and a hosted site that was never
+#     deployed answered ``site_not_deployed`` without a fetch. The reading itself
+#     is covered in tests/ee/sites/test_catalog_import.py against a mocked origin.
 #   * ``PawBarCatalogItem``'s new fields (description, in_stock) and its cleaning
 #     validators: legacy bad values load cleaned, only id and price reject.
 #   * The pass-through: a product card carries the item's url and description,
@@ -82,12 +82,12 @@ async def test_another_workspaces_site_is_a_404(owner, no_fetch):
     assert malformed.status_code == 404
 
 
-async def test_a_hosted_site_is_not_connected_and_nothing_is_fetched(owner, no_fetch):
-    site = await _site()
+async def test_an_undeployed_hosted_site_is_not_fetched(owner, no_fetch):
+    site = await _site(url="http://localhost:8787")
     resp = await owner.post(_URL.format(sid=site.id), json={})
     assert resp.status_code == 200
     body = resp.json()
-    assert (body["status"], body["reason"], body["items"]) == ("failed", "not_connected_site", [])
+    assert (body["status"], body["reason"], body["items"]) == ("failed", "site_not_deployed", [])
 
 
 async def test_a_connected_site_without_a_verified_origin_fails_before_fetching(owner, no_fetch):
@@ -240,8 +240,8 @@ def test_a_product_card_carries_the_items_url_and_description():
 def test_the_catalog_prompt_marks_only_sold_out_items():
     from pocketpaw_ee.paw_bar.concierge_runtime import _catalog_and_actions_block
 
-    widget = SimpleNamespace(spec=PawBarSpec(widget_id="w", pocket_id="p", catalog=_CATALOG))
-    block = _catalog_and_actions_block(widget)
+    widget = SimpleNamespace(spec=PawBarSpec(widget_id="w", pocket_id="p"))
+    block = _catalog_and_actions_block(widget, _CATALOG)
     lines = {line.split('"')[1]: line for line in block.splitlines() if 'id "' in line}
     assert lines["kettle"].endswith("(sold out)")
     assert "sold out" not in lines["mug"]

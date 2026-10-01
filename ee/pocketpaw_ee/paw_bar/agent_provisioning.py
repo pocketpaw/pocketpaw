@@ -100,18 +100,22 @@ def _guided_name(site: Any) -> str:
     return str(getattr(site, "concierge_name", "") or "")
 
 
-def derive_conversation_starters(widget: Any) -> list[str]:
-    """Derive up to four plain visitor questions from the widget spec.
+def derive_conversation_starters(widget: Any, *, catalog_count: int | None = None) -> list[str]:
+    """Derive up to four plain visitor questions from the widget.
 
     Rules (order preserved, capped at ``_MAX_STARTERS``):
-      * a non-empty catalog adds ``"What do you sell?"``;
+      * a non-empty catalog adds ``"What do you sell?"``. ``catalog_count`` is the
+        catalog store's count; without it a (deprecated) spec catalog decides;
       * each GATED action carrying a label adds ``"<label>?"`` (e.g. a
         ``book_table`` action labelled "Book a table" → "Book a table?");
       * if nothing derived, a single generic ``"What can you help me with?"``.
     """
     spec = getattr(widget, "spec", None)
     starters: list[str] = []
-    if spec is not None and getattr(spec, "catalog", None):
+    has_catalog = (
+        catalog_count > 0 if catalog_count is not None else bool(getattr(spec, "catalog", None))
+    )
+    if has_catalog:
         starters.append("What do you sell?")
     for action in getattr(spec, "actions", None) or []:
         if len(starters) >= _MAX_STARTERS:
@@ -124,7 +128,7 @@ def derive_conversation_starters(widget: Any) -> list[str]:
     return starters[:_MAX_STARTERS]
 
 
-def _seed_identity(body: Any, site: Any, widget: Any) -> None:
+def _seed_identity(body: Any, site: Any, widget: Any, catalog_count: int | None = None) -> None:
     """Seed the ASG-1 identity fields on a create body IF the model supports them.
 
     ``welcome_message`` ← ``Site.concierge_greeting`` (when non-empty),
@@ -133,7 +137,7 @@ def _seed_identity(body: Any, site: Any, widget: Any) -> None:
     guards only matter for a body that lacks one, which degrades to a debug log.
     """
     greeting = (getattr(site, "concierge_greeting", "") or "").strip()
-    starters = derive_conversation_starters(widget)
+    starters = derive_conversation_starters(widget, catalog_count=catalog_count)
 
     seeded = False
     if greeting and hasattr(body, "welcome_message"):
@@ -232,7 +236,13 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
             # soul_enabled defaults True — the concierge carries a soul.
         )
         _seed_tags(body, site_id)
-        _seed_identity(body, site, widget)
+        catalog_count: int | None = None
+        if getattr(widget, "id", ""):
+            try:
+                catalog_count = await _store().catalog_count(widget.id)
+            except Exception:  # noqa: BLE001 — a starter is cosmetic; never block the bind
+                logger.warning("paw-bar concierge: catalog count failed for %s", widget.id)
+        _seed_identity(body, site, widget, catalog_count)
         try:
             agent = await agents_service.create(ctx, workspace_id, body)
         except ConflictError:

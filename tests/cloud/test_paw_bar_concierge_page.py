@@ -11,7 +11,8 @@
 #     indexed title and summary, and the page's own article joins <knowledge>
 #     first, so it can ground documentation code. A miss keeps only the
 #     browser's title, clipped to 120 characters and labelled unverified;
-#   * a catalog item whose url is that page is named in the <page> block;
+#   * a catalog item whose url is that page (looked up in the catalog store) is
+#     named in the <page> block;
 #   * no ``page`` (a bundle cached before CR-7) or a malformed one means the prompt
 #     is exactly what it was before this change.
 #
@@ -278,21 +279,33 @@ def test_a_malformed_page_is_dropped(page):
     assert _resolve(page) is None
 
 
-def test_the_catalog_item_for_the_page_is_attached():
-    widget = _widget(
-        spec=_spec(
-            catalog=[
-                PawBarCatalogItem(
-                    id="espresso", name="Espresso", url="https://brewco.com/shop/espresso"
-                ),
-                PawBarCatalogItem(id="latte", name="Latte", url="/shop/latte"),
-            ]
+@pytest.mark.asyncio
+async def test_the_catalog_item_for_the_page_is_attached(tmp_path):
+    from pocketpaw_ee.paw_bar.concierge_runtime import with_page_product
+
+    from pocketpaw.paw_bar.store import PawBarStore
+
+    store = PawBarStore(tmp_path / "page.db")
+    widget = await store.create_widget(
+        _widget(
+            spec=_spec(
+                catalog=[
+                    PawBarCatalogItem(
+                        id="espresso", name="Espresso", url="https://brewco.com/shop/espresso"
+                    ),
+                    PawBarCatalogItem(id="latte", name="Latte", url="/shop/latte"),
+                    PawBarCatalogItem(id="far", name="Far", url="https://other.com/menu"),
+                ]
+            )
         )
     )
 
-    hit = _resolve({"url": "https://brewco.com/shop/latte"}, widget=widget)
-    other = _resolve({"url": "https://brewco.com/shop/espresso/"}, widget=widget)
-    none = _resolve({"url": "https://brewco.com/menu"}, widget=widget)
+    async def _with_product(url: str):
+        return await with_page_product(_resolve({"url": url}, widget=widget), widget, store)
+
+    hit = await _with_product("https://brewco.com/shop/latte")
+    other = await _with_product("https://brewco.com/shop/espresso/")
+    none = await _with_product("https://brewco.com/menu")  # "far" is on another host
 
     assert hit is not None and hit.product is not None and hit.product.id == "latte"
     assert other is not None and other.product is not None and other.product.id == "espresso"

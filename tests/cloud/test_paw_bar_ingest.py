@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -236,15 +237,32 @@ class TestSpecMoneyUnits:
         ).json()
         assert stored["spec"]["catalog"] == []
 
-    def test_a_yen_catalog_with_the_header_is_stored_as_sent(self, client: TestClient) -> None:
-        res, _ = self._save(client, "JPY", **{"X-Paw-Money-Units": "iso4217"})
-        assert res.status_code == 200, res.text
-        assert res.json()["spec"]["catalog"][0]["price_cents"] == 1500  # not converted
+    @staticmethod
+    def _stored_price(store: PawBarStore, widget_id: str) -> int:
+        # The catalog lands in the catalog store, not the spec. A private loop,
+        # not asyncio.run, which would clear the thread's current loop for the
+        # sync tests after this one.
+        loop = asyncio.new_event_loop()
+        try:
+            [item] = loop.run_until_complete(store.get_catalog_items(widget_id, ["tea"]))
+        finally:
+            loop.close()
+        return item.price_cents
 
-    def test_a_usd_catalog_from_an_old_client_still_saves(self, client: TestClient) -> None:
-        res, _ = self._save(client, "USD")
+    def test_a_yen_catalog_with_the_header_is_stored_as_sent(
+        self, app_with_store, client: TestClient
+    ) -> None:
+        res, created = self._save(client, "JPY", **{"X-Paw-Money-Units": "iso4217"})
         assert res.status_code == 200, res.text
-        assert res.json()["spec"]["catalog"][0]["price_cents"] == 1500
+        assert res.json()["spec"]["catalog"] == []
+        assert self._stored_price(app_with_store[1], created["id"]) == 1500  # not converted
+
+    def test_a_usd_catalog_from_an_old_client_still_saves(
+        self, app_with_store, client: TestClient
+    ) -> None:
+        res, created = self._save(client, "USD")
+        assert res.status_code == 200, res.text
+        assert self._stored_price(app_with_store[1], created["id"]) == 1500
 
 
 # ---------------------------------------------------------------------------

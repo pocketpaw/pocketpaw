@@ -1,10 +1,11 @@
-# ee/pocketpaw_ee/paw_bar/catalog_import.py — read a connected store's products
-# off its own website, for the owner to review before they reach the catalog.
+# ee/pocketpaw_ee/paw_bar/catalog_import.py — read a store's products off its own
+# website, for the owner to review before they reach the catalog.
 #
 # PREVIEW ONLY. ``preview_catalog_import`` returns a ``CatalogImportPreview`` and
 # writes nothing: the owner picks products in the dashboard and saves them through
-# the existing widget-spec PATCH, so there is one write path into ``PawBarSpec``
-# and one set of catalog validators.
+# the catalog routes (``POST …/catalog/items:bulk``, 500 per call), whose store
+# applies the catalog validators. Results are capped at the catalog cap
+# (``catalog_max_items``, config ``pawbar_catalog_max_items``).
 #
 # Two layers. The PURE parsers (``parse_shopify_products``, ``parse_woo_products``,
 # ``parse_jsonld_products``, ``parse_og_product``, ``detect_platform``) take bytes
@@ -17,31 +18,39 @@
 # ORCHESTRATOR fetches: Shopify's ``/products.json`` or WooCommerce's Store API
 # when the homepage says so, and otherwise (or when that endpoint is refused) the
 # generic reader: sitemap → product pages → JSON-LD, then OpenGraph product tags.
+# Shopify pages ``/products.json`` up to 20 × 250, WooCommerce up to 50 × 100, both
+# stopping at a short page, the catalog cap or the soft deadline (below).
 #
 # THE FETCH RULES, same as the knowledge crawl (``sites.foreign_grounding``):
-#   * connected (foreign) sites only, and only their ONE verified, fresh origin
-#     (``crawlable_origin``); every fetch is pinned to that host, redirects too;
+#   * a connected (foreign) site is read on its ONE verified, fresh origin
+#     (``crawlable_origin``); a hosted Paw Site on its first live custom domain,
+#     else its deployed host (``embed.deployed_host(site.url)``), with no
+#     ownership check (we deployed it), the generic reader only, and
+#     ``site_not_deployed`` when that host is unset or local. Every fetch is
+#     pinned to the one host, redirects too;
 #   * every request goes through ``safe_fetch.SafeFetcher`` (SSRF pinning, size
 #     caps); no httpx call lives here;
 #   * robots.txt is checked for EVERY url, under the concierge crawler's UA; a
 #     robots.txt that cannot be read (including one redirecting off the host) is
 #     allow-all with a ``robots_unreadable`` warning, the crawl's own policy;
-#   * one soft deadline (``IMPORT_WALL_CLOCK_SEC``): no fetch starts unless its
-#     own timeout fits in what is left, and the run returns what it has as
-#     ``partial`` + ``deadline_reached``; a hard ``asyncio.timeout`` sits
-#     ``IMPORT_BACKSTOP_GRACE_SEC`` past it. ``IMPORT_MAX_PAGES`` product pages,
-#     ``IMPORT_BYTE_CAP`` bytes for the whole run.
+#   * one soft deadline (``IMPORT_WALL_CLOCK_SEC``) for the whole run: no fetch
+#     starts unless its own timeout fits in what is left, so platform paging and
+#     the page walk stop there and return what they read as ``partial`` +
+#     ``deadline_reached``; a hard ``asyncio.timeout`` sits
+#     ``IMPORT_BACKSTOP_GRACE_SEC`` past it. ``IMPORT_MAX_PAGES`` product pages for
+#     the generic reader, ``IMPORT_BYTE_CAP`` bytes for the whole run.
 #   * sitemaps are parsed only as UTF-8, by an expat parser that refuses any
 #     DOCTYPE or entity declaration (``_sitemap_locs``).
 # Never raises: every failure is ``status="failed"`` with a ``reason``.
 
-"""Preview a connected store's products from its own site (Shopify, Woo, JSON-LD, OG)."""
+"""Preview a store's products from its own site (Shopify, Woo, JSON-LD, OG)."""
 
 from __future__ import annotations
 
 import asyncio
 import codecs
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -60,6 +69,7 @@ from pydantic import BaseModel, Field
 
 from pocketpaw.api.v1.unfurl import MetaParser
 from pocketpaw.money import normalize_currency, to_minor
+from pocketpaw.paw_bar.catalog_store import DEFAULT_CATALOG_MAX_ITEMS, catalog_max_items
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.foreign_grounding import GROUNDING_USER_AGENT, crawlable_origin
 from pocketpaw_ee.sites.safe_fetch import (
@@ -73,10 +83,13 @@ from pocketpaw_ee.sites.url_crawler import POLITENESS_DELAY_SEC, allowed_by_robo
 
 logger = logging.getLogger(__name__)
 
-IMPORT_MAX_ITEMS = 200  # = PawBarSpec's catalog cap
+IMPORT_MAX_ITEMS = DEFAULT_CATALOG_MAX_ITEMS  # the default; the live cap is config
 IMPORT_MAX_PAGES = 30
-IMPORT_BYTE_CAP = 8 * 1024 * 1024
-IMPORT_WALL_CLOCK_SEC = 45.0  # soft deadline: no fetch starts that could outlive it
+# A full Shopify page with descriptions is ~1 MB, and 20 of them are allowed.
+IMPORT_BYTE_CAP = 40 * 1024 * 1024
+# Soft deadline: no fetch starts that could outlive it. Sized for platform
+# paging (up to 20 Shopify / 50 Woo pages); a slower store returns a partial.
+IMPORT_WALL_CLOCK_SEC = 60.0
 IMPORT_BACKSTOP_GRACE_SEC = 5.0  # the hard asyncio.timeout sits this far past it
 
 _FETCH_TIMEOUT_SEC = PER_FETCH_TIMEOUT_SEC
@@ -90,9 +103,10 @@ _JSONLD_BLOCK_BYTES = 256 * 1024
 _JSONLD_MAX_DEPTH = 12
 _MAX_SITEMAPS = 4  # the index or urlset, plus up to three child sitemaps
 _MAX_LINKS = 2000  # anchors / sitemap locs tracked per document
-_SHOPIFY_PAGE_SIZE = 250  # one page covers IMPORT_MAX_ITEMS
+_SHOPIFY_PAGE_SIZE = 250
+_SHOPIFY_MAX_PAGES = 20
 _WOO_PAGE_SIZE = 100
-_WOO_MAX_PAGES = 2
+_WOO_MAX_PAGES = 50
 
 _PRODUCT_PATH_RE = re.compile(r"/(products?|shop|item|p)/", re.IGNORECASE)
 _SHOPIFY_SHOP_RE = re.compile(r"Shopify\.shop\s*=")
@@ -106,7 +120,7 @@ _DECIMAL_COMMA_RE = re.compile(r"\d*,\d{1,2}")
 _XML_ENCODING_RE = re.compile(r"""\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([^"']*)["']""")
 
 Platform = Literal["shopify", "woocommerce", ""]
-Source = Literal["shopify", "woocommerce", "jsonld", "opengraph", ""]
+Source = Literal["shopify", "woocommerce", "jsonld", "opengraph", "csv", ""]
 
 
 class ImportedProduct(BaseModel):
@@ -117,7 +131,7 @@ class ImportedProduct(BaseModel):
     price_cents: int = Field(ge=0)  # ISO 4217 minor units of currency (2 places if unknown)
     currency: str = ""  # ISO 4217, upper-case; "" when unknown
     image_url: str = ""  # https only
-    url: str = ""  # site path on the verified host, else ""
+    url: str = ""  # site path on the read host (a CSV may give an absolute url), else ""
     description: str = ""
     in_stock: bool | None = None
 
@@ -125,7 +139,8 @@ class ImportedProduct(BaseModel):
 class CatalogImportPreview(BaseModel):
     """What an import would add. ``reason`` is set only when ``status`` is failed:
     origin_missing | origin_unverified | origin_verification_stale |
-    not_connected_site | blocked_by_robots | timeout | fetch_failed."""
+    site_not_deployed | blocked_by_robots | timeout | fetch_failed, or a CSV's
+    csv_empty | csv_unreadable | csv_no_name_column | csv_no_price_column."""
 
     status: Literal["ok", "partial", "empty", "failed"]
     reason: str = ""
@@ -205,8 +220,10 @@ def _clean_text(value: Any, limit: int) -> str:
         text = "".join(parser.parts)
     except Exception:  # noqa: BLE001 — a hostile fragment degrades to its raw text
         text = value
-    text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
-    text = _WHITESPACE_RE.sub(" ", text).strip()
+    # Whitespace first: a newline is a control character, and dropping it before
+    # folding would glue the words on either side together.
+    text = _WHITESPACE_RE.sub(" ", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf")).strip()
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text
@@ -275,11 +292,15 @@ def _web_id(path: str, name: Any) -> str:
     return "web:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]  # noqa: S324 — an id, not a secret
 
 
-def _normalise(raws: Iterable[_Raw], *, base: str = "", host: str = "") -> ParsedProducts:
+def _normalise(
+    raws: Iterable[_Raw], *, base: str = "", host: str = "", keep_absolute_urls: bool = False
+) -> ParsedProducts:
     """Raw reader output → catalog-shaped products. A product with no usable
     price or name is dropped (a card with no price is worse than no card), and so
     is one whose price overflows or passes ``_MAX_PRICE_MINOR``: one absurd
-    value costs that product, never the import."""
+    value costs that product, never the import. ``keep_absolute_urls`` (CSV,
+    which has no host to check against) keeps an http(s) product url as given
+    instead of dropping it."""
     out = ParsedProducts()
     for raw in raws:
         name = _clean_text(raw.name, _NAME_CHARS)
@@ -300,6 +321,10 @@ def _normalise(raws: Iterable[_Raw], *, base: str = "", host: str = "") -> Parse
         url = _site_path(raw.url, base, host) if host else ""
         if not url and isinstance(raw.url, str) and raw.url.startswith("/"):
             url = "/" + raw.url.lstrip("/")
+        elif not url and keep_absolute_urls and isinstance(raw.url, str):
+            absolute = raw.url.strip()
+            if absolute.lower().startswith(("http://", "https://")):
+                url = absolute
         product_id = raw.id or _web_id(url or urlsplit(base).path or "/", name)
         out.items.append(
             ImportedProduct(
@@ -700,6 +725,7 @@ class _Run:
         self.delay = delay
         self.deadline = deadline  # a time.monotonic() value
         self.deadline_hit = False
+        self.max_items = catalog_max_items()
         self.robots: Any = None
         self.requests = 0
         self.pages_failed = 0
@@ -750,10 +776,45 @@ class _Run:
         except (ValueError, RecursionError):
             return None
 
+    async def pages(self, path: str, size: int, max_pages: int, key: str | None) -> list | None:
+        """Every item of a paged JSON list endpoint (``path`` ends ``page=``),
+        until a short page, ``max_pages`` or the item cap. None when page 1 is not
+        the expected JSON (the reader falls back); on page 1 a crossed byte budget
+        or the soft deadline propagates, and on a later page either one (or a bad
+        page) ends the paging with what was read."""
+        items: list = []
+        for page in range(1, max_pages + 1):
+            try:
+                payload = await self.get_json(f"{path}{page}")
+            except FetchBudgetExceeded:
+                if page == 1:
+                    raise
+                self.budget_hit = True
+                break
+            except _DeadlineReached:
+                if page == 1:
+                    raise
+                break  # deadline_hit is set; the pages read so far stand
+            batch = payload.get(key) if key and isinstance(payload, dict) else payload
+            if not isinstance(batch, list):
+                if page == 1:
+                    return None
+                break
+            items.extend(batch)
+            if len(batch) < size or len(items) >= self.max_items:
+                break
+        return items
+
     async def shopify(self, home_html: str) -> ParsedProducts | None:
-        payload = await self.get_json(f"/products.json?limit={_SHOPIFY_PAGE_SIZE}&page=1")
-        if not isinstance(payload, dict) or not isinstance(payload.get("products"), list):
+        products = await self.pages(
+            f"/products.json?limit={_SHOPIFY_PAGE_SIZE}&page=",
+            _SHOPIFY_PAGE_SIZE,
+            _SHOPIFY_MAX_PAGES,
+            "products",
+        )
+        if products is None:
             return None
+        payload = {"products": products}
         currency = shopify_currency(home_html)
         if not currency:
             handle = next(
@@ -776,21 +837,13 @@ class _Run:
         return parse_shopify_products(payload, currency)
 
     async def woo(self) -> ParsedProducts | None:
-        parsed: ParsedProducts | None = None
-        for page in range(1, _WOO_MAX_PAGES + 1):
-            try:
-                payload = await self.get_json(
-                    f"/wp-json/wc/store/v1/products?per_page={_WOO_PAGE_SIZE}&page={page}"
-                )
-            except _DeadlineReached:
-                break  # keep the pages already read
-            if not isinstance(payload, list):
-                break
-            parsed = parsed or ParsedProducts()
-            parsed.extend(parse_woo_products(payload, self.host))
-            if len(payload) < _WOO_PAGE_SIZE:
-                break
-        return parsed
+        products = await self.pages(
+            f"/wp-json/wc/store/v1/products?per_page={_WOO_PAGE_SIZE}&page=",
+            _WOO_PAGE_SIZE,
+            _WOO_MAX_PAGES,
+            None,
+        )
+        return None if products is None else parse_woo_products(products, self.host)
 
     async def product_pages(self, home: _PageScan) -> list[str]:
         """Candidate product pages: from the sitemap(s) robots.txt names (else
@@ -872,7 +925,7 @@ def _failed(reason: str, host: str = "") -> CatalogImportPreview:
     return CatalogImportPreview(status="failed", reason=reason, host=host)
 
 
-async def _preview(run: _Run) -> CatalogImportPreview:
+async def _preview(run: _Run, *, platforms: bool = True) -> CatalogImportPreview:
     run.robots, robots_warning = await load_robots(
         run.fetcher, urlsplit(run.base), allowed_host=run.host
     )
@@ -891,7 +944,7 @@ async def _preview(run: _Run) -> CatalogImportPreview:
     parsed: ParsedProducts | None = None
     source: Source = ""
     try:
-        platform = detect_platform(home_html, home.headers)
+        platform = detect_platform(home_html, home.headers) if platforms else ""
         if platform == "shopify":
             parsed, source = await run.shopify(home_html), "shopify"
         elif platform == "woocommerce":
@@ -935,10 +988,33 @@ async def _preview(run: _Run) -> CatalogImportPreview:
         status=status,
         source=source if items else "",
         host=run.host,
-        items=items[:IMPORT_MAX_ITEMS],
+        items=items[: run.max_items],
         total_found=len(items),
         warnings=warnings,
     )
+
+
+def hosted_host(site: Any) -> str:
+    """Where a hosted Paw Site is served: its first live custom domain, else the
+    bare host of its deployed ``url``; "" when it has neither."""
+    for domain in getattr(site, "domains", None) or []:
+        hostname = str(getattr(domain, "hostname", "") or "").strip().lower().rstrip(".")
+        if getattr(domain, "status", "") == "live" and hostname:
+            return hostname
+    from pocketpaw_ee.paw_bar.embed import deployed_host
+
+    return deployed_host(str(getattr(site, "url", "") or ""))
+
+
+def _is_public_host(host: str) -> bool:
+    """False for no host, a dotless or ``localhost`` name, or a non-global IP: a
+    site in local mode, which the SSRF rules would refuse anyway."""
+    if not host or "." not in host or host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_global
+    except ValueError:
+        return True
 
 
 async def preview_catalog_import(
@@ -948,16 +1024,22 @@ async def preview_catalog_import(
     resolver: Callable[[str], Awaitable[list[str]]] | None = None,
     politeness_delay: float | None = None,
 ) -> CatalogImportPreview:
-    """Read the products a connected site publishes. Writes nothing, never raises.
+    """Read the products a site publishes. Writes nothing, never raises.
 
+    A connected site is read on its verified origin with every reader; a hosted
+    Paw Site on ``hosted_host(site)`` with the generic reader only.
     ``transport`` / ``resolver`` / ``politeness_delay`` are test seams, as on
     ``foreign_grounding.harvest_foreign_site``.
     """
-    if not getattr(site, "foreign_origin", False):
-        return _failed("not_connected_site")
-    host, reason = await crawlable_origin(site)
-    if reason:
-        return _failed(reason)
+    hosted = not getattr(site, "foreign_origin", False)
+    if hosted:
+        host = hosted_host(site)
+        if not _is_public_host(host):
+            return _failed("site_not_deployed")
+    else:
+        host, reason = await crawlable_origin(site)
+        if reason:
+            return _failed(reason)
     fetcher = SafeFetcher(
         total_byte_cap=IMPORT_BYTE_CAP,
         timeout_sec=_FETCH_TIMEOUT_SEC,
@@ -970,7 +1052,7 @@ async def preview_catalog_import(
     backstop = IMPORT_WALL_CLOCK_SEC + IMPORT_BACKSTOP_GRACE_SEC
     try:
         async with asyncio.timeout(backstop):
-            return await _preview(run)
+            return await _preview(run, platforms=not hosted)
     except TimeoutError:
         # Ahead of the catch-all: asyncio.timeout's TimeoutError is an Exception.
         # Only a fetch that overran its own timeout lands here; the soft
@@ -996,6 +1078,7 @@ __all__ = [
     "ImportedProduct",
     "ParsedProducts",
     "detect_platform",
+    "hosted_host",
     "parse_jsonld_products",
     "parse_og_product",
     "parse_shopify_products",
