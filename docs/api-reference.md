@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-01 (feat/partners-foundation, PH-1) — added "Paw Partners —
+  profile and clients": GET /partners/me, client CRUD under /partners/clients,
+  and the platform-operator PUT/DELETE /admin/partners/{workspace_id}. An active
+  partner profile turns site billing on for that workspace.
 Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
   startup (and then every 30 minutes with the cloud scheduler on); the owner
   using their own listing doesn't raise `remix_count`.
@@ -966,6 +970,40 @@ Returns `404` for a missing or cross-tenant pocket, `403` when the caller can't
 read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site,
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
+
+## Paw Partners — profile and clients
+
+A partner is a workspace that resells sites to local shops. A **client** is a
+shop-owner record inside the partner's workspace (not a workspace, not a user).
+All paths are under `/api/v1`. Errors use the standard CloudError JSON shape.
+
+### `GET /partners/me`
+
+The caller's workspace partner profile: `status` (`applied` | `active` |
+`suspended`), `tier`, `footer_name`, `billing_country` (ISO-2), `founding`,
+`joined_at`. **404** when the workspace is not a partner.
+
+### `GET /partners/clients` · `POST /partners/clients`
+
+List (newest first) or create clients. Create body: `name`, `whatsapp` (E.164,
+`^\+[1-9]\d{7,14}$`), optional `whatsapp_opt_in_at`, `gstin`, `notes`. Returns
+the client (`id`, `workspace_id`, fields, `created_at`, `updated_at`); create is
+**201**. **403** `partner.not_active` unless the workspace has an ACTIVE profile.
+
+### `PATCH /partners/clients/{client_id}` · `DELETE /partners/clients/{client_id}`
+
+Partial update (only sent fields change) or delete (**204**). Same 403 rule; a
+client from another workspace is **404**.
+
+### `PUT /admin/partners/{workspace_id}` · `DELETE /admin/partners/{workspace_id}`
+
+Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
+session cookie). PUT body: `status`, `footer_name`, optional `tier` (default
+`bronze`), `billing_country` (default `IN`, upper-cased), `founding`,
+`joined_at` (kept from the previous profile when omitted). PUT `null` or DELETE
+clears the profile. **Billing effect:** while the profile is `active`, the
+per-site billing seams (`billing.enforcement.sites_enforced`) enforce for that
+workspace even with `billing_enforced` and `sites_billing_enforced` off.
 
 ## Site templates
 
