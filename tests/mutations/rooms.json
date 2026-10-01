@@ -1,0 +1,83 @@
+[
+  {
+    "label": "rooms: resolution gate dropped, a raw id falls through to get_messages (membership + workspace)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/rooms.py",
+    "find": "    matches = _resolve(await _visible_rooms(workspace_id, user_id), ref, user_id)\n",
+    "replace": "    matches = _resolve(await _visible_rooms(workspace_id, user_id), ref, user_id) or [\n        {\"_id\": ref.strip(), \"name\": ref, \"type\": \"public\", \"members\": [], \"agents\": []}\n    ]\n",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: workspace scope dropped from the visible-room query",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "            \"workspace\": workspace_id,\n            \"archived\": False,\n            \"type\": {\"$ne\": MEETING_GROUP_TYPE},\n            \"$or\": [",
+    "replace": "            \"archived\": False,\n            \"type\": {\"$ne\": MEETING_GROUP_TYPE},\n            \"$or\": [",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: membership check dropped from the visible-room query",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "                {\"members\": user_id},",
+    "replace": "                {\"type\": {\"$in\": [\"private\", \"dm\", \"channel\"]}},",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: workspace-membership fail-closed check dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/rooms.py",
+    "find": "    if await _get_member_role(workspace_id, user_id) is None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: read limit no longer capped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/rooms.py",
+    "find": "    limit = _clamp(args.get(\"limit\"), READ_DEFAULT_LIMIT, READ_MAX_LIMIT)",
+    "replace": "    limit = _clamp(args.get(\"limit\"), READ_DEFAULT_LIMIT, 10_000)",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: per-message text cap dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/rooms.py",
+    "find": "\"text\": text[:MAX_MESSAGE_CHARS] + ",
+    "replace": "\"text\": text + ",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: total payload budget dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/rooms.py",
+    "find": "total + len(messages[keep_from - 1][\"text\"]) <= MAX_TOTAL_CHARS",
+    "replace": "True",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: untrusted-content notice dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/rooms.py",
+    "find": "            \"notice\": UNTRUSTED_NOTICE,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  },
+  {
+    "label": "rooms: leaks onto the public concierge allow-list",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "        deny_mcp_tool_ids=_CONCIERGE_DENY,\n        allow_mcp_tool_ids=allow,",
+    "replace": "        deny_mcp_tool_ids=_CONCIERGE_DENY,\n        allow_mcp_tool_ids=allow | {\"mcp__pocketpaw_rooms__read_room\"},",
+    "tests": [
+      "tests/ee/agent/test_rooms_mcp_server.py"
+    ]
+  }
+]
