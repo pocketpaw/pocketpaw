@@ -251,6 +251,7 @@ from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
@@ -264,6 +265,10 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.notification_outbox import (
+    NotificationOutboxItem,
+    NotificationRateMarker,
+)
 from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -451,6 +456,9 @@ __all__ = [
     "Message",
     "Notification",
     "NotificationDeliveryConfig",
+    "NotificationOutboxItem",
+    "NotificationRateMarker",
+    "SiteNotificationSettings",
     "NotificationSource",
     "OAuthAccount",
     "Payment",
@@ -522,6 +530,13 @@ def get_all_documents():
         # Per-workspace external-delivery config (Slack + generic webhook).
         # Only ``ee.cloud.notifications`` service/delivery import it.
         NotificationDeliveryConfig,
+        # External-delivery outbox (email / signed webhook / Slack). Only
+        # ``ee.cloud.notifications.outbox`` reads or writes it.
+        NotificationOutboxItem,
+        NotificationRateMarker,
+        # Per-site owner-notification settings. Only
+        # ``ee.cloud.leads.notification_settings`` writes it.
+        SiteNotificationSettings,
         FileObj,
         FileUpload,
         FileFolder,

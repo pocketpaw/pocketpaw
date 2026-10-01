@@ -1,25 +1,27 @@
 # ee/pocketpaw_ee/cloud/models/notification_delivery.py
-# Created: 2026-07-08 (feat/external-alerting-delivery) — Per-workspace external
-# notification delivery configuration. Backs Criterion 1 of external alerting:
-# a cloud notification (today WebSocket-only / in-app) can now ALSO fan out to a
-# Slack incoming-webhook and/or a generic HTTPS webhook. One row per workspace;
-# the ``workspace`` key is Indexed unique so the read/upsert path stays O(1)
-# (mirrors BeltWorkspaceConfig / ForesightWorkspaceConfig).
+# Per-workspace external notification delivery config: a Slack incoming-webhook
+# URL, a generic HTTPS webhook URL (signed, see ``notifications.webhook_signing``),
+# a master ``enabled`` switch and per-kind ``routes``. One row per workspace; the
+# ``workspace`` key is Indexed unique so read/upsert stays O(1).
 #
-# Only ``ee.cloud.notifications.service`` WRITES this doc (upsert via the PUT
-# /notifications/delivery-config route) and only ``ee.cloud.notifications``
-# (service + delivery) READS it — same single-owner discipline the other
-# per-workspace config docs use, pinned by the import-linter "Notifications"
-# contract (router/dto/domain may never import this module).
+# Only ``ee.cloud.notifications`` reads or writes this doc (service writes the
+# config; the outbox bumps the webhook failure counter). The import-linter
+# "Notifications" contract keeps router/dto/domain off it.
 #
-# Routing: ``routes`` maps a notification kind -> the sink names it should reach
-# ("slack", "webhook"). The default (empty ``routes`` OR a kind absent from it)
-# is deliver-to-every-configured-sink when ``enabled`` is True. A present entry
-# NARROWS delivery of that kind to the named sinks. The shape is
-# extension-additive: a third sink ("email" via the gmail connector) layers on
-# as a new optional URL field + a new sink name with safe defaults.
+# Routing: ``routes`` maps a notification kind to the sink names it should reach
+# ("slack", "webhook"). An empty ``routes``, or a kind absent from it, delivers to
+# every configured sink while ``enabled`` is True; a present entry narrows it.
+#
+# The webhook signing secret is Fernet-encrypted (``webhook_secret_enc``), minted
+# when a URL is first saved or changed, and shown to the admin once. A webhook
+# saved before signing existed has no secret and keeps delivering unsigned. On
+# rotation the old secret stays in ``webhook_secret_prev_enc`` and co-signs for
+# a grace window. After 10 consecutive dead deliveries the webhook is switched
+# off (``webhook_disabled_at``) until it is saved again.
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from beanie import Indexed
 from pydantic import Field
@@ -42,6 +44,9 @@ class NotificationDeliveryConfig(TimestampedDocument):
         regardless of the URLs (a workspace can save URLs but keep them dark).
       - ``routes`` — optional per-kind narrowing (see module docstring). Default
         empty => deliver every kind to every configured sink.
+      - ``webhook_secret_enc`` — Fernet ciphertext of the HMAC signing secret.
+      - ``webhook_failure_count`` / ``webhook_disabled_at`` — consecutive dead
+        webhook deliveries, and when the webhook was switched off for them.
       - ``createdAt`` / ``updatedAt`` — inherited from
         :class:`TimestampedDocument`.
 
@@ -54,9 +59,14 @@ class NotificationDeliveryConfig(TimestampedDocument):
     webhook_url: str | None = None
     enabled: bool = False
     routes: dict[str, list[str]] = Field(default_factory=dict)
+    webhook_secret_enc: str = ""
+    # The secret a rotation replaced, still signing until the grace window ends.
+    webhook_secret_prev_enc: str = ""
+    webhook_secret_rotated_at: datetime | None = None
+    webhook_failure_count: int = 0
+    webhook_disabled_at: datetime | None = None
 
     class Settings:
         name = "notification_delivery_configs"
         # ``workspace`` already carries a unique single-field index from the
-        # ``Indexed(..., unique=True)`` annotation; the upsert path uses it
-        # directly. No composite indexes needed in v1.
+        # ``Indexed(..., unique=True)`` annotation; the upsert path uses it.

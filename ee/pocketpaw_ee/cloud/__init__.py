@@ -471,6 +471,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
+    from pocketpaw_ee.cloud.leads.notifications_router import (
+        router as lead_notifications_router,
+    )
     from pocketpaw_ee.cloud.leads.router import router as leads_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.member_day_digest.router import router as member_day_digest_router
@@ -536,6 +539,9 @@ def mount_cloud(app: FastAPI) -> None:
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
     # workspace-scoped) for the Leads view.
     app.include_router(leads_router, prefix="/api/v1")
+    # Per-site owner notifications: recipients + confirm link, per-event sinks,
+    # signed site webhook, send-test. Admin-gated; the confirm link is public.
+    app.include_router(lead_notifications_router, prefix="/api/v1")
     # Growth — G-1 prospect store (/growth outbound engine, first slice).
     # License-gated, workspace-scoped CRUD under /growth/prospects; cross-tenant
     # ids 404 inside the service. Later slices add ingestion, drafts, and

@@ -72,6 +72,10 @@ _EXEMPT_PATHS: Final = (
     "/api/v1/auth/request-verify-token",
     "/api/v1/auth/verify",
     "/api/v1/auth/sso/callback",
+    # The emailed lead-notification confirm link: the path token IS the
+    # credential and the handler never reads the session, so a stray paw_auth
+    # cookie must not turn the button's plain form POST into a 403.
+    "/api/v1/lead-notifications/confirm",
     "/health",
 )
 _EXEMPT_SUBTREES: Final = tuple(p + "/" for p in _EXEMPT_PATHS)

@@ -429,6 +429,15 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper start failed: %s", exc)
 
+        # Notification outbox: sends queued owner email / signed webhooks /
+        # Slack, retrying with backoff. Safe on every process (atomic claims).
+        try:
+            from pocketpaw_ee.cloud.notifications.outbox import start_outbox_sweeper
+
+            await start_outbox_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification outbox sweeper start failed: %s", exc)
+
         # Cross-process bus/WS bridge consumer. Tier 2's arq worker can't
         # reach this process's InProcessBus or WsManager directly; it XADDs
         # envelopes to a shared Redis stream and the consumer dispatches
@@ -519,6 +528,13 @@ class CloudLifecycleHook:
             await stop_run_sweeper()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper stop failed: %s", exc)
+
+        try:
+            from pocketpaw_ee.cloud.notifications.outbox import stop_outbox_sweeper
+
+            await stop_outbox_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification outbox sweeper stop failed: %s", exc)
 
         try:
             await stop_xproc_consumer()

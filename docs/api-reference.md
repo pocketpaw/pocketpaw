@@ -3269,6 +3269,261 @@ published from it, rather than cascading — a cascade from there would bypass t
 export, so the one path that can destroy a site stays the one path that preserves its
 data first. Delete the site, then the pocket.
 
+## Owner notifications — email, signed webhooks, per-site recipients
+
+A captured lead, and a concierge handoff, reach the site's owner through three
+sinks: the in-app bell plus OS push, email (Cloudflare Email Service), and a
+signed webhook. Email and webhooks never run on the request that caused them:
+they are queued in the `notification_outbox` collection and a background
+sweeper sends them, retrying after 1 m, 5 m, 30 m, 2 h and 6 h before giving up.
+Slack deliveries go through the same queue. Each send has a hard 30 s deadline
+(an endpoint that doesn't answer in time counts as a failed try), and email is
+worked separately from webhooks and Slack, so a slow webhook never holds mail up.
+
+Push lock-screen text stays generic. Email and webhook payloads carry the
+lead itself (name, email, phone, message, every captured property, site name,
+form type and source), loaded when the delivery is sent.
+
+### Per-site settings
+
+Every route below is workspace-scoped (the caller's active workspace) and needs
+`notifications.manage` (workspace owner or admin). A member gets `403`; a site in
+another workspace is a `404`.
+
+#### `GET /sites/{site_id}/lead-notifications`
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "configured": false,
+  "include_owner": true,
+  "owner_email": "owner@acme.com",
+  "owner_email_status": "verified",
+  "emails": [
+    {"email": "team@acme.com", "status": "pending", "added_at": "…", "confirmed_at": null}
+  ],
+  "webhook_url": null,
+  "has_webhook_secret": false,
+  "webhook_secret": null,
+  "webhook_disabled_at": null,
+  "webhook_failure_count": 0,
+  "events": {
+    "lead_captured": ["email", "push"],
+    "handoff": ["email", "push"],
+    "booking": ["email", "push"]
+  },
+  "email_enabled": true
+}
+```
+
+A site that was never configured reads as the default: the workspace owner's
+account email, with `email` + `push` for every event. `owner_email_status` is
+`verified` when the account has verified that address (it gets mail with no
+extra step), or else `pending_confirm` until the owner clicks the same confirm
+link an added recipient gets, then `confirmed`. A lead sends that link
+automatically (at most once a day per site), and `POST .../recipients` with the
+owner's address re-sends it, under the same rate limits. `status` is `pending`
+(waiting for the confirm click), `confirmed`, or `bounced` (the mail provider
+reported a permanent bounce; re-add the address to try again). `email_enabled`
+is false while the server has no Cloudflare email credentials.
+
+#### `PUT /sites/{site_id}/lead-notifications`
+
+Partial update; omitted fields are kept.
+
+```json
+{
+  "include_owner": true,
+  "events": {"lead_captured": ["email", "push", "webhook"]},
+  "webhook_url": "https://hooks.example.com/paw",
+  "clear_webhook": false
+}
+```
+
+Sinks are `email`, `push` and `webhook`. `push` covers the bell row and the OS
+push together (every bell row is pushed). A `webhook_url` is checked against
+SSRF (https only, any port 1-65535, and every address the host resolves to must
+be globally routable, which also rules out 100.64.0.0/10; a failure is `403
+notifications.invalid_webhook_url` or `webhooks.private_address`). A NEW URL's
+signing secret comes back **once**, in this response's `webhook_secret`; later
+reads return `null`. Any save that names a webhook URL, the same one included,
+re-arms a webhook that was switched off.
+
+#### `POST /sites/{site_id}/lead-notifications/webhook-secret`
+
+Rotates the site webhook's signing secret and re-arms the webhook. The new
+secret comes back once in `webhook_secret`. For 24 hours after a rotation the
+old secret also signs (see "Webhook payload and signing"). `404` when the site
+has no webhook.
+
+#### `POST /sites/{site_id}/lead-notifications/recipients`
+
+Body `{"email": "team@acme.com"}`. Adds the address unconfirmed and emails it a
+confirm link that works for 7 days. Nothing else is sent to it until it is
+confirmed. At most 5 extra addresses per site (`422
+lead_notifications.too_many_recipients`); `422 lead_notifications.email_disabled`
+when the server can't send email; `422 lead_notifications.public_url_unset` in
+production when `POCKETPAW_PUBLIC_BASE_URL` is unset. Re-adding a pending
+address sends a fresh link and voids the old one. Confirm emails are limited to
+one per address per site every 30 minutes (`429
+lead_notifications.confirm_rate_limited`; removing and re-adding the address
+doesn't reset this) and 50 per workspace per day (`429
+lead_notifications.confirm_daily_cap`).
+
+#### `DELETE /sites/{site_id}/lead-notifications/recipients/{email}`
+
+Removes the address. Mail already queued for it is dropped at send time.
+
+#### `POST /sites/{site_id}/lead-notifications/test`
+
+Queues a test email to every address that may receive mail now and a test
+delivery (`type: "notification.test"`) to the site webhook. Returns
+`{"emails": ["owner@acme.com"], "webhook": true}`.
+
+#### `GET` / `POST /lead-notifications/confirm/{token}` (public)
+
+The link in the confirm email; the token is the credential, so no session is
+needed. `GET` only shows a page with a "Confirm this address" button and
+changes nothing, so mail scanners and link previews that fetch the link can't
+confirm on someone's behalf. The button `POST`s to the same path, which
+confirms (repeating it is harmless). The POST needs no session and no CSRF
+token: the path token is the credential. Both answer `400` when the link expired,
+was replaced by a newer one, or the address was removed, and both send
+`Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
+### Routing
+
+| Sink | Lead captured | Concierge handoff |
+|---|---|---|
+| `push` | bell + push to the workspace owner and admins | bell + push to the workspace owner |
+| `email` | the full lead; `reply_to` is the visitor's email when valid | a short notice linking to the conversation |
+| `webhook` | the site webhook, `type: "lead.captured"` | the site webhook, `type: "concierge.handoff"` |
+
+The workspace config (`/notifications/delivery-config`) stays the fallback: its
+Slack sink gets every site event (subject to its `routes`), and its webhook gets
+the event when the site has no webhook of its own. Each lead is delivered once
+per sink, not once per admin. A site event sent to the WORKSPACE webhook also
+carries the deprecated flat fields (`kind` = `lead_captured` /
+`paw_bar_needs_human`, `title`, `body`, `workspace_id`, `recipient_id: null`,
+`actor_id: null`) so receivers that filter on `kind` keep working. Three things
+still differ from a plain `notification.created` delivery: `id` is the event id
+(`evt_…`), not a notification id; `recipient_id` is `null`; and there is ONE
+delivery per event, where the old webhook received one per notified admin.
+Site webhooks get the envelope only.
+
+### Workspace webhook
+
+`GET` / `PUT /notifications/delivery-config` (admin) now sign the generic
+webhook the same way. The `PUT` response carries `webhook_secret` once, when a
+new URL (or a URL that had no secret) is saved; reads return
+`has_webhook_secret` instead. Any `PUT` naming a webhook URL re-arms it.
+`POST /notifications/delivery-config/webhook-secret` rotates it (returned once,
+old secret co-signs for 24 hours).
+
+A webhook saved before signing existed has no secret. It keeps receiving
+deliveries exactly as before, **unsigned**, and the config reports
+`"signed": false` so the settings screen can say "unsigned: rotate the secret to
+sign it". Saving it or rotating its secret turns signing on.
+Plain notifications arrive as `type: "notification.created"`. For
+compatibility with receivers built before the envelope, the old flat fields are
+also kept at the top level of the body:
+
+```json
+{
+  "id": "68f0c2…",
+  "type": "notification.created",
+  "created_at": "2026-10-01T09:30:00+00:00",
+  "data": {"id": "68f0c2…", "workspace_id": "…", "recipient_id": "…", "actor_id": null,
+           "kind": "mention", "title": "…", "body": "…"},
+  "workspace_id": "…", "recipient_id": "…", "actor_id": null,
+  "kind": "mention", "title": "…", "body": "…"
+}
+```
+
+The top-level `workspace_id`, `recipient_id`, `actor_id`, `kind`, `title` and
+`body` are **deprecated**: read them from `data`. They will be removed in a
+later release. There is no key clash: `id` is the notification id in both
+shapes (it is also the event id for this type, since each notification is
+delivered once per webhook). Every other event type (`lead.captured`,
+`concierge.handoff`, `notification.test`), and everything sent to a site
+webhook, uses the envelope only: `{id, type, created_at, data}`.
+
+### Webhook payload and signing
+
+```http
+POST /your/endpoint
+Content-Type: application/json
+X-Paw-Timestamp: 1700000000
+X-Paw-Signature: v1=<hex HMAC-SHA256(secret, "1700000000.<raw body>")>
+                 (v1=<new>,v1=<old> for 24 hours after a secret rotation)
+
+{"id":"evt_…","type":"lead.captured","created_at":"2026-10-01T09:30:00+00:00",
+ "data":{"id":"…","site_id":"…","site_name":"Bright Smile","form_type":"lead",
+         "name":"Priya","email":"priya@x.com","phone":"","message":"…",
+         "properties":{…},"source":{"kind":"form","form_type":"lead","origin":"…",
+         "origin_unrecognized":false,"conversation_ref":""},"created_at":"…"}}
+```
+
+`id` is the same on every retry of one delivery, so dedupe on it. Any non-2xx
+answer (redirects are not followed), or no complete answer within 30 s, is
+retried on the schedule above. Only the status code matters: a reply body is
+read up to 1 MB and the rest is ignored. The host is resolved and checked when
+each delivery is sent and the connection is pinned to the checked address, on a
+fresh connection per delivery (never one reused from another host); if DNS
+fails nothing is sent and the delivery is retried. After 10 deliveries in a row
+that ran out of retries, the webhook is switched off (`webhook_disabled_at`)
+until its URL is saved again or its secret rotated.
+
+To verify, recompute the HMAC over the timestamp header, a `.`, and the raw
+request body (before any JSON parsing), compare in constant time, and reject a
+timestamp more than 5 minutes old so a captured delivery can't be replayed:
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, timestamp: str, raw_body: bytes, signature: str) -> bool:
+    if abs(time.time() - int(timestamp)) > 300:
+        return False
+    expected = hmac.new(secret.encode(), timestamp.encode() + b"." + raw_body,
+                        hashlib.sha256).hexdigest()
+    return any(
+        part.strip().startswith("v1=") and hmac.compare_digest(part.strip()[3:], expected)
+        for part in signature.split(",")
+    )
+```
+
+Test vector: secret `whsec_test`, timestamp `1700000000`, body
+`{"id":"evt_1","type":"lead.captured"}` gives
+`v1=35aea954dafaba38bb223bdd493656857236540655f31dc96809ce7e59e0abe9`.
+
+### Email configuration
+
+| Variable | Purpose |
+|---|---|
+| `POCKETPAW_CF_EMAIL_ACCOUNT_ID` | Cloudflare account that owns the sending domain. |
+| `POCKETPAW_CF_EMAIL_API_TOKEN` | API token with permission to send email. Secret, never logged. |
+| `POCKETPAW_CF_EMAIL_FROM` | From address on the onboarded domain, e.g. `notifications@example.com`. |
+| `POCKETPAW_CF_EMAIL_FROM_NAME` | Display name. Default `PocketPaw`. |
+| `POCKETPAW_FRONTEND_BASE_URL` | Links to the lead and to notification settings. |
+| `POCKETPAW_PUBLIC_BASE_URL` | The confirm link points at this API origin. |
+
+Email is off, and the server logs that once, until the first three are set.
+Mail goes out through `POST /client/v4/accounts/{account_id}/email/sending/send`.
+A `429` or `5xx` from Cloudflare is retried. So are `401` and `403` (a bad token,
+or sending disabled on the account): those are fixed by an operator, not by
+dropping the mail. The server logs them at error level for operators, and the
+workspace owner/admins get one notice a day (kind `owner_email_failing`) saying
+lead email is delayed, the platform team has been alerted and queued mail will
+be retried. `400`/`422` (a bad message) are not retried.
+
+One-time ops step per sending domain, which adds the SPF and DKIM records
+(the domain must use Cloudflare DNS):
+
+```bash
+npx wrangler email sending enable example.com
+npx wrangler email sending dns get example.com   # check the records
+```
+
 ## Ship — Managed Deploys
 
 SHIP-3. The `/api/v1/ship` surface behind the /ship console: a workspace

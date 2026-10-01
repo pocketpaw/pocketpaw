@@ -1,8 +1,8 @@
 # tests/cloud/chat/test_send_message_fanout.py
 # Guards the send_message notification fan-out: notifications are written with
 # one insert_many per kind, the workspace delivery config is read once per
-# message, external webhook delivery runs in the background (the request does
-# not wait on a slow sink), recipients are unchanged, and a message with the
+# message, external deliveries are queued in the background (the request does
+# not wait on the outbox), recipients are unchanged, and a message with the
 # startup bus handlers registered bumps message_count and writes each mention
 # notification exactly once.
 
@@ -16,7 +16,7 @@ from pocketpaw_ee.cloud.chat import message_service
 from pocketpaw_ee.cloud.chat.schemas import SendMessageRequest
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
-from pocketpaw_ee.cloud.notifications import delivery
+from pocketpaw_ee.cloud.notifications import delivery, outbox
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -85,6 +85,12 @@ async def test_notifications_are_batched_and_recipients_unchanged(
 async def test_external_delivery_is_off_the_request_and_reads_config_once(
     mongo_db, recording_bus, monkeypatch, _no_mention_bump
 ):
+    from pocketpaw_ee.cloud.audit import webhooks as audit_webhooks
+
+    async def _public(_hostname):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(audit_webhooks, "_resolve_addresses", _public)
     await notifications_service.set_delivery_config(
         "w1", slack_webhook_url="", webhook_url=WEBHOOK_URL, enabled=True, routes={}
     )
@@ -99,26 +105,28 @@ async def test_external_delivery_is_off_the_request_and_reads_config_once(
         return await real_load(workspace_id)
 
     gate = asyncio.Event()
-    posted: list[tuple[str, str]] = []
+    queued: list[tuple[str, str]] = []
+    real_enqueue = outbox.enqueue_many
 
-    async def slow_post(_client, _sink, _url, notification):
-        await gate.wait()  # a sink that hangs until the test releases it
-        posted.append((notification.kind, notification.recipient_id))
+    async def slow_enqueue(rows):
+        await gate.wait()  # an outbox write that hangs until the test releases it
+        queued.extend((r["kind"], r["payload"]["data"]["recipient_id"]) for r in rows)
+        return await real_enqueue(rows)
 
     monkeypatch.setattr(delivery, "_load_config", counting_load)
-    monkeypatch.setattr(delivery, "_post_one", slow_post)
+    monkeypatch.setattr(outbox, "enqueue_many", slow_enqueue)
 
     body = SendMessageRequest(
         content="hi all", mentions=[{"type": "everyone", "id": "", "display_name": "@everyone"}]
     )
-    # Returns while every sink is still hung: delivery is not on the request path.
+    # Returns while the enqueue is still hung: delivery is not on the request path.
     await asyncio.wait_for(message_service.send_message(str(group.id), "sender", body), 2)
-    assert posted == []
+    assert queued == []
 
     gate.set()
     await _drain_delivery()
     assert loads == 1  # one config read for the whole message, not one per member
-    assert sorted(posted) == [
+    assert sorted(queued) == [
         ("mention", "u2"),
         ("mention", "u3"),
         ("message", "u2"),
