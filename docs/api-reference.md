@@ -3278,9 +3278,12 @@ another workspace is a `404`.
 ```
 
 A site that was never configured reads as the default: the workspace owner's
-account email, with `email` + `push` for every event. The owner's address only
-gets mail while the account email is verified; `owner_email_status` is
-`unverified` otherwise. `status` is `pending`
+account email, with `email` + `push` for every event. `owner_email_status` is
+`verified` when the account has verified that address (it gets mail with no
+extra step), or else `pending_confirm` until the owner clicks the same confirm
+link an added recipient gets, then `confirmed`. A lead sends that link
+automatically (at most once a day per site), and `POST .../recipients` with the
+owner's address re-sends it, under the same rate limits. `status` is `pending`
 (waiting for the confirm click), `confirmed`, or `bounced` (the mail provider
 reported a permanent bounce; re-add the address to try again). `email_enabled`
 is false while the server has no Cloudflare email credentials.
@@ -3300,8 +3303,8 @@ Partial update; omitted fields are kept.
 
 Sinks are `email`, `push` and `webhook`. `push` covers the bell row and the OS
 push together (every bell row is pushed). A `webhook_url` is checked against
-SSRF (https only, and every address the host resolves to must be globally
-routable, which also rules out 100.64.0.0/10; a failure is `403
+SSRF (https only, any port 1-65535, and every address the host resolves to must
+be globally routable, which also rules out 100.64.0.0/10; a failure is `403
 notifications.invalid_webhook_url` or `webhooks.private_address`). A NEW URL's
 signing secret comes back **once**, in this response's `webhook_secret`; later
 reads return `null`. Any save that names a webhook URL, the same one included,
@@ -3324,7 +3327,8 @@ when the server can't send email; `422 lead_notifications.public_url_unset` in
 production when `POCKETPAW_PUBLIC_BASE_URL` is unset. Re-adding a pending
 address sends a fresh link and voids the old one. Confirm emails are limited to
 one per address per site every 30 minutes (`429
-lead_notifications.confirm_rate_limited`) and 50 per workspace per day (`429
+lead_notifications.confirm_rate_limited`; removing and re-adding the address
+doesn't reset this) and 50 per workspace per day (`429
 lead_notifications.confirm_daily_cap`).
 
 #### `DELETE /sites/{site_id}/lead-notifications/recipients/{email}`
@@ -3343,7 +3347,8 @@ The link in the confirm email; the token is the credential, so no session is
 needed. `GET` only shows a page with a "Confirm this address" button and
 changes nothing, so mail scanners and link previews that fetch the link can't
 confirm on someone's behalf. The button `POST`s to the same path, which
-confirms (repeating it is harmless). Both answer `400` when the link expired,
+confirms (repeating it is harmless). The POST needs no session and no CSRF
+token: the path token is the credential. Both answer `400` when the link expired,
 was replaced by a newer one, or the address was removed, and both send
 `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 
@@ -3361,8 +3366,11 @@ the event when the site has no webhook of its own. Each lead is delivered once
 per sink, not once per admin. A site event sent to the WORKSPACE webhook also
 carries the deprecated flat fields (`kind` = `lead_captured` /
 `paw_bar_needs_human`, `title`, `body`, `workspace_id`, `recipient_id: null`,
-`actor_id: null`) so receivers that filter on `kind` keep working; its `id` is
-the event id. Site webhooks get the envelope only.
+`actor_id: null`) so receivers that filter on `kind` keep working. Three things
+still differ from a plain `notification.created` delivery: `id` is the event id
+(`evt_…`), not a notification id; `recipient_id` is `null`; and there is ONE
+delivery per event, where the old webhook received one per notified admin.
+Site webhooks get the envelope only.
 
 ### Workspace webhook
 
@@ -3419,8 +3427,10 @@ X-Paw-Signature: v1=<hex HMAC-SHA256(secret, "1700000000.<raw body>")>
 
 `id` is the same on every retry of one delivery, so dedupe on it. Any non-2xx
 answer (redirects are not followed), or no complete answer within 30 s, is
-retried on the schedule above. The host is resolved and checked when each
-delivery is sent and the connection is pinned to the checked address; if DNS
+retried on the schedule above. Only the status code matters: a reply body is
+read up to 1 MB and the rest is ignored. The host is resolved and checked when
+each delivery is sent and the connection is pinned to the checked address, on a
+fresh connection per delivery (never one reused from another host); if DNS
 fails nothing is sent and the delivery is retried. After 10 deliveries in a row
 that ran out of retries, the webhook is switched off (`webhook_disabled_at`)
 until its URL is saved again or its secret rotated.
@@ -3462,9 +3472,10 @@ Email is off, and the server logs that once, until the first three are set.
 Mail goes out through `POST /client/v4/accounts/{account_id}/email/sending/send`.
 A `429` or `5xx` from Cloudflare is retried. So are `401` and `403` (a bad token,
 or sending disabled on the account): those are fixed by an operator, not by
-dropping the mail, and they ring the workspace owner/admins once a day with
-"Owner email is failing" (kind `owner_email_failing`). `400`/`422` (a bad
-message) are not retried.
+dropping the mail. The server logs them at error level for operators, and the
+workspace owner/admins get one notice a day (kind `owner_email_failing`) saying
+lead email is delayed, the platform team has been alerted and queued mail will
+be retried. `400`/`422` (a bad message) are not retried.
 
 One-time ops step per sending domain, which adds the SPF and DKIM records
 (the domain must use Cloudflare DNS):
