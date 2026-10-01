@@ -459,6 +459,35 @@ async def test_the_runtime_gate_still_refuses_pending(mongo_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_plan_half_answers_for_a_concierge_that_is_switched_off(mongo_db, monkeypatch):
+    """``concierge_plan_entitled`` is the PLAN and nothing else.
+
+    Owner surfaces read it to tell "your plan does not include it" from "it is
+    off". A paid concierge that is created but switched off is entitled and not
+    available; reading ``concierge_available`` as the plan told that owner to
+    restore a plan they already had.
+    """
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_plan_entitled
+
+    _enforce(monkeypatch, on=True)
+    paid_off = await _site(
+        plan_tier=_concierge_tier(), subscription_status="active", concierge_enabled=False
+    )
+    assert concierge_plan_entitled(paid_off) is True
+    assert concierge_available(paid_off) is False, "the control: the switch still gates"
+
+    unpaid = await _site(
+        signed_key="site_key_" + "b" * 24,
+        plan_tier=_concierge_tier(),
+        subscription_status="none",
+    )
+    assert concierge_plan_entitled(unpaid) is False
+
+    _enforce(monkeypatch, on=False)
+    assert concierge_plan_entitled(unpaid) is True, "no paywall, every plan sells it"
+
+
+@pytest.mark.asyncio
 async def test_an_unentitled_site_publishes_without_the_snippet(bound_widget, monkeypatch):
     """The strongest form of "remove the bar": the built page never carries it.
 

@@ -1698,4 +1698,13 @@ class ForeignConciergeResponse(BaseModel):
     # ``auth.site_keys.concierge_available``, the predicate every public paw-bar
     # seam asks. Kept beside the snippet because they can disagree for one
     # legitimate reason: entitled and enabled, but the agent is not bound yet.
+    # It is the AND of the three fields below, so it cannot say WHICH is missing;
+    # a panel explaining an empty snippet reads those instead.
     concierge_available: bool = False
+    # Does the plan sell a concierge (``site_keys.concierge_plan_entitled``)?
+    # True whenever sites billing is not enforced.
+    concierge_entitled: bool = False
+    # The owner's switch. CR-12 creates every concierge switched OFF.
+    concierge_enabled: bool = False
+    # Has the owner created the concierge (``site_keys.concierge_exists``)?
+    concierge_exists: bool = False
