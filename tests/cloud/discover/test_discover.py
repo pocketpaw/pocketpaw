@@ -1,0 +1,374 @@
+# tests/cloud/discover/test_discover.py — the Discover index (DS-1 part 1).
+#
+# Created 2026-10-01 (feat/discover-index). Pins: the SiteTemplate Discover fields
+# (kind, audiences, live_url) default and round-trip through save / PATCH; the
+# event sync (public save lists, PATCH private / delete / report-hide unlist, and a
+# re-sync never unhides a listing Discover reports hid); ``list_public`` (only
+# unhidden rows, every filter, cursor paging); the public wire is exactly the
+# allow-list; ``use_listing`` returns the source result and counts one remix;
+# ``report_listing`` (one per user, owner refused, third reporter hides);
+# ``reindex`` idempotence; and the source registry.
+#
+# ``RecordingBus.subscribe`` is a no-op (tests/cloud/conftest.py), so the sync
+# tests replay the recorded site-template events into the real handler.
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud.discover import listeners, service, service_admin, sources
+from pocketpaw_ee.cloud.discover.dto import PublicListingResponse
+from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
+from pocketpaw_ee.cloud.models.pocket import Pocket as PocketDoc
+from pocketpaw_ee.cloud.models.site import Site
+from pocketpaw_ee.cloud.models.site_template import SiteTemplate
+from pocketpaw_ee.cloud.site_templates import service as templates
+
+pytestmark = pytest.mark.usefixtures("mongo_db")
+
+WS = "w1"
+OTHER_WS = "w2"
+OWNER = "u1"
+STRANGERS = ("u3", "u4", "u5")
+
+PUBLIC_KEYS = {
+    "id",
+    "source",
+    "kind",
+    "title",
+    "description",
+    "audiences",
+    "featured",
+    "preview_image_url",
+    "live_url",
+    "remix_count",
+    "created_at",
+}
+SYNCED = {"site_template.saved", "site_template.updated", "site_template.deleted"}
+
+
+@pytest.fixture(autouse=True)
+def sites_plan(monkeypatch) -> None:
+    """Synthetic workspaces have no Workspace doc: answer the Sites plan gate."""
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    async def _plan(_workspace_id: str) -> str:
+        return "go"
+
+    monkeypatch.setattr(workspace_service, "get_workspace_plan", _plan)
+
+
+@pytest.fixture(autouse=True)
+def builtin_sources() -> None:
+    sources.register_builtin_sources()
+
+
+async def _site(**fields: Any) -> PocketDoc:
+    doc = PocketDoc(
+        workspace=WS,
+        type="site",
+        owner=OWNER,
+        name="Bakery",
+        engine="svelte",
+        pattern="landing",
+        source={"src/routes/+page.svelte": "<h1>Bakery</h1>\n"},
+        rippleSpec={"ui": {"type": "flex", "id": "root", "children": []}},
+        keeps_client_bundle=True,
+        **fields,
+    )
+    await doc.insert()
+    return doc
+
+
+async def _template(src: PocketDoc | None = None, **body: Any) -> dict:
+    src = src or await _site()
+    body.setdefault("name", "Bakery template")
+    return await templates.save_template(WS, OWNER, {"pocket_id": str(src.id), **body})
+
+
+async def _sync(bus) -> None:
+    """Deliver the recorded site-template events to the Discover handler."""
+    events, bus.events[:] = list(bus.events), []
+    for event in events:
+        if event.type in SYNCED:
+            await listeners.on_site_template_changed(event)
+
+
+async def _listing(template_id: str) -> DiscoverListing | None:
+    return await DiscoverListing.find_one({"source": "site_template", "source_id": template_id})
+
+
+async def _upsert(source_id: str, **fields: Any) -> str:
+    fields.setdefault("workspace", WS)
+    fields.setdefault("owner", OWNER)
+    fields.setdefault("kind", "site")
+    fields.setdefault("title", f"Listing {source_id}")
+    return await service_admin.upsert_from_source("site_template", source_id, fields)
+
+
+# ---------------------------------------------------------------------------
+# SiteTemplate Discover fields
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_template_discover_fields_default_and_round_trip() -> None:
+    plain = await _template()
+    assert (plain["kind"], plain["audiences"], plain["live_url"]) == ("site", [], None)
+
+    src = await _site()
+    await Site(
+        workspace=WS, pocket_id=str(src.id), owner=OWNER, deployed=True, url="https://b.example"
+    ).insert()
+    meta = await _template(src, kind="tool", audiences=["shop", "design"])
+    assert (meta["kind"], meta["audiences"], meta["live_url"]) == (
+        "tool",
+        ["shop", "design"],
+        "https://b.example",
+    )
+
+    patched = await templates.update_template(
+        WS, OWNER, meta["id"], {"kind": "game", "audiences": ["fun"]}
+    )
+    assert (patched["kind"], patched["audiences"]) == ("game", ["fun"])
+    doc = await SiteTemplate.get(meta["id"])
+    assert (doc.kind, doc.audiences, doc.live_url) == ("game", ["fun"], "https://b.example")
+    listed = (await templates.list_templates(WS, OWNER, {}))["templates"]
+    assert {t["id"]: t["kind"] for t in listed}[meta["id"]] == "game"
+
+
+@pytest.mark.asyncio
+async def test_live_url_is_none_for_an_undeployed_site() -> None:
+    src = await _site()
+    await Site(
+        workspace=WS, pocket_id=str(src.id), owner=OWNER, deployed=False, url="https://draft"
+    ).insert()
+    assert (await _template(src))["live_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# Event sync
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_follows_visibility_and_delete(recording_bus) -> None:
+    private = await _template()
+    await _sync(recording_bus)
+    assert await _listing(private["id"]) is None
+
+    meta = await _template(visibility="public", kind="tool", audiences=["shop"], description="d")
+    await _sync(recording_bus)
+    listing = await _listing(meta["id"])
+    assert listing is not None
+    assert (listing.title, listing.description, listing.kind, listing.audiences) == (
+        "Bakery template",
+        "d",
+        "tool",
+        ["shop"],
+    )
+    assert (listing.workspace, listing.owner) == (WS, OWNER)
+
+    await templates.update_template(WS, OWNER, meta["id"], {"visibility": "private"})
+    await _sync(recording_bus)
+    assert await _listing(meta["id"]) is None
+
+    await templates.update_template(WS, OWNER, meta["id"], {"visibility": "public"})
+    await _sync(recording_bus)
+    assert await _listing(meta["id"]) is not None
+
+    await templates.delete_template(WS, OWNER, meta["id"])
+    await _sync(recording_bus)
+    assert await _listing(meta["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_removes_a_report_hidden_template(recording_bus) -> None:
+    meta = await _template(visibility="public")
+    await _sync(recording_bus)
+    assert await _listing(meta["id"]) is not None
+    for user in STRANGERS:
+        await templates.report_template(OTHER_WS, user, meta["id"], {"reason": "spam"})
+    await _sync(recording_bus)
+    assert await _listing(meta["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_resync_keeps_discover_owned_state(recording_bus) -> None:
+    meta = await _template(visibility="public")
+    await _sync(recording_bus)
+    listing = await _listing(meta["id"])
+    for user in STRANGERS:
+        await service.report_listing(OTHER_WS, user, str(listing.id), {"reason": "spam"})
+    await service_admin.set_featured(str(listing.id), True)
+
+    await templates.update_template(WS, OWNER, meta["id"], {"name": "Renamed"})
+    await _sync(recording_bus)
+    after = await _listing(meta["id"])
+    assert after.title == "Renamed"
+    assert (after.hidden, after.featured, len(after.reports)) == (True, True, 3)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_sync_is_swallowed(monkeypatch) -> None:
+    async def _boom(_template_id: str) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(service_admin, "sync_site_template", _boom)
+    event = type("E", (), {"type": "site_template.saved", "data": {"id": "x"}})()
+    await listeners.on_site_template_changed(event)  # no raise
+
+
+def test_register_discover_listeners_subscribes_the_three_events(monkeypatch) -> None:
+    subscribed: list[str] = []
+
+    class _Bus:
+        def subscribe(self, event_type: str, _handler) -> None:
+            subscribed.append(event_type)
+
+    monkeypatch.setattr(listeners, "get_bus", lambda: _Bus())
+    listeners.register_discover_listeners()
+    assert set(subscribed) == SYNCED
+
+
+# ---------------------------------------------------------------------------
+# Public reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_public_filters_and_hides() -> None:
+    await _upsert("a", kind="site", title="Corner Bakery", audiences=["shop"])
+    b = await _upsert("b", kind="tool", title="Color tool", audiences=["design", "everyone"])
+    await _upsert("c", kind="game", title="Snake", description="A BAKERY game", audiences=["fun"])
+    hidden = await _upsert("d", kind="site", title="Hidden bakery")
+    await service_admin.set_hidden(hidden, True)
+    await service_admin.set_featured(b, True)
+
+    async def titles(**query: Any) -> list[str]:
+        return [i["title"] for i in (await service_admin.list_public(query))["items"]]
+
+    assert await titles() == ["Snake", "Color tool", "Corner Bakery"]
+    assert await titles(kind="tool") == ["Color tool"]
+    assert await titles(audience="design") == ["Color tool"]
+    assert await titles(q="bakery") == ["Snake", "Corner Bakery"]
+    assert await titles(q="b.k") == []  # regex metacharacters are escaped
+    assert await titles(featured=True) == ["Color tool"]
+    assert await titles(source="other") == []
+    with pytest.raises(NotFound):
+        await service_admin.get_public(hidden)
+
+
+@pytest.mark.asyncio
+async def test_list_public_cursor_pages() -> None:
+    for i in range(5):
+        await _upsert(f"p{i}", title=f"T{i}")
+    first = await service_admin.list_public({"limit": 2})
+    second = await service_admin.list_public({"limit": 2, "cursor": first["next_cursor"]})
+    third = await service_admin.list_public({"limit": 2, "cursor": second["next_cursor"]})
+    seen = [i["title"] for page in (first, second, third) for i in page["items"]]
+    assert seen == ["T4", "T3", "T2", "T1", "T0"]
+    assert third["next_cursor"] is None
+    with pytest.raises(ValidationError):
+        await service_admin.list_public({"cursor": "nope"})
+
+
+@pytest.mark.asyncio
+async def test_public_wire_is_exactly_the_allow_list() -> None:
+    listing_id = await _upsert("a", audiences=["shop"], live_url="https://x")
+    card = await service_admin.get_public(listing_id)
+    assert set(card) == PUBLIC_KEYS == set(PublicListingResponse.model_fields)
+    assert (await service_admin.list_public())["items"] == [card]
+
+
+# ---------------------------------------------------------------------------
+# use / report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_use_listing_returns_the_pocket_and_counts_once(recording_bus) -> None:
+    meta = await _template(visibility="public")
+    await _sync(recording_bus)
+    listing_id = str((await _listing(meta["id"])).id)
+
+    used = await service.use_listing(OTHER_WS, "u3", listing_id, name="My bakery")
+    assert used["source"] == "site_template"
+    pocket = await PocketDoc.get(used["result"]["pocket_id"])
+    assert (pocket.workspace, pocket.owner, pocket.name) == (OTHER_WS, "u3", "My bakery")
+    assert (await DiscoverListing.get(listing_id)).remix_count == 1
+    assert [e.type for e in recording_bus.events].count("discover.listing.used") == 1
+
+    await service_admin.set_hidden(listing_id, True)
+    with pytest.raises(NotFound):
+        await service.use_listing(OTHER_WS, "u3", listing_id)
+    assert (await DiscoverListing.get(listing_id)).remix_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_use_does_not_count() -> None:
+    # A listing whose template is gone (the sync has not caught up yet).
+    listing_id = await _upsert("650000000000000000000000")
+    with pytest.raises(NotFound):
+        await service.use_listing(OTHER_WS, "u3", listing_id)
+    assert (await DiscoverListing.get(listing_id)).remix_count == 0
+
+
+@pytest.mark.asyncio
+async def test_report_listing_hides_at_three_distinct_reporters() -> None:
+    listing_id = await _upsert("a")
+    with pytest.raises(Forbidden):
+        await service.report_listing(WS, OWNER, listing_id, {"reason": "mine"})
+
+    await service.report_listing(OTHER_WS, "u3", listing_id, {"reason": "spam"})
+    await service.report_listing(OTHER_WS, "u3", listing_id, {"reason": "again"})
+    await service.report_listing(OTHER_WS, "u4", listing_id, {"reason": "spam"})
+    doc = await DiscoverListing.get(listing_id)
+    assert ([r["user"] for r in doc.reports], doc.hidden) == (["u3", "u4"], False)
+
+    await service.report_listing(OTHER_WS, "u5", listing_id, {"reason": "spam"})
+    assert (await DiscoverListing.get(listing_id)).hidden is True
+    with pytest.raises(NotFound):
+        await service.report_listing(OTHER_WS, "u6", listing_id, {"reason": "late"})
+
+
+# ---------------------------------------------------------------------------
+# reindex / registry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reindex_is_idempotent() -> None:
+    public = await _template(visibility="public", kind="game")
+    await _template(name="Private one")
+    await _upsert("650000000000000000000000")  # a template that no longer exists
+
+    first = await service_admin.reindex("site_template")
+    rows = await DiscoverListing.find_all().to_list()
+    second = await service_admin.reindex("site_template")
+    again = await DiscoverListing.find_all().to_list()
+
+    assert (first["upserted"], first["removed"]) == (1, 1)
+    assert (second["upserted"], second["removed"]) == (1, 0)
+    assert [(r.source_id, r.kind) for r in rows] == [(public["id"], "game")]
+    assert [(r.id, r.source_id) for r in again] == [(rows[0].id, public["id"])]
+    with pytest.raises(ValidationError):
+        await service_admin.reindex("nope")
+
+
+@pytest.mark.asyncio
+async def test_registry(monkeypatch) -> None:
+    monkeypatch.setattr(sources, "_SOURCES", dict(sources._SOURCES))
+    with pytest.raises(NotFound):
+        sources.get_source("nope")
+
+    async def _use(*_args: Any) -> dict:
+        return {"x": 1}
+
+    sources.register_source(sources.DiscoverSource("probe", frozenset({"tool"}), _use))
+    sources.register_source(sources.DiscoverSource("probe", frozenset({"game"}), _use))
+    assert sources.get_source("probe").kinds == frozenset({"game"})
+    assert [s.name for s in sources.registered_sources()].count("probe") == 1
+    with pytest.raises(ValidationError):
+        await _upsert("a", kind="widget")
