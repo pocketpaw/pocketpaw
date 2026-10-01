@@ -70,6 +70,9 @@
 #   already persisted; the worst case is a chain without a policy →
 #   human causation, which the Slice 4 reconciler / abandon-sweeper
 #   will eventually surface).
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -387,9 +390,6 @@ async def _persist_parked_policy_event_id(
     emits without a causation_id (the chain still folds; causation_id
     is optional on EventEntry).
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -403,13 +403,7 @@ async def _persist_parked_policy_event_id(
         blob["parked_policy_event_id"] = event_id
         params["_pocket_write"] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "failed to persist parked_policy_event_id=%s onto action %s — "

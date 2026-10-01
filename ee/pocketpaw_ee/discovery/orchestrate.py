@@ -61,6 +61,9 @@
 # Async orchestration; depends on the SZD-4 DiscoveryRun + the SZD-5a/5b propose
 # helpers + the OSS InstinctStore (for the supersede sweep). No direct Fabric /
 # Pocket writes.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -637,9 +640,6 @@ async def _stamp_discovery_marker(
     un-marked (it just won't be auto-superseded by the next run; a human can still
     reject it). A failed stamp must NOT fail the proposal that was already filed.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -653,13 +653,7 @@ async def _stamp_discovery_marker(
         blob[DISCOVERY_MARKER_KEY] = dict(marker)
         params[blob_key] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — marker stamp is best-effort
         logger.warning(
             "discovery: failed to stamp discovery_run marker onto action %s "
