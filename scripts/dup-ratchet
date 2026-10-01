@@ -3,6 +3,9 @@
 # function-level duplicates that import-linter can't see. Each row pins today's
 # count; the check fails only when a count GROWS. Consolidating copies is
 # welcome: lower max_count in the same PR. Stdlib only.
+# Updated 2026-10-01: added the FabricJournalStore( construction row, which
+# closes the `from pocketpaw.fabric import FabricJournalStore` re-export gap
+# the Fabric import-linter contract can't see.
 # Plan: paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md §3.
 """Fail on new copies of primitives we already have.
 
@@ -142,6 +145,14 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         (),
         11,
         "one iter_nodes(spec) generator in src/pocketpaw/ripple",
+    ),
+    (
+        "FabricJournalStore construction",
+        r"FabricJournalStore\(",
+        ("*",),
+        ("src/pocketpaw/fabric/*",),
+        1,
+        "journal writes go through the shared journal_store helper; see canonicalization plan A1",
     ),
 ]
 

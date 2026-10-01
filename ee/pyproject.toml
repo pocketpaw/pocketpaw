@@ -440,8 +440,11 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 #   uv run lint-imports --config ee/pyproject.toml
 [tool.importlinter]
 root_packages = ["pocketpaw_ee"]
-# Needed by "Email — no SMTP" (forbids the stdlib `smtplib`). Only top-level
-# external packages can be forbidden; internal contracts are unaffected.
+# Why include_external_packages: "Email — no SMTP" forbids the stdlib
+# `smtplib`, and import-linter only accepts an external forbidden module when
+# the graph is built with externals (top-level names only, never submodules).
+# Every other contract here forbids internal modules, so turning this on
+# changes nothing for them; all 38 pre-existing contracts stay KEPT with it.
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -1188,6 +1191,11 @@ forbidden_modules = [
 # today's violators in ignore_imports; that list is the ratchet and only shrinks.
 # unmatched alerting is off so PRs that remove a violator merge in any order.
 # Plan: paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md §3.
+# Known gap: this checks direct imports of the submodule only. A writer that
+# does `from pocketpaw_ee.cloud.models import InstinctApproval` goes through the
+# models/__init__ re-export and is NOT caught. A grep ratchet can't cover it
+# either, because the domain class shares the name. Nothing uses that path
+# today; review new InstinctApproval imports by hand until the queue is retired.
 [[tool.importlinter.contracts]]
 name = "InstinctApprovals — no new writers"
 type = "forbidden"
