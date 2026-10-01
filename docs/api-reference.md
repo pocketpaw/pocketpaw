@@ -2,6 +2,11 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/discover-index, hardening) — Discover reports are
+  limited to 10 an hour per user (`429 discover.report_rate_limited`); a
+  Discover hide also hides the source template (so re-publishing it doesn't
+  bring it back) and keeps a hidden listing; staff unhide ignores that
+  listing's earlier reporters; a 30-minute reindex refreshes `live_url`.
 Updated: 2026-10-01 (feat/discover-index) — Site templates gain `kind`,
   `audiences` (accepted on save and PATCH) and `live_url` (the source site's
   deployed URL) on every response; public, unhidden templates are mirrored into
@@ -1024,9 +1029,13 @@ still succeeds. Deleting the template removes the image.
 `kind` (`site`, the default, `tool` or `game`) and `audiences` (any of `shop`,
 `design`, `everyone`, `fun`; default `[]`) describe the template for the
 Discover index. `live_url` is the source site's live URL when that site is
-deployed, else `null`; it is re-read on save and on every `PATCH`. A public
-template that reports have not hidden is listed in Discover; making it private,
-hiding it or deleting it removes the listing.
+deployed, else `null`; it is re-read on save, on every `PATCH` and on every
+Discover reindex (every 30 minutes when the cloud scheduler is on), so a renamed
+or unpublished site's URL catches up within one reindex. A public template is
+listed in Discover; making it private or deleting it removes the listing. A
+hidden template (reported here or on Discover) keeps a hidden listing, and a
+hide from either side hides both: the template leaves the public list and `use`,
+and changing its visibility back to `public` keeps it hidden.
 
 Events: `site_template.saved`, `site_template.updated`, `site_template.deleted`
 (to the owner) and `site_template.used` (to the user who used it, with the new
@@ -1135,8 +1144,8 @@ Errors: `404` for a template you can't see or that is not public; `403`
 ## Discover — Public Index
 
 One index of shareable items from every workspace, newest first. Today the only
-source is public site templates (`source: "site_template"`); a template that is
-public and not report-hidden has one listing. The two reads need no sign-in and
+source is public site templates (`source: "site_template"`); a public template
+has one listing, hidden when the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
 return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
 user and act in the caller's active workspace.
@@ -1197,11 +1206,17 @@ or hidden listing.
 ```
 
 Response `204`, no body. One report per user counts; a repeat changes nothing.
+Each user may send 10 reports an hour across all listings (repeats included);
+past that the route returns `429` with `discover.report_rate_limited`.
 Three different reporters hide the listing from both public reads, `use` and
-`report`. There is no unhide endpoint yet; when staff unhide a listing its
-reports are cleared. Errors: `404` for a
-missing or hidden listing; `403` (`discover.own_listing`) for the owner
-reporting their own.
+`report`, and hide the source item too: a hidden site template also leaves the
+/sites public list, and making it private and public again does not relist it.
+There is no unhide endpoint yet. When staff unhide a listing, the source item is
+unhidden with it, the reports are cleared, and the users who reported it are
+recorded so their later reports on that listing are ignored. Hiding, unhiding,
+featuring and `use` each write an audit row. Errors: `404` for a missing or
+hidden listing; `403` (`discover.own_listing`) for the owner reporting their
+own; `429` past the report limit.
 
 ## Skills — Per-Backend API Skills
 
