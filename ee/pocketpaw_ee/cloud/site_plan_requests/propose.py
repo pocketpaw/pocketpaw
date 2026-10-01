@@ -4,6 +4,9 @@
 # Created: 2026-09-01 (feat/sites-plan-purchase-request).
 # Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
 #   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
+# Updated: 2026-10-02 (feat/partners-sell, PH-2): partner-only rungs are refused
+# here like an unknown key — they are sold only through /partners/sell, and the
+# request card would quote their display-only monthly price.
 #
 # The propose half of the site-plan request gate. A member publishes and asks for
 # a paid tier; ``sites.buy_plan`` (ADMIN) refuses them; instead of ending there,
@@ -159,7 +162,8 @@ async def propose_site_plan_request(
     # to be told why.
     canonical_key = site_plans.canonical_site_tier_key(str(site_plan_key or ""))
     tier = site_plans.site_scoped_tier(canonical_key)
-    if tier is None:
+    # Partner-only rungs are sold through /partners/sell, never requested (PH-2).
+    if tier is None or tier.partner_only:
         raise ValueError(f"'{site_plan_key}' is not a plan a single site can be put on")
     monthly_price_usd = int(tier.monthly_price_usd or 0)
 

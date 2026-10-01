@@ -36,7 +36,8 @@
 #   period of a site tier costs THIS workspace. Monthly rungs return
 #   ``monthly_price_usd`` unchanged; partner-only rungs return
 #   ``site_plans.partner_price_usd`` for the partner's billing country. The three
-#   site charge sites (publish purchase, tier change, renewal) read it.
+#   site charge sites (publish purchase, tier change, renewal) read it. With no
+#   partner profile a renewal keeps the price last paid; otherwise it refuses.
 # Updated 2026-06-24 (security): enforce USD before granting; correct the
 #   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
 # Updated 2026-06-24 (BC-7, the Subscription primitive): added ``subscribe`` (open
@@ -206,7 +207,7 @@ from beanie.operators import In
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from pocketpaw_ee.cloud._core.errors import NoActiveSubscription, ValidationError
+from pocketpaw_ee.cloud._core.errors import ConflictError, NoActiveSubscription, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     BillingSubscriptionGranted,
@@ -581,14 +582,30 @@ async def charge_site_plan_credits(
     )
 
 
-async def site_plan_price_usd(tier: Any, workspace_id: str | None) -> int:
+async def site_plan_charged(
+    *, workspace_id: str, site_id: str, tier_key: str, period_start: datetime
+) -> bool:
+    """Has this (site, tier, day) already been debited? A replayed debit is a silent
+    no-op, so a caller that grants a NEW period on the charge asks first."""
+    return await credits_service.is_recorded(
+        workspace_id, site_plan_debit_key(site_id, tier_key, period_start)
+    )
+
+
+async def site_plan_price_usd(
+    tier: Any, workspace_id: str | None, *, last_paid_usd: int | None = None
+) -> int:
     """Whole USD for one PERIOD of ``tier``, as charged to ``workspace_id``.
 
     A monthly rung costs its ``monthly_price_usd`` — byte-identical to before. A
     partner-only rung is priced per the partner's ``billing_country``. Read the
     profile directly, not via ``enforcement.load_partner``: that one returns None
-    whenever the global flags enforce. No profile (partner since removed) prices
-    at the default country rather than failing a renewal.
+    whenever the global flags enforce.
+
+    NO PROFILE (the partner was removed) never guesses a country. A renewal passes
+    ``last_paid_usd`` — what the site paid for this same tier last period — and
+    keeps that price; with nothing to keep, this refuses rather than charging a
+    default the partner never agreed to.
     """
     if not getattr(tier, "partner_only", False):
         return int(tier.monthly_price_usd)
@@ -596,7 +613,15 @@ async def site_plan_price_usd(tier: Any, workspace_id: str | None) -> int:
     from pocketpaw_ee.cloud.partners import service as partners_service
 
     profile = await partners_service.partner_profile_for_workspace(workspace_id)
-    return site_plans.partner_price_usd(tier.key, getattr(profile, "billing_country", "") or "")
+    if profile is None:
+        if last_paid_usd and last_paid_usd > 0:
+            return int(last_paid_usd)
+        raise ConflictError(
+            "billing.partner_price_unknown",
+            f"Site tier '{tier.key}' is sold by Paw Partners and this workspace has no "
+            "partner profile to price it.",
+        )
+    return site_plans.partner_price_usd(tier.key, profile.billing_country)
 
 
 async def subscribe(

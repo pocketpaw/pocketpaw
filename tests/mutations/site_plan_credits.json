@@ -2,8 +2,8 @@
   {
     "label": "the purchase debit becomes overdraftable (an empty wallet buys a paid site)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "        allow_negative=False,\n    )\n\n\nasync def site_plan_price_usd(",
-    "replace": "        allow_negative=True,\n    )\n\n\nasync def site_plan_price_usd(",
+    "find": "        allow_negative=False,\n    )\n\n\nasync def site_plan_charged(",
+    "replace": "        allow_negative=True,\n    )\n\n\nasync def site_plan_charged(",
     "tests": [
       "tests/cloud/sites/test_credits_publish.py::test_an_empty_wallet_leaves_the_site_unpaid_and_undeployed"
     ]
@@ -110,7 +110,7 @@
   {
     "label": "a tier change is priced at the new tier's full month again",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        delta_usd = price_usd - already_paid_usd",
+    "find": "        delta_usd = price_usd if _period_change else price_usd - already_paid_usd",
     "replace": "        delta_usd = price_usd",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing",
@@ -147,8 +147,8 @@
   {
     "label": "the paid high-water mark falls on a downgrade",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            existing_doc.period_paid_usd = price_usd\n        # A move to a LONGER",
-    "replace": "        existing_doc.period_paid_usd = price_usd\n        # A move to a LONGER",
+    "find": "            if _period_change:\n                existing_doc.renewal_date = _now + relativedelta(months=tier.period_months)\n",
+    "replace": "            if _period_change:\n                existing_doc.renewal_date = _now + relativedelta(months=tier.period_months)\n        existing_doc.period_paid_usd = price_usd\n",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_returning_to_a_tier_already_bought_this_period_is_free",
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing"

@@ -4,8 +4,11 @@
 # Updated 2026-10-02 (feat/partners-sell, PH-2): partner-only yearly rungs. The
 # publish path refuses them outside an ACTIVE partner workspace and never
 # plan-carries them; every charge site prices one period via
-# ``billing.service.site_plan_price_usd``; renewals stamp ``tier.period_months``;
-# a tier change to a LONGER period restarts it today. A refused charge on an
+# ``billing.service.site_plan_price_usd``; renewals stamp ``tier.period_months``.
+# A tier change to a DIFFERENT period length is a fresh purchase (full price, new
+# period from today); moving to a shorter period while the longer one runs is
+# refused (``sites.period_downgrade_refused``), and a same-day re-buy that would
+# replay the debit is refused (``sites.plan_already_bought_today``). A refused charge on an
 # already-deployed site now restores its prior billing fields (it used to be left
 # "pending" on the unpaid tier). New: ``sell_site_plan`` (the partner sale — it
 # runs ``publish_pocket``, the same purchase + redeploy path, then stamps
@@ -8340,22 +8343,62 @@ async def publish_pocket(
         # One period of the new tier for THIS workspace — ``monthly_price_usd`` for
         # a monthly rung, the partner's country price for a partner-only one.
         price_usd = await _billing_service.site_plan_price_usd(tier, workspace_id)
-        delta_usd = price_usd - already_paid_usd
+        _now = datetime.now(UTC)
+        _held_months = _existing_tier.period_months if _existing_tier is not None else 1
+        # A DIFFERENT PERIOD LENGTH IS NOT A RE-PRICE (PH-2). ``period_paid_usd`` is a
+        # high-water mark for ONE period; comparing a year's price against a
+        # month's hands out time (year -> month -> year restarted a year for free,
+        # year -> a cheaper monthly rung got the concierge for nothing).
+        #
+        #   * Shorter period while the longer one is still running: REFUSED. The
+        #     year was bought; it runs out first, then the site can move.
+        #   * Any other period change is a FRESH PURCHASE: the full new price, a
+        #     new ``period_paid_usd`` and a new period starting today. An unused
+        #     monthly remainder is not credited (no proration, as everywhere here).
+        #   * Same period: today's rule — pay the gap, keep the date.
+        _period_change = tier.period_months != _held_months
+        if _period_change and tier.period_months < _held_months:
+            _paid_through = existing_doc.renewal_date
+            if _paid_through is None or _as_utc(_paid_through) > _now:
+                _through = (
+                    _as_utc(_paid_through).date().isoformat()
+                    if _paid_through is not None
+                    else "the end of its current period"
+                )
+                raise ConflictError(
+                    "sites.period_downgrade_refused",
+                    f"This site is paid through {_through}. Switch plans when it renews. "
+                    "Nothing has been charged.",
+                )
+        delta_usd = price_usd if _period_change else price_usd - already_paid_usd
+        # A replayed debit is a silent no-op, and a fresh purchase grants a whole
+        # new period — so a same-day re-buy of a tier this site already paid for
+        # today would restart the period for nothing. Refuse it.
+        if _period_change and await _billing_service.site_plan_charged(
+            workspace_id=workspace_id,
+            site_id=str(existing_doc.id),
+            tier_key=tier.key,
+            period_start=_now,
+        ):
+            raise ConflictError(
+                "sites.plan_already_bought_today",
+                "This site already bought this plan today. Try again tomorrow. "
+                "Nothing has been charged.",
+            )
         if delta_usd > 0:
             await _billing_service.charge_site_plan_credits(
                 workspace_id=workspace_id,
                 site_id=str(existing_doc.id),
                 tier_key=tier.key,
                 amount_usd=delta_usd,
-                period_start=datetime.now(UTC),
+                period_start=_now,
                 member_id=user_id,
             )
             existing_doc.period_paid_usd = price_usd
-        # A move to a LONGER period (monthly -> yearly) starts that period today;
-        # the gap charged above is what buys it. A same-or-shorter period keeps the
-        # date — the period already bought runs out first.
-        if _existing_tier is not None and tier.period_months > _existing_tier.period_months:
-            existing_doc.renewal_date = datetime.now(UTC) + relativedelta(months=tier.period_months)
+            # The period restarts ONLY on a fresh purchase that was charged —
+            # never on a change that cost nothing.
+            if _period_change:
+                existing_doc.renewal_date = _now + relativedelta(months=tier.period_months)
         _previous_tier = existing_doc.plan_tier
         existing_doc.plan_tier = tier.key
         # Moving to a different paid tier is a decision to keep paying, so it

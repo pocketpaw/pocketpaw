@@ -5,7 +5,8 @@
 # tier — ``tier.period_months`` (1 for every monthly rung, 12 for the partner-only
 # yearly rungs) — priced by ``billing.service.site_plan_price_usd`` (the partner's
 # country price for partner rungs, ``monthly_price_usd`` otherwise).
-# ``period_paid_usd`` records the amount actually charged. Monthly behaviour is
+# ``period_paid_usd`` records the amount actually charged, and is the price kept
+# if a partner's profile has since been removed. Monthly behaviour is
 # unchanged; partner sites ride this same sweep.
 #
 # Created 2026-09-05 (fix/sites-plan-credits). A paid site now bills against the
@@ -228,7 +229,11 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # partner's country price.
         price_usd = 0
         try:
-            price_usd = await billing_service.site_plan_price_usd(tier, doc.workspace)
+            # The tier is unchanged at renewal, so what this site paid last period
+            # is the price to keep if a partner's profile has since gone.
+            price_usd = await billing_service.site_plan_price_usd(
+                tier, doc.workspace, last_paid_usd=getattr(doc, "period_paid_usd", 0) or 0
+            )
             await billing_service.charge_site_plan_credits(
                 workspace_id=doc.workspace,
                 site_id=site_id,
