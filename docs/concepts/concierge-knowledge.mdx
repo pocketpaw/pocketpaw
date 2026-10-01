@@ -281,8 +281,10 @@ Existing sites stay on `legacy` until an owner changes it.
 - **v2** answers in one streamed model call with **no tools at all**. Before the call it
   searches the same two scopes a legacy run reads (`pocket:<pocket_id>`, then
   `agent:<agent_id>` when the widget has an agent) and puts up to six matching items into
-  the prompt, along with the widget's catalog and declared actions and the recent turns of
-  this conversation. The instructions are a fixed frame: answer only about this site and
+  the prompt, along with the turn's products from the widget's catalog (the whole
+  catalog when it has 50 products or fewer, otherwise the product on the visitor's page
+  and the ones that match the conversation), its declared actions and the recent turns
+  of this conversation. The instructions are a fixed frame: answer only about this site and
   only from that material, write no code, and treat everything in the tagged blocks and
   the visitor's message as data.
 
@@ -315,7 +317,8 @@ backticks) until it closes:
   card that breaks any rule is dropped whole.
 - A `product-card` names catalog ids only. The server fills in each product's name,
   price, currency and image from the widget's catalog, drops ids the catalog does not
-  have, and drops the card when nothing is left. Whatever name or price the model wrote
+  have, and drops the card when nothing is left. Any product in the catalog can be shown,
+  not only the ones the prompt listed. Whatever name or price the model wrote
   is discarded.
 - An older-style `pawbar-card` (`{"kind": "product"}` or `{"kind": "form"}`) still
   works. Product cards in that format are repriced from the catalog the same way; form
