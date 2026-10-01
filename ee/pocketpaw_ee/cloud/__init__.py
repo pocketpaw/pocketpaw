@@ -311,9 +311,8 @@ def mount_cloud(app: FastAPI) -> None:
         router as meetings_webhooks_router,
     )
     from pocketpaw_ee.cloud.meetings.router import router as meetings_router
-    from pocketpaw_ee.cloud.planner.router import router as planner_router
-    from pocketpaw_ee.cloud.partners.router import admin_router as partners_admin_router
     from pocketpaw_ee.cloud.partners.router import router as partners_router
+    from pocketpaw_ee.cloud.planner.router import router as planner_router
     from pocketpaw_ee.cloud.platform.router import router as platform_router
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
@@ -340,9 +339,8 @@ def mount_cloud(app: FastAPI) -> None:
     # by require_platform, never by workspace membership. The prefix IS the
     # audit boundary — see ee/pocketpaw_ee/cloud/platform/router.py.
     app.include_router(platform_router, prefix="/api/v1")
-    # Paw Partners (PH-1): tenant routes + the platform-admin partner switch.
+    # Paw Partners (PH-1) tenant routes; the operator switch lives under /platform.
     app.include_router(partners_router, prefix="/api/v1")
-    app.include_router(partners_admin_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
     # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
     # tenancy/auth oracle every later Web Cursor slice authorizes against.

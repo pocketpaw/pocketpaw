@@ -129,7 +129,7 @@
   {
     "label": "the billing_enforced guard is dropped from the count \u2014 OSS/self-host inherits the cap",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not await sites_enforced_for(getattr(site, \"workspace\", None)):\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.billing import site_plans as _site_plans",
+    "find": "    if not await sites_enforced_for(getattr(site, \"workspace\", None), partner=partner):\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.billing import site_plans as _site_plans",
     "replace": "    from pocketpaw_ee.cloud.billing import site_plans as _site_plans",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_free_site_is_not_capped",

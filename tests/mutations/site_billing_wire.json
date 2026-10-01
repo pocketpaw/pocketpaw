@@ -39,7 +39,7 @@
   {
     "label": "the entitlements read ignores the per-site cap — a full site's button stays enabled and 402s",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    exceeded, _hosts, _limit = await _hostname_cap_exceeded(doc)",
+    "find": "    exceeded, _hosts, _limit = await _hostname_cap_exceeded(doc, partner=partner)",
     "replace": "    exceeded, _hosts, _limit = (False, 0, None)",
     "tests": [
       "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_free_allowance_reads_as_spent_once_this_site_is_full",

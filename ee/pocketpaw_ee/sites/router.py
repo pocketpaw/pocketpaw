@@ -1848,9 +1848,9 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
     workspace_id = str(getattr(site, "workspace", "") or "")
     pocket_id = str(getattr(site, "pocket_id", "") or "")
     site_key = str(getattr(site, "signed_key", "") or "")
-    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+    from pocketpaw_ee.cloud.billing.enforcement import load_partner
 
-    partner = await partner_profile_for_workspace(workspace_id)
+    partner = await load_partner(workspace_id)
     available = bool(concierge_available(site, partner=partner))
     entitled = bool(concierge_plan_entitled(site, partner=partner))
     enabled = bool(getattr(site, "concierge_enabled", False))

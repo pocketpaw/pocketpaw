@@ -5743,10 +5743,11 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         subscription_status=getattr(doc, "subscription_status", None),
         concierge_enabled=bool(getattr(doc, "concierge_enabled", False)),
     )
-    exceeded, _hosts, _limit = await _hostname_cap_exceeded(doc)
-    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+    from pocketpaw_ee.cloud.billing.enforcement import load_partner
 
-    partner = await partner_profile_for_workspace(workspace_id)  # PH-1: match the public seams
+    # PH-1: one partner read serves both gates below, matching the public seams.
+    partner = await load_partner(workspace_id)
+    exceeded, _hosts, _limit = await _hostname_cap_exceeded(doc, partner=partner)
 
     return SiteEntitlementsResponse(
         site_id=site_id,
@@ -6552,7 +6553,7 @@ async def _assert_entitled_to_project_download(site: Any) -> None:
     )
 
 
-async def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
+async def _hostname_cap_exceeded(site: Any, *, partner: Any = ...) -> tuple[bool, int, int | None]:
     """Would this be one hostname too many ON THIS SITE? -> (exceeded, count, limit).
 
     This is the free floor's whole domain allowance: each free site may carry one
@@ -6573,7 +6574,7 @@ async def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
     """
     from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
 
-    if not await sites_enforced_for(getattr(site, "workspace", None)):
+    if not await sites_enforced_for(getattr(site, "workspace", None), partner=partner):
         return (False, 0, None)
 
     from pocketpaw_ee.cloud.billing import site_plans as _site_plans

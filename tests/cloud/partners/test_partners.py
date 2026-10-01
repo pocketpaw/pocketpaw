@@ -9,22 +9,26 @@
 # SOUL_DATA_DIR at tmp_path and clears the default-store cache so nothing can
 # reach a real journal; cross-tenant writes and reads share ONE store; admin PUT
 # writes an audit row; a seam test proves partner billing at site_entitlements.
+# Updated 2026-10-02 (quality review): HTTP-level tests for the operator switch
+# (now /platform/workspaces/{id}/partner) and the client-route action guards,
+# a seam that REFUSES (badge removal), empty-PATCH no-op and GSTIN validation.
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.billing import enforcement
 from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as WorkspaceDoc
-from pocketpaw_ee.cloud.partners import router as partners_router
-from pocketpaw_ee.cloud.partners import service, service_admin
-from pocketpaw_ee.guards.platform import check_platform_action
-from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
+from pocketpaw_ee.cloud.partners import service
 from pydantic import ValidationError as PydanticValidationError
 from soul_protocol.engine.journal import open_journal
 
@@ -62,7 +66,8 @@ def _no_real_journal(tmp_path, monkeypatch):
     service._default_store.cache_clear()
     reset_journal_cache()
     yield
-    service._default_store.cache_clear()
+    # A test may have swapped _default_store for a stub (partners_http).
+    getattr(service._default_store, "cache_clear", lambda: None)()
     reset_journal_cache()
 
 
@@ -161,63 +166,6 @@ async def test_me_is_404_without_a_profile_and_returns_it_with_one(mongo_db) -> 
     assert await service.get_active_profile(_ctx(str(partner.id))) is None
 
 
-# ---------------------------------------------------------------- admin
-
-
-async def test_admin_route_is_guarded_by_the_operator_rung() -> None:
-    routes = {r.path: r for r in partners_router.admin_router.routes}
-    route = routes["/admin/partners/{workspace_id}"]
-    actions = {getattr(d.call, "__platform_action__", None) for d in route.dependant.dependencies}
-    assert "platform.partners.write" in actions
-
-    for role in (None, "support"):
-        with pytest.raises(GuardForbidden):
-            check_platform_action("platform.partners.write", role)
-    check_platform_action("platform.partners.write", "operator")
-
-
-async def test_admin_sets_updates_and_clears_a_partner(mongo_db) -> None:
-    ws = await _workspace("shop")
-    wid = str(ws.id)
-    out = await service_admin.set_partner_profile(
-        workspace_id=wid,
-        body={"status": "active", "footer_name": "Shop Prints", "billing_country": "in"},
-        operator_id="op1",
-    )
-    assert out is not None and out.status == "active" and out.billing_country == "IN"
-    assert await service.get_active_profile(_ctx(wid)) is not None
-    joined = out.joined_at
-
-    out = await service_admin.set_partner_profile(
-        workspace_id=wid,
-        body={"status": "suspended", "footer_name": "Shop Prints"},
-        operator_id="op1",
-    )
-    assert out.status == "suspended"
-    assert out.joined_at.replace(tzinfo=None) == joined.replace(tzinfo=None)
-
-    assert (
-        await service_admin.set_partner_profile(workspace_id=wid, body=None, operator_id="op1")
-        is None
-    )
-    assert (await WorkspaceDoc.get(ws.id)).partner is None
-
-    with pytest.raises(NotFound):
-        await service_admin.set_partner_profile(
-            workspace_id="000000000000000000000000", body=None, operator_id="op1"
-        )
-
-
-async def test_bad_billing_country_rejected(mongo_db) -> None:
-    ws = await _workspace("shop")
-    with pytest.raises(PydanticValidationError):
-        await service_admin.set_partner_profile(
-            workspace_id=str(ws.id),
-            body={"status": "active", "footer_name": "x", "billing_country": "IND"},
-            operator_id="op1",
-        )
-
-
 # ---------------------------------------------------------------- billing
 
 
@@ -274,39 +222,6 @@ async def test_opt_in_timestamp_round_trips(mongo_db, store) -> None:
     assert (await service.get_client(ctx, client_id=out.id, store=store)).whatsapp_opt_in_at == at
 
 
-async def test_admin_put_writes_an_audit_row_and_null_clears(mongo_db) -> None:
-    from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
-    from pocketpaw_ee.cloud.models.user import User as UserDoc
-    from pocketpaw_ee.cloud.partners.dto import PartnerProfileIn
-    from starlette.datastructures import Headers
-    from starlette.requests import Request
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "PUT",
-            "path": "/api/v1/admin/partners/x",
-            "headers": Headers(raw=[(b"user-agent", b"test")]).raw,
-            "query_string": b"",
-            "client": ("10.0.0.5", 1234),
-        }
-    )
-    operator = UserDoc(email="op@paw.test", hashed_password="x", platform_role="operator")
-    await operator.insert()
-    ws = await _workspace("shop")
-    wid = str(ws.id)
-
-    body = PartnerProfileIn(status="active", footer_name="Shop Prints")
-    out = await partners_router.set_partner(wid, body, request, operator)
-    assert out is not None and out.status == "active"
-    assert await partners_router.set_partner(wid, None, request, operator) is None
-    assert (await WorkspaceDoc.get(ws.id)).partner is None
-
-    rows = await PlatformAuditEvent.find_all().to_list()
-    assert [r.action for r in rows] == ["platform.partners.write"] * 2
-    assert all(r.target_workspace == wid and r.status == "applied" for r in rows)
-
-
 async def test_partner_billing_reaches_the_site_entitlements_seam(mongo_db, monkeypatch) -> None:
     """Both global flags off: a free site in an ACTIVE partner workspace is refused the
     concierge at ``site_entitlements``; the same site in a plain workspace is not."""
@@ -344,3 +259,226 @@ async def test_partner_billing_reaches_the_site_entitlements_seam(mongo_db, monk
     )
     assert p_ent.concierge_entitled is False  # enforced: the free floor sells no concierge
     assert n_ent.concierge_entitled is True  # unchanged: no billing, everything entitled
+
+
+async def test_empty_patch_writes_nothing(mongo_db, store, monkeypatch) -> None:
+    ws = await _workspace("acme", "active")
+    ctx = _ctx(str(ws.id))
+    out = await service.create_client(ctx, body={"name": "R", "whatsapp": PHONE}, store=store)
+
+    async def _no_write(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("an empty PATCH must not write")
+
+    monkeypatch.setattr(store, "update", _no_write)
+    assert await service.update_client(ctx, client_id=out.id, body={}, store=store) == out
+
+
+async def test_gstin_is_upper_cased_and_pattern_checked(mongo_db, store) -> None:
+    ws = await _workspace("acme", "active")
+    ctx = _ctx(str(ws.id))
+    out = await service.create_client(
+        ctx, body={"name": "R", "whatsapp": PHONE, "gstin": " 29abcde1234f1z5 "}, store=store
+    )
+    assert out.gstin == "29ABCDE1234F1Z5"
+    with pytest.raises(PydanticValidationError):
+        await service.create_client(
+            ctx, body={"name": "R", "whatsapp": PHONE, "gstin": "29ABCDE1234F1Z"}, store=store
+        )
+
+
+async def test_partner_billing_refuses_badge_removal_at_the_seam(mongo_db, monkeypatch) -> None:
+    """Flags off: a free site in an ACTIVE partner workspace is REFUSED badge removal
+    by ``update_site_branding``; the same request in a plain workspace goes through."""
+    from pocketpaw_ee.cloud._core.errors import BadgeRemovalNotEntitled
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.dto import SiteBrandingUpdate
+
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: SimpleNamespace(
+            billing_enforced=False, sites_billing_enforced=False, dodo_site_products=None
+        ),
+    )
+
+    async def free_site(ws: WorkspaceDoc) -> str:
+        doc = Site(
+            workspace=str(ws.id),
+            pocket_id=f"pk_{ws.slug}",
+            owner="u1",
+            name="Shop",
+            plan_tier=site_plans.BASE_SITE_PLAN_KEY,
+            subscription_status="none",
+            deployed=True,
+        )
+        await doc.insert()
+        return str(doc.id)
+
+    hide = SiteBrandingUpdate(badge_hidden=True)
+    partner = await _workspace("partner", "active")
+    with pytest.raises(BadgeRemovalNotEntitled):
+        await sites_service.update_site_branding(
+            workspace_id=str(partner.id), site_id=await free_site(partner), body=hide
+        )
+    plain = await _workspace("plain")
+    out = await sites_service.update_site_branding(
+        workspace_id=str(plain.id), site_id=await free_site(plain), body=hide
+    )
+    assert out.badge_hidden is True
+
+
+# ---------------------------------------------------------------- HTTP: operator switch
+
+
+async def _operator(role: str) -> Any:
+    from pocketpaw_ee.cloud.models.user import User as UserDoc
+
+    user = UserDoc(email=f"{role}@paw.test", hashed_password="x", platform_role=role)
+    await user.insert()
+    return user
+
+
+@pytest_asyncio.fixture
+async def platform_http(mongo_db):
+    """The real platform router, guard and error handler; only the session user is faked."""
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.platform.router import router as platform_router
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(platform_router, prefix="/api/v1")
+    holder: dict[str, Any] = {}
+    app.dependency_overrides[current_active_user] = lambda: holder["user"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t", cookies={"paw_auth": "session"}
+    ) as c:
+        yield c, holder
+
+
+def _url(wid: str) -> str:
+    return f"/api/v1/platform/workspaces/{wid}/partner"
+
+
+async def test_http_operator_sets_then_clears_a_partner_with_audit(platform_http) -> None:
+    from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
+
+    client, holder = platform_http
+    holder["user"] = await _operator("operator")
+    ws = await _workspace("shop")
+    wid = str(ws.id)
+
+    r = await client.put(
+        _url(wid),
+        json={
+            "status": "active",
+            "footer_name": "Shop Prints",
+            "billing_country": "in",
+            "reason": "signed",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["partner"]["status"] == "active"
+    assert r.json()["partner"]["billing_country"] == "IN"
+    joined = r.json()["partner"]["joined_at"]
+
+    r = await client.put(
+        _url(wid), json={"status": "suspended", "footer_name": "x", "reason": "late"}
+    )
+    assert r.status_code == 200 and r.json()["partner"]["joined_at"] == joined
+
+    r = await client.request("DELETE", _url(wid), json={"reason": "left the program"})
+    assert r.status_code == 200 and r.json()["partner"] is None
+    assert (await WorkspaceDoc.get(ws.id)).partner is None
+
+    rows = await PlatformAuditEvent.find_all().to_list()
+    assert [r.action for r in rows] == ["platform.partners.write"] * 3
+    assert all(r.target_workspace == wid and r.status == "applied" for r in rows)
+
+
+async def test_http_put_requires_a_body_and_a_reason(platform_http) -> None:
+    client, holder = platform_http
+    holder["user"] = await _operator("operator")
+    ws = await _workspace("shop", "active")
+    wid = str(ws.id)
+
+    assert (await client.put(_url(wid))).status_code == 422  # missing body never clears
+    bad = {"status": "active", "footer_name": "x", "billing_country": "IND", "reason": "r"}
+    assert (await client.put(_url(wid), json=bad)).status_code == 422
+    no_reason = {"status": "active", "footer_name": "x", "reason": "  "}
+    assert (await client.put(_url(wid), json=no_reason)).status_code == 422
+    assert (await client.request("DELETE", _url(wid), json={"reason": ""})).status_code == 422
+    assert (await WorkspaceDoc.get(ws.id)).partner.status == "active"  # nothing changed
+
+
+async def test_http_guard_refuses_support_and_bearer(platform_http) -> None:
+    client, holder = platform_http
+    ws = await _workspace("shop")
+    body = {"status": "active", "footer_name": "x", "reason": "r"}
+
+    holder["user"] = await _operator("support")
+    assert (await client.put(_url(str(ws.id)), json=body)).status_code == 403
+
+    holder["user"] = await _operator("operator")
+    r = await client.put(_url(str(ws.id)), json=body, headers={"Authorization": "Bearer t"})
+    assert r.status_code == 403
+    assert (await WorkspaceDoc.get(ws.id)).partner is None
+
+
+async def test_http_missing_workspace_is_404(platform_http) -> None:
+    client, holder = platform_http
+    holder["user"] = await _operator("operator")
+    body = {"status": "active", "footer_name": "x", "reason": "r"}
+    assert (await client.put(_url("000000000000000000000000"), json=body)).status_code == 404
+
+
+# ---------------------------------------------------------------- HTTP: client route guards
+
+
+@pytest_asyncio.fixture
+async def partners_http(mongo_db, store, monkeypatch):
+    """The real partners router with its action guards; user and context are faked."""
+    from pocketpaw_ee.cloud._core.context import request_context
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.partners.router import router
+
+    ws = await _workspace("acme", "active")
+    wid = str(ws.id)
+    holder: dict[str, Any] = {}
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(router, prefix="/api/v1")
+    app.dependency_overrides[current_active_user] = lambda: holder["user"]
+    app.dependency_overrides[current_workspace_id] = lambda: wid
+    app.dependency_overrides[request_context] = lambda: _ctx(wid)
+    monkeypatch.setattr(service, "_default_store", lambda: store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        yield c, holder, wid
+
+
+def _user(workspace_id: str, role: str | None) -> SimpleNamespace:
+    memberships = [SimpleNamespace(workspace=workspace_id, role=role)] if role else []
+    return SimpleNamespace(id="u1", active_workspace=workspace_id, workspaces=memberships)
+
+
+async def test_http_member_can_write_and_read_clients(partners_http) -> None:
+    client, holder, wid = partners_http
+    holder["user"] = _user(wid, "member")
+    r = await client.post("/api/v1/partners/clients", json={"name": "R", "whatsapp": PHONE})
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert (await client.patch(f"/api/v1/partners/clients/{cid}", json={})).status_code == 200
+    assert [c["id"] for c in (await client.get("/api/v1/partners/clients")).json()] == [cid]
+    assert (await client.delete(f"/api/v1/partners/clients/{cid}")).status_code == 204
+
+
+async def test_http_non_member_cannot_read_or_write_clients(partners_http) -> None:
+    client, holder, wid = partners_http
+    holder["user"] = _user(wid, None)
+    r = await client.post("/api/v1/partners/clients", json={"name": "R", "whatsapp": PHONE})
+    assert r.status_code == 403
+    assert (await client.get("/api/v1/partners/clients")).status_code == 403
+    assert (await client.get("/api/v1/partners/me")).status_code == 403

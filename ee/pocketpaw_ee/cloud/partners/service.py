@@ -3,7 +3,9 @@
 # Created 2026-10-01 (feat/partners-foundation, PH-1). Reads the caller's own
 # partner profile and does tenant-scoped CRUD on clients. Client routes require
 # an ACTIVE partner profile (``Forbidden`` otherwise).
-# Updated the same day: clients are Fabric ``Customer`` objects in the org
+# Updated 2026-10-02: PATCH re-reads via the scoped ``_load``; empty PATCH is a
+# no-op; the operator switch moved to ``cloud/platform/partners.py``.
+# Updated 2026-10-01: clients are Fabric ``Customer`` objects in the org
 # journal (``FabricJournalStore``), scope ``workspace:<id>`` = tenancy, copying
 # ``people/service.py``. The journal's ``fabric.object.*`` events ARE the
 # emit-on-write, so no cloud realtime event is fired. Delete = Fabric archive.
@@ -70,6 +72,8 @@ async def partner_profile_for_workspace(workspace_id: str | None) -> PartnerProf
     oid = _oid(workspace_id)
     if oid is None:
         return None
+    # global-read: billing seams and the platform route ask about a workspace by id;
+    # tenant callers reach this only through ``ctx.workspace_id``.
     ws = await _WorkspaceDoc.find_one({"_id": oid, "deleted_at": None})
     return ws.partner if ws is not None else None
 
@@ -137,8 +141,9 @@ def _ours(obj: FabricObject | None) -> bool:
 
 async def _load(fabric: FabricJournalStore, workspace_id: str, client_id: str) -> FabricObject:
     # Scope-filtered: another workspace's id is indistinguishable from not-found.
-    # Typed query (like people.get_person), not ``fabric.get``: ``get`` scans every
-    # object in the scope under a 10k limit, so a busy workspace would 404 its own client.
+    # Typed query (like people.get_person) narrows to customer objects, but it still
+    # scans the in-memory org projection — the same ceiling as ``list_clients``'s
+    # ponytail note.
     result = await fabric.query(
         FabricQuery(type_id=CUSTOMER_TYPE_ID, limit=10_000),
         requester_scopes=_scope(workspace_id),
@@ -212,18 +217,23 @@ async def update_client(
     body = PartnerClientUpdateRequest.model_validate(body)
     workspace_id = await _require_active(ctx)
     fabric = store or _default_store()
-    await _load(fabric, workspace_id, client_id)
+    current = await _load(fabric, workspace_id, client_id)
     changes: dict[str, Any] = {}
     for field, value in body.model_dump(exclude_unset=True).items():
         if field in ("name", "whatsapp", "notes") and value is None:
             continue  # required on the record; null means "leave it"
         changes[field] = _iso(value) if field == "whatsapp_opt_in_at" else value
+    if not changes:
+        # no-event: empty PATCH writes nothing.
+        return _to_out(_client_from_object(current, workspace_id=workspace_id))
     scope = _scope(workspace_id)
-    obj = await fabric.update(client_id, changes, scope=scope, actor=_actor(ctx, scope))
-    if obj is None:
-        raise NotFound("partner_client", client_id)
+    # The return is ignored (as in people/service.py): it is an unscoped, capped
+    # lookup. Re-read through the scoped, typed ``_load`` instead.
+    await fabric.update(client_id, changes, scope=scope, actor=_actor(ctx, scope))
     # no-event: the journal's fabric.object.updated event is the emit-on-write.
-    return _to_out(_client_from_object(obj, workspace_id=workspace_id))
+    return _to_out(
+        _client_from_object(await _load(fabric, workspace_id, client_id), workspace_id=workspace_id)
+    )
 
 
 async def delete_client(

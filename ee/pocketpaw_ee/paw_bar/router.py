@@ -1,7 +1,8 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
 #
 # Updated 2026-10-02 (feat/partners-foundation, PH-1): concierge gates take the
-# site's workspace Paw Partners profile; the frame memo caches it with the Site.
+# site's workspace Paw Partners profile; the frame memo caches it with the Site,
+# and the chat turn passes the key gate's profile into the quota check.
 #
 # PUBLIC (anonymous visitors; the Site's ``signed_key`` is the only credential):
 #   GET /paw-bar/frame (the glass app document: CSP frame-ancestors from the Site's
@@ -1038,14 +1039,14 @@ _frame_site_memo: dict[str, tuple[float, Any]] = {}
 async def _frame_site_lookup(key: str) -> tuple[Any, Any]:
     """``(Site, partner profile)`` memoised for ``_FRAME_SITE_TTL_S`` (the frame only)."""
     from pocketpaw_ee.cloud.auth import site_keys
-    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+    from pocketpaw_ee.cloud.billing.enforcement import load_partner
 
     now = time.monotonic()
     hit = _frame_site_memo.get(key) if isinstance(key, str) else None
     if hit is not None and hit[0] > now:
         return hit[1]
     site = await site_keys.lookup_site_by_key(key)
-    entry = (site, await partner_profile_for_workspace(getattr(site, "workspace", None)))
+    entry = (site, await load_partner(getattr(site, "workspace", None)))
     _frame_site_memo[key] = (now + _FRAME_SITE_TTL_S, entry)
     return entry
 
@@ -1689,7 +1690,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
     """
     try:
         from pocketpaw_ee.cloud.auth.site_keys import concierge_exists, concierge_plan_entitled
-        from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+        from pocketpaw_ee.cloud.billing.enforcement import load_partner
         from pocketpaw_ee.cloud.pockets import service as pockets_service
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.service import _capture_base
@@ -1705,9 +1706,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
             concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
             # The PLAN half only; the switch is passed on its own just above.
             concierge_entitled=bool(
-                concierge_plan_entitled(
-                    site, partner=await partner_profile_for_workspace(workspace_id)
-                )
+                concierge_plan_entitled(site, partner=await load_partner(workspace_id))
             ),
             concierge_exists=concierge_exists(site),
         )
@@ -5348,9 +5347,9 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # still requiring an inline-mode request's Origin to be on ``Site.allowed_origins``.
     # ``_with_site`` hands back the Site the gate already loaded, so step (8) can
     # read the owner's transcript-retention toggle without a second query.
-    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_partner
 
-    ctx, site = await resolve_site_key_with_site(
+    ctx, site, partner = await resolve_site_key_with_partner(
         body.signed_key, origin, body.customer_ref, frame_origin=frame_origin
     )
 
@@ -5485,7 +5484,11 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         )
 
         if await concierge_conversation_quota_exceeded(
-            site, widget_id=body.widget_id, workspace_id=ctx.workspace_id, store=store
+            site,
+            widget_id=body.widget_id,
+            workspace_id=ctx.workspace_id,
+            store=store,
+            partner=partner,  # PH-1: loaded by the key gate above; no second read
         ):
             logger.info(
                 "paw-bar: refusing a NEW conversation for widget %s — the site's "

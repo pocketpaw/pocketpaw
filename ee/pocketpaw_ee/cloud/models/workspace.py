@@ -1,9 +1,11 @@
 """Workspace document — one per deployment/org, and the sub-models embedded in it.
 
 Updated 2026-10-01 (feat/partners-foundation, PH-1): added ``PartnerProfile`` and
-``Workspace.partner``. Set only by the platform admin route in
-``cloud/partners/service_admin.py``; an ``active`` profile turns the per-site
-billing seams on for THIS workspace (``billing.enforcement.sites_enforced``).
+``Workspace.partner``. Set only by the platform route in
+``cloud/platform/partners.py`` (via the workspace service's platform partner writer);
+an ``active`` profile turns the per-site billing seams on for THIS workspace
+(``billing.enforcement.sites_enforced``). Updated 2026-10-02: ``IsoCountry`` is the
+one billing-country validator; ``tier`` is a Literal of the known tiers.
 
 ``Workspace`` carries the tenant's plan, its members' roles, and the embedded
 config below. The sub-models are separated by WHAT THEY ARE, not by who edits
@@ -35,10 +37,10 @@ reads the resolved values and threads them through ``run_action`` →
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from beanie import Indexed
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -193,27 +195,34 @@ class VerifiedDomain(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+def normalize_iso2(v: str) -> str:
+    """Upper-case ISO-3166 alpha-2 country code, or ValueError."""
+    v = v.strip().upper()
+    if len(v) != 2 or not v.isalpha():
+        raise ValueError("billing_country must be an ISO-3166 alpha-2 code")
+    return v
+
+
+# The ONE billing-country validator; the platform write body reuses this type.
+IsoCountry = Annotated[str, AfterValidator(normalize_iso2)]
+PartnerStatus = Literal["applied", "active", "suspended"]
+PartnerTier = Literal["bronze", "silver", "gold"]
+
+
 class PartnerProfile(BaseModel):
     """Paw Partners (PH-1): this workspace resells sites to its own clients.
 
     ``None`` on the workspace = not a partner. Only ``status == "active"`` turns
     on site billing for the workspace; ``applied`` and ``suspended`` do not.
+    Written only by the workspace service's platform partner writer.
     """
 
-    status: Literal["applied", "active", "suspended"]
-    tier: str = "bronze"
-    footer_name: str
-    billing_country: str = "IN"  # ISO-2, upper-case
+    status: PartnerStatus
+    tier: PartnerTier = "bronze"
+    footer_name: str = Field(min_length=1, max_length=120)
+    billing_country: IsoCountry = "IN"
     founding: bool = False
     joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-    @field_validator("billing_country")
-    @classmethod
-    def _iso2(cls, v: str) -> str:
-        v = v.strip().upper()
-        if len(v) != 2 or not v.isalpha():
-            raise ValueError("billing_country must be an ISO-3166 alpha-2 code")
-        return v
 
 
 class Workspace(TimestampedDocument):

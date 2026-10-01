@@ -2,9 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
-Updated: 2026-10-01 (feat/partners-foundation, PH-1) — added "Paw Partners —
+Updated: 2026-10-02 (feat/partners-foundation, PH-1) — added "Paw Partners —
   profile and clients": GET /partners/me, client CRUD under /partners/clients,
-  and the platform-operator PUT /admin/partners/{workspace_id}. An active
+  and the operator PUT/DELETE /platform/workspaces/{workspace_id}/partner. An active
   partner profile turns site billing on for that workspace.
 Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
   startup (and then every 30 minutes with the cloud scheduler on); the owner
@@ -986,24 +986,35 @@ The caller's workspace partner profile: `status` (`applied` | `active` |
 ### `GET /partners/clients` · `POST /partners/clients`
 
 List (newest first) or create clients. Create body: `name`, `whatsapp` (E.164,
-`^\+[1-9]\d{7,14}$`), optional `whatsapp_opt_in_at`, `gstin`, `notes`. Returns
+`^\+[1-9]\d{7,14}$`), optional `whatsapp_opt_in_at`, `gstin` (upper-cased, then the 15-char GSTIN
+pattern), `notes`. Returns
 the client (`id`, `workspace_id`, fields, `created_at`, `updated_at`); create is
-**201**. **403** `partner.not_active` unless the workspace has an ACTIVE profile.
+**201**. **403** `partner.not_active` unless the workspace has an ACTIVE profile. Reads
+need the `fabric.read` workspace action and writes `fabric.write` (member+); a
+non-member is **403**.
 
 ### `PATCH /partners/clients/{client_id}` · `DELETE /partners/clients/{client_id}`
 
-Partial update (only sent fields change) or delete (**204**). Same 403 rule; a
-client from another workspace is **404**.
+Partial update (only sent fields change; an empty body writes nothing) or delete
+(**204**). Same 403 rule; a client from another workspace is **404**.
 
-### `PUT /admin/partners/{workspace_id}`
+**Delete archives.** The client disappears from every read, but the org journal
+keeps its full history, including the WhatsApp number and GSTIN. There is no
+erasure path yet.
+
+### `PUT /platform/workspaces/{workspace_id}/partner` · `DELETE /platform/workspaces/{workspace_id}/partner`
 
 Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
-session cookie). PUT body: `status`, `footer_name`, optional `tier` (default
-`bronze`), `billing_country` (default `IN`, upper-cased), `founding`,
-`joined_at` (kept from the previous profile when omitted). A `null` body clears
-the profile. Every call writes a platform audit row (`platform.partners.write`). **Billing effect:** while the profile is `active`, the
-per-site billing seams (`billing.enforcement.sites_enforced`) enforce for that
-workspace even with `billing_enforced` and `sites_billing_enforced` off.
+session cookie; bearer tokens are refused). PUT requires a body: `status`,
+`footer_name`, `reason` (required, non-blank), optional `tier` (`bronze` |
+`silver` | `gold`, default `bronze`), `billing_country` (ISO-2, default `IN`,
+upper-cased), `founding`, `joined_at` (kept from the previous profile when
+omitted). A missing body is **422**. DELETE takes `{"reason": "..."}` and clears
+the profile. Both return `{workspace_id, partner}` and write a platform audit row.
+
+**Billing effect:** while the profile is `active`, the per-site billing seams
+(`billing.enforcement.sites_enforced`) enforce for that workspace even with
+`billing_enforced` and `sites_billing_enforced` off.
 
 ## Site templates
 
