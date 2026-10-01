@@ -2,6 +2,8 @@
 # Created: 2026-03-27
 # TDD: tests written before implementation.
 # Covers AuditEntry model, AuditStore (log/query/export), and API endpoints.
+# 2026-10-01 (CN-2): TestAuditStorePurge covers purge_entries, the retention
+#   delete (workspace- and age-scoped, offset/microsecond-agnostic).
 
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ if TYPE_CHECKING:
 import csv
 import io
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -274,6 +276,50 @@ class TestAuditStoreQueryEntries:
         assert len(entries) == 1
         assert entries[0].pocket_id == "pocket-1"
         assert entries[0].category == "decision"
+
+
+class TestAuditStorePurge:
+    @staticmethod
+    def _backdate(store: AuditStore, entry_id: str, timestamp: str) -> None:
+        with store._get_conn() as conn:
+            conn.execute("UPDATE audit_log SET timestamp = ? WHERE id = ?", (timestamp, entry_id))
+            conn.commit()
+
+    async def _log(self, store: AuditStore, workspace_id: str | None, action: str) -> str:
+        context = {"workspace_id": workspace_id} if workspace_id else {}
+        return await store.log_entry(
+            actor="system", action=action, category="decision", description="d", context=context
+        )
+
+    @pytest.mark.asyncio
+    async def test_purge_deletes_only_old_rows_of_that_workspace(self, audit_db):
+        now = datetime.now(UTC)
+        old = now - timedelta(days=100)
+        old_a = await self._log(audit_db, "ws-A", "old.a")
+        # Same instant, no microseconds and a non-UTC offset: still older.
+        old_a_plain = await self._log(audit_db, "ws-A", "old.a.plain")
+        await self._log(audit_db, "ws-A", "recent.a")
+        old_b = await self._log(audit_db, "ws-B", "old.b")
+        old_none = await self._log(audit_db, None, "old.none")
+        self._backdate(audit_db, old_a, old.isoformat())
+        offset = old.replace(microsecond=0).astimezone(timezone(timedelta(hours=5)))
+        self._backdate(audit_db, old_a_plain, offset.isoformat())
+        self._backdate(audit_db, old_b, old.isoformat())
+        self._backdate(audit_db, old_none, old.isoformat())
+
+        deleted = await audit_db.purge_entries("ws-A", now - timedelta(days=30))
+
+        assert deleted == 2
+        remaining = {e.action for e in await audit_db.query_entries(limit=50)}
+        assert remaining == {"recent.a", "old.b", "old.none"}
+
+    @pytest.mark.asyncio
+    async def test_purge_accepts_naive_cutoff_as_utc(self, audit_db):
+        entry = await self._log(audit_db, "ws-A", "old")
+        self._backdate(audit_db, entry, "2026-01-01T00:00:00+00:00")
+
+        assert await audit_db.purge_entries("ws-A", datetime(2025, 12, 31)) == 0
+        assert await audit_db.purge_entries("ws-A", datetime(2026, 1, 2)) == 1
 
 
 class TestAuditStoreExport:

@@ -11,6 +11,8 @@
 #   ``AuditLogger`` → ``AuditStore`` bridge (``ee/pocketpaw_ee/cloud/audit/
 #   listeners.py``) can mirror events into SQLite from the sync
 #   ``AuditLogger.on_log`` fan-out callback without needing an event loop.
+# Modified: 2026-10-01 (CN-2) — Added ``purge_entries`` (workspace + age
+#   scoped delete) so cloud retention clears the rows the audit list reads.
 
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import io
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -282,6 +284,27 @@ class AuditStore:
             rows = conn.execute(sql, params).fetchall()
 
         return [AuditEntry.from_db_row(dict(row)) for row in rows]
+
+    async def purge_entries(self, workspace_id: str, older_than: datetime) -> int:
+        """Delete one workspace's entries older than ``older_than``. Returns the count.
+
+        Tenancy uses the same ``context.workspace_id`` predicate as
+        :meth:`search_entries`. Ages compare through ``julianday`` so stored
+        timestamps with or without microseconds or a UTC offset all order
+        correctly. A naive ``older_than`` is read as UTC.
+        """
+        self._ensure_schema()
+        if older_than.tzinfo is None:
+            older_than = older_than.replace(tzinfo=UTC)
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM audit_log "
+                "WHERE COALESCE(json_extract(context, '$.workspace_id'), '') = ? "
+                "AND julianday(timestamp) < julianday(?)",
+                (workspace_id, older_than.astimezone(UTC).isoformat()),
+            )
+            conn.commit()
+        return cursor.rowcount
 
     async def query_entries(
         self,
