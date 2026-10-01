@@ -17,6 +17,8 @@
 #     address is caught by the per-hop re-check during the fetch;
 #   * the status lifecycle: processing, ready, failed{reason}, too_large,
 #     unsupported, blocked, and a stuck row read as failed/interrupted;
+#   * every ingest, engine or parser failure logs its cause with the source id
+#     (a missing parser at error: a deployment fault, not the owner's file);
 #   * removal and ``delete_sources`` un-index, without touching an article another
 #     source or the page sync still holds; a row removed mid-ingest leaves no orphan;
 #   * tenancy (404) and the role gate (403), nothing written;
@@ -28,6 +30,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import socket
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -726,6 +729,80 @@ async def test_an_unreadable_pdf_fails_without_reaching_the_kb(owner, caps, jobs
     [row] = (await _list(owner, str(site.id)))["sources"]
     assert row["status"] == "failed"
     assert row["reason"] in {"unreadable", "no_content"}
+    assert kb.ingested == []
+
+
+def _source_logs(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "pocketpaw_ee.paw_bar.knowledge_routes"]
+
+
+@pytest.mark.asyncio
+async def test_an_ingest_failure_logs_its_cause(owner, caps, jobs, kb, caplog):
+    """BUG (2026-10-01): a PDF failed with ingest_failed and nothing was logged,
+    so the cause (a compile rejected as an echo) was invisible in Logfire."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeEngineUnavailable
+
+    site = await _site()
+    sid = str(site.id)
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.paw_bar.knowledge_routes"):
+        kb.fail = RuntimeError("compile failed: looks like a verbatim echo")
+        await _upload(owner, sid, "a.txt", b"some words")
+        await jobs.run()
+        kb.fail = KnowledgeEngineUnavailable("old binary")
+        await _upload(owner, sid, "b.txt", b"other words")
+        await jobs.run()
+
+    rows = {r["name"]: r for r in (await _list(owner, sid))["sources"]}
+    [failed, unavailable] = _source_logs(caplog)
+    assert failed.levelno == logging.WARNING
+    assert rows["a.txt"]["id"] in failed.getMessage()
+    assert "file" in failed.getMessage()
+    assert "verbatim echo" in failed.getMessage()
+    assert failed.exc_info is not None
+    assert unavailable.levelno == logging.WARNING
+    assert rows["b.txt"]["id"] in unavailable.getMessage()
+    assert "old binary" in unavailable.getMessage()
+    assert unavailable.exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_a_missing_pdf_parser_logs_an_error_not_a_bad_file(
+    owner, caps, jobs, kb, monkeypatch, caplog
+):
+    """A parser that is not installed fails every PDF: that is a deployment fault,
+    logged at error. A file the parser rejects is the owner's, logged at warning."""
+    from pocketpaw_ee.paw_bar import knowledge_sources
+
+    def no_pypdf(*_a: Any) -> str:
+        try:
+            raise ImportError("No module named 'pypdf'")
+        except ImportError as exc:
+            raise RuntimeError("pypdf not installed — run: pip install pypdf") from exc
+
+    def corrupt(*_a: Any) -> str:
+        raise ValueError("EOF marker not found")
+
+    site = await _site()
+    sid = str(site.id)
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.paw_bar.knowledge_routes"):
+        monkeypatch.setattr(knowledge_sources, "_extract_with_local", no_pypdf)
+        await _upload(owner, sid, "guide.pdf", _PDF_FACT)
+        await jobs.run()
+        monkeypatch.setattr(knowledge_sources, "_extract_with_local", corrupt)
+        await _upload(owner, sid, "other.pdf", _PDF_FACT)
+        await jobs.run()
+
+    rows = {r["name"]: r for r in (await _list(owner, sid))["sources"]}
+    assert rows["guide.pdf"]["reason"] == rows["other.pdf"]["reason"] == "unreadable"
+    [missing, bad] = _source_logs(caplog)
+    assert missing.levelno == logging.ERROR
+    assert rows["guide.pdf"]["id"] in missing.getMessage()
+    assert "pypdf not installed" in missing.getMessage()
+    assert bad.levelno == logging.WARNING
+    assert rows["other.pdf"]["id"] in bad.getMessage()
+    assert "EOF marker" in bad.getMessage()
     assert kb.ingested == []
 
 

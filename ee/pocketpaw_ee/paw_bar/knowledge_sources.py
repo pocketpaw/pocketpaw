@@ -12,6 +12,8 @@
 #     ceiling before python-docx is handed it (a small zip can inflate to GBs).
 #   * ``extract_file_text`` runs the existing ``extraction.local.LocalExtractor``
 #     (pypdf, python-docx) in a thread; Markdown and text are decoded directly.
+#     ``missing_parser`` tells a parser that is not installed (a deployment
+#     fault) from a file the parser cannot read.
 #   * ``fetch_link_text`` fetches through ``pocketpaw.security.safe_fetch`` — DNS
 #     pinned, every redirect hop re-checked for a public address, body capped — and
 #     turns HTML into text with ``sites.kb_ingest.html_to_text``, the same helper
@@ -131,9 +133,24 @@ def _extract_with_local(data: bytes, ext: str, mime: str) -> str:
     return result.text or ""
 
 
+def missing_parser(exc: BaseException | None) -> bool:
+    """True when ``exc`` (or anything in its cause chain) says a parser library is
+    not installed. LocalExtractor turns that ``ImportError`` into a RuntimeError
+    reading "pypdf not installed"; either form is a deployment fault, not a bad
+    file, and the caller logs it as an error."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ImportError) or "not installed" in str(exc):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 async def extract_file_text(data: bytes, ext: str, mime: str) -> str:
     """The text of an upload already accepted by ``sniff_upload``. A file the
-    parser cannot read raises ``SourceRefused("failed", "unreadable")``."""
+    parser cannot read raises ``SourceRefused("failed", "unreadable")`` chained
+    to the parser's exception (see ``missing_parser``)."""
     if mime not in (PDF_MIME, DOCX_MIME):
         return data.decode("utf-8-sig", errors="replace")
     try:
