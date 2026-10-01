@@ -163,7 +163,10 @@ def enforced(monkeypatch):
     """
 
     def _set(on: bool) -> None:
-        monkeypatch.setattr("pocketpaw_ee.cloud.billing.enforcement.sites_enforced", lambda *a, **k: on)
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.billing.enforcement.sites_enforced",
+            lambda *a, **k: on,
+        )
 
     _set(True)
     return _set
