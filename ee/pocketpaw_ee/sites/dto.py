@@ -1101,7 +1101,8 @@ class ImportBriefStatusResponse(BaseModel):
 
 class SiteInvoiceOut(BaseModel):
     """One manual receipt on the site's client record. ``amount_cents`` is integer
-    MINOR units — the wire never carries a float for money, so the reading client
+    ISO 4217 minor units of ``currency`` (¥1,500 is 1500, $3.50 is 350; the name is
+    historical) — the wire never carries a float for money, so the reading client
     formats it and nothing rounds in transit."""
 
     id: str
@@ -1224,7 +1225,8 @@ class SiteClientUpdate(BaseModel):
 class SiteInvoiceCreate(BaseModel):
     """POST body for recording one manual receipt against the client record.
 
-    ``amount_cents`` is a non-negative integer in minor units. It is bounded on BOTH
+    ``amount_cents`` is a non-negative integer in ISO 4217 minor units of
+    ``currency`` (the name is historical). It is bounded on BOTH
     ends on purpose: negative would let a receipt reverse the running total, and the
     upper bound stops a typo (or a paste of an id into an amount field) from writing
     a number no currency has a use for. ``currency`` is normalized to upper case and

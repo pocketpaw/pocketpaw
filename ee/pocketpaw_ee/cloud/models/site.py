@@ -359,8 +359,9 @@ class SiteInvoice(BaseModel):
 
     This is bookkeeping the owner keeps, not a charge we process: nothing here
     moves money, and the sites service never reads it back for billing. Amounts
-    are integer MINOR units (cents) so a receipt cannot drift through float
-    arithmetic on its way to and from the wire.
+    are integer ISO 4217 minor units of ``currency`` (the ``_cents`` name is
+    historical) so a receipt cannot drift through float arithmetic on its way to
+    and from the wire.
     """
 
     id: str
