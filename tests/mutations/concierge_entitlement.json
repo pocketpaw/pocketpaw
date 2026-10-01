@@ -51,7 +51,7 @@
   {
     "label": "the chat/action seam stops asking the plan",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not concierge_available(site):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "find": "    if not concierge_available(site, partner=partner):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site"
@@ -60,7 +60,7 @@
   {
     "label": "the frame stops asking the plan \u2014 a free site's bar renders",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
+    "find": "    if not concierge_available(site, partner=partner):\n        return _dead_frame_response(po, site.allowed_origins)",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_refuses_a_free_site_with_the_self_remove_message"
@@ -69,8 +69,8 @@
   {
     "label": "the frame refuses with a JSON error rendered onto the customer's page",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
-    "replace": "    if not concierge_available(site):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "find": "    if not concierge_available(site, partner=partner):\n        return _dead_frame_response(po, site.allowed_origins)",
+    "replace": "    if not concierge_available(site, partner=partner):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_refused_frame_never_renders_an_error_payload"
     ]
@@ -78,7 +78,7 @@
   {
     "label": "the billing_enforced guard is dropped \u2014 OSS/self-host loses its concierge",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not sites_enforced():\n        return True",
+    "find": "    if not sites_enforced(partner):\n        return True",
     "replace": "    if False:\n        return True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
@@ -87,8 +87,8 @@
   {
     "label": "the guard inverts \u2014 the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not sites_enforced():\n        return True",
-    "replace": "    if sites_enforced():\n        return True",
+    "find": "    if not sites_enforced(partner):\n        return True",
+    "replace": "    if sites_enforced(partner):\n        return True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site",
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
@@ -125,7 +125,7 @@
   {
     "label": "the publish-path resolver is deleted entirely",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        if sites_enforced():\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "find": "        if await sites_enforced_for(workspace_id):\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "replace": "        if False:\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "tests": [
       "tests/ee/sites/test_concierge_autoembed.py::test_a_free_site_publishes_with_no_bar_when_billing_is_enforced",

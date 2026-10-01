@@ -1,6 +1,12 @@
 # ee/pocketpaw_ee/cloud/billing/enforcement.py — one function answering "do the
 # PER-SITE billing seams enforce right now".
 #
+# Updated 2026-10-01 (feat/partners-foundation, PH-1): the answer is now also
+# PER WORKSPACE. ``sites_enforced(partner)`` is True when the site's workspace
+# holds an ACTIVE Paw Partners profile, even with both global flags off; async
+# seams call ``sites_enforced_for(workspace_id)``, which loads that profile only
+# when the global flags are off. Non-partner workspaces behave exactly as before.
+#
 # Created 2026-08-21 (feat/sites-billing-flag, PW-2). Until now every sites seam
 # read ``billing_enforced`` directly, which is the workspace-wide switch: turning
 # it on to start charging for custom domains also starts 402ing chat runs, seat
@@ -45,7 +51,7 @@ from datetime import datetime
 from typing import Any
 
 
-def sites_enforced() -> bool:
+def sites_enforced(partner: Any | None = None) -> bool:
     """Are the per-site billing seams live?
 
     True when EITHER the workspace-wide ``billing_enforced`` or the sites-only
@@ -64,7 +70,28 @@ def sites_enforced() -> bool:
     return bool(
         getattr(settings, "billing_enforced", False)
         or getattr(settings, "sites_billing_enforced", False)
+        or _partner_active(partner)
     )
+
+
+def _partner_active(partner: Any | None) -> bool:
+    """An ``active`` Paw Partners profile (PH-1). ``applied`` / ``suspended`` are not."""
+    return getattr(partner, "status", None) == "active"
+
+
+async def sites_enforced_for(workspace_id: str | None) -> bool:
+    """``sites_enforced`` for one workspace, loading its partner profile.
+
+    Global flags first, so a deployment with them on never reads anything. With
+    them off (OSS, self-host, prod today) this is one ``_id`` lookup on the
+    workspace — a positive per-workspace check, never a cached marker.
+    """
+    if sites_enforced():
+        return True
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    # ponytail: one workspace read per call; cache per request if a hot path shows it.
+    return _partner_active(await partners_service.partner_profile_for_workspace(workspace_id))
 
 
 def _month_start() -> datetime:
@@ -119,7 +146,7 @@ async def concierge_conversation_quota_exceeded(
     the safe error is allow — the alternative charges a customer for a tier and
     then withholds it because a count did not load.
     """
-    if not sites_enforced():
+    if not await sites_enforced_for(workspace_id):
         return False
 
     from pocketpaw_ee.cloud.billing import site_plans
@@ -152,4 +179,4 @@ async def concierge_conversation_quota_exceeded(
     return used >= allowance
 
 
-__all__ = ["concierge_conversation_quota_exceeded", "sites_enforced"]
+__all__ = ["concierge_conversation_quota_exceeded", "sites_enforced", "sites_enforced_for"]

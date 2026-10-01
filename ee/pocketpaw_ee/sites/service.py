@@ -4231,9 +4231,9 @@ async def _embed_concierge_bar(
         # and self-correcting in the right direction. The inverse (refuse at publish,
         # allow at runtime) does not self-correct at all.
         concierge_entitled = True
-        from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+        from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
 
-        if sites_enforced():
+        if await sites_enforced_for(workspace_id):
             from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
             status = getattr(doc, "subscription_status", None)
@@ -5739,7 +5739,7 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         subscription_status=getattr(doc, "subscription_status", None),
         concierge_enabled=bool(getattr(doc, "concierge_enabled", False)),
     )
-    exceeded, _hosts, _limit = _hostname_cap_exceeded(doc)
+    exceeded, _hosts, _limit = await _hostname_cap_exceeded(doc)
 
     return SiteEntitlementsResponse(
         site_id=site_id,
@@ -5811,7 +5811,7 @@ async def download_site_project(
     looking in the wrong place.
     """
     doc = await _load(workspace_id, site_id)
-    _assert_entitled_to_project_download(doc)
+    await _assert_entitled_to_project_download(doc)
 
     try:
         assembled = await project_zip.build_project_zip(
@@ -6433,7 +6433,7 @@ def _route_target(site: Any) -> str:
     return site_worker_name(site)
 
 
-def _assert_entitled_to_custom_domain(site: Any) -> None:
+async def _assert_entitled_to_custom_domain(site: Any) -> None:
     """Refuse the attach unless this site's own plan grants a custom domain.
 
     Delegates the RULE to ``entitlements.resolve_site_entitlements`` rather than
@@ -6452,9 +6452,9 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
     ``entitlements`` may not import ``models.site`` (EE cloud rule 2): the caller
     that owns the document passes what it owns.
     """
-    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
 
-    if not sites_enforced():
+    if not await sites_enforced_for(getattr(site, "workspace", None)):
         return
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -6481,7 +6481,7 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
     )
 
 
-def _assert_entitled_to_project_download(site: Any) -> None:
+async def _assert_entitled_to_project_download(site: Any) -> None:
     """Refuse the download unless this site's own plan grants the project archive.
 
     The third caller of ``resolve_site_entitlements``, and written to look exactly
@@ -6516,9 +6516,9 @@ def _assert_entitled_to_project_download(site: Any) -> None:
     Synchronous and handed the loaded doc, because the resolver is pure and
     ``entitlements`` may not import ``models.site`` (EE cloud rule 2).
     """
-    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
 
-    if not sites_enforced():
+    if not await sites_enforced_for(getattr(site, "workspace", None)):
         return
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -6545,7 +6545,7 @@ def _assert_entitled_to_project_download(site: Any) -> None:
     )
 
 
-def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
+async def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
     """Would this be one hostname too many ON THIS SITE? -> (exceeded, count, limit).
 
     This is the free floor's whole domain allowance: each free site may carry one
@@ -6557,15 +6557,16 @@ def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
 
     Applies only to a site riding a CAPPED allowance, which today is exactly the
     free floor — every paid tier is uncapped, so a paying site is never subject to
-    it. Synchronous and reads no database: everything it needs is on the loaded doc.
+    it. Async since PH-1: the only read is the workspace partner profile, via
+    ``sites_enforced_for``; everything else it needs is on the loaded doc.
 
     This cap is a judgement the build made rather than a rule handed down, so it is
     one constant and one comparison — raising it or removing it changes nothing
     else. Gated on ``sites_enforced()`` like every other cap here.
     """
-    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
 
-    if not sites_enforced():
+    if not await sites_enforced_for(getattr(site, "workspace", None)):
         return (False, 0, None)
 
     from pocketpaw_ee.cloud.billing import site_plans as _site_plans
@@ -6682,7 +6683,7 @@ async def add_domain(
     #     hostname on the shared zone with no Site row pointing at it: invisible to
     #     the product, and it makes the customer's next legitimate attach fail on a
     #     1406 duplicate they can neither see nor clear.
-    _assert_entitled_to_custom_domain(site)
+    await _assert_entitled_to_custom_domain(site)
 
     # Then the COUNT, per site: has THIS site already used the free floor's apex +
     # ``www``? The capability gate above asks whether this site may have a custom
@@ -6696,7 +6697,7 @@ async def add_domain(
     # ``create_custom_hostname`` (a refusal after Cloudflare accepts the hostname
     # strands it on the shared zone, invisible to the product and blocking the
     # customer's next legitimate attach with a 1406 they cannot clear).
-    host_exceeded, _hosts, host_limit = _hostname_cap_exceeded(site)
+    host_exceeded, _hosts, host_limit = await _hostname_cap_exceeded(site)
     if host_exceeded:
         logger.info(
             "sites: refused a custom domain for site %s — it already carries %s "
@@ -7645,7 +7646,7 @@ async def update_site_metadata(
     return _to_response(site)
 
 
-def _assert_entitled_to_badge_removal(site: Any) -> None:
+async def _assert_entitled_to_badge_removal(site: Any) -> None:
     """Refuse ``badge_hidden=True`` unless this site's own plan removes the badge.
 
     Written to look like ``_assert_entitled_to_custom_domain``: same resolver, same
@@ -7657,9 +7658,9 @@ def _assert_entitled_to_badge_removal(site: Any) -> None:
     from claiming "hidden" on a page that will keep its badge. On OSS / self-host
     (``sites_enforced()`` off) the write is accepted and the stamper still decides.
     """
-    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
 
-    if not sites_enforced():
+    if not await sites_enforced_for(getattr(site, "workspace", None)):
         return
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -7706,7 +7707,7 @@ async def update_site_branding(
     site = await _load(workspace_id, site_id)
 
     if body.badge_hidden:
-        _assert_entitled_to_badge_removal(site)
+        await _assert_entitled_to_badge_removal(site)
 
     if bool(getattr(site, "badge_hidden", True)) == body.badge_hidden:
         return _to_response(site)

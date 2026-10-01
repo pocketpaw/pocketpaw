@@ -79,6 +79,7 @@
 from __future__ import annotations
 
 import secrets
+from typing import Any
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -176,7 +177,7 @@ def concierge_exists(site: _SiteDoc) -> bool:
     return getattr(site, "concierge_created_at", None) is not None
 
 
-def concierge_available(site: _SiteDoc) -> bool:
+def concierge_available(site: _SiteDoc, *, partner: Any | None = None) -> bool:
     """May this site serve its concierge right now — created, switched on, and sold?
 
     The ONE question every public paw-bar seam asks, so the rule lives here instead
@@ -209,10 +210,10 @@ def concierge_available(site: _SiteDoc) -> bool:
     """
     if not concierge_exists(site) or not site.concierge_enabled:
         return False
-    return concierge_plan_entitled(site)
+    return concierge_plan_entitled(site, partner=partner)
 
 
-def concierge_plan_entitled(site: _SiteDoc) -> bool:
+def concierge_plan_entitled(site: _SiteDoc, *, partner: Any | None = None) -> bool:
     """Does this site's PLAN sell a concierge? The plan half of
     ``concierge_available`` and nothing else: not created, not switched on.
 
@@ -223,10 +224,15 @@ def concierge_plan_entitled(site: _SiteDoc) -> bool:
 
     With ``sites_enforced()`` off (OSS, self-host) every site is entitled, the
     same fail-open direction ``concierge_available`` takes.
+
+    ``partner`` (PH-1) is the site's workspace Paw Partners profile; an ACTIVE one
+    turns enforcement on for this site. Callers that own a request load it with
+    ``partners.service.partner_profile_for_workspace`` and pass it in, so this
+    stays synchronous and DB-free. Omitted = not a partner (the old behaviour).
     """
     from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not sites_enforced():
+    if not sites_enforced(partner):
         return True
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -367,7 +373,10 @@ async def resolve_site_key_with_site(
     # silence to a visitor — only the detail differs, because an owner who switched
     # it off and an owner whose subscription lapsed need different remedies. A
     # no-op unless ``billing_enforced`` or ``sites_billing_enforced``.
-    if not concierge_available(site):
+    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+
+    partner = await partner_profile_for_workspace(site.workspace)
+    if not concierge_available(site, partner=partner):
         raise HTTPException(status_code=403, detail="concierge_not_entitled")
 
     # Dual-mode origin gate. Frame mode (request Origin == our frame origin) means

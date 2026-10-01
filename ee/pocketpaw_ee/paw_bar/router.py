@@ -1099,7 +1099,10 @@ async def frame(
     # lapsed subscription from an owner's choice by looking at the page, and the
     # loader already knows how to remove an iframe that says ``pawbar:dead``. The
     # reason is surfaced to the OWNER through the dashboard, and to logs, never here.
-    if not concierge_available(site):
+    from pocketpaw_ee.cloud.partners.service import partner_profile_for_workspace
+
+    partner = await partner_profile_for_workspace(site.workspace)
+    if not concierge_available(site, partner=partner):
         return _dead_frame_response(po, site.allowed_origins)
 
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
