@@ -9,7 +9,8 @@
 #     capture routes), "concierge" (the visitor tapped Send on the concierge's
 #     send_to_team card), "handoff" (a handoff that carried a contact) or
 #     "booking". ``source.conversation_ref`` ("<widget_id>:<customer_ref>") links
-#     a concierge/handoff lead to its transcript.
+#     a concierge/handoff lead to its transcript. A partial unique index keeps
+#     handoff leads to one per (workspace, site, conversation).
 #   * ``status`` is the owner's pipeline state; ``read_at`` the first time the
 #     owner marked it read (None = unread).
 #   * ``source.rate_key`` is the server-derived host hash the per-IP limiter used;
@@ -26,6 +27,7 @@ from typing import Any, Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -81,4 +83,18 @@ class Lead(TimestampedDocument):
             # first); the compound index keeps that query cheap once a site
             # accumulates thousands of submissions.
             [("workspace", 1), ("site_id", 1), ("createdAt", -1)],
+            # One handoff lead per conversation, enforced by the database so
+            # concurrent handoffs can't both insert (the service treats the
+            # duplicate-key error as "already captured").
+            IndexModel(
+                [
+                    ("workspace", 1),
+                    ("site_id", 1),
+                    ("source.kind", 1),
+                    ("source.conversation_ref", 1),
+                ],
+                unique=True,
+                partialFilterExpression={"source.kind": "handoff"},
+                name="uq_handoff_lead_per_conversation",
+            ),
         ]

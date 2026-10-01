@@ -11,7 +11,8 @@
 #      conversation (form_type and source.kind "handoff", the question as
 #      ``message``, conversation_ref "<widget_id>:<customer_ref>"), so every way a
 #      visitor leaves contact details lands on the site's Leads page. A second
-#      handoff in the same conversation adds no second lead. Its
+#      handoff in the same conversation adds no second lead (a partial unique
+#      index on the Lead decides, so concurrent handoffs can't both insert). Its
 #      ``lead.captured`` carries source_kind "handoff", which the leads bridge
 #      skips: step 6 already tells the owner;
 #   4. record the rate-limit / audit marker;

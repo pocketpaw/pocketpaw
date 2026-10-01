@@ -148,3 +148,30 @@ async def test_a_lead_failure_never_fails_the_handoff(mongo_db, store, fabric, m
     widget = await store.create_widget(_widget(str(ws.id)))
     outcome = await _raise(store, widget, ws, question="q", contact="v@brewco.com")
     assert outcome.ok
+
+
+@pytest.mark.asyncio
+async def test_concurrent_handoffs_write_one_lead(mongo_db, store, fabric, monkeypatch, ws):
+    import asyncio
+
+    monkeypatch.setattr("pocketpaw_ee.api.get_fabric_store", lambda *a, **k: fabric)
+    await _site(str(ws.id), script_name=_SCRIPT)
+    widget = await store.create_widget(_widget(str(ws.id)))
+    from pocketpaw_ee.cloud.leads import service as leads_service
+    from pocketpaw_ee.paw_bar import handoff
+
+    # Every pre-check reads "no lead yet", as when all of them run before any
+    # insert lands. Only the database can then keep it to one.
+    async def _none_yet(*_a, **_kw):
+        return False
+
+    monkeypatch.setattr(leads_service, "has_conversation_lead", _none_yet)
+    # Straight at the lead step: raise_handoff's own per-minute cap would
+    # otherwise refuse the burst before it reached the lead.
+    await asyncio.gather(
+        *(
+            handoff._write_handoff_lead(widget, str(ws.id), _REF, f"q{i}", "v@brewco.com")
+            for i in range(10)
+        )
+    )
+    assert len(await _leads()) == 1

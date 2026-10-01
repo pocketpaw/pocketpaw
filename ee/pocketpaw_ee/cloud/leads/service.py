@@ -332,23 +332,30 @@ async def capture_internal(
     """Persist a lead the product writes itself (``kind`` concierge / handoff /
     booking). No honeypot, event_mapping, signed key or per-IP limit: the caller
     already authenticated the visitor and enforces its own rate limit. The HIGH
-    injection screen still runs; a drop returns None and writes nothing."""
+    injection screen still runs; a drop returns None and writes nothing. So does
+    a second handoff lead for the same conversation: the partial unique index
+    refuses the insert, and nothing is emitted."""
+    from pymongo.errors import DuplicateKeyError
+
     if not _passes_injection_screen(properties):
         _emit_drop_audit(site=site, form_type=form_type, reason="injection")
         return None
-    return await _persist(
-        site,
-        form_type,
-        dict(properties),
-        _LeadSourceDoc(
-            form_type=form_type,
-            site_id=site.script_name,
-            submitter_ref=submitter_ref,
-            kind=kind,
-            conversation_ref=conversation_ref,
-        ),
-        status=status,
-    )
+    try:
+        return await _persist(
+            site,
+            form_type,
+            dict(properties),
+            _LeadSourceDoc(
+                form_type=form_type,
+                site_id=site.script_name,
+                submitter_ref=submitter_ref,
+                kind=kind,
+                conversation_ref=conversation_ref,
+            ),
+            status=status,
+        )
+    except DuplicateKeyError:
+        return None
 
 
 async def list_for_site(workspace_id: str, site_id: str, *, limit: int = 100) -> list[Lead]:
