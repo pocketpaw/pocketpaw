@@ -46,7 +46,7 @@
 #   ``currency`` ("USD" default | "INR"). For INR ``amount_credits`` is the charge
 #   in PAISE, so the ceiling is per currency: unchanged 1,000,000 for USD ($10,000),
 #   100,000,000 paise for INR (Rs.10,00,000) — the flat USD cap would 422 every
-#   partner prepay above Rs.10,000.
+#   partner prepay above Rs.10,000. INR also has a floor of Rs.100 (10,000 paise).
 
 from __future__ import annotations
 
@@ -56,6 +56,9 @@ from pydantic import BaseModel, Field, model_validator
 
 # Per-currency ceiling on one top-up, in that currency's lowest denomination.
 _TOPUP_CEILING = {"USD": 1_000_000, "INR": 100_000_000}
+# INR floor: Rs.100 (10,000 paise), so nobody pays for a charge that converts to
+# (next to) zero credits.
+_INR_MINIMUM_PAISE = 10_000
 
 
 class CreateTopupRequest(BaseModel):
@@ -79,6 +82,8 @@ class CreateTopupRequest(BaseModel):
 
     @model_validator(mode="after")
     def _within_ceiling(self) -> CreateTopupRequest:
+        if self.currency == "INR" and self.amount_credits < _INR_MINIMUM_PAISE:
+            raise ValueError("an INR top-up must be at least Rs.100 (10,000 paise)")
         if self.amount_credits > _TOPUP_CEILING[self.currency]:
             raise ValueError(
                 f"amount_credits exceeds the {self.currency} top-up ceiling "
