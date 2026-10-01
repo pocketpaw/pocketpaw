@@ -2,8 +2,8 @@
   {
     "label": "a running year may drop to a monthly plan — the paid year is given away",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "        if through is None or through > now:",
-    "replace": "        if False:",
+    "find": "    if new_months < held_months and not ended:",
+    "replace": "    if False:",
     "tests": [
       "tests/cloud/partners/test_partners.py::test_change_terms_refuse_a_running_year_moving_to_monthly",
       "tests/cloud/partners/test_partners.py::test_a_running_year_cannot_move_to_a_monthly_plan"
@@ -81,6 +81,46 @@
     "find": "        if last_paid_usd and int(last_paid_usd) in site_plans.partner_prices_usd(tier.key):",
     "replace": "        if last_paid_usd:",
     "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_renewal_after_a_downgrade_never_charges_the_high_water_mark"
+    ]
+  },
+  {
+    "label": "a change after the period ended is re-priced as a gap — the ended period is billed, then the sweep bills a new one",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    ended = through is not None and through <= now",
+    "replace": "    ended = False",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_change_terms_after_the_period_ended_is_a_fresh_purchase",
+      "tests/cloud/partners/test_partners.py::test_an_upgrade_after_the_period_ended_is_one_fresh_period"
+    ]
+  },
+  {
+    "label": "a same-day period re-buy is not refused — a replayed debit restarts the period for nothing",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if already_bought_today:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_change_terms_refuse_a_same_day_period_rebuy",
+      "tests/cloud/partners/test_partners.py::test_change_terms_after_the_period_ended_is_a_fresh_purchase"
+    ]
+  },
+  {
+    "label": "every tier change rewrites the renewal date — a same-period upgrade loses the paid date",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            if _new_renewal is not None:",
+    "replace": "            if True:",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py",
+      "tests/cloud/partners/test_partners.py::test_an_upgrade_on_renewal_day_does_not_make_the_renewal_free"
+    ]
+  },
+  {
+    "label": "a renewal with no partner price retries forever — paid features stay on, unpaid",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "            if exc.code != billing_service.PARTNER_PRICE_UNKNOWN:",
+    "replace": "            if True:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_renewal_with_no_price_lapses_and_keeps_the_site_up",
       "tests/cloud/partners/test_partners.py::test_a_renewal_after_a_downgrade_never_charges_the_high_water_mark"
     ]
   }

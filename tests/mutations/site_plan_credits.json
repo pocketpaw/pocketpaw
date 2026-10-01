@@ -47,8 +47,8 @@
   {
     "label": "a lapsed renewal takes the site down instead of dropping it to the floor",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "            doc.subscription_status = \"cancelled\"\n            doc.renewal_date = None\n",
-    "replace": "            doc.subscription_status = \"cancelled\"\n            doc.deployed = False\n            doc.renewal_date = None\n",
+    "find": "            # LAPSED. Drop to the free floor and stop trying; the site stays up.\n            doc.subscription_status = \"cancelled\"\n            doc.renewal_date = None\n",
+    "replace": "            # LAPSED. Drop to the free floor and stop trying; the site stays up.\n            doc.subscription_status = \"cancelled\"\n            doc.deployed = False\n            doc.renewal_date = None\n",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_short_wallet_lapses_the_plan_but_leaves_the_site_up"
     ]
@@ -147,8 +147,8 @@
   {
     "label": "the paid high-water mark falls on a downgrade",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            # The period restarts ONLY together with a charge.\n",
-    "replace": "        existing_doc.period_paid_usd = price_usd\n            # The period restarts ONLY together with a charge.\n",
+    "find": "                existing_doc.renewal_date = _new_renewal\n        _previous_tier = existing_doc.plan_tier\n",
+    "replace": "                existing_doc.renewal_date = _new_renewal\n        existing_doc.period_paid_usd = price_usd\n        _previous_tier = existing_doc.plan_tier\n",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_returning_to_a_tier_already_bought_this_period_is_free",
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing"

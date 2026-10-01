@@ -25,6 +25,10 @@
 # (tier-change debits have their own key); a profile-less renewal never charges
 # the high-water mark; a lapsed partner tier cannot be re-bought past the gates;
 # unit tests for the pure ``site_plan_change_terms``.
+# Review fix 3: a change after the paid period ENDED (sweep not yet run) is a
+# fresh purchase, so the sweep does not bill a second period; a renewal with no
+# partner price lapses instead of retrying forever; same-day purchase/change
+# sequences charge each thing once.
 # Updated 2026-10-02: the autouse fixture clears the shared
 # ``read_model.default_journal_store`` cache (``service._default_store`` now
 # delegates to it) and points the per-workspace stores at tmp_path.
@@ -1134,7 +1138,7 @@ async def test_a_renewal_without_a_partner_profile_keeps_the_last_price(mongo_db
 async def test_a_renewal_after_a_downgrade_never_charges_the_high_water_mark(mongo_db) -> None:
     """R2. staff_year ($89) downgraded mid-year to site_year leaves
     ``period_paid_usd`` at 89. With the profile gone that is not a site_year price,
-    so the renewal refuses (retried) instead of charging $89."""
+    so there is no price: the site lapses to the free floor instead of paying $89."""
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
     ws = WorkspaceDoc(name="gone", slug="gone-partner-3", owner="u1", plan="go")
@@ -1148,31 +1152,43 @@ async def test_a_renewal_after_a_downgrade_never_charges_the_high_water_mark(mon
     await doc.save()
 
     counts = await sweep_site_renewals()
-    assert counts["failed"] == 1 and counts["renewed"] == 0
+    assert counts["lapsed"] == 1 and counts["renewed"] == 0
     assert await _balance(wid) == 50_000
 
 
-async def test_a_renewal_with_no_price_to_keep_is_refused_not_guessed(mongo_db) -> None:
+@pytest.mark.parametrize("case", ["nothing_paid", "price_since_changed"])
+async def test_a_renewal_with_no_price_lapses_and_keeps_the_site_up(
+    mongo_db, monkeypatch, case
+) -> None:
+    """No partner profile and no real price to keep — nothing paid last period, or
+    the table was re-priced so the old price is no longer one. Retrying forever left
+    every paid feature on, unpaid; it lapses like a short wallet now."""
+    from pocketpaw_ee.cloud.billing import site_plans
     from pocketpaw_ee.cloud.models.site import Site
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
-    ws = WorkspaceDoc(name="gone", slug="gone-partner-2", owner="u1", plan="go")
+    paid = 0
+    if case == "price_since_changed":
+        monkeypatch.setitem(site_plans._PARTNER_PRICE_USD, "site_year", {"default": 29, "IN": 19})
+        paid = 17
+    ws = WorkspaceDoc(name="gone", slug=f"gone-{case}", owner="u1", plan="go")
     await ws.insert()
     wid = str(ws.id)
     await _fund(wid, 5000)
-    due = datetime.now(UTC) - timedelta(days=1)
-    doc = await _sold_site(wid, tier="site_year", renewal_date=due)
-    doc.period_paid_usd = 0
+    doc = await _sold_site(
+        wid, tier="site_year", renewal_date=datetime.now(UTC) - timedelta(days=1)
+    )
+    doc.period_paid_usd = paid
     await doc.save()
 
-    counts = await sweep_site_renewals()
-    assert counts["failed"] == 1 and counts["renewed"] == 0
+    for _ in range(2):  # a second tick finds nothing due
+        counts = await sweep_site_renewals()
     fresh = await Site.get(doc.id)
     assert await _balance(wid) == 5000
-    assert fresh.subscription_status == "active", "left due for an operator, not lapsed"
-    assert _aware(fresh.renewal_date) == _aware(due).replace(
-        microsecond=_aware(fresh.renewal_date).microsecond
-    )
+    assert fresh.subscription_status == "cancelled"
+    assert fresh.renewal_date is None and fresh.period_paid_usd == 0
+    assert fresh.deployed is True, "the site stays up"
+    assert counts == {"renewed": 0, "lapsed": 0, "failed": 0, "not_live": 0, "closed": 0}
 
 
 async def test_a_partner_tier_cannot_be_requested_through_the_plan_request_door(mongo_db) -> None:
@@ -1282,3 +1298,103 @@ async def test_the_change_key_is_its_own_namespace() -> None:
     plain = site_plan_debit_key("s", "staff", _NOW)
     assert plain == "site_plan:s:staff:2026-10-02"
     assert site_plan_debit_key("s", "staff", _NOW, change=True) == plain + ":change"
+
+
+# --------------------------------------- after the period ended (review fix 3)
+
+
+@pytest.mark.parametrize(
+    ("held", "paid", "new", "price"),
+    [("site_year", 29, "staff_year", 8900), ("site", 7, "staff", 1900)],
+)
+async def test_an_upgrade_after_the_period_ended_is_one_fresh_period(
+    mongo_db, store, monkeypatch, held, paid, new, price
+) -> None:
+    """The renewal date has passed and the sweep has not run. The upgrade is a
+    fresh purchase of the new tier; the sweep then has nothing due. Before, the
+    gap was billed against the ENDED period and the sweep billed a whole new one."""
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("od-shop", country="US")
+    await _fund(wid, 100_000)
+    site_id = await _paying_site(
+        wid, tier=held, paid=paid, renewal=datetime.now(UTC) - timedelta(minutes=1)
+    )
+    start = await _balance(wid)
+
+    await _republish(wid, site_id, new)
+    counts = await sweep_site_renewals()
+
+    fresh = await Site.get(site_id)
+    assert start - await _balance(wid) == price
+    assert counts["renewed"] == 0
+    assert (fresh.plan_tier, fresh.period_paid_usd) == (new, price // 100)
+    assert _aware(fresh.renewal_date) > datetime.now(UTC) + timedelta(days=25)
+
+
+async def test_same_day_purchases_and_changes_each_charge_once(
+    mongo_db, store, monkeypatch
+) -> None:
+    """free -> site -> site_year -> site_year -> staff_year -> site_year -> staff_year,
+    all today: $7 + $29 + the $60 gap, and nothing else."""
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+
+    _sell_seams(monkeypatch)
+
+    async def _no_carry(*a, **k):
+        return False
+
+    monkeypatch.setattr(sites_service, "_plan_can_carry", _no_carry)
+    wid = await _partner_ws("dd-shop", country="US")
+    await _fund(wid, 100_000)
+    site_id = await _free_site(wid)
+    start = await _balance(wid)
+    for tier in ("site", "site_year", "site_year", "staff_year", "site_year", "staff_year"):
+        await _republish(wid, site_id, tier)
+    assert start - await _balance(wid) == 700 + 2900 + 6000
+    assert (await Site.get(site_id)).plan_tier == "staff_year"
+
+
+async def test_republishing_a_bought_year_charges_nothing(mongo_db, store, monkeypatch) -> None:
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("dd2-shop", country="US")
+    await _fund(wid, 100_000)
+    site_id = await _free_site(wid)
+    start = await _balance(wid)
+    await _republish(wid, site_id, "site_year")
+    await _republish(wid, site_id, "site_year")
+    assert start - await _balance(wid) == 2900
+
+
+async def test_change_terms_after_the_period_ended_is_a_fresh_purchase() -> None:
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+    from pocketpaw_ee.cloud.billing.service import site_plan_change_terms
+
+    ended = _NOW - timedelta(minutes=1)
+    for held, new, price, paid, months in (
+        ("site_year", "staff_year", 89, 29, 12),
+        ("staff_year", "site_year", 29, 89, 12),
+        ("site", "staff", 19, 7, 1),
+    ):
+        assert site_plan_change_terms(
+            held_tier=_tier(held),
+            new_tier=_tier(new),
+            new_price_usd=price,
+            already_paid_usd=paid,
+            paid_through=ended,
+            now=_NOW,
+        ) == (price, _NOW + relativedelta(months=months))
+    with pytest.raises(ConflictError) as exc:
+        site_plan_change_terms(
+            held_tier=_tier("site"),
+            new_tier=_tier("staff"),
+            new_price_usd=19,
+            already_paid_usd=7,
+            paid_through=ended,
+            now=_NOW,
+            already_bought_today=True,
+        )
+    assert exc.value.code == "sites.plan_already_bought_today"

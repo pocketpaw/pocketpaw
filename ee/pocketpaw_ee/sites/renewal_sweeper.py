@@ -7,8 +7,9 @@
 # country price for partner rungs, ``monthly_price_usd`` otherwise).
 # ``period_paid_usd`` records the amount actually charged; for a partner whose
 # profile has since been removed it is the renewal price only if it is a real
-# price of the tier (otherwise the renewal fails and is retried). Monthly behaviour is
-# unchanged; partner sites ride this same sweep.
+# price of the tier. Otherwise there is no price, and the site LAPSES to the free
+# floor like a short wallet (it stays up) rather than keeping paid features unpaid.
+# Monthly behaviour is unchanged; partner sites ride this same sweep.
 #
 # Created 2026-09-05 (fix/sites-plan-credits). A paid site now bills against the
 # workspace's own credit balance rather than a Dodo subscription, and a Dodo
@@ -50,7 +51,7 @@ from datetime import UTC, datetime
 
 from dateutil.relativedelta import relativedelta
 
-from pocketpaw_ee.cloud._core.errors import InsufficientCredits
+from pocketpaw_ee.cloud._core.errors import ConflictError, InsufficientCredits
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
 logger = logging.getLogger(__name__)
@@ -234,7 +235,8 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
             # price (a mid-period downgrade leaves the dearer tier's number). It is
             # offered only as a fallback for a partner whose profile is gone, and
             # ``site_plan_price_usd`` keeps it only if it is a real price of this
-            # tier; otherwise the renewal fails and is retried, never guessed.
+            # tier; otherwise there is no price and the site LAPSES (below), never
+            # charged at a guess.
             price_usd = await billing_service.site_plan_price_usd(
                 tier, doc.workspace, last_paid_usd=getattr(doc, "period_paid_usd", 0) or 0
             )
@@ -266,6 +268,33 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
                 doc.workspace,
                 tier.key,
                 price_usd,
+            )
+            continue
+        except ConflictError as exc:
+            if exc.code != billing_service.PARTNER_PRICE_UNKNOWN:
+                counts["failed"] += 1
+                logger.warning(
+                    "sites.renewal_sweeper: site %s (workspace=%s) refused to renew (%s); "
+                    "left due and will be retried on the next tick",
+                    site_id,
+                    doc.workspace,
+                    exc.code,
+                )
+                continue
+            # NO PRICE TO RENEW AT (a partner rung whose partner profile is gone).
+            # Retrying forever would leave every paid capability on, unpaid. Lapse
+            # exactly as a short wallet does: free floor, site stays up.
+            doc.subscription_status = "cancelled"
+            doc.renewal_date = None
+            doc.period_paid_usd = 0
+            await doc.save()
+            counts["lapsed"] += 1
+            logger.warning(
+                "sites.renewal_sweeper: site %s (workspace=%s tier=%s) has no partner "
+                "price to renew at — lapsed to the free floor; the site STAYS LIVE.",
+                site_id,
+                doc.workspace,
+                tier.key,
             )
             continue
         except Exception:

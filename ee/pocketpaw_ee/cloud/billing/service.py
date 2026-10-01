@@ -634,8 +634,10 @@ def site_plan_change_terms(
         high-water mark for this period), keep the date. A downgrade pays nothing.
       * A SHORTER period while the longer one is still running (``paid_through``
         in the future, or unknown): ``sites.period_downgrade_refused``.
-      * Any other period change is a FRESH PURCHASE: the full new price and a new
-        period from ``now``. No proration of what is left of the old period.
+      * Any other period change — and ANY change once ``paid_through`` has
+        passed (the period ended, the sweep has not run yet) — is a FRESH
+        PURCHASE: the full new price and a new period from ``now``. No proration
+        of what is left of the old period.
         Refused with ``sites.plan_already_bought_today`` when that debit already
         exists today — the charge would replay as a no-op and the period would
         restart for nothing.
@@ -644,17 +646,21 @@ def site_plan_change_terms(
     """
     held_months = getattr(held_tier, "period_months", 1) if held_tier is not None else 1
     new_months = new_tier.period_months
-    if new_months == held_months:
+    through = None if paid_through is None else _as_utc(paid_through)
+    # The paid period has already ENDED (the sweep has not got to it yet). There is
+    # nothing left to re-price: any change is a fresh purchase from now, and the
+    # sweep then finds the renewal date moved forward and skips the site. Pricing
+    # the gap here would bill the ended period and then the sweep a whole new one.
+    ended = through is not None and through <= now
+    if new_months == held_months and not ended:
         return max(new_price_usd - already_paid_usd, 0), None
-    if new_months < held_months:
-        through = None if paid_through is None else _as_utc(paid_through)
-        if through is None or through > now:
-            when = through.date().isoformat() if through is not None else "the end of its period"
-            raise ConflictError(
-                "sites.period_downgrade_refused",
-                f"This site is paid through {when}. Switch plans when it renews. "
-                "Nothing has been charged.",
-            )
+    if new_months < held_months and not ended:
+        when = through.date().isoformat() if through is not None else "the end of its period"
+        raise ConflictError(
+            "sites.period_downgrade_refused",
+            f"This site is paid through {when}. Switch plans when it renews. "
+            "Nothing has been charged.",
+        )
     if already_bought_today:
         raise ConflictError(
             "sites.plan_already_bought_today",
@@ -666,6 +672,11 @@ def site_plan_change_terms(
     from dateutil.relativedelta import relativedelta
 
     return new_price_usd, now + relativedelta(months=new_months)
+
+
+# Raised by ``site_plan_price_usd`` when a partner rung has no price it can charge.
+# The renewal sweep LAPSES on it, like a short wallet.
+PARTNER_PRICE_UNKNOWN = "billing.partner_price_unknown"
 
 
 async def site_plan_price_usd(
@@ -682,7 +693,8 @@ async def site_plan_price_usd(
     ``last_paid_usd`` (the site's ``period_paid_usd``), and it is kept ONLY when it
     is one of this tier's real prices. ``period_paid_usd`` is a per-period
     HIGH-WATER mark, so after a mid-period downgrade it holds the dearer tier's
-    price; renewing at that would overcharge. Anything else refuses.
+    price; renewing at that would overcharge. Anything else raises
+    ``PARTNER_PRICE_UNKNOWN`` and the renewal sweep lapses the site.
     """
     if not getattr(tier, "partner_only", False):
         return int(tier.monthly_price_usd)
@@ -694,7 +706,7 @@ async def site_plan_price_usd(
         if last_paid_usd and int(last_paid_usd) in site_plans.partner_prices_usd(tier.key):
             return int(last_paid_usd)
         raise ConflictError(
-            "billing.partner_price_unknown",
+            PARTNER_PRICE_UNKNOWN,
             f"Site tier '{tier.key}' is sold by Paw Partners and this workspace has no "
             "partner profile to price it.",
         )
