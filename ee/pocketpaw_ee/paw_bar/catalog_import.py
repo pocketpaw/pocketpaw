@@ -24,8 +24,13 @@
 #   * robots.txt is checked for EVERY url, under the concierge crawler's UA; a
 #     robots.txt that cannot be read (including one redirecting off the host) is
 #     allow-all with a ``robots_unreadable`` warning, the crawl's own policy;
-#   * one wall clock (``IMPORT_WALL_CLOCK_SEC``), ``IMPORT_MAX_PAGES`` product
-#     pages, ``IMPORT_BYTE_CAP`` bytes for the whole run.
+#   * one soft deadline (``IMPORT_WALL_CLOCK_SEC``): no fetch starts unless its
+#     own timeout fits in what is left, and the run returns what it has as
+#     ``partial`` + ``deadline_reached``; a hard ``asyncio.timeout`` sits
+#     ``IMPORT_BACKSTOP_GRACE_SEC`` past it. ``IMPORT_MAX_PAGES`` product pages,
+#     ``IMPORT_BYTE_CAP`` bytes for the whole run.
+#   * sitemaps are parsed only as UTF-8, by an expat parser that refuses any
+#     DOCTYPE or entity declaration (``_sitemap_locs``).
 # Never raises: every failure is ``status="failed"`` with a ``reason``.
 
 """Preview a connected store's products from its own site (Shopify, Woo, JSON-LD, OG)."""
@@ -33,18 +38,20 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import json
 import logging
 import re
+import time
 import unicodedata
-import xml.etree.ElementTree as ET  # noqa: S405 — DTDs are refused before parsing, see _sitemap_locs
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit
+from xml.parsers import expat
 
 import httpx
 from pydantic import BaseModel, Field
@@ -52,7 +59,13 @@ from pydantic import BaseModel, Field
 from pocketpaw.api.v1.unfurl import MetaParser
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.foreign_grounding import GROUNDING_USER_AGENT, crawlable_origin
-from pocketpaw_ee.sites.safe_fetch import FetchBudgetExceeded, FetchError, FetchResult, SafeFetcher
+from pocketpaw_ee.sites.safe_fetch import (
+    PER_FETCH_TIMEOUT_SEC,
+    FetchBudgetExceeded,
+    FetchError,
+    FetchResult,
+    SafeFetcher,
+)
 from pocketpaw_ee.sites.url_crawler import POLITENESS_DELAY_SEC, allowed_by_robots, load_robots
 
 logger = logging.getLogger(__name__)
@@ -60,7 +73,12 @@ logger = logging.getLogger(__name__)
 IMPORT_MAX_ITEMS = 200  # = PawBarSpec's catalog cap
 IMPORT_MAX_PAGES = 30
 IMPORT_BYTE_CAP = 8 * 1024 * 1024
-IMPORT_WALL_CLOCK_SEC = 45.0
+IMPORT_WALL_CLOCK_SEC = 45.0  # soft deadline: no fetch starts that could outlive it
+IMPORT_BACKSTOP_GRACE_SEC = 5.0  # the hard asyncio.timeout sits this far past it
+
+_FETCH_TIMEOUT_SEC = PER_FETCH_TIMEOUT_SEC
+_DEADLINE_MARGIN_SEC = 1.0
+_MAX_PRICE_MINOR = 10**12  # a price past this is a parse accident, not a product
 
 _NAME_CHARS = 200
 _DESCRIPTION_CHARS = 300
@@ -81,6 +99,8 @@ _SHOPIFY_ACTIVE_CURRENCY_RE = re.compile(
 _CURRENCY_CODE_RE = re.compile(r'"currencyCode"\s*:\s*"([A-Za-z]{3})"')
 _WOO_BODY_CLASS_RE = re.compile(r"<body[^>]*class=[\"'][^\"']*\bwoocommerce\b", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
+_DECIMAL_COMMA_RE = re.compile(r"\d*,\d{1,2}")
+_XML_ENCODING_RE = re.compile(r"""\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([^"']*)["']""")
 
 Platform = Literal["shopify", "woocommerce", ""]
 Source = Literal["shopify", "woocommerce", "jsonld", "opengraph", ""]
@@ -119,11 +139,13 @@ class ParsedProducts:
 
     items: list[ImportedProduct] = field(default_factory=list)
     skipped_no_price: int = 0
+    skipped_bad_price: int = 0  # a price that overflows or passes _MAX_PRICE_MINOR
     currency: str = ""  # the first priceCurrency seen (JSON-LD), for Shopify's fallback
 
     def extend(self, other: ParsedProducts) -> None:
         self.items.extend(other.items)
         self.skipped_no_price += other.skipped_no_price
+        self.skipped_bad_price += other.skipped_bad_price
         self.currency = self.currency or other.currency
 
 
@@ -188,13 +210,19 @@ def _clean_text(value: Any, limit: int) -> str:
 
 
 def _price(value: Any) -> Decimal | None:
-    """A non-negative decimal amount from a number or a "1,299.00" string."""
+    """A non-negative decimal amount from a number or a string. A lone comma
+    followed by one or two digits (and no dot) is a decimal comma ("19,99");
+    any other comma is a thousands separator ("1,500", "1,299.00")."""
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int | float):
         text = str(value)
     elif isinstance(value, str):
-        text = value.strip().replace(",", "")
+        text = value.strip()
+        if _DECIMAL_COMMA_RE.fullmatch(text):
+            text = text.replace(",", ".")
+        else:
+            text = text.replace(",", "")
     else:
         return None
     try:
@@ -246,14 +274,22 @@ def _web_id(path: str, name: Any) -> str:
 
 def _normalise(raws: Iterable[_Raw], *, base: str = "", host: str = "") -> ParsedProducts:
     """Raw reader output → catalog-shaped products. A product with no usable
-    price or name is dropped (a card with no price is worse than no card)."""
+    price or name is dropped (a card with no price is worse than no card), and so
+    is one whose price overflows or passes ``_MAX_PRICE_MINOR``: one absurd
+    value costs that product, never the import."""
     out = ParsedProducts()
     for raw in raws:
         name = _clean_text(raw.name, _NAME_CHARS)
         if raw.price is None or not name:
             out.skipped_no_price += 1
             continue
-        cents = int((raw.price * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        try:
+            cents = int((raw.price * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        except (ArithmeticError, ValueError):
+            cents = -1
+        if not 0 <= cents <= _MAX_PRICE_MINOR:
+            out.skipped_bad_price += 1
+            continue
         currency = raw.currency.strip().upper() if isinstance(raw.currency, str) else ""
         url = _site_path(raw.url, base, host) if host else ""
         if not url and isinstance(raw.url, str) and raw.url.startswith("/"):
@@ -553,25 +589,83 @@ def parse_og_product(html: str | bytes, page_url: str, host: str) -> ParsedProdu
     return _og_product(_scan(html).meta, page_url, host)
 
 
+class _RefusedXML(Exception):
+    """A sitemap declared a DTD or an entity: refused, nothing expanded."""
+
+
+class _EnoughLocs(Exception):
+    """``_MAX_LINKS`` locs read: stop parsing."""
+
+
+def _refuse_dtd(*_args: Any) -> None:
+    raise _RefusedXML
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit(" ", 1)[-1].lower()
+
+
 def _sitemap_locs(body: bytes) -> tuple[bool, list[str]]:
-    """(is_index, <loc> values) of a sitemap. A document carrying a DTD or an
-    entity declaration is refused before parsing (the defusedxml rule), so the
-    stdlib parser never sees an entity to expand."""
-    head = body[:4096].lower()
-    if b"<!doctype" in head or b"<!entity" in body.lower():
-        return False, []
+    """(is_index, <loc> values) of a sitemap; (False, []) when refused.
+
+    Two locks against entity expansion. The body must be UTF-8 (sitemaps.org
+    requires it; a UTF-8 BOM is allowed), carry no NUL (a BOM-less UTF-16 body
+    is valid UTF-8 byte-wise, its NULs give it away) and declare no other
+    encoding; the decoded text is then fed to expat as a str, so expat cannot
+    re-detect an encoding. And the expat parser raises on any DOCTYPE, entity
+    declaration or external entity reference, so nothing is ever expanded."""
+    if body.startswith(codecs.BOM_UTF8):
+        body = body[len(codecs.BOM_UTF8) :]
     try:
-        root = ET.fromstring(body)  # noqa: S314 — DTD/entities refused above
-    except ET.ParseError:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
         return False, []
-    is_index = root.tag.rsplit("}", 1)[-1].lower() == "sitemapindex"
+    declared = _XML_ENCODING_RE.match(text)
+    if "\x00" in text or (declared and declared.group(1).strip().lower() not in ("utf-8", "utf8")):
+        return False, []
+
+    parser = expat.ParserCreate(namespace_separator=" ")
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartDoctypeDeclHandler = _refuse_dtd
+    parser.EntityDeclHandler = _refuse_dtd
+    parser.UnparsedEntityDeclHandler = _refuse_dtd
+    parser.ExternalEntityRefHandler = _refuse_dtd
+    parser.buffer_text = True
+    root: list[str] = []
     locs: list[str] = []
-    for el in root.iter():
-        if el.tag.rsplit("}", 1)[-1].lower() == "loc" and el.text and el.text.strip():
-            locs.append(el.text.strip())
-            if len(locs) >= _MAX_LINKS:
-                break
-    return is_index, locs
+    current: list[str] | None = None
+
+    def start(tag: str, _attrs: Any) -> None:
+        nonlocal current
+        if not root:
+            root.append(_local(tag))
+        if _local(tag) == "loc":
+            current = []
+
+    def data(chunk: str) -> None:
+        if current is not None:
+            current.append(chunk)
+
+    def end(tag: str) -> None:
+        nonlocal current
+        if current is not None and _local(tag) == "loc":
+            loc = "".join(current).strip()
+            current = None
+            if loc:
+                locs.append(loc)
+                if len(locs) >= _MAX_LINKS:
+                    raise _EnoughLocs
+
+    parser.StartElementHandler = start
+    parser.CharacterDataHandler = data
+    parser.EndElementHandler = end
+    try:
+        parser.Parse(text, True)
+    except _EnoughLocs:
+        pass
+    except (_RefusedXML, expat.ExpatError):
+        return False, []
+    return bool(root) and root[0] == "sitemapindex", locs
 
 
 def _prefer_products(urls: list[str]) -> list[str]:
@@ -585,14 +679,20 @@ def _prefer_products(urls: list[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+class _DeadlineReached(Exception):
+    """The next fetch could outlive the soft deadline: stop and keep what we have."""
+
+
 class _Run:
     """One import against one verified host: a fetcher, robots, and counters."""
 
-    def __init__(self, fetcher: SafeFetcher, host: str, delay: float) -> None:
+    def __init__(self, fetcher: SafeFetcher, host: str, delay: float, deadline: float) -> None:
         self.fetcher = fetcher
         self.host = host
         self.base = f"https://{host}/"
         self.delay = delay
+        self.deadline = deadline  # a time.monotonic() value
+        self.deadline_hit = False
         self.robots: Any = None
         self.requests = 0
         self.pages_failed = 0
@@ -606,17 +706,25 @@ class _Run:
     def allowed(self, url: str) -> bool:
         return allowed_by_robots(self.robots, url, GROUNDING_USER_AGENT)
 
+    def _check_deadline(self) -> None:
+        if self.deadline - time.monotonic() < _FETCH_TIMEOUT_SEC + _DEADLINE_MARGIN_SEC:
+            self.deadline_hit = True
+            raise _DeadlineReached
+
     async def get(self, target: str) -> FetchResult | None:
         """GET an on-host url, robots first. None when blocked or failed; a
-        crossed byte budget propagates so the caller stops walking."""
+        crossed byte budget or the soft deadline propagates so the caller
+        stops walking."""
         url = self.url(target)
         if (urlsplit(url).hostname or "") != self.host:
             return None
         if not self.allowed(url):
             self.skipped_by_robots += 1
             return None
+        self._check_deadline()
         if self.requests and self.delay:
             await asyncio.sleep(self.delay)
+            self._check_deadline()
         self.requests += 1
         try:
             return await self.fetcher.fetch(url, allowed_host=self.host)
@@ -650,7 +758,10 @@ class _Run:
                 None,
             )
             if handle:
-                page = await self.get(f"/products/{handle}")
+                try:
+                    page = await self.get(f"/products/{handle}")
+                except _DeadlineReached:
+                    page = None  # keep the products; the currency stays unknown
                 if page is not None and page.status == 200:
                     currency = parse_jsonld_products(page.body, page.url, self.host).currency
         if not currency:
@@ -660,9 +771,12 @@ class _Run:
     async def woo(self) -> ParsedProducts | None:
         parsed: ParsedProducts | None = None
         for page in range(1, _WOO_MAX_PAGES + 1):
-            payload = await self.get_json(
-                f"/wp-json/wc/store/v1/products?per_page={_WOO_PAGE_SIZE}&page={page}"
-            )
+            try:
+                payload = await self.get_json(
+                    f"/wp-json/wc/store/v1/products?per_page={_WOO_PAGE_SIZE}&page={page}"
+                )
+            except _DeadlineReached:
+                break  # keep the pages already read
             if not isinstance(payload, list):
                 break
             parsed = parsed or ParsedProducts()
@@ -737,6 +851,8 @@ class _Run:
                 take(scan.jsonld, scan.meta, result.url)
         except FetchBudgetExceeded:
             self.budget_hit = True
+        except _DeadlineReached:
+            pass  # deadline_hit is set; the pages read so far stand
         source: Source = "jsonld" if jsonld else ("opengraph" if og else "")
         return found, source
 
@@ -757,7 +873,10 @@ async def _preview(run: _Run) -> CatalogImportPreview:
         run.warnings.append("robots_unreadable")
     if not run.allowed(run.base):
         return _failed("blocked_by_robots", run.host)
-    home = await run.get("/")
+    try:
+        home = await run.get("/")
+    except _DeadlineReached:
+        return _failed("timeout", run.host)
     if home is None or home.status != 200:
         return _failed("fetch_failed", run.host)
     home_html = home.body.decode("utf-8", errors="replace")
@@ -772,6 +891,8 @@ async def _preview(run: _Run) -> CatalogImportPreview:
             parsed, source = await run.woo(), "woocommerce"
     except FetchBudgetExceeded:
         run.budget_hit, parsed = True, None
+    except _DeadlineReached:
+        parsed = None
     if parsed is None or not parsed.items:
         if "currency_unknown" in run.warnings:
             run.warnings.remove("currency_unknown")
@@ -785,15 +906,21 @@ async def _preview(run: _Run) -> CatalogImportPreview:
     warnings = list(run.warnings)
     if parsed.skipped_no_price:
         warnings.append(f"skipped_no_price:{parsed.skipped_no_price}")
+    if parsed.skipped_bad_price:
+        warnings.append(f"skipped_bad_price:{parsed.skipped_bad_price}")
     if run.skipped_by_robots:
         warnings.append(f"skipped_by_robots:{run.skipped_by_robots}")
     if run.pages_failed:
         warnings.append(f"pages_failed:{run.pages_failed}")
     if run.budget_hit:
         warnings.append("byte_budget_reached")
+    if run.deadline_hit:
+        warnings.append("deadline_reached")
     if not items:
+        if run.deadline_hit:
+            return _failed("timeout", run.host)
         status = "empty"
-    elif run.pages_failed or run.budget_hit:
+    elif run.pages_failed or run.budget_hit or run.deadline_hit:
         status = "partial"
     else:
         status = "ok"
@@ -826,18 +953,22 @@ async def preview_catalog_import(
         return _failed(reason)
     fetcher = SafeFetcher(
         total_byte_cap=IMPORT_BYTE_CAP,
+        timeout_sec=_FETCH_TIMEOUT_SEC,
         user_agent=GROUNDING_USER_AGENT,
         transport=transport,
         resolver=resolver,
     )
     delay = POLITENESS_DELAY_SEC if politeness_delay is None else politeness_delay
-    run = _Run(fetcher, host, delay)
+    run = _Run(fetcher, host, delay, time.monotonic() + IMPORT_WALL_CLOCK_SEC)
+    backstop = IMPORT_WALL_CLOCK_SEC + IMPORT_BACKSTOP_GRACE_SEC
     try:
-        async with asyncio.timeout(IMPORT_WALL_CLOCK_SEC):
+        async with asyncio.timeout(backstop):
             return await _preview(run)
     except TimeoutError:
         # Ahead of the catch-all: asyncio.timeout's TimeoutError is an Exception.
-        logger.warning("catalog_import: %s exceeded %.0fs", host, IMPORT_WALL_CLOCK_SEC)
+        # Only a fetch that overran its own timeout lands here; the soft
+        # deadline normally returns first with what was read.
+        logger.warning("catalog_import: %s exceeded %.0fs", host, backstop)
         return _failed("timeout", host)
     except FetchBudgetExceeded:
         return _failed("fetch_failed", host)
@@ -849,6 +980,7 @@ async def preview_catalog_import(
 
 
 __all__ = [
+    "IMPORT_BACKSTOP_GRACE_SEC",
     "IMPORT_BYTE_CAP",
     "IMPORT_MAX_ITEMS",
     "IMPORT_MAX_PAGES",

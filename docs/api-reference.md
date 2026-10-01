@@ -4329,7 +4329,17 @@ The concierge's prompt carries the first 50 items.
 this workspace has verified within the last 30 days, the same rule as the knowledge
 crawl. It sends the concierge crawler's user agent (`PawSitesConcierge/1.0`), checks
 robots.txt for every URL, follows redirects only on that host, and stops at 30 product
-pages, 8 MB or 45 seconds.
+pages, 8 MB or 45 seconds. At the 45-second mark it starts no new fetch and returns
+what it has read as `partial` with `deadline_reached`; `timeout` is reserved for a run
+that read no products by then. Sitemaps are read only as UTF-8 (a UTF-8 BOM is fine);
+one that is not UTF-8, declares another encoding, or carries a DOCTYPE or entity
+declaration is ignored.
+
+A price is read from a number or a string. A single comma followed by one or two digits
+and no dot is a decimal comma (`"19,99"` is 19.99); any other comma is a thousands
+separator (`"1,500"`, `"1,299.00"`). A product whose price does not fit (over
+10^12 minor units, or too large to compute) is skipped and counted in
+`skipped_bad_price:<n>`; the rest of the import stands.
 
 It reads Shopify's `/products.json` or the WooCommerce Store API when the homepage looks
 like one of them, and otherwise (or when that endpoint is refused, missing or
@@ -4341,7 +4351,7 @@ order, and capped at 200; `total_found` is the count before the cap.
 | `status` | Meaning |
 |---|---|
 | `ok` | Products found and every page read. |
-| `partial` | Products found, but some pages could not be read or the byte budget ran out. |
+| `partial` | Products found, but some pages could not be read, or the byte budget or the 45-second deadline ran out. |
 | `empty` | Nothing with a name and a price was found. |
 | `failed` | Nothing was read; `reason` says why. |
 
@@ -4349,8 +4359,9 @@ order, and capped at 200; `total_found` is the count before the cap.
 `origin_missing`, `origin_unverified`, `origin_verification_stale`, `blocked_by_robots`
 (robots.txt disallows the homepage for our crawler), `timeout` or `fetch_failed`.
 `source` is `shopify`, `woocommerce`, `jsonld`, `opengraph` or `""`. `warnings` can hold
-`currency_unknown`, `skipped_no_price:<n>`, `skipped_by_robots:<n>`, `pages_failed:<n>`,
-`byte_budget_reached` and `robots_unreadable`.
+`currency_unknown`, `skipped_no_price:<n>`, `skipped_bad_price:<n>`,
+`skipped_by_robots:<n>`, `pages_failed:<n>`, `byte_budget_reached`, `deadline_reached`
+and `robots_unreadable`.
 
 Each item has the catalog fields above. `image_url` is always `https://` or empty, and
 `url` is a site path on the verified host or empty. Re-importing returns the same ids

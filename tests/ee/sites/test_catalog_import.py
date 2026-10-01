@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -196,6 +197,40 @@ def test_a_shopify_product_with_no_price_is_skipped_and_counted():
     parsed = ci.parse_shopify_products(payload, "USD")
     assert parsed.items == []
     assert parsed.skipped_no_price == 1
+
+
+def test_an_absurd_price_skips_that_product_and_keeps_the_rest():
+    payload = {
+        "products": [
+            _shopify_product(1, price="12.50"),
+            _shopify_product(2, price="1e30"),  # quantize overflows (InvalidOperation)
+            _shopify_product(3, price="1" * 30),
+            _shopify_product(4, price="20000000000"),  # 2 * 10**12 cents: past the cap
+            _shopify_product(5, price="4"),
+        ]
+    }
+    parsed = ci.parse_shopify_products(payload, "USD")
+    assert [i.id for i in parsed.items] == ["shopify:1", "shopify:5"]
+    assert parsed.skipped_bad_price == 3
+    assert parsed.skipped_no_price == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("19,99", "19.99"),  # decimal comma
+        ("5,5", "5.5"),
+        ("1,500", "1500"),  # thousands
+        ("1,299.00", "1299.00"),
+        ("12,345", "12345"),
+        ("1,234,56", "123456"),  # two commas: not a decimal comma
+        ("12.50", "12.50"),
+    ],
+)
+def test_price_reads_a_decimal_comma_and_keeps_thousands_separators(raw, expected):
+    from decimal import Decimal
+
+    assert ci._price(raw) == Decimal(expected)
 
 
 # --------------------------------------------------------------------------- #
@@ -404,6 +439,56 @@ def test_a_sitemap_with_a_dtd_is_refused_before_parsing():
     assert ci._sitemap_locs(ok) == (False, ["https://a/p/1?x=1&y=2"])
 
 
+_LAUGHS = (
+    '<?xml version="1.0"?>'
+    '<!DOCTYPE lolz [<!ENTITY lol "lol">'
+    + "".join(
+        f'<!ENTITY lol{i} "{("&lol" + str(i - 1) + ";") * 10 if i > 1 else "&lol;" * 10}">'
+        for i in range(1, 10)
+    )
+    + "]><urlset><url><loc>&lol9;</loc></url></urlset>"
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _LAUGHS.encode("utf-8"),
+        _LAUGHS.encode("utf-16"),  # BOM: not UTF-8
+        _LAUGHS.encode("utf-16-le"),  # no BOM: byte-valid UTF-8, its NULs give it away
+        _LAUGHS.replace('version="1.0"', 'version="1.0" encoding="UTF-16"').encode("utf-16-be"),
+    ],
+    ids=["utf8", "utf16-bom", "utf16le-no-bom", "utf16be-declared"],
+)
+def test_an_entity_bomb_is_refused_in_any_encoding_without_expanding(body):
+    started = time.monotonic()
+    assert ci._sitemap_locs(body) == (False, [])
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_sitemap_declaring_a_non_utf8_encoding_is_refused():
+    body = (
+        b'<?xml version="1.0" encoding="UTF-16"?>'
+        b"<urlset><url><loc>https://a/p/1</loc></url></urlset>"
+    )
+    assert ci._sitemap_locs(body) == (False, [])
+
+
+def test_the_parser_itself_refuses_a_doctype_with_no_entities():
+    body = b'<!DOCTYPE urlset SYSTEM "https://evil.example/x.dtd"><urlset><url><loc>https://a/p/1</loc></url></urlset>'
+    assert ci._sitemap_locs(body) == (False, [])
+
+
+def test_a_utf8_bom_and_a_utf8_declaration_are_accepted():
+    body = (
+        b"\xef\xbb\xbf"
+        b'<?xml version="1.0" encoding="utf-8"?>'
+        b'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        b"<sitemap><loc>https://a/s1.xml</loc></sitemap></sitemapindex>"
+    )
+    assert ci._sitemap_locs(body) == (True, ["https://a/s1.xml"])
+
+
 # --------------------------------------------------------------------------- #
 # Orchestrator
 # --------------------------------------------------------------------------- #
@@ -579,9 +664,14 @@ async def test_an_offsite_redirect_is_refused(beanie_test_db):
     assert all(r.headers["host"] == _HOST for r in seen)
 
 
-async def test_the_wall_clock_ends_a_slow_origin(beanie_test_db, monkeypatch):
+async def test_the_backstop_ends_a_fetch_that_overruns_its_own_timeout(beanie_test_db, monkeypatch):
     await _claim()
+    # MockTransport ignores httpx timeouts, so the trickle outlives the soft
+    # deadline; the hard asyncio.timeout behind it ends the run.
     monkeypatch.setattr(ci, "IMPORT_WALL_CLOCK_SEC", 0.05)
+    monkeypatch.setattr(ci, "IMPORT_BACKSTOP_GRACE_SEC", 0.05)
+    monkeypatch.setattr(ci, "_FETCH_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(ci, "_DEADLINE_MARGIN_SEC", 0.0)
 
     async def trickle(_request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(5)
@@ -589,6 +679,50 @@ async def test_the_wall_clock_ends_a_slow_origin(beanie_test_db, monkeypatch):
 
     preview = await _preview({"/": trickle})
     assert (preview.status, preview.reason, preview.host) == ("failed", "timeout", _HOST)
+
+
+async def test_the_soft_deadline_keeps_what_was_read_as_partial(beanie_test_db, monkeypatch):
+    await _claim()
+    # 1.0 s deadline, and no fetch starts with under 0.35 s left: with 0.2 s per
+    # product page, about four of the ten pages are read before the stop.
+    monkeypatch.setattr(ci, "IMPORT_WALL_CLOCK_SEC", 1.0)
+    monkeypatch.setattr(ci, "_FETCH_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(ci, "_DEADLINE_MARGIN_SEC", 0.05)
+    names = [f"Mug{i}" for i in range(10)]
+
+    def slow(name: str):
+        async def page(_request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0.2)
+            return _html(_jsonld_page(name, "10"))
+
+        return page
+
+    home = "<html><body>" + "".join(f'<a href="/products/{n}">{n}</a>' for n in names)
+    routes: dict[str, Any] = {"/": _html(home + "</body></html>")}
+    routes.update({f"/products/{n}": slow(n) for n in names})
+    seen: list[httpx.Request] = []
+    started = time.monotonic()
+    preview = await _preview(routes, seen)
+    elapsed = time.monotonic() - started
+
+    assert (preview.status, preview.reason) == ("partial", "")
+    assert "deadline_reached" in preview.warnings
+    assert 1 <= len(preview.items) < len(names)
+    assert [i.name for i in preview.items] == names[: len(preview.items)]
+    assert elapsed < 1.0  # stopped on its own, well before the backstop
+    product_paths = [p for p in _paths(seen) if p.startswith("/products/")]
+    assert len(product_paths) == len(preview.items)  # no fetch was started and dropped
+
+
+async def test_one_absurd_price_is_a_warning_not_a_failed_import(beanie_test_db):
+    await _claim()
+    products = [_shopify_product(1), _shopify_product(2, price="1e30"), _shopify_product(3)]
+    preview = await _preview(
+        {"/": _html(_SHOPIFY_HOME), "/products.json": _json({"products": products})}
+    )
+    assert (preview.status, preview.source) == ("ok", "shopify")
+    assert [i.id for i in preview.items] == ["shopify:1", "shopify:3"]
+    assert "skipped_bad_price:1" in preview.warnings
 
 
 async def test_more_than_200_products_are_capped_with_the_total_reported(beanie_test_db):
