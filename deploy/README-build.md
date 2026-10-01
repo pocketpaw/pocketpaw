@@ -1,6 +1,9 @@
 <!--
   deploy/README-build.md -- how to build the PocketPaw Enterprise image with the
   Paw Sites publish toolchain bundled.
+  Updated 2026-09-18 (chore/ripple-split-sites-dep): ripple is a bun workspace, so
+  the vendor step now stages TWO tarballs (svelte + core) and the image bakes a
+  second env var for the core resolution.
   Updated 2026-09-06 (feat/fx-mcp-server): paw-fx registry vendoring section.
   Created 2026-06-25 (feat/paw-sites-prod-deploy, DEP-4): documents the
   vendor/clone source switch for the paw-sites generator + the @ripple-ui/svelte
@@ -31,7 +34,7 @@ prebuilt trees from the build context. Stage them once before building:
 ```bash
 # Generator → deploy/paw-sites/ (dist/ + templates/ + package.json)
 scripts/vendor-paw-sites.sh
-# @ripple-ui/svelte tarball → deploy/ripple/ripple-ui-svelte-0.5.0.tgz
+# ripple tarballs → deploy/ripple/{ripple-ui-svelte-0.7.0.tgz,ripple-ui-core-0.5.0.tgz}
 scripts/vendor-ripple-tarball.sh
 ```
 
@@ -98,8 +101,13 @@ the cost of a longer first build (cached afterward).
 The image bakes these so a publish resolves with no extra config (see
 `.env.enterprise.example` for the full list):
 
-- `PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz` — the bundled ripple
+- `PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.7.0.tgz` — the bundled ripple
   tarball the publish path rewrites the generated site's dep to.
+- `PAW_SITES_RIPPLE_CORE_DEP=file:/opt/ripple-ui-core-0.5.0.tgz` — the second,
+  engine tarball. It lands as a `resolutions` entry, not a dependency: the svelte
+  tarball declares `@ripple-ui/core` as `file:../core`, which bun resolves against
+  its own install cache rather than the tarball, so without this redirect the site
+  installs with no engine and dies at `bun run build`.
 - `PAW_SITES_MOTION_DEP=^12.40.0` — kept in lockstep with ripple's motion pin.
 - `paw-sites-gen` is on `PATH` (a wrapper at `/usr/local/bin/paw-sites-gen` that
   execs `node /opt/paw-sites/dist/cli.js`), so `PAW_SITES_GEN_CMD` stays unset.
