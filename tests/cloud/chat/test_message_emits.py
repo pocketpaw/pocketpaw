@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Tests that message_service emits realtime events via the bus.
 
 Each public message_service mutation must fire the appropriate Event
@@ -9,15 +11,7 @@ no fake repositories or seam-patching needed.
 from __future__ import annotations
 
 import pytest
-from pocketpaw_ee.cloud.chat import message_service
-from pocketpaw_ee.cloud.chat.schemas import (
-    EditMessageRequest,
-    SendMessageRequest,
-)
-from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
-from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
-from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.events import (
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -27,6 +21,14 @@ from pocketpaw_ee.cloud.realtime.events import (
     ThreadCreated,
     UnreadUpdate,
 )
+from pocketpaw_ee.cloud.chat import message_service
+from pocketpaw_ee.cloud.chat.schemas import (
+    EditMessageRequest,
+    SendMessageRequest,
+)
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
+from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
 
 
 async def _make_group(
@@ -314,7 +316,7 @@ async def test_close_thread_emits_thread_closed(mongo_db, recording_bus):
 @pytest.mark.asyncio
 async def test_send_reply_emits_message_new_not_thread_reply(mongo_db, recording_bus):
     """Inline replies fan out via MessageNew; no ThreadReply event fires."""
-    from pocketpaw_ee.cloud.realtime.events import ThreadReply
+    from pocketpaw_ee.cloud._core.realtime.events import ThreadReply
 
     group = await _make_group(owner="sender", members=["sender"])
     parent = await _make_message(group_id=str(group.id), sender="u_other")

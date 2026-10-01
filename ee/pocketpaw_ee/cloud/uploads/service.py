@@ -38,6 +38,9 @@
 #   The KB listener picks up the new key and routes the article into
 #   ``pocket:{id}`` instead of ``workspace:{wid}``. Storage layout is
 #   unchanged — partitioning is metadata-only (Captain Option A).
+#
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """EEUploadService — workspace-scoped upload pipeline on top of the OSS service."""
 
 from __future__ import annotations
@@ -64,8 +67,8 @@ from pocketpaw.uploads.service import (
 from pocketpaw.uploads.service import (
     generate_thumbnail as _oss_generate_thumbnail,
 )
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import FileDeleted, FileReady
 from pocketpaw_ee.cloud.uploads.extracted_text import delete_extracted_text
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 

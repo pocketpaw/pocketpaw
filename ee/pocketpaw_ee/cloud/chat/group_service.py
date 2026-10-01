@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Chat domain — group business logic (CRUD, membership, agents, DMs).
 
 Sole owner of writes to the ``Group`` Beanie document. Module-level
@@ -32,6 +34,19 @@ from typing import Any, Literal
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    GroupAgentAdded,
+    GroupAgentRemoved,
+    GroupAgentUpdated,
+    GroupCreated,
+    GroupJoined,
+    GroupMemberAdded,
+    GroupMemberRemoved,
+    GroupMemberRole,
+    GroupUpdated,
+)
 from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
 from pocketpaw_ee.cloud.chat.domain import Group as _GroupDomain
 from pocketpaw_ee.cloud.chat.domain import GroupAgent as _GroupAgentDomain
@@ -46,19 +61,6 @@ from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
 from pocketpaw_ee.cloud.models.group import MemberRole
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.notifications import service as notifications_service
-from pocketpaw_ee.cloud.realtime.bus import get_resolver
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
-    GroupAgentAdded,
-    GroupAgentRemoved,
-    GroupAgentUpdated,
-    GroupCreated,
-    GroupJoined,
-    GroupMemberAdded,
-    GroupMemberRemoved,
-    GroupMemberRole,
-    GroupUpdated,
-)
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.guards.actions import GroupRole
 from pocketpaw_ee.guards.audit import log_denial

@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
@@ -170,10 +172,10 @@ def init_realtime() -> None:
     import logging
     import os
 
+    from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
+    from pocketpaw_ee.cloud._core.realtime.bus import InProcessBus, set_bus, set_resolver
     from pocketpaw_ee.cloud.chat import group_service
     from pocketpaw_ee.cloud.chat.ws import manager as _conn_manager
-    from pocketpaw_ee.cloud.realtime.audience import AudienceResolver
-    from pocketpaw_ee.cloud.realtime.bus import InProcessBus, set_bus, set_resolver
     from pocketpaw_ee.cloud.workspace import service as workspace_service
 
     logger = logging.getLogger(__name__)

@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Chat domain — REST endpoints + WebSocket handler.
 
 REST routes live under ``/chat`` and require an enterprise license. The
@@ -33,6 +35,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from pocketpaw_ee.cloud._core.realtime import presence
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    MessageRead,
+    PresenceOffline,
+    PresenceOnline,
+    TypingStart,
+    TypingStop,
+)
 from pocketpaw_ee.cloud.chat import group_service, message_service, unread_service
 from pocketpaw_ee.cloud.chat.agent_router import router as agent_router
 from pocketpaw_ee.cloud.chat.schemas import (
@@ -52,14 +62,6 @@ from pocketpaw_ee.cloud.chat.schemas import (
 )
 from pocketpaw_ee.cloud.chat.ws import PRESENCE_GRACE_SECONDS, manager
 from pocketpaw_ee.cloud.license import get_license, require_license
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
-    MessageRead,
-    PresenceOffline,
-    PresenceOnline,
-    TypingStart,
-    TypingStop,
-)
 from pocketpaw_ee.cloud.shared.deps import (
     current_user,
     current_user_id,

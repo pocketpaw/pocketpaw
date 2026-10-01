@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """EEMultipartService — resumable uploads, from init to a ``FileUpload`` row.
 
 Created 2026-09-14 (feat/uploads-multipart-endpoints). Implements the server
@@ -85,8 +87,8 @@ from pocketpaw_ee.cloud._core.errors import (
     NotFound,
     PayloadTooLarge,
 )
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import FileReady
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import FileReady
 from pocketpaw_ee.cloud.shared.time import iso_utc
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw_ee.cloud.uploads.multipart_models import (
