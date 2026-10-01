@@ -4,7 +4,8 @@
 # list / button / form / divider, no raw HTML, no script paths) inside a
 # ``PawBarSpec``, plus the visitor-commerce declarations on that spec: ``actions``
 # (unique snake_case verbs; only the cart verbs may be ``auto``, everything else is
-# ``gated`` to an Instinct proposal) and an http(s) ``checkout_url``. The product
+# ``gated`` to an Instinct proposal; the built-in ``send_to_team`` is reserved and
+# can't be declared) and an http(s) ``checkout_url``. The product
 # catalog lives in its own table (``paw_bar.catalog_store``, rows read back as
 # ``PawBarCatalogRow``); ``PawBarSpec.catalog`` is DEPRECATED, kept one release so
 # an older editor's spec PATCH still works: the store adds a non-empty one to the
@@ -74,6 +75,9 @@ _ACTION_POLICIES = frozenset({"auto", "gated"})
 # MUST be "gated" — a non-cart effect auto-firing would violate the staffed-sites
 # rule that tenant-scoped effects only happen through an Instinct proposal.
 _AUTO_VERBS = frozenset({"add_to_cart", "checkout"})
+# Built-in verbs the executor handles itself (``send_to_team``: the concierge's
+# lead card). An owner can't declare one, so the name can only ever mean that.
+_RESERVED_VERBS = frozenset({"send_to_team"})
 # snake_case verb: lowercase, digits, underscores; must start with a letter.
 _VERB_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -341,6 +345,8 @@ class PawBarSpec(BaseModel):
             if action.verb in seen:
                 raise ValueError(f"duplicate action verb {action.verb!r} — verbs must be unique")
             seen.add(action.verb)
+            if action.verb in _RESERVED_VERBS:
+                raise ValueError(f"action verb {action.verb!r} is built in and can't be declared")
             # SS-2: a non-cart verb must never be "auto" — only visitor-scoped
             # cart verbs auto-fire; everything else is gated to an Instinct proposal.
             if action.policy == "auto" and action.verb not in _AUTO_VERBS:

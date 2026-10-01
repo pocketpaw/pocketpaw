@@ -360,6 +360,23 @@ async def list_for_site(workspace_id: str, site_id: str, *, limit: int = 100) ->
     return [_to_domain(doc) async for doc in cursor]
 
 
+async def has_conversation_lead(
+    workspace_id: str, site_id: str, kind: str, conversation_ref: str
+) -> bool:
+    """Whether this site already holds a ``kind`` lead for the conversation."""
+    if not conversation_ref:
+        return False
+    found = await _LeadDoc.find_one(
+        {
+            "workspace": workspace_id,
+            "site_id": site_id,
+            "source.kind": kind,
+            "source.conversation_ref": conversation_ref,
+        }
+    )
+    return found is not None
+
+
 async def count_for_site(workspace_id: str, site_id: str) -> int:
     return await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).count()
 
@@ -469,6 +486,7 @@ __all__ = [
     "capture",
     "capture_internal",
     "count_for_site",
+    "has_conversation_lead",
     "lead_payload",
     "list_for_site",
     "mark_all_read",
