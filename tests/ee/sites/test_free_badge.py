@@ -33,8 +33,10 @@
 # ``_Doc`` gains ``partner_client_id`` (absent unless passed). New cases: the
 # default builder call is unchanged, the co-brand text and partners href land
 # (escaped, ASCII-only, never a tag), a paid non-partner site stays clean, a
-# partner rung with no footer name or a lapsed one falls back, and a republish
-# swaps badge <-> co-brand in both directions.
+# partner rung with no footer name (whitespace-only included) or a lapsed one falls
+# back, a sold site moved to a monthly rung and hidden ships clean, a long name is
+# shortened on screen but whole in the aria-label, and a republish swaps badge <->
+# co-brand in both directions.
 
 from __future__ import annotations
 
@@ -898,9 +900,38 @@ async def test_only_a_sold_partner_rung_gets_the_cobrand(tmp_path, monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_no_footer_name_falls_back_to_the_ordinary_rule(tmp_path, monkeypatch):
-    _partner_profile(monkeypatch, "   ")
+@pytest.mark.parametrize("blank", ["", "   ", " \t\n "])
+async def test_a_blank_footer_name_falls_back_to_the_ordinary_rule(tmp_path, monkeypatch, blank):
+    """Whitespace-only is blank: no "Made by  ·" pill, the ordinary rule applies
+    (a paid, hidden partner rung ships clean)."""
+    _partner_profile(monkeypatch, blank)
     assert badge.BADGE_MARKER not in await _stamp(tmp_path, monkeypatch, _sold())
+
+
+@pytest.mark.asyncio
+async def test_a_long_footer_name_is_shortened_on_screen_but_whole_for_screen_readers(
+    tmp_path, monkeypatch
+):
+    """The pill is fixed and nowrap, so a long name would run off a phone."""
+    name = "Mahalakshmi Printers & Graphics"
+    _partner_profile(monkeypatch, name)
+    page = await _stamp(tmp_path, monkeypatch, _sold())
+
+    label = re.search(r'aria-label="([^"]*)"', page).group(1)
+    shown = re.search(r"<span [^>]*>([^<]*)</span>", page).group(1)
+    assert label == "Made by Mahalakshmi Printers &amp; Graphics &#183; Paw Sites by PocketPaw"
+    assert shown == "Made by Mahalakshmi&#8230; &#183; Paw Sites by PocketPaw"
+
+
+@pytest.mark.asyncio
+async def test_a_partner_site_moved_to_a_monthly_rung_and_hidden_ships_clean(tmp_path, monkeypatch):
+    """Still holding a client id, but off the partner rungs: the ordinary paid rule
+    applies, so an owner who hid the badge gets nothing — no co-brand, no badge."""
+    _partner_profile(monkeypatch, "Sharma Prints")
+    page = await _stamp(
+        tmp_path, monkeypatch, _Doc("site", partner_client_id="client-1", badge_hidden=True)
+    )
+    assert badge.BADGE_MARKER not in page
 
 
 async def _restamp(tmp_path, monkeypatch, doc) -> str:

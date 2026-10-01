@@ -3370,7 +3370,9 @@ field existed reads `true`, which is how an entitled site behaved before the swi
 (`site_year` / `staff_year`) publishes with "Made by <footer_name> · Paw Sites by
 PocketPaw", linking to `https://pocketpaw.xyz/partners`. `footer_name` comes from the
 partner's profile. It sits in the same place as the badge with the same lock, so the
-shop's own stylesheet cannot hide it, and `badge_hidden` does not remove it. The sale's
+shop's own stylesheet cannot hide it, and `badge_hidden` does not remove it. A name over
+13 characters is shortened with "…" on screen so the mark fits a phone, and the full name
+stays in its accessible label. The sale's
 own redeploy already carries it. If the partner plan lapses, the next publish puts the
 standard badge back. A partner profile with no `footer_name` falls back to the rules
 above.

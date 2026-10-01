@@ -31,13 +31,15 @@
 # sequences charge each thing once.
 # Updated 2026-10-02 (feat/partners-cobrand, PH-5): the sale's OWN redeploy stamps
 # the co-brand mark (``partner_client_id`` lands before the deploy), and a refused
-# sale still leaves ``partner_client_id`` unset.
+# sale still leaves ``partner_client_id`` unset, and a failed or cancelled re-sale
+# to another client restores the previous one.
 # Updated 2026-10-02: the autouse fixture clears the shared
 # ``read_model.default_journal_store`` cache (``service._default_store`` now
 # delegates to it) and points the per-workspace stores at tmp_path.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -686,7 +688,9 @@ async def test_the_sale_redeploy_already_carries_the_cobrand_mark(
     )
 
     assert stamped, "the sale redeploys through the badge stamper"
-    assert stamped[-1].get("text") == "Made by in-shop Prints · Paw Sites by PocketPaw"
+    # "in-shop Prints" is 14 characters: shortened on screen, whole in the label.
+    assert stamped[-1].get("text") == "Made by in-shop Prin… · Paw Sites by PocketPaw"
+    assert stamped[-1].get("label") == "Made by in-shop Prints · Paw Sites by PocketPaw"
     assert stamped[-1].get("href") == badge.PARTNERS_HREF
 
 
@@ -750,6 +754,42 @@ async def test_a_short_wallet_refuses_the_sale_and_changes_nothing(
     assert doc.subscription_status == "none"
     assert doc.deployed is True
     assert doc.partner_client_id is None
+
+
+@pytest.mark.parametrize("error", [RuntimeError("deploy failed"), asyncio.CancelledError()])
+async def test_a_failed_resale_keeps_the_previous_client(
+    mongo_db, store, monkeypatch, error
+) -> None:
+    """The client id lands before the redeploy, so a re-sale that does not complete
+    — raised OR cancelled — must put the PREVIOUS client back, not clear it."""
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 9000)
+    site_id = await _free_site(wid)
+    first = await _client(ctx, store)
+    await service.sell(
+        ctx, body={"client_id": first, "site_id": site_id, "sku": "site_year"}, store=store
+    )
+    second = (
+        await service.create_client(
+            ctx, body={"name": "Asha", "whatsapp": "+919876500000"}, store=store
+        )
+    ).id
+
+    async def _boom(**_kw):
+        raise error
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _boom)
+    with pytest.raises(type(error)):
+        await service.sell(
+            ctx, body={"client_id": second, "site_id": site_id, "sku": "staff_year"}, store=store
+        )
+
+    assert (await Site.get(site_id)).partner_client_id == first
 
 
 async def test_selling_needs_an_active_partner_and_its_own_client_and_site(

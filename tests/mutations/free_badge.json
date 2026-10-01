@@ -250,7 +250,7 @@
     ]
   },
   {
-    "label": "the sale stamps its client after the redeploy, so the sold site ships the free badge",
+    "label": "the sale stops stamping its client before the redeploy, so the sold site ships unmarked",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    prior_client_id = getattr(doc, \"partner_client_id\", None)\n    await doc.set({\"partner_client_id\": partner_client_id})\n",
     "replace": "    prior_client_id = getattr(doc, \"partner_client_id\", None)\n",
@@ -264,7 +264,26 @@
     "find": "            await doc.set({\"partner_client_id\": prior_client_id})\n",
     "replace": "",
     "tests": [
-      "tests/cloud/partners/test_partners.py::test_a_short_wallet_refuses_the_sale_and_changes_nothing"
+      "tests/cloud/partners/test_partners.py::test_a_short_wallet_refuses_the_sale_and_changes_nothing",
+      "tests/cloud/partners/test_partners.py::test_a_failed_resale_keeps_the_previous_client"
+    ]
+  },
+  {
+    "label": "a long partner name is shown whole and runs the pill off a phone screen",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                if len(footer_name) <= _COBRAND_NAME_MAX\n",
+    "replace": "                if True\n",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_long_footer_name_is_shortened_on_screen_but_whole_for_screen_readers"
+    ]
+  },
+  {
+    "label": "the co-brand drops the full name from its accessible label",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                label=f\"Made by {footer_name} · Paw Sites by PocketPaw\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_long_footer_name_is_shortened_on_screen_but_whole_for_screen_readers"
     ]
   }
 ]

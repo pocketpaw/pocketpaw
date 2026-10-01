@@ -5,9 +5,11 @@
 # the partner CO-BRAND mark ("Made by <footer_name> · Paw Sites by PocketPaw" ->
 # the Paw Partners page) on a partner-sold site (``partner_client_id``) riding an
 # active partner-only rung, ahead of the hidden-badge skip; free and paid
-# non-partner sites are unchanged. ``sell_site_plan`` now stamps
-# ``partner_client_id`` BEFORE the redeploy (rolled back if the sale fails) so the
-# sale's own deploy already carries the co-brand mark.
+# non-partner sites are unchanged. A name over ``_COBRAND_NAME_MAX`` is shortened
+# in the visible text (full name in the aria-label) so the pill fits a phone.
+# ``sell_site_plan`` now stamps ``partner_client_id`` once, BEFORE the redeploy
+# (restored in a ``finally`` if the sale does not complete, cancellation included),
+# so the sale's own deploy already carries the co-brand mark.
 #
 # Updated 2026-10-02 (feat/partners-sell, PH-2): partner-only yearly rungs. The
 # publish path refuses them outside an ACTIVE partner workspace and never
@@ -4321,6 +4323,16 @@ async def _embed_concierge_bar(
         )
 
 
+# PH-5: longest partner name the co-brand pill shows before it is shortened.
+# Measured headless (Chrome, system-ui, 375px viewport): the fixed text around the
+# name already takes ~250px. At 13 a mixed-case name keeps 8-23px to the left
+# edge and an all-caps one just fits (~0px); 20 ran 24-47px off-screen. 13 rather
+# than 12 so a typical shop name ("Sharma Prints") shows whole. ponytail: a
+# character cap, not a width cap — a name of only wide glyphs ("MMMM…") can still
+# clip; a per-variant max-width + ellipsis in the lock is the upgrade.
+_COBRAND_NAME_MAX = 13
+
+
 async def _stamp_free_badge(
     *,
     workspace_id: str,
@@ -4398,10 +4410,18 @@ async def _stamp_free_badge(
         profile = await partners_service.partner_profile_for_workspace(workspace_id)
         footer_name = (getattr(profile, "footer_name", "") or "").strip()
         if footer_name:
+            # The pill is fixed and nowrap, so a long name would run off a phone
+            # screen: show a shortened name, keep the full one in the aria-label.
+            shown = (
+                footer_name
+                if len(footer_name) <= _COBRAND_NAME_MAX
+                else footer_name[: _COBRAND_NAME_MAX - 1].rstrip() + "…"
+            )
             changed = badge.inject_into_tree(
                 root,
-                text=f"Made by {footer_name} · Paw Sites by PocketPaw",
+                text=f"Made by {shown} · Paw Sites by PocketPaw",
                 href=badge.PARTNERS_HREF,
+                label=f"Made by {footer_name} · Paw Sites by PocketPaw",
             )
             logger.info(
                 "sites: stamped the partner co-brand mark onto %d page(s) of site %s",
@@ -8635,23 +8655,28 @@ async def sell_site_plan(
         and not getattr(doc, "plan_cancels_at_period_end", False)
     )
     # Stamped BEFORE the redeploy: the badge stamper reads ``partner_client_id``
-    # mid-deploy, so stamping after would ship the sale with the free badge and
-    # the co-brand mark only on the next publish. A refused sale restores it.
+    # mid-deploy, and partner rungs remove the badge (``badge_hidden`` defaults
+    # True), so stamping after would ship the sale with NO mark at all until the
+    # next publish. Written once: ``publish_pocket`` loads the doc after this, so
+    # its saves and the doc it returns already carry it. A sale that does not
+    # complete (refused, raised, or cancelled) restores the prior value.
     prior_client_id = getattr(doc, "partner_client_id", None)
     await doc.set({"partner_client_id": partner_client_id})
-    if not already_sold:
-        try:
-            doc = await publish_pocket(
-                workspace_id=workspace_id,
-                user_id=user_id,
-                pocket_id=doc.pocket_id,
-                site_plan_key=tier_key,
-                purchase_authorized=True,
-            )
-        except Exception:
+    if already_sold:
+        return doc
+    sold = False
+    try:
+        doc = await publish_pocket(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=doc.pocket_id,
+            site_plan_key=tier_key,
+            purchase_authorized=True,
+        )
+        sold = True
+    finally:
+        if not sold:
             await doc.set({"partner_client_id": prior_client_id})
-            raise
-    await doc.set({"partner_client_id": partner_client_id})
     return doc
 
 

@@ -92,7 +92,8 @@
 #   changes state. Defaults are byte-identical to the old badge. Every input is
 #   escaped AND forced to ASCII (character references), because the latin-1
 #   fallback below re-encodes the page and the co-brand carries a middle dot and a
-#   shop name in any script.
+#   shop name in any script. The latin-1 comment in ``inject_into_tree`` now
+#   points at both ASCII tests.
 
 from __future__ import annotations
 
@@ -559,9 +560,13 @@ def inject_into_tree(
         # same codec reproduces the original bytes with ASCII spliced in. That is
         # safe for every ASCII-compatible encoding — utf-8, latin-1, windows-1252,
         # the whole ISO-8859 family. ``test_the_badge_is_pure_ascii`` pins the
-        # assumption the fallback rests on; if the badge ever gains a non-ASCII
-        # character, this silently corrupts a latin-1 page and that test is what
-        # stops it.
+        # assumption the fallback rests on for the default badge, and
+        # ``_ascii_escape`` keeps it true for caller-supplied text (a partner's
+        # co-brand name in any script, the middle dot) —
+        # ``test_a_hostile_cobrand_name_is_escaped_and_ascii`` pins that half. A raw
+        # non-ASCII character would either abort the publish here
+        # (``UnicodeEncodeError``) or be written as a latin-1 byte into a page whose
+        # real codec may not be latin-1.
         try:
             page, codec = raw.decode("utf-8"), "utf-8"
         except UnicodeDecodeError:
