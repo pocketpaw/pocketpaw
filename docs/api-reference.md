@@ -5,7 +5,9 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 Updated: 2026-10-01 (feat/discover-index) — Site templates gain `kind`,
   `audiences` (accepted on save and PATCH) and `live_url` (the source site's
   deployed URL) on every response; public, unhidden templates are mirrored into
-  the Discover index.
+  the Discover index. Added "Discover — Public Index" (GET /discover,
+  GET /discover/{id} public and rate-limited; POST /discover/{id}/use and
+  /report signed in).
 Updated: 2026-10-01 (feat/atlas-canonical) — added "Atlas — Surfaces, Verbs and
   Search" (GET /api/v1/atlas/{surfaces,verbs,search}), and `open_surface`'s
   route list now comes from atlas (`agent_openable` surfaces). Review pass: the
@@ -1129,6 +1131,76 @@ return `404` for everyone but the owner, who still sees it with
 
 Errors: `404` for a template you can't see or that is not public; `403`
 (`site_templates.own_template`) for the owner reporting their own.
+
+## Discover — Public Index
+
+One index of shareable items from every workspace, newest first. Today the only
+source is public site templates (`source: "site_template"`); a template that is
+public and not report-hidden has one listing. The two reads need no sign-in and
+are limited to 60 requests a minute per IP (shared between them); past that they
+return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
+user and act in the caller's active workspace.
+
+A listing on the wire is exactly these fields (never the owner, workspace,
+reports or the source item's id):
+
+```json
+{
+  "id": "6660a1...",
+  "source": "site_template",
+  "kind": "site",
+  "title": "Bakery",
+  "description": "",
+  "audiences": ["shop"],
+  "featured": false,
+  "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
+  "live_url": "https://bakery.pawsites.workers.dev",
+  "remix_count": 3,
+  "created_at": "2026-10-01T09:00:00Z"
+}
+```
+
+### `GET /discover` (public)
+
+Query params, all optional: `source`, `kind` (`site`, `tool`, `game`),
+`audience` (matches one of a listing's `audiences`), `q` (case-insensitive
+substring of title or description, up to 100 chars), `featured` (`true` /
+`false`), `cursor`, `limit` (1-50, default 24).
+
+Response `200`: `{"items": [<listing>, ...], "next_cursor": "6660a0..." | null}`.
+Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last
+page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
+`limit` above 50 returns `422`.
+
+### `GET /discover/{listing_id}` (public)
+
+Response `200`: one listing. `404` when it doesn't exist or has been hidden.
+
+### `POST /discover/{listing_id}/use` (signed in)
+
+Make your own copy of the listing's item in your workspace. The body is
+optional; `name` defaults to the item's name.
+
+```json
+{ "name": "My bakery" }
+```
+
+Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
+The source's own checks apply (a site template needs a plan with Sites), and
+`remix_count` goes up by one only when the copy succeeded. `404` for a missing
+or hidden listing.
+
+### `POST /discover/{listing_id}/report` (signed in)
+
+```json
+{ "reason": "Spam, up to 500 chars" }
+```
+
+Response `204`, no body. One report per user counts; a repeat changes nothing.
+Three different reporters hide the listing from both public reads, `use` and
+`report`. Staff unhiding a listing clears its reports. Errors: `404` for a
+missing or hidden listing; `403` (`discover.own_listing`) for the owner
+reporting their own.
 
 ## Skills — Per-Backend API Skills
 
