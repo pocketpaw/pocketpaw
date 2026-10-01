@@ -227,7 +227,8 @@ async def test_caps_and_paging(world) -> None:
         older = body(
             await _read_room_handler({"room": gid, "limit": 5, "before": first["older_cursor"]})
         )["messages"]
-    assert older and older[-1]["text"][:4] < msgs[0]["text"][:4]
+    # Contiguous: no message skipped across the page boundary.
+    assert int(older[-1]["text"][:4]) == int(msgs[0]["text"][:4]) - 1
     assert not {m["id"] for m in older} & {m["id"] for m in msgs}
 
 
