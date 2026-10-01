@@ -279,3 +279,67 @@ async def test_declared_verbs_still_answer_with_a_string_detail(action_client):
     )
     assert res.status_code == 422
     assert res.json()["detail"] == "verb_not_declared"
+
+
+# --------------------------------------------------------------------------- #
+# The caps under concurrency, and when the store fails
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_burst_cannot_pass_the_site_cap(action_client):
+    """The caps are admitted atomically BEFORE the write: 50 parallel sends from
+    50 rotated visitor handles land at most 30 leads and 30 lead.captured."""
+    import asyncio
+
+    from pocketpaw_ee.cloud.shared.events import event_bus
+    from pocketpaw_ee.paw_bar.actions import execute_action
+
+    _client, store, site, widget = await _setup(action_client)
+    seen: list[dict] = []
+
+    async def _rec(data: dict) -> None:
+        seen.append(data)
+
+    event_bus.subscribe("lead.captured", _rec)
+    try:
+        outcomes = await asyncio.gather(
+            *(
+                execute_action(
+                    widget,
+                    "ws-1",
+                    f"burst-{i:04d}",
+                    "send_to_team",
+                    {"email": f"v{i}@b.co"},
+                    store=store,
+                    site=site,
+                )
+                for i in range(50)
+            )
+        )
+    finally:
+        event_bus.unsubscribe("lead.captured", _rec)
+    assert sum(o.ok for o in outcomes) <= 30
+    assert len(await _leads()) <= 30
+    assert len(seen) <= 30
+    assert all(o.http_status == 429 for o in outcomes if not o.ok)
+
+
+@pytest.mark.asyncio
+async def test_a_store_error_fails_closed(action_client, monkeypatch):
+    """No admission, no lead: a store that can't count answers 503."""
+    from pocketpaw_ee.paw_bar.actions import execute_action
+
+    _client, store, site, widget = await _setup(action_client)
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "admit_capped_event", _boom)
+    monkeypatch.setattr(store, "count_events_since", _boom)
+    outcome = await execute_action(
+        widget, "ws-1", _CUST, "send_to_team", {"email": "a@b.co"}, store=store, site=site
+    )
+    assert outcome.ok is False
+    assert outcome.http_status == 503
+    assert await _leads() == []

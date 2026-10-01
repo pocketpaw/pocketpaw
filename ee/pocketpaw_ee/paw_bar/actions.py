@@ -13,8 +13,10 @@
 #       route does; the agent's tool path doesn't), and only while the site's
 #       ``concierge_lead_capture`` is on (409 otherwise). Fields name <=120,
 #       email/phone (one required, contact_form checks), message <=2000; 3 per
-#       visitor per 10 minutes, 30 per site per hour (429), counted off the
-#       ``pawbar_lead`` marker. Writes a Lead via leads.capture_internal (HIGH
+#       visitor per 10 minutes, 30 per site per hour (429), admitted atomically
+#       BEFORE the write by recording the ``pawbar_lead`` marker in the same
+#       transaction that counts (a slot is never given back; a store error is 503,
+#       no lead). Writes a Lead via leads.capture_internal (HIGH
 #       injection screen there) with conversation_ref "<widget_id>:<customer_ref>".
 #       A field refusal is 422 with ``detail`` {code, field, message}; any other
 #       422 has field None (paw-bar's lead form reads exactly this).
@@ -36,7 +38,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -508,43 +510,36 @@ def _lead_fields(args: Any) -> tuple[dict[str, str] | None, ActionOutcome | None
     return fields, None
 
 
-async def _within_lead_rate(store: Any, widget_id: str, customer_ref: str) -> bool:
-    """3 per visitor per 10 minutes, 30 per site (its widget) per hour, counted
-    off the lead marker. A counting failure ALLOWS the lead: losing one is the
-    worse failure, and the front gate's per-minute caps still apply."""
-    now = datetime.now()
+async def _admit_lead(store: Any, widget_id: str, customer_ref: str) -> bool | None:
+    """Take one lead slot: 3 per visitor per 10 minutes, 30 per site (its widget)
+    per hour. The ``pawbar_lead`` marker is written by the SAME transaction that
+    counts (``store.admit_capped_event``), BEFORE the lead is written, so a
+    parallel burst with rotated visitor handles can't all read "under the cap".
+    True admitted, False capped, None the store failed (the caller fails closed:
+    no admission, no lead).
+
+    A slot is never given back, even when the write that follows fails (the
+    injection screen drops it, or Mongo errors). Failed attempts spend budget
+    on purpose: a bot that trips the screen exhausts the site's hourly cap
+    without producing a single email."""
+    from pocketpaw.paw_bar.models import PawBarEvent
+
     try:
-        mine = await store.count_events_since(
-            widget_id,
-            now - LEAD_VISITOR_WINDOW,
-            customer_ref=customer_ref,
-            event_type=LEAD_MARKER_TYPE,
-        )
-        if mine >= LEADS_PER_VISITOR:
-            return False
-        site_total = await store.count_events_since(
-            widget_id, now - LEAD_SITE_WINDOW, event_type=LEAD_MARKER_TYPE
-        )
-        return site_total < LEADS_PER_SITE
-    except Exception:  # noqa: BLE001
-        logger.debug("lead rate check failed (allowing)", exc_info=True)
-        return True
-
-
-async def _record_lead_marker(store: Any, widget_id: str, customer_ref: str, ok: bool) -> None:
-    try:
-        from pocketpaw.paw_bar.models import PawBarEvent
-
-        await store.record_event(
+        return await store.admit_capped_event(
             PawBarEvent(
                 widget_id=widget_id,
                 type=LEAD_MARKER_TYPE,
-                payload={"policy": "builtin", "verb": SEND_TO_TEAM_VERB, "ok": ok},
+                payload={"policy": "builtin", "verb": SEND_TO_TEAM_VERB},
                 customer_ref=customer_ref,
-            )
+            ),
+            per_customer=LEADS_PER_VISITOR,
+            customer_window=LEAD_VISITOR_WINDOW,
+            overall=LEADS_PER_SITE,
+            overall_window=LEAD_SITE_WINDOW,
         )
-    except Exception:  # noqa: BLE001
-        logger.debug("paw-bar lead marker record failed (non-fatal)", exc_info=True)
+    except Exception:  # noqa: BLE001 — fail closed, see the docstring
+        logger.warning("lead admission failed for widget %s", widget_id, exc_info=True)
+        return None
 
 
 async def _do_send_to_team(
@@ -564,7 +559,10 @@ async def _do_send_to_team(
     fields, refusal = _lead_fields(args)
     if refusal is not None:
         return refusal
-    if not await _within_lead_rate(store, widget_id, customer_ref):
+    admitted = await _admit_lead(store, widget_id, customer_ref)
+    if admitted is None:
+        return _fail("lead_unavailable", 503)
+    if not admitted:
         return _fail("lead_rate_limit", 429)
     try:
         lead = await leads_service.capture_internal(
@@ -577,9 +575,7 @@ async def _do_send_to_team(
     except Exception:  # noqa: BLE001 — a store error is a retry, never a 500
         logger.warning("send_to_team lead write failed for widget %s", widget_id, exc_info=True)
         return _fail("lead_unavailable", 503)
-    # Counted whether or not the screen dropped it, so a visitor can't probe the
-    # screen faster than the cap allows.
-    await _record_lead_marker(store, widget_id, customer_ref, lead is not None)
+    # The slot taken above stays spent whether or not the screen dropped it.
     if lead is None:
         return _lead_refusal("rejected", "We couldn't send that. Please reword it and try again.")
     logger.info("paw_bar.action.executed verb=send_to_team widget=%s lead=%s", widget_id, lead.id)
