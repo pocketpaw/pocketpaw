@@ -92,6 +92,12 @@ reads; the two `capability:fabric.*` cards inherit `primitive:source-truth`'s
 flag mode (`FLAGGED_CAPABILITY_MODES`); `primitive:source-truth`'s `how` is
 hedged to where the EE fabric MCP server is bound (OSS has no
 `include_provenance`).
+Updated: 2026-10-01 (feat/atlas-canonical): atlas is the single source for
+surfaces and composer verbs. Surfaces carry `slash` / `presentation` /
+`agent_openable`; a new `verb` kind (`atlas/authored/verbs.json`) lists every
+composer verb with `applies_to` / `triggers` / `risk` / `undo`; `open_surface`
+derives its route allowlist from `agent_openable`; GET /api/v1/atlas/* serves
+the composer; atlas_search cards carry `slash`.
 -->
 
 # Atlas — the OS self-model
@@ -195,7 +201,7 @@ in its `surface` field:
 | `surface:belt` | `/belt` | develop-station console: runs + diff viewer |
 | `surface:decisions` | `/decisions` | org-wide decision feed (Instinct corrections) |
 | `surface:decisions-graph` | `/decisions-graph` | visual query layer over decision history |
-| `surface:mission-control` | `/mission-control` | operator work feed (cycles, analytics) |
+| `surface:mission-control` | `/deep-work` | Deep Work: operator work feed (cycles, analytics, approvals) |
 | `surface:agents` | `/agents` | agent list + per-agent editor |
 | `surface:settings` | `/settings` | personal settings (profile, security, API keys, …) |
 | `surface:integrations` | `/settings/workspace/integrations` | third-party credentials |
@@ -218,6 +224,42 @@ field so `atlas_describe` answers include where to see the result:
 `primitive:verify-loop` → `/deep-work`. Billing lives at `/settings/billing`
 (`surface:billing`), the owner-gated security console at `/security`
 (`surface:security`).
+
+### Surface fields: `slash`, `presentation`, `agent_openable`
+
+Every authored surface also states:
+
+- `slash`: the composer command that navigates there (without the `/`), the
+  route's last segment (`files`, `sites`, `deep-work`, ...), or `null` for
+  settings sub-pages, `/studio/editor` and `/decisions-graph`.
+- `presentation`: `inline` for the views the no-UI shell renders in the thread
+  (`/chat`, `/files`, `/deep-work`, `/pockets`, `/sites`, `/knowledge`,
+  `/studio`), `window` otherwise.
+- `agent_openable`: whether the agent's `open_surface` tool may open it
+  (`/files`, `/studio/editor`, `/chat`, `/pockets`, `/knowledge`). The tool
+  reads this set at call time, so flipping the flag here is the whole change;
+  `tests/atlas/test_surfaces_verbs.py` pins the set so widening it is a
+  deliberate, reviewed edit.
+
+## Verb entries (`kind: "verb"`)
+
+`atlas/authored/verbs.json` lists the composer verbs: things the user does to an
+object (send to a channel, rename a file, complete a task, keep a panel as a
+Pocket). Each carries `slash` (the composer command, or `null` when the verb is
+an action on the object rather than a command), `applies_to` (object types:
+`channel`, `file`, `task`, `room`, `message`, `pocket`, `site`, `article`,
+`panel`), `triggers` (`slash`, `verb`, `agent`), `risk` (`read` / `safe` /
+`risky`) and `undo`. Navigation is not a verb; the surface `slash` values cover
+it.
+
+These fields default to `null` on the model and the compiler drops null keys,
+so other kinds serialize exactly as before; `compile_atlas` fails the build when
+a surface or verb leaves one of its fields unset (`model.KIND_FIELDS`).
+
+Both lists are served to the composer by `GET /api/v1/atlas/surfaces`,
+`/verbs` and `/search` (see `docs/api-reference.md`), and verb cards come back
+from `atlas_search` with their `slash` so the agent can tell the user the
+command.
 
 ## Source-truth + the verify loop in the self-model (AST-1)
 
@@ -508,7 +550,7 @@ path), so it is ambient on every agent run. Two tools:
 - **Args:** `intent` (string, required) — what the agent is trying to do,
   e.g. `"approve agent actions"` or `"publish a website"`.
 - **Returns:** ranked capability cards as JSON —
-  `{"results": [{id, kind, name, summary, surface?, available?, mode?}, ...]}`
+  `{"results": [{id, kind, name, summary, surface?, slash?, available?, mode?}, ...]}`
   (top 5). Simple lexical scoring over name / keywords / summary /
   narrative with suffix normalization (see "Search ranking rules"); name
   and keyword hits rank highest. `available` appears on
@@ -519,6 +561,9 @@ path), so it is ambient on every agent run. Two tools:
   results when the intent matches live workspace entity types.
 - **When:** before guessing whether the OS can do something or which
   primitive fits an intent.
+- **Verbs:** cards of kind `verb` are composer commands. The tool description
+  tells the agent to mention the slash command when the user could do the
+  thing faster themselves ("you can also type `/task Fix login @rohit`").
 
 ### `atlas_describe`
 
