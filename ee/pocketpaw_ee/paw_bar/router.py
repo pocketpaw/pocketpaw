@@ -2635,6 +2635,12 @@ class ConciergeKnowledgeResponse(BaseModel):
     connection and never finished answering, so the crawl was abandoned on its
     wall clock), ``crawl_failed``, and ``crawl_partial`` (pages were ingested but
     some could not be read, so nothing was pruned).
+
+    ``catalog_*`` is the last background catalog sync a knowledge sync scheduled
+    (``catalog_sync``): when it ran ("" never), how it ended (``catalog_status``:
+    ``ok`` / ``partial`` / ``empty``, the importer's failure reason, or
+    ``sync_failed``) and what it did to the catalog. A manual sync answers before
+    its catalog sync finishes, so these describe the previous one until a re-read.
     """
 
     site_id: str
@@ -2644,6 +2650,11 @@ class ConciergeKnowledgeResponse(BaseModel):
     ingested: int = 0
     removed: int = 0
     skipped: int = 0
+    catalog_synced_at: str = ""
+    catalog_status: str = ""
+    catalog_added: int = 0
+    catalog_updated: int = 0
+    catalog_sold_out: int = 0
 
 
 def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResponse:
@@ -2651,6 +2662,8 @@ def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResp
     status = getattr(site, "kb_sync_error", "") or ""
     if not synced_at and not status:
         status = "never_synced"
+    catalog_at = getattr(site, "catalog_synced_at", None)
+    catalog_counts = getattr(site, "catalog_sync_counts", None) or {}
     return ConciergeKnowledgeResponse(
         site_id=str(site.id),
         article_count=len(getattr(site, "kb_article_ids", None) or []),
@@ -2659,6 +2672,11 @@ def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResp
         ingested=getattr(report, "ingested", 0) or 0,
         removed=getattr(report, "removed", 0) or 0,
         skipped=getattr(report, "skipped", 0) or 0,
+        catalog_synced_at=catalog_at.isoformat() if catalog_at else "",
+        catalog_status=getattr(site, "catalog_sync_status", "") or "",
+        catalog_added=int(catalog_counts.get("added", 0) or 0),
+        catalog_updated=int(catalog_counts.get("updated", 0) or 0),
+        catalog_sold_out=int(catalog_counts.get("sold_out", 0) or 0),
     )
 
 

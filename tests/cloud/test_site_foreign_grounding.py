@@ -21,6 +21,8 @@
 #   * a connected site's FIRST card picture is taken here: a crawl that reached the
 #     verified origin schedules a background screenshot when the site has none yet,
 #     and that schedule can never change the sync's own result.
+#   * the same crawl schedules the catalog sync (a refused one does not), and a
+#     schedule that raises cannot change the sync's result either.
 from __future__ import annotations
 
 from typing import Any
@@ -479,6 +481,54 @@ async def test_a_screenshot_schedule_that_raises_cannot_change_the_sync_result(m
     _forbid_pocket_read(monkeypatch)
 
     report = await kb_ingest.sync_site_knowledge(_FakeSite(preview_image_url=""))
+
+    assert report.error == ""
+    assert report.ingested == 2
+
+
+# --------------------------------------------------------------------------- #
+# The catalog follows the knowledge on the connected lane too
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_crawl_that_reached_the_origin_schedules_the_catalog_sync(
+    monkeypatch, scheduled_catalog_syncs
+):
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(host="customer.example", source=_HARVEST_SOURCE))
+    _forbid_pocket_read(monkeypatch)
+    site = _FakeSite(preview_image_url="/api/v1/uploads/x")
+
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert scheduled_catalog_syncs == [site]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_crawl_schedules_no_catalog_sync(monkeypatch, scheduled_catalog_syncs):
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(error="origin_unverified"))
+    _forbid_pocket_read(monkeypatch)
+
+    await kb_ingest.sync_site_knowledge(_FakeSite())
+
+    assert scheduled_catalog_syncs == []
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_schedule_that_raises_cannot_change_the_sync_result(monkeypatch):
+    from pocketpaw_ee.paw_bar import catalog_sync
+
+    def _boom(_site):
+        raise RuntimeError("scheduler exploded")
+
+    monkeypatch.setattr(catalog_sync, "_scheduler", _boom)
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(host="customer.example", source=_HARVEST_SOURCE))
+    _forbid_pocket_read(monkeypatch)
+
+    report = await kb_ingest.sync_site_knowledge(_FakeSite(preview_image_url="x"))
 
     assert report.error == ""
     assert report.ingested == 2

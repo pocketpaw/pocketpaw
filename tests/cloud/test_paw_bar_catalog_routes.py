@@ -387,3 +387,77 @@ async def test_widget_create_checks_the_spec_size_and_the_catalog_cap(rig, monke
     assert res.status_code == 409
     assert res.json()["detail"] == {"code": "catalog_full", "limit": 1}
     assert await store.list_widgets(pocket_id="pocket-9") == []
+
+
+# --------------------------------------------------------------------------- #
+# Site sync provenance on the owner's routes
+# --------------------------------------------------------------------------- #
+
+
+def _web(i: int, **ov: Any) -> dict:
+    return {"id": f"web:{i}", "name": f"Site mug {i}", "price_cents": 900, "currency": "EUR", **ov}
+
+
+async def test_the_list_says_which_items_came_from_the_site(rig):
+    admin, _member, store = rig
+    site, widget = await _seeded(store, 1)
+    await store.sync_site_catalog(widget.id, [_web(1)], complete=True)
+
+    body = (await admin.get(_CAT.format(sid=site.id))).json()
+
+    assert {i["id"]: i["origin"] for i in body["items"]} == {"p0": "owner", "web:1": "site"}
+
+
+async def test_an_owner_put_or_bulk_write_takes_a_site_item_over(rig):
+    admin, _member, store = rig
+    site, widget = await _seeded(store, 0)
+    await store.sync_site_catalog(widget.id, [_web(1), _web(2)], complete=True)
+    base = _CAT.format(sid=site.id)
+
+    put = await admin.put(f"{base}/items/web:1", json=_web(1, price_cents=1500, origin="site"))
+    bulk = await admin.post(f"{base}/items:bulk", json={"items": [_web(2, name="Renamed")]})
+    assert (put.status_code, put.json()["origin"], bulk.status_code) == (200, "owner", 200)
+
+    await store.sync_site_catalog(widget.id, [_web(1), _web(2)], complete=True)
+    rows = {i.id: i for i in (await store.list_catalog(widget.id))[0]}
+    assert (rows["web:1"].price_cents, rows["web:2"].name) == (1500, "Renamed")
+
+
+async def test_an_owner_delete_keeps_a_site_item_from_coming_back(rig):
+    admin, _member, store = rig
+    site, widget = await _seeded(store, 0)
+    await store.sync_site_catalog(widget.id, [_web(1)], complete=True)
+
+    res = await admin.request(
+        "DELETE", f"{_CAT.format(sid=site.id)}/items", json={"ids": ["web:1"]}
+    )
+    assert res.status_code == 200
+    await store.sync_site_catalog(widget.id, [_web(1)], complete=True)
+
+    assert (await store.list_catalog(widget.id))[1] == 0
+
+
+def test_the_knowledge_response_carries_the_last_catalog_sync():
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.paw_bar.router import _knowledge_response
+
+    at = datetime(2026, 10, 1, tzinfo=UTC)
+    site = SimpleNamespace(
+        id="s1",
+        kb_synced_at=None,
+        kb_sync_error="",
+        kb_article_ids=[],
+        catalog_synced_at=at,
+        catalog_sync_status="partial",
+        catalog_sync_counts={"added": 3, "updated": 1, "sold_out": 0},
+    )
+
+    body = _knowledge_response(site)
+
+    assert body.catalog_synced_at == at.isoformat()
+    assert body.catalog_status == "partial"
+    assert (body.catalog_added, body.catalog_updated, body.catalog_sold_out) == (3, 1, 0)
+    never = _knowledge_response(SimpleNamespace(id="s2", kb_article_ids=[]))
+    assert (never.catalog_synced_at, never.catalog_status) == ("", "")
