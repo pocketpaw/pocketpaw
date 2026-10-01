@@ -191,6 +191,48 @@ async def test_compile_verbatim_echo_of_large_doc_rejected(monkeypatch):
     assert spy.calls == []
 
 
+def _dense_fact_doc() -> tuple[str, str]:
+    """A fact-dense source (a price/service table, like a store's care-and-repair
+    guide) and an honest compiled article for it: every fact kept, reworded into
+    markdown bullets. Real compiles of such documents land well above 60% of the
+    input length because there is nothing to drop — every row is a fact."""
+    items = [f"service {i:03d}" for i in range(150)]
+    source = "\n".join(
+        f"Row {i:03d} | {name} | price ${10 + i % 40} | turnaround {1 + i % 9} business days"
+        for i, name in enumerate(items)
+    )
+    compiled = "# Services and prices\n\n" + "\n".join(
+        f"- **{name.title()}** costs ${10 + i % 40} and is ready in {1 + i % 9} business days."
+        for i, name in enumerate(items)
+    )
+    return source, compiled
+
+
+@pytest.mark.asyncio
+async def test_compile_of_a_dense_fact_doc_is_not_mistaken_for_an_echo(monkeypatch):
+    """BUG REPRO (2026-10-01): a concierge PDF (a 6.5k-char care, repair and
+    pricing guide) failed with ingest_failed while a short .txt worked. The
+    compile kept every fact, as the prompt asks, so the article came out above
+    60% of the input and the length-only echo check rejected it. A reworded,
+    restructured article is not a verbatim echo, whatever its length ratio."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    source, compiled = _dense_fact_doc()
+    assert len(source) > knowledge._LARGE_DOC_CHARS
+    assert len(compiled) > len(source) * knowledge._MAX_COMPILED_RATIO  # the trigger
+    _install_compiler(monkeypatch, json.dumps(dict(_ARTICLE, content=compiled)))
+    spy = _install_spy(
+        monkeypatch,
+        [(0, json.dumps({"id": "art-dense", "compiled_with": "pocketpaw-agent:claude_agent_sdk"}), "")],
+    )
+
+    result = await KnowledgeService.ingest_text_to_scope(
+        "pocket:p1", source, source="cairn-field-guide.pdf"
+    )
+
+    assert result["id"] == "art-dense"
+    assert json.loads(spy.calls[0]["input"])["article"]["content"] == compiled
+
+
 @pytest.mark.asyncio
 async def test_old_binary_silently_ignoring_article_json_fails_loudly(monkeypatch, caplog):
     """Reality check (live-smoke confirmed): kb-go parses flags by hand and
