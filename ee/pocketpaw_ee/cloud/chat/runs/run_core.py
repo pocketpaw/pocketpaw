@@ -26,7 +26,8 @@ turn's model pick and tool switch so the warmed client's key matches the turn's.
 allow, skills, system-message override), BYOK credentials, the per-send model
 override, surface preamble and attachments, then calls ``AgentPool.run`` and maps
 backend events to SSE frames (chunks, thinking, tool chips with narration, plan
-updates, ripple / artifact / studio frames, token usage). Behind
+updates, ripple / artifact / studio frames, ``open_surface`` frames, token
+usage). Behind
 ``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI session and
 can lease a warm client. A backend ``error`` event becomes a terminal ``error``
 frame; a rate-limited or overloaded provider gets the stable code
@@ -2291,6 +2292,27 @@ async def _drive_agent_loop(
                     _tl_payload = _timeline_payload(output, _marker)
                     if _tl_payload is not None:
                         yield (_marker, _tl_payload)
+                # The agent asked to open an app surface. Promoted ONLY from the
+                # open_surface tool's own result: a web page or file the agent
+                # reads can carry a well-formed marker with a valid route, so
+                # "the text parses" is a prompt-injection path to opening a
+                # surface with attacker-chosen params. An unresolved name ("",
+                # or a backend fallback like "mcp_server") fails closed. The
+                # payload is then re-validated, never trusted as-is.
+                from pocketpaw_ee.agent.mcp_servers.surfaces import (
+                    OPEN_SURFACE_TOOL_NAMES,
+                    validate_open_surface,
+                )
+
+                _os_payload = (
+                    _timeline_payload(output, "open_surface")
+                    if name in OPEN_SURFACE_TOOL_NAMES
+                    else None
+                )
+                if _os_payload is not None:
+                    _os_clean, _ = validate_open_surface(_os_payload)
+                    if _os_clean is not None:
+                        yield ("open_surface", _os_clean)
                 # The ask_user ack is internal (the question UI already rendered
                 # from the tool_use); don't surface a tool_result chip for it.
                 if name != _ASK_USER_TOOL_ID:

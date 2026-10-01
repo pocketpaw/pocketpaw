@@ -37,6 +37,9 @@
 # describe payload must never read as live source-truth / verification when the
 # mode is off — the rendered text has to carry ``mode: off`` + the enable
 # pointer, and the ``available``/``mode`` overlay hints must be present.
+# Updated: 2026-10-01 (feat/atlas-canonical) — verbs.json is the fourth authored
+# file and carries only kind="verb" entries; 29 authored surfaces after the review
+# pass added the five the composer's slash menu offers.
 
 import json
 import logging
@@ -98,7 +101,9 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 12
-        assert len(surfs.entries) == 24
+        assert len(surfs.entries) == 29
+        verbs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[3].read_text(encoding="utf-8")))
+        assert {e.kind for e in verbs.entries} == {"verb"}
 
     def test_authored_entries_survive_compile_unchanged(self):
         """Every authored entry appears in the compiled model identical

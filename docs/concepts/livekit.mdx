@@ -70,17 +70,20 @@ The Svelte frontend lives in the paw-enterprise repo and consumes this router:
 
 ## API Surface
 
-All routes under `/api/v1/livekit/*` require an active enterprise license, user authentication, and group membership. Recording routes additionally require workspace ownership.
+All routes under `/api/v1/livekit/*` require an active enterprise license, user authentication, and group membership, except the two public guest-invite routes (validate and join). Recording routes additionally require workspace ownership.
 
 | Method + Path | Purpose |
 |---------------|---------|
-| `POST /livekit/rooms` | Create or fetch the room for a group; returns a short-lived admin token for the call bot |
-| `POST /livekit/token` | Mint a participant access token (default TTL 3600s); display name comes from `user.full_name` |
-| `GET /livekit/rooms/{group_id}` | Room state: participant count, list, active flag |
+| `POST /livekit/rooms` | Create or fetch the room for a group. The call-bot's token stays on the server; members get their own from `POST /livekit/token` |
+| `POST /livekit/token` | Mint a participant access token. The LiveKit identity is always the caller's user id (a body `identity` is ignored) and `ttl_seconds` is clamped to 60-3600 (default 3600); display name comes from `user.full_name`. The room must be `group-call-<id>` for a group the caller belongs to in their workspace, otherwise 403 `livekit.room_forbidden` |
+| `GET /livekit/rooms/{group_id}` | Room state: participant count, list, active flag (`active` is true only while someone other than the call-bot is in the room) |
 | `DELETE /livekit/rooms/{group_id}` | End the call; all participants are disconnected; the bot's notes post shortly after |
 | `POST /livekit/rooms/{group_id}/recording/start` | Begin composite recording to S3 (owner only) |
 | `POST /livekit/rooms/{group_id}/recording/stop` | Stop recording; writes a `FileUpload` doc; returns the file id |
 | `GET /livekit/rooms/{group_id}/recording` | Current recording status (mapped from LiveKit `EgressStatus` protobuf) |
+| `POST /livekit/rooms/{group_id}/invite` | Create a guest invite link. An `emails` list inside the `display_name` JSON becomes the invite's server-side allow-list and is removed from `display_name` |
+| `GET /livekit/invites/{token}` | Public. Validate an invite for the join page. Returns `requires_email` (bool); the allow-list itself is never returned |
+| `POST /livekit/invites/{token}/join` | Public. Join as a guest with `display_name` and, when `requires_email` is true, `email` (checked trimmed and case-insensitively; otherwise 403 `meeting_invite.email_not_allowed`). A guest link never starts a call: if no one other than the call-bot is in the room, join returns 403 `meeting_invite.call_ended` |
 
 Events fire on the realtime bus:
 
@@ -88,6 +91,248 @@ Events fire on the realtime bus:
 - `CallEnded` — on room delete
 
 The frontend's realtime channel subscribes to both so participant lists update without polling.
+
+Starting a call goes through the workspace plan's daily call-time budget, whether a member starts it or a scheduled meeting auto-starts. When the budget is spent, a member gets 402 `billing.call_limit`, and a scheduled meeting that reaches its start time is marked `failed` with `raw_provider_payload.start_error = "billing.call_limit"`. Scheduling a LiveKit meeting on a group requires the scheduler to be a member of that group in the same workspace.
+
+A guest invite link never starts a call. Guests of a scheduled meeting can join only after a member has joined the call; until then the join page gets `meeting_invite.call_ended`.
+
+Ending a call closes every in-progress LiveKit meeting row for that room. If a scheduled meeting started while an instant call was already running in the same group, both rows end together, and the daily call budget counts the overlapping time once.
+
+## Instant Meetings
+
+`POST /api/v1/meetings/instant` starts a meeting right away, Google Meet style. It does not need an existing chat group: it creates one of type `meeting` with the host as owner and only member, named after the meeting title. Because the meeting has its own room, everything keyed on a room works unchanged: the LiveKit room `group-call-<room_group_id>`, the call-bot, meeting notes posted to the room's chat, the transcript sent to the KB, recording, and in-call chat.
+
+Meeting rooms are hidden. They never show up in the room list (`GET /chat/groups`), workspace message search, unread badges, the @-mention channel picker, or the workspace room count, and only members can read them. They can't be edited or retyped through the chat API, and a mention of a non-member in a meeting room sends no notification.
+
+Request body (both fields optional):
+
+```json
+{ "title": "Design sync", "description": "Q4 roadmap" }
+```
+
+The title defaults to `"Instant meeting"`. The response is the usual meeting object with these fields added:
+
+| Field | Meaning |
+|-------|---------|
+| `code` | Meeting code in display form, `xxx-xxxx-xxx`: 10 lowercase letters, never `l`, `i` or `o`. Stored without dashes; a code lookup should strip dashes and lowercase, so both forms work |
+| `link` | `<POCKETPAW_FRONTEND_BASE_URL>/m/<code>`, also stored as `join_url` |
+| `room_group_id` | The hidden meeting room (also mirrored in `group_id`) |
+| `host_user_id` | The member who started it |
+| `access` | `"ask"` (default) or `"open"`: whether guests wait to be let in or join on their own. See [Guest Lobby](#guest-lobby) |
+| `description` | Optional description |
+
+The meeting row starts as `status: "in_progress"` with `source: "livekit"`, and there is exactly one row per meeting. The call goes through the daily call-time budget like any other call. When the plan has no call time left, the endpoint returns 402 `billing.call_limit` and neither the room nor the meeting row is created.
+
+## Meetings for Later
+
+`POST /api/v1/meetings` with `source: "livekit"` and no `group_id` creates a meeting without starting a call. It makes the same hidden `meeting` room as an instant meeting (host as only member) and a meeting row with a code and link. No LiveKit room exists until someone joins, so creating one uses no call time.
+
+```json
+{ "source": "livekit", "title": "Planning", "scheduled_start": "2026-10-03T09:00:00Z", "duration_minutes": 45 }
+```
+
+`title` is required. `scheduled_start`, `duration_minutes` (default 30) and `description` (up to 2000 characters, stored trimmed) are optional. The row's status is `scheduled` either way. A null `scheduled_start` means the meeting has no date: no reminder or auto-start job is set for it. A dated one gets the usual reminder, auto-start and auto-end.
+
+Only a dated meeting sends the "Meeting scheduled" notification, worded "<title> is scheduled for Oct 3 at 09:00 UTC". An undated one sends none, though the realtime `meeting.scheduled` event still goes out so meeting lists refresh.
+
+`POST /api/v1/meetings` with `source: "livekit"` and a chat-room `group_id` works as before (the caller must be a member of that room) and now also gets a `code` and `link`. Its `join_url` stays empty and `room_group_id` stays null; the room is in `group_id`. Recall (Zoom / Meet) meetings get no code.
+
+### How long a link works
+
+| Meeting | `link_expires_at` |
+|---------|-------------------|
+| No date (for later, and instant meetings) | 30 days after creation, pushed to 30 days after each join |
+| Dated | The meeting's `scheduled_end` |
+
+A meeting past its link expiry, or one that is `ended`, `cancelled` or `failed`, can't be joined. An undated meeting whose link expires before anyone joins is marked `ended` the next time the workspace's meetings are listed.
+
+When everyone leaves a meeting-room call, the call-bot leaves 5 seconds later and the meeting goes back to `scheduled`. Its code, link, link expiry and `actual_start` stay, members of the room get `meeting.updated`, and the next join starts a fresh call on the same meeting row. If the bot never ran, `GET /meetings` does the same for an `in_progress` meeting-room meeting whose room has nobody in it, once its current call is more than 2 minutes old (so a call whose host is still connecting isn't caught). Ending the call for everyone (`DELETE /livekit/rooms/{group_id}`) marks the meeting `ended`, and its link stops working (410 `meeting.ended`). Calls on an ordinary chat room are unchanged: their meeting row stays `in_progress` when everyone leaves.
+
+## Joining by Code
+
+`GET /api/v1/meetings/by-code/{code}` is public (no sign-in) and is what the `/m/<code>` page calls first. The code can be sent with or without dashes, in any case. It is limited to 30 lookups a minute per client IP (429 `meetings.lookup_rate_limited`). It returns exactly these fields:
+
+```json
+{
+  "code": "abc-defg-hjk",
+  "title": "Planning",
+  "scheduled_start": null,
+  "host_name": "Hana Host",
+  "access": "ask",
+  "status": "not_started"
+}
+```
+
+`status` is `live` while someone other than the call-bot is in the call, `not_started` when nobody is, and `ended` when the meeting is ended, cancelled, failed or past its link expiry. An unknown code is 404. The response never includes ids, emails, members or room names.
+
+`POST /api/v1/meetings/by-code/{code}/join` is for signed-in members of the meeting's workspace (the caller's active workspace). It adds the caller to the meeting room and makes sure the call is running, then returns what the call token flow needs:
+
+```json
+{ "room_group_id": "66fa…", "room_name": "group-call-66fa…" }
+```
+
+If no LiveKit room is running, the join starts one through the daily call-time budget and marks the meeting `in_progress`, and members of the room get the realtime `meeting.started` event. Joining a running call starts nothing new: there is still one room and one meeting row.
+
+| Status | Code | When |
+|--------|------|------|
+| 403 | `livekit.room_forbidden` | The meeting is in another workspace, or it runs in a chat room the caller isn't a member of. A code only grants entry to a hidden meeting room, never to a chat room |
+| 404 | `meeting.not_found` | Unknown code |
+| 410 | `meeting.ended` | Ended, cancelled, failed or past its link expiry |
+| 402 | `billing.call_limit` | No call time left today, and the call isn't running yet. The caller is not added to the room |
+
+Meeting rooms can only be joined this way. `POST /chat/groups/{id}/join` refuses them.
+
+`POST /livekit/rooms` on a meeting room (the call engine calls it every time a member joins a call) follows the same rules as the join above: it never adds an "Instant call" row, it restarts the call on the meeting's own row after LiveKit has closed an empty room, it returns 410 `meeting.ended` for an ended or expired meeting, and it goes through the call budget (402). For any other room it works as before. The recommended order for a code join is still `POST /meetings/by-code/{code}/join`, then the usual `POST /livekit/rooms` and `POST /livekit/token`.
+
+## Guest Lobby
+
+People without an account (or from another workspace) join through the meeting link by asking to be let in. A member who is in the call admits or denies them. The three guest endpoints are public.
+
+"In the call" here always means a **member**: a participant who is neither `call-bot` nor a `guest-*` identity. Guests who were already let in don't count, so once the last member leaves, nobody new gets in and admitted guests stop getting fresh tokens.
+
+**1. Knock.** `POST /api/v1/meetings/by-code/{code}/knock`
+
+```json
+{ "name": "Gus Guest", "email": "gus@example.com" }
+```
+
+`name` is 1 to 80 characters after trimming. `email` is optional unless the meeting has a guest list, in which case it must be on the list (compared trimmed and case-insensitive, on the server). The reply:
+
+```json
+{ "knock_id": "66fb…", "secret": "Qx3…", "status": "waiting" }
+```
+
+`secret` is shown once. The guest sends it in the `X-Knock-Secret` header on every later call; it is not accepted as a query parameter, because query strings end up in access logs. The server keeps only a hash of it. A knock on a meeting with no member in the call yet is fine: it waits until one joins or it expires.
+
+**2. Poll.** `GET /api/v1/meetings/by-code/{code}/knocks/{knock_id}` with `X-Knock-Secret`. Poll every 2 seconds. While waiting, or after a denial:
+
+```json
+{ "status": "waiting" }
+```
+
+Once admitted, and only while a member is in the call, the reply also carries what the guest connects with:
+
+```json
+{
+  "status": "admitted",
+  "token": "eyJ…",
+  "room_name": "group-call-66fa…",
+  "identity": "guest-3f9a1c07b2d4e815",
+  "livekit_url": "wss://…"
+}
+```
+
+The token joins that one room and lasts 5 minutes, never past the admission. Each poll returns a fresh one, so a guest who drops and reconnects should poll again first (LiveKit keeps a connected participant's session alive past the token's expiry). The identity stays the same for the knock, and the `guest-` prefix means it can never match a member id or `call-bot`. With no member in the call but the meeting still open, an admitted guest gets `{ "status": "admitted" }` without a token; keep polling. An admission lasts an hour, after which the knock reads `expired`.
+
+**3. Cancel.** `DELETE /api/v1/meetings/by-code/{code}/knocks/{knock_id}` with the same header returns `{ "status": "cancelled" }`.
+
+A knock is `waiting`, `admitted`, `denied`, `cancelled` or `expired`. A waiting knock expires 10 minutes after it was made, or as soon as the meeting ends.
+
+The poll has one more answer, `{ "status": "ended" }`: the meeting is over (ended, including "End for everyone", cancelled, failed, or past its link expiry). Stop polling. It replaces `waiting`, `admitted` and `expired` once the meeting is over; a `denied` or `cancelled` knock keeps its answer.
+
+| Status | Code | When |
+|--------|------|------|
+| 404 | `meeting.not_found` | Knock on an unknown code |
+| 404 | `meeting_knock.not_found` | Poll or cancel that doesn't match: unknown code, unknown knock, a knock from another meeting, or a wrong or missing secret. All give the same answer, so these calls can't be used to find out which codes exist |
+| 410 | `meeting.ended` | Knock on a meeting that is ended, cancelled, failed or past its link expiry |
+| 403 | `meeting.email_not_allowed` | The meeting has a guest list and the email isn't on it |
+| 409 | `meeting.knock_decided` | Cancel after the knock was already answered or expired |
+| 422 | | Name empty or over 80 characters |
+| 429 | `meetings.knock_rate_limited` | Knocks: 10 a minute per client IP and 30 a minute per meeting code. Poll and cancel: 120 a minute per client IP |
+| 429 | `meeting.knock_cooldown` | Knock from an address that was denied on this meeting in the last minute. The address is stored only as a hash salted with the meeting id |
+
+**Access "open".** When the meeting's `access` is `"open"`, nobody has to decide: a knock is admitted straight away if a member is in the call, or on the guest's first poll after one joins. The guest list still applies.
+
+**LiveKit server requirement.** Run the LiveKit server with automatic room creation turned off (`room.auto_create: false` on a self-hosted server; the matching project setting on LiveKit Cloud). The backend always creates rooms explicitly before anyone joins, so members aren't affected. With auto-create on, a guest token that is still valid could recreate a room after the call ended, outside the call budget. The 5-minute token life keeps that window small, but the server setting closes it. There is no LiveKit server config in this repository, so this is an operator step.
+
+### Letting people in
+
+Members of the meeting room get realtime events keyed on the room:
+
+| Event | Data |
+|-------|------|
+| `meeting.knock` | `{workspace_id, meeting_id, group_id, knock_id, name}`, sent for a new knock on an `"ask"` meeting |
+| `meeting.knock_resolved` | `{workspace_id, meeting_id, group_id, knock_id, status}`, sent whenever a knock leaves `waiting` (admitted, denied, cancelled, expired), so every admit card clears |
+
+The audience is every member of the room, whether or not they are in the call. For a hidden meeting room that is the people who joined the meeting. For a meeting scheduled on a chat room, it is every member of that chat room, so the guest's name reaches all of them.
+
+`GET /api/v1/meetings/{id}/knocks` lists the guests still waiting, oldest first: `[{ "knock_id", "name", "email", "created_at" }]`. `email` is null when the guest gave none, and it is whatever the guest typed: it isn't verified.
+
+`POST /api/v1/meetings/{id}/knocks/{knock_id}/admit` and `.../deny` return `{ "knock_id", "status" }`.
+
+All three need the caller to be a member of the meeting room and in the call at that moment, checked against LiveKit. A host looking at the meetings page from outside the call can't see or admit guests; the admit cards live in the call. When two people answer at once, one wins and the others get 409. Every admit and deny is written to the audit log as `meeting.knock_decide` with the actor, meeting, knock and decision.
+
+| Status | Code | When |
+|--------|------|------|
+| 403 | `livekit.room_forbidden` | Not a member of the meeting room |
+| 403 | `meeting.not_in_call` | A member, but not in the call |
+| 404 | `meeting.not_found` / `meeting_knock.not_found` | Meeting not in the caller's workspace, or unknown knock |
+| 409 | `meeting.knock_decided` | Already admitted, denied, cancelled or expired |
+| 410 | `meeting.ended` | The meeting has ended (admit, deny) |
+| 503 | `livekit.unavailable` | LiveKit couldn't be asked who is in the call |
+
+### Changing access
+
+`PATCH /api/v1/meetings/{id}` takes any of `access` (`"ask"` or `"open"`), `title`, `description`, `scheduled_start` and `duration_minutes`, and returns the meeting. Only the host can call it (403 `meeting.host_only`); a blank title is 422 `meeting.empty_title`. Any other field, such as `status`, is refused with 422 rather than ignored. Members of the room get `meeting.updated`. Moving a meeting is covered under [Scheduled Meetings](#scheduled-meetings).
+
+## Scheduled Meetings
+
+A dated meeting for later (`POST /api/v1/meetings` with `source: "livekit"`, no `group_id`, a `scheduled_start`) runs on its hidden meeting room like any other meeting:
+
+- **Reminder**, 5 minutes before the start: a `meeting_reminder` notification to every member of the meeting room, which is the host plus everyone who has joined by code.
+- **Auto-start**, at the start time: the call starts on the meeting's own row, the same way a by-code join does. It goes through the daily call-time budget, and no second "Instant call" row is made. With no call time left, the meeting is marked `failed` (`start_error = "billing.call_limit"`).
+- **Auto-end**, at the scheduled end: the room's call ends and the meeting is marked `ended`.
+
+Job times are UTC instants. A `scheduled_start` sent with an offset (`2026-10-03T14:30:00+05:30`) is converted, not relabelled.
+
+### Rescheduling
+
+`PATCH /api/v1/meetings/{id}` with `scheduled_start` and/or `duration_minutes` (1 to 1440) moves the meeting:
+
+```json
+{ "scheduled_start": "2026-10-05T09:00:00Z", "duration_minutes": 60 }
+```
+
+`scheduled_end` becomes the start (seconds dropped) plus the duration, and the link then works until that new end. The old reminder, auto-start and auto-end jobs are removed and new ones set; a reminder whose time has already passed is not set again. Sending only `duration_minutes` keeps the start. A meeting with no date gets one this way. The in-app calendar event moves with it.
+
+Only a LiveKit meeting that is still `scheduled` and has not started can be moved. Anything in progress, ended, cancelled or failed, and any Zoom or Meet meeting (moving the row here would not move the real meeting), gets 409 `meeting.not_reschedulable`. Title, description and access can still be changed on a live meeting.
+
+### Joining info
+
+`GET /api/v1/meetings/{id}/joining-info` returns `text/plain` to paste into an invite:
+
+```
+Planning
+Wednesday, 7 October 2026 · 14:00–14:45 UTC
+2026-10-07T14:00:00Z – 2026-10-07T14:45:00Z
+Join: https://app.example.com/m/abc-defg-hjk
+Meeting code: abc-defg-hjk
+
+Bring the Q4 numbers.
+```
+
+The time is always UTC: a readable line and the ISO instants, so a client can show local time itself. A meeting that crosses midnight names both days (`… · 23:30 UTC – Thursday, 8 October 2026 · 00:15 UTC`). An undated meeting has no time lines, and there is no blank line or description when the description is empty. The meeting object carries the same text as `joining_info` (null for a meeting without a code).
+
+Anyone in the meeting's workspace can read it, the same people who already see the meeting, its code and its link in `GET /meetings`. That lets a host's colleagues copy it without having joined. Another workspace gets 404. A meeting with no code (Zoom, Meet) gets 409 `meeting.no_link`.
+
+### Calendar file
+
+`GET /api/v1/meetings/{id}/ics` downloads the meeting as `text/calendar; charset=utf-8` with `Content-Disposition: attachment; filename="<slug>.ics"` (the slug is the title, lowercase ASCII letters and digits joined by `-`; `meeting.ics` if nothing is left). It holds one `VEVENT`:
+
+| Property | Value |
+|----------|-------|
+| `UID` | `<meeting id>@<frontend host>`, the same every time the file is downloaded |
+| `DTSTAMP` | When the file was made, UTC |
+| `DTSTART` / `DTEND` | UTC with a `Z` suffix, whatever the server's own timezone |
+| `SUMMARY` | Title |
+| `DESCRIPTION` | The joining info |
+| `URL`, `LOCATION` | The meeting link |
+
+Text values are escaped per RFC 5545 (backslash, `;`, `,`, newlines as `\n`), lines are folded at 75 octets without splitting a character, and lines end in CRLF. There is no `ORGANIZER`: its value has to be an address, and the file doesn't carry anyone's email. Same access as joining info; a meeting with no date gets 409 `meeting.not_scheduled`.
+
+### In-app calendar
+
+A dated meeting appears on the workspace's `meetings` calendar. For a meeting-room meeting the event's location is the meeting link and its description is the joining info. When the host moves, renames or re-describes the meeting, the event is updated; when a meeting with no date gets one, the event is created then; cancelling the meeting deletes it. Nothing is sent to Google Calendar.
 
 ## Soul Memory Integration
 

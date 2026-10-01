@@ -18,7 +18,7 @@
     "tests": [
       "tests/cloud/sites/test_sites_billing_flag.py::test_either_flag_turns_the_sites_seams_on",
       "tests/cloud/sites/test_sites_billing_flag.py::test_the_global_flag_alone_still_enforces_the_domain_cap",
-      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_free_site_may_carry_apex_plus_www_and_no_more"
     ]
   },
   {
@@ -46,7 +46,7 @@
     "replace": "    sites_billing_enforced: bool = Field(\n        default=True,",
     "tests": [
       "tests/cloud/sites/test_sites_billing_flag.py::test_the_setting_defaults_off_and_reads_its_env_var",
-      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_second_site_attaches_freely"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_free_site_is_not_capped"
     ]
   },
   {

@@ -11,6 +11,14 @@ scheduled, no APScheduler jobs exist and no DB queries run.
 
 Jobs are recovered from MongoDB on startup (APScheduler in-memory store
 does not survive restarts).
+
+2026-10-01 (feat/meetings-ics, MC-4): job times go through ``_as_utc`` — a naive
+datetime is stored UTC, an aware one is CONVERTED to UTC. ``replace(tzinfo=UTC)``
+on an aware ``+05:30`` value moved the job 5h30 late. For a meeting-room meeting
+``raw_provider_payload["group_id"]`` is the hidden room, so the reminder reaches
+its members (host + everyone who joined), auto-start runs the call on the
+meeting's own row (``LiveKitProvider.start``: budget gate, no twin row) and
+auto-end ends that room.
 """
 
 from __future__ import annotations
@@ -58,6 +66,11 @@ def _autostart_job_id(meeting_id: str) -> str:
 
 def _autoend_job_id(meeting_id: str) -> str:
     return f"autoend:{meeting_id}"
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Naive = stored UTC; aware = converted. APScheduler reads naive as LOCAL time."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +206,7 @@ def schedule_meeting_jobs(doc: _MeetingDoc) -> None:
     # APScheduler's DateTrigger interprets naive datetimes in the server's
     # LOCAL timezone, not UTC. We must attach UTC tzinfo so the job fires
     # at the correct absolute time regardless of server location.
-    scheduled_at_utc = doc.scheduled_start.replace(tzinfo=UTC)
+    scheduled_at_utc = _as_utc(doc.scheduled_start)
 
     # Reminder: 5 min before scheduled_start
     reminder_at = scheduled_at_utc - _REMINDER_LEAD_TIME
@@ -225,7 +238,7 @@ def schedule_meeting_jobs(doc: _MeetingDoc) -> None:
         else None
     )
     if end_time:
-        autoend_at = end_time.replace(tzinfo=UTC)
+        autoend_at = _as_utc(end_time)
         if autoend_at > datetime.now(UTC):
             sched.add_job(
                 _auto_end_meeting,
@@ -311,7 +324,7 @@ def _schedule_autoend_only(doc: _MeetingDoc) -> None:
         else None
     )
     if end_time:
-        autoend_at = end_time.replace(tzinfo=UTC)
+        autoend_at = _as_utc(end_time)
         if autoend_at > datetime.now(UTC):
             sched.add_job(
                 _auto_end_meeting,

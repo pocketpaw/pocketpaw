@@ -41,8 +41,8 @@
   {
     "label": "the runner drops the site from the prompt — owner fields never reach the model",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        prompt = build_prompt(items, widget, history, message, site=site, page=page_ctx)",
-    "replace": "        prompt = build_prompt(items, widget, history, message, page=page_ctx)",
+    "find": "            items, widget, history, message, site=site, page=page_ctx, catalog=catalog",
+    "replace": "            items, widget, history, message, page=page_ctx, catalog=catalog",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_owner_fields_reach_the_data_half_and_never_the_frame"
     ]

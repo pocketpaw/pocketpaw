@@ -41,7 +41,7 @@
       },
       {"id": "soul-protocol", "name": "Soul Protocol", "description": "External: portable identity + 5-tier memory (.soul). PocketPaw runtime, Fabric, and Instinct write to the soul journal (Decision Graph).", "tags": ["external"], "containers": []},
       {"id": "ripple", "name": "Ripple", "description": "External: Svelte 5 generative-UI runtime that renders rippleSpec into live UI. Pockets and the static/ripple site track compile through it.", "tags": ["external"], "containers": []},
-      {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites.", "tags": ["external"], "containers": []},
+      {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites; Email Service (REST) sends owner lead/handoff email.", "tags": ["external"], "containers": []},
       {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []}
     ],
     "relationships": [
@@ -59,6 +59,7 @@
       {"source": "sites", "target": "pockets", "description": "publishes from a pocket spec", "technology": "", "style": "sync"},
       {"source": "sites", "target": "ripple", "description": "compiles the ripple track", "technology": "", "style": "sync"},
       {"source": "sites", "target": "cloudflare", "description": "deploys worker + D1", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "cloudflare", "description": "owner lead email via the notification outbox", "technology": "Email Service REST", "style": "async"},
       {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
       {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
       {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},

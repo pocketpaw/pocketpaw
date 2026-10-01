@@ -429,6 +429,15 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper start failed: %s", exc)
 
+        # Notification outbox: sends queued owner email / signed webhooks /
+        # Slack, retrying with backoff. Safe on every process (atomic claims).
+        try:
+            from pocketpaw_ee.cloud.notifications.outbox import start_outbox_sweeper
+
+            await start_outbox_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification outbox sweeper start failed: %s", exc)
+
         # Cross-process bus/WS bridge consumer. Tier 2's arq worker can't
         # reach this process's InProcessBus or WsManager directly; it XADDs
         # envelopes to a shared Redis stream and the consumer dispatches
@@ -519,6 +528,13 @@ class CloudLifecycleHook:
             await stop_run_sweeper()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper stop failed: %s", exc)
+
+        try:
+            from pocketpaw_ee.cloud.notifications.outbox import stop_outbox_sweeper
+
+            await stop_outbox_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification outbox sweeper stop failed: %s", exc)
 
         try:
             await stop_xproc_consumer()
@@ -847,6 +863,54 @@ class CloudTimelineMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.timeline import TIMELINE_TOOL_IDS
 
         return list(TIMELINE_TOOL_IDS)
+
+
+class CloudSurfacesMcpProvider:
+    """`pocketpaw.mcp_servers` — the open-surface server (``pocketpaw_surfaces``).
+    Hosts ``open_surface``, which only returns an envelope run_core promotes to
+    an ``open_surface`` chat event; the browser does the opening.
+
+    Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
+    with no MCP allowlist (the GENERIC / default profile) and on /studio/editor,
+    whose allowlist names it; filtered out of the other allowlisted surfaces.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.surfaces import build_surfaces_server
+
+            return build_surfaces_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.surfaces import SURFACES_TOOL_IDS
+
+        return list(SURFACES_TOOL_IDS)
+
+
+class CloudRoomsMcpProvider:
+    """`pocketpaw.mcp_servers` — the chat-rooms READ server (``pocketpaw_rooms``).
+    Hosts ``list_rooms`` + ``read_room``: the user's own PocketPaw channels,
+    groups and DMs, through the same group/message services the chat API uses.
+
+    Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
+    with no MCP allowlist (GENERIC, CHAT, HOME, ...) and filtered out of every
+    allowlisted one, the public concierge included.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.rooms import build_rooms_server
+
+            return build_rooms_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.rooms import ROOMS_TOOL_IDS
+
+        return list(ROOMS_TOOL_IDS)
 
 
 class CloudMediaMcpProvider:

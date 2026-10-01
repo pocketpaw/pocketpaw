@@ -340,9 +340,9 @@ class CustomDomainNotEntitled(CloudError):
 
     The distinction from its siblings is that this is not a COUNT limit: there is no
     ceiling to report, only a capability the site's tier either grants or does not.
-    ``CustomDomainLimitError`` below is the count sibling, and since 2026-08-21 it
-    is the one that normally fires — the free floor grants one domained site, so a
-    tier granting NONE only exists if the catalog is edited to say so, or if a
+    ``CustomDomainLimitError`` below is the count sibling, and it is the one that
+    normally fires — the free floor grants every site its own domain, so a tier
+    granting NONE only exists if the catalog is edited to say so, or if a
     resolve lands on a tier whose allowance is 0. The class stays because that is
     exactly the fail-closed case worth having a distinct code for.
     Two different failures land here and the message separates them, because the
@@ -371,19 +371,17 @@ class CustomDomainNotEntitled(CloudError):
 
 
 class CustomDomainLimitError(CloudError):
-    """Workspace hit its plan's cap on how many SITES may carry a custom domain (402).
+    """A free site already carries as many custom hostnames as the floor allows (402).
 
     The COUNT sibling of ``CustomDomainNotEntitled``, and a separate class because
     the remedies differ: that one means "this site's subscription is not paying",
-    this one means "you have used the allowance, upgrade a site to add another".
+    this one means "this site has used its free domain, upgrade it to add more".
     A UI that collapses them tells a paying customer to renew a subscription that
     never lapsed.
 
-    **The unit is the SITE, not the hostname.** A workspace on the free floor gets
-    one site carrying custom domains; apex and ``www`` both sit on that site and
-    spend one allowance between them. ``scope="site"`` reports the OTHER cap — how
-    many hostnames one floor-tier site may carry — which exists only because the
-    site-unit cap leaves that number unbounded.
+    **The allowance is per site.** Every free site may carry its own custom domain,
+    apex + ``www``; ``limit`` is that per-site hostname count. Nothing another site
+    in the workspace holds counts against it, and paid tiers are uncapped.
 
     Enforced at ATTACH time only, never retroactive: an existing domain is never
     detached, and re-adding an already-connected hostname (the only self-service
@@ -391,19 +389,11 @@ class CustomDomainLimitError(CloudError):
     ``billing_enforced``, so OSS / self-host never sees it.
     """
 
-    def __init__(self, *, limit: int, scope: str = "workspace") -> None:
-        if scope == "site":
-            detail = (
-                f"this site already has {limit} custom hostnames, which is the limit "
-                "on the free plan — upgrade it to connect more"
-            )
-        else:
-            noun = "site" if limit == 1 else "sites"
-            detail = (
-                f"custom domains are included on {limit} {noun} on your plan, and "
-                f"{'that one is' if limit == 1 else 'those are'} already in use — "
-                "upgrade a site's plan to connect another"
-            )
+    def __init__(self, *, limit: int) -> None:
+        detail = (
+            f"this site already has {limit} custom hostnames, which is the limit "
+            "on the free plan — upgrade it to connect more"
+        )
         super().__init__(402, "billing.custom_domain_limit", f"Custom domain: {detail}")
 
 

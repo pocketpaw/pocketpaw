@@ -108,6 +108,11 @@ class Pocket(TimestampedDocument):
     # actions against it. Legacy pockets (no template) read as ``None``
     # — no Mongo migration needed for adding an optional field.
     template_slug: str | None = None
+    # Provenance for a site pocket copied from a site template: which template
+    # and which version of it. ``None`` for every other pocket, including a
+    # plain duplicate. Additive, no migration.
+    template_id: str | None = None
+    template_version: int | None = None
     # Optional create-pocket layout pattern (e.g. ``"dashboard"``,
     # ``"viewer"``, ``"app"``, ``"landing"``). Records the conversion /
     # layout intent the pocket was authored as. ``pattern="landing"``

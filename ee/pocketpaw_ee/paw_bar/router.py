@@ -487,9 +487,9 @@
 # Updated: 2026-07-16 (C1 hardening) — (a) the shared front-gate now validates
 #   customer_ref against a charset+length bound (400) as its cheapest check;
 #   (b) GET /paw-bar/cart records a cart-read marker so read enumeration counts
-#   toward the rate limiter like writes; (c) concierge_chat threads the widget's
-#   catalog (capped at _MAX_PREAMBLE_CATALOG) onto surface_meta so the concierge
-#   preamble can name real products, not just the action verbs.
+#   toward the rate limiter like writes; (c) concierge_chat threads the turn's
+#   catalog items (``concierge_runtime.catalog_for_turn``, from the catalog store)
+#   onto surface_meta so the concierge preamble can name real products.
 # Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor commerce loop.
 #   (1) POST /paw-bar/action {key,w,customer_ref,verb,args} and GET /paw-bar/cart
 #   ?key&w&customer_ref — PUBLIC endpoints with the SAME armor as concierge chat,
@@ -640,7 +640,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from pocketpaw.money import (
+    DEFAULT_EXPONENT,
+    MONEY_UNITS_HEADER,
+    client_sends_minor_units,
+    exponent,
+)
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.catalog_store import CatalogFull
 from pocketpaw.paw_bar.concierge_fields import (
     ConciergeAbout,
     ConciergeAvoidTopics,
@@ -651,6 +658,7 @@ from pocketpaw.paw_bar.concierge_fields import (
 )
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
+    MAX_SPEC_BYTES,
     ConversationState,
     DecisionState,
     OwnerMessageRole,
@@ -659,6 +667,7 @@ from pocketpaw.paw_bar.models import (
     PawBarSpec,
     PawBarWidget,
     PawBarWidgetPublic,
+    spec_bytes,
 )
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
@@ -688,9 +697,20 @@ router = APIRouter(tags=["PawBar"])
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 
-# Cap the catalog threaded into the concierge preamble so a large catalog can't
-# bloat the prompt (C1). The full catalog is still enforced by the spec cap.
-_MAX_PREAMBLE_CATALOG = 50
+# The frozen public ``GET /paw-bar/spec/{id}`` still carries ``spec.catalog`` for
+# the key-less ``src/`` widget: the catalog store's first this-many items.
+_PUBLIC_SPEC_CATALOG = 200
+
+
+def _catalog_full(exc: CatalogFull) -> HTTPException:
+    return HTTPException(409, detail={"code": CatalogFull.code, "limit": exc.limit})
+
+
+def _check_spec_size(spec: PawBarSpec) -> None:
+    """422 ``spec_too_large`` past ``MAX_SPEC_BYTES``, measured without the
+    catalog (``spec_bytes``), on every spec write path."""
+    if spec_bytes(spec) > MAX_SPEC_BYTES:
+        raise HTTPException(422, "spec_too_large")
 
 
 def _store():
@@ -1820,8 +1840,13 @@ async def create_widget(
     )
     # No agent is provisioned here, even on a site's pocket (CR-12): a concierge
     # exists only once its owner creates one via POST .../concierge. A widget is
-    # a bar, not a decision to publish an assistant.
-    return await _store().create_widget(widget)
+    # a bar, not a decision to publish an assistant. The spec is held to the same
+    # size cap as a spec PATCH, and a (deprecated) catalog in it to the item cap.
+    _check_spec_size(req.spec)
+    try:
+        return await _store().create_widget(widget)
+    except CatalogFull as exc:
+        raise _catalog_full(exc) from None
 
 
 @router.get(
@@ -1868,6 +1893,7 @@ async def update_spec(
     widget_id: str,
     spec: PawBarSpec,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidgetPublic:
     # W4a — the lookup is workspace-scoped: another tenant's widget id resolves
@@ -1876,8 +1902,23 @@ async def update_spec(
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    _refuse_outdated_money_client(spec, x_paw_money_units)
     updated = await _save_widget_spec(widget_id, spec, workspace_id)
     return PawBarWidgetPublic.from_widget(updated)
+
+
+def _refuse_outdated_money_client(spec: PawBarSpec, money_units: str | None) -> None:
+    """409 ``currency_units_client_outdated`` when a client that predates ISO 4217
+    minor units (no ``X-Paw-Money-Units: iso4217``) saves a catalog holding a
+    currency whose exponent is not 2. Such a client writes major × 100, so its
+    yen and dinar prices would be stored 100× / 10× off. Refused, not converted:
+    an old client also re-sends prices it READ in minor units, and converting
+    those would shift them a second time. Two-decimal catalogs are the same in
+    both conventions and pass."""
+    if client_sends_minor_units(money_units):
+        return
+    if any(exponent(item.currency) != DEFAULT_EXPONENT for item in spec.catalog):
+        raise HTTPException(status_code=409, detail="currency_units_client_outdated")
 
 
 async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str) -> PawBarWidget:
@@ -1885,8 +1926,19 @@ async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str)
     ``update_spec`` and the session-authed admin/site route. ``store.update_spec``
     archives the prior spec as a revision in the same transaction, so either
     caller leaves a rollback point. Workspace-scoped; a widget that vanished
-    between the caller's lookup and this write is a 404."""
-    updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
+    between the caller's lookup and this write is a 404.
+
+    422 ``spec_too_large`` past ``MAX_SPEC_BYTES`` (catalog excluded). A body that
+    still carries a non-empty ``catalog`` (an older editor) has those items ADDED
+    to the catalog store (upserted by id, nothing deleted, so an editor that
+    loaded an empty catalog cannot wipe it) and is stored without it; an empty or
+    absent one leaves the catalog alone. 409 ``catalog_full`` when the added
+    items would pass the cap. Callers run ``_refuse_outdated_money_client`` first."""
+    _check_spec_size(spec)
+    try:
+        updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
+    except CatalogFull as exc:
+        raise _catalog_full(exc) from None
     if updated is None:
         raise HTTPException(404, "Widget not found")
     return updated
@@ -1945,12 +1997,17 @@ async def rollback_spec(
     this endpoint restores the most recent one. The restore is itself an
     update that archives the current spec, so a rollback is reversible.
     Auth mirrors ``update_spec``: admin session + per-widget owner token,
-    with the lookup workspace-scoped (cross-tenant id → 404).
+    with the lookup workspace-scoped (cross-tenant id → 404). The revision's
+    ``catalog`` is ignored (the catalog is not versioned with the spec), and a
+    revision past ``MAX_SPEC_BYTES`` is 422 ``spec_too_large``.
     """
     widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    latest = await _store().latest_spec_revision(widget_id)
+    if latest is not None:
+        _check_spec_size(latest[1])
     restored = await _store().rollback_spec(widget_id, workspace_id=workspace_id)
     if restored is None:
         raise HTTPException(409, "No spec revision to roll back to")
@@ -2175,7 +2232,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
     still opens; the snippet is a convenience, the settings are the point.
     """
     try:
-        from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_exists
+        from pocketpaw_ee.cloud.auth.site_keys import concierge_exists, concierge_plan_entitled
         from pocketpaw_ee.cloud.pockets import service as pockets_service
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.service import _capture_base
@@ -2189,7 +2246,8 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
             site_key=str(getattr(site, "signed_key", "") or ""),
             api_base=_capture_base(),
             concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
-            concierge_entitled=bool(concierge_available(site)),
+            # The PLAN half only; the switch is passed on its own just above.
+            concierge_entitled=bool(concierge_plan_entitled(site)),
             concierge_exists=concierge_exists(site),
         )
     except Exception:  # noqa: BLE001 — the settings response must not 500 on the bar
@@ -2464,6 +2522,7 @@ async def _purge_concierge_runs(pocket_id: str, workspace_id: str) -> None:
 async def update_site_widget_spec(
     site_id: str,
     req: AdminWidgetSpecUpdate,
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     workspace_id: str = Depends(current_workspace_id),
 ) -> AdminWidgetSpecResponse:
     """Save the site's concierge widget spec from the owner dashboard.
@@ -2475,10 +2534,13 @@ async def update_site_widget_spec(
     malformed site id and a site with no concierge widget are both 404. The write
     is the shared ``_save_widget_spec``, so the prior spec is archived as a
     revision exactly as the token route does. The token routes are unchanged.
+    A catalog with a non-2-decimal currency needs ``X-Paw-Money-Units: iso4217``
+    (409 ``currency_units_client_outdated`` otherwise), as on the token route.
     """
     _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
         raise HTTPException(status_code=404, detail="no_concierge_widget")
+    _refuse_outdated_money_client(req.spec, x_paw_money_units)
     # The widget is chosen by the SITE, so the spec's own identity keys are pinned
     # to that widget's row, not taken from the body. Overwritten, not rejected: the
     # editor spreads the spec it loaded, and a provisioned spec was minted with
@@ -2810,7 +2872,10 @@ class AdminWidgetView(BaseModel):
     """The site's paw-bar widget as the owner dashboard needs it (D2 overview)."""
 
     id: str
+    # The spec WITHOUT its catalog: the catalog has its own paginated routes
+    # (``catalog_routes``); ``catalog_count`` says how many products it holds.
     spec: PawBarSpec
+    catalog_count: int = 0
     agent_id: str = ""
     # The bound agent's display name (feat/site-dedicated-agent, E2). Resolved from
     # the agents service when ``agent_id`` is set so the dashboard card can show the
@@ -3313,7 +3378,8 @@ async def get_site_overview(
     if widget is not None:
         widget_view = AdminWidgetView(
             id=widget.id,
-            spec=widget.spec,
+            spec=widget.spec.model_copy(update={"catalog": []}),
+            catalog_count=await _store().catalog_count(widget.id),
             agent_id=widget.agent_id,
             agent_name=await _bound_agent_name(widget.agent_id),
         )
@@ -5203,7 +5269,8 @@ async def get_spec(
 
     Per-IP limited (2026-09-26). No customer_ref, so no format check: the only
     caller is the frozen key-less ``src/`` widget, and the glass app never
-    fetches it.
+    fetches it. Its ``catalog`` is filled from the catalog store (the first
+    ``_PUBLIC_SPEC_CATALOG`` items in owner order) so that client keeps working.
     """
     _public_ip_gate(request, widget_id)
     widget = await _store().get_widget(widget_id)
@@ -5221,7 +5288,12 @@ async def get_spec(
     headers: dict[str, str] = {"Cache-Control": "public, max-age=60", "Vary": "Origin"}
     if origin:
         headers["Access-Control-Allow-Origin"] = origin
-    return JSONResponse(widget.spec.model_dump(), headers=headers)
+    items, _ = await _store().list_catalog(widget.id, limit=_PUBLIC_SPEC_CATALOG)
+    body = widget.spec.model_dump()
+    body["catalog"] = [
+        item.model_dump(exclude={"position", "source", "updated_at"}) for item in items
+    ]
+    return JSONResponse(body, headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -6163,23 +6235,28 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
         for a in (widget.spec.actions or [])
     ]
-    # C1 — the catalog also rides surface_meta (capped) so the concierge preamble
-    # can name real products, prices, and ids: without it the agent knows the
-    # action verbs but not WHAT it sells and declines ("I don't have a list"). Only
-    # threaded when actions are declared; the preamble renders a compact block.
-    pawbar_catalog = (
-        [
-            {
-                "id": c.id,
-                "name": c.name,
-                "price_cents": c.price_cents,
-                "currency": c.currency,
-            }
-            for c in (widget.spec.catalog or [])[:_MAX_PREAMBLE_CATALOG]
-        ]
-        if pawbar_actions
-        else []
-    )
+    # C1 — the turn's catalog items also ride surface_meta so the concierge
+    # preamble can name real products, prices, and ids: without them the agent
+    # knows the action verbs but not WHAT it sells and declines ("I don't have a
+    # list"). Retrieved from the catalog store exactly as the v2 runner does it
+    # (``catalog_for_turn``: a small catalog whole, else the page's product plus
+    # the search hits for this message). Only threaded when actions are declared;
+    # the preamble renders a compact block.
+    pawbar_catalog: list[dict[str, Any]] = []
+    if pawbar_actions:
+        from pocketpaw_ee.paw_bar import concierge_runtime
+
+        page_ctx = await concierge_runtime.with_page_product(
+            concierge_runtime.resolve_page(widget, body.page, site=site), widget, store
+        )
+        pawbar_catalog = concierge_runtime.catalog_rows(
+            await concierge_runtime.catalog_for_turn(
+                store,
+                widget,
+                concierge_runtime._retrieval_query(body.message, prior_history, page_ctx),
+                page_ctx,
+            )
+        )
     # The run is bound to the KEY's pocket (ctx.pocket_id — the authenticated
     # authority), the KEY's workspace, and the widget's agent. ``user_id`` is the
     # anonymous customer handle (session / rate-limit key, never a principal).

@@ -24,17 +24,20 @@
 # (asyncio only holds a WEAK ref to a bare create_task, so a fire-and-forget task
 # can be garbage-collected mid-run).
 #
-# SOURCE — the site's own live URL. Unlike kb_ingest, which reads the pocket
-# precisely to avoid a server-side fetch of a customer hostname, a screenshot has
-# no other source: the point is a picture of the page as deployed. The RENDER does
-# not happen on our network — Cloudflare's browser does it — and the readiness
-# probe added below, which does, addresses a hostname WE composed
-# (``<site_id>.<PAW_CF_SITES_DOMAIN>``, or the local-mode base) rather than one a
-# customer supplied, so neither is the SSRF surface ``url_crawler`` had to be
-# hardened against. Every write of ``Site.url`` in ``sites.service`` builds it from
-# the site id plus operator configuration; a connected custom domain is appended to
-# ``allowed_origins`` and never becomes ``url``. A site with no url (a WfP deploy
-# with PAW_CF_SITES_DOMAIN unset) is skipped rather than guessed at.
+# SOURCE — ``capture_target`` is the one place that decides the address. A HOSTED
+# site is photographed at its own ``url``; every write of ``Site.url`` in
+# ``sites.service`` builds it from the site id plus operator configuration, so the
+# readiness probe (below) addresses a hostname WE composed and runs on a plain
+# client. A CONNECTED site (``foreign_origin``, a concierge on a page we do not
+# host) has no url and never deploys; it is photographed at ``https://{host}/`` for
+# the single verified, fresh host ``foreign_grounding.crawlable_origin`` returns —
+# never an unproved ``allowed_origins`` entry — and its probe is a customer
+# hostname, so it goes through ``safe_fetch`` (DNS pinned, private targets
+# refused). Its ``url`` is never written: elsewhere a url means "hosted and
+# deployed". The RENDER never runs on our network — Cloudflare's browser does it.
+# A site with no address (a WfP deploy with PAW_CF_SITES_DOMAIN unset, a connected
+# site with no fresh proof) is skipped rather than guessed at. A connected site's
+# first picture is scheduled by ``kb_ingest`` after a crawl reaches its origin.
 #
 # PERSISTENCE — ``site.set({...})``, never ``site.save()``. This runs seconds to
 # minutes after the publish that scheduled it, holding a Site instance
@@ -162,6 +165,7 @@ import asyncio
 import io
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -248,7 +252,9 @@ _READY_DELAYS_MANUAL: tuple[float, ...] = (2.0,)
 _PROBE_UA = "PocketPaw-SitePreview/1.0 (+readiness-probe)"
 
 
-async def _url_is_serving(url: str, *, transport: Any = None) -> bool:
+async def _url_is_serving(
+    url: str, *, transport: Any = None, foreign: bool = False, resolver: Any = None
+) -> bool:
     """One probe: does this address answer 2xx right now?
 
     A plain GET from this process — no Browser Rendering quota is spent deciding
@@ -262,10 +268,30 @@ async def _url_is_serving(url: str, *, transport: Any = None) -> bool:
     not having propagated. All three are "come back in a moment", not errors to
     report — the caller's only decision is capture or don't.
 
-    ``transport`` is the injectable httpx seam, so the probe's semantics are pinned
-    against a real client rather than a stubbed function.
+    ``foreign`` marks a CUSTOMER'S host (a connected site's verified origin). That
+    probe goes through ``safe_fetch.fetch_single_url`` instead of a plain client:
+    DNS pinned to a validated public IP and every redirect hop re-checked, because a
+    verified domain can still resolve somewhere inside our network.
+
+    ``transport`` / ``resolver`` are the injectable seams, so the probe's semantics
+    are pinned against a real client rather than a stubbed function.
     """
     import httpx
+
+    if foreign:
+        from pocketpaw_ee.sites.safe_fetch import fetch_single_url
+
+        try:
+            result = await fetch_single_url(
+                url,
+                timeout_sec=_READY_PROBE_TIMEOUT,
+                user_agent=_PROBE_UA,
+                transport=transport,
+                resolver=resolver,
+            )
+        except Exception:  # noqa: BLE001 — refused or unreachable is a NO
+            return False
+        return result.status // 100 == 2
 
     kwargs: dict[str, Any] = {
         "timeout": _READY_PROBE_TIMEOUT,
@@ -283,7 +309,14 @@ async def _url_is_serving(url: str, *, transport: Any = None) -> bool:
         return False
 
 
-async def wait_until_serving(url: str, *, delays: Any = None, transport: Any = None) -> bool:
+async def wait_until_serving(
+    url: str,
+    *,
+    delays: Any = None,
+    transport: Any = None,
+    foreign: bool = False,
+    resolver: Any = None,
+) -> bool:
     """Poll ``url`` until it answers 2xx. True when it did, False when the budget ran
     out.
 
@@ -297,15 +330,50 @@ async def wait_until_serving(url: str, *, delays: Any = None, transport: Any = N
     URL, so an unmodified probe could be answered 200 from the document that was
     there before this deploy, and the gate would open on the strength of the page it
     exists to stop us photographing.
+
+    ``foreign`` says ``url`` is a customer's host rather than one we composed, and
+    routes each probe through the SSRF-hardened fetch (see :func:`_url_is_serving`).
     """
     schedule = _READY_DELAYS if delays is None else tuple(delays)
-    if await _url_is_serving(_shot_url(url), transport=transport):
+    probe = {"transport": transport, "foreign": foreign, "resolver": resolver}
+    if await _url_is_serving(_shot_url(url), **probe):
         return True
     for delay in schedule:
         await asyncio.sleep(delay)
-        if await _url_is_serving(_shot_url(url), transport=transport):
+        if await _url_is_serving(_shot_url(url), **probe):
             return True
     return False
+
+
+@dataclass(frozen=True)
+class CaptureTarget:
+    """Where a site's live picture is taken. ``url`` is "" when there is nowhere,
+    and ``reason`` then says why (a ``crawlable_origin`` code for a connected site,
+    ``"no_url"`` for a hosted one). ``foreign`` marks a customer's host."""
+
+    url: str
+    foreign: bool = False
+    reason: str = ""
+
+
+async def capture_target(site: Any) -> CaptureTarget:
+    """The ONE answer to "what address do we photograph for this site".
+
+    A hosted site: its own ``url``, which we composed. A connected site
+    (``foreign_origin``): ``https://{host}/`` for the single verified, fresh host
+    ``foreign_grounding.crawlable_origin`` picks — the same host the knowledge
+    crawl reads, and never an unproved ``allowed_origins`` entry. A connected
+    site's ``url`` is never written: elsewhere a url means "hosted and deployed".
+    """
+    if getattr(site, "foreign_origin", False):
+        from pocketpaw_ee.sites.foreign_grounding import crawlable_origin
+
+        host, reason = await crawlable_origin(site)
+        if not host:
+            return CaptureTarget(url="", foreign=True, reason=reason)
+        return CaptureTarget(url=f"https://{host}/", foreign=True)
+    url = (getattr(site, "url", "") or "").strip()
+    return CaptureTarget(url=url, reason="" if url else "no_url")
 
 
 async def _store_screenshot(site: Any, image: bytes) -> str:
@@ -355,11 +423,12 @@ async def take_site_screenshot(
 ) -> str:
     """Screenshot the site's live page, store it, record it on the Site.
 
-    Returns the stored image's URL, or "" when there was nothing worth shooting —
-    no live url yet, the page not serving before the readiness budget ran out, or a
-    shot that produced no bytes. Raises on a Cloudflare or upload failure — callers
-    on the publish path use :func:`safe_take_site_screenshot`, which is the form
-    that cannot.
+    The address comes from :func:`capture_target`: a hosted site's own url, or a
+    connected site's verified origin. Returns the stored image's URL, or "" when
+    there was nothing worth shooting — no address yet, the page not serving before
+    the readiness budget ran out, or a shot that produced no bytes. Raises on a
+    Cloudflare or upload failure — callers on the publish path use
+    :func:`safe_take_site_screenshot`, which is the form that cannot.
 
     ``ready_delays`` is the readiness poll's retry schedule, passed straight to
     :func:`wait_until_serving`: ``None`` for the generous post-deploy budget, ``()``
@@ -378,13 +447,17 @@ async def take_site_screenshot(
     card lie. Every call captures, stores under a fresh uploads id, and records
     the new URL over the old one.
     """
-    url = (getattr(site, "url", "") or "").strip()
+    target = await capture_target(site)
+    url = target.url
     if not url:
-        # A Workers-for-Platforms deploy with PAW_CF_SITES_DOMAIN unset lands
-        # here: the worker uploaded fine, it just has no public address yet.
-        # There is no page to photograph, and guessing one would photograph
-        # somebody else's.
-        logger.debug("sites.screenshot: site %s has no url — nothing to capture", site.id)
+        # A Workers-for-Platforms deploy with PAW_CF_SITES_DOMAIN unset, or a
+        # connected site with no verified, fresh origin. There is no page we may
+        # photograph, and guessing one would photograph somebody else's.
+        logger.debug(
+            "sites.screenshot: site %s has nowhere to capture (%s)",
+            getattr(site, "id", "?"),
+            target.reason,
+        )
         return ""
 
     # THE GATE. A deploy is live at Cloudflare before it is live at the edge, so the
@@ -393,7 +466,7 @@ async def take_site_screenshot(
     # somebody republished. Poll first; a page that never comes up is left with no
     # picture, which is honest and — unlike a photograph of a 404 — does not
     # overwrite a good preview from the previous deploy.
-    if not await wait_until_serving(url, delays=ready_delays):
+    if not await wait_until_serving(url, delays=ready_delays, foreign=target.foreign):
         logger.warning(
             "sites.screenshot: %s was not serving within the readiness budget — no "
             "preview captured for site %s (the card keeps its previous image; "
@@ -506,7 +579,7 @@ async def take_draft_screenshot(site: Any, *, cloudflare: Any | None = None) -> 
     """Screenshot a DRAFT site from its own markup, store it, record it on the Site.
 
     Returns the stored image's URL, or "" when there was nothing to shoot: the site
-    is live (the live path owns that picture), the draft has no renderable markup
+    is live or connected (the live path owns that picture), the draft has no renderable markup
     yet, getting markup would cost a Node build this deployment has not opted into,
     or the shot produced no bytes. Raises on a Cloudflare or upload failure —
     :func:`safe_take_draft_screenshot` is the form that cannot.
@@ -514,8 +587,9 @@ async def take_draft_screenshot(site: Any, *, cloudflare: Any | None = None) -> 
     The markup goes over as the endpoint's ``html`` body, which renders at
     ``about:blank``: ``draft_markup`` is what makes that document self-contained.
     """
-    if (getattr(site, "url", "") or "").strip():
-        # A deployed site — ``take_site_screenshot`` photographs the real page.
+    if (getattr(site, "url", "") or "").strip() or getattr(site, "foreign_origin", False):
+        # A deployed site, or a connected one — ``take_site_screenshot`` photographs
+        # the real page. A connected site's pocket is not the page visitors see.
         return ""
 
     from pocketpaw_ee.sites.draft_markup import build_draft_markup
@@ -644,6 +718,8 @@ def schedule_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id: str) -
 
 
 __all__ = [
+    "CaptureTarget",
+    "capture_target",
     "safe_take_draft_screenshot",
     "safe_take_draft_screenshot_for_pocket",
     "safe_take_site_screenshot",

@@ -303,6 +303,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.request_log.router import router as request_log_router
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
+    from pocketpaw_ee.cloud.site_templates.router import router as site_templates_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.storage.router import router as storage_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
@@ -385,6 +386,9 @@ def mount_cloud(app: FastAPI) -> None:
     # (GET /storage/usage -> used_bytes / max_bytes / remaining / percent).
     app.include_router(storage_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
+    # Site templates — save a site pocket as a private template, list / get /
+    # delete them, and start a new site from one (POST /site-templates/{id}/use).
+    app.include_router(site_templates_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
@@ -467,6 +471,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
+    from pocketpaw_ee.cloud.leads.notifications_router import (
+        router as lead_notifications_router,
+    )
     from pocketpaw_ee.cloud.leads.router import router as leads_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.member_day_digest.router import router as member_day_digest_router
@@ -483,6 +490,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
+    from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
     from pocketpaw_ee.sites.router import router as sites_router
@@ -531,6 +539,9 @@ def mount_cloud(app: FastAPI) -> None:
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
     # workspace-scoped) for the Leads view.
     app.include_router(leads_router, prefix="/api/v1")
+    # Per-site owner notifications: recipients + confirm link, per-event sinks,
+    # signed site webhook, send-test. Admin-gated; the confirm link is public.
+    app.include_router(lead_notifications_router, prefix="/api/v1")
     # Growth — G-1 prospect store (/growth outbound engine, first slice).
     # License-gated, workspace-scoped CRUD under /growth/prospects; cross-tenant
     # ids 404 inside the service. Later slices add ingestion, drafts, and
@@ -726,6 +737,7 @@ def mount_cloud(app: FastAPI) -> None:
     # reach /api/v1/paw-bar/* without a second app setup entry point.
     app.include_router(paw_bar_router, prefix="/api/v1")
     app.include_router(paw_bar_knowledge_router, prefix="/api/v1")
+    app.include_router(paw_bar_catalog_router, prefix="/api/v1")
 
     # Fabric / Fleet / Instinct also live outside ee/cloud/ (pocketpaw_ee.
     # {fabric,fleet,instinct}). Their logic split into the OSS core in Phase 2,

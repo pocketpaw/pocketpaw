@@ -18,17 +18,16 @@
 # pricing-spec rekey (basic/pro/business → free/site/staff) moves these tests with
 # the catalog instead of breaking them.
 #
-# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1). Free now INCLUDES a
-# custom domain — one site's worth — so the headline assertions here invert: a free
-# site attaches its domain and the refusal moves to the SECOND site that wants one.
-# That count gate has its own tree (test_custom_domain_cap.py); what stays here is
-# the capability gate and the postures around it, which are unchanged.
+# Free INCLUDES a custom domain on every site (apex + ``www``), so a free site
+# attaches its domain and the refusal a free site can trip is its own third
+# hostname. That per-site count has its own tree (test_custom_domain_cap.py); what
+# stays here is the capability gate and the postures around it.
 #
-# The lapsed-subscription cases invert too, and that one is worth reading twice: a
-# paid site whose subscription stopped falls to the FLOOR, not to zero. It keeps
-# what free would have given it and loses the uncapped allowance, which is what it
-# was actually paying for. Refusing it outright would leave a former customer worse
-# off than someone who never paid.
+# The lapsed-subscription cases are worth reading twice: a paid site whose
+# subscription stopped falls to the FLOOR, not to zero. It keeps what free would
+# have given it and loses the uncapped allowance, which is what it was actually
+# paying for. Refusing it outright would leave a former customer worse off than
+# someone who never paid.
 #
 # Two postures inherited from the siblings this gate copies (``PocketLimitError``,
 # ``ConnectorLimitError``) and pinned here because both are easy to "fix" wrongly
@@ -157,6 +156,15 @@ async def _seed_site(
     return str(doc.id)
 
 
+async def _fill_site(ws: str, site_id: str, domain: str) -> None:
+    """Spend a floor site's whole hostname allowance: apex, then ``www``."""
+    hosts = [domain, f"www.{domain}"]
+    for host in hosts[: site_plans.free_max_hostnames_per_site()]:
+        await sites_service.add_domain(
+            workspace_id=ws, site_id=site_id, hostname=host, _cloudflare=_RecordingCF()
+        )
+
+
 # --------------------------------------------------------------------------- #
 # The bug: a site with no paid entitlement attached a custom domain.
 # --------------------------------------------------------------------------- #
@@ -165,9 +173,8 @@ async def _seed_site(
 async def test_a_free_site_attaches_its_one_custom_domain(monkeypatch):
     """The captain's rule, end to end at the seam that enforces it.
 
-    This assertion is the inverse of the one that stood here until 2026-08-21, and
-    the inversion IS the feature: free includes a custom domain on one site. What
-    free does not include is a second site with one, which is a count and lives in
+    Free includes a custom domain on every site. What free does not include is
+    more than apex + ``www`` on one site, which is a count and lives in
     test_custom_domain_cap.py.
     """
     _enforce(monkeypatch, on=True)
@@ -215,23 +222,20 @@ async def test_a_refused_attach_never_reaches_cloudflare(monkeypatch):
     makes the customer's next legitimate attach fail on a 1406 duplicate they
     cannot see or clear.
 
-    Driven through the COUNT gate now, since that is the one a free workspace can
-    actually trip: one site already holds a domain, a second one asks.
+    Driven through the per-site COUNT gate, since that is the one a free site can
+    actually trip: the site already holds apex + ``www`` and asks for a third.
     """
     _enforce(monkeypatch, on=True)
     ws = "ws_no_cf_call"
-    first = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
-    await sites_service.add_domain(
-        workspace_id=ws, site_id=first, hostname="www.first.com", _cloudflare=_RecordingCF()
-    )
-    second = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier(), pocket_id="pk_2")
+    site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    await _fill_site(ws, site_id, "first.com")
     cf = _RecordingCF()
 
     with pytest.raises(CloudError):
         await sites_service.add_domain(
             workspace_id=ws,
-            site_id=second,
-            hostname="www.nocall.com",
+            site_id=site_id,
+            hostname="nocall.first.com",
             _cloudflare=cf,
         )
 
@@ -245,24 +249,22 @@ async def test_a_refused_attach_writes_nothing_to_the_site(monkeypatch):
     host to POST captures at the site."""
     _enforce(monkeypatch, on=True)
     ws = "ws_no_write"
-    first = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
-    await sites_service.add_domain(
-        workspace_id=ws, site_id=first, hostname="www.taken.com", _cloudflare=_RecordingCF()
-    )
-    second = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier(), pocket_id="pk_2")
+    site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    await _fill_site(ws, site_id, "taken.com")
+    before = await Site.get(site_id)
     cf = _RecordingCF()
 
     with pytest.raises(CloudError):
         await sites_service.add_domain(
             workspace_id=ws,
-            site_id=second,
-            hostname="www.nowrite.com",
+            site_id=site_id,
+            hostname="nowrite.taken.com",
             _cloudflare=cf,
         )
 
-    doc = await Site.get(second)
-    assert doc.domains == []
-    assert "www.nowrite.com" not in doc.allowed_origins
+    doc = await Site.get(site_id)
+    assert [d.hostname for d in doc.domains] == [d.hostname for d in before.domains]
+    assert "nowrite.taken.com" not in doc.allowed_origins
 
 
 # --------------------------------------------------------------------------- #
@@ -277,7 +279,7 @@ async def test_a_paid_tier_without_an_active_subscription_falls_to_the_floor(mon
     trusted, and the resolver still gates the PAID grants on the subscription.
 
     What changed is where the site lands when it fails that gate: on the free
-    floor, which now includes one domained site. So this attach SUCCEEDS, and the
+    floor, which includes a domain on every site. So this attach SUCCEEDS, and the
     thing the lapsed site lost is its uncapped allowance — the next test proves it
     is genuinely capped rather than silently still uncapped.
     """
@@ -303,10 +305,10 @@ async def test_a_paid_tier_without_an_active_subscription_falls_to_the_floor(mon
 async def test_a_lapsed_paid_site_is_capped_like_a_free_one(monkeypatch):
     """The other half: falling to the floor means being SUBJECT to the floor.
 
-    A lapsed ``pro`` site keeps one domained site, not its old uncapped allowance,
-    so a second site in the same workspace is refused exactly as it would be under
-    free. Without this the previous test would pass just as happily if lapsing did
-    nothing at all.
+    A lapsed paid site keeps free's one domain (apex + ``www``), not its old
+    uncapped allowance, so a third hostname on it is refused exactly as it would be
+    under free. Without this the previous test would pass just as happily if
+    lapsing did nothing at all.
     """
     _enforce(monkeypatch, on=True)
     ws = "ws_lapsed_capped"
@@ -315,14 +317,11 @@ async def test_a_lapsed_paid_site_is_capped_like_a_free_one(monkeypatch):
         plan_tier=_a_tier_granting_custom_domain(),
         subscription_status="cancelled",
     )
-    await sites_service.add_domain(
-        workspace_id=ws, site_id=lapsed, hostname="www.lapsed.com", _cloudflare=_RecordingCF()
-    )
-    other = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier(), pocket_id="pk_2")
+    await _fill_site(ws, lapsed, "lapsed.com")
 
     with pytest.raises(CloudError) as exc:
         await sites_service.add_domain(
-            workspace_id=ws, site_id=other, hostname="www.other.com", _cloudflare=_RecordingCF()
+            workspace_id=ws, site_id=lapsed, hostname="more.lapsed.com", _cloudflare=_RecordingCF()
         )
 
     assert exc.value.code == "billing.custom_domain_limit"
@@ -427,11 +426,11 @@ async def test_an_already_connected_domain_still_repairs_its_route(monkeypatch):
 # The capability gate's remaining job.
 #
 # Free includes a domain, so ``_assert_entitled_to_custom_domain`` fires on no tier
-# the catalog currently ships — what bites is the COUNT. That makes the gate easy
-# to read as dead code and delete. It is not dead: it is the fail-closed floor for
-# a catalog that grants zero, which is exactly what reverting the captain's rule
-# would produce. These two prove it still works, so the guard is pinned rather than
-# merely present.
+# the catalog currently ships — what bites is the per-site COUNT. That makes the
+# gate easy to read as dead code and delete. It is not dead: it is the fail-closed
+# floor for a catalog that grants zero, which is exactly what taking the free
+# domain away again would produce. These two prove it still works, so the guard
+# is pinned rather than merely present.
 # --------------------------------------------------------------------------- #
 
 

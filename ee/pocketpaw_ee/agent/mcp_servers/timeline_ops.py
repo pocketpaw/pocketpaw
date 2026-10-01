@@ -82,7 +82,20 @@ MAX_OPS_PER_BATCH = 50
 _MAX_ZOOM_SCALE = 5
 
 _TRANSITION_KINDS: frozenset[str] = frozenset(
-    {"none", "crossfade", "dip", "slide", "push", "zoom", "blur"}
+    {
+        "none",
+        "crossfade",
+        "dip",
+        "slide",
+        "push",
+        "zoom",
+        "blur",
+        "whip",
+        "flip",
+        "wipe",
+        "iris",
+        "spin",
+    }
 )
 
 _ASPECT_RATIOS: frozenset[str] = frozenset(

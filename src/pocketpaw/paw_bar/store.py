@@ -1,7 +1,8 @@
 # src/pocketpaw/paw_bar/store.py — Async SQLite persistence for Paw Bar
-# (PawBarStore): widgets and spec revisions, the append-only event log that backs
-# the rate limiter, customer decisions, visitor carts, and the owner inbox
-# (conversations + owner messages). Pure SQLite, no EE import (OSS boundary).
+# (PawBarStore): widgets and spec revisions, each widget's product catalog
+# (``catalog_store.CatalogStoreMixin``: rows + FTS5 search), the append-only event
+# log that backs the rate limiter, customer decisions, visitor carts, and the owner
+# inbox (conversations + owner messages). Pure SQLite, no EE import (OSS boundary).
 #
 # Invariants a reader must not break:
 #   * The file runs in WAL mode, set once in _ensure_schema (it persists in the
@@ -13,7 +14,20 @@
 #     schema setup runs once per process behind _schema_lock.
 #   * Schema changes are additive: SCHEMA_SQL for fresh files, _migrate_columns
 #     ALTERs (run BEFORE SCHEMA_SQL) for deployed ones, so an old file never
-#     fails on an index over a missing column.
+#     fails on an index over a missing column. Row rewrites are one-shot data
+#     migrations (pocketpaw.sqlite_migrations.run_once, recorded in
+#     schema_migrations): money_minor_units_v1 moved non-2-decimal amounts to
+#     ISO 4217 minor units; catalog_to_table_v1 (after it, and only once it is
+#     recorded) moved spec catalogs into rows. A cart holds one currency
+#     (CartCurrencyMismatch).
+#   * A spec is stored WITHOUT a catalog: create_widget / update_spec ADD a
+#     non-empty ``spec.catalog`` to the catalog table in the same transaction
+#     (upsert by id, never a delete: an older editor that loaded an empty catalog
+#     and saved one product must not wipe the rest); an empty or absent one
+#     leaves the table alone. update_spec also moves a stored spec's catalog the
+#     migration has not reached yet (rows already there win), so a save cannot
+#     drop it. A rollback never restores a revision's catalog.
+#     delete_widget removes its rows.
 #   * Tenancy is in-row: the *_workspace_scope helpers match the caller's
 #     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
 #     column holds the widget OWNER, so widget-keyed decision reads filter on
@@ -34,13 +48,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import weakref
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent, normalize_currency
+from pocketpaw.paw_bar.catalog_store import (
+    CATALOG_SCHEMA_SQL,
+    CatalogStoreMixin,
+    add_missing_rows,
+    catalog_max_items,
+    clean_items,
+    clean_legacy_catalog,
+    ensure_catalog_search,
+    migrate_catalog_out_of_specs,
+    upsert_rows,
+)
 from pocketpaw.paw_bar.models import (
     MAX_CART_ITEMS,
     Conversation,
@@ -59,6 +87,93 @@ from pocketpaw.paw_bar.models import (
     _gen_owner_message_id,
     _gen_token,
 )
+from pocketpaw.sqlite_migrations import is_applied, run_once
+
+logger = logging.getLogger(__name__)
+
+# The money data migration's marker in ``schema_migrations``.
+MONEY_MIGRATION = "money_minor_units_v1"
+
+
+class CartCurrencyMismatch(ValueError):
+    """A cart line's currency differs from the (non-empty) cart's currency."""
+
+    code = "cart_currency_mismatch"
+
+    def __init__(self, cart_currency: str, item_currency: str) -> None:
+        super().__init__(
+            f"cart is in {cart_currency}; cannot add an item priced in {item_currency}"
+        )
+        self.cart_currency = cart_currency
+        self.item_currency = item_currency
+
+
+def _convert_lines(lines: Any, default_currency: Any, table: str, counts: Counter) -> bool:
+    """Re-express ``price_cents`` on each dict line from the old ×100 rule.
+
+    Lines whose currency has exponent 2 (or no integer price) are left alone.
+    Returns True when any line changed; ``counts`` gains ``(table, CODE)`` hits.
+    """
+    if not isinstance(lines, list):
+        return False
+    changed = False
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        code = line.get("currency") or default_currency or "USD"
+        price = line.get("price_cents")
+        if not isinstance(price, int) or isinstance(price, bool):
+            continue
+        if exponent(code) == DEFAULT_EXPONENT:
+            continue
+        line["price_cents"] = convert_legacy_minor(price, code)
+        counts[(table, str(code).strip().upper())] += 1
+        changed = True
+    return changed
+
+
+async def _migrate_money_minor_units(db: aiosqlite.Connection) -> None:
+    """Old amounts were "major × 100" for every currency; make them ISO minor units.
+
+    Covers widget-spec catalogs, archived spec revisions (so a rollback restores
+    correct units) and cart lines. Totals are derived, so nothing else stores
+    money here. A row whose JSON does not parse is left exactly as found.
+    """
+    counts: Counter = Counter()
+    for table, key in (("paw_bar_widgets", "id"), ("paw_bar_spec_revisions", "id")):
+        async with db.execute(f"SELECT {key}, spec FROM {table}") as cur:  # noqa: S608
+            rows = await cur.fetchall()
+        for row_id, raw in rows:
+            try:
+                spec = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            if _convert_lines(spec.get("catalog"), "USD", table, counts):
+                await db.execute(
+                    f"UPDATE {table} SET spec = ? WHERE {key} = ?",  # noqa: S608
+                    (json.dumps(spec), row_id),
+                )
+    async with db.execute(
+        "SELECT widget_id, customer_ref, items, currency FROM paw_bar_carts"
+    ) as cur:
+        carts = await cur.fetchall()
+    for widget_id, customer_ref, raw, currency in carts:
+        try:
+            items = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            continue
+        if _convert_lines(items, currency, "paw_bar_carts", counts):
+            await db.execute(
+                "UPDATE paw_bar_carts SET items = ? WHERE widget_id = ? AND customer_ref = ?",
+                (json.dumps(items), widget_id, customer_ref),
+            )
+    if counts:
+        for (table, code), n in sorted(counts.items()):
+            logger.info("paw_bar money migration: %s %s: %d amount(s) converted", table, code, n)
+    else:
+        logger.info("paw_bar money migration: no non-2-decimal amounts to convert")
 
 
 def _as_note(value: Any) -> ConversationNote:
@@ -423,12 +538,14 @@ def _conversation_workspace_scope(workspace_id: str | None) -> tuple[str | None,
     return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
 
 
-class PawBarStore:
+class PawBarStore(CatalogStoreMixin):
     """Async SQLite store — same shape as InstinctStore so the wiring is familiar."""
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
+        # Set at schema setup: whether this SQLite has FTS5 (else LIKE search).
+        self._catalog_fts = False
         # Serializes the first _ensure_schema in this process. Many connections
         # switching a fresh file to WAL at once can get "database is locked"
         # without the busy timeout ever applying (seen on Windows).
@@ -464,7 +581,23 @@ class PawBarStore:
             # no-op and SCHEMA_SQL builds the full schema below). Idempotent.
             await self._migrate_columns(db)
             await db.executescript(SCHEMA_SQL)
+            await db.executescript(CATALOG_SCHEMA_SQL)
             await db.commit()
+            self._catalog_fts = await ensure_catalog_search(db)
+            # One-shot data migrations, recorded in schema_migrations. A failure
+            # rolls the file back untouched and is retried on the next process
+            # start; it must not take the whole Paw Bar down with it.
+            try:
+                await run_once(db, MONEY_MIGRATION, _migrate_money_minor_units)
+            except Exception:
+                logger.exception("paw_bar: %s failed; data left unmigrated", MONEY_MIGRATION)
+            # Catalogs leave the spec only once their amounts are minor units: the
+            # money migration converts spec catalogs, never catalog rows.
+            try:
+                if await is_applied(db, MONEY_MIGRATION):
+                    await migrate_catalog_out_of_specs(db)
+            except Exception:
+                logger.exception("paw_bar: catalog migration failed; catalogs left in specs")
         self._initialized = True
 
     @staticmethod
@@ -645,9 +778,39 @@ class PawBarStore:
     def _conn(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path, timeout=_BUSY_TIMEOUT_S)
 
+    @staticmethod
+    async def _widget_in_scope(
+        db: aiosqlite.Connection, widget_id: str, workspace_id: str | None
+    ) -> bool:
+        """Whether the widget exists (in ``workspace_id``'s scope when given)."""
+        sql = "SELECT 1 FROM paw_bar_widgets WHERE id = ?"
+        params: list[Any] = [widget_id]
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        async with db.execute(sql, params) as cur:
+            return await cur.fetchone() is not None
+
+    @staticmethod
+    def _split_catalog(widget_id: str, spec: PawBarSpec) -> tuple[PawBarSpec, list[Any] | None]:
+        """``(spec without catalog, cleaned items or None)``. None when the spec
+        carries no catalog, which leaves the catalog table untouched."""
+        if not spec.catalog:
+            return spec, None
+        logger.info(
+            "paw_bar: spec write for widget %s carried %d catalog item(s); "
+            "added to the catalog store (spec.catalog is deprecated)",
+            widget_id,
+            len(spec.catalog),
+        )
+        return spec.model_copy(update={"catalog": []}), clean_items(spec.catalog)
+
     # ---------------- Widgets ----------------
 
     async def create_widget(self, widget: PawBarWidget) -> PawBarWidget:
+        spec, catalog = self._split_catalog(widget.id, widget.spec)
+        widget = widget.model_copy(update={"spec": spec})
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
@@ -675,6 +838,10 @@ class PawBarStore:
                     widget.updated_at.isoformat(),
                 ),
             )
+            if catalog is not None:
+                await upsert_rows(
+                    db, widget.id, catalog, datetime.now().isoformat(), catalog_max_items()
+                )
             await db.commit()
         return widget
 
@@ -743,9 +910,11 @@ class PawBarStore:
         existing = await self.get_widget(widget_id, workspace_id=workspace_id)
         if existing is None:
             return None
+        spec, catalog = self._split_catalog(widget_id, spec)
+        now = datetime.now().isoformat()
         ws_cond, ws_params = _widget_workspace_scope(workspace_id)
         sql = "UPDATE paw_bar_widgets SET spec = ?, updated_at = ? WHERE id = ?"
-        params: list[Any] = [spec.model_dump_json(), datetime.now().isoformat(), widget_id]
+        params: list[Any] = [spec.model_dump_json(), now, widget_id]
         if ws_cond:
             sql += f" AND {ws_cond}"
             params.extend(ws_params)
@@ -764,7 +933,17 @@ class PawBarStore:
                 "INSERT INTO paw_bar_spec_revisions (widget_id, revision, spec) VALUES (?, ?, ?)",
                 (widget_id, next_revision, existing.spec.model_dump_json()),
             )
+            # A stored spec the catalog migration has not reached yet still holds
+            # its catalog. Move it before the new spec overwrites it (a lazy,
+            # per-widget migration; rows already there win), then apply the body.
+            if existing.spec.catalog:
+                legacy = clean_legacy_catalog(
+                    [c.model_dump() for c in existing.spec.catalog], widget_id
+                )
+                await add_missing_rows(db, widget_id, legacy, now)
             await db.execute(sql, params)
+            if catalog is not None:
+                await upsert_rows(db, widget_id, catalog, now, catalog_max_items())
             await db.commit()
         return await self.get_widget(widget_id, workspace_id=workspace_id)
 
@@ -790,7 +969,9 @@ class PawBarStore:
         The restore is itself an ``update_spec`` — the CURRENT spec is archived
         as a new revision before being replaced, so a rollback is always
         auditable and itself reversible. Returns ``None`` when the widget does
-        not exist in the caller's workspace scope OR when no revision exists.
+        not exist in the caller's workspace scope OR when no revision exists. A
+        revision's ``catalog`` is ignored: the catalog is not versioned with the
+        spec, and restoring an old one would overwrite the live catalog.
         """
         widget = await self.get_widget(widget_id, workspace_id=workspace_id)
         if widget is None:
@@ -799,6 +980,7 @@ class PawBarStore:
         if latest is None:
             return None
         _, archived_spec = latest
+        archived_spec = archived_spec.model_copy(update={"catalog": []})
         return await self.update_spec(widget_id, archived_spec, workspace_id=workspace_id)
 
     async def update_fields(
@@ -878,8 +1060,13 @@ class PawBarStore:
         await self._ensure_schema()
         async with self._conn() as db:
             cur = await db.execute(sql, params)
+            deleted = (cur.rowcount or 0) > 0
+            if deleted:
+                await db.execute(
+                    "DELETE FROM paw_bar_catalog_items WHERE widget_id = ?", (widget_id,)
+                )
             await db.commit()
-            return (cur.rowcount or 0) > 0
+            return deleted
 
     # The per-visitor tables a concierge's conversations live in. Events, spec
     # revisions and the widget itself are the BAR's history, not a conversation.
@@ -2036,12 +2223,20 @@ class PawBarStore:
         If the product id is already in the cart the quantities add (capped at
         the model's per-line qty ceiling by the caller); a new id appends, up to
         ``MAX_CART_ITEMS`` distinct lines (an over-cap add is dropped rather than
-        raising — the visitor keeps the cart they have). The cart currency tracks
-        the first line added. Idempotent per call; the executor owns the qty caps.
+        raising — the visitor keeps the cart they have). A cart holds ONE currency:
+        an empty cart takes the line's currency, and a line in any other currency
+        raises :class:`CartCurrencyMismatch` with the cart unchanged, so
+        ``total_cents`` never adds yen to dollars. Idempotent per call; the
+        executor owns the qty caps.
         """
+        item_currency = normalize_currency(item.currency)
         cart = await self.get_cart(widget_id, customer_ref) or PawBarCart(
-            widget_id=widget_id, customer_ref=customer_ref, currency=item.currency
+            widget_id=widget_id, customer_ref=customer_ref, currency=item_currency
         )
+        if not cart.items:
+            cart.currency = item_currency
+        elif cart.currency != item_currency:
+            raise CartCurrencyMismatch(cart.currency, item_currency)
         merged = False
         for line in cart.items:
             if line.id == item.id:

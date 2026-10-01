@@ -19,6 +19,10 @@
 # graphic's id and HTML source (capped), so an edit rewrites it in place via
 # ``add_motion_graphic``'s ``replace_asset_id`` instead of adding a second one.
 #
+# Changes: 2026-09-30 (feat/open-surface-tool) — ONLY PLACE WHAT EXISTS now also
+# names ``open_surface``: when the clip is not in their gallery yet, the agent can
+# open /files so the user uploads or picks it.
+#
 # Changes: 2026-09-10 (feat/studio-editor-gallery-attach) — the user can now type
 # ``@`` in the editor's chat rail and pick an item from their /studio gallery,
 # and the page IMPORTS it into the media rail before the message is even sent.
@@ -328,9 +332,12 @@ Rules that matter:
   media from their /studio gallery by typing `@` in the composer, and it is
   imported onto the rail before they even send. So when the rail lacks what they
   described, tell them to attach it with `@` (or drag the file onto the rail) —
-  do not tell them media cannot be brought in here. The one exception is a
-  motion graphic (title card, kinetic type, animated stat, lower third), which
-  you author yourself with `mcp__pocketpaw_timeline__add_motion_graphic`.
+  do not tell them media cannot be brought in here. If the file is not in their
+  gallery at all yet, call `mcp__pocketpaw_surfaces__open_surface` with route
+  /files so they can upload or pick it, then have them attach it here. The one
+  thing you make yourself is a motion graphic (title card, kinetic type,
+  animated stat, lower third), authored with
+  `mcp__pocketpaw_timeline__add_motion_graphic`.
 - EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
   edit its source from that block and call add_motion_graphic with
   replace_asset_id set to its id — never add a second one alongside it.

@@ -71,6 +71,10 @@
 # the card, so ``_overlay_one`` (unchanged) stamps identical ``mode`` /
 # ``available`` and describe renders the same ``enable_hint``. Sort logic and
 # ``is_granted`` are untouched — the cards keep their ``role:member`` gate.
+#
+# Updated: 2026-10-01 (feat/atlas-canonical) — ``build_role_aware_provider`` takes
+# an optional ``user_id`` so the atlas read API can bind the request's verified
+# user (it has no chat-run ContextVars). Agent runs are unchanged.
 
 from __future__ import annotations
 
@@ -408,7 +412,9 @@ class DefaultEntitlementProvider:
         return entry_role_requirement(entry) is None
 
 
-def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
+def build_role_aware_provider(
+    scope_key: str, user_id: str | None = None
+) -> EntitlementProvider | None:
     """EE wiring hook: a role-aware entitlement provider for *scope_key*, or None.
 
     Mirrors ``atlas.fabric.build_workspace_fabric_introspector`` — the seam that
@@ -419,6 +425,9 @@ def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
     ``pocketpaw_ee.agent.atlas_provider`` not importable (OSS install), or
     construction failure — all DEBUG-logged, all degrading to "no role-aware
     provider" so admin entries stay hidden rather than leaking.
+
+    ``user_id`` binds an explicit caller (the HTTP read API, which has no
+    chat-run identity ContextVars); agent runs omit it.
 
     A ``None`` return is SAFE: the default provider hides every ``role:*`` entry,
     so admin capabilities never surface without the EE provider explicitly
@@ -438,6 +447,8 @@ def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
         logger.debug("pocketpaw_ee.agent.atlas_provider not importable; role-aware atlas off")
         return None
     try:
+        if user_id is not None:
+            return RoleAwareEntitlementProvider(scope_key=scope_key, user_id=user_id)
         return RoleAwareEntitlementProvider(scope_key=scope_key)
     except Exception as exc:  # noqa: BLE001 — construction failure degrades, never crashes
         logger.debug("atlas role-aware provider construction failed: %s", exc)

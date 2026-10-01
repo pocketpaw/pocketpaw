@@ -3,7 +3,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:loader` in the
 // paw-bar repo (loader/dist/loader.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar loader/src/loader.ts @ 91dc09b (main)
+// Source: qbtrix/paw-bar loader/src/loader.ts @ 636e413 (main)
 //
 // It used to be hand-transcribed TypeScript with the annotations stripped by
 // hand. That drifts silently: this copy predated a whole session of loader
@@ -31,7 +31,6 @@
 // To update: rebuild in paw-bar, copy loader/dist/loader.readable.js over this
 // file, and restore this header. tests/cloud/test_paw_bar_widget_js.py checks
 // the copy has not fallen behind the behaviours the backend depends on.
-
 "use strict";
 (() => {
   // loader/src/loader.ts
@@ -300,7 +299,30 @@
     function postViewport() {
       postToFrame({ type: "pawbar:viewport", w: win.innerWidth, h: win.innerHeight });
     }
-    iframe.addEventListener("load", postViewport);
+    let lastPage = "";
+    let watching = false;
+    function postPage(force) {
+      try {
+        const l = win.location;
+        const url = l.origin + l.pathname;
+        const title = doc.title.slice(0, 120);
+        const key = url + " " + title;
+        if (!force && key === lastPage) return;
+        lastPage = key;
+        postToFrame({ type: "pawbar:page", url, title });
+      } catch (_) {
+      }
+    }
+    const pageChanged = () => postPage();
+    iframe.addEventListener("load", () => {
+      postViewport();
+      postPage(true);
+      if (watching) return;
+      watching = true;
+      win.addEventListener("popstate", pageChanged);
+      win.addEventListener("hashchange", pageChanged);
+      win.setInterval(pageChanged, 1e3);
+    });
     win.addEventListener("resize", () => {
       if (!overlay) applyDock();
       postViewport();

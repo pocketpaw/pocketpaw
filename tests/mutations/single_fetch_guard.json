@@ -72,8 +72,8 @@
   {
     "label": "the declared content-length is ignored, so an oversized body is streamed before anyone objects",
     "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
-    "find": "            if declared.isdigit() and int(declared) > self._per_fetch_cap:",
-    "replace": "            if False and int(declared) > self._per_fetch_cap:",
+    "find": "            if not truncate and declared.isdigit() and int(declared) > self._per_fetch_cap:",
+    "replace": "            if False and not truncate and int(declared) > self._per_fetch_cap:",
     "tests": [
       "tests/ee/sites/test_safe_fetch.py::test_declared_content_length_over_the_cap_is_refused_before_the_body"
     ]
@@ -90,8 +90,8 @@
   {
     "label": "any port is fetchable, so the whole non-web port range (6379, 11211, 22) is in reach",
     "file": "ee/pocketpaw_ee/sites/safe_fetch.py",
-    "find": "    if port not in (None, 80, 443):",
-    "replace": "    if False:",
+    "find": "    elif port not in (None, 80, 443):",
+    "replace": "    elif False:",
     "tests": [
       "tests/ee/sites/test_safe_fetch.py::test_rejects_forbidden_url_shapes_before_any_request"
     ]

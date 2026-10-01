@@ -591,13 +591,16 @@ live OS.** Two whole subsystems (Fabric source-truth, the verify loop) shipped
 after atlas was seeded and stayed invisible for weeks; three live routes were
 once missing/stale while the check stayed green.
 
-When you **add, rename, or remove a primitive, a user-facing surface/route, or
-an agent-facing capability** — in the same PR:
+When you **add, rename, or remove a primitive, a user-facing surface/route, a
+composer verb, or an agent-facing capability** — in the same PR:
 
-1. Update `src/pocketpaw/atlas/authored/{primitives,surfaces,capabilities}.json`
-   (all 10 `AtlasEntry` fields; primitives carry a `gist`; capabilities carry a
-   `role:*` marker in `requires`; verify every route/fact against the real
-   frontend routes, not just that it recompiles).
+1. Update `src/pocketpaw/atlas/authored/{primitives,surfaces,capabilities,verbs}.json`
+   (all 10 base `AtlasEntry` fields; primitives carry a `gist`; capabilities carry a
+   `role:*` marker in `requires`; surfaces carry `slash` / `presentation` /
+   `agent_openable`, and `agent_openable` IS the `open_surface` allowlist;
+   composer verbs carry `slash` / `applies_to` / `triggers` / `risk` / `undo`;
+   verify every route/fact against the real frontend routes, not just that it
+   recompiles).
 2. Recompile: `uv run pocketpaw atlas build`, then `atlas build --check` green;
    commit `src/pocketpaw/atlas/data/atlas.json`.
 3. Pin the new intent(s) in `tests/atlas/eval_cases.json` (both directions — the

@@ -22,10 +22,19 @@
 # pinned FAQs first, then the visitor's page article, then KB hits from the site
 # pocket and the bound agent's scope, inside one character budget
 # (``select_knowledge``). ``resolve_page`` accepts the request's page only when it
-# is on one of the site's allowed origins.
+# is on one of the site's allowed origins; ``with_page_product`` then finds the
+# catalog item whose url is that page.
+#
+# The <catalog> block is retrieved per turn from the catalog store
+# (``catalog_for_turn``, shared with the legacy relay's ``pawbar_catalog``): a
+# catalog of at most ``CATALOG_ALL_UP_TO`` items goes whole, in owner order; a
+# larger one gives the page's product, the ``CATALOG_SEARCH_K`` best FTS hits for
+# ``_retrieval_query`` and, when that search is weak, the first
+# ``CATALOG_FALLBACK`` items, de-duplicated.
 #
 # Output passes through ``FenceFilter``: a ```pawbar-card fence is validated and
-# hydrated from the widget's catalog; any other code fence becomes
+# hydrated from the catalog store (any id in it, not only the ids the prompt
+# listed, looked up per card); any other code fence becomes
 # ``CODE_REPLACEMENT`` unless the site allows doc code and ``is_grounded_code``
 # finds the fence verbatim in this turn's knowledge.
 #
@@ -79,8 +88,9 @@ FRAME = (
     "5. You cannot call tools or take actions yourself. When the visitor wants to "
     "buy, book or send something, point them to the widget's own buttons and forms "
     "or to contacting the business.\n"
-    "6. Keep answers short: a few sentences of plain text, in the visitor's language "
-    "unless <owner-settings> says otherwise."
+    "6. Keep answers short: a few sentences of plain text, plus a product card when "
+    "you show products, in the visitor's language unless <owner-settings> says "
+    "otherwise."
 )
 
 # The frame for a site whose owner turned on "Answer with code examples from your
@@ -130,6 +140,13 @@ _BACKEND = "pawbar_concierge_v2"
 # The provider's per-request timeout (ModelSettings ``timeout``). A stalled
 # provider becomes the degrade reply instead of a widget spinning forever.
 _PROVIDER_TIMEOUT_S = 30.0
+# The per-turn catalog (``catalog_for_turn``): a catalog this small goes whole;
+# a bigger one sends the search's top hits, plus the first few items in owner
+# order when the search found fewer than ``CATALOG_WEAK_HITS``.
+CATALOG_ALL_UP_TO = 50
+CATALOG_SEARCH_K = 20
+CATALOG_FALLBACK = 10
+CATALOG_WEAK_HITS = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -320,7 +337,8 @@ class PageContext:
     ``_with_page_article`` fills ``summary`` and ``chunk`` (the article as a
     knowledge item). Not indexed: ``title`` is the browser's, one line, at most
     ``_PAGE_TITLE_CHARS``, and unverified. ``product`` — the widget's catalog item
-    whose url is this page, if any.
+    whose url is this page, if any (``with_page_product`` fills it). ``host`` and
+    ``key`` — the url's host and ``page_key``, for that lookup.
     """
 
     url: str
@@ -330,6 +348,8 @@ class PageContext:
     summary: str = ""
     chunk: KnowledgeItem | None = None
     product: Any = None
+    host: str = ""
+    key: str = ""
 
 
 def resolve_page(widget: Any, page: Any, *, site: Any) -> PageContext | None:
@@ -370,37 +390,79 @@ def _resolve_page(widget: Any, page: Any, site: Any) -> PageContext | None:
     path = unquote(parts.path or "/")
     url = f"{parts.scheme}://{netloc}{quote(path, safe=_PATH_SAFE)}"
     key = page_key(path)
-    product = _catalog_item_for(widget, host, key)
+    where = {"host": host.lower(), "key": key}
 
     entry = (getattr(site, "kb_page_index", None) or {}).get(key)
     if isinstance(entry, dict) and entry.get("id"):
         title = one_line(str(entry.get("title") or ""))[:_PAGE_TITLE_CHARS]
-        return PageContext(
-            url=url, title=title, indexed=True, article_id=str(entry["id"]), product=product
-        )
+        return PageContext(url=url, title=title, indexed=True, article_id=str(entry["id"]), **where)
     title = one_line(raw_title if isinstance(raw_title, str) else "")[:_PAGE_TITLE_CHARS]
-    return PageContext(url=url, title=title, product=product)
+    return PageContext(url=url, title=title, **where)
 
 
-def _catalog_item_for(widget: Any, host: str, key: str) -> Any:
-    """The widget's catalog item whose ``url`` is the page at ``key`` on ``host``
-    (a relative url counts as this host), or None."""
-    from urllib.parse import unquote, urlsplit
+async def with_page_product(page: PageContext | None, widget: Any, store: Any) -> Any:
+    """``page`` with ``product`` set to the catalog item whose ``url`` is that
+    page (a site path counts as any host). Fail-soft: no store, no widget id or a
+    failed read leaves the page without a product."""
+    widget_id = str(getattr(widget, "id", "") or "")
+    if page is None or store is None or not widget_id:
+        return page
+    from dataclasses import replace
 
-    from pocketpaw_ee.sites.kb_ingest import page_key
+    try:
+        product = await store.catalog_item_for_page(widget_id, page.key, host=page.host)
+    except Exception:  # noqa: BLE001 — the product is a hint; the turn goes on without it
+        logger.warning("concierge: could not look up the page's catalog item", exc_info=True)
+        return page
+    return replace(page, product=product) if product is not None else page
 
-    for item in getattr(getattr(widget, "spec", None), "catalog", None) or []:
-        raw = str(getattr(item, "url", "") or "").strip()
-        if not raw:
-            continue
-        parts = urlsplit(raw)
-        if parts.scheme not in ("", "http", "https"):
-            continue
-        if parts.hostname and parts.hostname != host:
-            continue
-        if page_key(unquote(parts.path)) == key:
-            return item
-    return None
+
+async def catalog_for_turn(
+    store: Any, widget: Any, query: str, page: PageContext | None = None
+) -> list[Any]:
+    """The catalog items this turn's prompt lists (see the module header).
+
+    Fail-soft: no store or a failed read is an empty list, never a failed turn."""
+    widget_id = str(getattr(widget, "id", "") or "")
+    if store is None or not widget_id:
+        return []
+    try:
+        total = await store.catalog_count(widget_id)
+        if total <= 0:
+            return []
+        if total <= CATALOG_ALL_UP_TO:
+            items, _ = await store.list_catalog(widget_id, limit=CATALOG_ALL_UP_TO)
+            return list(items)
+        picked: list[Any] = []
+        product = page.product if page is not None else None
+        if product is not None:
+            picked.append(product)
+        hits = await store.search_catalog(widget_id, query, k=CATALOG_SEARCH_K)
+        picked.extend(hits)
+        if len(hits) < CATALOG_WEAK_HITS:
+            first, _ = await store.list_catalog(widget_id, limit=CATALOG_FALLBACK)
+            picked.extend(first)
+    except Exception:  # noqa: BLE001 — a turn without products beats no turn
+        logger.warning("concierge: could not read the catalog for %s", widget_id, exc_info=True)
+        return []
+    unique: dict[str, Any] = {}
+    for item in picked:
+        unique.setdefault(str(getattr(item, "id", "")), item)
+    return list(unique.values())
+
+
+def catalog_rows(items: Sequence[Any]) -> list[dict[str, Any]]:
+    """The prompt's view of catalog items (``_catalog_block``'s input)."""
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "price_cents": c.price_cents,
+            "currency": c.currency,
+            "in_stock": c.in_stock,
+        }
+        for c in items
+    ]
 
 
 async def _with_page_article(page: PageContext | None, site: Any) -> PageContext | None:
@@ -553,23 +615,21 @@ def _knowledge_block(items: Sequence[KnowledgeItem]) -> str:
     return "\n".join(lines)
 
 
-def _catalog_and_actions_block(widget: Any) -> str:
-    """The widget's catalog and declared actions, as data.
+def _catalog_and_actions_block(widget: Any, catalog_items: Sequence[Any] = ()) -> str:
+    """This turn's catalog items (``catalog_for_turn``) and the widget's declared
+    actions, as data.
 
-    Reuses the legacy preamble's ``_catalog_block`` (ids, names, formatted prices).
+    Reuses the legacy preamble's ``_catalog_block`` (ids, names, formatted prices,
+    sold-out items last and marked).
     It does NOT reuse ``_actions_paragraph``'s declared-actions text: that tells the
     model to call ``pawbar_<verb>`` tools, and v2 has none. The actions are listed
     as plain data instead; the widget's own buttons and forms trigger them. Cards
     are taught by ``_cards_paragraph`` (the vendored paw-bar manifest).
     """
     from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
-    from pocketpaw_ee.paw_bar.router import _MAX_PREAMBLE_CATALOG
 
     spec = getattr(widget, "spec", None)
-    catalog = [
-        {"id": c.id, "name": c.name, "price_cents": c.price_cents, "currency": c.currency}
-        for c in (getattr(spec, "catalog", None) or [])[:_MAX_PREAMBLE_CATALOG]
-    ]
+    catalog = catalog_rows(catalog_items)
     declared = [
         {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
         for a in (getattr(spec, "actions", None) or [])
@@ -593,14 +653,17 @@ def _catalog_and_actions_block(widget: Any) -> str:
                 else "sent to the business for a person to approve"
             )
             parts.append(f"   - {a['verb']} ({label}): {behavior}.")
-    parts.append(_cards_paragraph(declared))
+    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog)))
     parts.append("</catalog>")
     return _data_block(parts)
 
 
-def _cards_paragraph(declared: Sequence[dict[str, Any]]) -> str:
+def _cards_paragraph(declared: Sequence[dict[str, Any]], *, has_catalog: bool = False) -> str:
     """How to write a ```pawbar-card: the compact manifest (one line per widget),
-    the host events a button may emit, and each gated verb's form fields.
+    the host events a button may emit, and each gated verb's form fields. With a
+    catalog it also makes the product-card mandatory for any product the reply
+    names: the widget renders GFM tables, so without this the model lists
+    products as a table and the visitor gets no Add to cart buttons.
 
     This replaces the legacy ``_form_block``, which teaches the old
     ``{"kind": "form"}`` card and tells the model to call an action tool."""
@@ -621,6 +684,15 @@ def _cards_paragraph(declared: Sequence[dict[str, Any]]) -> str:
         'state, or emit add_to_cart (value {"product_id": "<id>"}) or checkout, '
         "nothing else.",
     ]
+    if has_catalog:
+        lines.append(
+            "   Whenever your reply names, compares or recommends products from the "
+            "catalog, show them in ONE product-card with their catalog ids (most "
+            "relevant first) after a sentence or two of text; "
+            "never put products, prices or comparisons in a markdown table or list. "
+            "When the <page> block names this page's product and the visitor asks "
+            'about "this", answer about that product; a card for it is fine.'
+        )
     gated = [
         a
         for a in declared
@@ -700,12 +772,14 @@ def build_prompt(
     *,
     site: Any = None,
     page: PageContext | None = None,
+    catalog: Sequence[Any] = (),
 ) -> str:
     """The user half of the request: the owner's guided fields (when any are set),
     then tagged data blocks in the PRD's fixed order (page, knowledge, catalog and
     actions, history), then the visitor's message. The frame is NOT here; it rides
     as the run's instructions, ahead of all of this. ``items`` is the turn's
-    ``select_knowledge`` list; no ``page`` means no <page> block."""
+    ``select_knowledge`` list; no ``page`` means no <page> block; ``catalog`` is
+    the turn's ``catalog_for_turn`` items."""
     from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
 
     owner = render_owner_block(site) if site is not None else ""
@@ -713,9 +787,9 @@ def build_prompt(
     if page is not None:
         blocks.append(_page_block(page))
     blocks.append(_knowledge_block(items))
-    catalog = _catalog_and_actions_block(widget)
-    if catalog:
-        blocks.append(catalog)
+    catalog_block = _catalog_and_actions_block(widget, catalog)
+    if catalog_block:
+        blocks.append(catalog_block)
     past = _history_block(history)
     if past:
         blocks.append(past)
@@ -855,7 +929,10 @@ class FenceFilter:
 
     A ```pawbar-card fence goes through ``card_spec.render_card`` (a Ripple spec is
     validated and hydrated from the catalog; a legacy card passes, repriced when it
-    is a product card) and is dropped when that returns None. Any other fence
+    is a product card) and is dropped when that returns None. The catalog is
+    either a fixed list (``catalog``, for ``feed``) or an async ``lookup(ids)``
+    that ``afeed`` awaits for exactly the ids each card names; the runner uses
+    the lookup, so a card may name any item in the catalog store. Any other fence
     becomes ``CODE_REPLACEMENT``, unless the site allows documentation code
     (``allow_doc_code``) and the block is copied from this turn's ``knowledge``
     (``is_grounded_code``) within the reply's ``doc_code_chars`` budget; then it
@@ -876,8 +953,10 @@ class FenceFilter:
         knowledge: Sequence[KnowledgeItem] = (),
         allow_doc_code: bool = False,
         doc_code_chars: int = _DOC_CODE_CHARS,
+        lookup: Any = None,
     ) -> None:
         self._catalog = list(catalog or ())
+        self._lookup = lookup
         self._verbs = list(verbs or ())
         self._knowledge = list(knowledge or ())
         self._allow_doc_code = allow_doc_code is True
@@ -887,7 +966,20 @@ class FenceFilter:
         self._tag = ""
 
     def feed(self, chunk: str) -> list[str]:
+        """The text to emit for ``chunk``, cards hydrated from ``catalog``."""
+        out = [p if isinstance(p, str) else self._finish(*p) for p in self._scan(chunk)]
+        return [piece for piece in out if piece]
+
+    async def afeed(self, chunk: str) -> list[str]:
+        """``feed``, with each card hydrated through ``lookup`` when one is set."""
         out: list[str] = []
+        for piece in self._scan(chunk):
+            out.append(piece if isinstance(piece, str) else await self._afinish(*piece))
+        return [piece for piece in out if piece]
+
+    def _scan(self, chunk: str) -> list[Any]:
+        """Text pieces and closed fences (``(tag, body)``), in order."""
+        out: list[Any] = []
         data = chunk or ""
         while True:
             # Everything before the old buffer's last two chars was already scanned.
@@ -919,17 +1011,30 @@ class FenceFilter:
                 if j == -1:
                     self._buf = text
                     break
-                out.append(self._finish(text[:j]))
+                out.append((self._tag, text[:j]))
                 self._mode, data = "text", text[j + len(_TICKS) :]
-        return [piece for piece in out if piece]
+        return out
 
     def close(self) -> list[str]:
         held = self._buf if self._mode == "text" else ""
         self._mode, self._buf, self._tag = "text", "", ""
         return [held] if held else []
 
-    def _finish(self, body: str) -> str:
-        if self._tag == _CARD_LANG:
+    async def _afinish(self, tag: str, body: str) -> str:
+        if tag != _CARD_LANG or self._lookup is None:
+            return self._finish(tag, body)
+        from pocketpaw_ee.paw_bar.card_spec import card_ids, render_card
+
+        ids = card_ids(body)
+        try:
+            items = list(await self._lookup(ids)) if ids else []
+        except Exception:  # noqa: BLE001 — an unreadable catalog drops the card
+            logger.warning("concierge: catalog lookup for a card failed", exc_info=True)
+            return ""
+        return render_card(body, items, verbs=self._verbs) or ""
+
+    def _finish(self, tag: str, body: str) -> str:
+        if tag == _CARD_LANG:
             from pocketpaw_ee.paw_bar.card_spec import render_card
 
             return render_card(body, self._catalog, verbs=self._verbs) or ""
@@ -939,7 +1044,7 @@ class FenceFilter:
             and is_grounded_code(body, self._knowledge)
         ):
             self._doc_code_left -= len(body)
-            tag = self._tag if _LANG_RE.fullmatch(self._tag) else ""
+            tag = tag if _LANG_RE.fullmatch(tag) else ""
             return f"{_TICKS}{tag}\n{body}{_TICKS}"
         return CODE_REPLACEMENT
 
@@ -953,19 +1058,28 @@ def _allows_doc_code(site: Any) -> bool:
 def _fence_filter_for(
     widget: Any,
     *,
+    store: Any = None,
     knowledge: Sequence[KnowledgeItem] = (),
     allow_doc_code: bool = False,
     doc_code_chars: int = _DOC_CODE_CHARS,
 ) -> FenceFilter:
-    """A filter hydrating from this widget's catalog and declared verbs, and
-    grounding code in ``knowledge`` when the site allows documentation code."""
+    """A filter hydrating cards from this widget's catalog in ``store`` and its
+    declared verbs, and grounding code in ``knowledge`` when the site allows
+    documentation code. No store (or no widget id) hydrates nothing."""
     spec = getattr(widget, "spec", None)
+    widget_id = str(getattr(widget, "id", "") or "")
+    lookup = None
+    if store is not None and widget_id:
+
+        async def lookup(ids: list[str]) -> list[Any]:
+            return await store.get_catalog_items(widget_id, ids)
+
     return FenceFilter(
-        catalog=getattr(spec, "catalog", None) or (),
         verbs=[a.verb for a in (getattr(spec, "actions", None) or [])],
         knowledge=knowledge,
         allow_doc_code=allow_doc_code,
         doc_code_chars=doc_code_chars,
+        lookup=lookup,
     )
 
 
@@ -1207,14 +1321,24 @@ async def run_concierge_v2(
     finished = False
     try:
         await _bookkeep(run_service.mark_running, run_id)
+        if store is None:
+            from pocketpaw_ee.paw_bar.router import _store
+
+            store = _store()
         page_ctx = resolve_page(widget, page, site=site)
-        # The search and the page's own article are two kb reads; run them together.
-        retrieved, page_ctx = await asyncio.gather(
-            retrieve(site, _retrieval_query(message, history, page_ctx), agent_id=agent_id or None),
+        page_ctx = await with_page_product(page_ctx, widget, store)
+        query = _retrieval_query(message, history, page_ctx)
+        # The search and the page's own article are two kb reads, and the catalog
+        # a SQLite one; run them together.
+        retrieved, page_ctx, catalog = await asyncio.gather(
+            retrieve(site, query, agent_id=agent_id or None),
             _with_page_article(page_ctx, site),
+            catalog_for_turn(store, widget, query, page_ctx),
         )
         items = select_knowledge(retrieved, page_ctx)
-        prompt = build_prompt(items, widget, history, message, site=site, page=page_ctx)
+        prompt = build_prompt(
+            items, widget, history, message, site=site, page=page_ctx, catalog=catalog
+        )
         model = _build_model(settings)
         # NO tools, NO toolsets, NO capabilities: the zero-tools invariant (Global
         # Constraint 3), asserted in tests and guarded by a mutation plan. The frame
@@ -1227,6 +1351,7 @@ async def run_concierge_v2(
         # hydrated from the catalog.
         fences = _fence_filter_for(
             widget,
+            store=store,
             knowledge=items,
             allow_doc_code=allow_doc_code,
             doc_code_chars=int(
@@ -1239,7 +1364,7 @@ async def run_concierge_v2(
             prompt, model_settings=_model_settings(settings, workspace_id, tags=tags)
         ) as result:
             async for delta in result.stream_text(delta=True, debounce_by=None):
-                for piece in fences.feed(delta or ""):
+                for piece in await fences.afeed(delta or ""):
                     full_text += piece
                     yield _sse("chunk", {"content": piece, "type": "text"})
             usage = {**_usage(settings, result), **spend_tags}
@@ -1310,7 +1435,10 @@ __all__ = [
     "FenceFilter",
     "KnowledgeItem",
     "PageContext",
+    "CATALOG_ALL_UP_TO",
     "build_prompt",
+    "catalog_for_turn",
+    "catalog_rows",
     "degrade_reply",
     "is_grounded_code",
     "resolve_page",
@@ -1318,4 +1446,5 @@ __all__ = [
     "run_concierge_v2",
     "select_knowledge",
     "site_spend_today_usd",
+    "with_page_product",
 ]

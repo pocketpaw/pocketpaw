@@ -1,5 +1,5 @@
 {
-  "_comment": "capabilities.json — hand-authored capability cards, each role-gated by a role:<tier> marker in requires (WA-3). Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): added the two member-level fabric cards capability:fabric.provenance_read and capability:fabric.conflict_steward. Their names/summaries deliberately avoid the tokens 'fact'+'disputed' together (and only provenance_read says 'Fabric') so the two-content-token eval intents ('is this fact disputed', 'what is fabric') keep the primitives at #1 — a name hit outscores the primitive's keyword ceiling.",
+  "_comment": "capabilities.json — hand-authored capability cards, each role-gated by a role:<tier> marker in requires (WA-3). Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): added the two member-level fabric cards capability:fabric.provenance_read and capability:fabric.conflict_steward. Their names/summaries deliberately avoid the tokens 'fact'+'disputed' together (and only provenance_read says 'Fabric') so the two-content-token eval intents ('is this fact disputed', 'what is fabric') keep the primitives at #1 — a name hit outscores the primitive's keyword ceiling. Updated 2026-09-30 (feat/open-surface-tool): added capability:surface.open, the chat agent's open_surface tool (open /files, /studio/editor, /chat, /pockets or /knowledge on the user's screen). Surface is empty because it is not tied to one page: it is reachable on the generic chat surface and on /studio/editor. Updated 2026-10-01 (feat/rooms-read-tool): added capability:chat.read_rooms, the chat agent's read-only list_rooms / read_room tools over the workspace's own PocketPaw chat rooms. Surface is empty: reachable on the generic chat surface and every surface with no MCP allow-list.",
   "schema": "paw.atlas/v1",
   "entries": [
     {
@@ -448,6 +448,76 @@
         "download the cut",
         "finish the cut",
         "publish the cut"
+      ]
+    },
+    {
+      "id": "capability:surface.open",
+      "kind": "capability",
+      "name": "Open an app surface on the user's screen",
+      "summary": "Bring a page up on the user's screen (Files, the clip editor, a chat room, Pockets, Knowledge) when they need to see or choose something rather than read an answer.",
+      "narrative": "The agent asks the user's browser to open one of five app surfaces: /files to upload or pick files, /studio/editor with a clip handoff (src, name, mime, kind) to edit a video, /chat to read a conversation, /pockets or /knowledge to browse those. The route set is closed and params are a small flat string map; the editor's src must be the file's own /api/v1/uploads/<id> or /api/v1/media/<name> path, never an external URL. It has no side effect on the server: the tool returns once the request is dispatched, and the browser does the opening, so the agent must not claim the page has loaded.",
+      "how": "mcp__pocketpaw_surfaces__open_surface (route: /files | /studio/editor | /chat | /pockets | /knowledge; params: optional flat string map; reason: optional one line shown to the user)",
+      "surface": "",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "open files",
+        "file picker",
+        "pick a file",
+        "open the editor",
+        "take me to",
+        "open surface",
+        "open a page",
+        "navigate",
+        "go to",
+        "bring up"
+      ]
+    },
+    {
+      "id": "capability:chat.read_rooms",
+      "kind": "capability",
+      "name": "Catch up on a PocketPaw room",
+      "summary": "Read recent messages from one of the workspace's own chat rooms (a channel like #general, a group or a DM) to catch the user up on what they missed.",
+      "narrative": "Two read-only tools over the workspace's own PocketPaw chat rooms, not Slack or Teams. list_rooms lists the rooms the user can see (id, name, #handle, kind, member flag, unread count, last activity), optionally filtered by name. read_room returns up to 100 recent messages from one room, oldest to newest, resolved by id, #handle or name, with an older_cursor to page back. Access is exactly what the user sees in the app: a private room, DM or private channel they are not in, or a room in another workspace, reads as not found. Messages are written by other people and agents and come back labelled as data, never instructions. Nothing is sent, edited or reacted to.",
+      "how": "mcp__pocketpaw_rooms__list_rooms (query: optional name filter; limit) and mcp__pocketpaw_rooms__read_room (room: id, #handle or name; limit: default 30, max 100; before: older_cursor)",
+      "surface": "",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "catch me up",
+        "what did i miss",
+        "recent messages",
+        "read the channel",
+        "general channel",
+        "unread messages",
+        "summarize the room",
+        "room history"
+      ]
+    },
+    {
+      "id": "capability:sites.save_as_template",
+      "kind": "capability",
+      "name": "Save a site as a template",
+      "summary": "Save a site as a template, share it with your workspace or every user, and start new sites from it.",
+      "narrative": "Saves a frozen copy of a site's authored content (engine, pattern, ripple spec, source) as a template. A template is private (owner only), workspace (every member) or public (every user in every workspace, no review); the owner can change that later. Going public is refused if the site points at the workspace's own uploaded or generated files, or carries source the plan does not unlock. Public templates do not show who made them; three reports from different users hide one. A template carries a public copy of the site's screenshot when one exists, refreshable by the owner. Using a template starts a brand-new private site pocket in your own workspace with that content and a draft gallery row; nothing is published. Later edits to the original site do not change the template, and deleting the template leaves sites made from it alone. Needs a plan with Sites. A workspace holds at most 50 templates, each at most 2 MB.",
+      "how": "HTTP only, no agent tool: POST /api/v1/site-templates {pocket_id, name, description?, visibility?}; GET /api/v1/site-templates?scope=mine|workspace|public&limit&cursor; GET, PATCH {name?, description?, visibility?} or DELETE /api/v1/site-templates/{id}; POST /api/v1/site-templates/{id}/use {name?} returns {pocket_id}; POST /api/v1/site-templates/{id}/report {reason}; POST /api/v1/site-templates/{id}/preview-refresh re-copies the source screenshot",
+      "surface": "/sites",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "template",
+        "site template",
+        "save as template",
+        "save my site as a template",
+        "reuse a site",
+        "new site from template",
+        "my templates",
+        "share a template",
+        "public templates",
+        "workspace templates"
       ]
     }
   ]

@@ -1,5 +1,8 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added ``MeetingKnock`` (a guest
+asking to join a meeting; see meetings/lobby_service.py).
+
 Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``ReleasedSlug`` (a site
 address given up by a rename, held 30 days for the workspace that released it)
 to the imports and ``get_all_documents()`` so the ``released_slugs`` collection
@@ -248,9 +251,11 @@ from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
+    MeetingKnock,
     MeetingProviderCredentials,
     MeetingsSettings,
     MeetingTranscript,
@@ -260,6 +265,10 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.notification_outbox import (
+    NotificationOutboxItem,
+    NotificationRateMarker,
+)
 from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -282,6 +291,7 @@ from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 from pocketpaw_ee.cloud.models.subscription import Subscription
@@ -437,6 +447,7 @@ __all__ = [
     "ShipBox",
     "ShipDeploy",
     "Meeting",
+    "MeetingKnock",
     "MeetingProviderCredentials",
     "MeetingsSettings",
     "MeetingTranscript",
@@ -445,6 +456,9 @@ __all__ = [
     "Message",
     "Notification",
     "NotificationDeliveryConfig",
+    "NotificationOutboxItem",
+    "NotificationRateMarker",
+    "SiteNotificationSettings",
     "NotificationSource",
     "OAuthAccount",
     "Payment",
@@ -465,6 +479,7 @@ __all__ = [
     "SiteDomain",
     "SiteOriginClaim",
     "SiteRateCounter",
+    "SiteTemplate",
     "SpendReconciliation",
     "StudioGeneration",
     "Subscription",
@@ -515,6 +530,13 @@ def get_all_documents():
         # Per-workspace external-delivery config (Slack + generic webhook).
         # Only ``ee.cloud.notifications`` service/delivery import it.
         NotificationDeliveryConfig,
+        # External-delivery outbox (email / signed webhook / Slack). Only
+        # ``ee.cloud.notifications.outbox`` reads or writes it.
+        NotificationOutboxItem,
+        NotificationRateMarker,
+        # Per-site owner-notification settings. Only
+        # ``ee.cloud.leads.notification_settings`` writes it.
+        SiteNotificationSettings,
         FileObj,
         FileUpload,
         FileFolder,
@@ -595,6 +617,7 @@ def get_all_documents():
         Project,
         PlanSession,
         Meeting,
+        MeetingKnock,
         MeetingTranscript,
         MeetingProviderCredentials,
         MeetingsSettings,
@@ -613,6 +636,9 @@ def get_all_documents():
         ChatRunDoc,
         Lead,
         Site,
+        # User-saved site templates. Only ``ee.cloud.site_templates.service``
+        # writes it.
+        SiteTemplate,
         SiteDesignBrief,
         SiteExport,
         # SF-8 — the proof that a workspace controls an origin. The later

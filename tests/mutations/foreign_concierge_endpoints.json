@@ -130,5 +130,14 @@
     "tests": [
       "tests/ee/sites/test_foreign_concierge_endpoints.py::test_the_route_passes_the_CALLERS_role_to_the_rebind_rule"
     ]
+  },
+  {
+    "label": "the read reports 'available' as the plan, so a paid concierge that is switched off looks unsold",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "        concierge_entitled=entitled,\n        concierge_enabled=enabled,",
+    "replace": "        concierge_entitled=available,\n        concierge_enabled=enabled,",
+    "tests": [
+      "tests/ee/sites/test_foreign_concierge_endpoints.py::test_a_paid_concierge_switched_off_reads_as_entitled_not_as_unsold"
+    ]
   }
 ]

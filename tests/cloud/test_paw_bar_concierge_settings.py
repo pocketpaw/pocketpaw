@@ -850,16 +850,49 @@ async def test_admin_spec_save_needs_no_widget_token_and_archives(owner_client):
     body = res.json()
     assert set(body) == {"id", "spec"}
     assert body["id"] == widget.id
-    assert body["spec"]["catalog"][0]["id"] == "cold-brew"
     assert body["spec"]["checkout_url"] == "https://brewco.com/checkout"
 
+    # A catalog in the body (an older editor) lands in the catalog store, not the spec.
     stored = await store.get_widget(widget.id)
-    assert stored.spec.catalog[0].name == "Cold brew"
+    assert body["spec"]["catalog"] == [] and stored.spec.catalog == []
+    [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+    assert item.name == "Cold brew"
     revision = await store.latest_spec_revision(widget.id)
     assert revision is not None
     number, archived = revision
     assert number == 1
     assert archived == _spec()  # the PRIOR spec, not the new one
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("currency", "headers", "status"),
+    [
+        ("KWD", {}, 409),  # an old client: refused, nothing converted
+        ("KWD", {"X-Paw-Money-Units": "iso4217"}, 200),
+        ("USD", {}, 200),  # two decimals: the same in both conventions
+    ],
+)
+async def test_admin_spec_save_needs_the_money_units_header_for_odd_exponents(
+    owner_client, currency, headers, status
+):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    body = _new_spec_body(widget.id)
+    body["spec"]["catalog"][0]["currency"] = currency
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body, headers=headers)
+    assert res.status_code == status, res.text
+    stored = (await store.get_widget(widget.id)).spec
+    if status == 409:
+        assert res.json()["detail"] == "currency_units_client_outdated"
+        assert stored == _spec()  # untouched
+    else:
+        # Stored as sent, in the catalog store (the spec no longer holds it).
+        assert stored.catalog == []
+        [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+        assert item.price_cents == 450
 
 
 @pytest.mark.asyncio
@@ -883,9 +916,11 @@ async def test_admin_spec_save_pins_widget_and_pocket_ids(owner_client):
 
     stored = (await store.get_widget(widget.id)).spec
     expected = PawBarSpec.model_validate(
-        {**body["spec"], "widget_id": widget.id, "pocket_id": "pocket-1"}
+        {**body["spec"], "widget_id": widget.id, "pocket_id": "pocket-1", "catalog": []}
     )
-    assert stored == expected  # nothing but the two ids differs from the body
+    # Nothing but the two ids differs from the body; its catalog went to the store.
+    assert stored == expected
+    assert await store.catalog_count(widget.id) == 1
     # The widget the body named is untouched.
     assert await store.latest_spec_revision(other.id) is None
     assert (await store.get_widget(other.id)).spec == _spec()
@@ -1040,10 +1075,34 @@ async def test_settings_snippet_is_empty_when_the_plan_lacks_the_concierge(owner
     c, store = owner_client
     site = await _site()
     await store.create_widget(_widget())
-    with patch("pocketpaw_ee.cloud.auth.site_keys.concierge_available", return_value=False):
+    with patch("pocketpaw_ee.cloud.auth.site_keys.concierge_plan_entitled", return_value=False):
         res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
     assert res.status_code == 200, res.text
     assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_asks_the_plan_and_the_switch_separately(owner_client):
+    """The snippet's ``concierge_entitled`` is the PLAN half, not "available".
+
+    A switched-off concierge on a plan that sells one is entitled; passing
+    ``concierge_available`` there would report it as unsold.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    await store.create_widget(_widget())
+    spy = AsyncMock(return_value="")
+    with (
+        patch("pocketpaw_ee.cloud.auth.site_keys.concierge_plan_entitled", return_value=True),
+        patch("pocketpaw_ee.paw_bar.embed.concierge_snippet", new=spy),
+    ):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert spy.await_count == 1
+    assert spy.await_args.kwargs["concierge_entitled"] is True
+    assert spy.await_args.kwargs["concierge_enabled"] is False
 
 
 @pytest.mark.asyncio

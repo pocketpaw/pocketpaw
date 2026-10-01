@@ -1,41 +1,31 @@
-# ee/paw_bar/actions.py — the shared Paw Bar action executor (C1).
-# Updated: 2026-08-01 (AL-2, paw-bar emitters) — a SUCCESSFUL auto verb now
-#   records ``paw.visitor.action`` in the agent ledger, carrying ``value_cents``
-#   priced from the widget spec's own catalog (add_to_cart: the product's
-#   declared price × the qty added; checkout: the cart total the link was
-#   rendered for). This is the only ledger kind that routinely carries money,
-#   and it is what turns "the concierge answered some questions" into "the
-#   concierge put $X in carts". The emit sits in ``execute_action`` after the
-#   verb dispatch rather than inside ``_do_add_to_cart`` / ``_do_checkout``: one
-#   call site means the verbs cannot drift about the row's shape, and the auto
-#   branch was restructured (assign-then-return) purely to give it that seam.
-#   Gated verbs are NOT emitted here — they execute nothing, and their proposal
-#   and its approval are already AL-1's rows on the Instinct choke point.
-#   Failure paths emit nothing: an unknown product or an empty cart changed no
-#   state and belongs on no board. The emitter never raises (paw_bar/ledger.py).
-# Created: 2026-07-16 (Paw Bar action registry, C1) — the SINGLE code path both
-#   the public POST /paw-bar/action endpoint and the concierge agent's per-verb
-#   tools run through, so a visitor and the agent get identical validation +
-#   effects. SS-2 alignment: agent-facing action tools NEVER execute tenant-scoped
-#   effects. Only VISITOR-scoped state (the visitor's own cart / a handoff link)
-#   auto-fires; every "gated" verb emits an Instinct proposal (via
-#   decision_loop.propose_customer_action) and executes NOTHING. Checkout is a
-#   handoff LINK — the agent never runs payment.
+# ee/paw_bar/actions.py — the shared Paw Bar action executor.
+#
+# The SINGLE code path both the public POST /paw-bar/action endpoint and the
+# concierge agent's per-verb tools run through, so a visitor and the agent get
+# identical validation and effects. Agent-facing action tools never execute
+# tenant-scoped effects: only VISITOR-scoped state (the visitor's own cart, a
+# checkout link) auto-fires; every "gated" verb raises an Instinct proposal
+# (decision_loop.propose_customer_action) and executes nothing. Checkout is a
+# handoff LINK; the agent never runs payment.
 #
 #   execute_action(widget, workspace_id, customer_ref, verb, args):
-#     * validates the verb is declared on the spec, that every arg key is declared,
-#       coerces each arg to its declared flat type (str/int/float/bool), caps
-#       string args at 256 chars and clamps qty to 1..99;
-#     * auto + add_to_cart: the product_id must exist in the catalog; upserts the
-#       visitor's cart and returns the updated cart summary;
+#     * validates the verb is declared on the spec and every arg key is declared,
+#       coerces each arg to its flat type (str/int/float/bool), caps string args
+#       at 256 chars and clamps qty to 1..99;
+#     * auto + add_to_cart: the product_id must exist in the widget's catalog (the
+#       catalog store, ``store.get_catalog_items``); upserts the
+#       visitor's cart and returns the updated cart summary. A cart holds one
+#       currency: a product priced in another one is refused with 409
+#       ``cart_currency_mismatch`` and the cart is left as it was;
 #     * auto + checkout: renders checkout_url ({cart_ref} → an opaque, non-
-#       reversible cart handle); an empty cart returns a 409-style error;
-#     * gated verb: raises an Instinct proposal (the only effect) and returns a
-#       pending outcome the visitor polls on the existing decision endpoint.
-#   Returns a plain ``ActionOutcome`` (no FastAPI/MCP coupling); the endpoint maps
-#   it to HTTP, the tool maps it to an MCP result. Every executed/proposed action
-#   is recorded as a paw_bar event marker (the layer's existing audit + rate-limit
-#   mechanism) plus a structured log line.
+#       reversible cart handle); an empty cart is a 409;
+#     * gated verb: raises the proposal (behind its own per-visitor rate cap) and
+#       returns a pending outcome the visitor polls on the decision endpoint.
+#   Returns a plain ``ActionOutcome`` the endpoint maps to HTTP and the tool to
+#   an MCP result. Every action is recorded as a paw_bar event marker (audit +
+#   rate limit). A SUCCESSFUL auto verb also records ``paw.visitor.action`` in
+#   the agent ledger (ledger.emit_visitor_action, never raises) from one call
+#   site after dispatch; amounts are ISO 4217 minor units. Failures emit nothing.
 
 from __future__ import annotations
 
@@ -58,8 +48,9 @@ class ActionOutcome:
     ``ok`` is the success flag; ``result`` is the verb-specific payload; ``cart``
     is the visitor's cart summary (a JSON-safe dict) when the verb touched it;
     ``error`` is a stable machine code on failure; ``http_status`` is the status
-    the endpoint should return (200 ok, 409 empty-cart/unavailable, 422 bad
-    verb/args)."""
+    the endpoint should return (200 ok, 409 empty-cart/unavailable/
+    cart_currency_mismatch, 422 bad verb/args). Amounts in ``cart`` are ISO 4217
+    minor units of its ``currency``."""
 
     ok: bool
     result: dict[str, Any] = field(default_factory=dict)
@@ -272,6 +263,7 @@ async def execute_action(
                 spec=spec,
                 result=outcome.result,
                 cart=outcome.cart,
+                store=store,
             )
         return outcome
 
@@ -283,13 +275,14 @@ async def _do_add_to_cart(
     store: Any, widget: Any, spec: Any, customer_ref: str, args: dict[str, Any]
 ) -> ActionOutcome:
     from pocketpaw.paw_bar.models import PawBarCartItem
+    from pocketpaw.paw_bar.store import CartCurrencyMismatch
 
     widget_id = str(getattr(widget, "id", "") or "")
     product_id = str(args.get("product_id", "") or "")
     if not product_id:
         return _fail("missing_product_id", 422)
-    catalog = {item.id: item for item in (getattr(spec, "catalog", []) or [])}
-    product = catalog.get(product_id)
+    found = await store.get_catalog_items(widget_id, [product_id])
+    product = found[0] if found else None
     if product is None:
         return _fail("unknown_product", 422)
 
@@ -308,7 +301,32 @@ async def _do_add_to_cart(
         currency=product.currency,
         qty=qty,
     )
-    cart = await store.upsert_cart_item(widget_id, customer_ref, item)
+    try:
+        cart = await store.upsert_cart_item(widget_id, customer_ref, item)
+    except CartCurrencyMismatch as exc:
+        # One currency per cart, so the total is always a real amount. The cart
+        # is unchanged; the visitor checks out first or picks a same-currency item.
+        logger.info(
+            "paw_bar.action.refused verb=add_to_cart widget=%s product=%s cart=%s item=%s",
+            widget_id,
+            product_id,
+            exc.cart_currency,
+            exc.item_currency,
+        )
+        return ActionOutcome(
+            ok=False,
+            error=CartCurrencyMismatch.code,
+            http_status=409,
+            result={
+                "message": (
+                    f"Your cart is in {exc.cart_currency}, and this item is priced in "
+                    f"{exc.item_currency}. Check out first, or pick items in "
+                    f"{exc.cart_currency}."
+                ),
+                "cart_currency": exc.cart_currency,
+                "item_currency": exc.item_currency,
+            },
+        )
     await _record_action_marker(store, widget_id, customer_ref, "add_to_cart", "auto", True)
     logger.info(
         "paw_bar.action.executed verb=add_to_cart widget=%s product=%s qty=%s",

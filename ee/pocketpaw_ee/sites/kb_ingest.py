@@ -65,6 +65,9 @@
 #               ``url_crawler``) and hands back a source map the HTML LANE ABOVE
 #               reads — there is no fourth extractor. The pocket stays the truth
 #               for the other three precisely because they have one.
+#               A crawl that reached the origin also schedules the site's first
+#               card screenshot when it has none (it never deploys, so nothing
+#               else would take one).
 #
 # The crawl happens at bind and on the owner's explicit re-sync, NEVER on a
 # visitor's turn: a concierge run reads this scope out of the KB and fetches
@@ -87,6 +90,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
+
+from pocketpaw.paw_bar.pages import page_key
 
 logger = logging.getLogger(__name__)
 
@@ -348,26 +353,6 @@ def _path_slug(path: str) -> str:
     if cleaned in ("", "index", "src-routes-page"):
         cleaned = "home"
     return f"site-{cleaned}"[:120]
-
-
-def page_key(path: str) -> str:
-    """The crawl-index key for a page: its path with the file extension, SvelteKit
-    route scaffolding, a trailing ``index`` and the outer slashes removed, lowercased.
-
-    The sync keys a document by it and the v2 concierge keys the visitor's URL path
-    by it, so "about.html", "about/index.html" (the foreign crawler's spelling),
-    "src/routes/about/+page.svelte" and "/about/" are one page, and every spelling of
-    the homepage is "". Unlike ``_path_slug`` it keeps slashes, so "blog/post" and
-    "blog-post" stay two pages. ``_path_slug`` itself is left alone: it is the
-    article SOURCE, and changing it would re-mint every page's article.
-    """
-    key = path.strip().lower().lstrip("/")
-    key = re.sub(r"^src/routes/", "", key)
-    key = re.sub(r"\.(html?|svelte|md|svx)$", "", key)
-    key = re.sub(r"(^|/)\+(page|layout)$", "", key)
-    key = key.rstrip("/")
-    key = re.sub(r"(^|/)index$", "", key)
-    return key.strip("/")
 
 
 def _page_text(path: str, body: str, engine: str) -> str:
@@ -644,6 +629,8 @@ async def _sync_foreign_site_knowledge(
         await _record_sync(site, report, previous=previous)
         return report
 
+    _schedule_first_foreign_screenshot(site)
+
     docs = extract_site_documents(engine="html", source=harvest.source)
     if not docs:
         # The origin was reachable and carried no answerable text (a JS-rendered
@@ -689,6 +676,30 @@ async def _sync_foreign_site_knowledge(
     for warning in harvest.warnings:
         logger.info("sites.kb: %s crawl note — %s", harvest.host, warning)
     return report
+
+
+def _schedule_first_foreign_screenshot(site: Any) -> None:
+    """Give a connected site its first card picture. Never blocks, never raises.
+
+    A connected site never deploys, so the post-deploy capture never runs for it,
+    and a crawl that just reached its verified origin is the one moment that page
+    is known to be up. Only when the site has no picture yet: replacing one is the
+    owner's refresh, not a side effect of a knowledge re-sync. The capture itself is
+    the fire-and-forget ``screenshot.schedule_site_screenshot``, so the sync result
+    never waits on, or fails with, a picture.
+    """
+    if (getattr(site, "preview_image_url", "") or "").strip():
+        return
+    try:
+        from pocketpaw_ee.sites import screenshot
+
+        screenshot.schedule_site_screenshot(site)
+    except Exception:  # noqa: BLE001 — a picture is never a gate on a sync
+        logger.warning(
+            "sites.kb: could not schedule a first screenshot for foreign site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
 
 async def _record_sync(

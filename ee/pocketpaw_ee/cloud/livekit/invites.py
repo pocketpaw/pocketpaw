@@ -4,10 +4,24 @@ Guests receive a temporary LiveKit access token with ``guest-`` prefixed
 identity, bypassing the group membership check that guards regular
 participant tokens. The plaintext invite token lives only in the shared URL;
 we persist ``sha256(plaintext)`` so a DB read cannot reconstruct a usable link.
+
+2026-09-30 (fix/livekit-call-security): the guest email allow-list is enforced
+here at accept time. The call invite modal sends it inside the ``display_name``
+JSON (``{"emails": [...], "description": ...}``); create moves it to
+``MeetingInvite.allowed_emails``, legacy rows are parsed on read, validate
+returns ``requires_email`` instead of the list, and accept compares the guest's
+email (trimmed, case-insensitive) before minting a token. Accept also no
+longer creates the room: a guest can only join a call a human is already in.
+
+2026-10-01 (feat/meetings-lobby, MC-3): ``new_guest_identity`` and
+``issue_guest_token`` factored out of accept so the meeting lobby
+(meetings/lobby_service.py) mints guest tokens the same way: ``guest-<hex16>``
+identity, room-scoped grant, 1 hour for invites (the lobby passes a shorter TTL).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -30,6 +44,56 @@ def _validate_ttl_hours(ttl_hours: int) -> int:
     if ttl_hours > MAX_INVITE_TTL_HOURS:
         return MAX_INVITE_TTL_HOURS
     return ttl_hours
+
+
+def _split_emails(display_name: str) -> tuple[str, list[str]]:
+    """Pull an ``emails`` list out of a JSON ``display_name``.
+
+    Returns the display name without ``emails`` and the normalized list. A
+    plain-text name, or JSON with no ``emails`` key, comes back unchanged.
+    """
+    try:
+        meta = json.loads(display_name)
+    except (TypeError, ValueError):
+        return display_name, []
+    if not isinstance(meta, dict) or "emails" not in meta:
+        return display_name, []
+    raw = meta.pop("emails")
+    emails = [
+        e.strip().lower() for e in (raw if isinstance(raw, list) else []) if isinstance(e, str)
+    ]
+    return json.dumps(meta), [e for e in emails if e]
+
+
+def _allowed_emails(doc: _MeetingInviteDoc) -> list[str]:
+    """The invite's allow-list; legacy rows still carry it in ``display_name``."""
+    return doc.allowed_emails or _split_emails(doc.display_name)[1]
+
+
+def new_guest_identity() -> str:
+    """``guest-<16 hex>``. Member identities are user ids (ObjectId hex) and the
+    bot is ``call-bot``, so the prefix keeps guests from ever colliding."""
+    return f"guest-{secrets.token_hex(8)}"
+
+
+async def issue_guest_token(
+    room_name: str, identity: str, display_name: str, *, ttl_seconds: int = 3600
+) -> str:
+    """A LiveKit token that joins ``room_name`` only (1 hour unless told otherwise).
+
+    Callers must first make sure a human is in that room: LiveKit creates a
+    missing room on connect, so a token for an empty room would start a call.
+    """
+    from pocketpaw_ee.cloud.livekit.service import generate_participant_token
+
+    return await generate_participant_token(
+        room_name=room_name,
+        identity=identity,
+        name=display_name,
+        can_publish=True,
+        can_subscribe=True,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 async def create_meeting_invite(
@@ -60,6 +124,7 @@ async def create_meeting_invite(
             f"Room '{room_name}' does not belong to group '{group_id}'.",
         )
 
+    display_name, allowed_emails = _split_emails(display_name)
     ttl = _validate_ttl_hours(ttl_hours)
     plaintext = secrets.token_urlsafe(32)
     token_hash = _hash_token(plaintext)
@@ -71,6 +136,7 @@ async def create_meeting_invite(
         token_hash=token_hash,
         created_by=created_by,
         display_name=display_name,
+        allowed_emails=allowed_emails,
         max_uses=max_uses,
         expires_at=datetime.now(UTC) + timedelta(hours=ttl),
     )
@@ -123,9 +189,9 @@ async def validate_meeting_invite(token: str) -> dict[str, Any]:
             "This invite link has reached its maximum number of uses.",
         )
 
-    # Fetch the room info to check if the call is currently active.
-    # For scheduled meetings the room may not exist yet — that's fine,
-    # the invite is still valid and the room will be created on join.
+    # Fetch the room info to check if the call is currently active. For a
+    # scheduled meeting the room may not exist yet — the invite is still valid,
+    # but join works only once a member has started the call.
     from pocketpaw_ee.cloud.livekit.service import get_room_info
 
     room_info = await get_room_info(doc.group_id)
@@ -135,7 +201,9 @@ async def validate_meeting_invite(token: str) -> dict[str, Any]:
         "room_name": doc.room_name,
         "group_id": doc.group_id,
         "workspace_id": doc.workspace,
-        "display_name": doc.display_name,
+        # Never the allow-list itself: anyone holding the link can call this.
+        "display_name": _split_emails(doc.display_name)[0],
+        "requires_email": bool(_allowed_emails(doc)),
         "is_call_active": room_info is not None and room_info.get("active", False),
         "participant_count": room_info.get("participant_count", 0) if room_info else 0,
         "expires_at": doc.expires_at.isoformat(),
@@ -147,12 +215,14 @@ async def validate_meeting_invite(token: str) -> dict[str, Any]:
 async def accept_meeting_invite(
     token: str,
     guest_display_name: str,
+    email: str | None = None,
 ) -> dict[str, Any]:
     """Accept an invite and return a LiveKit guest token.
 
     The guest provides a ``guest_display_name`` that is shown to other
-    participants. Returns a LiveKit access token so the guest can connect
-    immediately.
+    participants. When the invite has an email allow-list, ``email`` must be
+    on it (trimmed, case-insensitive) or the accept is refused. Returns a
+    LiveKit access token so the guest can connect immediately.
 
     No authentication required — the guest may not have a Pocketpaw account.
     The returned token uses a ``guest-`` prefixed identity.
@@ -181,36 +251,30 @@ async def accept_meeting_invite(
             "This invite link has reached its maximum number of uses.",
         )
 
-    # Ensure the LiveKit room exists — create it if this is a scheduled
-    # meeting where the room hasn't been started yet. If the room already
-    # exists and is inactive (call ended), reject.
-    from pocketpaw_ee.cloud.livekit.service import LIVEKIT_URL, create_room, get_room_info
-
-    room_info = await get_room_info(doc.group_id)
-    if room_info is None:
-        # Room doesn't exist yet — create it (scheduled meeting, guest is first to join)
-        logger.info("Creating LiveKit room for group %s (guest join via invite)", doc.group_id)
-        await create_room(doc.group_id)
-    elif not room_info.get("active", False):
+    allowed = _allowed_emails(doc)
+    if allowed and (email or "").strip().lower() not in allowed:
         raise Forbidden(
-            "meeting_invite.call_ended",
-            "The call has ended. This invite is no longer valid.",
+            "meeting_invite.email_not_allowed",
+            "This email is not on the invite list. Check with the meeting host.",
         )
 
-    # Generate a guest identity.
-    guest_id = f"guest-{secrets.token_hex(8)}"
+    # A guest link joins a running call; it never starts one. Until 2026-09-30
+    # a missing room was created here with no workspace_id, which skipped the
+    # plan's daily call budget and the Meeting insert, and let any unexpired
+    # link restart an ended call. "Running" means a human is in the room (see
+    # service.get_room_info), so a room left holding only the call-bot counts
+    # as ended too.
+    from pocketpaw_ee.cloud.livekit.service import LIVEKIT_URL, get_room_info
 
-    # Generate a LiveKit access token for the guest.
-    from pocketpaw_ee.cloud.livekit.service import generate_participant_token
+    room_info = await get_room_info(doc.group_id)
+    if room_info is None or not room_info.get("active", False):
+        raise Forbidden(
+            "meeting_invite.call_ended",
+            "This call isn't running. It may have ended, or the host hasn't started it yet.",
+        )
 
-    lk_token = await generate_participant_token(
-        room_name=doc.room_name,
-        identity=guest_id,
-        name=guest_display_name,
-        can_publish=True,
-        can_subscribe=True,
-        ttl_seconds=3600,  # 1 hour — typical meeting length
-    )
+    guest_id = new_guest_identity()
+    lk_token = await issue_guest_token(doc.room_name, guest_id, guest_display_name)
 
     # Record the use.
     doc.use_count += 1

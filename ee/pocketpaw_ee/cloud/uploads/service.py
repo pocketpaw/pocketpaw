@@ -1,4 +1,7 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Module-level helpers for other entities: ``get_records_scoped`` (metadata only)
+#   and ``read_bytes_scoped`` (server-internal byte read pinned to a workspace,
+#   size-capped, NO per-user ACL; callers must authorise upstream).
 # Updated: 2026-09-27 — fix/chat-attachment-name-backfill. Added module-level
 #   ``get_records_scoped(file_ids, workspace)``, a metadata-only batch lookup
 #   (no blob I/O) other entities call instead of reaching into the store, so
@@ -390,6 +393,29 @@ async def get_records_scoped(file_ids: list[str], workspace: str) -> dict[str, F
     by another workspace are absent from the result.
     """
     return await MongoFileStore().get_many_scoped(file_ids, workspace)
+
+
+async def read_bytes_scoped(file_id: str, workspace: str, *, max_bytes: int) -> bytes | None:
+    """A live upload's bytes, read server-side, or ``None``.
+
+    For server-internal copies of a file the platform itself wrote (a site's
+    screenshot copied onto a template), so there is no requester and no
+    ``_assert_can_read``: the caller must already have authorised the read of
+    whatever pointed it at ``file_id``. Workspace-pinned like ``get_scoped``, so
+    an id from another workspace, an unknown id or a deleted row is ``None``.
+    ``None`` too past ``max_bytes``: the read stops there rather than buffer a
+    file the caller would refuse.
+    """
+    rec = await MongoFileStore().get_scoped(file_id, workspace=workspace)
+    if rec is None:
+        return None
+    adapter = build_adapter(Path.home() / ".pocketpaw" / "uploads")
+    buf = bytearray()
+    async for chunk in adapter.open(rec.storage_key):
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            return None
+    return bytes(buf)
 
 
 _PLANNER_EXTENSION_BY_MIME = {

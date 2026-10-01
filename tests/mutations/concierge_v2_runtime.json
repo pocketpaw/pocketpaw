@@ -88,7 +88,7 @@
   {
     "label": "the output filter is bypassed — raw deltas, code and all, reach the visitor",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                for piece in fences.feed(delta or \"\"):",
+    "find": "                for piece in await fences.afeed(delta or \"\"):",
     "replace": "                for piece in [delta] if delta else []:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code",
@@ -223,7 +223,7 @@
   {
     "label": "the compact manifest leaves the prompt — the model is never told how to write a card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    parts.append(_cards_paragraph(declared))",
+    "find": "    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog)))",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"
@@ -411,7 +411,7 @@
   },
   {
     "label": "CR-3: page_key stops folding about/index.html into about",
-    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "file": "src/pocketpaw/paw_bar/pages.py",
     "find": "    key = re.sub(r\"(^|/)index$\", \"\", key)",
     "replace": "    key = key",
     "tests": [

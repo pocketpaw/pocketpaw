@@ -90,7 +90,8 @@ class SurfaceMetaRequest(BaseModel):
     # widget's declared verbs. A JSON list of {verb, policy, args, label}.
     pawbar_actions: list[dict[str, Any]] | None = None
     # Concierge catalog hint (C1) — mirror SurfaceMeta. Set server-side from the
-    # widget spec (capped) so the preamble can name real products.
+    # catalog store (the turn's retrieved items) so the preamble can name real
+    # products.
     pawbar_catalog: list[dict[str, Any]] | None = None
     # Studio editor hint — mirror SurfaceMeta. The open timeline, projected to
     # ids + times. Carries state rather than an identifier because the document

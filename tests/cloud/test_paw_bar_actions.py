@@ -162,6 +162,24 @@ class TestExecutorAuto:
         assert out.error == "unknown_product"
         assert out.http_status == 422
 
+    async def test_add_to_cart_in_a_second_currency_is_refused(self, stores) -> None:
+        from pocketpaw_ee.paw_bar.actions import execute_action
+
+        pp_store, _ = stores
+        catalog = [
+            {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"},
+            {"id": "matcha", "name": "Matcha", "price_cents": 1500, "currency": "JPY"},
+        ]
+        widget = await pp_store.create_widget(_widget(spec=_actions_spec(catalog=catalog)))
+        first = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "matcha"})
+        assert first.ok and first.cart["currency"] == "JPY" and first.cart["total_cents"] == 1500
+        out = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "espresso"})
+        assert not out.ok
+        assert (out.error, out.http_status) == ("cart_currency_mismatch", 409)
+        assert "JPY" in out.result["message"] and "USD" in out.result["message"]
+        cart = await pp_store.get_cart(widget.id, "c1")
+        assert [i.id for i in cart.items] == ["matcha"]
+
     async def test_undeclared_verb_and_unknown_arg_rejected(self, stores) -> None:
         from pocketpaw_ee.paw_bar.actions import execute_action
 
@@ -449,6 +467,26 @@ class TestActionEndpoint:
             headers={"Origin": _ORIGIN},
         )
         assert res.status_code == 422
+
+    async def test_currency_mismatch_surfaces_409(self, action_client) -> None:
+        client, store = action_client
+        await _site()
+        catalog = [
+            {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"},
+            {"id": "dates", "name": "Dates", "price_cents": 1250, "currency": "KWD"},
+        ]
+        widget = await store.create_widget(_widget(spec=_actions_spec(catalog=catalog)))
+        ok = await client.post(
+            "/paw-bar/action", json=_action_body(widget.id), headers={"Origin": _ORIGIN}
+        )
+        assert ok.status_code == 200, ok.text
+        res = await client.post(
+            "/paw-bar/action",
+            json=_action_body(widget.id, args={"product_id": "dates"}),
+            headers={"Origin": _ORIGIN},
+        )
+        assert res.status_code == 409
+        assert "cart_currency_mismatch" in res.text
 
     async def test_empty_cart_returns_empty_shape(self, action_client) -> None:
         client, store = action_client

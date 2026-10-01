@@ -1,4 +1,8 @@
-"""Group document — multi-user channels with agent participants."""
+"""Group document — multi-user channels with agent participants.
+
+2026-10-01 (feat/meetings-instant, MC-1): new ``type="meeting"`` — the hidden
+room behind a meeting. Members only, and left out of every room list.
+"""
 
 from __future__ import annotations
 
@@ -39,7 +43,8 @@ class Group(TimestampedDocument):
     color: str = ""
     # Default "private": only explicit members can see/read. Workspace-wide
     # readable groups are opt-in via type="public" or type="channel".
-    type: str = Field(default="private", pattern="^(public|private|dm|channel)$")
+    # "meeting" is the hidden room behind a meeting (members only, never listed).
+    type: str = Field(default="private", pattern="^(public|private|dm|channel|meeting)$")
     # Channel-specific visibility: "public" (all workspace members can see) or
     # "private" (only explicit members). Ignored for non-channel groups.
     visibility: str = Field(default="public", pattern="^(public|private)$")

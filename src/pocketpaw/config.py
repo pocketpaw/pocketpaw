@@ -253,6 +253,17 @@ class Settings(BaseSettings):
             "/usr/local/bin/claude in the Docker images."
         ),
     )
+    claude_sdk_max_mcp_output_tokens: int = Field(
+        default=200_000,
+        ge=1,
+        description=(
+            "MAX_MCP_OUTPUT_TOKENS handed to the Claude Code CLI subprocess: the "
+            "largest MCP tool result it passes to the model whole. Claude Code's own "
+            "default (25,000) truncates large results such as a site file from "
+            "read_site_source. An explicit MAX_MCP_OUTPUT_TOKENS in the process "
+            "environment wins over this."
+        ),
+    )
 
     claude_sdk_connect_timeout: float = Field(
         default=90.0,
@@ -1304,6 +1315,16 @@ class Settings(BaseSettings):
             "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
             "day, in USD at provider cost. Past it, visitors get the leave-a-message "
             "reply and no model call is made. 0 turns the cap off."
+        ),
+    )
+    # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan
+    # split can come later the way the knowledge-source caps do it.
+    pawbar_catalog_max_items: int = Field(
+        default=5000,
+        ge=1,
+        description=(
+            "Most products one site's concierge catalog may hold. An import preview "
+            "returns at most this many, and a catalog write past it is refused."
         ),
     )
 
@@ -2418,6 +2439,37 @@ class Settings(BaseSettings):
             "redirect is omitted (the checkout still works, the buyer just isn't "
             "auto-returned)."
         ),
+    )
+
+    # Owner notification email — Cloudflare Email Service, REST API. The email
+    # sink (ee/pocketpaw_ee/cloud/notifications/email.py) stays OFF, and logs
+    # once, until account id, token and from address are all set. The sending
+    # domain is onboarded once by ops: ``wrangler email sending enable <domain>``.
+    cf_email_account_id: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare account id that owns the onboarded sending domain. Set via "
+            "POCKETPAW_CF_EMAIL_ACCOUNT_ID."
+        ),
+    )
+    cf_email_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare API token with Email Sending permission, sent as a Bearer "
+            "token to /email/sending/send. Set via POCKETPAW_CF_EMAIL_API_TOKEN. "
+            "NEVER logged."
+        ),
+    )
+    cf_email_from: str | None = Field(
+        default=None,
+        description=(
+            "From address for owner notification email, on the onboarded domain "
+            "(e.g. notifications@example.com). Set via POCKETPAW_CF_EMAIL_FROM."
+        ),
+    )
+    cf_email_from_name: str = Field(
+        default="PocketPaw",
+        description="Display name on owner notification email. POCKETPAW_CF_EMAIL_FROM_NAME.",
     )
 
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price

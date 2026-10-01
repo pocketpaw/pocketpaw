@@ -133,6 +133,17 @@ _GROUPS: list[tuple[str, str, str, list[str]]] = [
             "credit_usd",
         ],
     ),
+    (
+        "owner_email",
+        "Owner email",
+        "Cloudflare Email Service credentials for owner notification email.",
+        [
+            "cf_email_account_id",
+            "cf_email_api_token",
+            "cf_email_from",
+            "cf_email_from_name",
+        ],
+    ),
 ]
 
 _GROUPED_FIELD_NAMES: frozenset[str] = frozenset(

@@ -1101,7 +1101,8 @@ class ImportBriefStatusResponse(BaseModel):
 
 class SiteInvoiceOut(BaseModel):
     """One manual receipt on the site's client record. ``amount_cents`` is integer
-    MINOR units — the wire never carries a float for money, so the reading client
+    ISO 4217 minor units of ``currency`` (¥1,500 is 1500, $3.50 is 350; the name is
+    historical) — the wire never carries a float for money, so the reading client
     formats it and nothing rounds in transit."""
 
     id: str
@@ -1110,6 +1111,7 @@ class SiteInvoiceOut(BaseModel):
     currency: str
     paid: bool
     note: str = ""
+    amount_unit: str = ""  # "iso4217", or "" for a legacy row not yet migrated
 
 
 class SiteEntitlementsResponse(BaseModel):
@@ -1123,19 +1125,20 @@ class SiteEntitlementsResponse(BaseModel):
     The two fields that are NOT on ``SiteEntitlements`` are the ones that make the
     difference between a usable message and a useless one:
 
-    * ``domained_sites_used`` — how many sites in this workspace already spend the
-      floor allowance. "You cannot add a domain" and "your one free domain is on
-      another site" are different sentences, and only the count separates them.
+    * ``domained_sites_used`` — retained on the wire for older clients and always
+      0. It used to count sites across the workspace; the free allowance is now
+      per site, so there is nothing to count.
     * ``domain_slots_available`` — the same answer ``add_domain`` will give,
-      computed by the SAME function it calls (``_domain_cap_exceeded``), so the
+      computed by the SAME function it calls (``_hostname_cap_exceeded``), so the
       button's enabled state and the endpoint's verdict cannot drift apart. A
       second copy of the rule here would eventually disagree with the gate, and
-      the UI would confidently offer a button that 402s.
+      the UI would confidently offer a button that 402s. It closes only when THIS
+      site holds its free apex + ``www``; sibling sites never affect it.
 
-    ``max_domained_sites`` is None for an uncapped (paid) tier, mirroring the
-    catalog. ``subscription_active`` distinguishes a lapsed paid site from a site
-    that never had the capability — the tier stays recorded, only the payment
-    stopped, and the UI should say so.
+    ``max_domained_sites`` is the plan's per-site grant (1 on free, None for an
+    uncapped paid tier), mirroring the catalog. ``subscription_active``
+    distinguishes a lapsed paid site from a site that never had the capability —
+    the tier stays recorded, only the payment stopped, and the UI should say so.
 
     ``analytics`` says whether this site's plan buys visitor counting. It is what
     lets the panel disable itself with a reason BEFORE the call, and it is
@@ -1223,7 +1226,10 @@ class SiteClientUpdate(BaseModel):
 class SiteInvoiceCreate(BaseModel):
     """POST body for recording one manual receipt against the client record.
 
-    ``amount_cents`` is a non-negative integer in minor units. It is bounded on BOTH
+    ``amount_cents`` is a non-negative integer in ISO 4217 minor units of
+    ``currency`` (the name is historical) when the request carries
+    ``X-Paw-Money-Units: iso4217``; without it the service reads major × 100, the
+    pre-2026-10-01 client convention, and converts. It is bounded on BOTH
     ends on purpose: negative would let a receipt reverse the running total, and the
     upper bound stops a typo (or a paste of an id into an amount field) from writing
     a number no currency has a use for. ``currency`` is normalized to upper case and
@@ -1695,4 +1701,13 @@ class ForeignConciergeResponse(BaseModel):
     # ``auth.site_keys.concierge_available``, the predicate every public paw-bar
     # seam asks. Kept beside the snippet because they can disagree for one
     # legitimate reason: entitled and enabled, but the agent is not bound yet.
+    # It is the AND of the three fields below, so it cannot say WHICH is missing;
+    # a panel explaining an empty snippet reads those instead.
     concierge_available: bool = False
+    # Does the plan sell a concierge (``site_keys.concierge_plan_entitled``)?
+    # True whenever sites billing is not enforced.
+    concierge_entitled: bool = False
+    # The owner's switch. CR-12 creates every concierge switched OFF.
+    concierge_enabled: bool = False
+    # Has the owner created the concierge (``site_keys.concierge_exists``)?
+    concierge_exists: bool = False
