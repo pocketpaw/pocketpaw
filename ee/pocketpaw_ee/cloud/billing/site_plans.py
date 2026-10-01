@@ -170,9 +170,10 @@ _SITE_PLAN_MONTHLY_PRICE_USD: dict[str, int] = {
     # DISPLAY ONLY for the partner rungs, derived (default period price / months,
     # rounded down): it must be > 0 because ``is_paid`` / the sweeper's skip gate
     # on it, but nothing charges it — the charge is ``partner_price_usd``.
-    "site_year": _PARTNER_PRICE_USD["site_year"]["default"] // _SITE_PLAN_PERIOD_MONTHS["site_year"],
-    "staff_year": _PARTNER_PRICE_USD["staff_year"]["default"]
-    // _SITE_PLAN_PERIOD_MONTHS["staff_year"],
+    **{
+        key: prices["default"] // _SITE_PLAN_PERIOD_MONTHS[key]
+        for key, prices in _PARTNER_PRICE_USD.items()
+    },
 }
 
 # What a subscription on this tier BUYS: one site, or the whole workspace.

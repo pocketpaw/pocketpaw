@@ -1,6 +1,10 @@
 # ee/pocketpaw_ee/cloud/billing/enforcement.py — one function answering "do the
 # PER-SITE billing seams enforce right now".
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): the concierge quota counts over
+# the site's PAID PERIOD when the tier's period is longer than a month (the
+# partner ``staff_year`` rung: 1,200 a year, counted from ``renewal_date`` minus
+# 12 months). Monthly tiers still count from the 1st of the month, unchanged.
 # Updated 2026-10-01 (feat/partners-foundation, PH-1): the answer is now also
 # PER WORKSPACE. ``sites_enforced(partner)`` is True when the site's workspace
 # holds an ACTIVE Paw Partners profile, even with both global flags off; async
@@ -50,8 +54,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
+
+from dateutil.relativedelta import relativedelta
 
 
 def sites_enforced(partner: Any | None = None) -> bool:
@@ -122,6 +128,20 @@ def _month_start() -> datetime:
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def _period_start(site: Any, months: int) -> datetime | None:
+    """Start of the site's current paid period, on the store's naive-local clock.
+
+    ``renewal_date - months``; None when the site has no renewal date (it is not
+    paying, and the entitlement gate upstream already refuses it).
+    """
+    renewal = getattr(site, "renewal_date", None)
+    if renewal is None:
+        return None
+    if renewal.tzinfo is None:
+        renewal = renewal.replace(tzinfo=UTC)
+    return (renewal - relativedelta(months=months)).astimezone().replace(tzinfo=None)
+
+
 async def concierge_conversation_quota_exceeded(
     site: Any,
     *,
@@ -179,9 +199,11 @@ async def concierge_conversation_quota_exceeded(
 
         store = get_paw_bar_store()
     try:
-        used = await store.count_conversations_started_since(
-            widget_id, _month_start(), workspace_id
+        # A yearly rung's allowance is per YEAR: count from its period start.
+        since = (_period_start(site, tier.period_months) if tier.period_months > 1 else None) or (
+            _month_start()
         )
+        used = await store.count_conversations_started_since(widget_id, since, workspace_id)
     except Exception:
         import logging
 

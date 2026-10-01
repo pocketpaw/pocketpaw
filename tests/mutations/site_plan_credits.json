@@ -110,8 +110,8 @@
   {
     "label": "a tier change is priced at the new tier's full month again",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        delta_usd = int(tier.monthly_price_usd) - already_paid_usd",
-    "replace": "        delta_usd = int(tier.monthly_price_usd)",
+    "find": "        delta_usd = price_usd - already_paid_usd",
+    "replace": "        delta_usd = price_usd",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing",
       "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
@@ -138,8 +138,8 @@
   {
     "label": "a purchase records nothing as paid for the period",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.period_paid_usd = int(tier.monthly_price_usd)",
-    "replace": "    doc.period_paid_usd = 0",
+    "find": "        doc.period_paid_usd = int(price_usd)\n    # A FRESH PURCHASE",
+    "replace": "        doc.period_paid_usd = 0\n    # A FRESH PURCHASE",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
     ]
@@ -147,8 +147,8 @@
   {
     "label": "the paid high-water mark falls on a downgrade",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            existing_doc.period_paid_usd = int(tier.monthly_price_usd)\n        _previous_tier = existing_doc.plan_tier",
-    "replace": "        existing_doc.period_paid_usd = int(tier.monthly_price_usd)\n        _previous_tier = existing_doc.plan_tier",
+    "find": "            existing_doc.period_paid_usd = price_usd\n        # A move to a LONGER",
+    "replace": "        existing_doc.period_paid_usd = price_usd\n        # A move to a LONGER",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_returning_to_a_tier_already_bought_this_period_is_free",
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing"

@@ -4,12 +4,15 @@
 #   /partners/me, /partners/clients[/{client_id}]  — tenant routes, guarded with
 #   ``require_action_any_workspace("fabric.read" | "fabric.write")`` exactly like
 #   ``cloud/leads/router.py``. The operator switch is ``cloud/platform/partners.py``.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): GET /partners/offers and
+#   GET /partners/sites (fabric.read), POST /partners/sell — guarded by
+#   ``sites.buy_plan`` (ADMIN) because a sale spends the workspace wallet.
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
@@ -18,7 +21,11 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
+    PartnerOfferOut,
     PartnerProfileOut,
+    PartnerSaleOut,
+    PartnerSellRequest,
+    PartnerSiteOut,
 )
 
 router = APIRouter(prefix="/partners", tags=["partners"])
@@ -26,6 +33,8 @@ router = APIRouter(prefix="/partners", tags=["partners"])
 Ctx = Annotated[RequestContext, Depends(request_context)]
 _READ = [Depends(require_action_any_workspace("fabric.read"))]
 _WRITE = [Depends(require_action_any_workspace("fabric.write"))]
+# Selling spends the workspace wallet — the same admin action a paid publish needs.
+_BUY = [Depends(require_action_any_workspace("sites.buy_plan"))]
 
 
 @router.get("/me", response_model=PartnerProfileOut, dependencies=_READ)
@@ -56,3 +65,20 @@ async def delete_client(client_id: str, ctx: Ctx) -> Response:
     keeps the full history, including the WhatsApp number and GSTIN. No erasure."""
     await service.delete_client(ctx, client_id=client_id)
     return Response(status_code=204)
+
+
+@router.get("/offers", response_model=list[PartnerOfferOut], dependencies=_READ)
+async def list_offers(ctx: Ctx) -> list[PartnerOfferOut]:
+    return await service.list_offers(ctx)
+
+
+@router.post("/sell", response_model=PartnerSaleOut, dependencies=_BUY)
+async def sell(body: PartnerSellRequest, ctx: Ctx) -> PartnerSaleOut:
+    return await service.sell(ctx, body=body)
+
+
+@router.get("/sites", response_model=list[PartnerSiteOut], dependencies=_READ)
+async def list_sites(
+    ctx: Ctx, due_within_days: Annotated[int | None, Query(ge=0, le=3660)] = None
+) -> list[PartnerSiteOut]:
+    return await service.list_sites(ctx, due_within_days=due_within_days)

@@ -2,6 +2,10 @@
 # (BC-6, the Entitlement primitive). Module-level ``async def`` API, not a class,
 # per EE cloud rule and mirroring ``credits.service`` / ``billing.service``.
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): ``_PROJECT_DOWNLOAD_PLANS`` adds the
+# partner-only yearly rungs ``site_year`` / ``staff_year`` (same features as
+# ``site`` / ``staff``). Every other per-site answer reads the catalog row.
+#
 # WORKSPACE scope:
 #   * ``entitlements_from_plan(workspace_id, plan_key)`` — PURE, no DB. The plan
 #     catalog's answer for a tier key. The platform console reads it to show an
@@ -340,7 +344,7 @@ def _subscription_is_active(subscription_status: str | None) -> bool:
 # the buyer-facing plan-card DTO), which is the bar for lifting a rule out of the
 # resolver; until a plan card sells the download, a catalog field would be a
 # second home for a rule with one reader.
-_PROJECT_DOWNLOAD_PLANS = frozenset({"site", "staff"})
+_PROJECT_DOWNLOAD_PLANS = frozenset({"site", "staff", "site_year", "staff_year"})
 
 
 def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | None) -> int | None:

@@ -3,6 +3,10 @@
 # Created 2026-10-01 (feat/partners-foundation, PH-1). Reads the caller's own
 # partner profile and does tenant-scoped CRUD on clients. Client routes require
 # an ACTIVE partner profile (``Forbidden`` otherwise).
+# Updated 2026-10-02 (feat/partners-sell, PH-2): ``list_offers`` (partner-only
+# plans at the caller's country price), ``sell`` (validates the client, then
+# ``sites.service.sell_site_plan`` — the ordinary paid-publish path — debits the
+# wallet, redeploys and stamps ``partner_client_id``) and ``list_sites``.
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -28,7 +32,8 @@ from soul_protocol.spec.journal import Actor
 from pocketpaw.fabric.journal_store import FabricJournalStore
 from pocketpaw.fabric.models import FabricObject, FabricQuery
 from pocketpaw_ee.cloud._core.context import RequestContext
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.partners.domain import (
@@ -41,7 +46,11 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
+    PartnerOfferOut,
     PartnerProfileOut,
+    PartnerSaleOut,
+    PartnerSellRequest,
+    PartnerSiteOut,
 )
 
 
@@ -91,9 +100,15 @@ async def get_profile(ctx: RequestContext) -> PartnerProfileOut:
     return PartnerProfileOut.model_validate(profile, from_attributes=True)
 
 
-async def _require_active(ctx: RequestContext) -> str:
-    if await get_active_profile(ctx) is None:
+async def _active_profile(ctx: RequestContext) -> PartnerProfile:
+    profile = await get_active_profile(ctx)
+    if profile is None:
         raise Forbidden("partner.not_active", "This workspace is not an active partner")
+    return profile
+
+
+async def _require_active(ctx: RequestContext) -> str:
+    await _active_profile(ctx)
     return ctx.workspace_id  # type: ignore[return-value]  # active ⇒ workspace resolved
 
 
@@ -247,3 +262,77 @@ async def delete_client(
         client_id, scope=scope, reason="deleted by partner", actor=_actor(ctx, scope)
     )
     # no-event: the journal's fabric.object.archived event is the emit-on-write.
+
+
+# ---------------------------------------------------------------- selling (PH-2)
+
+
+async def list_offers(ctx: RequestContext) -> list[PartnerOfferOut]:
+    profile = await _active_profile(ctx)
+    return [
+        PartnerOfferOut(
+            sku=tier.key,
+            period_months=tier.period_months,
+            price_credits=site_plans.partner_price_usd(tier.key, profile.billing_country) * 100,
+            conversation_allowance=tier.conversation_allowance,
+            label=tier.display_name,
+        )
+        for tier in site_plans.list_partner_plans()
+    ]
+
+
+async def sell(
+    ctx: RequestContext, *, body: Any, store: FabricJournalStore | None = None
+) -> PartnerSaleOut:
+    body = PartnerSellRequest.model_validate(body)
+    workspace_id = await _require_active(ctx)
+    if body.sku not in {tier.key for tier in site_plans.list_partner_plans()}:
+        raise ValidationError("partners.unknown_sku", f"'{body.sku}' is not a partner plan")
+    # Scoped read: another workspace's client is a 404 here.
+    await get_client(ctx, client_id=body.client_id, store=store)
+
+    from pocketpaw_ee.sites import service as sites_service
+
+    doc = await sites_service.sell_site_plan(
+        workspace_id=workspace_id,
+        user_id=ctx.user_id,
+        site_id=body.site_id,
+        tier_key=body.sku,
+        partner_client_id=body.client_id,
+    )
+    # no-event: the sale runs the publish path, which emits SitePublished on deploy.
+    return PartnerSaleOut(
+        site_id=str(doc.id),
+        name=doc.name,
+        url=doc.url,
+        plan_tier=doc.plan_tier,
+        renewal_date=doc.renewal_date,
+        partner_client_id=body.client_id,
+        subscription_status=doc.subscription_status,
+    )
+
+
+async def list_sites(
+    ctx: RequestContext,
+    *,
+    due_within_days: int | None = None,
+    store: FabricJournalStore | None = None,
+) -> list[PartnerSiteOut]:
+    workspace_id = await _require_active(ctx)
+    from pocketpaw_ee.sites import service as sites_service
+
+    docs = await sites_service.list_partner_sites(workspace_id, due_within_days=due_within_days)
+    names = {c.id: c.name for c in await list_clients(ctx, store=store)} if docs else {}
+    return [
+        PartnerSiteOut(
+            site_id=str(d.id),
+            name=d.name,
+            url=d.url,
+            plan_tier=d.plan_tier,
+            renewal_date=d.renewal_date,
+            partner_client_id=d.partner_client_id,
+            # An archived client keeps its sold sites; the name is just gone.
+            client_name=names.get(d.partner_client_id or "", ""),
+        )
+        for d in docs
+    ]

@@ -25,6 +25,8 @@
 # ``period_paid_usd`` are what the owner pays US; ``client_*`` are what the owner's
 # own client owes THEM (an address and receipt book nothing bills from). A paid site
 # is created pending (``pending_deploy_inputs``) until payment confirms.
+# ``partner_client_id`` (PH-2, 2026-10-02) is the Paw Partners client (a Fabric
+# ``Customer`` object id) a partner sold this site to; None on every other site.
 #
 # Writes from background jobs (builds, provisioning, screenshots, KB sync) use
 # targeted ``set()``, never ``save()``, so a late job can't roll back a concurrent
@@ -434,6 +436,9 @@ class Site(TimestampedDocument):
     # be quietly renewed anyway. False on every legacy row, which is right — none
     # of them was ever scheduled to close.
     plan_cancels_at_period_end: bool = False
+    # Paw Partners (PH-2): the partner's client this site was sold to — a Fabric
+    # ``Customer`` object id, stamped by ``sites.service.sell_site_plan``.
+    partner_client_id: str | None = None
     # charge-first: the deploy inputs captured at publish time for a PENDING paid
     # site, so the ``subscription.active`` webhook can run the deferred deploy
     # without re-reading the pocket (the webhook carries only workspace_id +

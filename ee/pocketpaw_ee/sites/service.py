@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): partner-only yearly rungs. The
+# publish path refuses them outside an ACTIVE partner workspace and never
+# plan-carries them; every charge site prices one period via
+# ``billing.service.site_plan_price_usd``; renewals stamp ``tier.period_months``;
+# a tier change to a LONGER period restarts it today. A refused charge on an
+# already-deployed site now restores its prior billing fields (it used to be left
+# "pending" on the unpaid tier). New: ``sell_site_plan`` (the partner sale — it
+# runs ``publish_pocket``, the same purchase + redeploy path, then stamps
+# ``partner_client_id``) and ``list_partner_sites``.
+#
 # Updated 2026-10-02 (feat/partners-foundation, PH-1): per-site billing gates ask
 # ``sites_enforced_for(workspace)`` (active partner = enforced); the four entitlement
 # helpers are async for that read, and ``site_entitlements`` passes the profile.
@@ -8151,8 +8161,27 @@ async def publish_pocket(
     _on_plan_rail = (
         existing_doc is not None and getattr(existing_doc, "billing_rail", "") == _PLAN_RAIL
     )
+    # PARTNER-ONLY RUNGS (PH-2) are sold by an ACTIVE partner workspace and by
+    # nobody else. Refused before anything charges or mutates; a same-tier
+    # republish of a site already holding one is a content edit and stays open.
+    if (
+        requested_tier is not None
+        and requested_tier.partner_only
+        and requested_tier.key != _held_tier_key
+    ):
+        from pocketpaw_ee.cloud.partners import service as _partners_service
+
+        _profile = await _partners_service.partner_profile_for_workspace(workspace_id)
+        if getattr(_profile, "status", None) != "active":
+            raise Forbidden(
+                "sites.partner_plan_only",
+                "This plan is sold only by Paw Partners. Pick another plan for this site.",
+            )
+
     _plan_carries = False
-    if is_paid or _on_plan_rail:
+    # A partner-only rung is never plan-carried: it is a sale to the partner's
+    # client, paid from the wallet, not one of the partner's own plan slots.
+    if (is_paid or _on_plan_rail) and not getattr(tier, "partner_only", False):
         _plan_carries = await _plan_can_carry(
             workspace_id, site_id=str(existing_doc.id) if existing_doc is not None else None
         )
@@ -8308,7 +8337,10 @@ async def publish_pocket(
         from pocketpaw_ee.cloud.billing import service as _billing_service
 
         already_paid_usd = int(getattr(existing_doc, "period_paid_usd", 0) or 0)
-        delta_usd = int(tier.monthly_price_usd) - already_paid_usd
+        # One period of the new tier for THIS workspace — ``monthly_price_usd`` for
+        # a monthly rung, the partner's country price for a partner-only one.
+        price_usd = await _billing_service.site_plan_price_usd(tier, workspace_id)
+        delta_usd = price_usd - already_paid_usd
         if delta_usd > 0:
             await _billing_service.charge_site_plan_credits(
                 workspace_id=workspace_id,
@@ -8318,7 +8350,12 @@ async def publish_pocket(
                 period_start=datetime.now(UTC),
                 member_id=user_id,
             )
-            existing_doc.period_paid_usd = int(tier.monthly_price_usd)
+            existing_doc.period_paid_usd = price_usd
+        # A move to a LONGER period (monthly -> yearly) starts that period today;
+        # the gap charged above is what buys it. A same-or-shorter period keeps the
+        # date — the period already bought runs out first.
+        if _existing_tier is not None and tier.period_months > _existing_tier.period_months:
+            existing_doc.renewal_date = datetime.now(UTC) + relativedelta(months=tier.period_months)
         _previous_tier = existing_doc.plan_tier
         existing_doc.plan_tier = tier.key
         # Moving to a different paid tier is a decision to keep paying, so it
@@ -8492,6 +8529,67 @@ async def publish_pocket(
         pocket_id=pocket_id,
         site_plan_key=site_plan_key,
     )
+
+
+async def sell_site_plan(
+    *,
+    workspace_id: str,
+    user_id: str,
+    site_id: str,
+    tier_key: str,
+    partner_client_id: str,
+) -> _SiteDoc:
+    """A Paw Partner sells one of its sites a partner-only plan (PH-2).
+
+    NOT a second purchase path: it runs ``publish_pocket`` for the site's pocket
+    with the tier and ``purchase_authorized=True`` (the router has already checked
+    ``sites.buy_plan``), so the wallet debit, the deploy, the badge/concierge
+    stamping and the renewal date are exactly what a paid publish does. All this
+    adds is the tenant check, two refusals, and the ``partner_client_id`` stamp.
+
+    Re-selling the tier a site already holds and pays for is a no-op apart from
+    the stamp — no second debit, no redeploy.
+    """
+    doc = await _load(workspace_id, site_id)
+    if getattr(doc, "foreign_origin", False):
+        raise ConflictError(
+            "partners.foreign_site", "A concierge-only site can't be sold a site plan."
+        )
+    if getattr(doc, "billing_rail", "") == _PLAN_RAIL:
+        raise ConflictError(
+            "partners.site_on_plan",
+            "This site is carried by your workspace plan. Move it off the plan "
+            "before selling it to a client.",
+        )
+    already_sold = doc.subscription_status == "active" and doc.plan_tier == tier_key
+    if not already_sold:
+        doc = await publish_pocket(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=doc.pocket_id,
+            site_plan_key=tier_key,
+            purchase_authorized=True,
+        )
+    await doc.set({"partner_client_id": partner_client_id})
+    return doc
+
+
+async def list_partner_sites(
+    workspace_id: str, *, due_within_days: int | None = None
+) -> list[_SiteDoc]:
+    """The workspace's partner-sold sites (``partner_client_id`` set).
+
+    ``due_within_days`` keeps only sites whose ``renewal_date`` falls on or before
+    now + that many days (a null date is never due); omitted, every sold site.
+    """
+    query: dict[str, Any] = {"workspace": workspace_id, "partner_client_id": {"$ne": None}}
+    if due_within_days is not None:
+        query["renewal_date"] = {
+            "$ne": None,
+            "$lte": datetime.now(UTC) + timedelta(days=due_within_days),
+        }
+    # ponytail: unpaginated; a partner with thousands of sold sites needs a cursor.
+    return await _SiteDoc.find(query).sort("+renewal_date").to_list()
 
 
 async def _apply_site_plan(
@@ -8866,6 +8964,28 @@ async def _publish_credits_site(
     """
     from pocketpaw_ee.cloud.billing import service as billing_service
 
+    # A LIVE SITE KEEPS ITS STATE ON A REFUSED CHARGE (PH-2). ``_publish_pending_site``
+    # rewrites these fields on an existing row BEFORE the debit; for a site that
+    # is already deployed (an upgrade of a live free site) a refusal must leave it
+    # exactly as it was, not "pending" on a tier nobody paid for. A brand-new site
+    # keeps the old behaviour: pending and undeployed, ready for a retry.
+    _restore_fields = (
+        "owner",
+        "name",
+        "plan_tier",
+        "subscription_status",
+        "billing_rail",
+        "pending_deploy_inputs",
+    )
+    _prior = await _SiteDoc.find_one(
+        {"_id": await _resolve_live_site_oid(workspace_id, pocket_id), "workspace": workspace_id}
+    )
+    _prior_state = (
+        {f: getattr(_prior, f) for f in _restore_fields}
+        if _prior is not None and _prior.deployed
+        else None
+    )
+
     doc = await _publish_pending_site(
         workspace_id=workspace_id,
         user_id=user_id,
@@ -8883,15 +9003,26 @@ async def _publish_credits_site(
     )
 
     site_id = str(doc.id)
+    price_usd = 0
     if not covered_by_plan:
-        await billing_service.charge_site_plan_credits(
-            workspace_id=workspace_id,
-            site_id=site_id,
-            tier_key=tier.key,
-            amount_usd=tier.monthly_price_usd,
-            period_start=datetime.now(UTC),
-            member_id=user_id,
-        )
+        try:
+            # One PERIOD of the tier for this workspace (a partner-only rung is a
+            # year at the partner's country price; a monthly rung is unchanged).
+            price_usd = await billing_service.site_plan_price_usd(tier, workspace_id)
+            await billing_service.charge_site_plan_credits(
+                workspace_id=workspace_id,
+                site_id=site_id,
+                tier_key=tier.key,
+                amount_usd=price_usd,
+                period_start=datetime.now(UTC),
+                member_id=user_id,
+            )
+        except Exception:
+            if _prior_state is not None:
+                for _field, _value in _prior_state.items():
+                    setattr(doc, _field, _value)
+                await doc.save()
+            raise
 
     # NEITHER ``billing_rail`` NOR ``subscription_status`` IS SET HERE, and both
     # omissions were found the same way — by a mutation that deleted the write and
@@ -8914,11 +9045,11 @@ async def _publish_credits_site(
         doc.renewal_date = None
         doc.period_paid_usd = 0
     else:
-        doc.renewal_date = datetime.now(UTC) + relativedelta(months=1)
+        doc.renewal_date = datetime.now(UTC) + relativedelta(months=tier.period_months)
         # WHAT THIS PERIOD HAS BEEN PAID FOR, which is what a later tier change
         # prices against. Without it every upgrade would subtract from 0 and charge
         # the new tier's full month on top of the one just bought here.
-        doc.period_paid_usd = int(tier.monthly_price_usd)
+        doc.period_paid_usd = int(price_usd)
     # A FRESH PURCHASE STARTS UNSCHEDULED. Reaching here means the site was not
     # already paying, so a pending close should be impossible — but a stale flag
     # surviving into a month somebody just paid for would have the sweep close it
@@ -8935,10 +9066,11 @@ async def _publish_credits_site(
         )
     else:
         logger.info(
-            "sites.publish: site %s bought from the credit wallet (tier=%s, $%s/month)",
+            "sites.publish: site %s bought from the credit wallet (tier=%s, $%s for %s month(s))",
             site_id,
             tier.key,
-            tier.monthly_price_usd,
+            price_usd,
+            tier.period_months,
         )
 
     # ``force`` is a BELT, and honestly labelled as one: nothing on this path
@@ -9166,7 +9298,13 @@ def _stamp_next_renewal(doc: _SiteDoc, *, at: datetime | None = None) -> None:
     if getattr(doc, "billing_rail", "") == _PLAN_RAIL:
         doc.renewal_date = None
     else:
-        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)
+        # One PERIOD of the site's tier: 1 month for every monthly rung, 12 for a
+        # partner-only yearly rung (PH-2). An unresolvable tier keeps the month.
+        from pocketpaw_ee.cloud.billing import site_plans
+
+        _tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
+        months = _tier.period_months if _tier is not None else 1
+        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=months)
 
 
 async def activate_site(

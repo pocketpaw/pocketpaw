@@ -3,6 +3,8 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): the site-plan request door
+# refuses partner-only rungs (sold only through /partners/sell).
 # Updated 2026-10-02 (feat/partners-foundation, PH-1): the foreign-concierge
 # response passes the workspace partner profile to the concierge gates.
 #
@@ -471,7 +473,8 @@ async def request_site_plan(
     # quotes a price, and a client showing "$0/month" for a tier we could not
     # resolve would be worse than the refusal it replaced.
     tier = site_plans.site_scoped_tier(site_plans.canonical_site_tier_key(body.site_plan_key))
-    if tier is None:
+    # Partner-only rungs are sold through /partners/sell, never requested here.
+    if tier is None or tier.partner_only:
         raise ValidationError(
             "sites.unknown_plan_tier",
             f"'{body.site_plan_key}' is not a plan a single site can be put on",

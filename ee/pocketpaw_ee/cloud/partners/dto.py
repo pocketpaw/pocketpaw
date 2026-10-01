@@ -4,6 +4,7 @@
 # move; ``whatsapp_opt_in_at`` is stored as an ISO string and parsed back here.
 # Updated 2026-10-02: the profile write body moved to ``cloud/platform/partners.py``;
 # GSTIN is upper-cased and pattern-validated.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): offer / sell / sold-site shapes.
 
 from __future__ import annotations
 
@@ -61,3 +62,39 @@ class PartnerClientOut(BaseModel):
     notes: str
     created_at: datetime | None
     updated_at: datetime | None
+
+
+class PartnerOfferOut(BaseModel):
+    """One partner-only plan at the caller's country price (1 credit = $0.01)."""
+
+    sku: str
+    period_months: int
+    price_credits: int
+    conversation_allowance: int
+    label: str
+
+
+class PartnerSellRequest(BaseModel):
+    client_id: str = Field(min_length=1, max_length=200)
+    site_id: str = Field(min_length=1, max_length=64)
+    sku: str = Field(min_length=1, max_length=64)
+
+
+class PartnerSaleOut(BaseModel):
+    site_id: str
+    name: str
+    url: str
+    plan_tier: str | None
+    renewal_date: datetime | None
+    partner_client_id: str | None
+    subscription_status: str
+
+
+class PartnerSiteOut(BaseModel):
+    site_id: str
+    name: str
+    url: str
+    plan_tier: str | None
+    renewal_date: datetime | None
+    partner_client_id: str | None
+    client_name: str
