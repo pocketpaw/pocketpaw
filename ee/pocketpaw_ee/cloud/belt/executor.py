@@ -405,7 +405,7 @@ async def _persist_run_result(
     The runs read model reads ``pr_url`` / ``branch`` / ``commit_sha`` /
     ``files_changed`` off the blob STRUCTURALLY rather than parsing the free-text
     ``mark_executed`` outcome. Store-API write — the same pattern belt.py's
-    ``_persist_chain_ids`` uses for the propose-time chain ids. Best-effort: a
+    ``persist_chain_ids`` uses for the propose-time chain ids. Best-effort: a
     write failure leaves the run without the structured fields (the read model
     falls back to None) but never breaks the approve response.
 

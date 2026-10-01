@@ -44,9 +44,9 @@
 # Populating its diff in place keeps one durable run record per task (provenance
 # to the mandate shift stays on the blob) and reuses the EXACT applyable shape
 # the belt executor expects (``base_branch`` + ``diff`` + cleared
-# ``station_pending`` — see ``belt/executor.py`` schema-2 guard). The direct-SQL
+# ``station_pending`` — see ``belt/executor.py`` schema-2 guard). The store-API
 # blob update mirrors ``belt/executor.py::_persist_run_result`` and the MCP
-# server's ``_persist_chain_ids`` — the same pattern, no new store method.
+# server's ``persist_chain_ids`` — the same pattern, no new store method.
 #
 # Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
 #   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
@@ -237,9 +237,9 @@ class HeadlessDevelopRunner:
         files_changed: int,
     ) -> None:
         """Populate the queued blob with the produced diff and clear
-        ``station_pending``. Direct-SQL blob update — the SAME pattern as
+        ``station_pending``. Store-API blob update — the SAME pattern as
         ``belt/executor.py::_persist_run_result`` and the MCP server's
-        ``_persist_chain_ids`` (no new store method). The schema stays 2 so the
+        ``persist_chain_ids`` (no new store method). The schema stays 2 so the
         belt executor's schema guard passes. Best-effort but loud: a write
         failure records a note and leaves the run queued, never applyable."""
 

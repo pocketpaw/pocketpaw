@@ -326,7 +326,7 @@ async def _propose_change_handler(args: dict) -> dict:
     #
     # Schema 2 (BS-4, RFC 09) — carries the chain ``correlation_id`` and
     # ``proposed_event_id`` (the latter back-written after ``agent.proposed``
-    # fires; None here, filled by ``_persist_chain_ids`` below).
+    # fires; None here, filled by ``persist_chain_ids`` below).
     blob: dict[str, Any] = {
         "kind": CODE_CHANGE_KIND,
         "schema": CODE_CHANGE_SCHEMA,

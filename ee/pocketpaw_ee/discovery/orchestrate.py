@@ -635,8 +635,8 @@ async def _stamp_discovery_marker(
 ) -> None:
     """Write the ``discovery_run`` marker onto a filed proposal's blob.
 
-    Direct-SQL blob back-write — the same pattern the propose helpers use for
-    ``_persist_chain_ids``. Best-effort: a stamp failure leaves the proposal
+    Store-API blob back-write — the same pattern the propose helpers use for
+    ``persist_chain_ids``. Best-effort: a stamp failure leaves the proposal
     un-marked (it just won't be auto-superseded by the next run; a human can still
     reject it). A failed stamp must NOT fail the proposal that was already filed.
     """
