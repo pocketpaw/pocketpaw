@@ -239,8 +239,14 @@ class TestSpecMoneyUnits:
 
     @staticmethod
     def _stored_price(store: PawBarStore, widget_id: str) -> int:
-        # The catalog lands in the catalog store, not the spec.
-        [item] = asyncio.run(store.get_catalog_items(widget_id, ["tea"]))
+        # The catalog lands in the catalog store, not the spec. A private loop,
+        # not asyncio.run, which would clear the thread's current loop for the
+        # sync tests after this one.
+        loop = asyncio.new_event_loop()
+        try:
+            [item] = loop.run_until_complete(store.get_catalog_items(widget_id, ["tea"]))
+        finally:
+            loop.close()
         return item.price_cents
 
     def test_a_yen_catalog_with_the_header_is_stored_as_sent(
