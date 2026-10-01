@@ -1,32 +1,37 @@
 # ee/pocketpaw_ee/cloud/notifications/outbox.py
 # The external-delivery outbox: the ONLY module that reads or writes
 # ``notification_outbox``, and the only one that talks to email, webhook and
-# Slack endpoints. Producers call ``enqueue_many``; the sweeper loop calls
-# ``process_due``.
+# Slack endpoints. Producers call ``enqueue_many``; the sweeper calls ``process_due``.
 #
 # Claim: one atomic ``find_one_and_update`` moves a due row (``pending`` with
-# ``next_at <= now``, or ``sending`` whose ``lease_until`` lapsed) to
-# ``sending`` with a fresh lease and ``claim_id``, and bumps ``attempts``. Two
-# app instances can therefore never send the same row at once; a finish is
-# written only when the row still carries our ``claim_id``.
+# ``next_at <= now``, or ``sending`` whose lease lapsed) to ``sending`` with a
+# fresh lease and ``claim_id``, and bumps ``attempts``. Two app instances never
+# send the same row at once; a finish is written only while we hold the claim.
+# A row that fails to parse after the claim is marked dead by ``_id``.
 #
-# Outcome per send: ``sent``; ``retry`` (transport error, 429/5xx, any non-2xx
-# from a webhook) -> back to ``pending`` after 1 m, 5 m, 30 m, 2 h, 6 h, then
-# ``dead``; ``dead`` straight away for a permanent failure (bad request, unsafe
-# or removed webhook, unconfirmed recipient, permanent bounce).
+# Throughput and isolation: rows are worked in two LANES with their own claims
+# and workers (email: 4, webhook + Slack: 8), so a slow webhook can't hold mail
+# back. Every send runs under a hard ``SEND_DEADLINE_SECONDS`` (well under the
+# lease); hitting it is an ordinary failure.
 #
-# Webhooks: the secret is loaded at send time from the config named by
-# ``webhook_ref`` ("workspace:<id>" via notifications.service, "site:<id>" via
-# leads.notification_settings) and the URL is SSRF-checked again (DNS
-# included). A dead webhook row bumps that config's failure counter, which
-# switches the webhook off at 10; a sent row resets it. Lead events carry only
-# ``lead_id``: the lead is loaded and serialized when the row is sent. A
-# ``notification.created`` row also carries ``legacy``: the deprecated flat
-# fields, merged into the body's top level for pre-envelope consumers.
+# Outcome per send: ``sent``; ``retry`` (transport error, deadline, 429/5xx, any
+# non-2xx from a webhook, a Cloudflare 401/403) -> back to ``pending`` after 1 m,
+# 5 m, 30 m, 2 h, 6 h, then ``dead``; ``dead`` straight away for a permanent
+# failure (bad request, unsafe or removed webhook, unconfirmed recipient,
+# permanent bounce). A Cloudflare 401/403 also rings the workspace admins once a
+# day ("owner email is failing").
 #
-# The sweeper is an app-lifespan task started from ``extensions`` beside the run
-# sweeper. ``enqueue_many`` wakes it, so a fresh row goes out in well under the
-# 15 s tick; without a running sweeper (tests, CLI) rows wait for ``process_due``.
+# Webhooks and Slack go out through ``sites.safe_fetch.SafeFetcher.post``: DNS is
+# resolved and checked at send time (failing closed), and the connection is
+# pinned to the checked address, so rebinding can't redirect it. The webhook's
+# secrets are loaded at send time from the config named by ``webhook_ref``
+# ("workspace:<id>" / "site:<id>"); a workspace webhook saved before signing
+# existed has none and is sent unsigned, as before. Lead events carry only
+# ``lead_id`` and the lead is loaded when the row is sent; rows with ``legacy``
+# get those deprecated flat fields merged into the body's top level.
+#
+# The sweeper is an app-lifespan task started from ``extensions``. ``enqueue_many``
+# wakes it; without a running sweeper (tests, CLI) rows wait for ``process_due``.
 
 from __future__ import annotations
 
@@ -48,11 +53,21 @@ logger = logging.getLogger(__name__)
 BACKOFF_SECONDS: tuple[int, ...] = (60, 300, 1800, 7200, 21600)
 MAX_ATTEMPTS = len(BACKOFF_SECONDS) + 1
 LEASE_SECONDS = 120
+SEND_DEADLINE_SECONDS = 30.0
 SWEEP_INTERVAL_SECONDS = 15.0
 WEBHOOK_DISABLE_THRESHOLD = 10
 _HTTP_TIMEOUT_SECONDS = 10.0
 _MAX_ERROR_CHARS = 500
 _BATCH_LIMIT = 100
+_WEBHOOK_RESPONSE_CAP = 1024 * 1024
+_USER_AGENT = "PocketPaw-Webhooks/1.0 (+https://pocketpaw.dev)"
+EMAIL_FAILING_KIND = "owner_email_failing"
+
+# (sinks claimed by the lane, workers in the lane)
+LANES: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("email",), 4),
+    (("webhook", "slack"), 8),
+)
 
 _sweeper_task: asyncio.Task[None] | None = None
 _wake_event: asyncio.Event | None = None
@@ -80,7 +95,7 @@ def backoff_after(attempts: int) -> timedelta | None:
 
 
 # ---------------------------------------------------------------------------
-# Enqueue
+# Enqueue / counts
 # ---------------------------------------------------------------------------
 
 
@@ -101,38 +116,68 @@ async def enqueue(**row: Any) -> NotificationOutboxItem:
     return (await enqueue_many([row]))[0]
 
 
+async def count_recent(*, workspace: str, kind: str, since: datetime) -> int:
+    """Rows of ``kind`` queued for ``workspace`` since ``since`` (rate limits)."""
+    return await NotificationOutboxItem.find(
+        {"workspace": workspace, "kind": kind, "created_at": {"$gte": since}}
+    ).count()
+
+
 # ---------------------------------------------------------------------------
 # Claim / finish
 # ---------------------------------------------------------------------------
 
 
 async def claim_one(
-    *, now: datetime | None = None, lease_seconds: int = LEASE_SECONDS
+    *,
+    now: datetime | None = None,
+    lease_seconds: int = LEASE_SECONDS,
+    sinks: tuple[str, ...] | None = None,
 ) -> NotificationOutboxItem | None:
-    """Atomically claim the oldest due row, or None when nothing is due."""
+    """Atomically claim the oldest due row (of ``sinks`` when given), or None
+    when nothing is due. A claimed row that doesn't parse is marked dead and
+    skipped rather than crashing the sweep."""
     now = now or _now()
     coll = NotificationOutboxItem.get_pymongo_collection()
-    raw = await coll.find_one_and_update(
-        {
-            "$or": [
-                {"status": "pending", "next_at": {"$lte": now}},
-                {"status": "sending", "lease_until": {"$lte": now}},
-            ]
-        },
-        {
-            "$set": {
-                "status": "sending",
-                "lease_until": now + timedelta(seconds=lease_seconds),
-                "claim_id": uuid.uuid4().hex,
+    query: dict[str, Any] = {
+        "$or": [
+            {"status": "pending", "next_at": {"$lte": now}},
+            {"status": "sending", "lease_until": {"$lte": now}},
+        ]
+    }
+    if sinks is not None:
+        query["sink"] = {"$in": list(sinks)}
+    while True:
+        raw = await coll.find_one_and_update(
+            query,
+            {
+                "$set": {
+                    "status": "sending",
+                    "lease_until": now + timedelta(seconds=lease_seconds),
+                    "claim_id": uuid.uuid4().hex,
+                },
+                "$inc": {"attempts": 1},
             },
-            "$inc": {"attempts": 1},
-        },
-        sort=[("next_at", 1)],
-        return_document=ReturnDocument.AFTER,
-    )
-    if raw is None:
-        return None
-    return NotificationOutboxItem.model_validate({**raw, "id": raw["_id"]})
+            sort=[("next_at", 1)],
+            return_document=ReturnDocument.AFTER,
+        )
+        if raw is None:
+            return None
+        try:
+            return NotificationOutboxItem.model_validate({**raw, "id": raw["_id"]})
+        except Exception as exc:  # noqa: BLE001 — one bad row must not stop the sweep
+            logger.warning("outbox row %s is malformed; marking it dead", raw.get("_id"))
+            await coll.update_one(
+                {"_id": raw["_id"]},
+                {
+                    "$set": {
+                        "status": "dead",
+                        "finished_at": now,
+                        "lease_until": None,
+                        "last_error": f"malformed row: {type(exc).__name__}",
+                    }
+                },
+            )
 
 
 async def _finish(item: NotificationOutboxItem, outcome: Outcome, now: datetime) -> str:
@@ -172,24 +217,58 @@ async def _finish(item: NotificationOutboxItem, outcome: Outcome, now: datetime)
 
 
 # ---------------------------------------------------------------------------
-# Senders
+# HTTP (webhook + Slack) through the pinned SafeFetcher
 # ---------------------------------------------------------------------------
 
 
-async def _check_url(url: str) -> str:
-    """ "" when ``url`` is safe to POST to now, else the reason."""
-    from pocketpaw_ee.cloud._core.errors import Forbidden
-    from pocketpaw_ee.cloud.notifications.delivery import validate_webhook_url
+async def _resolve(host: str) -> list[str]:
+    """DNS for the pinned fetcher. Reads the audit webhooks' resolver at call
+    time (one resolver for every webhook path); no answer fails closed."""
+    from pocketpaw_ee.cloud.audit import webhooks as audit_webhooks
 
+    ips = await audit_webhooks._resolve_addresses(host)
+    if not ips:
+        raise OSError(f"no addresses for {host}")
+    return ips
+
+
+def _new_fetcher():
+    from pocketpaw_ee.sites.safe_fetch import SafeFetcher
+
+    return SafeFetcher(
+        total_byte_cap=1 << 62,
+        per_fetch_cap=_WEBHOOK_RESPONSE_CAP,
+        timeout_sec=_HTTP_TIMEOUT_SECONDS,
+        user_agent=_USER_AGENT,
+        resolver=_resolve,
+    )
+
+
+async def _post(fetcher, url: str, body: str, headers: dict[str, str]) -> Outcome:
+    """POST through the pinned fetcher and map the result to an Outcome."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+    from pocketpaw_ee.cloud.notifications.delivery import is_safe_webhook_url
+    from pocketpaw_ee.sites.safe_fetch import FetchError
+
+    if not is_safe_webhook_url(url):
+        return Outcome("dead", "unsafe url: not an https URL to a public host")
     try:
-        await validate_webhook_url(url)
-    except Forbidden as exc:
-        return f"unsafe url: {exc.message}"
-    return ""
+        result = await fetcher.post(url, content=body, headers=headers)
+    except ValidationError as exc:
+        return Outcome("dead", f"unsafe url: {exc.message}")
+    except FetchError as exc:
+        # DNS failure (or an oversized answer): nothing was sent to a host we
+        # couldn't check. Try again later.
+        return Outcome("retry", f"fetch: {exc.code}")
+    except Exception as exc:  # noqa: BLE001 — any transport failure retries
+        return Outcome("retry", f"transport: {type(exc).__name__}")
+    if 200 <= result.status < 300:
+        return Outcome("sent")
+    return Outcome("retry", f"http {result.status}")
 
 
-async def _webhook_target(item: NotificationOutboxItem) -> tuple[str, str] | None:
-    """(url, secret) currently configured for the row's ``webhook_ref``."""
+async def _webhook_target(item: NotificationOutboxItem) -> tuple[str, list[str]] | None:
+    """(url, signing secrets) currently configured for the row's ``webhook_ref``."""
     kind, _, ident = item.webhook_ref.partition(":")
     if kind == "workspace":
         from pocketpaw_ee.cloud.notifications import service as notifications_service
@@ -223,7 +302,7 @@ async def _lead_data(item: NotificationOutboxItem) -> dict[str, Any] | None:
     return await leads_service.lead_payload(item.workspace, str(item.payload.get("lead_id") or ""))
 
 
-async def _send_webhook(item: NotificationOutboxItem, client: httpx.AsyncClient) -> Outcome:
+async def _send_webhook(item: NotificationOutboxItem, fetcher) -> Outcome:
     from pocketpaw_ee.cloud.notifications import webhook_signing
 
     target = await _webhook_target(item)
@@ -231,9 +310,7 @@ async def _send_webhook(item: NotificationOutboxItem, client: httpx.AsyncClient)
         return Outcome(
             "dead", "webhook removed, changed or switched off", counts_against_webhook=False
         )
-    url, secret = target
-    if reason := await _check_url(url):
-        return Outcome("dead", reason)
+    url, secrets = target
     payload = item.payload
     if "data" in payload:
         data = payload["data"]
@@ -251,31 +328,32 @@ async def _send_webhook(item: NotificationOutboxItem, client: httpx.AsyncClient)
     )
     legacy = payload.get("legacy")
     if isinstance(legacy, dict):
-        # ``notification.created`` only: the deprecated flat fields, never
-        # overriding an envelope key (``id`` already equals the legacy id).
+        # Workspace webhook only: the deprecated flat fields, never overriding
+        # an envelope key.
         event = {**event, **{k: v for k, v in legacy.items() if k not in event}}
     body = webhook_signing.encode_event(event)
-    try:
-        resp = await client.post(
-            url, content=body, headers=webhook_signing.sign_headers(secret, body)
-        )
-    except Exception as exc:  # noqa: BLE001 — any transport failure retries
-        return Outcome("retry", f"transport: {type(exc).__name__}")
-    if 200 <= resp.status_code < 300:
-        return Outcome("sent")
-    return Outcome("retry", f"http {resp.status_code}")
+    headers = (
+        webhook_signing.sign_headers(secrets, body)
+        if secrets
+        else {"Content-Type": "application/json"}  # pre-signing webhook: as before
+    )
+    return await _post(fetcher, url, body, headers)
 
 
-async def _send_slack(item: NotificationOutboxItem, client: httpx.AsyncClient) -> Outcome:
-    if reason := await _check_url(item.target):
-        return Outcome("dead", reason)
-    try:
-        resp = await client.post(item.target, json=item.payload)
-    except Exception as exc:  # noqa: BLE001
-        return Outcome("retry", f"transport: {type(exc).__name__}")
-    if 200 <= resp.status_code < 300:
-        return Outcome("sent")
-    return Outcome("retry", f"http {resp.status_code}")
+async def _send_slack(item: NotificationOutboxItem, fetcher) -> Outcome:
+    import json
+
+    from pocketpaw_ee.cloud.notifications import service as notifications_service
+
+    if await notifications_service.slack_target(item.workspace) != item.target:
+        return Outcome("dead", "slack removed, changed or switched off")
+    body = json.dumps(item.payload)
+    return await _post(fetcher, item.target, body, {"Content-Type": "application/json"})
+
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
 
 
 async def _render_email(item: NotificationOutboxItem):
@@ -314,6 +392,31 @@ def _site_settings():
     return notification_settings
 
 
+async def _warn_email_failing(workspace_id: str) -> None:
+    """Ring the workspace owner/admins, at most once a day, that owner email is
+    failing on Cloudflare auth. Never raises."""
+    try:
+        from pocketpaw_ee.cloud.notifications import service as notifications_service
+        from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+        since = _now() - timedelta(days=1)
+        if await notifications_service.has_recent(workspace_id, EMAIL_FAILING_KIND, since):
+            return
+        admins = await workspace_service.list_admin_ids(workspace_id)
+        if admins:
+            await notifications_service.create_many(
+                workspace_id=workspace_id,
+                recipients=admins,
+                kind=EMAIL_FAILING_KIND,
+                title="Owner email is failing",
+                body="Cloudflare refused to send lead email. Check the Cloudflare token "
+                "and that email sending is enabled for the domain.",
+                deliver_external=False,
+            )
+    except Exception:
+        logger.warning("could not raise the email-failing notice", exc_info=True)
+
+
 async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -> Outcome:
     from pocketpaw_ee.cloud.notifications import email as email_mod
 
@@ -341,6 +444,8 @@ async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -
         config=config,
         client=client,
     )
+    if result.auth_failure:
+        await _warn_email_failing(item.workspace)
     if result.outcome == "retry":
         return Outcome("retry", result.error)
     if result.outcome == "permanent":
@@ -353,34 +458,61 @@ async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -
     return Outcome("sent")
 
 
-_SENDERS = {"email": _send_email, "webhook": _send_webhook, "slack": _send_slack}
+# ---------------------------------------------------------------------------
+# Sweep
+# ---------------------------------------------------------------------------
 
 
-async def deliver(item: NotificationOutboxItem, client: httpx.AsyncClient) -> Outcome:
-    """Send one claimed row. Never raises: a crash is a retry."""
+async def deliver(item: NotificationOutboxItem, client: httpx.AsyncClient, fetcher) -> Outcome:
+    """Send one claimed row under the hard deadline. Never raises: a crash or a
+    blown deadline is a retry."""
     try:
-        return await _SENDERS[item.sink](item, client)
+        async with asyncio.timeout(SEND_DEADLINE_SECONDS):
+            if item.sink == "email":
+                return await _send_email(item, client)
+            if item.sink == "webhook":
+                return await _send_webhook(item, fetcher)
+            if item.sink == "slack":
+                return await _send_slack(item, fetcher)
+            return Outcome("dead", f"unknown sink {item.sink!r}")
+    except TimeoutError:
+        return Outcome("retry", f"deadline: no answer in {SEND_DEADLINE_SECONDS:.0f}s")
     except Exception as exc:  # noqa: BLE001
         logger.warning("outbox send crashed for %s", item.id, exc_info=True)
         return Outcome("retry", f"crash: {type(exc).__name__}")
 
 
+async def _handle(item: NotificationOutboxItem, client, fetcher, now: datetime | None) -> None:
+    outcome = await deliver(item, client, fetcher)
+    status = await _finish(item, outcome, now or _now())
+    if item.sink == "webhook" and status in ("sent", "dead"):
+        if status == "sent" or outcome.counts_against_webhook:
+            await _record_webhook_result(item, ok=status == "sent")
+
+
 async def process_due(*, now: datetime | None = None, limit: int = _BATCH_LIMIT) -> int:
-    """Claim and send due rows until none are left (or ``limit``). Returns how
-    many rows were handled. Never raises."""
+    """Claim and send due rows across the lanes until none are left (or
+    ``limit``). Returns how many rows were handled. Never raises."""
     handled = 0
+
+    async def worker(sinks: tuple[str, ...], client, fetcher) -> None:
+        nonlocal handled
+        while handled < limit:
+            item = await claim_one(now=now, sinks=sinks)
+            if item is None:
+                return
+            handled += 1
+            await _handle(item, client, fetcher, now)
+
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT_SECONDS)) as client:
-            while handled < limit:
-                item = await claim_one(now=now)
-                if item is None:
-                    break
-                outcome = await deliver(item, client)
-                status = await _finish(item, outcome, now or _now())
-                if item.sink == "webhook" and status in ("sent", "dead"):
-                    if status == "sent" or outcome.counts_against_webhook:
-                        await _record_webhook_result(item, ok=status == "sent")
-                handled += 1
+            fetcher = _new_fetcher()
+            try:
+                await asyncio.gather(
+                    *(worker(sinks, client, fetcher) for sinks, n in LANES for _ in range(n))
+                )
+            finally:
+                await fetcher.aclose()
     except Exception:
         logger.warning("outbox sweep crashed", exc_info=True)
     return handled
@@ -429,11 +561,14 @@ async def stop_outbox_sweeper() -> None:
 
 __all__ = [
     "BACKOFF_SECONDS",
+    "LANES",
     "MAX_ATTEMPTS",
     "Outcome",
+    "SEND_DEADLINE_SECONDS",
     "WEBHOOK_DISABLE_THRESHOLD",
     "backoff_after",
     "claim_one",
+    "count_recent",
     "deliver",
     "enqueue",
     "enqueue_many",

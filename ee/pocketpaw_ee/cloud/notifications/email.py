@@ -9,10 +9,12 @@
 # ``result.delivered`` / ``queued`` / ``permanent_bounces``.
 #
 # ``send_email`` never raises. It returns a ``SendResult`` whose ``outcome`` the
-# outbox acts on: ``sent``; ``retry`` for 429, 5xx and transport errors (the
-# outbox backs off); ``permanent`` for every other non-2xx (400 schema, 401/403
-# token, sending disabled). Permanent bounces ride back on a ``sent`` result so
-# the caller can record them against the recipient.
+# outbox acts on: ``sent``; ``retry`` for 429, 5xx and transport errors, and also
+# for 401/403 (a revoked token or sending disabled on the account is an operator
+# problem that gets fixed, not a reason to drop mail; ``auth_failure`` tells the
+# outbox to warn the workspace admins once); ``permanent`` for every other
+# non-2xx (400/422 schema or bad message). Permanent bounces ride back on a
+# ``sent`` result so the caller can record them against the recipient.
 #
 # The sink is OFF until POCKETPAW_CF_EMAIL_ACCOUNT_ID, _API_TOKEN and _FROM are
 # all set; ``load_config`` logs that once. Templates are plain and accessible,
@@ -106,6 +108,8 @@ class SendResult:
     delivered: list[str] = field(default_factory=list)
     queued: list[str] = field(default_factory=list)
     permanent_bounces: list[str] = field(default_factory=list)
+    # 401/403 from Cloudflare: the token or the account's sending is broken.
+    auth_failure: bool = False
 
 
 def _request_body(message: EmailMessage, config: EmailConfig) -> dict[str, Any]:
@@ -159,6 +163,10 @@ async def send_email(
     code = resp.status_code
     if code == 429 or code >= 500:
         return SendResult(outcome="retry", error=_error_text(resp), status_code=code)
+    if code in (401, 403):
+        return SendResult(
+            outcome="retry", error=_error_text(resp), status_code=code, auth_failure=True
+        )
     if not 200 <= code < 300:
         return SendResult(outcome="permanent", error=_error_text(resp), status_code=code)
     try:

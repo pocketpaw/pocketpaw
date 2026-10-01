@@ -35,6 +35,7 @@ directly via module import.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from beanie import PydanticObjectId
@@ -201,6 +202,15 @@ async def create_many(
     return created
 
 
+async def has_recent(workspace_id: str, kind: str, since: datetime) -> bool:
+    """Whether a ``kind`` notification was created in ``workspace_id`` since
+    ``since`` (dedupe for once-a-day operational notices)."""
+    doc = await _NotificationDoc.find_one(
+        {"workspace": workspace_id, "type": kind, "createdAt": {"$gte": since}}
+    )
+    return doc is not None
+
+
 async def count_unread(user_id: str) -> int:
     """Return the total count of unread notifications for a user."""
     return await _NotificationDoc.find({"recipient": user_id, "read": False}).count()
@@ -265,12 +275,16 @@ async def delete_notification(notification_id: str, user_id: str) -> bool:
 
 
 _WEBHOOK_DISABLE_THRESHOLD = 10
+# After a rotation the replaced secret keeps signing (as a second ``v1=``) this long.
+WEBHOOK_SECRET_GRACE = timedelta(hours=24)
 
 
 def _config_to_dict(doc, *, webhook_secret: str | None = None) -> dict:
     """Wire shape for the delivery config. The URLs are returned as stored (the
     admin who set them may see them); the signing secret only when
-    ``webhook_secret`` is passed, i.e. once, right after it was minted."""
+    ``webhook_secret`` is passed, i.e. once, right after it was minted.
+    ``signed`` is False for a webhook saved before signing existed: it still
+    delivers, unsigned, until the admin saves it again or rotates its secret."""
     return {
         "workspace_id": doc.workspace,
         "slack_webhook_url": doc.slack_webhook_url,
@@ -278,6 +292,7 @@ def _config_to_dict(doc, *, webhook_secret: str | None = None) -> dict:
         "enabled": doc.enabled,
         "routes": dict(doc.routes or {}),
         "has_webhook_secret": bool(doc.webhook_secret_enc),
+        "signed": bool(doc.webhook_url and doc.webhook_secret_enc),
         "webhook_secret": webhook_secret,
         "webhook_disabled_at": doc.webhook_disabled_at,
         "webhook_failure_count": doc.webhook_failure_count,
@@ -290,6 +305,12 @@ async def _find_config(workspace_id: str):
     return await NotificationDeliveryConfig.find_one(
         NotificationDeliveryConfig.workspace == workspace_id
     )
+
+
+def _config_collection():
+    from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+
+    return NotificationDeliveryConfig.get_pymongo_collection()
 
 
 async def get_delivery_config(workspace_id: str) -> dict | None:
@@ -311,8 +332,9 @@ async def set_delivery_config(
 
     A non-empty URL that fails the SSRF check (DNS included) is rejected with
     ``Forbidden`` before anything is stored. Empty / ``None`` clears that sink.
-    Saving a NEW webhook URL (or the first one) mints a signing secret, returned
-    in this response only, and re-arms a webhook that was switched off.
+    Saving a NEW webhook URL, or one that has no secret yet, mints a signing
+    secret returned in this response only. Any save that names a webhook URL
+    re-arms a webhook that was switched off.
     """
     from pocketpaw_ee.cloud.audit.webhooks import mint_secret
     from pocketpaw_ee.cloud.auth.sso import crypto
@@ -329,15 +351,15 @@ async def set_delivery_config(
     if doc is None:
         doc = NotificationDeliveryConfig(workspace=workspace_id)
     new_secret: str | None = None
-    url_changed = generic != doc.webhook_url
     if generic is None:
         doc.webhook_secret_enc = ""
-    elif url_changed or not doc.webhook_secret_enc:
+        doc.webhook_secret_prev_enc = ""
+    elif generic != doc.webhook_url or not doc.webhook_secret_enc:
         new_secret = mint_secret()
         doc.webhook_secret_enc = crypto.encrypt(new_secret)
-    if url_changed:
-        doc.webhook_failure_count = 0
-        doc.webhook_disabled_at = None
+        doc.webhook_secret_prev_enc = ""
+    doc.webhook_failure_count = 0
+    doc.webhook_disabled_at = None
     doc.slack_webhook_url = slack
     doc.webhook_url = generic
     doc.enabled = enabled
@@ -348,7 +370,8 @@ async def set_delivery_config(
 
 async def rotate_webhook_secret(workspace_id: str) -> dict | None:
     """Mint a new signing secret for the workspace webhook, returned once, and
-    re-arm a webhook that was switched off. None when no webhook is set."""
+    re-arm a webhook that was switched off. The replaced secret keeps signing
+    alongside the new one for ``WEBHOOK_SECRET_GRACE``. None when no webhook."""
     from pocketpaw_ee.cloud.audit.webhooks import mint_secret
     from pocketpaw_ee.cloud.auth.sso import crypto
 
@@ -356,43 +379,80 @@ async def rotate_webhook_secret(workspace_id: str) -> dict | None:
     if doc is None or not doc.webhook_url:
         return None
     secret = mint_secret()
-    doc.webhook_secret_enc = crypto.encrypt(secret)
-    doc.webhook_failure_count = 0
-    doc.webhook_disabled_at = None
-    await doc.save()
+    await _config_collection().update_one(
+        {"_id": doc.id},
+        {
+            "$set": {
+                "webhook_secret_prev_enc": doc.webhook_secret_enc,
+                "webhook_secret_enc": crypto.encrypt(secret),
+                "webhook_secret_rotated_at": datetime.now(UTC),
+                "webhook_failure_count": 0,
+                "webhook_disabled_at": None,
+            }
+        },
+    )
+    doc = await _find_config(workspace_id)
     return _config_to_dict(doc, webhook_secret=secret)
 
 
-async def webhook_target(workspace_id: str) -> tuple[str, str] | None:
-    """(url, secret) of the workspace webhook while it is configured, enabled
-    and not switched off; None otherwise. Read by the outbox at send time."""
+def signing_secrets(current_enc: str, prev_enc: str, rotated_at: datetime | None) -> list[str]:
+    """Decrypted secrets to sign with: the current one, then the replaced one
+    while the rotation grace window is open. [] means deliver unsigned."""
     from pocketpaw_ee.cloud.auth.sso import crypto
 
+    if not current_enc:
+        return []
+    out = [crypto.decrypt(current_enc)]
+    if prev_enc and rotated_at is not None:
+        at = rotated_at if rotated_at.tzinfo else rotated_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) - at < WEBHOOK_SECRET_GRACE:
+            out.append(crypto.decrypt(prev_enc))
+    return out
+
+
+async def webhook_target(workspace_id: str) -> tuple[str, list[str]] | None:
+    """(url, signing secrets) of the workspace webhook while it is configured,
+    enabled and not switched off; None otherwise. An empty secret list is a
+    pre-signing webhook: the outbox delivers it unsigned, as it always was."""
     doc = await _find_config(workspace_id)
-    if doc is None or not doc.enabled or not doc.webhook_url or not doc.webhook_secret_enc:
+    if doc is None or not doc.enabled or not doc.webhook_url:
         return None
     if doc.webhook_disabled_at is not None:
         return None
-    return doc.webhook_url, crypto.decrypt(doc.webhook_secret_enc)
+    return doc.webhook_url, signing_secrets(
+        doc.webhook_secret_enc, doc.webhook_secret_prev_enc, doc.webhook_secret_rotated_at
+    )
+
+
+async def slack_target(workspace_id: str) -> str | None:
+    """The workspace Slack URL while configured and enabled (send-time check)."""
+    doc = await _find_config(workspace_id)
+    if doc is None or not doc.enabled:
+        return None
+    return doc.slack_webhook_url or None
 
 
 async def record_webhook_result(workspace_id: str, *, ok: bool) -> None:
     """Reset the consecutive-failure counter on success; on a dead delivery bump
-    it, switching the webhook off at ``_WEBHOOK_DISABLE_THRESHOLD``."""
-    from datetime import UTC, datetime
-
-    doc = await _find_config(workspace_id)
-    if doc is None:
-        return
+    it and switch the webhook off at ``_WEBHOOK_DISABLE_THRESHOLD``. Atomic
+    ``$inc`` / conditional ``$set``, never a whole-document save, so concurrent
+    results and a concurrent config save can't lose each other's updates."""
+    coll = _config_collection()
     if ok:
-        if doc.webhook_failure_count:
-            doc.webhook_failure_count = 0
-            await doc.save()
+        await coll.update_one(
+            {"workspace": workspace_id, "webhook_failure_count": {"$gt": 0}},
+            {"$set": {"webhook_failure_count": 0}},
+        )
         return
-    doc.webhook_failure_count += 1
-    if doc.webhook_failure_count >= _WEBHOOK_DISABLE_THRESHOLD and doc.webhook_disabled_at is None:
-        doc.webhook_disabled_at = datetime.now(UTC)
-    await doc.save()
+    await coll.update_one({"workspace": workspace_id}, {"$inc": {"webhook_failure_count": 1}})
+    await coll.update_one(
+        {
+            "workspace": workspace_id,
+            "webhook_failure_count": {"$gte": _WEBHOOK_DISABLE_THRESHOLD},
+            "webhook_disabled_at": None,
+        },
+        {"$set": {"webhook_disabled_at": datetime.now(UTC)}},
+    )
 
 
 __all__ = [
@@ -401,6 +461,7 @@ __all__ = [
     "count_unread",
     "create",
     "delete_notification",
+    "has_recent",
     "get_delivery_config",
     "list_for_user",
     "list_for_user_dicts",
@@ -409,5 +470,7 @@ __all__ = [
     "record_webhook_result",
     "rotate_webhook_secret",
     "set_delivery_config",
+    "signing_secrets",
+    "slack_target",
     "webhook_target",
 ]

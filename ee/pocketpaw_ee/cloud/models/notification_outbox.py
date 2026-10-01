@@ -10,9 +10,12 @@
 # same row; a claimant that dies mid-send leaves a lapsed lease, and the row is
 # claimable again once ``lease_until`` passes.
 #
-# ``payload`` never holds a webhook secret or rendered visitor data: a webhook
-# row names the config that owns its secret (``webhook_ref``) and a lead row
-# carries only the lead id, so the sender loads both at send time.
+# ``payload`` never holds a webhook secret (a webhook row names the config that
+# owns it, ``webhook_ref``) and never holds LEAD data (a lead row carries only
+# the lead id; the sender loads the lead at send time). It CAN hold notification
+# text: a handoff email or webhook row carries the notification's title and body,
+# which may quote the visitor (e.g. the handoff question). Finished rows expire
+# after 30 days.
 
 from __future__ import annotations
 

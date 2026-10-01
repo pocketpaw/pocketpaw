@@ -87,7 +87,7 @@ async def test_transport_error_is_retryable() -> None:
     assert result.outcome == "retry"
 
 
-@pytest.mark.parametrize("status", [400, 401, 403])
+@pytest.mark.parametrize("status", [400, 422])
 async def test_client_errors_are_permanent(status) -> None:
     def handler(_request):
         return httpx.Response(
@@ -209,3 +209,19 @@ def test_confirm_and_test_emails_have_both_parts() -> None:
     )
     test = email_mod.render_test_email(site_name="Acme", footer_url="https://app.x/s")
     assert test.html and test.text and "Acme" in test.subject
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [(401, 10101), (403, 10102), (403, 10203)],  # 10203: sending_disabled
+)
+async def test_auth_and_sending_disabled_are_retryable_and_flagged(status, code) -> None:
+    def handler(_request):
+        return httpx.Response(
+            status, json={"success": False, "errors": [{"code": code, "message": "x"}]}
+        )
+
+    async with _client(handler) as client:
+        result = await email_mod.send_email(MESSAGE, config=CONFIG, client=client)
+    assert result.outcome == "retry"
+    assert result.auth_failure is True

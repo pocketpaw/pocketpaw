@@ -8,6 +8,8 @@
 #   X-Paw-Signature: v1=<hex HMAC-SHA256(secret, f"{timestamp}.{raw_body}")>
 #   body: {"id", "type", "created_at", "data"}
 #
+# During a secret rotation's grace window the header carries two values,
+# ``v1=<new>,v1=<old>``; a receiver accepts the delivery if either verifies.
 # ``id`` is stable across retries of one delivery, so a receiver can dedupe.
 # The ``v1=`` prefix leaves room to rotate the scheme without breaking parsers.
 # ``verify_signature`` is what a Python receiver runs; it also rejects a
@@ -20,6 +22,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import Sequence
 from typing import Any
 
 TIMESTAMP_HEADER = "X-Paw-Timestamp"
@@ -39,12 +42,18 @@ def signature_header(secret: str, timestamp: str, body: str | bytes) -> str:
     return f"{SIGNATURE_VERSION}={compute_signature(secret, timestamp, body)}"
 
 
-def sign_headers(secret: str, body: str, *, now: float | None = None) -> dict[str, str]:
+def sign_headers(
+    secrets: str | Sequence[str], body: str, *, now: float | None = None
+) -> dict[str, str]:
+    """Headers for one delivery. Several secrets (the new one first, then the
+    one it replaced, during a rotation's grace window) give several
+    comma-separated ``v1=`` values; a receiver accepts any that verifies."""
     timestamp = str(int(now if now is not None else time.time()))
+    keys = [secrets] if isinstance(secrets, str) else [k for k in secrets if k]
     return {
         "Content-Type": "application/json",
         TIMESTAMP_HEADER: timestamp,
-        SIGNATURE_HEADER: signature_header(secret, timestamp, body),
+        SIGNATURE_HEADER: ",".join(signature_header(k, timestamp, body) for k in keys),
     }
 
 

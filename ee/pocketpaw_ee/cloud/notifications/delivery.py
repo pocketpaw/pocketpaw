@@ -70,14 +70,11 @@ _FORBIDDEN_HOSTNAMES = frozenset(
 
 
 def _ip_is_unsafe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    # ``is_global`` is False for private, loopback, link-local, reserved,
+    # unspecified AND shared/CGNAT space (100.64.0.0/10, which holds cloud
+    # metadata endpoints such as 100.100.100.200); multicast is "global" to
+    # ipaddress but never a webhook receiver.
+    return not ip.is_global or ip.is_multicast
 
 
 def _host_as_literal_ip(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:

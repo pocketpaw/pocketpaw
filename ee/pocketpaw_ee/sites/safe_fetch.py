@@ -7,7 +7,8 @@
 #
 # `fetch_single_url` is the entry point for one fetch; it owns the client
 # lifecycle. `SafeFetcher` is the multi-fetch form, for a caller that wants one
-# connection pool across many requests. Both run the same pipeline:
+# connection pool across many requests; its `post` (no redirects) is how the
+# notification outbox delivers webhooks. All run the same pipeline:
 #
 #   * URL SHAPE (`validate_fetch_url`): http(s) only, a real hostname, NO
 #     credentials, NO port beyond 80/443/default, length-capped. A literal-IP
@@ -318,18 +319,50 @@ class SafeFetcher:
             )
         raise FetchError(f"too many redirects (max {MAX_REDIRECTS})")
 
+    async def post(
+        self, url: str, *, content: str | bytes, headers: dict[str, str] | None = None
+    ) -> FetchResult:
+        """POST ``content`` to ``url`` through the same URL + DNS + IP checks and
+        the same pinned connection as ``fetch``. Redirects are NOT followed: a
+        3xx comes back as the result's status (a webhook receiver that redirects
+        a signed POST is answering wrong, and following it would re-send the
+        body to wherever it points). DNS failure raises ``FetchError``; a
+        forbidden target raises ``ValidationError`` — both before any socket."""
+        parsed = validate_fetch_url(url)
+        ip = await self._checked_ip(parsed.hostname)
+        status, content_type, _location, body, resp_headers = await self._pinned_request(
+            "POST", parsed, ip, content=content, headers=headers
+        )
+        return FetchResult(
+            url=url, status=status, content_type=content_type, body=body, headers=resp_headers
+        )
+
     async def _pinned_get(
         self, parsed: Any, ip: str
     ) -> tuple[int, str, str, bytes, dict[str, str]]:
-        """One GET pinned to ``ip``: URL host swapped for the validated address,
-        original Host header (and SNI hostname for https) supplied explicitly."""
+        return await self._pinned_request("GET", parsed, ip)
+
+    async def _pinned_request(
+        self,
+        method: str,
+        parsed: Any,
+        ip: str,
+        *,
+        content: str | bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, str, str, bytes, dict[str, str]]:
+        """One request pinned to ``ip``: URL host swapped for the validated
+        address, original Host header (and SNI hostname for https) supplied
+        explicitly."""
         port = parsed.port
         default_port = port is None or (parsed.scheme, port) in (("http", 80), ("https", 443))
         host_header = parsed.hostname if default_port else f"{parsed.hostname}:{port}"
         ip_host = f"[{ip}]" if ":" in ip else ip
         netloc = ip_host if default_port else f"{ip_host}:{port}"
         pinned = urlunparse((parsed.scheme, netloc, parsed.path or "/", "", parsed.query, ""))
-        request = self._client.build_request("GET", pinned, headers={"Host": host_header})
+        request = self._client.build_request(
+            method, pinned, content=content, headers={**(headers or {}), "Host": host_header}
+        )
         if parsed.scheme == "https":
             # TLS must negotiate + verify against the REAL name, not the IP.
             request.extensions["sni_hostname"] = parsed.hostname

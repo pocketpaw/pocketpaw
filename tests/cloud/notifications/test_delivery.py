@@ -50,7 +50,10 @@ class _Recorder:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
-        self.requests.append((str(request.url), body))
+        # Webhook/Slack connections are pinned to the resolved IP, so the URL
+        # the receiver was configured with is the Host header plus the path.
+        url = f"{request.url.scheme}://{request.headers['host']}{request.url.raw_path.decode()}"
+        self.requests.append((url, body))
         return self._responder(request)
 
     def urls(self) -> list[str]:

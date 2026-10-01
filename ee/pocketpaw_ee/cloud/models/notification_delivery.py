@@ -13,9 +13,11 @@
 # every configured sink while ``enabled`` is True; a present entry narrows it.
 #
 # The webhook signing secret is Fernet-encrypted (``webhook_secret_enc``), minted
-# when a URL is first saved or changed, and shown to the admin once. After 10
-# consecutive dead deliveries the webhook is switched off (``webhook_disabled_at``)
-# until the URL is saved again.
+# when a URL is first saved or changed, and shown to the admin once. A webhook
+# saved before signing existed has no secret and keeps delivering unsigned. On
+# rotation the old secret stays in ``webhook_secret_prev_enc`` and co-signs for
+# a grace window. After 10 consecutive dead deliveries the webhook is switched
+# off (``webhook_disabled_at``) until it is saved again.
 
 from __future__ import annotations
 
@@ -58,6 +60,9 @@ class NotificationDeliveryConfig(TimestampedDocument):
     enabled: bool = False
     routes: dict[str, list[str]] = Field(default_factory=dict)
     webhook_secret_enc: str = ""
+    # The secret a rotation replaced, still signing until the grace window ends.
+    webhook_secret_prev_enc: str = ""
+    webhook_secret_rotated_at: datetime | None = None
     webhook_failure_count: int = 0
     webhook_disabled_at: datetime | None = None
 
