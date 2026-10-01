@@ -1,5 +1,8 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated 2026-10-01 (feat/discover-index): ``mount_cloud`` registers the Discover
+sources and the site-template -> listing sync after ``init_realtime``.
+
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
 ``pocketpaw.routes`` entry-point). It mounts every domain router under
 ``/api/v1`` (each domain keeps a thin router over a service that owns its
@@ -7,10 +10,11 @@ Beanie writes), installs the CSRF and EE auth-bridge middleware (the bridge
 grants OSS ``full_access`` only to platform superusers), runs
 ``init_realtime()``, and only then registers the bus subscribers and bridges
 that need the singleton bus: upload -> KB indexing, pocket outcomes, audit
-mirroring into the SQLite store, tasks/meeting/lead/alert notifications, push
-fan-out, the Mission Control activity buffer, and built-in plus entry-point
-workspace jobs. Public routes that must stay unauthenticated (the Dodo webhook,
-share-link GETs) are mounted separately from their authenticated siblings.
+mirroring into the SQLite store, the Discover index sync (site templates ->
+listings), tasks/meeting/lead/alert notifications, push fan-out, the Mission
+Control activity buffer, and built-in plus entry-point workspace jobs. Public
+routes that must stay unauthenticated (the Dodo webhook, share-link GETs) are
+mounted separately from their authenticated siblings.
 
 Background loops are collected as lifespan hooks and run by
 ``_install_cloud_lifespan`` inside the host's lifespan (after Mongo is open).
@@ -977,6 +981,15 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.uploads.listeners import register_upload_listeners
 
     register_upload_listeners()
+
+    # Discover index (DS-1): register the built-in sources (site templates) and
+    # keep listings in sync with site-template events. Same constraint as the
+    # upload listeners: subscribe AFTER init_realtime installed the bus.
+    from pocketpaw_ee.cloud.discover.listeners import register_discover_listeners
+    from pocketpaw_ee.cloud.discover.sources import register_builtin_sources
+
+    register_builtin_sources()
+    register_discover_listeners()
 
     # Pocket outcomes ledger subscriber (RFC 05 M2b.2). Appends every
     # ``pocket.outcome`` event to its workspace-scoped JSONL ledger so

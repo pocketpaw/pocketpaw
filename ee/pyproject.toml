@@ -588,8 +588,40 @@ source_modules = [
     "pocketpaw_ee.cloud.site_templates.domain",
     "pocketpaw_ee.cloud.site_templates.router",
     "pocketpaw_ee.cloud.site_templates.service",
+    "pocketpaw_ee.cloud.site_templates.service_admin",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.pocket"]
+
+[[tool.importlinter.contracts]]
+name = "Discover — Beanie writes only from service.py/service_admin.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # DS-1 (feat/discover-index). Only ``discover.service`` and
+    # ``discover.service_admin`` own the DiscoverListing Beanie reads/writes;
+    # dto/domain/sources/listeners go through them.
+    "pocketpaw_ee.cloud.discover.dto",
+    "pocketpaw_ee.cloud.discover.domain",
+    "pocketpaw_ee.cloud.discover.sources",
+    "pocketpaw_ee.cloud.discover.listeners",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.discover_listing"]
+
+[[tool.importlinter.contracts]]
+name = "Discover — reads site templates only through its services"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Discover reads templates through ``site_templates.service`` /
+    # ``site_templates.service_admin`` and never touches the SiteTemplate doc.
+    "pocketpaw_ee.cloud.discover.dto",
+    "pocketpaw_ee.cloud.discover.domain",
+    "pocketpaw_ee.cloud.discover.sources",
+    "pocketpaw_ee.cloud.discover.listeners",
+    "pocketpaw_ee.cloud.discover.service",
+    "pocketpaw_ee.cloud.discover.service_admin",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.site_template"]
 
 [[tool.importlinter.contracts]]
 name = "AutomationsStatus — Beanie writes only from service.py"
