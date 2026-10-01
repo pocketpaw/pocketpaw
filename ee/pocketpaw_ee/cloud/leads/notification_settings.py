@@ -4,8 +4,9 @@
 # captured lead, a concierge handoff, later a booking) into bell/push rows,
 # emails and webhook deliveries.
 #
-# Settings: who gets email (the workspace owner's VERIFIED account address plus
-# up to 5 confirmed extras), an optional signed site webhook, and per-event sinks
+# Settings: who gets email (the workspace owner's account address, once it is
+# verified on the account OR confirmed through our link, plus up to 5 confirmed
+# extras), an optional signed site webhook, and per-event sinks
 # (email | webhook | push). No row means the owner's address with email + push
 # for every event. Every write is a targeted ``$set`` / ``$inc`` / ``$push`` /
 # ``$pull`` / positional update, never a read-modify-write of the whole row.
@@ -13,7 +14,8 @@
 # Confirm flow: adding an address stores it unconfirmed with a fresh nonce and
 # queues ONE confirm email carrying a Fernet token (site, workspace, email,
 # nonce) that expires after 7 days. Re-sends are limited to one per address per
-# 30 minutes and 50 per workspace per day. The public confirm page shows a
+# 30 minutes (an atomic marker that survives remove/re-add) and 50 per
+# workspace per day. An unverified owner address gets the same link. The public confirm page shows a
 # button only (GET has no side effect, so link scanners can't confirm); the
 # POST confirms. A new nonce voids older links. Unconfirmed, bounced or
 # unverified addresses get no other mail, checked at enqueue and at send.
@@ -176,6 +178,25 @@ def _recipient_state(r: LeadNotificationRecipient) -> str:
     return "confirmed" if r.confirmed_at is not None else "pending"
 
 
+def _owner_confirmed(settings: SiteNotificationSettings, owner: str) -> bool:
+    oc = settings.owner_confirm
+    return bool(
+        owner
+        and oc is not None
+        and oc.email == owner.lower()
+        and oc.confirmed_at is not None
+        and oc.bounced_at is None
+    )
+
+
+def _owner_status(settings: SiteNotificationSettings, owner: str, verified: bool) -> str | None:
+    if not owner:
+        return None
+    if verified:
+        return "verified"
+    return "confirmed" if _owner_confirmed(settings, owner) else "pending_confirm"
+
+
 def _site_webhook_active(settings: SiteNotificationSettings) -> bool:
     return bool(
         settings.webhook_url
@@ -194,8 +215,8 @@ async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[st
         "configured": settings.id is not None,
         "include_owner": settings.include_owner,
         "owner_email": owner or None,
-        # "unverified" owner addresses get no mail until the account is verified.
-        "owner_email_status": ("verified" if verified else "unverified") if owner else None,
+        # verified (account) | confirmed (clicked our link) | pending_confirm
+        "owner_email_status": _owner_status(settings, owner, verified),
         "emails": [
             {
                 "email": r.email,
@@ -337,20 +358,99 @@ def _require_public_base_url() -> None:
         )
 
 
-def _aware(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    return value if value.tzinfo else value.replace(tzinfo=UTC)
+async def _gate_confirm(site: _SiteDoc, address: str) -> None:
+    """The confirm-email rate limits, raising ``RateLimited``: 50 per workspace
+    per day, and one per (site, address) per 30 minutes. The 30-minute gate is
+    an atomic marker that outlives the recipient row, so removing and re-adding
+    an address doesn't reset it."""
+    from pocketpaw_ee.cloud.notifications import outbox
+
+    now = _now()
+    sent_today = await outbox.count_recent(
+        workspace=site.workspace, kind=CONFIRM_KIND, since=now - timedelta(days=1)
+    )
+    if sent_today >= CONFIRM_DAILY_CAP:
+        raise RateLimited(
+            "lead_notifications.confirm_daily_cap",
+            f"This workspace sent {CONFIRM_DAILY_CAP} confirm emails today. Try again tomorrow.",
+        )
+    marker = f"confirm:{site.workspace}:{site.id}:{address}"
+    if not await outbox.claim_marker(marker, CONFIRM_RESEND_INTERVAL, now=now):
+        raise RateLimited(
+            "lead_notifications.confirm_rate_limited",
+            "A confirm email was sent to this address recently. Try again in 30 minutes.",
+        )
+
+
+async def _queue_confirm(site: _SiteDoc, address: str, nonce: str) -> None:
+    from pocketpaw_ee.cloud.notifications import email as email_mod
+    from pocketpaw_ee.cloud.notifications import outbox
+
+    await outbox.enqueue(
+        workspace=site.workspace,
+        kind=CONFIRM_KIND,
+        sink="email",
+        target=address,
+        payload={
+            "template": "confirm",
+            "site_ref": str(site.id),
+            "site_name": site.name,
+            "confirm_url": confirm_url(_confirm_token(site, address, nonce)),
+            "footer_url": email_mod.site_settings_url(str(site.id)),
+        },
+    )
+
+
+async def _send_owner_confirm(site: _SiteDoc, owner: str) -> None:
+    """Send the owner's (unverified) account address the confirm link. Raises
+    ``RateLimited`` like any other confirm."""
+    address = owner.lower()
+    await _gate_confirm(site, address)
+    nonce = secrets.token_urlsafe(12)
+    now = _now()
+    record = LeadNotificationRecipient(
+        email=address, added_at=now, added_by="owner", confirm_nonce=nonce, confirm_sent_at=now
+    )
+    await _ensure_row(site)
+    await _coll().update_one(
+        _key(site), {"$set": {"owner_confirm": record.model_dump(mode="python")}}
+    )
+    await _queue_confirm(site, address, nonce)
+
+
+async def ensure_owner_confirm_sent(site: _SiteDoc) -> None:
+    """Best effort: when the owner's address needs a confirm, send it, at most
+    once a day per site. Silent on rate limits; never raises."""
+    try:
+        owner, verified = await owner_identity(site.workspace)
+        if not owner or verified:
+            return
+        settings = await settings_for(site)
+        if not settings.include_owner or _owner_confirmed(settings, owner):
+            return
+        from pocketpaw_ee.cloud.notifications import outbox
+
+        # Unprompted sends (triggered by a lead) at most once a day per site,
+        # so an owner who ignores the link isn't mailed on every lead.
+        if not await outbox.claim_marker(
+            f"owner_confirm_auto:{site.workspace}:{site.id}", timedelta(days=1)
+        ):
+            return
+        await _send_owner_confirm(site, owner)
+    except RateLimited:
+        return
+    except Exception:
+        logger.warning("could not send the owner confirm for site %s", site.id, exc_info=True)
 
 
 async def add_recipient(
     workspace_id: str, site_id: str, email: str, *, added_by: str = ""
 ) -> dict[str, Any]:
     """Add an unconfirmed address and queue its confirm email. Re-adding an
-    address that is pending or bounced re-sends a fresh link (at most once per
-    30 minutes); a confirmed one is left as is."""
+    address that is pending or bounced re-sends a fresh link; a confirmed one
+    is left as is. The owner's own address, when the account hasn't verified
+    it, re-sends the owner confirm instead. Rate limits: see ``_gate_confirm``."""
     from pocketpaw_ee.cloud.notifications import email as email_mod
-    from pocketpaw_ee.cloud.notifications import outbox
 
     address = _normalize_email(email)
     site = await _load(workspace_id, site_id)
@@ -361,26 +461,24 @@ async def add_recipient(
         )
     _require_public_base_url()
     current = await settings_for(site)
+    owner, verified = await owner_identity(workspace_id)
+    if owner and address == owner.lower():
+        if not verified and not _owner_confirmed(current, owner):
+            await _send_owner_confirm(site, owner)
+        return await _wire(site)
+
     existing = next((r for r in current.emails if r.email == address), None)
     if existing is not None and existing.confirmed_at is not None and existing.bounced_at is None:
         return await _wire(site)
-    now = _now()
-    last = _aware(existing.confirm_sent_at) if existing is not None else None
-    if last is not None and now - last < CONFIRM_RESEND_INTERVAL:
-        raise RateLimited(
-            "lead_notifications.confirm_rate_limited",
-            "A confirm email was sent to this address recently. Try again in 30 minutes.",
+    if existing is None and len(current.emails) >= MAX_EXTRA_RECIPIENTS:
+        raise ValidationError(
+            "lead_notifications.too_many_recipients",
+            f"A site can notify at most {MAX_EXTRA_RECIPIENTS} extra addresses.",
         )
-    sent_today = await outbox.count_recent(
-        workspace=workspace_id, kind=CONFIRM_KIND, since=now - timedelta(days=1)
-    )
-    if sent_today >= CONFIRM_DAILY_CAP:
-        raise RateLimited(
-            "lead_notifications.confirm_daily_cap",
-            f"This workspace sent {CONFIRM_DAILY_CAP} confirm emails today. Try again tomorrow.",
-        )
+    await _gate_confirm(site, address)
 
     nonce = secrets.token_urlsafe(12)
+    now = _now()
     await _ensure_row(site)
     if existing is not None:
         result = await _coll().update_one(
@@ -417,19 +515,7 @@ async def add_recipient(
             "lead_notifications.too_many_recipients",
             f"A site can notify at most {MAX_EXTRA_RECIPIENTS} extra addresses.",
         )
-    await outbox.enqueue(
-        workspace=workspace_id,
-        kind=CONFIRM_KIND,
-        sink="email",
-        target=address,
-        payload={
-            "template": "confirm",
-            "site_ref": str(site.id),
-            "site_name": site.name,
-            "confirm_url": confirm_url(_confirm_token(site, address, nonce)),
-            "footer_url": email_mod.site_settings_url(str(site.id)),
-        },
-    )
+    await _queue_confirm(site, address, nonce)
     return await _wire(site)
 
 
@@ -442,8 +528,8 @@ async def remove_recipient(workspace_id: str, site_id: str, email: str) -> dict[
     return await _wire(site)
 
 
-async def _token_target(token: str) -> tuple[_SiteDoc, str, str] | None:
-    """(site, email, nonce) named by a live confirm token, or None."""
+async def _token_target(token: str) -> tuple[_SiteDoc, str, str, bool] | None:
+    """(site, email, nonce, is_owner) named by a live confirm token, or None."""
     from cryptography.fernet import InvalidToken
 
     from pocketpaw_ee.cloud.auth.sso import crypto
@@ -458,10 +544,13 @@ async def _token_target(token: str) -> tuple[_SiteDoc, str, str] | None:
     if site is None:
         return None
     settings = await settings_for(site)
+    oc = settings.owner_confirm
+    if oc is not None and oc.email == address and secrets.compare_digest(oc.confirm_nonce, nonce):
+        return site, address, nonce, True
     match = next((r for r in settings.emails if r.email == address), None)
     if match is None or not secrets.compare_digest(match.confirm_nonce, nonce):
         return None
-    return site, address, nonce
+    return site, address, nonce, False
 
 
 async def check_token(token: str) -> tuple[str, str]:
@@ -478,7 +567,18 @@ async def confirm(token: str) -> tuple[str, str]:
     target = await _token_target(token)
     if target is None:
         return "invalid", ""
-    site, address, nonce = target
+    site, address, nonce, is_owner = target
+    if is_owner:
+        await _coll().update_one(
+            {
+                **_key(site),
+                "owner_confirm.email": address,
+                "owner_confirm.confirm_nonce": nonce,
+                "owner_confirm.confirmed_at": None,
+            },
+            {"$set": {"owner_confirm.confirmed_at": _now()}},
+        )
+        return "confirmed", site.name or ""
     await _coll().update_one(
         {
             **_key(site),
@@ -543,13 +643,14 @@ async def send_test(workspace_id: str, site_id: str) -> dict[str, Any]:
 
 
 async def allowed_recipients(workspace_id: str, site: _SiteDoc) -> list[str]:
-    """Addresses that may get this site's mail now: the owner's (when included
-    AND verified) plus confirmed, unbounced extras. Deduped, case-insensitively."""
+    """Addresses that may get this site's mail now: the owner's (when included,
+    and either verified on the account or confirmed through our link) plus
+    confirmed, unbounced extras. Deduped, case-insensitively."""
     settings = await settings_for(site)
     out: list[str] = []
     if settings.include_owner:
-        owner = await owner_email(workspace_id)
-        if owner:
+        owner, verified = await owner_identity(workspace_id)
+        if owner and (verified or _owner_confirmed(settings, owner)):
             out.append(owner)
     out += [r.email for r in settings.emails if r.confirmed_at and r.bounced_at is None]
     seen: set[str] = set()
@@ -572,6 +673,16 @@ async def record_bounce(workspace_id: str, site_id: str, email: str) -> None:
         },
         {"$set": {"emails.$.bounced_at": _now()}},
     )
+    if getattr(result, "modified_count", 0) == 0:
+        result = await _coll().update_one(
+            {
+                "workspace": workspace_id,
+                "site_id": site_id,
+                "owner_confirm.email": email.lower(),
+                "owner_confirm.bounced_at": None,
+            },
+            {"$set": {"owner_confirm.bounced_at": _now()}},
+        )
     if getattr(result, "modified_count", 0) == 0:
         logger.info("permanent bounce for a non-listed address on site %s", site_id)
 
@@ -675,6 +786,9 @@ async def dispatch_site_event(
         envelope = delivery.new_event_envelope(EVENT_TYPES.get(event, event), **fields)
         rows: list[dict[str, Any]] = []
         if site is not None and "email" in sinks and email_mod.is_configured():
+            # An owner address the account hasn't verified gets a confirm link
+            # (rate-limited) instead of this mail; once confirmed it gets mail.
+            await ensure_owner_confirm_sent(site)
             site_id = str(site.id)
             if lead_id:
                 payload: dict[str, Any] = {"template": "lead", "lead_id": lead_id}
@@ -750,6 +864,7 @@ __all__ = [
     "confirm",
     "confirm_url",
     "dispatch_site_event",
+    "ensure_owner_confirm_sent",
     "find_site",
     "get_settings",
     "owner_email",

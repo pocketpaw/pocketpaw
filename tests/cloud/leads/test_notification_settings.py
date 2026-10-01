@@ -137,15 +137,19 @@ async def _lead(ws: str, site: Site, **props) -> str:
 
 
 async def _backdate_confirm(site: Site) -> None:
-    """Move every recipient's last confirm email an hour into the past."""
+    """Move every confirm-email rate marker an hour into the past."""
     from datetime import UTC, datetime, timedelta
 
-    from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
+    from pocketpaw_ee.cloud.models.notification_outbox import NotificationRateMarker
 
-    doc = await SiteNotificationSettings.find_one({"site_id": str(site.id)})
-    for r in doc.emails:
-        r.confirm_sent_at = datetime.now(UTC) - timedelta(hours=1)
-    await doc.save()
+    await NotificationRateMarker.get_pymongo_collection().update_many(
+        {}, {"$set": {"at": datetime.now(UTC) - timedelta(hours=1)}}
+    )
+
+
+def _confirm_token_from(mail: dict) -> str:
+    url = next(w for w in mail["text"].split() if "/lead-notifications/confirm/" in w)
+    return url.rsplit("/", 1)[1]
 
 
 async def _capture(ws: str, site: Site, lead_id: str) -> None:
@@ -587,21 +591,108 @@ async def test_s1_concurrent_confirm_bounce_and_failures_all_stick(net) -> None:
     assert s.webhook_failure_count == 10 and s.webhook_disabled_at is not None
 
 
-async def test_s2_unverified_owner_address_gets_no_mail(net) -> None:
+async def _unverify(owner_id: str) -> None:
     from pocketpaw_ee.cloud.models.user import User
 
-    ws, owner = await _tenant()
-    user = await User.get(owner)
+    user = await User.get(owner_id)
     user.is_verified = False
     await user.save()
+
+
+async def test_unverified_owner_confirms_through_the_link_then_gets_mail(net) -> None:
+    ws, owner = await _tenant()
+    await _unverify(owner)
     site = await _site(ws)
 
     state = await ns.get_settings(ws, str(site.id))
-    assert state["owner_email"] == OWNER_EMAIL and state["owner_email_status"] == "unverified"
+    assert state["owner_email"] == OWNER_EMAIL
+    assert state["owner_email_status"] == "pending_confirm"
     assert (await ns.send_test(ws, str(site.id)))["emails"] == []
+
+    # The first lead sends the owner the confirm link, not the lead.
     await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
     await outbox.process_due()
-    assert _emails(net) == []
+    mails = _emails(net)
+    assert [m["to"] for m in mails] == [[OWNER_EMAIL]]
+    assert "Confirm" in mails[0]["subject"]
+    # A second lead the same day doesn't re-send it.
+    await _capture(ws, site, await _lead(ws, site, email="w@x.com"))
+    await outbox.process_due()
+    assert len(_emails(net)) == 1
+
+    assert (await ns.confirm(_confirm_token_from(mails[0])))[0] == "confirmed"
+    assert (await ns.get_settings(ws, str(site.id)))["owner_email_status"] == "confirmed"
+    net.clear()
+    await _capture(ws, site, await _lead(ws, site, full_name="Priya", email="p@x.com"))
+    await outbox.process_due()
+    mails = _emails(net)
+    assert [m["to"] for m in mails] == [[OWNER_EMAIL]]
+    assert "New lead" in mails[0]["subject"]
+
+
+async def test_unverified_owner_can_resend_through_the_recipients_route(net) -> None:
+    ws, owner = await _tenant()
+    await _unverify(owner)
+    site = await _site(ws)
+    path = f"/api/v1/sites/{site.id}/lead-notifications/recipients"
+    async with AsyncClient(
+        transport=ASGITransport(app=_app("admin", ws)), base_url="http://t"
+    ) as admin:
+        first = await admin.post(path, json={"email": OWNER_EMAIL.upper()})
+        assert first.status_code == 200
+        assert first.json()["emails"] == []  # the owner isn't an extra recipient
+        assert first.json()["owner_email_status"] == "pending_confirm"
+        again = await admin.post(path, json={"email": OWNER_EMAIL})
+        assert again.status_code == 429  # same rate limit as any confirm
+    await outbox.process_due()
+    assert [m["to"] for m in _emails(net)] == [[OWNER_EMAIL]]
+
+
+async def test_verified_owner_needs_no_confirm(net) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    assert (await ns.get_settings(ws, str(site.id)))["owner_email_status"] == "verified"
+    await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
+    await outbox.process_due()
+    assert ["New lead" in m["subject"] for m in _emails(net)] == [True]
+
+
+async def test_s3_rate_limit_survives_remove_and_re_add(net) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    await ns.add_recipient(ws, str(site.id), "a@acme.test")
+    await ns.remove_recipient(ws, str(site.id), "a@acme.test")
+    from pocketpaw_ee.cloud._core.errors import RateLimited
+
+    with pytest.raises(RateLimited):
+        await ns.add_recipient(ws, str(site.id), "a@acme.test")
+
+
+def test_s3_daily_cap_count_has_an_index() -> None:
+    keys = [list(i.document["key"]) for i in NotificationOutboxItem.Settings.indexes]
+    assert ["workspace", "kind", "created_at"] in keys
+
+
+async def test_confirm_post_with_auth_cookie_and_no_csrf_header_confirms(net) -> None:
+    from pocketpaw_ee.cloud._core.csrf import CSRFMiddleware
+
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    await ns.add_recipient(ws, str(site.id), "team@acme.test")
+    await outbox.process_due()
+    token = _confirm_token_from(_emails(net)[0])
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.add_middleware(CSRFMiddleware)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t", cookies={"paw_auth": "x"}
+    ) as client:
+        resp = await client.post(f"/api/v1/lead-notifications/confirm/{token}")
+        # A look-alike route is still protected.
+        other = await client.post(f"/api/v1/sites/{site.id}/lead-notifications/test")
+    assert resp.status_code == 200 and "Email confirmed" in resp.text
+    assert other.status_code == 403
 
 
 async def test_s3_confirm_resend_and_daily_cap_return_429(net, monkeypatch) -> None:

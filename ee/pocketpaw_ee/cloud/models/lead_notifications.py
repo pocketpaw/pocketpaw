@@ -11,7 +11,9 @@
 # ``$push`` / ``$pull`` on this row, so concurrent writers can't lose updates.
 #
 # No row means "never configured" and reads as the default: the workspace
-# owner's (verified) account email plus push for every event. Extra recipients
+# owner's account email plus push for every event. An owner address that the
+# account hasn't verified must confirm through the same link as an extra
+# recipient (``owner_confirm``) first. Extra recipients
 # (at most 5, stored lower-cased) must click a signed confirm link before they
 # get mail; ``confirm_nonce`` is rotated on every (re)send, so a stale link
 # can't confirm. The webhook secret is Fernet ciphertext; after a rotation the
@@ -55,6 +57,10 @@ class SiteNotificationSettings(Document):
     site_id: str
     # Send to the workspace owner's account email as well as ``emails``.
     include_owner: bool = True
+    # Confirm state for an owner whose ACCOUNT email isn't verified (e.g. a
+    # password signup): that address goes through the same confirm link as an
+    # extra recipient before it gets mail. Unused while the account is verified.
+    owner_confirm: LeadNotificationRecipient | None = None
     emails: list[LeadNotificationRecipient] = Field(default_factory=list)
     webhook_url: str | None = None
     webhook_secret_enc: str = ""
