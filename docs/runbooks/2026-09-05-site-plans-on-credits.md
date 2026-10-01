@@ -10,6 +10,10 @@ site is paid for, and it is not the wallet.** The workspace plan carries sites
 read first if a paid-looking site shows no debit. The same change retired the
 `studio` and `agency` org flats; "What was removed" records that.
 
+Updated 2026-10-02 (`feat/partners-sell`, PH-2): **Paw Partners sell yearly
+plans.** See "Partner yearly plans" below. A renewal now buys one *period* of the
+tier, which is still one month for every public rung.
+
 ## What was broken
 
 Selecting a paid plan for a site produced a site that said **pending payment** and
@@ -336,6 +340,39 @@ top-up buys the tier again through the ordinary purchase path.
 never also debited. Once its gateway subscription is cancelled, flip it over by
 setting `billing_rail` to `credits` and `renewal_date` to when its paid period
 ends — after that the sweep picks it up like any other.
+
+## Partner yearly plans (`site_year`, `staff_year`)
+
+An ACTIVE Paw Partners workspace can sell a client site a yearly plan from its
+own wallet (`POST /api/v1/partners/sell`). There is no separate purchase code:
+the sale calls `publish_pocket` with the partner tier, so the debit, the redeploy,
+the badge/concierge stamping and the renewal date are what any paid publish does.
+The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
+
+| Tier | Features | Period | IN | Everywhere else |
+|------|----------|--------|----|-----------------|
+| `site_year` | same as `site` (badge off, custom domain) | 12 months | $17 | $29 |
+| `staff_year` | same as `staff` + 1,200 concierge conversations per year | 12 months | $56 | $89 |
+
+- Prices live in one table in `billing/site_plans.py`, read by
+  `partner_price_usd(tier, country)`; the country is the partner profile's
+  `billing_country`. `billing.service.site_plan_price_usd` is what every charge
+  site calls, and for a monthly rung it is still `monthly_price_usd`.
+- The rungs are **not** in the public catalog (`list_site_plans`). A publish or a
+  plan request naming one outside an active partner workspace is refused
+  (`sites.partner_plan_only`). They are never carried by the workspace plan.
+- `monthly_price_usd` on these rows is display-only (year price / 12, rounded
+  down). Nothing charges it.
+- **Renewals ride the same sweep.** A due `site_year` site is debited the partner
+  price again and its `renewal_date` steps 12 months from the due date; a short
+  wallet lapses it to the free floor and the site stays up, like any other.
+- A move from a monthly rung to a yearly one charges the gap against
+  `period_paid_usd` and starts the year today. A move to a shorter period keeps
+  the date: the year already paid runs out first.
+- The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
+  not from the 1st of the month.
+- A refused charge on a site that was already live now puts its billing fields
+  back. Before this it was left "pending" on the tier nobody paid for.
 
 ## A site that was charged and never went live
 

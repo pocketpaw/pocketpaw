@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
+  POST /partners/sell, GET /partners/sites (yearly partner plans paid from the
+  partner's credit wallet).
 Updated: 2026-10-02 (feat/partners-foundation, PH-1) — added "Paw Partners —
   profile and clients": GET /partners/me, client CRUD under /partners/clients,
   and the operator PUT/DELETE /platform/workspaces/{workspace_id}/partner. An active
@@ -1015,6 +1018,46 @@ the profile. Both return `{workspace_id, partner}` and write a platform audit ro
 **Billing effect:** while the profile is `active`, the per-site billing seams
 (`billing.enforcement.sites_enforced`) enforce for that workspace even with
 `billing_enforced` and `sites_billing_enforced` off.
+
+### `GET /partners/offers`
+
+The partner-only yearly plans at the caller's `billing_country` price:
+`[{sku, period_months, price_credits, conversation_allowance, label}]`
+(1 credit = $0.01). Today: `site_year` (1,700 credits in IN, 2,900 elsewhere) and
+`staff_year` (5,600 / 8,900; 1,200 conversations a year). Needs `fabric.read`;
+**403** `partner.not_active` unless the profile is ACTIVE. These plans are not in
+the public plan catalog.
+
+### `POST /partners/sell`
+
+Body `{client_id, site_id, sku}`. Sells one of the workspace's sites a partner
+plan, paid from the workspace credit wallet. The client must be this partner's
+(**404** otherwise), the site must belong to this workspace (**404**), and `sku`
+must be a partner plan (**422** `partners.unknown_sku`). It runs the ordinary
+paid-publish path for the site's pocket — wallet debit, then redeploy — and
+stamps the site's `partner_client_id`. Returns `{site_id, name, url, plan_tier,
+renewal_date, partner_client_id, subscription_status}`.
+
+- Needs `sites.buy_plan` (workspace admin): a sale spends the wallet. **403**
+  for a member, and **403** `partner.not_active` without an ACTIVE profile.
+- Short wallet: **402** `credits.insufficient`, nothing charged, the site keeps
+  its plan.
+- Selling the sku a site already holds and pays for is a no-op apart from the
+  client stamp: no second debit, no redeploy.
+- **409** `partners.site_on_plan` for a site carried by the workspace plan, and
+  `partners.foreign_site` for a concierge-only (foreign) site.
+- Renewals happen on their own: the site-renewal sweep debits the partner price
+  when `renewal_date` passes and steps it 12 months, or lapses the site to the
+  free tier (still published) when the wallet is short.
+
+### `GET /partners/sites`
+
+The workspace's sold sites: `[{site_id, name, url, plan_tier, renewal_date,
+partner_client_id, client_name}]`, ordered by `renewal_date` (sites with none come first). Optional
+`due_within_days` (0–3660) keeps only sites whose `renewal_date` is within that
+many days (a site with no renewal date is never due); without it, every sold
+site is returned, including lapsed ones with a null date. Needs `fabric.read` and
+an ACTIVE profile.
 
 ## Site templates
 
