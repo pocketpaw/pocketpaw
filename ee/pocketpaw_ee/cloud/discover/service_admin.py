@@ -24,6 +24,9 @@
 # instead of losing it, so staff can unhide by listing id; reindex does the same.
 # Unhiding moves the reporters into ``dismissed_reporters`` (their later reports
 # on that listing are ignored), so the same accounts can't re-hide it at once.
+# ``reindex`` refreshes each template's ``live_url`` from its source site first
+# (sites emit no rename / unpublish / delete events), so a stale URL heals on
+# the next reindex.
 
 from __future__ import annotations
 
@@ -245,14 +248,18 @@ async def sync_site_template(template_id: str) -> None:
 
 async def reindex(source: str) -> dict:
     """Idempotent backfill: upsert every public item of ``source`` (a hidden
-    one as a hidden listing) and remove listings whose item is gone or no longer
-    public. Only ``site_template`` is supported."""
+    one as a hidden listing, ``live_url`` re-read from the source site) and
+    remove listings whose item is gone or no longer public. Only
+    ``site_template`` is supported."""
     # admin-cross-tenant: rebuilds the public index across every workspace.
     if source != SITE_TEMPLATE:
         raise ValidationError("discover.reindex_unsupported", f"Cannot reindex {source!r}")
     rows = await site_templates_admin.iter_public_for_discover()
     keep = {row["id"] for row in rows}
     for row in rows:
+        # ponytail: one site lookup per public template; batch by pocket id if
+        # public templates reach the thousands.
+        row["live_url"] = await site_templates_admin.refresh_live_url(row["id"])
         await upsert_from_source(
             SITE_TEMPLATE, row["id"], _site_template_fields(row), hide=row["hidden"]
         )

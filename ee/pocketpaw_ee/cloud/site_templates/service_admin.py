@@ -15,6 +15,8 @@
 # instead of deleting it; ``iter_public_for_discover`` includes hidden ones.
 # ``set_hidden_from_discover`` lets a Discover hide / unhide reach the template,
 # so making it private and public again can't launder a hide.
+# ``refresh_live_url`` re-reads the source site's URL (Discover's reindex calls
+# it: sites emit no rename / unpublish / delete events to listen to).
 
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ from pydantic import BaseModel, Field
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import SiteTemplateUpdated
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
-from pocketpaw_ee.cloud.site_templates.service import _audit, _event_data
+from pocketpaw_ee.cloud.site_templates.service import _audit, _event_data, _source_live_url
 
 
 class _Row(BaseModel):
@@ -45,6 +47,7 @@ class _Row(BaseModel):
     audiences: list[str] = Field(default_factory=list)
     preview_image_url: str | None = None
     live_url: str | None = None
+    source_pocket_id: str = ""
 
 
 def _discover_row(doc: _Row) -> dict[str, Any]:
@@ -87,6 +90,31 @@ async def iter_public_for_discover() -> list[dict[str, Any]]:
     return [_discover_row(doc) for doc in docs]
 
 
+async def refresh_live_url(template_id: str) -> str | None:
+    """Re-read the template's source site URL (``None`` once the site is no
+    longer deployed), store it when it changed, and return it. A missing
+    template returns ``None``."""
+    # admin-cross-tenant: Discover's reindex refreshes every public template,
+    # whatever workspace owns it.
+    try:
+        oid = PydanticObjectId(template_id)
+    except (InvalidId, TypeError, ValueError):
+        return None
+    doc = await SiteTemplate.find_one(SiteTemplate.id == oid).project(_Row)
+    if doc is None:
+        return None
+    url = await _source_live_url(doc.workspace, doc.source_pocket_id)
+    if url == doc.live_url:
+        # no-event: unchanged.
+        return url
+    await SiteTemplate.get_pymongo_collection().update_one(
+        {"_id": oid}, {"$set": {"live_url": url, "updatedAt": datetime.now(UTC)}}
+    )
+    fresh = await SiteTemplate.get(oid)
+    await emit(SiteTemplateUpdated(data=_event_data(fresh, fresh.owner, fresh.workspace)))
+    return url
+
+
 async def set_hidden_from_discover(template_id: str, hidden: bool) -> None:
     """Mirror a Discover hide / unhide onto the template. A hidden template is out
     of the /sites community tab and ``use_template`` for everyone but the owner,
@@ -120,4 +148,9 @@ async def set_hidden_from_discover(template_id: str, hidden: bool) -> None:
     )
 
 
-__all__ = ["get_for_discover", "iter_public_for_discover", "set_hidden_from_discover"]
+__all__ = [
+    "get_for_discover",
+    "iter_public_for_discover",
+    "refresh_live_url",
+    "set_hidden_from_discover",
+]

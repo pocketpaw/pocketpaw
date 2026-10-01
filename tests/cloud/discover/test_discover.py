@@ -449,6 +449,26 @@ async def test_reindex_keeps_a_hidden_public_template_as_a_hidden_listing() -> N
 
 
 @pytest.mark.asyncio
+async def test_reindex_refreshes_a_stale_live_url() -> None:
+    src = await _site()
+    site = Site(workspace=WS, pocket_id=str(src.id), owner=OWNER, deployed=True, url="https://a")
+    await site.insert()
+    meta = await _template(src, visibility="public")
+    await service_admin.reindex("site_template")
+    assert (await _listing(meta["id"])).live_url == "https://a"
+
+    await site.set({"url": "https://renamed"})  # a slug change emits no event
+    await service_admin.reindex("site_template")
+    assert (await _listing(meta["id"])).live_url == "https://renamed"
+    assert (await SiteTemplate.get(meta["id"])).live_url == "https://renamed"
+
+    await site.set({"deployed": False})  # unpublished
+    await service_admin.reindex("site_template")
+    assert (await _listing(meta["id"])).live_url is None
+    assert (await SiteTemplate.get(meta["id"])).live_url is None
+
+
+@pytest.mark.asyncio
 async def test_registry(monkeypatch) -> None:
     monkeypatch.setattr(sources, "_SOURCES", dict(sources._SOURCES))
     with pytest.raises(NotFound):
