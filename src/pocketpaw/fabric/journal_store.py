@@ -26,9 +26,23 @@
 # and the public flush_shadow() lets replay consumers drain after a sync
 # bootstrap(). Without a statement_store nothing changes — the flush is a
 # no-op and the projection never reads the mode flag.
+#
+# Updated: 2026-10-01 (CN-6 — write path vs read model) — THE SPLIT: this
+# journal store is the WRITE path for Fabric objects; the per-workspace SQLite
+# FabricStore is the READ MODEL every reader uses (Fabric API router, agents'
+# Fabric MCP, Ripple sources). Optional ``read_model`` (workspace_id ->
+# FabricStore) makes create/update/archive project the object's full current
+# state into the store of each ``workspace:<id>`` in the event scope
+# (pocketpaw.fabric.read_model). The first async call backfills everything
+# already journaled (sync_read_model). Projection failures are logged, never
+# raised — the journal append already succeeded and a re-sync heals drift.
+# Note the shadow hook above is NOT this: it records statements only. Use
+# ``pocketpaw.fabric.read_model.default_journal_store()`` for the wired,
+# process-wide instance. Without ``read_model`` nothing changes.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -46,6 +60,12 @@ from pocketpaw.fabric.events import (
 )
 from pocketpaw.fabric.models import FabricObject, FabricQuery, FabricQueryResult
 from pocketpaw.fabric.projection import FabricProjection
+from pocketpaw.fabric.read_model import (
+    ReadModelResolver,
+    project_object,
+    unproject_object,
+    workspace_ids_from_scope,
+)
 
 if TYPE_CHECKING:
     # Typing only (FST-4) — the statement_store kwarg is forwarded to the
@@ -53,6 +73,8 @@ if TYPE_CHECKING:
     from pocketpaw.fabric.store import FabricStore
 
 _SYSTEM_ACTOR_ID = "system:fabric"
+
+logger = logging.getLogger(__name__)
 
 
 class FabricJournalStore:
@@ -79,6 +101,7 @@ class FabricJournalStore:
         projection: FabricProjection | None = None,
         default_actor: Actor | None = None,
         statement_store: FabricStore | None = None,
+        read_model: ReadModelResolver | None = None,
     ) -> None:
         # FST-4: ``statement_store`` wires the DEFAULT projection's shadow
         # treatment (merge site 2). When the caller passes an explicit
@@ -90,6 +113,9 @@ class FabricJournalStore:
             id=_SYSTEM_ACTOR_ID,
             scope_context=[],
         )
+        # CN-6: workspace_id -> FabricStore the writes project into.
+        self._read_model = read_model
+        self._read_model_synced = False
 
     # -- Bootstrap ----------------------------------------------------------
 
@@ -163,6 +189,7 @@ class FabricJournalStore:
         )
         self._journal.append(entry)
         self._projection.apply(entry)
+        await self._project(obj.id, scope)
 
         projected = self._projection.query(
             FabricQuery(type_id=obj.type_id, limit=10000),
@@ -208,6 +235,7 @@ class FabricJournalStore:
         # statements land as part of the write call, matching site 1's
         # semantics. No statement_store wired (or mode off) → no-op.
         await self._projection.flush_shadow()
+        await self._project(object_id, scope)
         return self._lookup(object_id)
 
     async def archive(
@@ -239,6 +267,7 @@ class FabricJournalStore:
         )
         self._journal.append(entry)
         self._projection.apply(entry)
+        await self._project(object_id, scope)
         return self._lookup(object_id) is None
 
     # -- Reads --------------------------------------------------------------
@@ -254,6 +283,7 @@ class FabricJournalStore:
         (admin / system path).
         """
 
+        await self._sync_once()
         return self._projection.query(q, requester_scopes=requester_scopes)
 
     async def get(
@@ -276,6 +306,56 @@ class FabricJournalStore:
             if obj.id == object_id:
                 return obj
         return None
+
+    # -- Read model (CN-6) ---------------------------------------------------
+
+    async def sync_read_model(self) -> int:
+        """Project every live object in the journal projection into its
+        workspace store(s) — the backfill for objects journaled before the read
+        model was wired, or after a projection failure. Idempotent (upsert by
+        id). Returns how many objects were projected."""
+
+        self._read_model_synced = True
+        if self._read_model is None:
+            return 0
+        count = 0
+        for row in list(self._projection._objects.values()):
+            if not row.archived:
+                await self._project_row(row.obj, row.scope, archived=False)
+                count += 1
+        return count
+
+    async def _sync_once(self) -> None:
+        if self._read_model is not None and not self._read_model_synced:
+            await self.sync_read_model()
+
+    async def _project(self, object_id: str, scope: list[str]) -> None:
+        """Mirror one object's post-write state into the read model."""
+
+        if self._read_model is None:
+            return
+        await self._sync_once()
+        row = self._projection._objects.get(object_id)
+        if row is not None:
+            await self._project_row(row.obj, scope, archived=row.archived)
+
+    async def _project_row(self, obj: FabricObject, scope: list[str], *, archived: bool) -> None:
+        assert self._read_model is not None
+        for ws in workspace_ids_from_scope(scope):
+            try:
+                target = self._read_model(ws)
+                if archived:
+                    await unproject_object(target, obj.id, workspace_id=ws)
+                else:
+                    await project_object(target, obj, workspace_id=ws)
+            except Exception:
+                logger.warning(
+                    "fabric read model: projecting %s into workspace %s failed —"
+                    " journal write kept; sync_read_model() re-heals",
+                    obj.id,
+                    ws,
+                    exc_info=True,
+                )
 
     # -- Internals ----------------------------------------------------------
 
