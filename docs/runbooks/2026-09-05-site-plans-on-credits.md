@@ -416,8 +416,8 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
   this deploy used the plain key. On the deploy day D only, a change made before
   the deploy and a renewal of the same site and tier falling due later on D share
   that plain key, so the renewal replays as a no-op (the old R1 bug, once). To
-  avoid it, deploy right after a sweep tick, and check D's renewals for a debit
-  marked as a replay.
+  avoid it, deploy right after a sweep tick. To check afterwards: a site renewed
+  on D with no new `site_plan` ledger debit for that renewal was the replay.
 - The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
   not from the 1st of the month.
 

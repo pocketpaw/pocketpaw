@@ -1058,7 +1058,10 @@ renewal_date, partner_client_id, subscription_status}`.
   when `renewal_date` passes and steps it 12 months, or lapses the site to the
   free tier (still published) when the wallet is short. If the partner profile has
   been removed, the renewal reuses the price last paid only when that is a real
-  price of the plan; otherwise it is retried, never charged at a guessed price.
+  price of the plan; otherwise the site lapses to the free tier (still published),
+  never charged at a guessed price.
+- A plan change after `renewal_date` has passed (before the renewal sweep runs) is
+  charged as one fresh period of the new plan, starting now.
 
 ### `GET /partners/sites`
 
