@@ -1004,6 +1004,9 @@ non-member is **403**.
 
 Partial update (only sent fields change; an empty body writes nothing) or delete
 (**204**). Same 403 rule; a client from another workspace is **404**.
+Changing `whatsapp` clears `whatsapp_opt_in_at` unless the same PATCH sets it:
+consent was given for the old number. New-lead WhatsApp messages go only to an
+opted-in number (see "Partner leads on WhatsApp").
 
 **Delete archives.** The client disappears from every read, but the org journal
 keeps its full history, including the WhatsApp number and GSTIN. There is no
