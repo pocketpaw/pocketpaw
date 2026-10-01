@@ -63,6 +63,10 @@
 #      every other correction does: as a new journal event.
 # Proven by tests/test_fabric_enforce_site2.py: the store cache holds the
 # resolved value while this projection's fold (event-faithfully) differs.
+#
+# Updated: 2026-10-01 (CN-6) — read-only ``row(id)`` / ``rows()`` accessors so
+# FabricJournalStore can mirror objects (scope + archived flag included) into
+# the per-workspace FabricStore read model without reaching into ``_objects``.
 
 from __future__ import annotations
 
@@ -409,6 +413,18 @@ class FabricProjection:
         page = filtered[offset : offset + limit] if limit else filtered[offset:]
 
         return FabricQueryResult(objects=page, total=total)
+
+    # -- Row access (CN-6) ----------------------------------------------------
+
+    def row(self, object_id: str) -> _ProjectedObject | None:
+        """The projected row (object + scope + archived flag), or None."""
+
+        return self._objects.get(object_id)
+
+    def rows(self) -> list[_ProjectedObject]:
+        """Snapshot of every projected row, archived ones included."""
+
+        return list(self._objects.values())
 
     # -- Diagnostics --------------------------------------------------------
 

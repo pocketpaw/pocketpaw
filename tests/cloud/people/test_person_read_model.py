@@ -6,8 +6,11 @@
 # Locks: (1) materialize through the real default store lands the Person in
 # THAT workspace's FabricStore and not another's; (2) the MCP fabric_query
 # handler returns it for that workspace only; (3) re-materialize updates the
-# same row; (4) objects journaled before the wiring are backfilled; (5) a
-# workspace-authored "Person" type is not duplicated; (6) archive unprojects.
+# same row; (4) objects journaled before the wiring are backfilled by an
+# explicit sync_read_model() (never by a read); (5) a workspace-authored
+# "Person" type is reused, not duplicated or left dangling; (6) archive
+# unprojects, and a missed removal heals on sync; (7) a re-scope moves the row;
+# (8) a stale upsert never rolls a newer row back.
 
 from __future__ import annotations
 
@@ -133,8 +136,14 @@ async def test_pre_wiring_journal_objects_are_backfilled(journal):
     await _materialize_into(legacy, "ws1")
     assert await _people("ws1") == []
 
-    # The wired default store backfills on its first call (a read here).
+    # A read through the wired store must NOT trigger the backfill.
     assert await people_service.get_person("ws1", "u1") is not None
+    assert await _people("ws1") == []
+
+    # The explicit (startup) backfill does; re-running it is harmless.
+    store = read_model.default_journal_store()
+    assert await store.sync_read_model() == 1
+    assert await store.sync_read_model() == 1
     assert [o.id for o in await _people("ws1")] == ["person-ws1-u1"]
 
 
@@ -159,7 +168,12 @@ async def test_workspace_authored_person_type_is_not_duplicated(journal):
 
     types = [t for t in await fs.list_types(workspace_id="ws1") if t.name.lower() == "person"]
     assert [t.id for t in types] == [authored.id]
-    assert [o.id for o in await _people("ws1")] == ["person-ws1-u1"]
+    got = await _people("ws1")
+    assert [o.id for o in got] == ["person-ws1-u1"]
+    # Stamped with the workspace's own type id, not a dangling "person".
+    assert got[0].type_id == authored.id
+    res = await fs.query(FabricQuery(type_id=authored.id), workspace_id="ws1")
+    assert [o.id for o in res.objects] == ["person-ws1-u1"]
 
 
 @pytest.mark.asyncio
@@ -176,3 +190,44 @@ def test_workspace_ids_from_scope():
         ["workspace:a", "org:x", "workspace:b:team:t", "workspace:a"]
     ) == ["a", "b"]
     assert read_model.workspace_ids_from_scope(["org:x"]) == []
+
+
+@pytest.mark.asyncio
+async def test_sync_heals_a_missed_archive(journal):
+    await _materialize("ws1")
+    # Archive journaled by a store with no read model: the row lingers.
+    legacy = FabricJournalStore(journal)
+    legacy.bootstrap()
+    await legacy.archive("person-ws1-u1", scope=["workspace:ws1"])
+    assert len(await _people("ws1")) == 1
+
+    store = read_model.default_journal_store()
+    store.bootstrap()  # pick up the out-of-band archive event
+    await store.sync_read_model()
+    assert await _people("ws1") == []
+
+
+@pytest.mark.asyncio
+async def test_rescope_moves_the_row_between_workspaces(journal):
+    await _materialize("ws1")
+    store = read_model.default_journal_store()
+    await store.update("person-ws1-u1", {"name": "Moved"}, scope=["workspace:ws2"])
+
+    assert await _people("ws1") == []
+    moved = await _people("ws2")
+    assert [o.properties["name"] for o in moved] == ["Moved"]
+
+
+@pytest.mark.asyncio
+async def test_stale_upsert_does_not_roll_back_a_newer_row(journal):
+    await _materialize("ws1", name="New")
+    fs = stores.get_fabric_store(workspace_id="ws1")
+    current = (await _people("ws1"))[0]
+    stale = current.model_copy(
+        update={
+            "properties": {**current.properties, "name": "Old"},
+            "updated_at": datetime(2020, 1, 1, tzinfo=UTC),
+        }
+    )
+    assert await fs.upsert_object(stale, workspace_id="ws1") is False
+    assert (await _people("ws1"))[0].properties["name"] == "New"

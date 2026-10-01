@@ -16,7 +16,13 @@
 #
 # ``default_journal_store()`` is the process-wide journal store wired to the
 # per-workspace read model — the one helper callers (people today, partners
-# next) should use instead of building their own.
+# next) must reuse. Never build a second ``FabricJournalStore(get_journal())``:
+# that is a second in-memory projection and a second backfill.
+#
+# Updated: 2026-10-01 (CN-6 review) — when the workspace already owns a type
+# with the object's name, the projected row is stamped with THAT type's id
+# (no dangling ``type_id``); the backfill is no longer triggered lazily — EE
+# runs ``sync_read_model()`` as a startup background task.
 
 from __future__ import annotations
 
@@ -52,20 +58,22 @@ def workspace_ids_from_scope(scope: list[str]) -> list[str]:
     return ids
 
 
-async def _ensure_type(store: FabricStore, obj: FabricObject, workspace_id: str) -> None:
-    """Make sure the object's type is listable in ``store`` without colliding
-    with a workspace-authored type of the same name.
+async def _ensure_type(store: FabricStore, obj: FabricObject, workspace_id: str) -> str:
+    """Return the type id the object should carry in ``store``, defining the
+    type if the workspace has none.
 
-    Our stable id already present -> done. A same-named type the workspace (or a
-    legacy global) already owns -> leave it alone; our objects still carry the
-    denormalized ``type_name`` so ``query(type_name=...)`` finds them. Otherwise
-    define it under the stable id; a concurrent define loses the race on the
-    PK / name-unique index, which is fine.
+    Our stable id already present -> keep it. A same-named type the workspace
+    (or a legacy global) already owns -> use THAT id, so the row joins the
+    workspace's own type instead of dangling. Otherwise define the type under
+    the stable id; a concurrent define losing the race on the PK / name-unique
+    index re-resolves.
     """
     if not obj.type_id or await store.get_type(obj.type_id) is not None:
-        return
-    if obj.type_name and await store.get_type_by_name(obj.type_name, workspace_id=workspace_id):
-        return
+        return obj.type_id
+    if obj.type_name:
+        owned = await store.get_type_by_name(obj.type_name, workspace_id=workspace_id)
+        if owned is not None:
+            return owned.id
     try:
         await store.define_type(
             name=obj.type_name or obj.type_id,
@@ -74,15 +82,23 @@ async def _ensure_type(store: FabricStore, obj: FabricObject, workspace_id: str)
             type_id=obj.type_id,
         )
     except sqlite3.IntegrityError:
-        pass
+        owned = await store.get_type_by_name(
+            obj.type_name or obj.type_id, workspace_id=workspace_id
+        )
+        if owned is not None:
+            return owned.id
+    return obj.type_id
 
 
 async def project_object(store: FabricStore, obj: FabricObject, *, workspace_id: str) -> None:
     """Upsert ``obj`` (its full current state) into one workspace's store."""
-    await _ensure_type(store, obj, workspace_id)
+    type_id = await _ensure_type(store, obj, workspace_id)
+    if type_id != obj.type_id:
+        obj = obj.model_copy(update={"type_id": type_id})
     if not await store.upsert_object(obj, workspace_id=workspace_id):
-        logger.warning(
-            "fabric read model: %s already owned by another workspace — not projected into %s",
+        logger.info(
+            "fabric read model: %s not projected into %s — row is owned by another"
+            " workspace or already newer",
             obj.id,
             workspace_id,
         )
@@ -104,8 +120,9 @@ def _workspace_store(workspace_id: str) -> FabricStore:
 @lru_cache(maxsize=1)
 def default_journal_store() -> FabricJournalStore:
     """Process-wide FabricJournalStore over the org journal, projecting every
-    write into ``get_fabric_store(workspace_id=<scope ws>)``. Bootstrapped once;
-    the first write also backfills objects journaled before CN-6."""
+    write into ``get_fabric_store(workspace_id=<scope ws>)``. Bootstrapped once
+    (sync journal replay). Backfill of earlier journal objects is explicit:
+    ``await default_journal_store().sync_read_model()``."""
     from pocketpaw.fabric.journal_store import FabricJournalStore
     from pocketpaw.journal_dep import get_journal
 

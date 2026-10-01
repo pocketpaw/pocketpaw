@@ -25,6 +25,11 @@ sweep (`POCKETPAW_TEMPORAL_SWEEP_ENABLED`), the 5-minute sweeper (see
 With several web processes (`POCKETPAW_REALTIME_BUS=redis-streams`) the
 scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
 cluster, and the jail GC once per host. `on_shutdown` stops what it started.
+
+CN-6 (2026-10-01): `on_startup` also fires a one-shot background backfill of the
+Fabric read model (`default_journal_store().sync_read_model()`), so objects
+written to the journal before the read-model wiring reach the per-workspace
+FabricStore that agents read. Idempotent and cancel-safe; never on a read path.
 """
 
 from __future__ import annotations
@@ -82,6 +87,8 @@ def _sweep_interval_seconds() -> int:
 
 _sweeper_task: asyncio.Task[None] | None = None
 _xproc_consumer_task: asyncio.Task[None] | None = None
+# CN-6: held so the one-shot Fabric read-model backfill isn't GC'd mid-run.
+_fabric_read_model_task: asyncio.Task[None] | None = None
 # With several web processes (POCKETPAW_REALTIME_BUS=redis-streams) the sweeps
 # run on one process per cluster, and the jail GC on one process per HOST since
 # it reclaims local disk. ``None`` means no lease: this process runs them all.
@@ -369,6 +376,22 @@ class CloudLifecycleHook:
             asyncio.create_task(_reindex_meeting_transcripts())
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to schedule transcript reindex: %s", exc)
+
+        # CN-6: backfill the Fabric read model from the journal (Person objects
+        # journaled before the projection existed). One-shot, idempotent
+        # upserts; a cancel at shutdown just means the next boot redoes it.
+        global _fabric_read_model_task
+
+        async def _sync_fabric_read_model() -> None:
+            try:
+                from pocketpaw.fabric import default_journal_store
+
+                mirrored = await default_journal_store().sync_read_model()
+                logger.info("Fabric read model synced from journal: %d objects", mirrored)
+            except Exception:
+                logger.exception("Fabric read-model backfill failed")
+
+        _fabric_read_model_task = asyncio.create_task(_sync_fabric_read_model())
         # Pocket interval-refresh scheduler (RFC 04 M3). A single asyncio
         # task that periodically re-runs pocket data sources whose refresh
         # policy includes `"interval"`. Self-gated on

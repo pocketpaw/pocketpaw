@@ -3,7 +3,7 @@
 # Updated: 2026-10-01 (CN-6 — journal write path, FabricStore read model) —
 #   ``define_type`` takes an optional stable ``type_id`` and a new
 #   ``upsert_object`` writes an object under ITS OWN id (insert-or-replace,
-#   tenancy-guarded). Both exist for ``pocketpaw.fabric.read_model``, which
+#   tenancy- and updated_at-guarded). Both exist for ``pocketpaw.fabric.read_model``, which
 #   projects journal-written objects (FabricJournalStore) into the
 #   per-workspace store so the Fabric API / MCP / Ripple readers see them.
 #   The upsert writes the flat cache directly (no statement pass): the journal
@@ -1567,7 +1567,9 @@ class FabricStore:
         a repeat call overwrites ``properties`` wholesale — the caller passes
         the full current object, not a patch. Tenancy guard: an existing row
         owned by ANOTHER workspace is left untouched (returns ``False``); a
-        legacy NULL-workspace row is adopted. Writes the flat cache only — no
+        legacy NULL-workspace row is adopted. Ordering guard: a row whose
+        ``updated_at`` is newer than ``obj.updated_at`` is kept (a late replay
+        never rolls a row back). Writes the flat cache only — no
         statement pass, no write-time validation (the journal already accepted
         the write).
         """
@@ -1585,8 +1587,9 @@ class FabricStore:
                 " source_id = excluded.source_id,"
                 " workspace_id = excluded.workspace_id,"
                 " updated_at = excluded.updated_at"
-                " WHERE fabric_objects.workspace_id IS excluded.workspace_id"
-                " OR fabric_objects.workspace_id IS NULL",
+                " WHERE (fabric_objects.workspace_id IS excluded.workspace_id"
+                " OR fabric_objects.workspace_id IS NULL)"
+                " AND excluded.updated_at >= IFNULL(fabric_objects.updated_at, '')",
                 (
                     obj.id,
                     obj.type_id,

@@ -33,12 +33,15 @@
 # Fabric MCP, Ripple sources). Optional ``read_model`` (workspace_id ->
 # FabricStore) makes create/update/archive project the object's full current
 # state into the store of each ``workspace:<id>`` in the event scope
-# (pocketpaw.fabric.read_model). The first async call backfills everything
-# already journaled (sync_read_model). Projection failures are logged, never
-# raised — the journal append already succeeded and a re-sync heals drift.
-# Note the shadow hook above is NOT this: it records statements only. Use
-# ``pocketpaw.fabric.read_model.default_journal_store()`` for the wired,
-# process-wide instance. Without ``read_model`` nothing changes.
+# (pocketpaw.fabric.read_model); a re-scope drops it from workspaces it left,
+# archive drops it from the row's workspaces. sync_read_model() is the
+# explicit, re-runnable backfill (EE runs it as a startup background task —
+# never on a read path). Projection failures are logged, never raised: the
+# journal append already succeeded and a re-sync heals drift. The shadow hook
+# above is NOT this: it records statements only. Use the process-wide
+# ``pocketpaw.fabric.default_journal_store()``; never construct a second
+# ``FabricJournalStore(get_journal())`` (two projections, two backfills).
+# Without ``read_model`` nothing changes.
 
 from __future__ import annotations
 
@@ -115,7 +118,6 @@ class FabricJournalStore:
         )
         # CN-6: workspace_id -> FabricStore the writes project into.
         self._read_model = read_model
-        self._read_model_synced = False
 
     # -- Bootstrap ----------------------------------------------------------
 
@@ -187,9 +189,10 @@ class FabricJournalStore:
             correlation_id=correlation_id,
             payload=payload,
         )
+        previous = self._scope_of(obj.id)
         self._journal.append(entry)
         self._projection.apply(entry)
-        await self._project(obj.id, scope)
+        await self._project(obj.id, previous)
 
         projected = self._projection.query(
             FabricQuery(type_id=obj.type_id, limit=10000),
@@ -229,13 +232,14 @@ class FabricJournalStore:
             correlation_id=correlation_id,
             payload=payload,
         )
+        previous = self._scope_of(object_id)
         self._journal.append(entry)
         self._projection.apply(entry)
         # FST-4: drain the shadow observation this update may have staged so
         # statements land as part of the write call, matching site 1's
         # semantics. No statement_store wired (or mode off) → no-op.
         await self._projection.flush_shadow()
-        await self._project(object_id, scope)
+        await self._project(object_id, previous)
         return self._lookup(object_id)
 
     async def archive(
@@ -267,7 +271,7 @@ class FabricJournalStore:
         )
         self._journal.append(entry)
         self._projection.apply(entry)
-        await self._project(object_id, scope)
+        await self._project(object_id, [])
         return self._lookup(object_id) is None
 
     # -- Reads --------------------------------------------------------------
@@ -283,7 +287,6 @@ class FabricJournalStore:
         (admin / system path).
         """
 
-        await self._sync_once()
         return self._projection.query(q, requester_scopes=requester_scopes)
 
     async def get(
@@ -310,34 +313,38 @@ class FabricJournalStore:
     # -- Read model (CN-6) ---------------------------------------------------
 
     async def sync_read_model(self) -> int:
-        """Project every live object in the journal projection into its
-        workspace store(s) — the backfill for objects journaled before the read
-        model was wired, or after a projection failure. Idempotent (upsert by
-        id). Returns how many objects were projected."""
+        """Mirror every projected row into its workspace store(s): live rows
+        are upserted, archived rows removed. The backfill for objects journaled
+        before the read model was wired, and the heal after a failed
+        projection. Idempotent and safe to re-run or cancel midway (no state is
+        kept; the next run redoes it). Returns how many rows were mirrored."""
 
-        self._read_model_synced = True
         if self._read_model is None:
             return 0
-        count = 0
-        for row in list(self._projection._objects.values()):
-            if not row.archived:
-                await self._project_row(row.obj, row.scope, archived=False)
-                count += 1
-        return count
+        rows = self._projection.rows()
+        for row in rows:
+            await self._project_row(row.obj, row.scope, archived=row.archived)
+        return len(rows)
 
-    async def _sync_once(self) -> None:
-        if self._read_model is not None and not self._read_model_synced:
-            await self.sync_read_model()
+    def _scope_of(self, object_id: str) -> list[str]:
+        row = self._projection.row(object_id)
+        return list(row.scope) if row is not None else []
 
-    async def _project(self, object_id: str, scope: list[str]) -> None:
-        """Mirror one object's post-write state into the read model."""
+    async def _project(self, object_id: str, previous_scope: list[str]) -> None:
+        """Mirror one object's post-write state into the read model, and drop
+        it from any workspace its previous scope had but the new one lacks."""
 
         if self._read_model is None:
             return
-        await self._sync_once()
-        row = self._projection._objects.get(object_id)
-        if row is not None:
-            await self._project_row(row.obj, scope, archived=row.archived)
+        row = self._projection.row(object_id)
+        if row is None:
+            return
+        await self._project_row(row.obj, row.scope, archived=row.archived)
+        left = set(workspace_ids_from_scope(previous_scope)) - set(
+            workspace_ids_from_scope(row.scope)
+        )
+        if left:
+            await self._project_row(row.obj, [f"workspace:{ws}" for ws in left], archived=True)
 
     async def _project_row(self, obj: FabricObject, scope: list[str], *, archived: bool) -> None:
         assert self._read_model is not None
