@@ -1560,6 +1560,9 @@ class ConciergeSettingsUpdate(BaseModel):
     # Leads from conversation: on, the v2 concierge may offer a send_to_team lead
     # card and the visitor's Send writes a Lead. Default on.
     concierge_lead_capture: bool | None = None
+    # "Guide visitors around your site": on, the v2 concierge may suggest one
+    # page action per reply (``paw_bar.action_spec``). Default off.
+    concierge_page_actions: bool | None = None
     # CR-4 (2026-09-28): the guided fields. Caps and shapes are in
     # ``pocketpaw.paw_bar.concierge_fields``; each value is normalized (one line,
     # no control characters) and refused with a 422 past its cap. Clear a text
@@ -1606,6 +1609,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
     concierge_allow_doc_code: bool = False
     concierge_lead_capture: bool = True
+    concierge_page_actions: bool = False
     # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
     concierge_name: str = ""
     concierge_tone: ConciergeTone | None = None
@@ -1732,6 +1736,8 @@ async def _concierge_settings_response(
         concierge_allow_doc_code=getattr(site, "concierge_allow_doc_code", False) is True,
         # Only an explicit False turns it off (a row older than the field reads on).
         concierge_lead_capture=getattr(site, "concierge_lead_capture", True) is not False,
+        # Only an explicit True turns it on (a row older than the field reads off).
+        concierge_page_actions=getattr(site, "concierge_page_actions", False) is True,
         # getattr again: rows older than the guided fields read as unset.
         concierge_name=getattr(site, "concierge_name", "") or "",
         concierge_tone=getattr(site, "concierge_tone", None),
