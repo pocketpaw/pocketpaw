@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-01 (feat/atlas-canonical) — added "Atlas — Surfaces, Verbs and
+  Search" (GET /api/v1/atlas/{surfaces,verbs,search}), and `open_surface`'s
+  route list now comes from atlas (`agent_openable` surfaces).
 Updated: 2026-10-01 (feat/rooms-read-tool) — added "Agent — Read Chat Rooms
   (`list_rooms` / `read_room`)": the read-only in-process MCP tools over the
   workspace's own chat rooms, their authz path, caps and scoping.
@@ -1916,8 +1919,10 @@ the chat stream, and the browser does the opening. Registered via the
 
 **Input:** `{ "route": "...", "params"?: { "<key>": "<string>" }, "reason"?: "..." }`
 
-- `route` is one of `/files`, `/studio/editor`, `/chat`, `/pockets`, `/knowledge`.
-  Anything else is rejected.
+- `route` is one of the atlas surfaces marked `agent_openable` (today `/files`,
+  `/studio/editor`, `/chat`, `/pockets`, `/knowledge`; see
+  `src/pocketpaw/atlas/authored/surfaces.json`). Anything else is rejected, and
+  if atlas can't load, every route is.
 - `params` is a flat string-to-string map: at most 10 keys, keys up to 64 chars,
   values up to 500. A JSON-string `params` is decoded first.
 - For `/studio/editor`, `params` is the clip handoff (`src`, `name`, `mime`,
@@ -1944,6 +1949,71 @@ which is what the /no-ui-lab talks on) and on `/studio/editor`, whose allow-list
 names it so the agent can send the user to `/files` for another clip. Every
 other allow-listed surface filters it out, including the public Paw Bar
 concierge.
+
+## Atlas — Surfaces, Verbs and Search
+
+Atlas (`src/pocketpaw/atlas/`) is the one place that says which app surfaces and
+composer verbs exist, where they open, who can trigger them and how risky they
+are. The composer reads it here; the agent reads the same entries through
+`atlas_search`. Source: `src/pocketpaw/api/v1/atlas.py`.
+
+All three routes are read-only. They need a signed-in user (a cloud session the
+auth bridge verified) or a caller holding the `chat` scope; anyone else gets
+403. Answers go through the atlas overlay for the caller's workspace. The read
+API has no role context, so role-gated entries (`role:*` in `requires`: the admin
+capability cards and the owner-only `surface:security`) are always hidden here.
+
+### `GET /api/v1/atlas/surfaces`
+
+```json
+{ "surfaces": [ { "id": "surface:files", "name": "Files", "summary": "...",
+  "route": "/files", "slash": "files", "presentation": "inline",
+  "agent_openable": true, "keywords": ["files", "..."] } ] }
+```
+
+- `slash` is the composer command without the `/` (the route's last segment),
+  or `null` (settings sub-pages, `/studio/editor`, `/decisions-graph`).
+- `presentation` is `"inline"` for the views the no-UI shell renders in the
+  thread (`/chat`, `/files`, `/deep-work`, `/pockets`, `/sites`, `/knowledge`,
+  `/studio`) and `"window"` otherwise.
+- `agent_openable` marks the routes the agent's `open_surface` tool may open.
+
+### `GET /api/v1/atlas/verbs`
+
+```json
+{ "verbs": [ { "id": "verb:send", "name": "Send to a channel", "summary": "...",
+  "slash": "send", "applies_to": ["channel"], "triggers": ["slash"],
+  "risk": "risky", "undo": false, "keywords": ["send", "..."] } ] }
+```
+
+- `applies_to`: the object types the verb acts on (`channel`, `file`, `task`,
+  `room`, `message`, `pocket`, `site`, `article`, `panel`).
+- `triggers`: `slash` (a composer command), `verb` (an action on the object),
+  `agent` (the agent does the work).
+- `risk`: `read` changes nothing, `safe` is a benign change, `risky` acts as the
+  user where others see it or can't be taken back. `undo` says whether it can be
+  undone.
+- Navigation is not a verb: the surface `slash` values cover it.
+
+### `GET /api/v1/atlas/search?q=<text>&kinds=surface,verb&limit=5`
+
+```json
+{ "query": "rename this file", "results": [ { "id": "verb:file-rename",
+  "kind": "verb", "name": "Rename file", "route": null, "slash": null,
+  "score": 0.769 } ] }
+```
+
+- `q`: 1 to 200 chars. `limit`: default 5, at least 1, values above 20 are
+  capped to 20. `kinds`: comma-separated subset of `surface`, `verb`,
+  `capability`, `primitive` (default: all four); anything else is 422. Other
+  atlas kinds (widgets, connectors, skills, senses) never come back.
+- `route` is the entry's home route, or `null`.
+- `score` is 0..1, highest first. Atlas ranks by weighted word overlap (a name
+  match counts most, then keywords, summary and narrative). The API divides that
+  raw score by the score of a name match on every distinct query word, then
+  rounds to 3 places. A name that is the only one in atlas carrying the query
+  word scores 1.0 for a primitive and 0.96 for other kinds; a word many names
+  share is worth less.
 
 ## Sites — Native Editing
 
