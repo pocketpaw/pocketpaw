@@ -30,6 +30,16 @@
 # ``dispatch_lead_updated`` is narrower: a status change goes to the site webhook
 # only (when it is active and the owner routes ``lead_captured`` to it), with no
 # bell, mail or workspace fallback, since the owner made the change themselves.
+#
+# Partner lead WhatsApp (PH-6, 2026-10-02): a ``lead_captured`` on a partner-sold
+# site (``Site.partner_client_id``) also queues one ``whatsapp`` row to the
+# partner client's number, sent from the platform MSG91 account. The gate is the
+# client's consent (a ``whatsapp`` number AND ``whatsapp_opt_in_at``), not the
+# site's ``events``; the client is read through ``partners.service.get_client``
+# with a system context in the site's own workspace, so an archived client, a
+# deactivated partner or another workspace's client is simply no target. The
+# same check runs again at send time. With no platform credentials the row is
+# skipped with one warning; email, webhook and push are unaffected either way.
 
 from __future__ import annotations
 
@@ -730,6 +740,58 @@ async def record_webhook_result(workspace_id: str, site_id: str, *, ok: bool) ->
     )
 
 
+async def partner_whatsapp_target(workspace_id: str, site: _SiteDoc | None) -> str | None:
+    """The partner client's WhatsApp number for a partner-sold site, when the
+    client exists in this workspace, is not archived and opted in. None otherwise,
+    and on any lookup failure."""
+    client_id = getattr(site, "partner_client_id", None) if site is not None else None
+    if not client_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+        from pocketpaw_ee.cloud.partners import service as partners_service
+
+        ctx = RequestContext(
+            user_id="system.leads.whatsapp",
+            workspace_id=workspace_id,
+            request_id="lead-whatsapp",
+            scope=ScopeKind.WORKSPACE,
+            started_at=_now(),
+        )
+        client = await partners_service.get_client(ctx, client_id=client_id)
+    except Exception:  # NotFound (archived/deleted), Forbidden (partner inactive), …
+        return None
+    if client.whatsapp and client.whatsapp_opt_in_at:
+        return client.whatsapp
+    return None
+
+
+async def _partner_whatsapp_row(
+    workspace_id: str, site: _SiteDoc, kind: str, lead_id: str
+) -> dict[str, Any] | None:
+    """The ``whatsapp`` outbox row for a lead on a partner-sold site, or None."""
+    from pocketpaw_ee.cloud.growth import msg91
+
+    number = await partner_whatsapp_target(workspace_id, site)
+    if number is None:
+        return None
+    if msg91.resolve_platform_credentials() is None:
+        logger.warning(
+            "partner lead WhatsApp skipped for lead=%s site=%s: set "
+            "POCKETPAW_MSG91_PLATFORM_AUTHKEY, _INTEGRATED_NUMBER and _LEAD_TEMPLATE",
+            lead_id,
+            site.id,
+        )
+        return None
+    return {
+        "workspace": workspace_id,
+        "kind": kind,
+        "sink": "whatsapp",
+        "target": number,
+        "payload": {"lead_id": lead_id, "site_ref": str(site.id)},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Event routing
 # ---------------------------------------------------------------------------
@@ -758,7 +820,7 @@ async def dispatch_site_event(
     from pocketpaw_ee.cloud.notifications import email as email_mod
     from pocketpaw_ee.cloud.notifications import service as notifications_service
 
-    counts = {"push": 0, "email": 0, "webhook": 0}
+    counts = {"push": 0, "email": 0, "webhook": 0, "whatsapp": 0}
     site: _SiteDoc | None = None
     settings = SiteNotificationSettings(workspace=workspace_id, site_id="")
     try:
@@ -829,10 +891,18 @@ async def dispatch_site_event(
                     "webhook_ref": f"site:{site.id}",
                 }
             )
+        if site is not None and lead_id and event == "lead_captured":
+            try:
+                row = await _partner_whatsapp_row(workspace_id, site, kind, lead_id)
+            except Exception:  # never costs the owner their email / webhook
+                logger.warning("partner WhatsApp routing failed for lead=%s", lead_id)
+                row = None
+            if row is not None:
+                rows.append(row)
         if rows:
             await outbox.enqueue_many(rows)
-        counts["email"] = sum(1 for r in rows if r["sink"] == "email")
-        counts["webhook"] = sum(1 for r in rows if r["sink"] == "webhook")
+        for sink in ("email", "webhook", "whatsapp"):
+            counts[sink] = sum(1 for r in rows if r["sink"] == sink)
 
         # Workspace fallback: its Slack always, its webhook only when the site
         # has none of its own. That webhook predates the envelope and its
@@ -906,6 +976,7 @@ __all__ = [
     "get_settings",
     "owner_email",
     "owner_identity",
+    "partner_whatsapp_target",
     "record_bounce",
     "record_webhook_result",
     "recipient_allowed",

@@ -1,6 +1,7 @@
 """Encrypted credential storage for PocketPaw.
 
 Changes:
+  - 2026-10-02: add msg91_platform_authkey (partner lead WhatsApp, PH-6).
   - 2026-06-24: add dodo_payments_api_key + dodo_webhook_secret to SECRET_FIELDS
     so they persist encrypted, never plaintext in config.json (BC-2 trust boundary).
   - 2026-04-10: v1 migration failure no longer crashes — logs warning, starts with empty store.
@@ -66,6 +67,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "dodo_webhook_secret",
         "shield_api_token",
         "cf_email_api_token",
+        "msg91_platform_authkey",
     }
 )
 

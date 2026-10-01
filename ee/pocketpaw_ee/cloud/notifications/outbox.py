@@ -32,6 +32,16 @@
 #
 # The sweeper is an app-lifespan task started from ``extensions``. ``enqueue_many``
 # wakes it; without a running sweeper (tests, CLI) rows wait for ``process_due``.
+#
+# Updated 2026-10-02 (PH-6): ``whatsapp`` sink, worked in the webhook lane. A
+# partner lead goes to the shop owner's number through the platform MSG91
+# account (``growth.msg91``): no platform credentials -> dead; the client's
+# number must still be the opted-in target at send time (else dead, like an
+# email recipient who was removed); any MSG91 error retries on the normal
+# schedule, and only its code is stored (the message can echo the response).
+# The text is built at send time from the lead: site, name, message and the
+# visitor's phone or email (the lead email carries those too), on one line and
+# capped at ``WHATSAPP_BODY_CAP``.
 
 from __future__ import annotations
 
@@ -62,11 +72,13 @@ _BATCH_LIMIT = 100
 _WEBHOOK_RESPONSE_CAP = 1024 * 1024
 _USER_AGENT = "PocketPaw-Webhooks/1.0 (+https://pocketpaw.dev)"
 EMAIL_FAILING_KIND = "owner_email_failing"
+# MSG91 / Meta template body limit; also the cap on the one body variable.
+WHATSAPP_BODY_CAP = 1024
 
 # (sinks claimed by the lane, workers in the lane)
 LANES: tuple[tuple[tuple[str, ...], int], ...] = (
     (("email",), 4),
-    (("webhook", "slack"), 8),
+    (("webhook", "slack", "whatsapp"), 8),
 )
 
 _sweeper_task: asyncio.Task[None] | None = None
@@ -487,6 +499,59 @@ async def _send_email(item: NotificationOutboxItem, client: httpx.AsyncClient) -
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp (partner leads)
+# ---------------------------------------------------------------------------
+
+
+def _one_line(value: Any) -> str:
+    # Meta rejects template variables with newlines, tabs or long space runs.
+    return " ".join(str(value or "").split())
+
+
+def whatsapp_lead_text(lead: dict[str, Any]) -> str:
+    """The partner-lead WhatsApp text for ``lead`` (``leads.service.lead_payload``)."""
+    site = _one_line(lead.get("site_name")) or "your site"
+    name = _one_line(lead.get("name")) or "a visitor"
+    contact = _one_line(lead.get("phone")) or _one_line(lead.get("email"))
+    summary = " ".join(
+        part
+        for part in (
+            _one_line(lead.get("message"))[:600],
+            f"Contact: {contact}" if contact else "",
+        )
+        if part
+    )
+    text = f"New enquiry for {site} via Paw Sites by PocketPaw: {name}"
+    if summary:
+        text += f" — {summary}"
+    return text[:WHATSAPP_BODY_CAP]
+
+
+async def _send_whatsapp(item: NotificationOutboxItem) -> Outcome:
+    from pocketpaw_ee.cloud.growth import msg91
+
+    creds = msg91.resolve_platform_credentials()
+    if creds is None:
+        return Outcome("dead", "whatsapp sink not configured")
+    settings = _site_settings()
+    site = await settings.find_site(item.workspace, str(item.payload.get("site_ref") or ""))
+    if await settings.partner_whatsapp_target(item.workspace, site) != item.target:
+        return Outcome("dead", "recipient no longer allowed")
+    lead = await _lead_data(item)
+    if lead is None:
+        return Outcome("dead", "lead not found")
+    try:
+        await msg91.Msg91WhatsAppClient(creds).send_template(
+            to_number=item.target, body_text=whatsapp_lead_text(lead)
+        )
+    except msg91.Msg91Error as exc:
+        # ponytail: every MSG91 error retries (as a webhook non-2xx does); split
+        # out permanent 4xx when the provider's codes are mapped.
+        return Outcome("retry", f"msg91: {exc.code}")
+    return Outcome("sent")
+
+
+# ---------------------------------------------------------------------------
 # Sweep
 # ---------------------------------------------------------------------------
 
@@ -502,6 +567,8 @@ async def deliver(item: NotificationOutboxItem, client: httpx.AsyncClient, fetch
                 return await _send_webhook(item, fetcher)
             if item.sink == "slack":
                 return await _send_slack(item, fetcher)
+            if item.sink == "whatsapp":
+                return await _send_whatsapp(item)
             return Outcome("dead", f"unknown sink {item.sink!r}")
     except TimeoutError:
         return Outcome("retry", f"deadline: no answer in {SEND_DEADLINE_SECONDS:.0f}s")
@@ -594,6 +661,7 @@ __all__ = [
     "Outcome",
     "SEND_DEADLINE_SECONDS",
     "WEBHOOK_DISABLE_THRESHOLD",
+    "WHATSAPP_BODY_CAP",
     "backoff_after",
     "claim_marker",
     "claim_one",
@@ -605,4 +673,5 @@ __all__ = [
     "start_outbox_sweeper",
     "stop_outbox_sweeper",
     "wake",
+    "whatsapp_lead_text",
 ]
