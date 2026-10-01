@@ -8,6 +8,9 @@
 #
 # Auth runs through the real ``current_user_id`` / ``current_workspace_id``; only
 # ``current_active_user`` is swapped for a toggle (the meetings router-test shape).
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): POST /report is limited to
+# 10 an hour per user (the 11th is 429 ``discover.report_rate_limited``).
 from __future__ import annotations
 
 from types import SimpleNamespace

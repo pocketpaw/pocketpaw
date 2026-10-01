@@ -46,6 +46,8 @@ def get_source(name: str) -> DiscoverSource:
 
 async def hide_at_source(source: str, source_id: str, hidden: bool) -> None:
     """Carry a Discover hide / unhide to the source item, when the source can."""
+    # admin-cross-tenant: Discover moderation hides another workspace's item;
+    # the source's setter carries its own marker.
     setter = get_source(source).set_hidden
     if setter is not None:
         await setter(source_id, hidden)

@@ -15,6 +15,12 @@
 # Updated 2026-10-01 (feat/discover-index): the plan-gate and source-registry
 # autouse fixtures moved to conftest.py (shared with the router tests); unhiding
 # a listing clears its reports.
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): a Discover hide reaches the
+# template and survives private -> public; staff unhide restores both; dismissed
+# reporters are ignored; reindex keeps hidden listings and refreshes live_url;
+# the periodic reindex loop; audit rows for use / feature / hide; the
+# (hidden, _id) index.
 from __future__ import annotations
 
 from typing import Any
