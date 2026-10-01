@@ -394,6 +394,24 @@ async def test_unhide_clears_reports_and_hide_keeps_them() -> None:
     assert (await DiscoverListing.get(listing_id)).hidden is False
 
 
+@pytest.mark.asyncio
+async def test_dismissed_reporters_cannot_re_hide_after_an_unhide() -> None:
+    listing_id = await _upsert("a")
+    for user in STRANGERS:
+        await service.report_listing(OTHER_WS, user, listing_id, {"reason": "spam"})
+    await service_admin.set_hidden(listing_id, False)
+    doc = await DiscoverListing.get(listing_id)
+    assert (doc.reports, sorted(doc.dismissed_reporters)) == ([], list(STRANGERS))
+
+    for user in STRANGERS:  # the same accounts again: ignored
+        await service.report_listing(OTHER_WS, user, listing_id, {"reason": "spam"})
+    doc = await DiscoverListing.get(listing_id)
+    assert (doc.hidden, doc.reports) == (False, [])
+
+    await service.report_listing(OTHER_WS, "u6", listing_id, {"reason": "spam"})
+    assert [r["user"] for r in (await DiscoverListing.get(listing_id)).reports] == ["u6"]
+
+
 # ---------------------------------------------------------------------------
 # reindex / registry
 # ---------------------------------------------------------------------------

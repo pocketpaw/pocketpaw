@@ -15,13 +15,19 @@
 # present, so no exemption entry is needed (same as GET /meetings/by-code/{code}).
 # No Beanie doc import here (import-linter "Discover" contracts); errors are
 # CloudError subclasses mapped by the global handler.
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): POST /report is limited to
+# 10 an hour per user (``rate_limit_discover_report``, 429).
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response
 
 from pocketpaw_ee.cloud._core.deps import current_user_id, current_workspace_id
-from pocketpaw_ee.cloud._core.rate_limit import rate_limit_discover_public
+from pocketpaw_ee.cloud._core.rate_limit import (
+    rate_limit_discover_public,
+    rate_limit_discover_report,
+)
 from pocketpaw_ee.cloud.discover import service, service_admin
 from pocketpaw_ee.cloud.discover.dto import (
     ListPublicListingsRequest,
@@ -74,7 +80,11 @@ async def use_listing(
     return await service.use_listing(workspace_id, user_id, listing_id, name)
 
 
-@router.post("/{listing_id}/report", status_code=204)
+@router.post(
+    "/{listing_id}/report",
+    status_code=204,
+    dependencies=[Depends(rate_limit_discover_report)],
+)
 async def report_listing(
     listing_id: str,
     body: ReportListingRequest,
@@ -82,6 +92,7 @@ async def report_listing(
     user_id: str = Depends(current_user_id),
 ) -> Response:
     """Report a listing. One report per user; a repeat is a no-op. 403
-    ``discover.own_listing`` for your own listing."""
+    ``discover.own_listing`` for your own listing; 429
+    ``discover.report_rate_limited`` past 10 reports an hour."""
     await service.report_listing(workspace_id, user_id, listing_id, body)
     return Response(status_code=204)

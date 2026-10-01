@@ -44,8 +44,10 @@ PUBLIC_KEYS = {
 @pytest.fixture(autouse=True)
 def _fresh_limiter():
     rate_limit._discover_public_limiter._buckets.clear()
+    rate_limit._discover_report_limiter._buckets.clear()
     yield
     rate_limit._discover_public_limiter._buckets.clear()
+    rate_limit._discover_report_limiter._buckets.clear()
 
 
 @pytest_asyncio.fixture
@@ -226,3 +228,18 @@ async def test_report_needs_sign_in_and_three_reporters_unlist(client) -> None:
     client.log_out()
     assert await _titles(client) == []
     assert (await client.get(f"{URL}/{listing_id}")).status_code == 404
+
+
+async def test_reports_are_rate_limited_per_user(client) -> None:
+    listing_id = await _upsert("a")
+    report = {"reason": "spam"}
+    client.act_as("u3")
+    for _ in range(10):  # repeats are no-ops, but each still spends a token
+        assert (await client.post(f"{URL}/{listing_id}/report", json=report)).status_code == 204
+
+    blocked = await client.post(f"{URL}/{listing_id}/report", json=report)
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "discover.report_rate_limited"
+
+    client.act_as("u4")
+    assert (await client.post(f"{URL}/{listing_id}/report", json=report)).status_code == 204

@@ -13,6 +13,10 @@
 #
 # Only ``ee.cloud.discover.service`` / ``service_admin`` import this doc
 # (import-linter "Discover" contract).
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): ``dismissed_reporters``,
+# the user ids whose reports staff dismissed on an unhide; their later reports
+# on this listing are ignored. Discover-owned, like ``reports``.
 
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ class DiscoverListing(TimestampedDocument):
     featured: bool = False
     hidden: bool = False
     reports: list[dict[str, Any]] = Field(default_factory=list)
+    dismissed_reporters: list[str] = Field(default_factory=list)
     remix_count: int = 0
 
     class Settings(TimestampedDocument.Settings):
