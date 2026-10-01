@@ -1,5 +1,12 @@
 # dependency_manifest.py — the shape and the rules of ``paw.dependencies.json``.
 #
+# Updated: 2026-10-02 (fix/canon-cross-repo-pins, CN-8). ``TOOLCHAIN_RESERVED`` and
+# ``MAX_DECLARED_PACKAGES`` are read from the vendored paw-sites allowlist
+# (``vetted_pins.VENDORED_ALLOWLIST``, i.e. ``paw-sites-gen allowlist`` at a pinned
+# commit) instead of being hand copies of paw-sites' ``TOOLCHAIN_RESERVED`` /
+# ``MAX_AUTHOR_PACKAGES``. Same values today; paw-sites' ``@scope/*`` spelling is
+# turned into this module's ``@scope/``. Still network-free: the file is package data.
+#
 # Created: 2026-09-24 (feat/sites-author-dependencies, PP-1). Authors can now
 # declare npm packages on the svelte, react and html tracks. The resolved set rides
 # the pocket's own source map as ONE reserved file, ``paw.dependencies.json``, so
@@ -27,6 +34,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from pocketpaw_ee.sites.vetted_pins import VENDORED_ALLOWLIST
+
 #: Where the manifest lives: the ROOT of the source map on every engine. On svelte
 #: that is outside ``src/`` on purpose (contract §1).
 DEPENDENCY_MANIFEST_PATH = "paw.dependencies.json"
@@ -34,8 +43,8 @@ DEPENDENCY_MANIFEST_PATH = "paw.dependencies.json"
 #: The manifest schema version this module writes and reads.
 MANIFEST_SCHEMA = 1
 
-#: Most packages one site may declare (contract §2).
-MAX_DECLARED_PACKAGES = 20
+#: Most packages one site may declare (contract §2). paw-sites ``MAX_AUTHOR_PACKAGES``.
+MAX_DECLARED_PACKAGES: int = int(VENDORED_ALLOWLIST["maxAuthorPackages"])
 
 #: npm's own ceiling on a package name.
 MAX_NAME_LENGTH = 214
@@ -70,21 +79,12 @@ _BLOCKED_NAMES = frozenset(
     }
 )
 
-#: Toolchain-owned packages an author may not declare (contract §2). A string
-#: ending in ``/`` reserves the whole scope.
-TOOLCHAIN_RESERVED: tuple[str, ...] = (
-    "svelte",
-    "@sveltejs/",
-    "vite",
-    "react",
-    "react-dom",
-    "@vitejs/",
-    "tailwindcss",
-    "@tailwindcss/",
-    "@ripple-ui/",
-    "valibot",
-    "@noble/hashes",
-    "@cloudflare/",
+#: Toolchain-owned packages an author may not declare (contract §2), from paw-sites
+#: ``TOOLCHAIN_RESERVED``. A string ending in ``/`` reserves the whole scope (paw-sites
+#: writes ``@scope/*``). paw-sites' ``engineToolchainReserved`` (motion, ripple only)
+#: needs no twin here: ripple is not in ``DEPENDENCY_ENGINES``.
+TOOLCHAIN_RESERVED: tuple[str, ...] = tuple(
+    entry.removesuffix("*") for entry in VENDORED_ALLOWLIST["toolchainReserved"]
 )
 
 #: Every spelling of the Vite config the generator reserves (paw-sites PS-1).
