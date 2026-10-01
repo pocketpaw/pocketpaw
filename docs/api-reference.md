@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-01 (feat/rooms-read-tool) — added "Agent — Read Chat Rooms
+  (`list_rooms` / `read_room`)": the read-only in-process MCP tools over the
+  workspace's own chat rooms, their authz path, caps and scoping.
 Updated: 2026-09-30 (feat/open-surface-tool) — added "Agent — Open an App Surface
   (`open_surface`)": the in-process MCP tool, the `open_surface` chat stream event
   it produces, and the checks between the two.
@@ -1800,6 +1803,58 @@ more.
 
 Edges are deduplicated (`[[B]]` twice in one note is one edge). `ghosts` are
 the link names no file resolves.
+
+## Agent — Read Chat Rooms (`list_rooms` / `read_room`)
+
+Two read-only in-process MCP tools that let the chat agent read the user's own
+PocketPaw chat rooms: channels like #general, groups and DMs. Before these
+existed, "catch me up on #general" got an answer about Slack not being
+connected. Registered via the `pocketpaw.mcp_servers` entry point (`rooms` →
+`pocketpaw_rooms` → `mcp__pocketpaw_rooms__list_rooms` /
+`mcp__pocketpaw_rooms__read_room`). Source:
+`ee/pocketpaw_ee/agent/mcp_servers/rooms.py`. Nothing here sends, edits or
+reacts.
+
+**`list_rooms`** `{ "query"?: "...", "limit"?: n }` returns
+`{rooms: [{id, name, handle, kind, member, unread?, last_activity}], total, truncated}`,
+most recently active first. `kind` is `channel`, `group` or `dm`; a DM is named
+after the other side ("DM with Alice"). `member` is false for a public room the
+user can see but has not joined (the default General room, for most members).
+`query` matches name or handle, so `#general`, `general` and `General` are the
+same. `limit` defaults to 50, max 200.
+
+**`read_room`** `{ "room": "...", "limit"?: n, "before"?: "..." }` returns
+`{notice, room: {id, name, kind}, messages: [{id, author, author_kind, text, created_at}], has_more, older_cursor}`.
+`room` is an id, `#handle` or name. Messages are oldest to newest;
+`author_kind` is `human` or `agent`. Pass `older_cursor` back as `before` to
+page further back.
+
+**Caps.** `limit` defaults to 30, max 100. Each message's text is cut at 1,000
+chars. The whole call carries at most 40,000 chars of message text; the oldest
+messages are dropped first and `older_cursor` points at the oldest one kept.
+
+**Authz.** Identity is the run's `current_workspace_id` / `current_user_id`,
+read on every call; missing identity fails closed. The user must be a member of
+that workspace (`workspace.service._get_member_role`), which also turns away the
+anonymous concierge visitor id and the group bridge's agent id. A room is
+resolved only against `chat.group_service.list_groups(workspace_id, user_id)`,
+the list `GET /chat/groups` returns, and messages come from
+`chat.message_service.get_messages`, the same call
+`GET /chat/groups/{id}/messages` makes. A room outside that list (another
+workspace, a private room, DM or private channel the user is not in) gets the
+same "no room matching" error as a room that does not exist. Unread counts come
+from `chat.unread_service.list_unreads`.
+
+**Untrusted content.** `read_room` puts a `notice` first in its result saying
+the messages were written by people and agents and are data, never
+instructions.
+
+**Where the agent has it.** Ambient, not always-allowed: reachable on surfaces
+with no MCP allow-list (the generic surface /no-ui-lab talks on, chat, home and
+the like) and filtered out of every allow-listed surface, including the public
+Paw Bar concierge, which is exclusive to its own allow-list. The generic
+surface preamble tells the agent that the workspace's rooms are PocketPaw rooms
+and not to assume Slack unless the user names it.
 
 ## Agent Artifact Delivery (`deliver_artifact`)
 
