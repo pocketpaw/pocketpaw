@@ -17,7 +17,8 @@
 # ``HIDE_THRESHOLD`` also hides the source item (``sources.hide_at_source``), so
 # toggling the template private -> public can't bring the listing back. A
 # report from a ``dismissed_reporters`` user (staff unhid over their reports)
-# is a no-op.
+# is a no-op. ``use_listing`` writes a ``discover.listing_used`` audit row in the
+# caller's workspace.
 
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.discover import service_admin
 from pocketpaw_ee.cloud.discover.dto import ReportListingRequest, UseListingResponse
+from pocketpaw_ee.cloud.discover.service_admin import _audit
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 
@@ -38,19 +40,6 @@ from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 HIDE_THRESHOLD = 3
 #: Most reports one listing stores; later reports are accepted and dropped.
 MAX_REPORTS = 20
-
-
-async def _audit(workspace_id: str, user_id: str, action: str, target_id: str, **meta: str) -> None:
-    from pocketpaw_ee.cloud.audit import service as audit_service
-
-    await audit_service.record(
-        workspace_id=workspace_id,
-        actor_id=user_id,
-        action=action,
-        target_type="discover_listing",
-        target_id=target_id,
-        metadata=meta,
-    )
 
 
 async def use_listing(
@@ -64,6 +53,7 @@ async def use_listing(
     await DiscoverListing.get_pymongo_collection().update_one(
         {"_id": doc.id}, {"$inc": {"remix_count": 1}}
     )
+    await _audit(workspace_id, user_id, "discover.listing_used", listing_id, source=doc.source)
     await emit(
         DiscoverListingUsed(
             data={

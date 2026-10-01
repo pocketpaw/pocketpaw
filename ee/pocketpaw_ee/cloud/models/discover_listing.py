@@ -16,7 +16,8 @@
 #
 # Updated 2026-10-02 (feat/discover-index, hardening): ``dismissed_reporters``,
 # the user ids whose reports staff dismissed on an unhide; their later reports
-# on this listing are ignored. Discover-owned, like ``reports``.
+# on this listing are ignored. Discover-owned, like ``reports``. Index
+# ``(hidden, _id desc)`` serves the public list's filter + newest-first sort.
 
 from __future__ import annotations
 
@@ -52,6 +53,7 @@ class DiscoverListing(TimestampedDocument):
         indexes = [
             IndexModel([("source", 1), ("source_id", 1)], unique=True),
             IndexModel([("hidden", 1), ("featured", 1), ("createdAt", -1)]),
+            IndexModel([("hidden", 1), ("_id", -1)]),
             IndexModel([("kind", 1)]),
             IndexModel([("audiences", 1)]),
         ]

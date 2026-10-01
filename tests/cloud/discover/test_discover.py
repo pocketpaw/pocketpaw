@@ -23,6 +23,7 @@ import pytest
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.discover import listeners, service, service_admin, sources
 from pocketpaw_ee.cloud.discover.dto import PublicListingResponse
+from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.pocket import Pocket as PocketDoc
 from pocketpaw_ee.cloud.models.site import Site
@@ -434,6 +435,40 @@ async def test_dismissed_reporters_cannot_re_hide_after_an_unhide() -> None:
 
     await service.report_listing(OTHER_WS, "u6", listing_id, {"reason": "spam"})
     assert [r["user"] for r in (await DiscoverListing.get(listing_id)).reports] == ["u6"]
+
+
+@pytest.mark.asyncio
+async def test_moderation_and_use_write_audit_rows(recording_bus) -> None:
+    meta = await _template(visibility="public")
+    await _sync(recording_bus)
+    listing_id = str((await _listing(meta["id"])).id)
+    used = await service.use_listing(OTHER_WS, "u3", listing_id)
+    await service_admin.set_featured(listing_id, True)
+    await service_admin.set_hidden(listing_id, True)
+    await service_admin.set_hidden(listing_id, False)
+
+    for action, ws, actor, metadata in [
+        ("discover.listing_used", OTHER_WS, "u3", {"source": "site_template"}),
+        ("discover.listing_featured", WS, "staff", {"featured": "True"}),
+        ("discover.listing_hidden", WS, "staff", {"hidden": "True"}),
+        ("discover.listing_unhidden", WS, "staff", {"hidden": "False"}),
+    ]:
+        rows = await AuditEvent.find(AuditEvent.action == action).to_list()
+        assert len(rows) == 1, action
+        row = rows[0]
+        assert (row.workspace, row.actor_id, row.target_type, row.target_id) == (
+            ws,
+            actor,
+            "discover_listing",
+            listing_id,
+        ), action
+        assert row.metadata == metadata, action
+    assert used["result"]["pocket_id"]
+
+
+def test_public_list_sort_has_a_hidden_id_index() -> None:
+    keys = [list(index.document["key"].items()) for index in DiscoverListing.Settings.indexes]
+    assert [("hidden", 1), ("_id", -1)] in keys
 
 
 # ---------------------------------------------------------------------------

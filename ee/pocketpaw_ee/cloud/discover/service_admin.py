@@ -26,7 +26,8 @@
 # on that listing are ignored), so the same accounts can't re-hide it at once.
 # ``reindex`` refreshes each template's ``live_url`` from its source site first
 # (sites emit no rename / unpublish / delete events), so a stale URL heals on
-# the next reindex.
+# the next reindex. ``set_featured`` / ``set_hidden`` write audit rows (actor
+# "staff") in the listing owner's workspace.
 
 from __future__ import annotations
 
@@ -105,6 +106,19 @@ async def _any_doc(listing_id: str) -> DiscoverListing:
     if doc is None:
         raise NotFound("discover_listing", listing_id)
     return doc
+
+
+async def _audit(workspace_id: str, user_id: str, action: str, target_id: str, **meta: str) -> None:
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    await audit_service.record(
+        workspace_id=workspace_id,
+        actor_id=user_id,
+        action=action,
+        target_type="discover_listing",
+        target_id=target_id,
+        metadata=meta,
+    )
 
 
 def _ref(doc: DiscoverListing) -> dict[str, Any]:
@@ -288,7 +302,11 @@ async def _moderate(doc: DiscoverListing, fields: dict[str, Any]) -> dict:
 async def set_featured(listing_id: str, featured: bool) -> dict:
     """Feature or unfeature a listing (hidden ones included)."""
     # admin-cross-tenant: platform moderation acts on any workspace's listing.
-    return await _moderate(await _any_doc(listing_id), {"featured": featured})
+    doc = await _any_doc(listing_id)
+    result = await _moderate(doc, {"featured": featured})
+    action = "discover.listing_featured" if featured else "discover.listing_unfeatured"
+    await _audit(doc.workspace, "staff", action, listing_id, featured=str(featured))
+    return result
 
 
 async def set_hidden(listing_id: str, hidden: bool) -> dict:
@@ -307,6 +325,8 @@ async def set_hidden(listing_id: str, hidden: bool) -> dict:
         fields = {"hidden": False, "reports": [], "dismissed_reporters": sorted(dismissed)}
     result = await _moderate(doc, fields)
     await hide_at_source(doc.source, doc.source_id, hidden)
+    action = "discover.listing_hidden" if hidden else "discover.listing_unhidden"
+    await _audit(doc.workspace, "staff", action, listing_id, hidden=str(hidden))
     return result
 
 
