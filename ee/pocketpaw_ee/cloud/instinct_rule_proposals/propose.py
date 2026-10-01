@@ -218,6 +218,7 @@ async def propose_instinct_rule(
             param_key=INSTINCT_RULE_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="instinct_rule",
         )
 
     return action_obj.id

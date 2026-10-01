@@ -325,6 +325,7 @@ async def propose_fabric_objects(
             param_key=FABRIC_OBJECTS_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="fabric_objects",
         )
 
     return action_obj.id

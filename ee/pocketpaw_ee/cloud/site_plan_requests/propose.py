@@ -281,6 +281,7 @@ async def propose_site_plan_request(
             param_key=SITE_PLAN_REQUEST_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="site_plan_request",
         )
 
     return action_obj.id

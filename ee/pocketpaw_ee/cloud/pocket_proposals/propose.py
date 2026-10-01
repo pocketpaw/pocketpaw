@@ -270,6 +270,7 @@ async def propose_pocket(
             param_key=POCKET_CREATE_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="pocket_create",
         )
 
     return action_obj.id

@@ -224,6 +224,7 @@ async def propose_admin_action(
             param_key=ADMIN_ACTION_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="admin_action",
         )
 
     return action_obj.id

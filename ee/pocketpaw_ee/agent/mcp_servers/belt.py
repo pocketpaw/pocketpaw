@@ -27,7 +27,8 @@
 #
 # Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
 #   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL). The
-#   ``record_decision`` audit row still fires only after a successful emit.
+#   ``record_decision`` audit row still fires only after a successful emit. The
+#   helper is imported lazily inside the handler to keep this server's import light.
 #
 # What this file does: clones the media.py shape — a single
 # ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /
@@ -77,8 +78,6 @@ import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
-from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
 
 from ._audit import record_decision, record_tool_call
 
@@ -258,6 +257,10 @@ async def _propose_change_handler(args: dict) -> dict:
     or an ``is_error`` response with the reason. NO phantom successes: ok is
     returned only after ``store.propose`` confirms the Action is stored.
     """
+    # Lazy: keeps this server's import light and an import failure in the cloud
+    # package from silently disabling the belt surface at load time.
+    from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
     workspace_id, user_id, session_mongo_id = _identity()
     if not workspace_id or not user_id:
         return _error_response(
@@ -442,6 +445,7 @@ async def _propose_change_handler(args: dict) -> dict:
             param_key=CODE_CHANGE_PARAM_KEY,
             correlation_id=str(correlation_id),
             proposed_event_id=str(proposed_event_id),
+            label="belt",
         )
 
     # SC-2 — publish ``belt_run_updated`` (status=proposed, stage=gate) so the

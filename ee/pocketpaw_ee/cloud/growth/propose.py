@@ -158,6 +158,7 @@ async def propose_growth_send(
             param_key=GROWTH_SEND_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="growth",
         )
 
     logger.info(

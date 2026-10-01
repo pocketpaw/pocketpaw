@@ -23,7 +23,7 @@
 # Failures are logged and swallowed — audit must never break the tool.
 #
 # Updated: 2026-10-01 (CN-5) — the two sink writes are split into
-#   ``_log_runtime_sink`` / ``_record_workspace_sink`` so callers whose rows
+#   ``log_runtime_sink`` / ``record_workspace_sink`` so callers whose rows
 #   differ per sink (connectors.py's connector audit) reuse the plumbing without
 #   changing their stored shape. ``_record_audit_event`` behaviour is unchanged.
 # ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ def _record_audit_event(
     2. Workspace audit (MongoDB) — the primary source for the activity feed.
     """
     safe_meta = dict(metadata or {})
-    _log_runtime_sink(
+    log_runtime_sink(
         actor_id=actor_id,
         runtime_action=runtime_action,
         target=target_id,
@@ -206,7 +206,7 @@ def _record_audit_event(
         context=safe_meta,
         label=action,
     )
-    _record_workspace_sink(
+    record_workspace_sink(
         workspace_id=workspace_id,
         actor_id=actor_id,
         action=action,
@@ -216,7 +216,7 @@ def _record_audit_event(
     )
 
 
-def _log_runtime_sink(
+def log_runtime_sink(
     *,
     actor_id: str,
     runtime_action: str,
@@ -249,7 +249,7 @@ def _log_runtime_sink(
         logger.warning("audit runtime sink failed for %s", label, exc_info=True)
 
 
-def _record_workspace_sink(
+def record_workspace_sink(
     *,
     workspace_id: str,
     actor_id: str,

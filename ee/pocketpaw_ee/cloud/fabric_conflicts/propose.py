@@ -309,6 +309,7 @@ async def propose_fabric_conflict(
             param_key=FABRIC_CONFLICT_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="fabric_conflict",
         )
 
     return action_obj.id

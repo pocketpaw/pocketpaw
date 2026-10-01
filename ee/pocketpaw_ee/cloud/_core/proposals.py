@@ -8,7 +8,8 @@
 #   blob's parameters key and the payload's intent/proposal, so those are the
 #   arguments. Blob writes go through ``update_action_blob`` →
 #   ``InstinctStore.update_parameters`` — no raw SQL on ``instinct_actions``
-#   outside the store.
+#   outside the store. ``persist_chain_ids`` takes each kind's historical log
+#   ``label`` so warning greps keep matching.
 
 from __future__ import annotations
 
@@ -115,12 +116,15 @@ async def persist_chain_ids(
     param_key: str,
     correlation_id: str,
     proposed_event_id: str | None,
+    label: str,
 ) -> None:
     """Write ``correlation_id`` + ``proposed_event_id`` onto the stored blob
     after ``agent.proposed`` fired.
 
     Best-effort: a failure leaves ``proposed_event_id`` None and the eventual
     ``human.corrected`` emits without a causation_id (the chain still folds).
+    ``label`` prefixes the warning (the kind's historical log prefix, e.g.
+    ``admin_action`` / ``ship``) so existing log greps keep matching.
     """
     try:
         await update_action_blob(
@@ -133,7 +137,7 @@ async def persist_chain_ids(
         logger.warning(
             "%s: failed to persist chain ids onto action %s — the chain's "
             "human.corrected will emit without causation_id",
-            param_key,
+            label,
             action_id,
             exc_info=True,
         )

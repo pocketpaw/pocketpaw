@@ -96,7 +96,7 @@ from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
 
-from ._audit import _log_runtime_sink, _record_workspace_sink
+from ._audit import log_runtime_sink, record_workspace_sink
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +189,7 @@ def _audit_connector_execute(
     # The two sinks carry different rows (runtime target = connector, workspace
     # target = connector.action, no ``category`` key), so call each sink directly
     # rather than ``_record_audit_event``, which shares target + metadata.
-    _log_runtime_sink(
+    log_runtime_sink(
         actor_id=actor_id,
         runtime_action="connector.execute",
         target=connector_name,
@@ -204,7 +204,7 @@ def _audit_connector_execute(
         },
         label="connector.execute",
     )
-    _record_workspace_sink(
+    record_workspace_sink(
         workspace_id=workspace_id,
         actor_id=actor_id,
         action="workspace.agent.tool_executed",
