@@ -6,7 +6,9 @@
 #     `kb ingest --article-json` (spied at the subprocess boundary: exact
 #     argv + stdin payload — the seam under test is NOT mocked away);
 #   * key present → the original plain `kb ingest` path, byte-identical argv;
-#   * compile failure / garbage / verbatim echo → raises, NO kb call at all;
+#   * compile failure / garbage / verbatim echo → raises, NO kb call at all.
+#     An echo is judged by 8-word runs copied from the input, not length
+#     alone, so a fact-dense doc's honest compile is accepted;
 #   * compiled_with == "none (fallback)" in any ingest result → rejected
 #     loudly, warning names the scope and article id;
 #   * chat-turn search (search_context_for_scope) fails soft: timeout or
@@ -222,7 +224,7 @@ async def test_compile_of_a_dense_fact_doc_is_not_mistaken_for_an_echo(monkeypat
     _install_compiler(monkeypatch, json.dumps(dict(_ARTICLE, content=compiled)))
     spy = _install_spy(
         monkeypatch,
-        [(0, json.dumps({"id": "art-dense", "compiled_with": "pocketpaw-agent:claude_agent_sdk"}), "")],
+        [(0, json.dumps({"id": "art-dense", "compiled_with": "pocketpaw-agent:sdk"}), "")],
     )
 
     result = await KnowledgeService.ingest_text_to_scope(
@@ -231,6 +233,94 @@ async def test_compile_of_a_dense_fact_doc_is_not_mistaken_for_an_echo(monkeypat
 
     assert result["id"] == "art-dense"
     assert json.loads(spy.calls[0]["input"])["article"]["content"] == compiled
+
+
+def _prose_doc() -> str:
+    """~6k chars of varied prose sentences, over the large-doc threshold."""
+    return "\n".join(
+        f"Step {i}: the technician inspects valve {i * 7} and records pressure "
+        f"reading {i * 13} before closing ticket {1000 + i} for customer {i * 3}."
+        for i in range(60)
+    )
+
+
+@pytest.mark.asyncio
+async def test_lightly_reformatted_echo_of_large_doc_still_rejected(monkeypatch):
+    """Markdown bullets and changed whitespace do not turn a copy into a compile:
+    the copied-run check ignores punctuation and whitespace."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    source = _prose_doc()
+    echo = "# Procedure\n\n" + "\n".join(
+        "-  " + "  ".join(line.split()) for line in source.splitlines()
+    )
+    assert len(source) > knowledge._LARGE_DOC_CHARS
+    assert len(echo) <= len(source) * knowledge._MAX_COMPILED_CEILING  # not the ceiling
+    _install_compiler(monkeypatch, json.dumps(dict(_ARTICLE, content=echo)))
+    spy = _install_spy(monkeypatch, [])
+
+    with pytest.raises(RuntimeError, match="verbatim echo"):
+        await KnowledgeService.ingest_text_to_scope("workspace:w1", source, source="proc.md")
+
+    assert spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_compile_longer_than_the_ceiling_rejected(monkeypatch):
+    """However little it copies, an article well past its source's length is
+    carrying text the source never had."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    source, compiled = _dense_fact_doc()
+    bloated = (
+        compiled
+        + "\n\n"
+        + "\n".join(f"- Note {i}: ask our team about loyalty discount tier {i}." for i in range(80))
+    )
+    assert len(bloated) > len(source) * knowledge._MAX_COMPILED_CEILING
+    _install_compiler(monkeypatch, json.dumps(dict(_ARTICLE, content=bloated)))
+    spy = _install_spy(monkeypatch, [])
+
+    with pytest.raises(RuntimeError, match="longer than its source"):
+        await KnowledgeService.ingest_text_to_scope("pocket:p1", source, source="guide.pdf")
+
+    assert spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_small_doc_is_exempt_from_the_echo_and_ceiling_checks(monkeypatch):
+    """A short note's article may copy it and run longer than it: small docs skip
+    every length and copy check, as before."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    note = "Shop hours: open nine to five on weekdays, closed on public holidays."
+    content = "# Shop hours\n\n" + note + "\n\n" + note
+    assert len(note) < knowledge._LARGE_DOC_CHARS
+    assert len(content) > len(note) * knowledge._MAX_COMPILED_CEILING
+    _install_compiler(monkeypatch, json.dumps(dict(_ARTICLE, content=content)))
+    spy = _install_spy(
+        monkeypatch,
+        [(0, json.dumps({"id": "art-note", "compiled_with": "pocketpaw-agent:x"}), "")],
+    )
+
+    result = await KnowledgeService.ingest_text_to_scope("pocket:p1", note, source="hours.txt")
+
+    assert result["id"] == "art-note"
+    assert json.loads(spy.calls[0]["input"])["article"]["content"] == content
+
+
+def test_echo_check_compares_against_the_excerpt_passed_in():
+    """The same content is an echo of the text it copies and not of an unrelated
+    excerpt of similar length: copying, not length, decides."""
+    source = _prose_doc()
+    article = dict(_ARTICLE, content=source)
+    with pytest.raises(ValueError, match="verbatim echo"):
+        knowledge._validate_compiled_article(article, compile_input=source, source="s")
+
+    unrelated = "\n".join(
+        f"Unrelated line {i} about pricing tier {i * 5} and opening hours." for i in range(100)
+    )
+    ratio = len(source) / len(unrelated)
+    assert knowledge._MAX_COMPILED_RATIO <= ratio <= knowledge._MAX_COMPILED_CEILING
+    validated = knowledge._validate_compiled_article(article, compile_input=unrelated, source="s")
+    assert validated["content"] == source.strip()
 
 
 @pytest.mark.asyncio

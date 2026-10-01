@@ -1,73 +1,28 @@
-# knowledge.py — Agent knowledge service via the kb-go binary.
-# Updated: 2026-09-28 (feat/concierge-page-aware, CR-3) — get_article_for_scope,
-#   the scope-form sibling of get_article (`kb show <id> --scope <s> --json`). The
-#   v2 concierge reads the visitor's current page's own article with it, by the id
-#   the site sync recorded in Site.kb_page_index. Raises on failure; the caller is
-#   fail-soft.
-# Updated: 2026-09-25 (sites kb engine) — KnowledgeEngineUnavailable, a
-#   RuntimeError subclass raised when the kb ENGINE is the problem rather than
-#   the document: the binary is missing, or it predates `ingest --article-json`
-#   (unknown flag, or a receipt with no compiled_with). Callers that loop over
-#   many documents (the site page sync) catch it to stop at the first page
-#   instead of paying a compile and writing a verbatim article for every one.
-#   Existing `except RuntimeError` callers are unaffected.
-# Updated: 2026-08-04 (living-wiki review follow-up) — Added
-#   extract_ingest_article_id(): kb-go's finishIngest receipt keys the new
-#   article as "article" (not "id"), so callers that read result["id"] never
-#   saw it and FL-11b tracking writes silently never fired. The helper mirrors
-#   _check_ingest_result's key order (id, article_id, article) and is now the
-#   one place receipt-shape knowledge lives; the FileReady listener and the
-#   /knowledge reingest routes both use it.
-# Updated: 2026-08-04 — Ingest hardening (silent-poisoning fix). On boxes with
-#   no ANTHROPIC_API_KEY (the Claude Code agent backend deployment), kb's own
-#   LLM compile used to fail and kb silently stored every doc VERBATIM — a
-#   54-article / 4M-word scope that every chat turn then paid to search.
-#   Three changes: (1) ingest_text_to_scope now compiles the article with
-#   PocketPaw's own agent backend (PocketPawCompilerBackend) when the key is
-#   absent and pipes the pre-compiled article to `kb ingest --article-json`;
-#   compile failure RAISES — never a verbatim fallback. (2) Any ingest result
-#   with compiled_with == "none (fallback)" is rejected loudly (defense in
-#   depth against older binaries / --allow-fallback misuse). Note: the
-#   missing-compiled_with old-binary detector below applies ONLY to the
-#   --article-json path — the keyed plain-ingest path deliberately tolerates
-#   old-style output so a healthy keyed deployment on an old binary keeps
-#   working. (3) The chat-turn
-#   search path (search_context_for_scope) got a hard 5s timeout and fails
-#   soft (returns "") so a slow KB can never stall a chat turn; _kb translates
-#   subprocess timeouts into clear RuntimeErrors. ingest_file's text-file path
-#   now routes through ingest_text_to_scope so it gets the same guarantees;
-#   code files keep their AST treatment via a --lang hint derived from the
-#   source filename (stdin has no path for kb-go's own detectLanguage), and
-#   the keyless compile prompt is steered to document code structure.
-#   Requires the kb-go binary with --article-json support. Old-binary
-#   detection (2026-08-04 follow-up): kb-go silently IGNORES unknown flags,
-#   so an old binary exits 0 after storing the payload verbatim — the
-#   version-proof signal is the MISSING compiled_with key in the result
-#   (the paired binary always emits it); on that path we raise with an
-#   upgrade hint and name the article for purging.
-# Updated: 2026-07-30 — Paw Bar reply sources. Added the scope-form read pair
-#   search_articles_for_scope / list_articles_for_scope (raw {id, title, summary}
-#   hit dicts, mirroring ingest_text_to_scope's "caller owns the scope shape"
-#   contract) so the public concierge router can attribute a reply to the synced
-#   site pages and list them, without importing this module's private ``_kb``.
-# Updated: 2026-07-03 — FL-11b "hide-from-AI purge". Added
-#   KnowledgeService.remove_article(scope, article_id) → `kb delete
-#   <article_id> --scope <scope>`, mirroring get_article. Resilient: logs and
-#   swallows subprocess errors (returns False) like the other kb calls, so a
-#   purge failure never propagates back into the PATCH handler that hides a
-#   file. kb-go's `delete` is idempotent (deleting a missing id is a no-op).
-# Updated: 2026-04-30 — Stage 1.B of "Files as Knowledge". Added
-#   ingest_text_to_scope so callers (notably the FileReady listener) can
-#   target arbitrary kb-go scopes (workspace:{wid}, pocket:{pid}) without
-#   shoehorning everything through agent:{aid}. Existing ingest_text and
-#   ingest_file are now thin wrappers over the new entry point.
-# Updated: 2026-04-30 — File extraction routed through the pluggable
-#   ee/cloud/extraction chain (LocalExtractor preserves the previous pypdf
-#   / python-docx / pytesseract behaviour; cloud adapters slot in via
-#   POCKETPAW_EXTRACTION_CHAIN). Stage 1.A of "Files as Knowledge".
-# Updated: 2026-04-07 — Switched from Python knowledge_base package to kb Go binary.
-# Heavy extraction (PDF, OCR, URL) done in Python, piped as text to kb.
-# All other operations delegate to subprocess calls.
+# knowledge.py — agent knowledge service over the kb-go binary.
+#
+# Every ingest funnels through ``KnowledgeService.ingest_text_to_scope``; the
+# caller decides the scope string (``agent:{id}``, ``workspace:{id}``,
+# ``pocket:{id}``). File extraction runs through ``ee.cloud.extraction`` and URL
+# extraction through trafilatura; kb-go does compile, search, index and storage.
+#
+# Invariants a reader must not break:
+#   * A document is NEVER stored verbatim. With ANTHROPIC_API_KEY, kb compiles
+#     it. Without one, ``_compile_article_with_agent`` compiles it through
+#     PocketPaw's own agent backend and pipes the article to
+#     ``kb ingest --article-json``. A compile failure raises; there is no
+#     fallback. Any receipt with ``compiled_with == "none (fallback)"`` is
+#     rejected, and on the --article-json path a receipt with NO compiled_with
+#     means an old binary that ignored the flag (kb-go skips unknown flags), so
+#     that raises ``KnowledgeEngineUnavailable`` naming the article to purge.
+#   * ``_validate_compiled_article`` rejects a backend compile that is a
+#     verbatim echo of a large input. An echo is judged by how much of the
+#     content is COPIED from the input (8-word shingles), not by length alone:
+#     a fact-dense document's honest compile keeps every fact and can be about
+#     as long as its source. A hard length ceiling still applies.
+#   * Chat-turn search (``search_context_for_scope``) fails soft: a 5s timeout
+#     or a kb error returns "" with a warning, so the KB never stalls a turn.
+#   * ``extract_ingest_article_id`` is the one place that knows the receipt's
+#     key order (id, article_id, article).
 """Agent knowledge service — thin wrapper over the `kb` Go binary.
 
 The kb binary (github.com/qbtrix/kb-go) handles compilation, search, indexing,
@@ -83,6 +38,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -107,10 +63,28 @@ _AGENT_COMPILE_TIMEOUT_S = 300
 # bounds the LLM prompt.
 _COMPILE_INPUT_CAP_CHARS = 80_000
 
-# Above this size, a compiled article must be meaningfully shorter than the
-# text the compiler saw, or we treat it as a verbatim echo and reject it.
+# Echo detection on the agent-backend path, for inputs over _LARGE_DOC_CHARS
+# (a short note's article can honestly be as long as the note, so small docs
+# skip all three checks). A compile is a verbatim echo when its content is at
+# least _MAX_COMPILED_RATIO of the input's length AND at least
+# _ECHO_COPIED_FRACTION of its _ECHO_SHINGLE_WORDS-word runs appear verbatim in
+# the input. Length alone is not evidence: a price list or care guide is all
+# facts, so its honest compile keeps nearly every word and lands near 100%
+# of the input while sharing almost no 8-word run with it. Eight words is
+# long enough that rewording breaks the run, and short enough that a copied
+# paragraph with markdown bullets added still matches (shingles ignore
+# punctuation and whitespace).
 _LARGE_DOC_CHARS = 4_000
 _MAX_COMPILED_RATIO = 0.6
+_ECHO_SHINGLE_WORDS = 8
+_ECHO_COPIED_FRACTION = 0.5
+# Whatever it copies, content past this multiple of the input is rejected. A
+# compile restates, so markdown overhead (headings, bullets, bold labels) and
+# turning table rows into sentences can push a dense doc to or a little past
+# 1.0x (the price-table repro in test_knowledge_ingest_hardening compiles to
+# 0.97x). Past 1.25x the article carries text its source never had: padding or
+# invention, which a compression prompt should never produce.
+_MAX_COMPILED_CEILING = 1.25
 
 # kb-go's marker for "compile failed, stored verbatim". We never accept it.
 _FALLBACK_COMPILED_WITH = "none (fallback)"
@@ -318,24 +292,57 @@ def _parse_article_json(raw: str) -> dict:
     raise ValueError(f"compiler response is not a JSON object: {text[:200]!r}")
 
 
-def _validate_compiled_article(article: dict, *, compile_input_len: int, source: str) -> dict:
+_WORD_RE = re.compile(r"\w+")
+
+
+def _shingles(text: str) -> list[tuple[str, ...]]:
+    """The text's overlapping ``_ECHO_SHINGLE_WORDS``-word runs, lowercased, with
+    punctuation and whitespace ignored so reformatting does not hide a copy."""
+    words = _WORD_RE.findall(text.lower())
+    n = _ECHO_SHINGLE_WORDS
+    return [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
+
+
+def _copied_fraction(content: str, compile_input: str) -> float:
+    """Share of ``content``'s word runs that appear verbatim in ``compile_input``."""
+    runs = _shingles(content)
+    if not runs:
+        return 0.0
+    source_runs = set(_shingles(compile_input))
+    return sum(run in source_runs for run in runs) / len(runs)
+
+
+def _validate_compiled_article(article: dict, *, compile_input: str, source: str) -> dict:
     """Normalize + sanity-check a backend-compiled article.
 
-    Raises ``ValueError`` on garbage: empty title/content, or (for large
-    docs) content that isn't meaningfully shorter than what the compiler
-    saw — that's a verbatim echo, exactly the poisoning we're preventing.
+    ``compile_input`` is the exact excerpt the compiler saw. Raises
+    ``ValueError`` on garbage: empty title/content, or (for large docs) content
+    that is mostly copied from the input at a length close to it (a verbatim
+    echo, exactly the poisoning we're preventing), or content longer than
+    ``_MAX_COMPILED_CEILING`` times the input.
     """
     title = str(article.get("title") or "").strip()
     content = str(article.get("content") or "").strip()
     if not title or not content:
         raise ValueError("compiled article is missing a title or content")
-    compiled_cap = compile_input_len * _MAX_COMPILED_RATIO
-    if compile_input_len > _LARGE_DOC_CHARS and len(content) > compiled_cap:
-        raise ValueError(
-            f"compiled article is not a compression: content is {len(content)} chars "
-            f"against a {compile_input_len}-char input (limit "
-            f"{_MAX_COMPILED_RATIO:.0%}) — looks like a verbatim echo"
-        )
+    input_len = len(compile_input)
+    if input_len > _LARGE_DOC_CHARS:
+        ratio = len(content) / input_len
+        if ratio > _MAX_COMPILED_CEILING:
+            raise ValueError(
+                f"compiled article is longer than its source: content is {len(content)} "
+                f"chars against a {input_len}-char input (limit "
+                f"{_MAX_COMPILED_CEILING:.0%})"
+            )
+        if ratio >= _MAX_COMPILED_RATIO:
+            copied = _copied_fraction(content, compile_input)
+            if copied >= _ECHO_COPIED_FRACTION:
+                raise ValueError(
+                    f"compiled article is not a compression: content is {len(content)} "
+                    f"chars against a {input_len}-char input and {copied:.0%} of it is "
+                    f"copied verbatim (limits {_MAX_COMPILED_RATIO:.0%} length, "
+                    f"{_ECHO_COPIED_FRACTION:.0%} copied) — looks like a verbatim echo"
+                )
     summary = str(article.get("summary") or "").strip()
     concepts = [str(c).strip() for c in article.get("concepts") or [] if str(c).strip()]
     categories = [str(c).strip() for c in article.get("categories") or [] if str(c).strip()]
@@ -416,7 +423,7 @@ async def _compile_article_with_agent(text: str, source: str, lang: str | None =
         )
     try:
         article = _validate_compiled_article(
-            _parse_article_json(raw), compile_input_len=len(excerpt), source=source
+            _parse_article_json(raw), compile_input=excerpt, source=source
         )
     except ValueError as exc:
         raise RuntimeError(f"agent-backend article compile failed for {source!r}: {exc}")
