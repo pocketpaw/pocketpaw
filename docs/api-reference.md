@@ -4273,8 +4273,8 @@ the split is the security model:
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
 | `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |
-| `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. |
-| `GET /paw-bar/cart` | The visitor's own cart. |
+| `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. A cart holds one currency: `add_to_cart` for a product priced in another currency than a non-empty cart is 409 `cart_currency_mismatch` and the cart is left as it was. |
+| `GET /paw-bar/cart` | The visitor's own cart: `{items, total_cents, currency, checkout_url}`, amounts in minor units of `currency` (see Money below). |
 | `POST /paw-bar/decision-contact` | Leave an email so a decision reaches the visitor after they close the page. The address is stored on the decision row only — never in agent context, the KB, or transcripts. |
 | `GET /paw-bar/messages/{widget_id}/{customer_ref}` | Poll for owner and system messages once a human has joined. Returns `role`, `content`, `at` and `bot_paused` — never notes, tags, assignee or contact address. Pass `conversation_id` to scope the read (and `bot_paused`) to the thread on screen; omitting it answers for the visitor's whole history, which is what a cached widget bundle does. |
 | `GET /paw-bar/articles` | The site's own synced pages, for a self-serve reading list. |
@@ -4302,6 +4302,19 @@ the split is the security model:
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge/sources`, `POST …/knowledge/sources/{source_id}/refetch`, `DELETE …/knowledge/sources/{source_id}` | Uploaded files and single links the concierge answers from, read into the site pocket KB. GET returns `{site_id, sources, plan, max_count, max_bytes, max_chars, accepted_types}`. POST is a form (multipart, or urlencoded for a link alone; a JSON body is a 422) with exactly one of `file` (`.pdf`, `.docx`, `.md`, `.txt`) or `url`, otherwise 422 `one_source_required` (a `url` over 2,048 characters is 422 `url_too_long`), and returns the new row with status `processing` (202); poll GET until it changes. A row is `{id, kind: "file"|"link", name, url, mime, size_bytes, status, reason, chars, truncated, article_ids, created_at, updated_at, indexed_at}`; `status` is `processing`, `ready`, `failed` (`reason`: `unreadable`, `unreachable`, `no_content`, `ingest_failed`, `kb_unavailable`, `interrupted`), `too_large`, `unsupported` or `blocked`. Refusals write nothing and carry the code as `detail`: 409 `over_limit`, 413 `too_large`, 415 `unsupported` (the type is sniffed from the bytes and must match the extension; the client `Content-Type` is ignored), 422 `blocked` (not a public http(s) address). Refetch re-reads a link (409 `not_a_link` for a file, 409 `already_processing`), DELETE un-indexes and is a 204. Links are fetched through the SSRF-safe fetcher, which re-checks every redirect hop. The file bytes are not stored. Caps come from config: `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_COUNT_FREE`/`_SITE`/`_STAFF` (3/20/50, by the site plan), `…_SOURCE_MAX_BYTES` (10 MiB), `…_SOURCE_MAX_CHARS` (100,000). GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `source_id`, is a 404. |
 | `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP `sandbox` directive as the public frame. |
 
+#### Money
+
+Every amount field (`price_cents`, `total_cents`, `value_cents`, `amount_cents`) is an
+integer in ISO 4217 minor units of the currency next to it; the `_cents` names are
+historical. Most currencies have 2 decimals; the exceptions are 0 (BIF, CLP, DJF, GNF,
+ISK, JPY, KMF, KRW, PYG, RWF, UGX, UYI, VND, VUV, XAF, XOF, XPF), 3 (BHD, IQD, JOD, KWD,
+LYD, OMR, TND) and 4 (CLF, UYW). The table lives in `pocketpaw.money` and, identically,
+in `tests/fixtures/currency_exponents.json`, which the clients' copies are tested
+against. Currency codes are upper-cased; the agent ledger's per-currency totals group
+`usd` and `USD` together. Amounts stored before this rule (major × 100 for every
+currency) are converted once by the `money_minor_units_v1` migration in each SQLite
+store; client invoices in Mongo by `scripts/migrations/2026_10_01_invoice_minor_units.py`.
+
 #### Catalog items
 
 `spec.catalog` holds at most 200 products with unique ids. Product cards and the
@@ -4313,7 +4326,7 @@ rather than rejected, so a spec saved before these rules still loads.
 |---|---|---|
 | `id` | string | Required, unique within the catalog. Imported items use `shopify:<id>`, `woo:<id>` or `web:<hash of the page path>`; ids the editor mints start `item-`. |
 | `name` | string | Trimmed and cut to 200 characters. |
-| `price_cents` | int | Non-negative, in hundredths of the currency for every currency (zero-decimal currencies such as JPY included). |
+| `price_cents` | int | Non-negative, in ISO 4217 minor units of `currency`: `350` is $3.50, `1500` is ¥1,500, `1250` is 1.250 KWD. The name is historical. |
 | `currency` | string | Trimmed and upper-cased. Anything that isn't then 3 letters (including `""`) is stored as `USD`. |
 | `image_url` | string | An `http(s)://` URL of at most 2048 characters; anything else is stored as `""`. |
 | `url` | string | The product's page: an `http(s)://` URL or a site path starting with a single `/`, at most 2048 characters; anything else is stored as `""`. A product card links to it. |
@@ -4345,7 +4358,9 @@ It reads Shopify's `/products.json` or the WooCommerce Store API when the homepa
 like one of them, and otherwise (or when that endpoint is refused, missing or
 robots-disallowed) the store's sitemap and product pages: schema.org `Product` JSON-LD
 first, then `og:type=product` tags. One item per product: a Shopify product's price is
-its cheapest available variant. Products are sorted in stock first, then in the store's
+its cheapest available variant. Prices are converted to ISO 4217 minor units of the
+product's currency (WooCommerce's own `currency_minor_unit` is undone first); a product
+whose currency is unknown is converted as two decimals. Products are sorted in stock first, then in the store's
 order, and capped at 200; `total_found` is the count before the cap.
 
 | `status` | Meaning |
