@@ -1,0 +1,780 @@
+{
+  "schema": "paw.atlas/v1",
+  "entries": [
+    {
+      "id": "verb:send",
+      "kind": "verb",
+      "name": "Send to a channel",
+      "summary": "Post a message into a chat channel as the user, straight from the composer.",
+      "narrative": "A composer verb in the no-UI shell. /send #channel <text> posts the text into that channel AS THE USER, so everyone in the channel sees it under their name. It is risky because it speaks for the user in front of others and a sent message cannot be unsent from the composer. Suggest it when the user wants to say something in a channel without opening the chat; to read a channel instead, use the read-only room tools.",
+      "how": "type /send #channel your message in the composer",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "send",
+        "post",
+        "message to channel",
+        "post in channel",
+        "send a message",
+        "tell the channel",
+        "announce"
+      ],
+      "slash": "send",
+      "applies_to": [
+        "channel"
+      ],
+      "triggers": [
+        "slash"
+      ],
+      "risk": "risky",
+      "undo": false
+    },
+    {
+      "id": "verb:task",
+      "kind": "verb",
+      "name": "New task",
+      "summary": "Create a task from the composer, optionally assigned to a teammate with @name.",
+      "narrative": "A composer verb in the no-UI shell. /task <title> @person creates a task (the alias /new-task does the same). Mention a teammate to assign it. Suggest it when the user wants a to-do recorded or handed to someone, e.g. 'you can also type /task Fix login @rohit'.",
+      "how": "type /task Fix login @rohit in the composer (alias /new-task)",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "new task",
+        "create task",
+        "add a task",
+        "todo",
+        "to-do",
+        "remind",
+        "follow up",
+        "ticket"
+      ],
+      "slash": "task",
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "slash"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:site",
+      "kind": "verb",
+      "name": "Build a site",
+      "summary": "Ask the agent to build a website from a one-line brief, from the composer.",
+      "narrative": "A composer verb in the no-UI shell. /site <brief> hands the brief to the agent, which builds a Paw Site draft (a Pocket that can be published). Use it as the fast path for 'make me a site for ...'; publishing stays a separate, explicit step.",
+      "how": "type /site a calm dentist landing page in the composer",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "build site",
+        "new site",
+        "site brief",
+        "make site"
+      ],
+      "slash": "site",
+      "applies_to": [
+        "site"
+      ],
+      "triggers": [
+        "slash",
+        "agent"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:catch-up",
+      "kind": "verb",
+      "name": "Catch me up",
+      "summary": "One-tap room summary: the agent reads the room's recent messages and sums them up.",
+      "narrative": "A composer verb in the no-UI shell. The room's 'Catch me up' action sends the room's recent messages to the agent, which summarizes them. Read-only: nothing is posted. The agent side of this is the read-only room tools.",
+      "how": "the 'Catch me up' action on a room",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "summary of room",
+        "room recap",
+        "recap"
+      ],
+      "slash": null,
+      "applies_to": [
+        "room"
+      ],
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "risk": "read",
+      "undo": false
+    },
+    {
+      "id": "verb:file-rename",
+      "kind": "verb",
+      "name": "Rename file",
+      "summary": "Give a file in Files a new name.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: rename it in place. Its links and id stay the same.",
+      "how": "the Rename verb on a file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "rename file",
+        "rename",
+        "new name",
+        "change the name"
+      ],
+      "slash": null,
+      "applies_to": [
+        "file"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:file-move",
+      "kind": "verb",
+      "name": "Move file",
+      "summary": "Move a file into another folder in Files.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: move it to another folder.",
+      "how": "the Move verb on a file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "move file",
+        "move to folder",
+        "relocate",
+        "organize"
+      ],
+      "slash": null,
+      "applies_to": [
+        "file"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:file-delete",
+      "kind": "verb",
+      "name": "Delete file",
+      "summary": "Permanently delete a file from Files.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: delete it. Risky and NOT undoable — confirm with the user first.",
+      "how": "the Delete verb on a file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "delete file",
+        "remove file",
+        "trash file"
+      ],
+      "slash": null,
+      "applies_to": [
+        "file"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "risky",
+      "undo": false
+    },
+    {
+      "id": "verb:file-share-link",
+      "kind": "verb",
+      "name": "Share file link",
+      "summary": "Make a share link for a file so others can open it.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: mint a share link. Undoable — the link can be revoked.",
+      "how": "the Share link verb on a file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "share link",
+        "share file",
+        "shareable link",
+        "send file link"
+      ],
+      "slash": null,
+      "applies_to": [
+        "file"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": true
+    },
+    {
+      "id": "verb:file-download",
+      "kind": "verb",
+      "name": "Download file",
+      "summary": "Download a file from Files to the device.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: download it. Read-only.",
+      "how": "the Download verb on a file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "download",
+        "save locally",
+        "download file"
+      ],
+      "slash": null,
+      "applies_to": [
+        "file"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "read",
+      "undo": false
+    },
+    {
+      "id": "verb:file-summarize",
+      "kind": "verb",
+      "name": "Summarize file",
+      "summary": "Ask the agent for a summary of a file's contents.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: the agent reads the file and summarizes it. Read-only.",
+      "how": "the Summarize verb on a file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "summarize file",
+        "tl;dr",
+        "what is in this file",
+        "file summary"
+      ],
+      "slash": null,
+      "applies_to": [
+        "file"
+      ],
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "risk": "read",
+      "undo": false
+    },
+    {
+      "id": "verb:task-complete",
+      "kind": "verb",
+      "name": "Mark done",
+      "summary": "Mark a task done.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: mark it complete. Undoable (reopen it).",
+      "how": "the Complete verb on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "complete task",
+        "mark done",
+        "check off",
+        "finish task",
+        "close task"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": true
+    },
+    {
+      "id": "verb:task-reopen",
+      "kind": "verb",
+      "name": "Reopen",
+      "summary": "Reopen a completed task.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: reopen a completed task.",
+      "how": "the Reopen verb on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "reopen",
+        "reopen task",
+        "not done"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:task-reject",
+      "kind": "verb",
+      "name": "Reject",
+      "summary": "Reject a task proposed to you.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: reject a proposed task.",
+      "how": "the Reject verb on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "reject task",
+        "decline task",
+        "won't do"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:task-snooze",
+      "kind": "verb",
+      "name": "Snooze",
+      "summary": "Snooze a task so it comes back later.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: snooze it out of the way until later.",
+      "how": "the Snooze verb on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "snooze",
+        "later",
+        "postpone",
+        "defer"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:task-assign",
+      "kind": "verb",
+      "name": "Assign",
+      "summary": "Assign a task to a teammate.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: hand it to a teammate.",
+      "how": "the Assign verb on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "assign",
+        "assign task",
+        "hand off",
+        "delegate",
+        "reassign"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:task-due",
+      "kind": "verb",
+      "name": "Set due date",
+      "summary": "Set a task due today, tomorrow or next week.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: set its due date to today, tomorrow or next week.",
+      "how": "the Due today / Due tomorrow / Due next week verbs on a task",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "due date",
+        "due today",
+        "due tomorrow",
+        "due next week",
+        "deadline",
+        "schedule task"
+      ],
+      "slash": null,
+      "applies_to": [
+        "task"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:message-react",
+      "kind": "verb",
+      "name": "React to message",
+      "summary": "Add an emoji reaction to a chat message.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: react with an emoji.",
+      "how": "the React verb on a message",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "react",
+        "emoji",
+        "reaction",
+        "thumbs up"
+      ],
+      "slash": null,
+      "applies_to": [
+        "message"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:message-reply",
+      "kind": "verb",
+      "name": "Reply to message",
+      "summary": "Reply to a chat message in its thread.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: reply in the thread.",
+      "how": "the Reply verb on a message",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "reply",
+        "respond",
+        "thread reply",
+        "answer"
+      ],
+      "slash": null,
+      "applies_to": [
+        "message"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:message-edit",
+      "kind": "verb",
+      "name": "Edit own message",
+      "summary": "Edit a message you sent.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: edit its text. Undoable.",
+      "how": "the Edit verb on your own message",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "edit message",
+        "fix typo",
+        "change my message"
+      ],
+      "slash": null,
+      "applies_to": [
+        "message"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": true
+    },
+    {
+      "id": "verb:message-delete",
+      "kind": "verb",
+      "name": "Delete own message",
+      "summary": "Delete a message you sent.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: delete it. Risky, not undoable.",
+      "how": "the Delete verb on your own message",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "delete message",
+        "unsend",
+        "remove my message"
+      ],
+      "slash": null,
+      "applies_to": [
+        "message"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "risky",
+      "undo": false
+    },
+    {
+      "id": "verb:pocket-rename",
+      "kind": "verb",
+      "name": "Rename pocket",
+      "summary": "Rename a Pocket.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Pocket (workspace app container): rename it.",
+      "how": "the Rename verb on a pocket",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "rename pocket",
+        "rename app"
+      ],
+      "slash": null,
+      "applies_to": [
+        "pocket"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:pocket-delete",
+      "kind": "verb",
+      "name": "Delete pocket",
+      "summary": "Delete a Pocket and its canvas.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Pocket: delete it. Risky, not undoable — confirm first.",
+      "how": "the Delete verb on a pocket",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "delete pocket",
+        "remove pocket",
+        "delete app"
+      ],
+      "slash": null,
+      "applies_to": [
+        "pocket"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "risky",
+      "undo": false
+    },
+    {
+      "id": "verb:pocket-change",
+      "kind": "verb",
+      "name": "Change this pocket",
+      "summary": "Ask the agent to change a Pocket you're looking at.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Pocket: 'Change this' hands the agent an edit request for that Pocket's canvas.",
+      "how": "the Change this verb on a pocket",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "change this pocket",
+        "edit pocket",
+        "tweak app"
+      ],
+      "slash": null,
+      "applies_to": [
+        "pocket"
+      ],
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:site-publish",
+      "kind": "verb",
+      "name": "Publish site draft",
+      "summary": "Publish a site draft so it is live.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Paw Site draft: publish it live. Risky because it makes the draft public.",
+      "how": "the Publish verb on a site",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "publish draft",
+        "make it live",
+        "push live"
+      ],
+      "slash": null,
+      "applies_to": [
+        "site"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "risky",
+      "undo": false
+    },
+    {
+      "id": "verb:site-open-live",
+      "kind": "verb",
+      "name": "Open live site",
+      "summary": "Open the published site in a new tab.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a published site: open the live URL. Read-only.",
+      "how": "the Open live verb on a site",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "view live",
+        "live url",
+        "visit site"
+      ],
+      "slash": null,
+      "applies_to": [
+        "site"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "read",
+      "undo": false
+    },
+    {
+      "id": "verb:site-copy-url",
+      "kind": "verb",
+      "name": "Copy site URL",
+      "summary": "Copy a published site's URL.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a published site: copy its URL. Read-only.",
+      "how": "the Copy URL verb on a site",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "copy url",
+        "copy link",
+        "site url"
+      ],
+      "slash": null,
+      "applies_to": [
+        "site"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "read",
+      "undo": false
+    },
+    {
+      "id": "verb:site-delete",
+      "kind": "verb",
+      "name": "Delete site",
+      "summary": "Delete a site.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a site: delete it. Risky, not undoable — confirm first.",
+      "how": "the Delete verb on a site",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "delete site",
+        "remove site",
+        "take down"
+      ],
+      "slash": null,
+      "applies_to": [
+        "site"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "risky",
+      "undo": false
+    },
+    {
+      "id": "verb:site-change",
+      "kind": "verb",
+      "name": "Change this site",
+      "summary": "Ask the agent to change a site you're looking at.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a site: 'Change this' hands the agent an edit request for that site's draft.",
+      "how": "the Change this verb on a site",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "change this site",
+        "edit site",
+        "tweak site"
+      ],
+      "slash": null,
+      "applies_to": [
+        "site"
+      ],
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:knowledge-add-note",
+      "kind": "verb",
+      "name": "Add to knowledge",
+      "summary": "Add a note to the knowledge base.",
+      "narrative": "A composer verb in the no-UI shell. An object verb in Knowledge: add a note as a new article.",
+      "how": "the Add note verb in knowledge",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "add note",
+        "add to kb",
+        "save to knowledge",
+        "jot down"
+      ],
+      "slash": null,
+      "applies_to": [
+        "article"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": false
+    },
+    {
+      "id": "verb:knowledge-summarize",
+      "kind": "verb",
+      "name": "Summarize article",
+      "summary": "Ask the agent to summarize a knowledge article.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a knowledge article: the agent summarizes it. Read-only.",
+      "how": "the Summarize verb on a knowledge article",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "summarize article",
+        "article summary",
+        "kb summary"
+      ],
+      "slash": null,
+      "applies_to": [
+        "article"
+      ],
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "risk": "read",
+      "undo": false
+    },
+    {
+      "id": "verb:panel-keep",
+      "kind": "verb",
+      "name": "Keep as pocket",
+      "summary": "Keep a Ripple panel from the thread as a Pocket.",
+      "narrative": "A composer verb in the no-UI shell. An object verb on an ephemeral Ripple panel the agent drew in the thread: keep it as a Pocket so it persists. Undoable.",
+      "how": "the Keep as pocket verb on a panel",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "keep panel",
+        "save panel",
+        "keep this",
+        "pin panel"
+      ],
+      "slash": null,
+      "applies_to": [
+        "panel"
+      ],
+      "triggers": [
+        "verb"
+      ],
+      "risk": "safe",
+      "undo": true
+    }
+  ]
+}

@@ -24,6 +24,17 @@
 # load-bearing words (Belt's "Instinct gate", Branch's "review/merge/publish").
 # Defaults to "" — the compiler passes it through and the primer builder
 # prefers it, falling back to a clause-aware truncation of ``summary``.
+# Updated: 2026-10-01 (feat/atlas-canonical) — atlas becomes the single source
+# for what surfaces and composer verbs exist. Additive, still paw.atlas/v1:
+#   * new ``verb`` kind (authored in ``authored/verbs.json``): an action the
+#     user can run on an object (send to a channel, rename a file, complete a
+#     task), with ``slash`` / ``applies_to`` / ``triggers`` / ``risk`` / ``undo``;
+#   * surfaces gain ``slash`` / ``presentation`` / ``agent_openable``. The
+#     open_surface tool's route allowlist is the set of ``agent_openable``
+#     surfaces.
+# All new fields default to None and the compiler drops None keys, so entries
+# that don't use them serialize byte-identically to before. ``KIND_FIELDS``
+# names the fields each kind must fill; the compiler enforces it at build time.
 
 from __future__ import annotations
 
@@ -38,7 +49,29 @@ ATLAS_SCHEMA_V1 = "paw.atlas/v1"
 # (AT-4), ``widget``, and ``skill`` (AT-6) are extracted by the compiler;
 # ``capability`` stays reserved so a later task can add entries without a
 # schema bump.
-AtlasKind = Literal["primitive", "capability", "surface", "connector", "sense", "widget", "skill"]
+AtlasKind = Literal[
+    "primitive", "capability", "surface", "connector", "sense", "widget", "skill", "verb"
+]
+
+# How a surface opens in the no-UI shell: an inline view in the thread, or a
+# separate window/route.
+Presentation = Literal["inline", "window"]
+
+# Who can start a verb: a composer slash command, an object verb (chip / menu
+# on the thing it acts on), or the agent (the verb's work is done by the agent).
+VerbTrigger = Literal["slash", "verb", "agent"]
+
+# How much a verb changes: "read" changes nothing, "safe" is a benign change,
+# "risky" acts as the user in a way others see or can't easily take back.
+VerbRisk = Literal["read", "safe", "risky"]
+
+
+# Fields a kind must fill (non-None). Enforced by ``compile_atlas`` on the
+# authored sources, not on the model, so hand-built test fixtures stay light.
+KIND_FIELDS: dict[str, tuple[str, ...]] = {
+    "surface": ("presentation", "agent_openable"),
+    "verb": ("applies_to", "triggers", "risk", "undo"),
+}
 
 
 class AtlasEntry(BaseModel):
@@ -86,6 +119,28 @@ class AtlasEntry(BaseModel):
         default_factory=list,
         description="Search keywords — intent words a user/agent would actually say.",
     )
+    # -- surface + verb fields (feat/atlas-canonical). None = not applicable;
+    # the compiler drops None keys so other kinds serialize unchanged.
+    slash: str | None = Field(
+        default=None,
+        description="Composer slash command (without '/'), or None when there is none.",
+    )
+    presentation: Presentation | None = Field(
+        default=None, description="Surfaces only: 'inline' view or 'window'."
+    )
+    agent_openable: bool | None = Field(
+        default=None,
+        description="Surfaces only: whether the agent's open_surface tool may open it.",
+    )
+    applies_to: list[str] | None = Field(
+        default=None,
+        description="Verbs only: object types it acts on (channel, file, task, ...).",
+    )
+    triggers: list[VerbTrigger] | None = Field(
+        default=None, description="Verbs only: who can start it."
+    )
+    risk: VerbRisk | None = Field(default=None, description="Verbs only: read / safe / risky.")
+    undo: bool | None = Field(default=None, description="Verbs only: whether it can be undone.")
 
 
 class AtlasModel(BaseModel):
@@ -107,4 +162,13 @@ class AtlasModel(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-__all__ = ["ATLAS_SCHEMA_V1", "AtlasEntry", "AtlasKind", "AtlasModel"]
+__all__ = [
+    "ATLAS_SCHEMA_V1",
+    "AtlasEntry",
+    "AtlasKind",
+    "KIND_FIELDS",
+    "AtlasModel",
+    "Presentation",
+    "VerbRisk",
+    "VerbTrigger",
+]

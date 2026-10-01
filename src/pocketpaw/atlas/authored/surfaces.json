@@ -23,7 +23,10 @@
         "get started",
         "capabilities",
         "getting started"
-      ]
+      ],
+      "slash": "home",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:chat",
@@ -44,7 +47,10 @@
         "agent room",
         "channel",
         "group"
-      ]
+      ],
+      "slash": "chat",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:pockets",
@@ -65,7 +71,10 @@
         "open pocket",
         "workspace apps",
         "tracker"
-      ]
+      ],
+      "slash": "pockets",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:sites",
@@ -87,7 +96,10 @@
         "domain",
         "live site",
         "online"
-      ]
+      ],
+      "slash": "sites",
+      "presentation": "inline",
+      "agent_openable": false
     },
     {
       "id": "surface:belt",
@@ -108,7 +120,10 @@
         "develop",
         "code change",
         "proposed change"
-      ]
+      ],
+      "slash": "belt",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:decisions",
@@ -129,7 +144,10 @@
         "what happened",
         "instinct",
         "review decisions"
-      ]
+      ],
+      "slash": "decisions",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:decisions-graph",
@@ -150,7 +168,10 @@
         "projection",
         "drill down",
         "audit trail"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:mission-control",
@@ -173,7 +194,10 @@
         "analytics",
         "in flight",
         "mission control"
-      ]
+      ],
+      "slash": "deep-work",
+      "presentation": "inline",
+      "agent_openable": false
     },
     {
       "id": "surface:agents",
@@ -192,7 +216,10 @@
         "plugins",
         "soul",
         "tune"
-      ]
+      ],
+      "slash": "agents",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:settings",
@@ -211,7 +238,10 @@
         "security",
         "notifications",
         "configure"
-      ]
+      ],
+      "slash": "settings",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:integrations",
@@ -232,7 +262,10 @@
         "api key",
         "external service",
         "providers"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:workspace-admin",
@@ -250,7 +283,10 @@
         "policy",
         "sso",
         "channels"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:billing",
@@ -274,7 +310,10 @@
         "upgrade",
         "top up",
         "pricing"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:knowledge",
@@ -292,7 +331,10 @@
         "wiki",
         "search knowledge",
         "docs"
-      ]
+      ],
+      "slash": "knowledge",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:files",
@@ -320,7 +362,10 @@
         "graph view",
         "tags",
         "tag"
-      ]
+      ],
+      "slash": "files",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:studio",
@@ -340,7 +385,10 @@
         "poster",
         "illustration",
         "gallery"
-      ]
+      ],
+      "slash": "studio",
+      "presentation": "inline",
+      "agent_openable": false
     },
     {
       "id": "surface:studio_editor",
@@ -365,7 +413,10 @@
         "track",
         "lane",
         "sequence"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": true
     },
     {
       "id": "surface:code",
@@ -383,7 +434,10 @@
         "file tree",
         "scripts",
         "edit code"
-      ]
+      ],
+      "slash": "code",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:foresight",
@@ -403,7 +457,10 @@
         "what if",
         "runs",
         "insights"
-      ]
+      ],
+      "slash": "foresight",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:calendar",
@@ -420,7 +477,10 @@
         "schedule",
         "upcoming",
         "meetings schedule"
-      ]
+      ],
+      "slash": "calendar",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:meetings",
@@ -437,7 +497,10 @@
         "recordings",
         "notes",
         "transcript"
-      ]
+      ],
+      "slash": "meetings",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:activity",
@@ -455,7 +518,10 @@
         "events",
         "river",
         "what happened"
-      ]
+      ],
+      "slash": "activity",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:audit",
@@ -473,7 +539,10 @@
         "trail",
         "record",
         "who did what"
-      ]
+      ],
+      "slash": "audit",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:security",
@@ -497,7 +566,10 @@
         "mode",
         "blocked",
         "protection"
-      ]
+      ],
+      "slash": "security",
+      "presentation": "window",
+      "agent_openable": false
     }
   ]
 }

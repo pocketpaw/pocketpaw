@@ -336,6 +336,66 @@
       "expected_id": "surface:chat",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/rooms-read-tool): catch-up intents go to the read-only room tools; navigation and starting a DM stay with surface:chat."
+    },
+    {
+      "intent": "send a message to #design",
+      "expected_id": "verb:send",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "make a task to fix login",
+      "expected_id": "verb:task",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "rename this file",
+      "expected_id": "verb:file-rename",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "share a link to this file",
+      "expected_id": "verb:file-share-link",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "mark this task done",
+      "expected_id": "verb:task-complete",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "set this task due tomorrow",
+      "expected_id": "verb:task-due",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "delete my message",
+      "expected_id": "verb:message-delete",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "publish the site draft",
+      "expected_id": "verb:site-publish",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "keep this panel as a pocket",
+      "expected_id": "verb:panel-keep",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
+    },
+    {
+      "intent": "assign this task to priya",
+      "expected_id": "verb:task-assign",
+      "rank_within": 1,
+      "note": "Added 2026-10-01 (feat/atlas-canonical): composer verbs are atlas entries; each verb wins its own intent and every earlier case keeps its rank."
     }
   ]
 }

@@ -54,7 +54,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pocketpaw.atlas.model import AtlasEntry, AtlasModel
+from pocketpaw.atlas.model import KIND_FIELDS, AtlasEntry, AtlasModel
 from pocketpaw.atlas.store import _DATA_PATH
 
 if TYPE_CHECKING:
@@ -71,6 +71,7 @@ AUTHORED_FILES = (
     _AUTHORED_DIR / "primitives.json",
     _AUTHORED_DIR / "surfaces.json",
     _AUTHORED_DIR / "capabilities.json",
+    _AUTHORED_DIR / "verbs.json",
 )
 
 # Where connector YAML definitions live: the repo's top-level ``connectors/``
@@ -522,12 +523,23 @@ def compile_atlas(connectors_dir: Path | None = None) -> AtlasModel:
     dupes = _duplicate_ids([{"id": e.id} for e in entries])
     if dupes:
         raise ValueError(f"atlas compile: duplicate entry ids: {', '.join(dupes)}")
+    incomplete = [
+        f"{e.id} ({', '.join(f for f in KIND_FIELDS[e.kind] if getattr(e, f) is None)})"
+        for e in entries
+        if e.kind in KIND_FIELDS and any(getattr(e, f) is None for f in KIND_FIELDS[e.kind])
+    ]
+    if incomplete:
+        raise ValueError(f"atlas compile: entries missing kind fields: {'; '.join(incomplete)}")
     return AtlasModel(generated=True, entries=entries)
 
 
 def serialize_atlas(model: AtlasModel) -> bytes:
-    """Byte-deterministic serialization: sorted keys, indent 2, trailing \\n."""
-    payload = model.model_dump(by_alias=True)
+    """Byte-deterministic serialization: sorted keys, indent 2, trailing \\n.
+
+    None-valued keys are dropped: the optional surface/verb fields stay off the
+    entries they don't apply to.
+    """
+    payload = model.model_dump(by_alias=True, exclude_none=True)
     return (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode(
         "utf-8"
     )

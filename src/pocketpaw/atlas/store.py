@@ -67,6 +67,10 @@
 # toward the primitive, not seed order. Both are near-tie only — a match that
 # out-scores the primitive by a real margin still wins. Field weights and the
 # search_scored / search / describe signatures are unchanged.
+# Updated: 2026-10-01 (feat/atlas-canonical) — ``verb`` entries (composer verbs)
+# join the corpus and tie-break with surfaces (both below every other kind), and
+# ``max_score(query)`` exposes the score ceiling so the read API can normalize a
+# raw score to 0..1 without reaching into the private weights.
 
 from __future__ import annotations
 
@@ -206,6 +210,7 @@ _KIND_TIEBREAK: dict[str, int] = {
     "widget": 2,
     "skill": 1,
     "surface": 0,
+    "verb": 0,
 }
 
 
@@ -385,6 +390,11 @@ class AtlasStore:
             reverse=True,
         )
         return scored if limit is None else scored[:limit]
+
+    def max_score(self, query: str) -> float:
+        """Highest raw score any entry could get for *query*: a name hit on
+        every distinct query stem. ``score / max_score`` is a 0..1 relevance."""
+        return _NAME_WEIGHT * len(_stem_set(query))
 
     def describe(self, entry_id: str) -> AtlasEntry | None:
         """Return the full entry for a stable id, or None if unknown."""

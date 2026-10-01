@@ -32,6 +32,9 @@
 # Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — two authored
 # primitives joined the seed (primitive:source-truth, primitive:verify-loop);
 # EXPECTED_PRIMITIVE_IDS pins the twelve.
+# Updated: 2026-10-01 (feat/atlas-canonical) — COMPILED_KINDS gains "verb"; the
+# two hand-built surface fixtures carry the now-required presentation /
+# agent_openable fields.
 
 import json
 
@@ -46,6 +49,7 @@ COMPILED_KINDS = (
     "widget",
     "skill",
     "capability",
+    "verb",
 )
 
 EXPECTED_PRIMITIVE_IDS = {
@@ -222,6 +226,8 @@ class TestKindPriorityBias:
                     summary="s",
                     narrative="n",
                     keywords=["widget"],
+                    presentation="window",
+                    agent_openable=False,
                 ),
             ]
         )
@@ -249,6 +255,8 @@ class TestKindPriorityBias:
                     summary="s",
                     narrative="n",
                     keywords=[],
+                    presentation="window",
+                    agent_openable=False,
                 ),
             ]
         )
