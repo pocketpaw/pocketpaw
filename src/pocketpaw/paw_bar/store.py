@@ -32,8 +32,9 @@
 #     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
 #     column holds the widget OWNER, so widget-keyed decision reads filter on
 #     widget_id only and rely on the caller resolving the widget scoped first.
-#   * admit_event counts and inserts in ONE BEGIN IMMEDIATE transaction behind a
-#     per-widget asyncio lock, so a burst cannot all read "under the cap". Events
+#   * admit_event (and admit_capped_event, one event type over longer windows)
+#     counts and inserts in ONE BEGIN IMMEDIATE transaction behind a per-widget
+#     asyncio lock, so a burst cannot all read "under the cap". Events
 #     carry a rate bucket, so public event ingest cannot fill the chat budget.
 #     Atomic per SQLite file, which means per replica. With Redis configured the
 #     EE router admits in Redis instead (pocketpaw_ee.paw_bar.admit) and only
@@ -1166,11 +1167,7 @@ class PawBarStore(CatalogStoreMixin):
             " FROM paw_bar_events"
             " WHERE widget_id = ? AND timestamp >= ? AND COALESCE(bucket, '') = ?"
         )
-        lock = self._admit_locks.get(event.widget_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._admit_locks[event.widget_id] = lock
-        async with lock:
+        async with self._admit_lock(event.widget_id):
             async with self._conn() as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
@@ -1180,6 +1177,69 @@ class PawBarStore(CatalogStoreMixin):
                         row = await cur.fetchone()
                     total, per_customer = (row[0], row[1]) if row else (0, 0)
                     if total >= overall_per_min or per_customer >= per_customer_per_min:
+                        await db.rollback()
+                        return False
+                    await db.execute(self._INSERT_EVENT_SQL, self._event_params(event, bucket))
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
+        return True
+
+    def _admit_lock(self, widget_id: str) -> asyncio.Lock:
+        lock = self._admit_locks.get(widget_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._admit_locks[widget_id] = lock
+        return lock
+
+    async def admit_capped_event(
+        self,
+        event: PawBarEvent,
+        *,
+        per_customer: int,
+        customer_window: timedelta,
+        overall: int,
+        overall_window: timedelta,
+        bucket: str = "",
+        now: datetime | None = None,
+    ) -> bool:
+        """``admit_event`` for a cap on ONE event type over longer windows: count
+        this widget's ``event.type`` rows (at most ``per_customer`` for this
+        customer_ref within ``customer_window``, ``overall`` within
+        ``overall_window``) and insert ``event`` in the same ``BEGIN IMMEDIATE``
+        transaction behind the same per-widget lock. The event IS the slot: a
+        caller admits first and acts after, so a burst can't all read "under the
+        cap". Returns False (nothing written) when a cap is reached; raises on a
+        store error, and the caller decides whether that fails open or closed."""
+        await self._ensure_schema()
+        at = now or datetime.now()
+        count_sql = (
+            "SELECT"
+            " COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN customer_ref = ? AND timestamp >= ? THEN 1 ELSE 0 END), 0)"
+            " FROM paw_bar_events"
+            " WHERE widget_id = ? AND type = ? AND COALESCE(bucket, '') = ? AND timestamp >= ?"
+        )
+        overall_start = (at - overall_window).isoformat()
+        customer_start = (at - customer_window).isoformat()
+        params = (
+            overall_start,
+            event.customer_ref,
+            customer_start,
+            event.widget_id,
+            event.type,
+            bucket,
+            min(overall_start, customer_start),
+        )
+        async with self._admit_lock(event.widget_id):
+            async with self._conn() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    async with db.execute(count_sql, params) as cur:
+                        row = await cur.fetchone()
+                    total, mine = (row[0], row[1]) if row else (0, 0)
+                    if total >= overall or mine >= per_customer:
                         await db.rollback()
                         return False
                     await db.execute(self._INSERT_EVENT_SQL, self._event_params(event, bucket))

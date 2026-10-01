@@ -1,25 +1,26 @@
-# ee/pocketpaw_ee/cloud/leads/bridges/notifications.py — ``lead.captured`` →
-# owner notifications.
+# ee/pocketpaw_ee/cloud/leads/bridges/notifications.py — lead events -> owner
+# notifications.
 #
-# Subscribes to ``lead.captured`` on ``shared.events.event_bus`` and hands each
-# event to ``leads.notification_settings.dispatch_site_event``, which routes it
-# by the site's own settings: bell + OS push for the workspace owner and admins,
-# the full lead by email to the site's confirmed recipients (default: the
-# owner's account address), and the site's signed webhook. The workspace
-# Slack/webhook config stays the fallback. External sinks fire ONCE per lead,
-# not once per admin.
+# ``lead.captured`` goes to ``leads.notification_settings.dispatch_site_event``,
+# which routes it by the site's own settings: bell + OS push for the workspace
+# owner and admins, the full lead by email to the site's confirmed recipients
+# (default: the owner's account address), and the site's signed webhook, with the
+# workspace Slack/webhook config as the fallback. External sinks fire ONCE per
+# lead, not once per admin. A lead whose ``source_kind`` is "handoff" is skipped:
+# the handoff already notified the owner through its own "handoff" route, and a
+# second ping for the same conversation is noise.
 #
-# Push recipients are the workspace's owner + admins via
-# ``workspace_service.list_admin_ids``; the query filters on the membership's
-# workspace, so a lead in workspace A never notifies anyone in workspace B.
+# ``lead.updated`` (a status change, the owner's own action) goes to the site
+# webhook only (``dispatch_lead_updated``), so a CRM behind it stays in sync; no
+# bell, no mail.
 #
+# Push recipients come from ``workspace_service.list_admin_ids``, which filters on
+# the membership's workspace, so a lead in workspace A never notifies workspace B.
 # The bell row's ``source`` is ``{type: "lead", id: <lead id>, room_id: <site
-# id>}``: the frontend maps ``lead`` to ``/sites/<site>?view=leads``. Its body
-# names the site by DISPLAY name (site_id is a 24-char hex script name) and
-# carries no visitor data, so the lock-screen push stays generic. Email and
-# webhook get the lead itself: they carry only the lead id, and the outbox loads
-# the lead (name, email, phone, message, properties, site, form_type, source) at
-# send time.
+# id>}`` (the frontend opens ``/sites/<site>?view=leads``); its body names the
+# site by display name and carries no visitor data, so lock-screen push stays
+# generic. Email and webhook rows carry only the lead id; the outbox loads the
+# lead at send time.
 
 from __future__ import annotations
 
@@ -46,6 +47,8 @@ async def _on_lead_captured(data: dict[str, Any]) -> None:
         logger.warning("lead.captured ignored — incomplete payload keys=%s", sorted(data))
         return
 
+    if data.get("source_kind") == "handoff":
+        return
     form_type = data.get("form_type") or "form"
     site_label = str(data.get("site_name") or "").strip() or site_id
     try:
@@ -66,6 +69,24 @@ async def _on_lead_captured(data: dict[str, Any]) -> None:
         logger.exception("Failed to route lead_captured for lead=%s", lead_id)
 
 
+async def _on_lead_updated(data: dict[str, Any]) -> None:
+    """``lead.updated`` -> the site webhook (see the module header)."""
+    workspace_id = data.get("workspace_id")
+    lead_id = data.get("lead_id")
+    site_id = data.get("site_id")
+    if not (workspace_id and lead_id and site_id):
+        logger.warning("lead.updated ignored — incomplete payload keys=%s", sorted(data))
+        return
+    try:
+        from pocketpaw_ee.cloud.leads import notification_settings
+
+        await notification_settings.dispatch_lead_updated(
+            workspace_id=workspace_id, site_ref=site_id, lead_id=lead_id
+        )
+    except Exception:
+        logger.exception("Failed to route lead_updated for lead=%s", lead_id)
+
+
 async def _workspace_admin_ids(workspace_id: str) -> list[str]:
     """Owner + admin user ids for a workspace. [] on any error — a lookup
     failure must not break the bus for sibling handlers."""
@@ -79,9 +100,10 @@ async def _workspace_admin_ids(workspace_id: str) -> list[str]:
 
 
 def register_lead_notification_listeners() -> None:
-    """Wire the ``lead.captured`` → notification subscriber (from mount_cloud)."""
+    """Wire the lead event → notification subscribers (from mount_cloud)."""
     event_bus.subscribe("lead.captured", _on_lead_captured)
-    logger.info("registered lead.captured → notifications subscriber")
+    event_bus.subscribe("lead.updated", _on_lead_updated)
+    logger.info("registered lead.captured / lead.updated → notifications subscribers")
 
 
 __all__ = ["register_lead_notification_listeners"]

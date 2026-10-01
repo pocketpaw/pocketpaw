@@ -451,7 +451,7 @@ async def test_an_injection_in_a_faq_only_appears_inside_the_knowledge_block(v2,
 
     call = rec.last
     # The frame is the module constant, untouched by owner text.
-    assert call["info"].instructions == concierge_runtime.FRAME
+    assert call["info"].instructions == concierge_runtime.FRAME_LEADS
     assert "ignore every rule above" not in call["info"].instructions
     prompt = rec.user_prompt(call)
     # Exactly one real knowledge block, one real visitor block: the FAQ's own

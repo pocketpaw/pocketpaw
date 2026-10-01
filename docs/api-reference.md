@@ -3269,6 +3269,75 @@ published from it, rather than cascading — a cascade from there would bypass t
 export, so the one path that can destroy a site stays the one path that preserves its
 data first. Delete the site, then the pocket.
 
+## Leads
+
+A Lead is one way a visitor left their details on a site. `site_id` on these
+routes is the site's `script_name`, as on the Lead itself.
+
+| Route | Purpose |
+|---|---|
+| `GET /sites/{site_id}/leads?limit=` | Newest first, at most 500. |
+| `PATCH /sites/{site_id}/leads/{lead_id}` | `{"status"?: "new" \| "contacted" \| "won" \| "lost" \| "booked", "read"?: bool}` → the updated lead. `read: true` keeps the first read time; `false` marks it unread. Unknown status → 422. |
+| `POST /sites/{site_id}/leads/read-all` | Marks every unread lead on the site read → `{"updated": n}`. |
+
+All three need the `sites` plan feature. The GET needs `fabric.read`; the PATCH
+and read-all need `fabric.write`. All are scoped to the caller's workspace: another workspace's lead (or one on another site) is a 404,
+and read-all touches nothing there.
+
+A list item:
+
+```json
+{"id": "…", "site_id": "…", "form_type": "concierge",
+ "properties": {"name": "Priya", "email": "priya@x.com", "message": "20 jackets"},
+ "origin": "", "origin_unrecognized": false,
+ "source_kind": "concierge", "conversation_ref": "pp_w1:cust-0001",
+ "status": "new", "read_at": null, "created_at": "2026-10-01T09:30:00+00:00"}
+```
+
+`source_kind` is `form` (a site form), `concierge` (the visitor tapped Send on the
+concierge's lead card), `handoff` (a "talk to a person" request that carried an
+email or phone; one lead per conversation) or `booking`. `conversation_ref` is
+`<widget_id>:<customer_ref>`, the conversation the lead came from (`""` for a
+form). Leads written before these fields existed read as `status: "new"`,
+`read_at: null`, `source_kind: "form"`.
+
+A status change emits `lead.updated`, delivered to the site webhook only (when it
+is active and `lead_captured` routes to `webhook`), as
+`{"id": "evt_…", "type": "lead.updated", "data": {…the lead, with status…}}`. It
+rings no bell and sends no mail. Marking read emits nothing. A handoff lead's
+`lead.captured` is not routed: the handoff already notified the owner.
+
+### Leads from the concierge
+
+When `concierge_lead_capture` is on, the v2 concierge offers a lead card (a
+`form` whose verb is `send_to_team`, fields from `name`, `email`, `phone`,
+`message`, each optionally prefilled with `value` of at most 500 characters).
+Nothing is stored until the visitor taps Send, which posts:
+
+```http
+POST /paw-bar/action
+{"key": "<site key>", "w": "<widget id>", "customer_ref": "<visitor>",
+ "verb": "send_to_team", "args": {"name": "Priya", "email": "priya@x.com", "message": "…"}}
+```
+
+`args` carries only those four names; empty fields are left out. Rules: `name` at
+most 120 characters, `message` at most 2000, and an `email` and/or `phone` that
+look valid. Limits: 3 per visitor per 10 minutes, 30 per site per hour, taken
+atomically before the lead is written. A taken slot is never given back, so an
+attempt the injection screen drops still counts. The
+text goes through the same HIGH injection screen as site forms. `send_to_team`
+is reserved. Saving a spec that declares it (the spec PATCH routes and widget
+create) is `422 reserved_verb`. A spec already stored with it loads with that
+action dropped and a warning logged.
+
+| Response | Meaning |
+|---|---|
+| `200 {"ok": true, "result": {"message": "Sent. The team will get back to you."}}` | A Lead was written (`form_type` and `source_kind` `concierge`) and `lead.captured` fired. |
+| `422 {"detail": {"code", "field", "message"}}` | `field` names the form field to mark: `too_long` (name, message), `not_text`, `invalid_email`, `invalid_phone`, `contact_required` (field `email`). `field: null` (`unknown_field`, or `rejected` by the injection screen) is a generic retry. |
+| `429` | A lead limit. |
+| `409 lead_capture_off` | The owner turned lead capture off. |
+| `503 lead_unavailable` | The limit or the lead write couldn't be checked; nothing was stored. |
+
 ## Owner notifications — email, signed webhooks, per-site recipients
 
 A captured lead, and a concierge handoff, reach the site's owner through three
@@ -4804,7 +4873,7 @@ the split is the security model:
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
 | `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |
-| `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. A cart holds one currency: `add_to_cart` for a product priced in another currency than a non-empty cart is 409 `cart_currency_mismatch` and the cart is left as it was. |
+| `POST /paw-bar/action` | Run a verb the widget spec declares, or the built-in `send_to_team` (see [Leads from the concierge](#leads-from-the-concierge)). `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. A cart holds one currency: `add_to_cart` for a product priced in another currency than a non-empty cart is 409 `cart_currency_mismatch` and the cart is left as it was. |
 | `GET /paw-bar/cart` | The visitor's own cart: `{items, total_cents, currency, checkout_url}`, amounts in minor units of `currency` (see Money below). |
 | `POST /paw-bar/decision-contact` | Leave an email so a decision reaches the visitor after they close the page. The address is stored on the decision row only — never in agent context, the KB, or transcripts. |
 | `GET /paw-bar/messages/{widget_id}/{customer_ref}` | Poll for owner and system messages once a human has joined. Returns `role`, `content`, `at` and `bot_paused` — never notes, tags, assignee or contact address. Pass `conversation_id` to scope the read (and `bot_paused`) to the thread on screen; omitting it answers for the visitor's whole history, which is what a cached widget bundle does. |
@@ -4818,7 +4887,7 @@ the split is the security model:
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
-| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code` and the guided fields below. |
+| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code`, `concierge_lead_capture` (default `true`: the v2 concierge may offer the `send_to_team` lead card and the visitor's Send writes a Lead; `false` turns the card off everywhere) and the guided fields below. |
 | `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec, 422 `spec_too_large` past the [spec size cap](#spec-size-and-the-deprecated-catalog), 409 `currency_units_client_outdated` for a catalog with a non-2-decimal currency sent without `X-Paw-Money-Units: iso4217` (see Money below; the same rule holds on `PATCH /paw-bar/widgets/{id}/spec`). A non-empty `spec.catalog` is added to the catalog store (upserted by id, nothing deleted; see the deprecation note there); an absent or empty one leaves it alone. |
 | `GET /paw-bar/admin/site/{site_id}/catalog` | A page of the [catalog store](#catalog-store), in the owner's order: `?offset` (default 0), `?limit` (1-200, default 50), `?q` (keeps products whose name or description holds every word, prefix-matched). Returns `{"items", "total"}`; `total` counts what matched. Each item has the catalog fields plus `position`, `source`, `origin` and `updated_at` (see [Site sync](#site-sync)). Behind `paw_bar.read`. |
 | `PUT /paw-bar/admin/site/{site_id}/catalog/items/{item_id}` | Create or replace one product; returns it. A replaced product keeps its place, a new one goes last. The body is the catalog fields (`id` may be left out; one that differs from the path is 422 `item_id_mismatch`) plus an optional `source`. Behind `paw_bar.manage`. |

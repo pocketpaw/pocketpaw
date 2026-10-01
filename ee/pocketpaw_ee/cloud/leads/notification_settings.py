@@ -26,6 +26,10 @@
 # Slack always gets the event (subject to its own routes) and its webhook gets
 # it when the site has no webhook of its own, with the deprecated flat
 # notification fields added so existing ``kind`` filters keep working.
+#
+# ``dispatch_lead_updated`` is narrower: a status change goes to the site webhook
+# only (when it is active and the owner routes ``lead_captured`` to it), with no
+# bell, mail or workspace fallback, since the owner made the change themselves.
 
 from __future__ import annotations
 
@@ -64,6 +68,7 @@ EVENT_TYPES = {
     "handoff": "concierge.handoff",
     "booking": "booking.created",
 }
+LEAD_UPDATED_TYPE = "lead.updated"
 
 
 def _now() -> datetime:
@@ -855,6 +860,37 @@ async def dispatch_site_event(
     return counts
 
 
+async def dispatch_lead_updated(*, workspace_id: str, site_ref: str, lead_id: str) -> bool:
+    """Queue ``lead.updated`` for the site webhook. Returns whether a delivery was
+    queued. Never raises."""
+    from pocketpaw_ee.cloud.notifications import delivery, outbox
+
+    try:
+        site = await find_site(workspace_id, site_ref)
+        if site is None:
+            return False
+        settings = await settings_for(site)
+        sinks = settings.events.get("lead_captured", DEFAULT_EVENT_SINKS)
+        if not (_site_webhook_active(settings) and "webhook" in sinks):
+            return False
+        await outbox.enqueue_many(
+            [
+                {
+                    "workspace": workspace_id,
+                    "kind": "lead_updated",
+                    "sink": "webhook",
+                    "target": settings.webhook_url,
+                    "payload": delivery.new_event_envelope(LEAD_UPDATED_TYPE, lead_id=lead_id),
+                    "webhook_ref": f"site:{site.id}",
+                }
+            ]
+        )
+        return True
+    except Exception:
+        logger.warning("lead.updated dispatch failed for lead=%s", lead_id, exc_info=True)
+        return False
+
+
 __all__ = [
     "CONFIRM_TTL_SECONDS",
     "EVENT_TYPES",
@@ -863,6 +899,7 @@ __all__ = [
     "check_token",
     "confirm",
     "confirm_url",
+    "dispatch_lead_updated",
     "dispatch_site_event",
     "ensure_owner_confirm_sent",
     "find_site",

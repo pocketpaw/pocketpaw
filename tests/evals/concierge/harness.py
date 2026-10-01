@@ -173,11 +173,7 @@ async def run_case(case: dict[str, Any], settings: Any, *, replay: str | None = 
     final = "".join(d.get("content", "") for e, d in events if e == "chunk")
     sources = next((d.get("items") or [] for e, d in events if e == "sources"), [])
     error = next((d.get("code", "error") for e, d in events if e == "error"), "")
-    frame = (
-        concierge_runtime.FRAME_DOC_CODE
-        if getattr(site, "concierge_allow_doc_code", False) is True
-        else concierge_runtime.FRAME
-    )
+    frame = concierge_runtime.frame_for(site)
     page = case.get("page") or {}
     turn = Turn(
         final_text=final,
@@ -189,6 +185,7 @@ async def run_case(case: dict[str, Any], settings: Any, *, replay: str | None = 
         gated_args=seed.gated_args(widget),
         page_text=seen["prompt"].split("<knowledge>", 1)[0] if page else "",
         error=error,
+        lead_capture=concierge_runtime.lead_capture_on(site),
     )
     return CaseRun(turn=turn, prompt_fingerprint=prompt_fingerprint(frame, seen["prompt"]))
 
