@@ -27,7 +27,8 @@ scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
 cluster, and the jail GC once per host. `on_shutdown` stops what it started.
 
 Changes (2026-10-01, CN-4): `on_shutdown` closes the shared arq pool via
-`_core.redis_client.close_arq_pool` (was the chat-runs-only `close_pool`).
+`_core.redis_client.close_arq_pool` (was the chat-runs-only `close_pool`), then
+the shared and blocking Redis clients via `close_redis` (never called before).
 """
 
 from __future__ import annotations
@@ -562,6 +563,15 @@ class CloudLifecycleHook:
             await close_arq_pool()
         except Exception as exc:  # noqa: BLE001
             logger.warning("arq pool close failed: %s", exc)
+
+        # Last: the shared and blocking Redis clients. Everything above that
+        # still talks to Redis has stopped by now.
+        try:
+            from pocketpaw_ee.cloud._core.redis_client import close_redis
+
+            await close_redis()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Redis client close failed: %s", exc)
         return None
 
 

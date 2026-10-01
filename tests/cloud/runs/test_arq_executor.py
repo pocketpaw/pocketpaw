@@ -85,12 +85,16 @@ async def test_arq_executor_reuses_pool(monkeypatch):
     monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
     redis_client._reset_for_tests()
 
-    ex = ArqExecutor()
-    await ex.submit(_spec("a"))
-    await ex.submit(_spec("b"))
+    try:
+        ex = ArqExecutor()
+        await ex.submit(_spec("a"))
+        await ex.submit(_spec("b"))
 
-    # _get_pool is memoised — the underlying pool factory runs exactly once.
-    assert calls == 1
+        # _get_pool is memoised — the underlying pool factory runs exactly once.
+        assert calls == 1
+    finally:
+        # Don't leave the fake pool cached for later tests.
+        redis_client._reset_for_tests()
 
 
 def _make_create_pool(factory):

@@ -1,6 +1,7 @@
 # tests/cloud/runs/test_redis_client.py — process-wide Redis clients.
 # Changes (2026-10-01, CN-4): get_arq_pool singleton, close_arq_pool reset, the
-# four enqueuers sharing it, and CloudLifecycleHook.on_shutdown closing it.
+# four enqueuers sharing it, and CloudLifecycleHook.on_shutdown closing it and
+# then the Redis clients (close_redis).
 
 import pytest
 from pocketpaw_ee.cloud._core import redis_client
@@ -98,15 +99,18 @@ def test_every_enqueuer_shares_the_one_pool():
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_shutdown_closes_the_arq_pool(monkeypatch):
+async def test_lifecycle_shutdown_closes_the_arq_pool_and_redis_clients(monkeypatch):
     from pocketpaw_ee.extensions import CloudLifecycleHook
 
-    calls = 0
+    calls: list[str] = []
 
-    async def _spy() -> None:
-        nonlocal calls
-        calls += 1
+    async def _arq() -> None:
+        calls.append("arq")
 
-    monkeypatch.setattr(redis_client, "close_arq_pool", _spy)
+    async def _redis() -> None:
+        calls.append("redis")
+
+    monkeypatch.setattr(redis_client, "close_arq_pool", _arq)
+    monkeypatch.setattr(redis_client, "close_redis", _redis)
     await CloudLifecycleHook().on_shutdown()
-    assert calls == 1
+    assert calls == ["arq", "redis"]
