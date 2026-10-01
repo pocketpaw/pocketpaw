@@ -1,28 +1,38 @@
-# ee/pocketpaw_ee/cloud/models/lead.py — captured form submission, the tenant
-# cloud store sink for Paw Sites (NOT local SQLite Fabric). workspace + site
-# scoped and indexed by (workspace, site_id, createdAt desc) so the Leads view
-# pages efficiently per site/time. Storage is negligible (100k leads ≈ 200MB).
+# ee/pocketpaw_ee/cloud/models/lead.py — a captured lead, in the tenant's cloud
+# store (NOT local SQLite Fabric). Workspace + site scoped; ``site_id`` is the
+# site's ``script_name``. Indexed by (workspace, site_id, createdAt desc) so the
+# Leads view pages per site, newest first. Written only by cloud/leads/service.py.
 #
-# Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2): new Lead + LeadSource
-# documents. NOTE: the compound time index uses ``createdAt`` (camelCase) — the
-# actual timestamp column TimestampedDocument defines — not the plan's literal
-# ``created_at``, which names no field on the base doc and would index nothing.
-# This matches the canonical tenant/time-indexed docs (foresight_run, chat_run,
-# instinct_approval, message, task) so the per-site/time paging query is cheap.
-#
-# Updated 2026-05-30 (follow-up item 1): LeadSource gains ``rate_key`` — the
-# SERVER-derived hash of the client host the per-IP rate limiter buckets on.
-# ``submitter_ref`` stays as an opaque caller LABEL only (never the limiter key),
-# because a caller can randomize it to dodge the per-IP cap.
+# Every field added after launch is optional with a default, so an old row reads
+# as status "new", unread, source kind "form" and no conversation.
+#   * ``source.kind`` says how the lead arrived: "form" (a site form, the public
+#     capture routes), "concierge" (the visitor tapped Send on the concierge's
+#     send_to_team card), "handoff" (a handoff that carried a contact) or
+#     "booking". ``source.conversation_ref`` ("<widget_id>:<customer_ref>") links
+#     a concierge/handoff lead to its transcript.
+#   * ``status`` is the owner's pipeline state; ``read_at`` the first time the
+#     owner marked it read (None = unread).
+#   * ``source.rate_key`` is the server-derived host hash the per-IP limiter used;
+#     ``submitter_ref`` is only an opaque caller label, never a limiter key.
+#   * ``source.origin`` / ``origin_unrecognized`` are recorded, not enforced
+#     (``Site.enforce_origin`` is opt-in), evaluated against the allowlist at
+#     capture time.
+# The time index uses ``createdAt``, the column TimestampedDocument defines.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
+
+LeadStatus = Literal["new", "contacted", "won", "lost", "booked"]
+LeadKind = Literal["form", "concierge", "handoff", "booking"]
+LEAD_STATUSES: tuple[str, ...] = ("new", "contacted", "won", "lost", "booked")
+LEAD_KINDS: tuple[str, ...] = ("form", "concierge", "handoff", "booking")
 
 
 class LeadSource(BaseModel):
@@ -46,6 +56,10 @@ class LeadSource(BaseModel):
     # at capture because the allowlist can change afterwards, and a lead's flag
     # should mean "unrecognized when it arrived" rather than "unrecognized today".
     origin_unrecognized: bool = False
+    # How the lead arrived; see the header. Old rows read as "form".
+    kind: LeadKind = "form"
+    # "<widget_id>:<customer_ref>" for a concierge / handoff / booking lead.
+    conversation_ref: str = ""
 
 
 class Lead(TimestampedDocument):
@@ -57,6 +71,8 @@ class Lead(TimestampedDocument):
     # Resolved record properties (post event-mapping interpolation).
     properties: dict[str, Any] = Field(default_factory=dict)
     source: LeadSource
+    status: LeadStatus = "new"
+    read_at: datetime | None = None
 
     class Settings:
         name = "leads"

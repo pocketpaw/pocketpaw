@@ -774,3 +774,67 @@ async def test_n6_site_lookup_failure_still_rings_the_bell(net, monkeypatch) -> 
     monkeypatch.setattr(ns, "find_site", _boom)
     await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
     assert await _NotificationDoc.find({"recipient": owner}).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# lead.updated: the site webhook only
+# ---------------------------------------------------------------------------
+
+
+async def _updated(ws: str, site: Site, lead_id: str) -> None:
+    # Set the status directly: going through update_lead would also emit on the
+    # shared bus, where another test may have left the bridge subscribed.
+    doc = await Lead.get(lead_id)
+    doc.status = "won"
+    await doc.save()
+    await leads_bridge._on_lead_updated(
+        {
+            "workspace_id": ws,
+            "lead_id": lead_id,
+            "site_id": site.script_name,
+            "status": "won",
+            "previous_status": "new",
+        }
+    )
+
+
+async def test_lead_updated_reaches_the_site_webhook_and_nothing_else(net) -> None:
+    """A status change is the owner's own action, so it rings no bell and sends
+    no mail; a CRM behind the site webhook still hears about it, with the lead
+    (status included) loaded at send time."""
+    ws, owner = await _tenant()
+    site = await _site(ws)
+    await ns.update_settings(
+        ws,
+        str(site.id),
+        webhook_url=SITE_HOOK,
+        events={"lead_captured": ["email", "push", "webhook"]},
+    )
+    await notifications_service.set_delivery_config(ws, webhook_url=WS_HOOK, enabled=True)
+    lead_id = await _lead(ws, site, full_name="Priya", email="priya@x.com")
+
+    await _updated(ws, site, lead_id)
+    await outbox.process_due()
+
+    hooks = _hooks(net, SITE_HOOK)
+    assert len(hooks) == 1
+    event = json.loads(hooks[0].content)
+    assert event["type"] == "lead.updated"
+    assert event["data"]["id"] == lead_id
+    assert event["data"]["status"] == "won"
+    assert _emails(net) == []
+    assert _hooks(net, WS_HOOK) == []
+    assert await _NotificationDoc.find({"recipient": owner}).count() == 0
+
+
+async def test_lead_updated_follows_the_lead_captured_webhook_route(net) -> None:
+    """An owner who took the webhook off lead_captured gets no lead.updated either."""
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    await ns.update_settings(
+        ws, str(site.id), webhook_url=SITE_HOOK, events={"lead_captured": ["email"]}
+    )
+    lead_id = await _lead(ws, site, email="priya@x.com")
+    await _updated(ws, site, lead_id)
+    await outbox.process_due()
+    assert _hooks(net, SITE_HOOK) == []
