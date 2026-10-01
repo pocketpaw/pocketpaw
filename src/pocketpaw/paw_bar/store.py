@@ -24,7 +24,9 @@
 #     non-empty ``spec.catalog`` to the catalog table in the same transaction
 #     (upsert by id, never a delete: an older editor that loaded an empty catalog
 #     and saved one product must not wipe the rest); an empty or absent one
-#     leaves the table alone. A rollback never restores a revision's catalog.
+#     leaves the table alone. update_spec also moves a stored spec's catalog the
+#     migration has not reached yet (rows already there win), so a save cannot
+#     drop it. A rollback never restores a revision's catalog.
 #     delete_widget removes its rows.
 #   * Tenancy is in-row: the *_workspace_scope helpers match the caller's
 #     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
@@ -59,8 +61,10 @@ from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent, no
 from pocketpaw.paw_bar.catalog_store import (
     CATALOG_SCHEMA_SQL,
     CatalogStoreMixin,
+    add_missing_rows,
     catalog_max_items,
     clean_items,
+    clean_legacy_catalog,
     ensure_catalog_search,
     migrate_catalog_out_of_specs,
     upsert_rows,
@@ -929,6 +933,14 @@ class PawBarStore(CatalogStoreMixin):
                 "INSERT INTO paw_bar_spec_revisions (widget_id, revision, spec) VALUES (?, ?, ?)",
                 (widget_id, next_revision, existing.spec.model_dump_json()),
             )
+            # A stored spec the catalog migration has not reached yet still holds
+            # its catalog. Move it before the new spec overwrites it (a lazy,
+            # per-widget migration; rows already there win), then apply the body.
+            if existing.spec.catalog:
+                legacy = clean_legacy_catalog(
+                    [c.model_dump() for c in existing.spec.catalog], widget_id
+                )
+                await add_missing_rows(db, widget_id, legacy, now)
             await db.execute(sql, params)
             if catalog is not None:
                 await upsert_rows(db, widget_id, catalog, now, catalog_max_items())

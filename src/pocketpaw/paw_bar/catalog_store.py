@@ -25,7 +25,9 @@
 # widget's rows; a write past it raises ``CatalogFull`` and writes nothing.
 #
 # ``migrate_catalog_out_of_specs`` moves every widget spec's legacy ``catalog``
-# into rows, one transaction per widget (marker ``catalog_to_table_v1``).
+# into rows, one transaction per widget (marker ``catalog_to_table_v1``), archiving
+# the spec first and only ADDING rows (``add_missing_rows``): a row already there
+# wins, nothing is deleted.
 
 from __future__ import annotations
 
@@ -328,6 +330,60 @@ async def upsert_rows(
     return len(cleaned), total
 
 
+_INSERT_MISSING_SQL = _UPSERT_SQL.split(" ON CONFLICT")[0] + (
+    " ON CONFLICT(widget_id, item_id) DO NOTHING"
+)
+
+
+def clean_legacy_catalog(catalog: Any, widget_id: str) -> list[tuple[PawBarCatalogItem, str]]:
+    """A stored spec's legacy ``catalog`` list, cleaned like any write. An item
+    the model rejects or a repeated id is skipped and logged, never raised:
+    this runs on data an older build already accepted."""
+    cleaned: list[tuple[PawBarCatalogItem, str]] = []
+    seen: set[str] = set()
+    for raw in catalog if isinstance(catalog, list) else []:
+        try:
+            item = PawBarCatalogItem.model_validate(raw)
+        except ValidationError:
+            logger.warning("paw_bar catalog migration: %s: invalid item skipped", widget_id)
+            continue
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        cleaned.append((item, source_for(item.id)))
+    return cleaned
+
+
+async def add_missing_rows(
+    db: aiosqlite.Connection,
+    widget_id: str,
+    cleaned: Sequence[tuple[PawBarCatalogItem, str]],
+    now: str,
+) -> int:
+    """Insert the items the widget does not hold yet, after its existing rows, on
+    the caller's transaction. A row already there wins: it may be a newer edit
+    made through the catalog routes. Never deletes, and not capped (it moves
+    data an older build accepted). Returns how many rows were added."""
+    async with db.execute(
+        "SELECT item_id FROM paw_bar_catalog_items WHERE widget_id = ?", (widget_id,)
+    ) as cur:
+        existing = {r[0] for r in await cur.fetchall()}
+    async with db.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM paw_bar_catalog_items WHERE widget_id = ?",
+        (widget_id,),
+    ) as cur:
+        row = await cur.fetchone()
+        position = int(row[0]) if row else 0
+    params = []
+    for item, source in cleaned:
+        if item.id in existing:
+            continue
+        params.append(_row_params(widget_id, item, position, source, now))
+        position += 1
+    await db.executemany(_INSERT_MISSING_SQL, params)
+    return len(params)
+
+
 class CatalogStoreMixin:
     """The catalog methods of ``PawBarStore``. The host class provides
     ``_ensure_schema``, ``_conn``, ``_widget_in_scope`` and ``_catalog_fts``."""
@@ -603,14 +659,16 @@ async def _count(db: aiosqlite.Connection, widget_id: str) -> int:
 async def migrate_catalog_out_of_specs(db: aiosqlite.Connection) -> bool:
     """Move each widget spec's legacy ``catalog`` into rows (``catalog_to_table_v1``).
 
-    One BEGIN IMMEDIATE transaction per widget: the spec is re-read inside it, its
-    items inserted (position = index, cleaned like any write; an item the model
-    rejects or a repeated id is skipped and logged) and the spec stored with an
-    empty catalog. Only a widget whose spec still holds a catalog is touched, so a
-    re-run is a no-op. The marker is written once every widget moved; a widget
-    that failed is retried on the next start. Logs the largest spec left, which
-    is what the spec size cap is then measured against. Returns True when the
-    marker was written by this call.
+    One BEGIN IMMEDIATE transaction per widget: the spec is re-read inside it,
+    archived as a spec revision, its items ADDED after the rows the widget already
+    holds (``add_missing_rows``: an existing row wins and nothing is deleted, so a
+    write made through the catalog routes before a retried migration survives;
+    cleaned like any write, an invalid item or a repeated id skipped and logged),
+    and the spec stored with an empty catalog. Only a widget whose spec still
+    holds a catalog is touched, so a re-run is a no-op. The marker is written
+    once every widget moved; a widget that failed is retried on the next start.
+    Logs the largest spec left, which is what the spec size cap is then measured
+    against. Returns True when the marker was written by this call.
     """
     if await is_applied(db, CATALOG_MIGRATION):
         return False
@@ -633,26 +691,26 @@ async def migrate_catalog_out_of_specs(db: aiosqlite.Connection) -> bool:
             if not isinstance(catalog, list) or not catalog:
                 await db.rollback()
                 continue
-            cleaned: list[tuple[PawBarCatalogItem, str]] = []
-            seen: set[str] = set()
-            for raw in catalog:
-                try:
-                    item = PawBarCatalogItem.model_validate(raw)
-                except ValidationError:
-                    logger.warning("paw_bar catalog migration: %s: invalid item skipped", widget_id)
-                    continue
-                if item.id in seen:
-                    continue
-                seen.add(item.id)
-                cleaned.append((item, source_for(item.id)))
-            await replace_rows(db, widget_id, cleaned, datetime.now().isoformat())
+            cleaned = clean_legacy_catalog(catalog, widget_id)
+            moved = await add_missing_rows(db, widget_id, cleaned, datetime.now().isoformat())
+            # The spec as it was, catalog included, stays a rollback point.
+            async with db.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM paw_bar_spec_revisions"
+                " WHERE widget_id = ?",
+                (widget_id,),
+            ) as cur:
+                revision = (await cur.fetchone())[0]
+            await db.execute(
+                "INSERT INTO paw_bar_spec_revisions (widget_id, revision, spec) VALUES (?, ?, ?)",
+                (widget_id, revision, row[0]),
+            )
             spec["catalog"] = []
             await db.execute(
                 "UPDATE paw_bar_widgets SET spec = ? WHERE id = ?", (json.dumps(spec), widget_id)
             )
             await db.commit()
             moved_widgets += 1
-            moved_items += len(cleaned)
+            moved_items += moved
         except Exception:
             await db.rollback()
             failures += 1
@@ -683,7 +741,9 @@ __all__ = [
     "CatalogFull",
     "CatalogStoreMixin",
     "catalog_max_items",
+    "add_missing_rows",
     "clean_items",
+    "clean_legacy_catalog",
     "ensure_catalog_search",
     "fts5_available",
     "migrate_catalog_out_of_specs",

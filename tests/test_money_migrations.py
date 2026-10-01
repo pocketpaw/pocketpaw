@@ -85,7 +85,11 @@ async def test_paw_bar_migration_converts_once_and_leaves_usd(tmp_path: Path) ->
     assert by_id["dates"].currency == "KWD"
 
     db = sqlite3.connect(path)
-    [(rev,)] = db.execute("SELECT spec FROM paw_bar_spec_revisions").fetchall()
+    # Revision 1 is the one the older build archived; the catalog migration
+    # archives the pre-migration spec after it.
+    [(rev,)] = db.execute(
+        "SELECT spec FROM paw_bar_spec_revisions WHERE widget_id = 'w1' AND revision = 1"
+    ).fetchall()
     assert _prices(rev) == {"tea": 1500}
     [(bad,)] = db.execute("SELECT spec FROM paw_bar_widgets WHERE id = 'w2'").fetchall()
     assert bad == "not json"  # unparseable rows are left exactly as found

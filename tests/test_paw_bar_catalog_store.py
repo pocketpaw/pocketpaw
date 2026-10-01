@@ -407,14 +407,14 @@ async def test_the_migration_waits_for_the_money_migration(tmp_path, monkeypatch
 async def test_a_widget_that_fails_to_move_is_retried_on_the_next_start(tmp_path, monkeypatch):
     path = tmp_path / "paw_bar.db"
     _legacy_db(path, with_money_marker=True)
-    real = catalog_store.replace_rows
+    real = catalog_store.add_missing_rows
 
     async def _flaky(db, widget_id, cleaned, now):
         if widget_id == "w2":
             raise RuntimeError("disk hiccup")
         return await real(db, widget_id, cleaned, now)
 
-    monkeypatch.setattr(catalog_store, "replace_rows", _flaky)
+    monkeypatch.setattr(catalog_store, "add_missing_rows", _flaky)
     store = PawBarStore(path)
     assert await store.catalog_count("w1") == 150
     assert await store.catalog_count("w2") == 0
@@ -433,3 +433,66 @@ def test_catalog_rows_are_catalog_items():
     # Card hydration, the cart and the ledger read rows where they read items.
     row = catalog_store._row_to_item(("a", "A", 5, "USD", "", "", "", None, 0, "manual", ""))
     assert isinstance(row, PawBarCatalogItem)
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes: an unmigrated spec catalog never deletes or loses rows
+# --------------------------------------------------------------------------- #
+
+
+def _stale_spec(path: Path, widget_id: str, catalog: list[dict]) -> None:
+    """Put a legacy catalog back into a stored spec, as a widget the migration
+    has not reached yet still holds it."""
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE paw_bar_widgets SET spec = ? WHERE id = ?",
+            (json.dumps({"widget_id": widget_id, "pocket_id": "p", "catalog": catalog}), widget_id),
+        )
+        db.execute("DELETE FROM schema_migrations WHERE name = ?", (CATALOG_MIGRATION,))
+
+
+async def test_the_migration_adds_spec_items_and_never_touches_existing_rows(tmp_path):
+    path = tmp_path / "paw_bar.db"
+    store = PawBarStore(path)
+    w = await _widget(store)
+    # Written through the new routes before this widget's migration ran.
+    await store.upsert_catalog_items(w.id, [_item(1, name="Edited live"), _item(2)])
+    _stale_spec(path, w.id, [_item(1, name="Stale"), _item(3)])
+
+    await PawBarStore(path).catalog_count(w.id)  # a new process runs the migration
+
+    items, total = await store.list_catalog(w.id)
+    assert total == 3
+    assert [(i.id, i.name, i.position) for i in items] == [
+        ("p1", "Edited live", 0),  # the row already there wins
+        ("p2", "Product 2", 1),
+        ("p3", "Product 3", 2),  # spec items not in the table go after
+    ]
+    assert (await store.get_widget(w.id)).spec.catalog == []
+
+
+async def test_the_migration_archives_the_spec_it_clears(tmp_path):
+    path = tmp_path / "paw_bar.db"
+    store = PawBarStore(path)
+    w = await _widget(store)
+    _stale_spec(path, w.id, [_item(5)])
+
+    await PawBarStore(path).catalog_count(w.id)
+
+    latest = await store.latest_spec_revision(w.id)
+    assert latest is not None
+    assert [c.id for c in latest[1].catalog] == ["p5"]  # the pre-migration spec
+    assert (await store.get_widget(w.id)).spec.catalog == []
+
+
+async def test_a_spec_save_moves_an_unmigrated_catalog_instead_of_dropping_it(store, tmp_path):
+    w = await _widget(store)
+    await store.upsert_catalog_items(w.id, [_item(1, name="Live")])
+    _stale_spec(tmp_path / "paw_bar.db", w.id, [_item(1, name="Stale"), _item(2)])
+
+    # The new client saves a spec with no catalog at all.
+    await store.update_spec(w.id, PawBarSpec.model_validate({"widget_id": w.id, "pocket_id": "p"}))
+
+    items, _ = await store.list_catalog(w.id)
+    assert [(i.id, i.name) for i in items] == [("p1", "Live"), ("p2", "Product 2")]
+    assert (await store.get_widget(w.id)).spec.catalog == []

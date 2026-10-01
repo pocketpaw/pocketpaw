@@ -4630,7 +4630,12 @@ Money above) runs before any of it. Deleting or reordering products takes the ca
 routes. A rollback ignores the `catalog` in an archived revision: the catalog is not
 versioned with the spec. The `catalog_to_table_v1` migration moves every
 stored spec's catalog into the store once, after `money_minor_units_v1`, one transaction
-per widget; it logs the largest spec left.
+per widget: the spec as it was is archived as a revision first, its products are added
+after any the store already holds for that widget (a product already there is kept as
+it is, nothing is deleted), and it logs the largest spec left. A spec save on a widget
+the migration has not reached yet moves that widget's catalog the same way before
+writing, so a save never drops it. `POST /paw-bar/widgets` applies the same size cap
+(422 `spec_too_large`) and item cap (409 `catalog_full`).
 
 #### Catalog import
 
