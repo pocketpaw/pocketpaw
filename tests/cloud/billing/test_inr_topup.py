@@ -16,9 +16,16 @@
 #   rate cap inflation, the crash-heal emit reporting only what moved, the
 #   settlement sanity band, the audit fields on the Payment row, and the Rs.100
 #   DTO floor.
+# Updated 2026-10-02 (PH-4 quality-review fix): the grant routes on the product
+#   SOLD (checkout metadata ``topup_currency``), not the charge currency — a
+#   USD-product checkout charged in INR grants its metadata ``credits`` with no
+#   bonus, and an untagged INR charge grants nothing. Also: concurrent duplicate
+#   deliveries, the conversion source on the Payment row, the sanity-band warning
+#   firing once, and checkout metadata stamping.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -249,6 +256,66 @@ async def test_inr_logs_carry_no_rupee_or_fx_figures(mongo_db, caplog):
     assert "2500000" not in caplog.text and "fx_estimate" not in caplog.text
 
 
+async def test_usd_product_charged_in_inr_grants_what_was_sold_and_no_bonus(mongo_db):
+    # Dodo's local pricing charged a USD-product checkout (30,000 credits) in rupees.
+    body = _payment_body(
+        paise=RS_25K,
+        settlement=(29_500, "USD"),
+        meta={"topup_currency": "USD", "credits": "30000"},
+    )
+    result = await _deliver(body, "evt_usd_in_inr")
+
+    assert result["granted"] is True
+    assert await _lines("top_up") == [30_000]
+    assert await _lines("bulk_bonus") == []
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_usd_in_inr")
+    assert row.credits_granted == 30_000
+    assert row.conversion == "metadata_credits"
+
+    # Its full refund (stated in the rupees it was charged in) reverses exactly that.
+    refund = await _deliver(_refund(RS_25K, is_partial=False), "evt_usd_in_inr_refund")
+    assert refund["reversed"] == 30_000
+    assert await credits.balance(WS) == 0
+
+
+async def test_usd_product_charged_in_inr_without_credits_metadata_grants_nothing(mongo_db):
+    body = _payment_body(paise=RS_25K, meta={"topup_currency": "USD"})
+    assert (await _deliver(body, "evt_usd_no_credits"))["granted"] is False
+    assert await credits.balance(WS) == 0
+
+
+async def test_an_inr_charge_without_our_metadata_grants_nothing(mongo_db):
+    result = await _deliver(_payment_body(paise=RS_1L, meta={}), "evt_inr_untagged")
+
+    assert result == {"ok": True, "granted": False}
+    assert await credits.balance(WS) == 0
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_untagged")
+    assert row.credits_granted == 0
+
+
+async def test_concurrent_duplicate_inr_deliveries_grant_each_line_once(mongo_db):
+    body = _payment_body(paise=RS_25K)
+    await asyncio.gather(_deliver(body, "evt_inr_race"), _deliver(body, "evt_inr_race"))
+
+    assert await _lines("top_up") == [28_089]
+    assert await _lines("bulk_bonus") == [2_808]
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_race")
+    assert row.credits_granted == 28_089 + 2_808
+    assert row.conversion == "fx"
+    assert await credits.balance(WS) == 30_897
+
+
+async def test_sanity_band_warning_fires_only_on_the_granting_delivery(mongo_db, caplog):
+    caplog.set_level(logging.WARNING, logger="pocketpaw_ee.cloud.billing.service")
+    body = _payment_body(paise=RS_25K, settlement=(RS_25K, "USD"))
+    await _deliver(body, "evt_inr_warn_once")
+    await _deliver(body, "evt_inr_warn_once")
+
+    assert caplog.text.count("sanity band") == 1
+    row = await Payment.find_one(Payment.gateway_event_id == "evt_inr_warn_once")
+    assert row.conversion == "fx_settlement_distrusted"
+
+
 async def test_eur_grants_nothing_and_logs_without_the_amount(mongo_db, caplog):
     caplog.set_level(logging.INFO, logger="pocketpaw_ee.cloud.billing.service")
     result = await _deliver(_payment_body(paise=2_345_678, currency="EUR", meta={}), "evt_eur")
@@ -368,6 +435,8 @@ async def test_inr_topup_checkout_charges_paise_on_the_inr_product(mongo_db, mon
         "amount": RS_25K,
     }
     assert kwargs["billing_currency"] == "INR"
+    assert kwargs["metadata"]["topup_currency"] == "INR"
+    assert "credits" not in kwargs["metadata"]
 
 
 async def test_usd_topup_checkout_does_not_pin_a_currency(mongo_db, monkeypatch):
@@ -380,6 +449,8 @@ async def test_usd_topup_checkout_does_not_pin_a_currency(mongo_db, monkeypatch)
     _, kwargs = client.payments.create.call_args
     assert kwargs["product_cart"][0]["product_id"] == PRODUCT_ID
     assert "billing_currency" not in kwargs
+    assert kwargs["metadata"]["topup_currency"] == "USD"
+    assert kwargs["metadata"]["credits"] == "1000"
 
 
 async def test_inr_topup_without_an_inr_product_is_refused(mongo_db):
