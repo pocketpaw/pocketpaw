@@ -10,7 +10,8 @@
 # explicit sync_read_model() (never by a read); (5) a workspace-authored
 # "Person" type is reused, not duplicated or left dangling; (6) archive
 # unprojects, and a missed removal heals on sync; (7) a re-scope moves the row;
-# (8) a stale upsert never rolls a newer row back.
+# (8) a stale upsert never rolls a newer row back, while a journal write after
+# a direct store edit still lands.
 
 from __future__ import annotations
 
@@ -231,3 +232,14 @@ async def test_stale_upsert_does_not_roll_back_a_newer_row(journal):
     )
     assert await fs.upsert_object(stale, workspace_id="ws1") is False
     assert (await _people("ws1"))[0].properties["name"] == "New"
+
+
+@pytest.mark.asyncio
+async def test_journal_update_lands_after_a_direct_store_edit(journal):
+    # An agent edits the row through FabricStore (datetime('now') stamp); a
+    # later journal write must still land — the guard compares like formats.
+    await _materialize("ws1", name="Mira")
+    fs = stores.get_fabric_store(workspace_id="ws1")
+    await fs.update_object("person-ws1-u1", {"name": "Agent edit"}, workspace_id="ws1")
+    await _materialize("ws1", name="Mira K")
+    assert (await _people("ws1"))[0].properties["name"] == "Mira K"
