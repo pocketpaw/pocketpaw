@@ -236,6 +236,7 @@ async def purge_workspace_audit(
     Interim: audit lives in two sinks — Mongo ``AuditEvent`` and the SQLite
     ``AuditStore`` that ``agent_list_audit`` reads — so both are purged with
     the same tenant + age scope. Returns the total deleted across both.
+    # no-event: retention bookkeeping
     """
     result = await _AuditEventDoc.find(
         {"workspace": workspace_id, "at": {"$lt": older_than}}

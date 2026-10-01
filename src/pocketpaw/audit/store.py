@@ -12,7 +12,8 @@
 #   listeners.py``) can mirror events into SQLite from the sync
 #   ``AuditLogger.on_log`` fan-out callback without needing an event loop.
 # Modified: 2026-10-01 (CN-2) — Added ``purge_entries`` (workspace + age
-#   scoped delete) so cloud retention clears the rows the audit list reads.
+#   scoped delete; refuses an empty workspace id) so cloud retention clears
+#   the rows the audit list reads.
 
 from __future__ import annotations
 
@@ -291,8 +292,12 @@ class AuditStore:
         Tenancy uses the same ``context.workspace_id`` predicate as
         :meth:`search_entries`. Ages compare through ``julianday`` so stored
         timestamps with or without microseconds or a UTC offset all order
-        correctly. A naive ``older_than`` is read as UTC.
+        correctly. A naive ``older_than`` is read as UTC. An empty
+        ``workspace_id`` raises ``ValueError``: it would match every
+        untenanted row.
         """
+        if not workspace_id:
+            raise ValueError("purge_entries needs a workspace_id")
         self._ensure_schema()
         if older_than.tzinfo is None:
             older_than = older_than.replace(tzinfo=UTC)

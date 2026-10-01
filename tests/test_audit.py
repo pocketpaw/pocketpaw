@@ -3,7 +3,8 @@
 # TDD: tests written before implementation.
 # Covers AuditEntry model, AuditStore (log/query/export), and API endpoints.
 # 2026-10-01 (CN-2): TestAuditStorePurge covers purge_entries, the retention
-#   delete (workspace- and age-scoped, offset/microsecond-agnostic).
+#   delete (workspace- and age-scoped, offset/microsecond-agnostic, refuses
+#   an empty workspace id).
 
 from __future__ import annotations
 
@@ -312,6 +313,15 @@ class TestAuditStorePurge:
         assert deleted == 2
         remaining = {e.action for e in await audit_db.query_entries(limit=50)}
         assert remaining == {"recent.a", "old.b", "old.none"}
+
+    @pytest.mark.asyncio
+    async def test_purge_refuses_an_empty_workspace_id(self, audit_db):
+        untenanted = await self._log(audit_db, None, "old.none")
+        self._backdate(audit_db, untenanted, "2020-01-01T00:00:00+00:00")
+
+        with pytest.raises(ValueError):
+            await audit_db.purge_entries("", datetime.now(UTC))
+        assert len(await audit_db.query_entries(limit=50)) == 1
 
     @pytest.mark.asyncio
     async def test_purge_accepts_naive_cutoff_as_utc(self, audit_db):

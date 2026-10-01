@@ -3,7 +3,9 @@
 #   socket connects to the IP the SSRF check validated (closes the DNS-rebind
 #   window between check and connect). Headers, failure counting and
 #   auto-disable are unchanged; a target the pinned fetcher refuses disables the
-#   webhook like the pre-check does.
+#   webhook like the pre-check does. The create/pre-check now also refuses
+#   URLs carrying credentials or longer than the fetcher's cap, which the
+#   pinned path would otherwise refuse (and auto-disable) on the first event.
 """SIEM webhook delivery for workspace audit events (Wave 3 Task 15).
 
 External HTTPS endpoint registry. Each enabled webhook receives a signed
@@ -156,15 +158,28 @@ async def _validate_url_safety(url: str) -> None:
 
     Defense against SSRF: a workspace admin should not be able to point
     a webhook at ``https://169.254.169.254/...`` and have us POST signed
-    audit events into the cloud metadata service. Runs at create time
-    AND per-delivery (the second call catches DNS rebinding).
+    audit events into the cloud metadata service. Runs at create time and
+    again per delivery as defence in depth; the rebinding guard proper is the
+    delivery itself, which ``SafeFetcher`` pins to the IP it validated.
+    Also refuses what that pinned path refuses (credentials in the URL, an
+    over-long URL), so such a hook fails at create instead of being
+    auto-disabled on its first event.
     """
+    from pocketpaw_ee.sites.safe_fetch import MAX_URL_LENGTH
+
     if not url.startswith("https://"):
         raise Forbidden("webhooks.https_required", "Webhook URL must be https://")
+    if len(url) > MAX_URL_LENGTH:
+        raise Forbidden("webhooks.invalid_url", "Webhook URL is too long")
     try:
         parsed = urlparse(url)
     except ValueError as exc:
         raise Forbidden("webhooks.invalid_url", "Webhook URL is malformed") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise Forbidden(
+            "webhooks.invalid_url",
+            "Webhook URL must not embed credentials; authenticate with the signature",
+        )
     hostname = (parsed.hostname or "").lower()
     if not hostname:
         raise Forbidden("webhooks.invalid_url", "Webhook URL missing hostname")

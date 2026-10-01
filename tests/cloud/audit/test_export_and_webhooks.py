@@ -1,6 +1,7 @@
 # 2026-10-01 (CN-2): delivery tests run through an httpx MockTransport + stubbed
 #   DNS instead of a mocked client .post, and pin the DNS-rebind fix: delivery
 #   connects to the validated IP (Host + SNI = hostname), never a rebound one.
+#   Create refuses credential-bearing / over-long URLs the pinned path refuses.
 """Wave 3 Task 15 — CSV export + SIEM webhook delivery."""
 
 from __future__ import annotations
@@ -203,6 +204,38 @@ async def test_post_webhook_rejects_private_address(admin_client: AsyncClient, u
     )
     assert resp.status_code == 403, f"{url} should be rejected"
     assert resp.json()["error"]["code"] == "webhooks.private_address"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pass@siem.example.com/in",
+        "https://token@siem.example.com/in",
+    ],
+    ids=["user-pass", "token"],
+)
+async def test_post_webhook_rejects_urls_delivery_would_refuse(
+    admin_client: AsyncClient, url: str
+) -> None:
+    """Credentials in the URL and over-long URLs are refused by the pinned
+    delivery path, so they must be refused at create time too, not accepted
+    and then silently disabled on the first event."""
+    resp = await admin_client.post(
+        f"/api/v1/workspaces/{WS}/audit/webhooks",
+        json={"url": url},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "webhooks.invalid_url"
+
+
+async def test_url_safety_rejects_over_long_url() -> None:
+    """The create DTO already caps the URL at 2048 (422); the service check
+    holds the same line for any other caller, matching the pinned fetcher."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+
+    with pytest.raises(Forbidden) as exc:
+        await audit_webhooks._validate_url_safety("https://siem.example.com/" + "a" * 2048)
+    assert exc.value.code == "webhooks.invalid_url"
 
 
 async def test_delivery_disables_webhook_if_url_flips_private(
@@ -430,6 +463,8 @@ async def test_deliver_dns_rebind_never_connects_to_private_ip(monkeypatch) -> N
 
     seen = _patch_transport(monkeypatch, _status(200), resolve=_rebinding)
     await audit_webhooks.deliver(event)
+
+    assert seen == []  # refused before any socket
 
     import ipaddress
 
