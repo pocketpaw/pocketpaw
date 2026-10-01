@@ -5,7 +5,8 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 Updated: 2026-10-02 (feat/partners-whatsapp-leads, PH-6) — "Partner leads on
   WhatsApp" under Owner notifications: a lead on a partner-sold site goes to the
   opted-in shop owner on WhatsApp through the platform MSG91 account
-  (POCKETPAW_MSG91_PLATFORM_*).
+  (POCKETPAW_MSG91_PLATFORM_*), capped at 30 a day per number; a client PATCH
+  that changes the number clears the opt-in.
 Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
   POST /partners/sell, GET /partners/sites (yearly partner plans paid from the
   partner's credit wallet).
