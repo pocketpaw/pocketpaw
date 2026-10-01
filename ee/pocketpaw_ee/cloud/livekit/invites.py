@@ -12,6 +12,11 @@ JSON (``{"emails": [...], "description": ...}``); create moves it to
 returns ``requires_email`` instead of the list, and accept compares the guest's
 email (trimmed, case-insensitive) before minting a token. Accept also no
 longer creates the room: a guest can only join a call a human is already in.
+
+2026-10-01 (feat/meetings-lobby, MC-3): ``new_guest_identity`` and
+``issue_guest_token`` factored out of accept so the meeting lobby
+(meetings/lobby_service.py) mints guest tokens the same way: ``guest-<hex16>``
+identity, room-scoped grant, 1 hour for invites (the lobby passes a shorter TTL).
 """
 
 from __future__ import annotations
@@ -63,6 +68,32 @@ def _split_emails(display_name: str) -> tuple[str, list[str]]:
 def _allowed_emails(doc: _MeetingInviteDoc) -> list[str]:
     """The invite's allow-list; legacy rows still carry it in ``display_name``."""
     return doc.allowed_emails or _split_emails(doc.display_name)[1]
+
+
+def new_guest_identity() -> str:
+    """``guest-<16 hex>``. Member identities are user ids (ObjectId hex) and the
+    bot is ``call-bot``, so the prefix keeps guests from ever colliding."""
+    return f"guest-{secrets.token_hex(8)}"
+
+
+async def issue_guest_token(
+    room_name: str, identity: str, display_name: str, *, ttl_seconds: int = 3600
+) -> str:
+    """A LiveKit token that joins ``room_name`` only (1 hour unless told otherwise).
+
+    Callers must first make sure a human is in that room: LiveKit creates a
+    missing room on connect, so a token for an empty room would start a call.
+    """
+    from pocketpaw_ee.cloud.livekit.service import generate_participant_token
+
+    return await generate_participant_token(
+        room_name=room_name,
+        identity=identity,
+        name=display_name,
+        can_publish=True,
+        can_subscribe=True,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 async def create_meeting_invite(
@@ -242,20 +273,8 @@ async def accept_meeting_invite(
             "This call isn't running. It may have ended, or the host hasn't started it yet.",
         )
 
-    # Generate a guest identity.
-    guest_id = f"guest-{secrets.token_hex(8)}"
-
-    # Generate a LiveKit access token for the guest.
-    from pocketpaw_ee.cloud.livekit.service import generate_participant_token
-
-    lk_token = await generate_participant_token(
-        room_name=doc.room_name,
-        identity=guest_id,
-        name=guest_display_name,
-        can_publish=True,
-        can_subscribe=True,
-        ttl_seconds=3600,  # 1 hour — typical meeting length
-    )
+    guest_id = new_guest_identity()
+    lk_token = await issue_guest_token(doc.room_name, guest_id, guest_display_name)
 
     # Record the use.
     doc.use_count += 1
