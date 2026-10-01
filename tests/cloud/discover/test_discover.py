@@ -11,6 +11,10 @@
 #
 # ``RecordingBus.subscribe`` is a no-op (tests/cloud/conftest.py), so the sync
 # tests replay the recorded site-template events into the real handler.
+#
+# Updated 2026-10-01 (feat/discover-index): the plan-gate and source-registry
+# autouse fixtures moved to conftest.py (shared with the router tests); unhiding
+# a listing clears its reports.
 from __future__ import annotations
 
 from typing import Any
@@ -46,22 +50,6 @@ PUBLIC_KEYS = {
     "created_at",
 }
 SYNCED = {"site_template.saved", "site_template.updated", "site_template.deleted"}
-
-
-@pytest.fixture(autouse=True)
-def sites_plan(monkeypatch) -> None:
-    """Synthetic workspaces have no Workspace doc: answer the Sites plan gate."""
-    from pocketpaw_ee.cloud.workspace import service as workspace_service
-
-    async def _plan(_workspace_id: str) -> str:
-        return "go"
-
-    monkeypatch.setattr(workspace_service, "get_workspace_plan", _plan)
-
-
-@pytest.fixture(autouse=True)
-def builtin_sources() -> None:
-    sources.register_builtin_sources()
 
 
 async def _site(**fields: Any) -> PocketDoc:
@@ -331,6 +319,26 @@ async def test_report_listing_hides_at_three_distinct_reporters() -> None:
     assert (await DiscoverListing.get(listing_id)).hidden is True
     with pytest.raises(NotFound):
         await service.report_listing(OTHER_WS, "u6", listing_id, {"reason": "late"})
+
+
+@pytest.mark.asyncio
+async def test_unhide_clears_reports_and_hide_keeps_them() -> None:
+    listing_id = await _upsert("a")
+    for user in STRANGERS:
+        await service.report_listing(OTHER_WS, user, listing_id, {"reason": "spam"})
+    doc = await DiscoverListing.get(listing_id)
+    assert (doc.hidden, len(doc.reports)) == (True, 3)
+
+    await service_admin.set_hidden(listing_id, True)
+    assert len((await DiscoverListing.get(listing_id)).reports) == 3  # hiding keeps them
+
+    await service_admin.set_hidden(listing_id, False)
+    doc = await DiscoverListing.get(listing_id)
+    assert (doc.hidden, doc.reports) == (False, [])
+
+    # One fresh report no longer re-hides it.
+    await service.report_listing(OTHER_WS, "u6", listing_id, {"reason": "spam"})
+    assert (await DiscoverListing.get(listing_id)).hidden is False
 
 
 # ---------------------------------------------------------------------------
