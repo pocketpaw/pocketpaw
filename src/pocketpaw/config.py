@@ -2431,6 +2431,37 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Owner notification email — Cloudflare Email Service, REST API. The email
+    # sink (ee/pocketpaw_ee/cloud/notifications/email.py) stays OFF, and logs
+    # once, until account id, token and from address are all set. The sending
+    # domain is onboarded once by ops: ``wrangler email sending enable <domain>``.
+    cf_email_account_id: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare account id that owns the onboarded sending domain. Set via "
+            "POCKETPAW_CF_EMAIL_ACCOUNT_ID."
+        ),
+    )
+    cf_email_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare API token with Email Sending permission, sent as a Bearer "
+            "token to /email/sending/send. Set via POCKETPAW_CF_EMAIL_API_TOKEN. "
+            "NEVER logged."
+        ),
+    )
+    cf_email_from: str | None = Field(
+        default=None,
+        description=(
+            "From address for owner notification email, on the onboarded domain "
+            "(e.g. notifications@example.com). Set via POCKETPAW_CF_EMAIL_FROM."
+        ),
+    )
+    cf_email_from_name: str = Field(
+        default="PocketPaw",
+        description="Display name on owner notification email. POCKETPAW_CF_EMAIL_FROM_NAME.",
+    )
+
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price
     # primitives). A completed chat run is billed by its real compute cost times
     # a flat markup, converted from USD into integer credits. These two settings
