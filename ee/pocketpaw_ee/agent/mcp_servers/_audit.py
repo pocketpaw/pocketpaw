@@ -21,6 +21,11 @@
 #     )
 #
 # Failures are logged and swallowed — audit must never break the tool.
+#
+# Updated: 2026-10-01 (CN-5) — the two sink writes are split into
+#   ``_log_runtime_sink`` / ``_record_workspace_sink`` so callers whose rows
+#   differ per sink (connectors.py's connector audit) reuse the plumbing without
+#   changing their stored shape. ``_record_audit_event`` behaviour is unchanged.
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -190,8 +195,40 @@ def _record_audit_event(
     2. Workspace audit (MongoDB) — the primary source for the activity feed.
     """
     safe_meta = dict(metadata or {})
+    _log_runtime_sink(
+        actor_id=actor_id,
+        runtime_action=runtime_action,
+        target=target_id,
+        status=status,
+        ok=ok,
+        category=category,
+        workspace_id=workspace_id,
+        context=safe_meta,
+        label=action,
+    )
+    _record_workspace_sink(
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        metadata={**safe_meta, "category": category},  # frontend uses this for feed filter
+    )
 
-    # 1. Runtime audit (SQLite)
+
+def _log_runtime_sink(
+    *,
+    actor_id: str,
+    runtime_action: str,
+    target: str,
+    status: str,
+    ok: bool,
+    category: str,
+    workspace_id: str,
+    context: dict[str, Any],
+    label: str,
+) -> None:
+    """Runtime audit (SQLite via ``get_audit_logger``). Never raises."""
     try:
         from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 
@@ -201,17 +238,28 @@ def _record_audit_event(
                 severity=severity,
                 actor=actor_id,
                 action=runtime_action,
-                target=target_id,
+                target=target,
                 status=status,
                 category=category,
                 workspace_id=workspace_id,
-                **safe_meta,
+                **context,
             )
         )
     except Exception:  # noqa: BLE001 — audit must never break the caller
-        logger.warning("audit runtime sink failed for %s", action, exc_info=True)
+        logger.warning("audit runtime sink failed for %s", label, exc_info=True)
 
-    # 2. Workspace audit (MongoDB)
+
+def _record_workspace_sink(
+    *,
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    target_type: str,
+    target_id: str,
+    metadata: dict[str, Any],
+) -> None:
+    """Workspace audit (MongoDB via ``audit_service.record``), fire-and-forget.
+    Never raises."""
     try:
         import asyncio
 
@@ -224,10 +272,7 @@ def _record_audit_event(
                 action=action,
                 target_type=target_type,
                 target_id=target_id,
-                metadata={
-                    **safe_meta,
-                    "category": category,  # frontend uses this for feed filter
-                },
+                metadata=metadata,
             )
         )
     except Exception:  # noqa: BLE001 — audit must never break the caller
