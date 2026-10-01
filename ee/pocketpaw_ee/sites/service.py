@@ -1214,6 +1214,7 @@ from bson.errors import InvalidId
 from dateutil.relativedelta import relativedelta
 from pymongo.errors import DuplicateKeyError
 
+from pocketpaw.money import MONEY_UNITS_ISO4217, convert_legacy_minor
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     BadgeRemovalNotEntitled,
@@ -7522,6 +7523,7 @@ async def list_domains(*, workspace_id: str, site_id: str) -> list[DomainStatusR
 # billed monthly for a decade is 120 rows, so this is generous enough that no real
 # owner meets it — it exists to bound the document, not to ration the feature.
 _INVOICE_KEEP = 500
+_INVOICE_MAX_MINOR = 1_000_000_000_000  # = SiteInvoiceCreate's bound, after conversion
 
 
 def _client_response(site: _SiteDoc) -> SiteClientResponse:
@@ -7541,6 +7543,7 @@ def _client_response(site: _SiteDoc) -> SiteClientResponse:
                 currency=inv.currency,
                 paid=inv.paid,
                 note=inv.note,
+                amount_unit=inv.amount_unit,
             )
             for inv in site.client_invoices
         ],
@@ -7712,7 +7715,7 @@ async def update_site_client(
 
 
 async def record_site_invoice(
-    *, workspace_id: str, site_id: str, body: SiteInvoiceCreate
+    *, workspace_id: str, site_id: str, body: SiteInvoiceCreate, minor_units: bool = False
 ) -> SiteClientResponse:
     """Append one manual receipt to the site's client record and return the whole
     updated record (so the caller re-renders from one authoritative response rather
@@ -7723,17 +7726,29 @@ async def record_site_invoice(
     that is billed monthly for years cannot grow a document without bound; the cap
     drops the OLDEST, which is the only end that can be dropped without losing the
     balance the owner is actually looking at.
+
+    ``minor_units`` is True when the client sent ``X-Paw-Money-Units: iso4217``.
+    Otherwise the amount is a legacy client's major × 100 and is converted here
+    (``convert_legacy_minor``: ÷100 for yen, ×10 for dinar, unchanged for
+    two-decimal currencies). Either way the row is stamped ``amount_unit=
+    "iso4217"``, so the invoice migration never converts it again.
     """
     body = SiteInvoiceCreate.model_validate(body)
     site = await _load(workspace_id, site_id)
 
+    amount = (
+        body.amount_cents if minor_units else convert_legacy_minor(body.amount_cents, body.currency)
+    )
+    if amount > _INVOICE_MAX_MINOR:
+        raise ValidationError("sites.invoice_amount_too_large", "amount_cents is implausibly large")
     entry = _SiteInvoiceDoc(
         id=f"inv_{secrets.token_hex(8)}",
         issued_at=datetime.now(UTC),
-        amount_cents=body.amount_cents,
+        amount_cents=amount,
         currency=body.currency,
         paid=body.paid,
         note=body.note.strip(),
+        amount_unit=MONEY_UNITS_ISO4217,
     )
     kept = [entry, *site.client_invoices][:_INVOICE_KEEP]
     # Beanie's ``set()`` merges the updated document back onto ``site``, so the

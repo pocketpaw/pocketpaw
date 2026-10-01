@@ -4525,7 +4525,7 @@ the split is the security model:
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
 | `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code` and the guided fields below. |
-| `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Catalog & Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec. |
+| `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Catalog & Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec, 409 `currency_units_client_outdated` for a catalog with a non-2-decimal currency sent without `X-Paw-Money-Units: iso4217` (see Money below; the same rule holds on `PATCH /paw-bar/widgets/{id}/spec`). |
 | `POST /paw-bar/admin/site/{site_id}/catalog/import/preview` | Read the products a connected store publishes on its own site, for the owner to review. Writes nothing: the owner saves the products they pick through `PATCH …/widget/spec`. Behind `paw_bar.manage`; 404 for a site outside your workspace. Body `{}`. Always a 200 with `{"status", "reason", "source", "host", "items", "total_found", "warnings"}`; see [Catalog import](#catalog-import). |
 | `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. One row per CONVERSATION, not per visitor — a visitor who asked four separate questions is four rows, each carrying its own `conversation_id` and its own last sentence. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
 | `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. Pass `conversation_id` to read ONE thread; without it the visitor's whole history is merged into a single transcript. Both sources narrow together — narrowing only the runs would interleave one thread's questions with every reply a human ever sent that visitor. Narrowing reads each turn's own session-key token rather than rebuilding a key from the conversation id and the widget's current agent, so a conversation that predates conversation identity — or one answered before its widget was bound to a dedicated agent — opens instead of 404-ing. A conversation the visitor really holds returns an empty transcript rather than a 404 when it has nothing in it yet. |
@@ -4552,6 +4552,22 @@ against. Currency codes are upper-cased; the agent ledger's per-currency totals 
 currency) are converted once by the `money_minor_units_v1` migration in each SQLite
 store; client invoices in Mongo by `scripts/migrations/2026_10_01_invoice_minor_units.py`.
 
+A client that writes amounts in minor units sends the request header
+`X-Paw-Money-Units: iso4217`. Without it the server assumes a client built before this
+rule, which still sends major × 100:
+
+- `POST /sites/{site_id}/invoices` converts such an amount (÷100 for a 0-decimal
+  currency, ×10 for a 3-decimal one, unchanged for 2 decimals) before storing it.
+  Every invoice it records is stamped `amount_unit: "iso4217"`; `""` marks a legacy
+  row the migration script has not converted yet. The script converts only unstamped
+  rows and stamps each in the same write, so it is safe to run at any time, more than
+  once, before or after any client release. `amount_unit` is returned on each invoice.
+- `PATCH /paw-bar/widgets/{id}/spec` and `PATCH /paw-bar/admin/site/{site_id}/widget/spec`
+  refuse a catalog holding any item whose currency does not have 2 decimals with 409
+  `currency_units_client_outdated`. They do not convert, because an old client also
+  re-sends prices it read in minor units. Catalogs whose currencies all have 2 decimals
+  are the same in both conventions and save as before.
+
 #### Catalog items
 
 `spec.catalog` holds at most 200 products with unique ids. Product cards and the
@@ -4563,7 +4579,7 @@ rather than rejected, so a spec saved before these rules still loads.
 |---|---|---|
 | `id` | string | Required, unique within the catalog. Imported items use `shopify:<id>`, `woo:<id>` or `web:<hash of the page path>`; ids the editor mints start `item-`. |
 | `name` | string | Trimmed and cut to 200 characters. |
-| `price_cents` | int | Non-negative, in ISO 4217 minor units of `currency`: `350` is $3.50, `1500` is ¥1,500, `1250` is 1.250 KWD. The name is historical. |
+| `price_cents` | int | Non-negative, in ISO 4217 minor units of `currency`: `350` is $3.50, `1500` is ¥1,500, `1250` is 1.250 KWD. The name is historical. A value over 10^12 is read as `0` (and logged), so one absurd stored price cannot make the spec unloadable. |
 | `currency` | string | Trimmed and upper-cased. Anything that isn't then 3 letters (including `""`) is stored as `USD`. |
 | `image_url` | string | An `http(s)://` URL of at most 2048 characters; anything else is stored as `""`. |
 | `url` | string | The product's page: an `http(s)://` URL or a site path starting with a single `/`, at most 2048 characters; anything else is stored as `""`. A product card links to it. |

@@ -170,6 +170,17 @@ def test_the_id_and_price_rules_still_reject(fields):
         PawBarCatalogItem(**{"id": "m", "name": "M", **fields})
 
 
+def test_an_out_of_range_price_loads_as_zero_with_a_warning(caplog):
+    from pocketpaw.paw_bar.models import MAX_CATALOG_PRICE_MINOR
+
+    at_cap = PawBarCatalogItem(id="a", name="A", price_cents=MAX_CATALOG_PRICE_MINOR)
+    assert at_cap.price_cents == MAX_CATALOG_PRICE_MINOR
+    with caplog.at_level("WARNING", logger="pocketpaw.paw_bar.models"):
+        item = PawBarCatalogItem(id="b", name="B", price_cents=MAX_CATALOG_PRICE_MINOR + 1)
+    assert item.price_cents == 0
+    assert "reading it as 0" in caplog.text
+
+
 def test_catalog_currency_is_upper_cased():
     assert PawBarCatalogItem(id="m", name="M", currency=" eur ").currency == "EUR"
 

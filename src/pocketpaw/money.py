@@ -13,6 +13,11 @@
 # Babel) digits: they differ from ISO for some codes (e.g. IQD) and server and
 # clients must agree exactly. An unknown but well-formed 3-letter code is
 # accepted with exponent 2.
+#
+# A client that writes amounts in minor units says so with the request header
+# ``X-Paw-Money-Units: iso4217`` (``MONEY_UNITS_HEADER``). A request without it
+# comes from a client built before the switch, which still sends major × 100;
+# ``client_sends_minor_units`` is the one place that reads the header's value.
 
 from __future__ import annotations
 
@@ -29,6 +34,9 @@ CURRENCY_EXPONENTS: dict[str, int] = {
 # fmt: on
 
 DEFAULT_EXPONENT = 2
+
+MONEY_UNITS_HEADER = "X-Paw-Money-Units"
+MONEY_UNITS_ISO4217 = "iso4217"
 
 _CODE_RE = re.compile(r"[A-Z]{3}")
 
@@ -47,6 +55,12 @@ def normalize_currency(code: object) -> str:
     return norm
 
 
+def client_sends_minor_units(header_value: object) -> bool:
+    """True when the ``X-Paw-Money-Units`` header says the client writes ISO
+    4217 minor units. Absent or anything else means a legacy (major × 100) client."""
+    return isinstance(header_value, str) and header_value.strip().lower() == MONEY_UNITS_ISO4217
+
+
 def exponent(code: object) -> int:
     """ISO 4217 minor-unit exponent; 2 for unknown or malformed codes."""
     if not isinstance(code, str):
@@ -58,7 +72,8 @@ def to_minor(amount: str | Decimal | int | float, code: object) -> int:
     """Major amount (``"3.50"``) → minor units for ``code``, rounded half-up.
 
     Floats go through ``str`` first so ``0.1`` stays 0.1. Raises ``ValueError``
-    on a non-numeric or non-finite amount.
+    on a non-numeric or non-finite amount, and on one too large for the decimal
+    context (28 significant digits) to round.
     """
     try:
         value = amount if isinstance(amount, Decimal) else Decimal(str(amount).strip())
@@ -66,32 +81,43 @@ def to_minor(amount: str | Decimal | int | float, code: object) -> int:
         raise ValueError(f"not a decimal amount: {amount!r}") from exc
     if not value.is_finite():
         raise ValueError(f"not a finite amount: {amount!r}")
-    scaled = value.scaleb(exponent(code))
-    return int(scaled.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    try:
+        scaled = value.scaleb(exponent(code))
+        return int(scaled.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    except InvalidOperation as exc:
+        raise ValueError(f"amount out of range: {amount!r}") from exc
 
 
 def from_minor(amount: int, code: object) -> Decimal:
-    """Minor units → exact major ``Decimal`` with the currency's exponent places."""
+    """Minor units → exact major ``Decimal`` with the currency's exponent places.
+    Raises ``ValueError`` on an amount too large for the decimal context."""
     e = exponent(code)
-    return Decimal(int(amount)).scaleb(-e).quantize(Decimal(1).scaleb(-e))
+    try:
+        return Decimal(int(amount)).scaleb(-e).quantize(Decimal(1).scaleb(-e))
+    except InvalidOperation as exc:
+        raise ValueError(f"amount out of range: {amount!r}") from exc
 
 
 def format_minor(amount: object, code: object) -> str:
     """Human amount for prompts: ``$3.50``, ``¥1,500``, ``1.250 KWD``.
 
-    Returns ``""`` when ``amount`` is not an integer-like value. A blank or
-    malformed code renders the bare number with two decimals.
+    Returns ``""`` when ``amount`` is not an integer-like value or is too large
+    to format, so one absurd stored price never breaks the prompt it sits in. A
+    blank or malformed code renders the bare number with two decimals.
     """
     try:
         minor = int(amount)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ArithmeticError):
         return ""
     try:
         norm = normalize_currency(code)
     except ValueError:
         norm = ""
     e = exponent(norm)
-    major = from_minor(minor, norm)
+    try:
+        major = from_minor(minor, norm)
+    except (ArithmeticError, ValueError):
+        return ""
     number = f"{abs(major):,.{e}f}"
     sign = "-" if minor < 0 else ""
     symbol = _SYMBOLS.get(norm)

@@ -290,6 +290,7 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -297,6 +298,7 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 
+from pocketpaw.money import MONEY_UNITS_HEADER, client_sends_minor_units
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
@@ -1422,15 +1424,21 @@ async def update_site_client(
 async def record_site_invoice(
     site_id: str,
     body: SiteInvoiceCreate,
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteClientResponse:
     """Log one manual receipt against the site's client. This records that the
     owner was paid — it does NOT charge anyone, and it is unrelated to the owner's
     own subscription with us. Returns the whole updated client record so the caller
-    re-renders from one response instead of splicing the new row in locally."""
+    re-renders from one response instead of splicing the new row in locally.
+    ``X-Paw-Money-Units: iso4217`` marks the amount as minor units; without it the
+    amount is read as a legacy client's major × 100 and converted."""
     return await sites_service.record_site_invoice(
-        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+        workspace_id=ctx.workspace_id,
+        site_id=site_id,
+        body=body,
+        minor_units=client_sends_minor_units(x_paw_money_units),
     )
 
 
