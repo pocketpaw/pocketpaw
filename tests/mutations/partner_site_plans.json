@@ -1,0 +1,87 @@
+[
+  {
+    "label": "a running year may drop to a monthly plan — the paid year is given away",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if through is None or through > now:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_change_terms_refuse_a_running_year_moving_to_monthly",
+      "tests/cloud/partners/test_partners.py::test_a_running_year_cannot_move_to_a_monthly_plan"
+    ]
+  },
+  {
+    "label": "tier-change debits lose their own namespace — an upgrade on renewal day makes the renewal free",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    return f\"{key}:change\" if change else key",
+    "replace": "    return key",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_the_change_key_is_its_own_namespace",
+      "tests/cloud/partners/test_partners.py::test_an_upgrade_on_renewal_day_does_not_make_the_renewal_free"
+    ]
+  },
+  {
+    "label": "the tier-change charge is keyed like a renewal again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                member_id=user_id,\n                change=True,\n            )",
+    "replace": "                member_id=user_id,\n                change=False,\n            )",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_an_upgrade_on_renewal_day_does_not_make_the_renewal_free"
+    ]
+  },
+  {
+    "label": "a refused charge leaves a live site pending on the unpaid tier",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            if _prior_state is not None:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_publish.py::test_a_refused_upgrade_of_a_live_free_site_leaves_it_exactly_as_it_was",
+      "tests/cloud/partners/test_partners.py::test_a_short_wallet_refuses_the_sale_and_changes_nothing"
+    ]
+  },
+  {
+    "label": "the partner-only gate is gone — any workspace buys a partner tier",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if getattr(_profile, \"status\", None) != \"active\":",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_partner_tier_cannot_be_bought_through_a_normal_publish",
+      "tests/cloud/partners/test_partners.py::test_a_lapsed_partner_tier_cannot_be_rebought_past_the_gates"
+    ]
+  },
+  {
+    "label": "the partner-only gate exempts a lapsed site re-buying the tier it names",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and (requested_tier.key != _held_tier_key or not already_paying)\n    ):",
+    "replace": "        and requested_tier.key != _held_tier_key\n    ):",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_lapsed_partner_tier_cannot_be_rebought_past_the_gates"
+    ]
+  },
+  {
+    "label": "the purchase gate exempts a lapsed site re-buying the tier it names — a member spends the wallet",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and (requested_tier.key != _held_tier_key or not already_paying)\n        and not purchase_authorized",
+    "replace": "        and requested_tier.key != _held_tier_key\n        and not purchase_authorized",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_lapsed_partner_tier_cannot_be_rebought_past_the_gates"
+    ]
+  },
+  {
+    "label": "a yearly renewal steps one month — the partner is charged a year's price twelve times a year",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        doc.renewal_date = period + relativedelta(months=tier.period_months)",
+    "replace": "        doc.renewal_date = period + relativedelta(months=1)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_the_renewal_sweeper_renews_a_year_at_the_partner_price"
+    ]
+  },
+  {
+    "label": "a profile-less renewal charges the high-water mark — a downgraded site pays the dearer tier",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if last_paid_usd and int(last_paid_usd) in site_plans.partner_prices_usd(tier.key):",
+    "replace": "        if last_paid_usd:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_renewal_after_a_downgrade_never_charges_the_high_water_mark"
+    ]
+  }
+]
