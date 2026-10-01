@@ -873,6 +873,30 @@ class CloudSurfacesMcpProvider:
         return list(SURFACES_TOOL_IDS)
 
 
+class CloudRoomsMcpProvider:
+    """`pocketpaw.mcp_servers` — the chat-rooms READ server (``pocketpaw_rooms``).
+    Hosts ``list_rooms`` + ``read_room``: the user's own PocketPaw channels,
+    groups and DMs, through the same group/message services the chat API uses.
+
+    Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
+    with no MCP allowlist (GENERIC, CHAT, HOME, ...) and filtered out of every
+    allowlisted one, the public concierge included.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.rooms import build_rooms_server
+
+            return build_rooms_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.rooms import ROOMS_TOOL_IDS
+
+        return list(ROOMS_TOOL_IDS)
+
+
 class CloudMediaMcpProvider:
     """`pocketpaw.mcp_servers` — the STUDIO media-generation in-process server
     (``pocketpaw_media``). Hosts ``image_generate`` + ``video_generate``.
