@@ -1,7 +1,8 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
 Updated 2026-10-01 (feat/discover-index): ``mount_cloud`` registers the Discover
-sources and the site-template -> listing sync after ``init_realtime``.
+sources and the site-template -> listing sync after ``init_realtime``, and mounts
+the Discover router (``/api/v1/discover``) next to site templates.
 
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
 ``pocketpaw.routes`` entry-point). It mounts every domain router under
@@ -289,6 +290,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.daytona.router import router as daytona_router
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
+    from pocketpaw_ee.cloud.discover.router import router as discover_router
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
@@ -393,6 +395,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Site templates — save a site pocket as a private template, list / get /
     # delete them, and start a new site from one (POST /site-templates/{id}/use).
     app.include_router(site_templates_router, prefix="/api/v1")
+    # Discover (DS-1) — the public index of shareable items (GET /discover,
+    # GET /discover/{id}, no sign-in, per-IP limited) plus signed-in use / report.
+    app.include_router(discover_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")

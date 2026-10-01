@@ -604,6 +604,7 @@ source_modules = [
     "pocketpaw_ee.cloud.discover.domain",
     "pocketpaw_ee.cloud.discover.sources",
     "pocketpaw_ee.cloud.discover.listeners",
+    "pocketpaw_ee.cloud.discover.router",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.discover_listing"]
 
@@ -620,6 +621,7 @@ source_modules = [
     "pocketpaw_ee.cloud.discover.listeners",
     "pocketpaw_ee.cloud.discover.service",
     "pocketpaw_ee.cloud.discover.service_admin",
+    "pocketpaw_ee.cloud.discover.router",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.site_template"]
 
