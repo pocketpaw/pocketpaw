@@ -1,5 +1,5 @@
 # tests/cloud/leads/test_notification_settings.py
-# Per-site owner notifications (Site.lead_notifications) end to end over the
+# Per-site owner notifications (site_notification_settings) end to end over the
 # shared mongo_db fixture and an httpx MockTransport:
 #   * default: the owner's account email gets the FULL lead (escaped, reply_to
 #     the visitor) and push still fires; webhook data carries the lead
@@ -90,7 +90,12 @@ def _emails(requests) -> list[dict]:
 
 
 def _hooks(requests, url) -> list[httpx.Request]:
-    return [r for r in requests if str(r.url) == url]
+    # Pinned connections: the logical URL is the Host header plus the path.
+    return [
+        r
+        for r in requests
+        if f"{r.url.scheme}://{r.headers['host']}{r.url.raw_path.decode()}" == url
+    ]
 
 
 async def _tenant(email: str = OWNER_EMAIL) -> tuple[str, str]:
@@ -129,6 +134,18 @@ async def _lead(ws: str, site: Site, **props) -> str:
     )
     await doc.insert()
     return str(doc.id)
+
+
+async def _backdate_confirm(site: Site) -> None:
+    """Move every recipient's last confirm email an hour into the past."""
+    from datetime import UTC, datetime, timedelta
+
+    from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
+
+    doc = await SiteNotificationSettings.find_one({"site_id": str(site.id)})
+    for r in doc.emails:
+        r.confirm_sent_at = datetime.now(UTC) - timedelta(hours=1)
+    await doc.save()
 
 
 async def _capture(ws: str, site: Site, lead_id: str) -> None:
@@ -227,12 +244,19 @@ async def test_confirm_link_then_recipient_gets_lead_mail(net) -> None:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
-        first = await client.get(f"/api/v1/lead-notifications/confirm/{token}")
-        second = await client.get(f"/api/v1/lead-notifications/confirm/{token}")
-        bad = await client.get("/api/v1/lead-notifications/confirm/not-a-token")
+        page = await client.get(f"/api/v1/lead-notifications/confirm/{token}")
+        # GET is what a link scanner does: it renders a button and confirms nothing.
+        assert page.status_code == 200 and '<form method="post">' in page.text
+        assert page.headers["referrer-policy"] == "no-referrer"
+        assert page.headers["cache-control"] == "no-store"
+        assert (await ns.get_settings(ws, str(site.id)))["emails"][0]["status"] == "pending"
+        first = await client.post(f"/api/v1/lead-notifications/confirm/{token}")
+        second = await client.post(f"/api/v1/lead-notifications/confirm/{token}")
+        bad = await client.post("/api/v1/lead-notifications/confirm/not-a-token")
+        bad_get = await client.get("/api/v1/lead-notifications/confirm/not-a-token")
     assert first.status_code == 200 and "Email confirmed" in first.text
     assert second.status_code == 200  # idempotent
-    assert bad.status_code == 400
+    assert bad.status_code == 400 and bad_get.status_code == 400
     assert "Bright Smile" in first.text
 
     state = await ns.get_settings(ws, str(site.id))
@@ -251,7 +275,7 @@ async def test_expired_or_superseded_token_is_refused(net) -> None:
     ws, _ = await _tenant()
     site = await _site(ws)
     await ns.add_recipient(ws, str(site.id), "team@acme.test")
-    settings = (await Site.get(site.id)).lead_notifications
+    settings = await ns.settings_for(site)
     nonce = settings.emails[0].confirm_nonce
     claims = json.dumps({"s": str(site.id), "w": ws, "e": "team@acme.test", "n": nonce})
     old = (
@@ -262,7 +286,9 @@ async def test_expired_or_superseded_token_is_refused(net) -> None:
     assert (await ns.confirm(old))[0] == "invalid"
 
     fresh = ns._confirm_token(await Site.get(site.id), "team@acme.test", nonce)
-    # Re-adding mints a new nonce: the earlier link stops working.
+    # Re-adding (after the 30-minute resend limit) mints a new nonce: the
+    # earlier link stops working.
+    await _backdate_confirm(site)
     await ns.add_recipient(ws, str(site.id), "team@acme.test")
     assert (await ns.confirm(fresh))[0] == "invalid"
 
@@ -284,8 +310,8 @@ async def test_removed_recipient_is_not_mailed_even_if_already_queued(net) -> No
     ws, _ = await _tenant()
     site = await _site(ws)
     await ns.add_recipient(ws, str(site.id), "team@acme.test")
-    s = (await Site.get(site.id)).lead_notifications
-    token = ns._confirm_token(await Site.get(site.id), "team@acme.test", s.emails[0].confirm_nonce)
+    s = await ns.settings_for(site)
+    token = ns._confirm_token(site, "team@acme.test", s.emails[0].confirm_nonce)
     assert (await ns.confirm(token))[0] == "confirmed"
     await NotificationOutboxItem.find_all().delete()
 
@@ -499,3 +525,161 @@ async def test_handoff_routes_through_site_settings(net, monkeypatch) -> None:
     event = json.loads(_hooks(net, SITE_HOOK)[0].content)
     assert event["type"] == "concierge.handoff"
     assert event["data"]["customer_ref"] == "c1" and event["data"]["question"]
+
+
+# ---------------------------------------------------------------------------
+# Security-review fixes
+# ---------------------------------------------------------------------------
+
+
+async def _confirmed(ws: str, site: Site, email: str) -> None:
+    await ns.add_recipient(ws, str(site.id), email)
+    s = await ns.settings_for(site)
+    nonce = next(r.confirm_nonce for r in s.emails if r.email == email)
+    assert (await ns.confirm(ns._confirm_token(site, email, nonce)))[0] == "confirmed"
+
+
+async def test_s1_whole_site_save_cannot_clobber_settings(net) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    stale = await Site.get(site.id)  # loaded before the settings change
+    await _confirmed(ws, site, "team@acme.test")
+    stale.name = "Renamed"
+    await stale.save()  # what sites/service.py does
+    state = await ns.get_settings(ws, str(site.id))
+    assert [e["status"] for e in state["emails"]] == ["confirmed"]
+
+
+async def test_s1_concurrent_adds_respect_the_cap_and_never_duplicate(net) -> None:
+    import asyncio
+
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    addresses = [f"r{i}@acme.test" for i in range(7)] + ["r0@acme.test"]
+    results = await asyncio.gather(
+        *(ns.add_recipient(ws, str(site.id), a) for a in addresses), return_exceptions=True
+    )
+    stored = [r.email for r in (await ns.settings_for(site)).emails]
+    assert len(stored) == 5 and len(set(stored)) == 5
+    assert any(isinstance(r, ValidationError) for r in results)
+
+
+async def test_s1_concurrent_confirm_bounce_and_failures_all_stick(net) -> None:
+    import asyncio
+
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    await ns.update_settings(ws, str(site.id), webhook_url=SITE_HOOK)
+    await _confirmed(ws, site, "a@acme.test")
+    await ns.add_recipient(ws, str(site.id), "b@acme.test")
+    s = await ns.settings_for(site)
+    b_nonce = next(r.confirm_nonce for r in s.emails if r.email == "b@acme.test")
+    await asyncio.gather(
+        ns.confirm(ns._confirm_token(site, "b@acme.test", b_nonce)),
+        ns.record_bounce(ws, str(site.id), "a@acme.test"),
+        *(ns.record_webhook_result(ws, str(site.id), ok=False) for _ in range(10)),
+    )
+    s = await ns.settings_for(site)
+    states = {r.email: (r.confirmed_at is not None, r.bounced_at is not None) for r in s.emails}
+    assert states == {"a@acme.test": (True, True), "b@acme.test": (True, False)}
+    assert s.webhook_failure_count == 10 and s.webhook_disabled_at is not None
+
+
+async def test_s2_unverified_owner_address_gets_no_mail(net) -> None:
+    from pocketpaw_ee.cloud.models.user import User
+
+    ws, owner = await _tenant()
+    user = await User.get(owner)
+    user.is_verified = False
+    await user.save()
+    site = await _site(ws)
+
+    state = await ns.get_settings(ws, str(site.id))
+    assert state["owner_email"] == OWNER_EMAIL and state["owner_email_status"] == "unverified"
+    assert (await ns.send_test(ws, str(site.id)))["emails"] == []
+    await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
+    await outbox.process_due()
+    assert _emails(net) == []
+
+
+async def test_s3_confirm_resend_and_daily_cap_return_429(net, monkeypatch) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    async with AsyncClient(
+        transport=ASGITransport(app=_app("admin", ws)), base_url="http://t"
+    ) as admin:
+        path = f"/api/v1/sites/{site.id}/lead-notifications/recipients"
+        assert (await admin.post(path, json={"email": "a@acme.test"})).status_code == 200
+        again = await admin.post(path, json={"email": "a@acme.test"})
+        assert again.status_code == 429
+        assert again.json()["error"]["code"] == "lead_notifications.confirm_rate_limited"
+        monkeypatch.setattr(ns, "CONFIRM_DAILY_CAP", 1)
+        capped = await admin.post(path, json={"email": "b@acme.test"})
+        assert capped.status_code == 429
+        assert capped.json()["error"]["code"] == "lead_notifications.confirm_daily_cap"
+
+
+async def test_s6_workspace_webhook_lead_event_keeps_flat_kind(net) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    await notifications_service.set_delivery_config(ws, webhook_url=WS_HOOK, enabled=True)
+    await _capture(ws, site, await _lead(ws, site, email="priya@x.com"))
+    await outbox.process_due()
+    event = json.loads(_hooks(net, WS_HOOK)[0].content)
+    assert event["type"] == "lead.captured" and event["data"]["email"] == "priya@x.com"
+    assert event["kind"] == "lead_captured" and event["title"] == "New lead"
+    assert event["workspace_id"] == ws and event["recipient_id"] is None
+    assert "Bright Smile" in event["body"]
+
+
+async def test_s7_same_url_save_rearms_and_rotate_route(net) -> None:
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    first = await ns.update_settings(ws, str(site.id), webhook_url=SITE_HOOK)
+    for _ in range(10):
+        await ns.record_webhook_result(ws, str(site.id), ok=False)
+    assert (await ns.get_settings(ws, str(site.id)))["webhook_disabled_at"] is not None
+    again = await ns.update_settings(ws, str(site.id), webhook_url=SITE_HOOK)
+    assert again["webhook_disabled_at"] is None and again["webhook_failure_count"] == 0
+    assert again["webhook_secret"] is None
+
+    path = f"/api/v1/sites/{site.id}/lead-notifications/webhook-secret"
+    async with AsyncClient(
+        transport=ASGITransport(app=_app("member", ws)), base_url="http://t"
+    ) as member:
+        assert (await member.post(path)).status_code == 403
+    async with AsyncClient(
+        transport=ASGITransport(app=_app("admin", ws)), base_url="http://t"
+    ) as admin:
+        rotated = await admin.post(path)
+    assert rotated.status_code == 200
+    new = rotated.json()["webhook_secret"]
+    assert new and new != first["webhook_secret"]
+    _url, secrets_now = await ns.webhook_target(ws, str(site.id))
+    assert secrets_now == [new, first["webhook_secret"]]  # grace window
+
+
+async def test_n5_add_recipient_refused_without_public_url_in_production(monkeypatch) -> None:
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    ws, _ = await _tenant()
+    site = await _site(ws)
+    monkeypatch.setenv("POCKETPAW_ENV", "production")
+    monkeypatch.delenv("POCKETPAW_PUBLIC_BASE_URL", raising=False)
+    with pytest.raises(ValidationError) as exc:
+        await ns.add_recipient(ws, str(site.id), "a@acme.test")
+    assert exc.value.code == "lead_notifications.public_url_unset"
+
+
+async def test_n6_site_lookup_failure_still_rings_the_bell(net, monkeypatch) -> None:
+    ws, owner = await _tenant()
+    site = await _site(ws)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr(ns, "find_site", _boom)
+    await _capture(ws, site, await _lead(ws, site, email="v@x.com"))
+    assert await _NotificationDoc.find({"recipient": owner}).count() == 1

@@ -1,5 +1,5 @@
 # ee/pocketpaw_ee/cloud/leads/notifications_router.py
-# HTTP surface for per-site owner notifications (``Site.lead_notifications``).
+# HTTP surface for per-site owner notifications (``site_notification_settings``).
 # Thin: every route delegates to ``leads.notification_settings``.
 #
 # Owner/admin routes, workspace-scoped through the caller's active workspace and
@@ -11,10 +11,12 @@
 #   POST   /sites/{site_id}/lead-notifications/recipients   (queues a confirm email)
 #   DELETE /sites/{site_id}/lead-notifications/recipients/{email}
 #   POST   /sites/{site_id}/lead-notifications/test
+#   POST   /sites/{site_id}/lead-notifications/webhook-secret  (rotate; shown once)
 #
-# One PUBLIC route: GET /lead-notifications/confirm/{token}, the link in the
-# confirm email. The token is a 7-day Fernet token, so no session is needed;
-# it answers a small HTML page and is idempotent. The token rides in the PATH,
+# PUBLIC: /lead-notifications/confirm/{token}, the link in the confirm email.
+# GET only renders a confirm button (no side effect, so link scanners can't
+# confirm); POST to the same path confirms, idempotently. The token (7-day
+# Fernet) is the credential, so no session is needed. The token rides in the PATH,
 # not a ``?token=`` query, because the dashboard auth middleware treats a
 # ``token`` query parameter as a dashboard credential.
 
@@ -105,31 +107,68 @@ async def send_lead_notification_test(
     return await settings_service.send_test(workspace_id, site_id)
 
 
-def _page(title: str, message: str, status_code: int) -> HTMLResponse:
+@router.post("/sites/{site_id}/lead-notifications/webhook-secret")
+async def rotate_lead_notification_webhook_secret(
+    site_id: str,
+    _user=Depends(_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """New signing secret for the site webhook, returned once; re-arms it."""
+    return await settings_service.rotate_webhook_secret(workspace_id, site_id)
+
+
+_INVALID = (
+    "Link not valid",
+    "This confirm link has expired or was replaced. Ask the site owner to add you again.",
+)
+
+
+def _page(title: str, message: str, status_code: int, *, button: bool = False) -> HTMLResponse:
+    form = (
+        '<form method="post"><button type="submit" style="font-size:16px;padding:10px 16px;'
+        'border-radius:6px;border:none;background:#1d4ed8;color:#ffffff;cursor:pointer">'
+        "Confirm this address</button></form>"
+        if button
+        else ""
+    )
     body = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="robots" content="noindex">'
         f"<title>{html.escape(title)}</title></head>"
         '<body style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
         'max-width:480px;margin:64px auto;padding:0 16px;line-height:1.5;color:#111827">'
         f'<h1 style="font-size:22px">{html.escape(title)}</h1>'
-        f"<p>{html.escape(message)}</p></body></html>"
+        f"<p>{html.escape(message)}</p>{form}</body></html>"
     )
     return HTMLResponse(
         body,
         status_code=status_code,
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
+            "form-action 'self'; frame-ancestors 'none'",
+        },
     )
 
 
 @router.get("/lead-notifications/confirm/{token}", response_class=HTMLResponse)
+async def show_lead_notification_confirm(token: str) -> HTMLResponse:
+    """The emailed link. Renders a confirm button and changes NOTHING: mail
+    scanners and link previewers fetch links, and must not confirm for a person."""
+    state, site_name = await settings_service.check_token(token)
+    if state != "valid":
+        return _page(*_INVALID, 400)
+    where = f" for {site_name}" if site_name else ""
+    return _page("Confirm your email", f"Get new-lead email{where}?", 200, button=True)
+
+
+@router.post("/lead-notifications/confirm/{token}", response_class=HTMLResponse)
 async def confirm_lead_notification_email(token: str) -> HTMLResponse:
+    """The button's POST: the token is the credential. Idempotent."""
     state, site_name = await settings_service.confirm(token)
     if state == "confirmed":
         where = f" for {site_name}" if site_name else ""
         return _page("Email confirmed", f"You'll now get new-lead email{where}.", 200)
-    return _page(
-        "Link not valid",
-        "This confirm link has expired or was replaced. Ask the site owner to add you again.",
-        400,
-    )
+    return _page(*_INVALID, 400)

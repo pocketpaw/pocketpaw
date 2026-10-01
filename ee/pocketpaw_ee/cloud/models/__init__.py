@@ -251,6 +251,7 @@ from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
@@ -453,6 +454,7 @@ __all__ = [
     "Notification",
     "NotificationDeliveryConfig",
     "NotificationOutboxItem",
+    "SiteNotificationSettings",
     "NotificationSource",
     "OAuthAccount",
     "Payment",
@@ -527,6 +529,9 @@ def get_all_documents():
         # External-delivery outbox (email / signed webhook / Slack). Only
         # ``ee.cloud.notifications.outbox`` reads or writes it.
         NotificationOutboxItem,
+        # Per-site owner-notification settings. Only
+        # ``ee.cloud.leads.notification_settings`` writes it.
+        SiteNotificationSettings,
         FileObj,
         FileUpload,
         FileFolder,

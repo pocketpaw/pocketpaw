@@ -1,55 +1,59 @@
 # ee/pocketpaw_ee/cloud/leads/notification_settings.py
-# Per-site owner notifications: the ONLY writer of ``Site.lead_notifications``,
-# and the router that turns a site event (a captured lead, a concierge handoff,
-# later a booking) into bell/push rows, emails and webhook deliveries.
+# Per-site owner notifications: the ONLY writer of ``site_notification_settings``
+# (``models/lead_notifications.py``), and the router that turns a site event (a
+# captured lead, a concierge handoff, later a booking) into bell/push rows,
+# emails and webhook deliveries.
 #
-# Settings (``models/lead_notifications.py``): who gets email (the workspace
-# owner's account address plus up to 5 confirmed extras), an optional signed
-# site webhook, and per-event sinks (email | webhook | push). Unset means the
-# owner's address with email + push for every event.
+# Settings: who gets email (the workspace owner's VERIFIED account address plus
+# up to 5 confirmed extras), an optional signed site webhook, and per-event sinks
+# (email | webhook | push). No row means the owner's address with email + push
+# for every event. Every write is a targeted ``$set`` / ``$inc`` / ``$push`` /
+# ``$pull`` / positional update, never a read-modify-write of the whole row.
 #
 # Confirm flow: adding an address stores it unconfirmed with a fresh nonce and
 # queues ONE confirm email carrying a Fernet token (site, workspace, email,
-# nonce) that expires after 7 days. The public confirm route checks the token
-# and the nonce, so removing and re-adding an address kills older links.
-# Confirming twice is a no-op. An unconfirmed or bounced address gets nothing
-# else, checked when mail is queued AND again when the outbox sends it.
+# nonce) that expires after 7 days. Re-sends are limited to one per address per
+# 30 minutes and 50 per workspace per day. The public confirm page shows a
+# button only (GET has no side effect, so link scanners can't confirm); the
+# POST confirms. A new nonce voids older links. Unconfirmed, bounced or
+# unverified addresses get no other mail, checked at enqueue and at send.
 #
 # Routing (``dispatch_site_event``): "push" creates the bell rows (and so the
-# OS push, which follows every bell row); "email" queues one email per allowed
-# recipient; "webhook" queues one signed delivery to the site webhook. The
-# workspace config stays the fallback: its Slack sink always gets the event
-# (subject to its own routes), and its webhook gets it when the site has no
-# webhook of its own. Every delivery goes through the notification outbox, so
-# the visitor's request never waits on mail or HTTP.
-#
-# Site writes are targeted ``$set`` / ``$inc`` on ``lead_notifications`` only,
-# never a whole-document save, so they can't clobber a concurrent Site edit.
+# OS push); "email" queues one email per allowed recipient; "webhook" queues one
+# signed delivery to the site webhook. The workspace config is the fallback: its
+# Slack always gets the event (subject to its own routes) and its webhook gets
+# it when the site has no webhook of its own, with the deprecated flat
+# notification fields added so existing ``kind`` filters keep working.
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import NotFound, RateLimited, ValidationError
 from pocketpaw_ee.cloud.models.lead_notifications import (
     DEFAULT_EVENT_SINKS,
     LEAD_EVENTS,
     MAX_EXTRA_RECIPIENTS,
     LeadNotificationRecipient,
-    LeadNotificationSettings,
+    SiteNotificationSettings,
+    default_events,
 )
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
 logger = logging.getLogger(__name__)
 
 CONFIRM_TTL_SECONDS = 7 * 24 * 3600
+CONFIRM_RESEND_INTERVAL = timedelta(minutes=30)
+CONFIRM_DAILY_CAP = 50
 WEBHOOK_DISABLE_THRESHOLD = 10
+CONFIRM_KIND = "lead_notifications_confirm"
 _VALID_SINKS = frozenset({"email", "webhook", "push"})
 
 # Webhook ``type`` per site event.
@@ -62,6 +66,10 @@ EVENT_TYPES = {
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _coll():
+    return SiteNotificationSettings.get_pymongo_collection()
 
 
 # ---------------------------------------------------------------------------
@@ -92,40 +100,71 @@ async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     return site
 
 
-def effective(site: _SiteDoc | None) -> LeadNotificationSettings:
-    settings = getattr(site, "lead_notifications", None) if site is not None else None
-    return settings if settings is not None else LeadNotificationSettings()
+def _key(site: _SiteDoc) -> dict[str, str]:
+    return {"workspace": site.workspace, "site_id": str(site.id)}
 
 
-async def owner_email(workspace_id: str) -> str:
-    """The workspace owner's account email, or "" when it can't be resolved."""
+async def settings_for(site: _SiteDoc | None) -> SiteNotificationSettings:
+    """The site's settings row, or the unsaved default when it has none."""
+    if site is not None:
+        doc = await SiteNotificationSettings.find_one(_key(site))
+        if doc is not None:
+            return doc
+    return SiteNotificationSettings(
+        workspace=getattr(site, "workspace", "") or "", site_id=str(getattr(site, "id", ""))
+    )
+
+
+async def _ensure_row(site: _SiteDoc) -> None:
+    """Create the settings row with defaults if it doesn't exist (atomic upsert)."""
+    await _coll().update_one(
+        _key(site),
+        {
+            "$setOnInsert": {
+                "include_owner": True,
+                "emails": [],
+                "webhook_url": None,
+                "webhook_secret_enc": "",
+                "webhook_secret_prev_enc": "",
+                "webhook_secret_rotated_at": None,
+                "webhook_failure_count": 0,
+                "webhook_disabled_at": None,
+                "events": default_events(),
+            }
+        },
+        upsert=True,
+    )
+
+
+async def owner_identity(workspace_id: str) -> tuple[str, bool]:
+    """(the workspace owner's account email, whether that address is verified),
+    or ("", False) when it can't be resolved."""
     try:
         from pocketpaw_ee.cloud.models.user import User
         from pocketpaw_ee.cloud.models.workspace import Workspace
 
         ws = await Workspace.get(PydanticObjectId(workspace_id))
         if ws is None or not ws.owner:
-            return ""
+            return "", False
         user = await User.get(PydanticObjectId(ws.owner))
-        return str(getattr(user, "email", "") or "") if user is not None else ""
+        if user is None:
+            return "", False
+        return str(getattr(user, "email", "") or ""), bool(getattr(user, "is_verified", False))
     except Exception:  # noqa: BLE001 — "no owner email" is a normal answer here
         logger.debug("owner email lookup failed for %s", workspace_id, exc_info=True)
-        return ""
+        return "", False
 
 
-async def _write(site: _SiteDoc, settings: LeadNotificationSettings) -> None:
-    coll = _SiteDoc.get_pymongo_collection()
-    await coll.update_one(
-        {"_id": site.id, "workspace": site.workspace},
-        {"$set": {"lead_notifications": settings.model_dump(mode="python")}},
-    )
-    site.lead_notifications = settings
+async def owner_email(workspace_id: str) -> str:
+    """The owner's account email when it is verified, else ""."""
+    email, verified = await owner_identity(workspace_id)
+    return email if verified else ""
 
 
 def _normalize_email(value: str) -> str:
     from pocketpaw.sites_capture.contact_form import looks_like_email
 
-    email = (value or "").strip()
+    email = (value or "").strip().lower()
     if len(email) > 320 or not looks_like_email(email) or any(c in email for c in "\r\n<>,;"):
         raise ValidationError("lead_notifications.invalid_email", "That is not a valid email.")
     return email
@@ -137,20 +176,26 @@ def _recipient_state(r: LeadNotificationRecipient) -> str:
     return "confirmed" if r.confirmed_at is not None else "pending"
 
 
-def to_wire(
-    site: _SiteDoc,
-    settings: LeadNotificationSettings,
-    owner: str,
-    *,
-    webhook_secret: str | None = None,
-) -> dict[str, Any]:
+def _site_webhook_active(settings: SiteNotificationSettings) -> bool:
+    return bool(
+        settings.webhook_url
+        and settings.webhook_secret_enc
+        and settings.webhook_disabled_at is None
+    )
+
+
+async def _wire(site: _SiteDoc, *, webhook_secret: str | None = None) -> dict[str, Any]:
     from pocketpaw_ee.cloud.notifications import email as email_mod
 
+    settings = await settings_for(site)
+    owner, verified = await owner_identity(site.workspace)
     return {
         "site_id": str(site.id),
-        "configured": getattr(site, "lead_notifications", None) is not None,
+        "configured": settings.id is not None,
         "include_owner": settings.include_owner,
         "owner_email": owner or None,
+        # "unverified" owner addresses get no mail until the account is verified.
+        "owner_email_status": ("verified" if verified else "unverified") if owner else None,
         "emails": [
             {
                 "email": r.email,
@@ -176,8 +221,7 @@ def to_wire(
 
 
 async def get_settings(workspace_id: str, site_id: str) -> dict[str, Any]:
-    site = await _load(workspace_id, site_id)
-    return to_wire(site, effective(site), await owner_email(workspace_id))
+    return await _wire(await _load(workspace_id, site_id))
 
 
 def _clean_events(events: dict[str, list[str]]) -> dict[str, list[str]]:
@@ -201,36 +245,69 @@ async def update_settings(
     webhook_url: str | None = None,
     clear_webhook: bool = False,
 ) -> dict[str, Any]:
-    """Patch the settings. A new webhook URL is SSRF-checked (DNS included),
-    mints a signing secret returned in this response only, and re-arms a
-    webhook that was switched off. ``clear_webhook`` removes it."""
+    """Patch the settings. A webhook URL is SSRF-checked (DNS included); saving
+    one (new or the same) re-arms a webhook that was switched off, and a new URL
+    (or one without a secret) mints a signing secret returned in this response
+    only. ``clear_webhook`` removes it."""
     from pocketpaw_ee.cloud.audit.webhooks import mint_secret
     from pocketpaw_ee.cloud.auth.sso import crypto
     from pocketpaw_ee.cloud.notifications.delivery import validate_webhook_url
 
     site = await _load(workspace_id, site_id)
-    settings = effective(site).model_copy(deep=True)
+    update: dict[str, Any] = {}
     new_secret: str | None = None
     if include_owner is not None:
-        settings.include_owner = include_owner
+        update["include_owner"] = include_owner
     if events is not None:
-        settings.events = {**settings.events, **_clean_events(events)}
+        for event, sinks in _clean_events(events).items():
+            update[f"events.{event}"] = sinks
     if clear_webhook:
-        settings.webhook_url = None
-        settings.webhook_secret_enc = ""
-        settings.webhook_failure_count = 0
-        settings.webhook_disabled_at = None
+        update.update(
+            webhook_url=None,
+            webhook_secret_enc="",
+            webhook_secret_prev_enc="",
+            webhook_failure_count=0,
+            webhook_disabled_at=None,
+        )
     elif webhook_url is not None and webhook_url.strip():
         url = webhook_url.strip()
         await validate_webhook_url(url)
-        if url != settings.webhook_url or not settings.webhook_secret_enc:
+        current = await settings_for(site)
+        if url != current.webhook_url or not current.webhook_secret_enc:
             new_secret = mint_secret()
-            settings.webhook_secret_enc = crypto.encrypt(new_secret)
-            settings.webhook_failure_count = 0
-            settings.webhook_disabled_at = None
-        settings.webhook_url = url
-    await _write(site, settings)
-    return to_wire(site, settings, await owner_email(workspace_id), webhook_secret=new_secret)
+            update["webhook_secret_enc"] = crypto.encrypt(new_secret)
+            update["webhook_secret_prev_enc"] = ""
+        update.update(webhook_url=url, webhook_failure_count=0, webhook_disabled_at=None)
+    await _ensure_row(site)
+    if update:
+        await _coll().update_one(_key(site), {"$set": update})
+    return await _wire(site, webhook_secret=new_secret)
+
+
+async def rotate_webhook_secret(workspace_id: str, site_id: str) -> dict[str, Any]:
+    """Mint a new signing secret for the site webhook (returned once) and re-arm
+    it. The replaced secret keeps co-signing for the grace window."""
+    from pocketpaw_ee.cloud.audit.webhooks import mint_secret
+    from pocketpaw_ee.cloud.auth.sso import crypto
+
+    site = await _load(workspace_id, site_id)
+    current = await settings_for(site)
+    if not current.webhook_url:
+        raise NotFound("lead_notification_webhook", site_id)
+    secret = mint_secret()
+    await _coll().update_one(
+        _key(site),
+        {
+            "$set": {
+                "webhook_secret_prev_enc": current.webhook_secret_enc,
+                "webhook_secret_enc": crypto.encrypt(secret),
+                "webhook_secret_rotated_at": _now(),
+                "webhook_failure_count": 0,
+                "webhook_disabled_at": None,
+            }
+        },
+    )
+    return await _wire(site, webhook_secret=secret)
 
 
 def _confirm_token(site: _SiteDoc, email: str, nonce: str) -> str:
@@ -246,43 +323,103 @@ def confirm_url(token: str) -> str:
     return f"{email_mod.api_base_url()}/api/v1/lead-notifications/confirm/{token}"
 
 
+def _require_public_base_url() -> None:
+    """In production a confirm link must point at a real public origin, not the
+    localhost default."""
+    env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+    if (
+        env in ("production", "prod")
+        and not os.environ.get("POCKETPAW_PUBLIC_BASE_URL", "").strip()
+    ):
+        raise ValidationError(
+            "lead_notifications.public_url_unset",
+            "POCKETPAW_PUBLIC_BASE_URL is not set, so a confirm link can't be built.",
+        )
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
 async def add_recipient(
     workspace_id: str, site_id: str, email: str, *, added_by: str = ""
 ) -> dict[str, Any]:
     """Add an unconfirmed address and queue its confirm email. Re-adding an
-    address that is pending or bounced re-sends a fresh link; a confirmed one
-    is left as is."""
+    address that is pending or bounced re-sends a fresh link (at most once per
+    30 minutes); a confirmed one is left as is."""
     from pocketpaw_ee.cloud.notifications import email as email_mod
     from pocketpaw_ee.cloud.notifications import outbox
 
     address = _normalize_email(email)
     site = await _load(workspace_id, site_id)
-    settings = effective(site).model_copy(deep=True)
-    existing = next((r for r in settings.emails if r.email.lower() == address.lower()), None)
-    owner = await owner_email(workspace_id)
-    if existing is not None and existing.confirmed_at is not None and existing.bounced_at is None:
-        return to_wire(site, settings, owner)
-    if existing is None and len(settings.emails) >= MAX_EXTRA_RECIPIENTS:
-        raise ValidationError(
-            "lead_notifications.too_many_recipients",
-            f"A site can notify at most {MAX_EXTRA_RECIPIENTS} extra addresses.",
-        )
     if not email_mod.is_configured():
         raise ValidationError(
             "lead_notifications.email_disabled",
             "Email is not set up on this server, so the address can't be confirmed.",
         )
+    _require_public_base_url()
+    current = await settings_for(site)
+    existing = next((r for r in current.emails if r.email == address), None)
+    if existing is not None and existing.confirmed_at is not None and existing.bounced_at is None:
+        return await _wire(site)
+    now = _now()
+    last = _aware(existing.confirm_sent_at) if existing is not None else None
+    if last is not None and now - last < CONFIRM_RESEND_INTERVAL:
+        raise RateLimited(
+            "lead_notifications.confirm_rate_limited",
+            "A confirm email was sent to this address recently. Try again in 30 minutes.",
+        )
+    sent_today = await outbox.count_recent(
+        workspace=workspace_id, kind=CONFIRM_KIND, since=now - timedelta(days=1)
+    )
+    if sent_today >= CONFIRM_DAILY_CAP:
+        raise RateLimited(
+            "lead_notifications.confirm_daily_cap",
+            f"This workspace sent {CONFIRM_DAILY_CAP} confirm emails today. Try again tomorrow.",
+        )
+
     nonce = secrets.token_urlsafe(12)
-    if existing is None:
-        existing = LeadNotificationRecipient(email=address, added_at=_now(), added_by=added_by)
-        settings.emails.append(existing)
-    existing.confirm_nonce = nonce
-    existing.confirmed_at = None
-    existing.bounced_at = None
-    await _write(site, settings)
+    await _ensure_row(site)
+    if existing is not None:
+        result = await _coll().update_one(
+            {**_key(site), "emails.email": address},
+            {
+                "$set": {
+                    "emails.$.confirm_nonce": nonce,
+                    "emails.$.confirm_sent_at": now,
+                    "emails.$.confirmed_at": None,
+                    "emails.$.bounced_at": None,
+                }
+            },
+        )
+    else:
+        recipient = LeadNotificationRecipient(
+            email=address,
+            added_at=now,
+            added_by=added_by,
+            confirm_nonce=nonce,
+            confirm_sent_at=now,
+        )
+        # The filter IS the cap and the dedupe, so two concurrent adds can't
+        # overshoot 5 or insert the same address twice.
+        result = await _coll().update_one(
+            {
+                **_key(site),
+                "emails.email": {"$ne": address},
+                f"emails.{MAX_EXTRA_RECIPIENTS - 1}": {"$exists": False},
+            },
+            {"$push": {"emails": recipient.model_dump(mode="python")}},
+        )
+    if getattr(result, "modified_count", 0) == 0:
+        raise ValidationError(
+            "lead_notifications.too_many_recipients",
+            f"A site can notify at most {MAX_EXTRA_RECIPIENTS} extra addresses.",
+        )
     await outbox.enqueue(
         workspace=workspace_id,
-        kind="lead_notifications_confirm",
+        kind=CONFIRM_KIND,
         sink="email",
         target=address,
         payload={
@@ -293,43 +430,64 @@ async def add_recipient(
             "footer_url": email_mod.site_settings_url(str(site.id)),
         },
     )
-    return to_wire(site, settings, owner)
+    return await _wire(site)
 
 
 async def remove_recipient(workspace_id: str, site_id: str, email: str) -> dict[str, Any]:
     site = await _load(workspace_id, site_id)
-    settings = effective(site).model_copy(deep=True)
-    before = len(settings.emails)
-    settings.emails = [r for r in settings.emails if r.email.lower() != email.strip().lower()]
-    if len(settings.emails) == before:
+    address = email.strip().lower()
+    result = await _coll().update_one(_key(site), {"$pull": {"emails": {"email": address}}})
+    if getattr(result, "modified_count", 0) == 0:
         raise NotFound("lead_notification_recipient", email)
-    await _write(site, settings)
-    return to_wire(site, settings, await owner_email(workspace_id))
+    return await _wire(site)
 
 
-async def confirm(token: str) -> tuple[str, str]:
-    """Confirm an address from its emailed token. Returns ``(state, site_name)``
-    with state ``confirmed`` (also on a repeat click) or ``invalid`` (bad,
-    expired, superseded, or the address/site is gone)."""
+async def _token_target(token: str) -> tuple[_SiteDoc, str, str] | None:
+    """(site, email, nonce) named by a live confirm token, or None."""
     from cryptography.fernet import InvalidToken
 
     from pocketpaw_ee.cloud.auth.sso import crypto
 
     try:
         claims = json.loads(crypto.decrypt_with_ttl(token, CONFIRM_TTL_SECONDS))
-        site_id, workspace_id, address, nonce = claims["s"], claims["w"], claims["e"], claims["n"]
+        site_id, workspace_id = str(claims["s"]), str(claims["w"])
+        address, nonce = str(claims["e"]).lower(), str(claims["n"])
     except (InvalidToken, ValueError, KeyError, TypeError):
-        return "invalid", ""
-    site = await find_site(str(workspace_id), str(site_id))
+        return None
+    site = await find_site(workspace_id, site_id)
     if site is None:
+        return None
+    settings = await settings_for(site)
+    match = next((r for r in settings.emails if r.email == address), None)
+    if match is None or not secrets.compare_digest(match.confirm_nonce, nonce):
+        return None
+    return site, address, nonce
+
+
+async def check_token(token: str) -> tuple[str, str]:
+    """No side effects: ``("valid", site_name)`` or ``("invalid", "")``. Backs
+    the GET confirm page, which only renders a button."""
+    target = await _token_target(token)
+    return ("valid", target[0].name or "") if target is not None else ("invalid", "")
+
+
+async def confirm(token: str) -> tuple[str, str]:
+    """Confirm an address from its emailed token. Returns ``(state, site_name)``
+    with state ``confirmed`` (also on a repeat) or ``invalid`` (bad, expired,
+    superseded, or the address/site is gone)."""
+    target = await _token_target(token)
+    if target is None:
         return "invalid", ""
-    settings = effective(site).model_copy(deep=True)
-    match = next((r for r in settings.emails if r.email.lower() == str(address).lower()), None)
-    if match is None or not secrets.compare_digest(match.confirm_nonce, str(nonce)):
-        return "invalid", ""
-    if match.confirmed_at is None:
-        match.confirmed_at = _now()
-        await _write(site, settings)
+    site, address, nonce = target
+    await _coll().update_one(
+        {
+            **_key(site),
+            "emails": {
+                "$elemMatch": {"email": address, "confirm_nonce": nonce, "confirmed_at": None}
+            },
+        },
+        {"$set": {"emails.$.confirmed_at": _now()}},
+    )
     return "confirmed", site.name or ""
 
 
@@ -341,7 +499,7 @@ async def send_test(workspace_id: str, site_id: str) -> dict[str, Any]:
     from pocketpaw_ee.cloud.notifications.delivery import new_event_envelope
 
     site = await _load(workspace_id, site_id)
-    settings = effective(site)
+    settings = await settings_for(site)
     rows: list[dict[str, Any]] = []
     emails: list[str] = []
     if email_mod.is_configured():
@@ -384,18 +542,10 @@ async def send_test(workspace_id: str, site_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _site_webhook_active(settings: LeadNotificationSettings) -> bool:
-    return bool(
-        settings.webhook_url
-        and settings.webhook_secret_enc
-        and settings.webhook_disabled_at is None
-    )
-
-
 async def allowed_recipients(workspace_id: str, site: _SiteDoc) -> list[str]:
-    """Addresses that may get this site's mail now: the owner's (when included)
-    plus confirmed, unbounced extras. Deduped, case-insensitively."""
-    settings = effective(site)
+    """Addresses that may get this site's mail now: the owner's (when included
+    AND verified) plus confirmed, unbounced extras. Deduped, case-insensitively."""
+    settings = await settings_for(site)
     out: list[str] = []
     if settings.include_owner:
         owner = await owner_email(workspace_id)
@@ -414,48 +564,54 @@ async def recipient_allowed(workspace_id: str, site_id: str, email: str) -> bool
 
 
 async def record_bounce(workspace_id: str, site_id: str, email: str) -> None:
+    result = await _coll().update_one(
+        {
+            "workspace": workspace_id,
+            "site_id": site_id,
+            "emails": {"$elemMatch": {"email": email.lower(), "bounced_at": None}},
+        },
+        {"$set": {"emails.$.bounced_at": _now()}},
+    )
+    if getattr(result, "modified_count", 0) == 0:
+        logger.info("permanent bounce for a non-listed address on site %s", site_id)
+
+
+async def webhook_target(workspace_id: str, site_id: str) -> tuple[str, list[str]] | None:
+    """(url, signing secrets) of the site webhook while it is active, else None.
+    Site webhooks are always signed."""
+    from pocketpaw_ee.cloud.notifications.service import signing_secrets
+
     site = await find_site(workspace_id, site_id)
-    if site is None or site.lead_notifications is None:
-        return
-    settings = site.lead_notifications.model_copy(deep=True)
-    hit = False
-    for r in settings.emails:
-        if r.email.lower() == email.lower() and r.bounced_at is None:
-            r.bounced_at = _now()
-            hit = True
-    if hit:
-        await _write(site, settings)
-    else:
-        logger.info("permanent bounce for a non-listed address on site %s", site.id)
-
-
-async def webhook_target(workspace_id: str, site_id: str) -> tuple[str, str] | None:
-    from pocketpaw_ee.cloud.auth.sso import crypto
-
-    site = await find_site(workspace_id, site_id)
-    settings = effective(site)
-    if site is None or not _site_webhook_active(settings):
+    if site is None:
         return None
-    return str(settings.webhook_url), crypto.decrypt(settings.webhook_secret_enc)
+    settings = await settings_for(site)
+    if not _site_webhook_active(settings):
+        return None
+    return str(settings.webhook_url), signing_secrets(
+        settings.webhook_secret_enc,
+        settings.webhook_secret_prev_enc,
+        settings.webhook_secret_rotated_at,
+    )
 
 
 async def record_webhook_result(workspace_id: str, site_id: str, *, ok: bool) -> None:
-    site = await find_site(workspace_id, site_id)
-    if site is None or site.lead_notifications is None:
-        return
-    settings = site.lead_notifications.model_copy(deep=True)
+    """Atomic: reset on success; on a dead delivery ``$inc`` the counter and,
+    in a separate conditional ``$set``, switch the webhook off at the threshold."""
+    key = {"workspace": workspace_id, "site_id": site_id}
     if ok:
-        if settings.webhook_failure_count == 0:
-            return
-        settings.webhook_failure_count = 0
-    else:
-        settings.webhook_failure_count += 1
-        if (
-            settings.webhook_failure_count >= WEBHOOK_DISABLE_THRESHOLD
-            and settings.webhook_disabled_at is None
-        ):
-            settings.webhook_disabled_at = _now()
-    await _write(site, settings)
+        await _coll().update_one(
+            {**key, "webhook_failure_count": {"$gt": 0}}, {"$set": {"webhook_failure_count": 0}}
+        )
+        return
+    await _coll().update_one(key, {"$inc": {"webhook_failure_count": 1}})
+    await _coll().update_one(
+        {
+            **key,
+            "webhook_failure_count": {"$gte": WEBHOOK_DISABLE_THRESHOLD},
+            "webhook_disabled_at": None,
+        },
+        {"$set": {"webhook_disabled_at": _now()}},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -480,22 +636,25 @@ async def dispatch_site_event(
     """Route one site event to its sinks; see the module header. ``lead_id``
     makes the email the full lead email and the webhook data the lead (both
     loaded at send time); otherwise ``event_data`` is the webhook data and the
-    email is a short notification. Never raises; returns per-sink counts."""
+    email is a short notification. Never raises; returns per-sink counts. A
+    failed site or settings lookup degrades to the defaults: the bell still rings."""
     from pocketpaw_ee.cloud.notifications import delivery, outbox
     from pocketpaw_ee.cloud.notifications import email as email_mod
     from pocketpaw_ee.cloud.notifications import service as notifications_service
 
     counts = {"push": 0, "email": 0, "webhook": 0}
+    site: _SiteDoc | None = None
+    settings = SiteNotificationSettings(workspace=workspace_id, site_id="")
     try:
         site = await find_site(workspace_id, site_ref)
-        settings = effective(site)
-        sinks = set(settings.events.get(event, DEFAULT_EVENT_SINKS))
-        envelope_fields: dict[str, Any] = (
-            {"lead_id": lead_id} if lead_id else {"data": dict(event_data or {})}
-        )
-        envelope = delivery.new_event_envelope(EVENT_TYPES.get(event, event), **envelope_fields)
+        settings = await settings_for(site)
+    except Exception:
+        logger.warning("site lookup failed for %s; using default routing", site_ref, exc_info=True)
+        site = None
+    sinks = set(settings.events.get(event, DEFAULT_EVENT_SINKS))
 
-        if "push" in sinks and push_recipients:
+    if "push" in sinks and push_recipients:
+        try:
             created = await notifications_service.create_many(
                 workspace_id=workspace_id,
                 recipients=push_recipients,
@@ -506,7 +665,14 @@ async def dispatch_site_event(
                 deliver_external=False,
             )
             counts["push"] = len(created)
+        except Exception:
+            logger.warning("bell/push for %s failed", kind, exc_info=True)
 
+    try:
+        fields: dict[str, Any] = (
+            {"lead_id": lead_id} if lead_id else {"data": dict(event_data or {})}
+        )
+        envelope = delivery.new_event_envelope(EVENT_TYPES.get(event, event), **fields)
         rows: list[dict[str, Any]] = []
         if site is not None and "email" in sinks and email_mod.is_configured():
             site_id = str(site.id)
@@ -550,12 +716,24 @@ async def dispatch_site_event(
         counts["webhook"] = sum(1 for r in rows if r["sink"] == "webhook")
 
         # Workspace fallback: its Slack always, its webhook only when the site
-        # has none of its own.
+        # has none of its own. That webhook predates the envelope and its
+        # consumers filter on the flat ``kind``, so those fields ride along.
+        workspace_event = {
+            **envelope,
+            "legacy": {
+                "workspace_id": workspace_id,
+                "recipient_id": None,
+                "actor_id": None,
+                "kind": kind,
+                "title": title,
+                "body": body,
+            },
+        }
         await delivery.enqueue_workspace_event(
             workspace_id=workspace_id,
             kind=kind,
             slack_text=f"{title}\n{body}" if body else title,
-            webhook_event=envelope,
+            webhook_event=workspace_event,
             include_webhook=not site_webhook,
         )
     except Exception:
@@ -568,18 +746,21 @@ __all__ = [
     "EVENT_TYPES",
     "add_recipient",
     "allowed_recipients",
+    "check_token",
     "confirm",
     "confirm_url",
     "dispatch_site_event",
-    "effective",
     "find_site",
     "get_settings",
     "owner_email",
+    "owner_identity",
     "record_bounce",
     "record_webhook_result",
     "recipient_allowed",
     "remove_recipient",
+    "rotate_webhook_secret",
     "send_test",
+    "settings_for",
     "update_settings",
     "webhook_target",
 ]
