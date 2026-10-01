@@ -1,5 +1,7 @@
 # ee/cloud/external_actions/propose.py — propose a gated external-action call.
 # Created: 2026-06-11 (feat/external-action-proposal).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 #
 # What this module does (the propose half of the external-action gate): an
 # agent (or any caller) proposes a call to an external system through a bound
@@ -56,6 +58,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator for an external-action proposal. The
@@ -92,122 +96,6 @@ def compute_params_hash(action: str, params: dict[str, Any]) -> str:
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    connector_name: str,
-    connector_action: str,
-    workspace_id: str,
-    user_id: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for an external action.
-
-    Mirrors belt.py's ``_emit_agent_proposed``: the proposing caller is the
-    actor (``kind="agent"`` with the requesting user on its id, the workspace on
-    its scope_context). An external action isn't bound to a pocket — its tenancy
-    is the workspace — so ``pocket_id`` on the chain carries the workspace id
-    (matching how the Action's ``pocket_id`` field carries the workspace).
-
-    Returns the emitted event id so the caller can persist it on the blob's
-    ``proposed_event_id`` field for the ``human.corrected`` causation chain, or
-    ``None`` when the emit raised — best-effort per RFC 09; the Slice 4
-    reconciler picks up any orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    intent = f"external action '{connector_action}' on connector '{connector_name}'"
-    payload: dict[str, Any] = {
-        # Fields the projection's ``_fold_proposed`` consumes.
-        "intent": intent,
-        "action": "external_action",
-        "pocket_id": workspace_id,
-        "inputs": [],
-        # Richer fields for the explain narrator.
-        "proposal_kind": "external_action",
-        "proposal": {
-            "connector": connector_name,
-            "connector_action": connector_action,
-        },
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "external_action agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — Slice 4 reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._external_action`` blob after ``agent.proposed`` fired.
-
-    The blob is built with ``correlation_id`` already set (minted before build);
-    ``proposed_event_id`` is the field this back-write fills in. Direct SQL
-    update — the same pattern belt.py's ``_persist_chain_ids`` and the
-    pocket-write bridge's ``_persist_parked_policy_event_id`` use. Best-effort:
-    a write failure leaves ``proposed_event_id`` None and the eventual
-    ``human.corrected`` emits without a causation_id (the chain still folds;
-    causation_id is optional on EventEntry).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(EXTERNAL_ACTION_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[EXTERNAL_ACTION_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "external_action: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 async def propose_external_action(
@@ -350,18 +238,20 @@ async def propose_external_action(
     # proposed`` is the chain origin; its event id is back-written onto the blob
     # so the router's ``human.corrected`` can cite it as causation. Best-effort:
     # a Decision-Graph wiring failure must NOT fail the propose response.
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
-        connector_name=connector_name,
-        connector_action=action,
+        kind="external_action",
+        intent=f"external action '{action}' on connector '{connector_name}'",
+        proposal={"connector": connector_name, "connector_action": action},
         workspace_id=workspace_id,
         user_id=requested_by,
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=EXTERNAL_ACTION_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
         )

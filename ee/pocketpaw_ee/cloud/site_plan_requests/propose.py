@@ -2,6 +2,8 @@
 # site on a paid plan.
 #
 # Created: 2026-09-01 (feat/sites-plan-purchase-request).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 #
 # The propose half of the site-plan request gate. A member publishes and asks for
 # a paid tier; ``sites.buy_plan`` (ADMIN) refuses them; instead of ending there,
@@ -56,6 +58,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator. The blob also carries this as ``kind``
@@ -95,109 +99,6 @@ def compute_request_hash(workspace_id: str, pocket_id: str, site_plan_key: str) 
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    workspace_id: str,
-    pocket_id: str,
-    site_plan_key: str,
-    user_id: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a plan request.
-
-    Mirrors ``admin_proposals.propose._emit_agent_proposed``: the requesting
-    member is the actor. Unlike an admin action, this proposal IS bound to a
-    pocket, so the chain's ``pocket_id`` carries the real pocket rather than
-    standing in with the workspace.
-
-    Returns the emitted event id for the blob's ``proposed_event_id`` (the
-    ``human.corrected`` causation handle), or ``None`` when the emit raised —
-    best-effort; the reconciler picks up orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    payload: dict[str, Any] = {
-        "intent": f"put this site on the '{site_plan_key}' plan",
-        "action": "site_plan_request",
-        "pocket_id": pocket_id,
-        "inputs": [],
-        "proposal_kind": "site_plan_request",
-        "proposal": {"site_plan_key": site_plan_key, "pocket_id": pocket_id},
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "site_plan_request agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write the chain ids onto the persisted blob after ``agent.proposed`` fired.
-
-    Direct SQL update, the same pattern ``admin_proposals.propose`` uses.
-    Best-effort: a failure leaves ``proposed_event_id`` None and the eventual
-    ``human.corrected`` emits without a causation_id (the chain still folds).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(SITE_PLAN_REQUEST_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[SITE_PLAN_REQUEST_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "site_plan_request: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 async def propose_site_plan_request(
@@ -363,18 +264,21 @@ async def propose_site_plan_request(
         corr,
     )
 
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
+        kind="site_plan_request",
+        intent=f"put this site on the '{canonical_key}' plan",
+        proposal={"site_plan_key": canonical_key, "pocket_id": pocket_id},
         workspace_id=workspace_id,
         pocket_id=pocket_id,
-        site_plan_key=canonical_key,
         user_id=requested_by,
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=SITE_PLAN_REQUEST_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
         )

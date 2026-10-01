@@ -20,12 +20,16 @@
 # Tray card is reviewable without a lookup. No credential ever rides the blob.
 #
 # Created 2026-07-27 (feat/growth-g4): new module.
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 from uuid import UUID, uuid4
+
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
 
 logger = logging.getLogger(__name__)
 
@@ -36,60 +40,6 @@ GROWTH_SEND_PARAM_KEY = "_growth_send"
 # dispatching a misinterpreted send.
 GROWTH_SEND_KIND = "growth_send"
 GROWTH_SEND_SCHEMA = 1
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    channel: str,
-    target_label: str,
-    workspace_id: str,
-    user_id: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a growth send.
-
-    Mirrors ``ship.propose._emit_agent_proposed``: the proposing caller is the
-    actor, and a growth send is workspace-scoped rather than pocket-bound, so
-    the chain's ``pocket_id`` carries the workspace id (matching how the
-    Action's ``pocket_id`` field does). Returns the emitted ``EventEntry.id``
-    for the blob's ``proposed_event_id`` (the ``human.corrected`` causation
-    link), or ``None`` when the emit raised — best-effort per RFC 09.
-    """
-    try:
-        from soul_protocol.spec.journal import Actor
-
-        from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-        actor = Actor(
-            kind="agent",
-            id=f"user:{user_id or 'unknown'}",
-            scope_context=[f"workspace:{workspace_id}"],
-        )
-        payload: dict[str, Any] = {
-            "intent": f"send {channel} outreach to {target_label}",
-            "action": "growth_send",
-            "pocket_id": workspace_id,
-            "inputs": [],
-            "proposal_kind": "growth_send",
-            "proposal": {"channel": channel, "target": target_label},
-            "action_id": action_id,
-        }
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emission is best-effort (RFC 09)
-        logger.warning(
-            "growth: agent.proposed emit failed for action %s — the chain opens "
-            "without causation; the reconciler catches orphans",
-            action_id,
-            exc_info=True,
-        )
-        return None
 
 
 async def propose_growth_send(
@@ -192,17 +142,22 @@ async def propose_growth_send(
     )
 
     action_id = str(getattr(action_obj, "id", "") or "")
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_id,
-        channel=channel,
-        target_label=target_label,
+        kind="growth_send",
+        intent=f"send {channel} outreach to {target_label}",
+        proposal={"channel": channel, "target": target_label},
         workspace_id=workspace_id,
         user_id=requested_by,
     )
     if proposed_event_id is not None:
-        await _persist_proposed_event_id(
-            store=store, action_id=action_id, blob=blob, event_id=str(proposed_event_id)
+        await persist_chain_ids(
+            store=store,
+            action_id=action_id,
+            param_key=GROWTH_SEND_PARAM_KEY,
+            correlation_id=corr,
+            proposed_event_id=str(proposed_event_id),
         )
 
     logger.info(
@@ -213,35 +168,3 @@ async def propose_growth_send(
         workspace_id,
     )
     return action_id
-
-
-async def _persist_proposed_event_id(
-    *, store: Any, action_id: str, blob: dict[str, Any], event_id: str
-) -> None:
-    """Write the ``agent.proposed`` event id back onto the stored blob.
-
-    Best-effort, mirroring ``ship.propose``: without it the eventual
-    ``human.corrected`` emits with no causation id, which the Decision-Graph
-    reconciler repairs. A failure here must never fail the propose.
-    """
-    try:
-        import json as _json
-
-        import aiosqlite
-
-        blob["proposed_event_id"] = event_id
-        params = {GROWTH_SEND_PARAM_KEY: blob}
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "growth: failed to persist chain ids onto action %s — the chain's "
-            "human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )

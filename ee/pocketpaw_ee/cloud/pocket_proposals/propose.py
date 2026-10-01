@@ -1,5 +1,7 @@
 # ee/cloud/pocket_proposals/propose.py — propose a gated starter-Pocket create.
 # Created: 2026-06-19 (SZD-5b — _pocket_create Instinct proposal type).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 #
 # What this module does (the propose half of the Pocket-create gate): "sovereign
 # zero-setup discovery" stages a PROPOSED starter Pocket — a rippleSpec + name (an
@@ -62,6 +64,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator for a Pocket-create proposal. The router
@@ -80,118 +84,6 @@ POCKET_CREATE_PARAM_KEY = "_pocket_create"
 # creating a misinterpreted Pocket (same discipline as the Fabric-objects gate's
 # ``FABRIC_OBJECTS_SCHEMA``). Starts at 1 — first version.
 POCKET_CREATE_SCHEMA = 1
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    workspace_id: str,
-    user_id: str,
-    name: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a Pocket create.
-
-    Mirrors ``fabric_proposals.propose._emit_agent_proposed``: the proposing
-    caller is the actor (``kind="agent"`` with the requesting user on its id, the
-    workspace on its scope_context). A proposed Pocket isn't bound to an EXISTING
-    pocket — its tenancy is the workspace — so ``pocket_id`` on the chain carries
-    the workspace id (matching how the Action's ``pocket_id`` field carries the
-    workspace).
-
-    Returns the emitted event id so the caller can persist it on the blob's
-    ``proposed_event_id`` field for the ``human.corrected`` causation chain, or
-    ``None`` when the emit raised — best-effort per RFC 09; the Slice 4 reconciler
-    picks up any orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    intent = f"create the starter Pocket {name!r}"
-    payload: dict[str, Any] = {
-        # Fields the projection's ``_fold_proposed`` consumes.
-        "intent": intent,
-        "action": "pocket_create",
-        "pocket_id": workspace_id,
-        "inputs": [],
-        # Richer fields for the explain narrator.
-        "proposal_kind": "pocket_create",
-        "proposal": {"name": name},
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "pocket_create agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — Slice 4 reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._pocket_create`` blob after ``agent.proposed`` fired.
-
-    The blob is built with ``correlation_id`` already set (minted before build);
-    ``proposed_event_id`` is the field this back-write fills in. Direct SQL update
-    — the same pattern the Fabric-objects gate's ``_persist_chain_ids`` uses.
-    Best-effort: a write failure leaves ``proposed_event_id`` None and the eventual
-    ``human.corrected`` emits without a causation_id (the chain still folds;
-    causation_id is optional on EventEntry).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(POCKET_CREATE_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[POCKET_CREATE_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "pocket_create: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 def _normalize_pocket_spec(
@@ -362,17 +254,20 @@ async def propose_pocket(
     # proposed`` is the chain origin; its event id is back-written onto the blob so
     # the router's ``human.corrected`` can cite it as causation. Best-effort: a
     # Decision-Graph wiring failure must NOT fail the propose response.
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
+        kind="pocket_create",
+        intent=f"create the starter Pocket {name!r}",
+        proposal={"name": name},
         workspace_id=workspace_id,
         user_id=user_id,
-        name=name,
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=POCKET_CREATE_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
         )
