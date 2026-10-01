@@ -447,6 +447,27 @@ class AgentScopeUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "agent.scope_updated"
 
 
+# Paw Partners (PH-1)
+@dataclass
+class PartnerProfileSet(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.profile_set"
+
+
+@dataclass
+class PartnerClientCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.client_created"
+
+
+@dataclass
+class PartnerClientUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.client_updated"
+
+
+@dataclass
+class PartnerClientDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.client_deleted"
+
+
 # Pockets
 @dataclass
 class PocketCreated(Event):

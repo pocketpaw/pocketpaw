@@ -1,5 +1,10 @@
 """Workspace document — one per deployment/org, and the sub-models embedded in it.
 
+Updated 2026-10-01 (feat/partners-foundation, PH-1): added ``PartnerProfile`` and
+``Workspace.partner``. Set only by the platform admin route in
+``cloud/partners/service_admin.py``; an ``active`` profile turns the per-site
+billing seams on for THIS workspace (``billing.enforcement.sites_enforced``).
+
 ``Workspace`` carries the tenant's plan, its members' roles, and the embedded
 config below. The sub-models are separated by WHAT THEY ARE, not by who edits
 them, and the split is load-bearing:
@@ -188,6 +193,29 @@ class VerifiedDomain(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class PartnerProfile(BaseModel):
+    """Paw Partners (PH-1): this workspace resells sites to its own clients.
+
+    ``None`` on the workspace = not a partner. Only ``status == "active"`` turns
+    on site billing for the workspace; ``applied`` and ``suspended`` do not.
+    """
+
+    status: Literal["applied", "active", "suspended"]
+    tier: str = "bronze"
+    footer_name: str
+    billing_country: str = "IN"  # ISO-2, upper-case
+    founding: bool = False
+    joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_validator("billing_country")
+    @classmethod
+    def _iso2(cls, v: str) -> str:
+        v = v.strip().upper()
+        if len(v) != 2 or not v.isalpha():
+            raise ValueError("billing_country must be an ISO-3166 alpha-2 code")
+        return v
+
+
 class Workspace(TimestampedDocument):
     """Organization workspace — one per enterprise deployment."""
 
@@ -208,6 +236,8 @@ class Workspace(TimestampedDocument):
     # ``WorkspaceOverrides`` for the field list and why two ``Entitlements``
     # fields are deliberately absent from it.
     overrides: WorkspaceOverrides | None = None
+    # Paw Partners (PH-1). Platform-admin set only; see ``PartnerProfile``.
+    partner: PartnerProfile | None = None
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None

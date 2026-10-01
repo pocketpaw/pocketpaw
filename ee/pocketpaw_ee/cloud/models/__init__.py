@@ -262,6 +262,7 @@ from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.partner_client import PartnerClient
 from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
@@ -633,6 +634,8 @@ def get_all_documents():
         ForesightWorkspaceScenario,
         ChatRunDoc,
         Lead,
+        # Paw Partners (PH-1): a partner's shop-owner client record.
+        PartnerClient,
         Site,
         # User-saved site templates. Only ``ee.cloud.site_templates.service``
         # writes it.
