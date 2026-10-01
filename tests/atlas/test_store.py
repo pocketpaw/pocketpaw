@@ -32,6 +32,12 @@
 # Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — two authored
 # primitives joined the seed (primitive:source-truth, primitive:verify-loop);
 # EXPECTED_PRIMITIVE_IDS pins the twelve.
+# Updated: 2026-10-01 (feat/atlas-canonical) — COMPILED_KINDS gains "verb"; the
+# two hand-built surface fixtures carry the now-required presentation /
+# agent_openable fields. Live tie fix: TestVerbRankingSafety pins the verb
+# object-noun damper and the deterministic tie order (surface before verb, then
+# name hits, then id). Review pass: five surfaces the composer's slash menu
+# offers (/agents/activity, /fabric, /ship, /growth, /browser) join the set.
 
 import json
 
@@ -46,6 +52,7 @@ COMPILED_KINDS = (
     "widget",
     "skill",
     "capability",
+    "verb",
 )
 
 EXPECTED_PRIMITIVE_IDS = {
@@ -90,6 +97,11 @@ EXPECTED_SURFACE_IDS = {
     "surface:activity",
     "surface:audit",
     "surface:security",
+    "surface:agents-activity",
+    "surface:fabric",
+    "surface:ship",
+    "surface:growth",
+    "surface:browser",
 }
 
 # primitive id → the home route its ``surface`` field must carry (AT-3
@@ -222,6 +234,8 @@ class TestKindPriorityBias:
                     summary="s",
                     narrative="n",
                     keywords=["widget"],
+                    presentation="window",
+                    agent_openable=False,
                 ),
             ]
         )
@@ -249,6 +263,8 @@ class TestKindPriorityBias:
                     summary="s",
                     narrative="n",
                     keywords=[],
+                    presentation="window",
+                    agent_openable=False,
                 ),
             ]
         )
@@ -276,3 +292,68 @@ class TestDescribe:
         assert entry is not None
         assert entry.kind == "surface"
         assert entry.surface == "/sites"
+
+
+class TestVerbRankingSafety:
+    """Live bug (2026-10-01): "show me my files" tied surface:files with
+    verb:file-delete and verb:file-download, and seed order picked the winner."""
+
+    @staticmethod
+    def _store(entries):
+        return AtlasStore(AtlasModel(entries=entries))
+
+    @staticmethod
+    def _surface(eid, name, keywords=()):
+        return AtlasEntry(
+            id=eid,
+            kind="surface",
+            name=name,
+            summary="s",
+            narrative="n",
+            keywords=list(keywords),
+            presentation="window",
+            agent_openable=False,
+        )
+
+    @staticmethod
+    def _verb(eid, name, keywords=(), applies_to=("file",)):
+        return AtlasEntry(
+            id=eid,
+            kind="verb",
+            name=name,
+            summary="s",
+            narrative="n",
+            keywords=list(keywords),
+            applies_to=list(applies_to),
+            triggers=["verb"],
+            risk="risky",
+            undo=False,
+        )
+
+    def test_object_noun_alone_does_not_tie_a_verb_with_the_surface(self):
+        store = self._store(
+            [self._verb("verb:file-delete", "Delete file"), self._surface("surface:files", "Files")]
+        )
+        (top_score, top), (verb_score, verb) = store.search_scored("show me my files")
+        assert top.id == "surface:files" and verb.id == "verb:file-delete"
+        assert verb_score <= 0.5 * top_score
+
+    def test_action_word_lifts_the_damping(self):
+        store = self._store(
+            [self._verb("verb:file-delete", "Delete file"), self._surface("surface:files", "Files")]
+        )
+        assert store.search("delete this file", limit=1)[0].id == "verb:file-delete"
+
+    def test_exact_tie_puts_surface_before_verb_then_name_hits_then_id_order(self):
+        # Same keyword-only overlap, no damping (the token is not an object
+        # noun). The verb comes FIRST in seed order and still ranks last.
+        store = self._store(
+            [
+                self._verb("verb:a", "A", keywords=["zap"], applies_to=["task"]),
+                self._surface("surface:b", "B", keywords=["zap"]),
+                self._surface("surface:z", "Z", keywords=["zap"]),
+            ]
+        )
+        ranked = store.search_scored("zap")
+        assert len({round(score, 9) for score, _ in ranked}) == 1, "fixture must tie"
+        assert [e.id for _, e in ranked] == ["surface:b", "surface:z", "verb:a"]

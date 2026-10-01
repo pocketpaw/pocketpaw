@@ -42,6 +42,15 @@
 # Changes: 2026-09-29 (same branch, review fix) — name-gated promotion
 # (``OPEN_SURFACE_TOOL_NAMES``) and the /studio/editor ``src`` shape check.
 # Changes: 2026-09-30 (same branch) — /studio/editor's allow-list carries the tool.
+# Changes: 2026-10-01 (feat/atlas-canonical) — the route allowlist is no longer a
+# literal here: ``allowed_routes()`` reads the atlas surfaces marked
+# ``agent_openable`` (src/pocketpaw/atlas/authored/surfaces.json), so atlas is
+# the one place that says which surfaces the agent may open. The atlas is the
+# global compiled artifact (no tenant data), read through its process singleton
+# at call time; a load failure yields no routes, so every open is refused.
+# Review pass (same branch): allowed_routes() also drops malformed routes and the
+# hard denylist (settings, audit, security, admin) whatever the flag says, and
+# build_surfaces_server() registers nothing when no route is openable.
 
 from __future__ import annotations
 
@@ -66,8 +75,30 @@ OPEN_SURFACE_TOOL_NAMES = frozenset({OPEN_SURFACE_TOOL_ID, "open_surface"})
 # /studio/editor ``src``: the backend's own media routes only (see header).
 _EDITOR_SRC_RE = re.compile(r"/api/v1/(?:uploads|media)/[A-Za-z0-9][A-Za-z0-9._-]*")
 
-# The contract's closed route set. Anything else is rejected, never forwarded.
-ALLOWED_ROUTES = ("/files", "/studio/editor", "/chat", "/pockets", "/knowledge")
+
+def allowed_routes() -> tuple[str, ...]:
+    """The closed route set: atlas surfaces marked ``agent_openable``.
+
+    Anything else is rejected, never forwarded. Fails closed: if atlas can't be
+    loaded, no route is allowed.
+    """
+    try:
+        from pocketpaw.atlas.model import never_agent_openable
+        from pocketpaw.atlas.store import get_atlas_store
+
+        return tuple(
+            e.surface
+            for e in get_atlas_store().entries
+            if e.kind == "surface"
+            and e.agent_openable is True
+            # SECURITY: the hard denylist and the route-shape check apply even
+            # if the flag says otherwise (the compiler refuses that too).
+            and not never_agent_openable(e.surface)
+        )
+    except Exception:  # noqa: BLE001 — fail closed, never open an unvetted route
+        logger.warning("open_surface: atlas unavailable, no routes allowed", exc_info=True)
+        return ()
+
 
 MAX_PARAMS = 10
 MAX_PARAM_KEY_CHARS = 64
@@ -97,10 +128,11 @@ def validate_open_surface(args: Any) -> tuple[dict[str, Any] | None, str | None]
 
     route = args.get("route")
     route = route.strip() if isinstance(route, str) else ""
-    if route not in ALLOWED_ROUTES:
+    routes = allowed_routes()
+    if route not in routes:
         return None, (
             f"{route or '(empty)'!r} is not a surface you can open. "
-            f"Valid routes: {', '.join(ALLOWED_ROUTES)}."
+            f"Valid routes: {', '.join(routes)}."
         )
     payload: dict[str, Any] = {"route": route}
 
@@ -182,7 +214,7 @@ def _open_surface_schema() -> dict[str, Any]:
     properties: dict[str, Any] = {
         "route": {
             "type": "string",
-            "enum": list(ALLOWED_ROUTES),
+            "enum": list(allowed_routes()),
             "description": "The surface to open.",
         },
         "params": {
@@ -210,6 +242,11 @@ def build_surfaces_server() -> tuple[str, Any] | None:
     except ImportError:
         logger.debug("claude_agent_sdk not installed; pocketpaw_surfaces MCP disabled")
         return None
+    if not allowed_routes():
+        # Nothing is openable (atlas failed to load, or no surface is flagged):
+        # don't register a tool whose route enum is empty.
+        logger.warning("open_surface: no openable routes, pocketpaw_surfaces MCP disabled")
+        return None
 
     @tool("open_surface", OPEN_SURFACE_DESCRIPTION, _open_surface_schema())
     async def open_surface(args):  # type: ignore[no-untyped-def]
@@ -220,11 +257,11 @@ def build_surfaces_server() -> tuple[str, Any] | None:
 
 
 __all__ = [
-    "ALLOWED_ROUTES",
     "OPEN_SURFACE_TOOL_ID",
     "OPEN_SURFACE_TOOL_NAMES",
     "SERVER_NAME",
     "SURFACES_TOOL_IDS",
+    "allowed_routes",
     "build_surfaces_server",
     "validate_open_surface",
 ]

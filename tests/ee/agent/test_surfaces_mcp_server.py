@@ -12,6 +12,11 @@
 # Changes: 2026-09-30 — scoping: reachable on the unrestricted GENERIC profile and
 # on /studio/editor's allow-list (the editor preamble names it), and on NO other
 # allow-listed surface, the public concierge included.
+# Changes: 2026-10-01 (feat/atlas-canonical) — the allowlist is derived from the
+# atlas surfaces marked agent_openable: pinned as a set here, followed when the
+# atlas changes (a swapped store singleton), and empty when atlas can't load.
+# Review pass: a denylisted or malformed route stays closed even when atlas flags
+# it openable, and no server is built when nothing is openable.
 
 from __future__ import annotations
 
@@ -21,11 +26,13 @@ from typing import Any
 
 import pytest
 from pocketpaw_ee.agent.mcp_servers.surfaces import (
-    ALLOWED_ROUTES,
     OPEN_SURFACE_TOOL_ID,
     OPEN_SURFACE_TOOL_NAMES,
     SURFACES_TOOL_IDS,
     _open_surface_handler,
+    allowed_routes,
+    build_surfaces_server,
+    validate_open_surface,
 )
 from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
 from pocketpaw_ee.cloud.chat.runs import run_core
@@ -38,14 +45,82 @@ def text(result: dict) -> str:
 def test_tool_ids() -> None:
     assert OPEN_SURFACE_TOOL_ID == "mcp__pocketpaw_surfaces__open_surface"
     assert SURFACES_TOOL_IDS == (OPEN_SURFACE_TOOL_ID,)
-    assert ALLOWED_ROUTES == ("/files", "/studio/editor", "/chat", "/pockets", "/knowledge")
+    assert set(allowed_routes()) == {"/files", "/studio/editor", "/chat", "/pockets", "/knowledge"}
 
 
-@pytest.mark.parametrize("route", ["/settings", "/files/../admin", "", None, "files"])
+def _swap_atlas(monkeypatch: pytest.MonkeyPatch, openable: dict[str, bool]) -> None:
+    from pocketpaw.atlas import store as atlas_store
+    from pocketpaw.atlas.model import AtlasEntry, AtlasModel
+
+    entries = [
+        AtlasEntry(
+            id=f"surface:{route.strip('/')}",
+            kind="surface",
+            name=route,
+            summary="s",
+            narrative="n",
+            surface=route,
+            presentation="window",
+            agent_openable=flag,
+        )
+        for route, flag in openable.items()
+    ]
+    monkeypatch.setattr(atlas_store, "_store", atlas_store.AtlasStore(AtlasModel(entries=entries)))
+
+
+def test_allowlist_follows_the_atlas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flip agent_openable in atlas and the tool follows — no second list."""
+    _swap_atlas(monkeypatch, {"/sites": True, "/files": False})
+    assert allowed_routes() == ("/sites",)
+    assert validate_open_surface({"route": "/sites"}) == ({"route": "/sites"}, None)
+    payload, error = validate_open_surface({"route": "/files"})
+    assert payload is None and "Valid routes: /sites." in error
+
+
+@pytest.mark.parametrize(
+    "route", ["/settings", "/settings/billing", "/audit", "/security", "/admin", "//evil.example"]
+)
+def test_denylisted_route_stays_closed_even_if_flagged(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """SECURITY: the code-level denylist holds even if atlas flags the route."""
+    _swap_atlas(monkeypatch, {route: True, "/files": True})
+    assert allowed_routes() == ("/files",)
+    payload, _ = validate_open_surface({"route": route})
+    assert payload is None
+
+
+def test_no_server_when_nothing_is_openable(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("claude_agent_sdk")
+    _swap_atlas(monkeypatch, {"/files": False})
+    assert build_surfaces_server() is None
+
+
+def test_server_built_when_routes_exist() -> None:
+    pytest.importorskip("claude_agent_sdk")
+    built = build_surfaces_server()
+    assert built is not None and built[0] == "pocketpaw_surfaces"
+
+
+def test_allowlist_fails_closed_when_atlas_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pocketpaw.atlas import store as atlas_store
+
+    def boom() -> None:
+        raise RuntimeError("atlas gone")
+
+    monkeypatch.setattr(atlas_store, "get_atlas_store", boom)
+    assert allowed_routes() == ()
+    payload, _ = validate_open_surface({"route": "/files"})
+    assert payload is None
+
+
+@pytest.mark.parametrize(
+    "route", ["/settings", "/settings/billing", "/sites", "/files/../admin", "", None, "files"]
+)
 async def test_route_outside_the_allowlist_is_rejected(route: Any) -> None:
     result = await _open_surface_handler({"route": route})
     assert result["is_error"] is True
-    assert "Valid routes: /files" in text(result)
+    assert "Valid routes: " in text(result) and "/files" in text(result)
     # An error must never carry the marker the run_core scan looks for.
     assert '"open_surface"' not in text(result)
 
