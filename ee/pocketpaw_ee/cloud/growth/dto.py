@@ -1,66 +1,23 @@
-# ee/pocketpaw_ee/cloud/growth/dto.py — request/response DTOs for the prospect
-# entity. Distinct Request and Response shapes per the ee/cloud rule — never
-# reuse a model for input and output. ``domain`` (the dedupe key) is normalised
-# to a bare lowercase hostname at the DTO boundary so every caller — router,
-# upsert, later ingestion slices — dedupes on the same canonical form.
-# DeleteProspectsRequest / DeleteProspectsResponse carry prospect deletion
-# (1..500 ids in, removed prospect / draft / withdrawn-proposal counts out).
-# ProspectResearch (+ Location/Person/Channel/Fact) is the structured profile a
-# single-prospect research run stores; it coerces loose input rather than
-# rejecting it. DraftProspectRequest/Response carry the writer-agent draft call.
+# ee/pocketpaw_ee/cloud/growth/dto.py — request/response DTOs for /growth.
+# Distinct Request and Response shapes per the ee/cloud rule; domain → DTO
+# mapping lives in ``service.py``.
 #
-# Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
-# store. Domain → DTO mapping lives in ``service.py`` as private helpers.
-# Updated 2026-07-27 (feat/growth-g2): bulk-ingestion DTOs — BulkIngestRequest
-# (raw rows, 500-row cap enforced at the DTO boundary so an oversized payload
-# 422s before any row is touched), BulkRowError, BulkIngestResponse. Rows are
-# deliberately ``dict`` (not CreateProspectRequest) so one invalid row becomes
-# a per-row error entry in the response instead of failing the whole payload.
-# Updated 2026-07-27 (feat/growth-g3): draft DTOs — CreateDraftRequest (subject
-# is email-only, enforced here at the boundary; body non-empty),
-# TransitionDraftRequest (the target status; legality is the SERVICE's job —
-# the DTO only checks it's a known status), DraftResponse.
-# Updated 2026-07-27 (feat/growth-g4): ProposeSendResponse — the Instinct
-# proposal id + the flipped draft returned by POST /growth/drafts/{id}/propose.
-# Updated 2026-07-28 (feat/growth-api-scale): ProspectPageResponse — the
-# cursor-paginated envelope GET /growth/prospects now returns
-# ({items, next_cursor, total}) in place of the bare array. Breaking on
-# purpose: "n of m" needs a filter-scoped total and reaching row 3,000 needs a
-# resume key, and neither fits in a naked list. ProspectFacetsResponse — the
-# per-tier / per-status / per-source counts behind the filter chips.
-# ProposeBatchRequest / ProposeBatchError / ProposeBatchResponse — proposing a
-# selection of drafts in one call, with per-draft error entries in the
-# bulk-ingest style (100-id cap enforced at the boundary).
-# Updated 2026-07-28 (feat/growth-mcp): UpdateDraftRequest — a partial edit of a
-# draft's COPY (subject / body / demo_url), the shape the agent surface needs to
-# revise a draft it wrote. No ``status`` field, deliberately: the lifecycle moves
-# through the transition route and the Instinct gate, never through an edit.
-# Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
-# the manual LinkedIn send queue: the draft envelope joined with the prospect
-# context the captain needs to send by hand (name, company, profile URL,
-# research brief, tier). Response-only; the queue has no request DTO.
-# Updated 2026-07-28 (feat/growth-projects): a prospect may be JUST A DOMAIN.
-# ``name`` and ``company`` on CreateProspectRequest lost their ``min_length=1``
-# and now default to ``""`` — "not yet known", the shape a pasted domain list
-# actually arrives in (bulk rows validate through this same model, so they
-# relax with it). ``domain`` stays required and still normalises: it is the
-# dedupe identity, and a row without one is not a prospect. The LinkedIn queue
-# row gained ``prospect_domain`` so an export can still title a section for a
-# prospect whose name nobody has filled in yet.
-# Updated 2026-07-29 (feat/growth-discovery): the ICP shapes — CreateIcpRequest
-# (name + criteria required, everything else optional; ``cadence`` defaults to
-# ``off`` and ``max_per_run`` is capped at the boundary), UpdateIcpRequest
-# (partial, ``project_id`` three-valued like the prospect update), IcpResponse.
-# Plus ``icp_id`` / ``source_urls`` on the prospect create + response: the
-# provenance of a row nobody typed. The DTO cannot enforce the observed-email
-# rule — by the time an address reaches ``emails`` it is a plain string — so
-# that filter lives one layer up, in ``domain.recordable_emails``, which the
-# discovery run is the only caller of.
-# Updated 2026-07-28 (feat/growth-projects): ``project_id`` on the create,
-# update and response shapes — the client a prospect belongs to. On the UPDATE
-# it is three-valued the way ``tasks`` does it (None = leave alone, an id =
-# reassign, "" = clear); on the CREATE it is a plain optional. Neither can
-# validate the id itself: only the service knows the caller's workspace.
+# Boundary rules enforced here: ``domain`` normalises to a bare lowercase
+# hostname (the dedupe key, so every caller dedupes on the same form); a
+# prospect may be just a domain (name / company default to ""); batch caps
+# (500 ingest / delete rows, 100 propose ids) 422 before anything is touched;
+# bulk rows are raw dicts so one bad row becomes an indexed error entry;
+# ``subject`` is email-only; ``UpdateDraftRequest`` has no ``status`` — the
+# lifecycle moves only through the status route and the Instinct gate.
+# ``project_id`` is three-valued on updates (None leave, id set, "" clear).
+# ``ProspectResearch`` coerces loose agent output rather than rejecting it.
+# What the DTO cannot check (an observed vs guessed email, a project in the
+# caller's workspace) is enforced one layer up.
+#
+# Response shapes include the cursor page envelope, facet counts, the LinkedIn
+# queue row, the per-channel ``DeliveryQueueItemResponse`` (with the latest
+# ``DeliveryStateResponse``), ``DeliverApprovedResponse`` and the growth
+# settings pair.
 
 from __future__ import annotations
 
@@ -723,6 +680,46 @@ class LinkedInQueueItemResponse(BaseModel):
     tier: str
 
 
+class DeliveryStateResponse(BaseModel):
+    """The newest ``MessageLog`` row for a draft — what happened on its latest
+    delivery attempt. ``mock`` is true when the fake provider handled it."""
+
+    outcome: str  # sending | sent | failed | blocked
+    provider: str
+    mock: bool
+    error: str | None
+    sent_at: str | None
+    at: str | None  # when the row last changed (updatedAt, else createdAt)
+
+
+class DeliveryQueueItemResponse(BaseModel):
+    """One row of a per-channel delivery queue: a proposed / approved / sent
+    draft, its prospect, the resolved recipient, and its latest delivery."""
+
+    draft: DraftResponse
+    prospect_name: str
+    prospect_company: str
+    prospect_domain: str
+    tier: str
+    to: str | None  # email address / WhatsApp number / LinkedIn URL
+    opted_in: bool
+    delivery: DeliveryStateResponse | None
+
+
+class DeliverApprovedResponse(BaseModel):
+    """Draft ids a deliver-approved call started mock delivery for."""
+
+    started: list[str]
+
+
+class GrowthSettingsResponse(BaseModel):
+    mock_delivery: bool
+
+
+class UpdateGrowthSettingsRequest(BaseModel):
+    mock_delivery: bool
+
+
 __all__ = [
     "BulkIngestRequest",
     "BulkIngestResponse",
@@ -732,10 +729,14 @@ __all__ = [
     "CreateProspectRequest",
     "DeleteProspectsRequest",
     "DeleteProspectsResponse",
+    "DeliverApprovedResponse",
+    "DeliveryQueueItemResponse",
+    "DeliveryStateResponse",
     "DraftProspectRequest",
     "DraftProspectResponse",
     "DraftResponse",
     "DraftSkipped",
+    "GrowthSettingsResponse",
     "IcpLastPreviewResponse",
     "IcpPreviewResponse",
     "IcpResponse",
@@ -755,6 +756,7 @@ __all__ = [
     "ResearchPerson",
     "TransitionDraftRequest",
     "UpdateDraftRequest",
+    "UpdateGrowthSettingsRequest",
     "UpdateIcpRequest",
     "UpdateProspectRequest",
 ]

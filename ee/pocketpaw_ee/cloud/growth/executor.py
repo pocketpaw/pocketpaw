@@ -4,9 +4,7 @@
 # an Instinct Action carrying a ``_growth_send`` blob; after a human approves
 # it, the ee instinct router fires ``execute_approved_growth_send`` here —
 # exactly mirroring ``ship.executor.execute_approved_ship_action``. This is the
-# ONLY code path that may flip a draft to ``approved`` and enqueue its
-# ``growth.dispatch`` job. The job itself is a logging STUB in this slice —
-# G-5/G-6 make it actually send and flip the draft to ``sent``.
+# ONLY code path that may flip a draft to ``approved`` and start its delivery.
 #
 # Guard sequence (order matters, mirroring ship):
 #   1. Read the ``_growth_send`` blob. Missing → return (no chain was opened).
@@ -27,10 +25,13 @@
 #      (``gate_transition`` — the only caller allowed onto a gate-owned edge).
 #      A draft that moved meanwhile (rejected / already approved) fails the
 #      action instead of dispatching.
-#   5. Enqueue ``growth.dispatch`` ``{draft_id, channel}`` on the dedicated
-#      ``growth`` arq queue. Enqueue failure → ``store.mark_failed(error=...)``
-#      (the draft stays ``approved`` — the approval stands; the failure is
-#      recorded on the Action for the operator).
+#   5. Deliver. In a workspace with ``growth_mock_delivery`` on, an email or
+#      WhatsApp draft is handed to ``growth.mock_delivery`` (an in-process fake
+#      send; nothing is enqueued). Otherwise enqueue ``growth.dispatch``
+#      ``{draft_id, channel}`` on the dedicated ``growth`` arq queue; enqueue
+#      failure → ``store.mark_failed(error=...)`` (the draft stays
+#      ``approved`` — the approval stands; the failure is recorded on the
+#      Action for the operator).
 #   6. Back-write the outcome, mark the Action executed/failed, close the
 #      Decision-Graph chain exactly once.
 #
@@ -40,8 +41,6 @@
 # NEVER RAISES — a failure here must not break the approve response. Every
 # terminal path goes through the single ``_fail`` chokepoint or the one success
 # path, never both.
-#
-# Created 2026-07-27 (feat/growth-g4): new module.
 
 from __future__ import annotations
 
@@ -51,7 +50,11 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from pocketpaw_ee.cloud.growth.domain import GROWTH_DISPATCH_JOB_NAME, GROWTH_QUEUE_NAME
+from pocketpaw_ee.cloud.growth.domain import (
+    GROWTH_DISPATCH_JOB_NAME,
+    GROWTH_QUEUE_NAME,
+    MOCK_DELIVERY_CHANNELS,
+)
 from pocketpaw_ee.cloud.growth.propose import GROWTH_SEND_PARAM_KEY, GROWTH_SEND_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -251,7 +254,7 @@ async def execute_approved_growth_send(
     *,
     human_event_id: Any | None = None,
 ) -> None:
-    """Flip the draft to ``approved`` and enqueue its dispatch job.
+    """Flip the draft to ``approved`` and start its delivery.
 
     Called best-effort from the instinct router's approve paths (single AND
     bulk) after ``store.approve()`` succeeds — exactly like
@@ -347,24 +350,34 @@ async def execute_approved_growth_send(
             await _fail(f"draft could not be approved ({type(exc).__name__})")
             return
 
-        # (6) Enqueue the dispatch job on the dedicated growth queue.
+        # (6) Deliver. A workspace in mock-delivery mode gets an in-process
+        # fake send for email/WhatsApp instead of the real dispatch job;
+        # everything else enqueues ``growth.dispatch`` on the growth queue.
         # ``_queue_name`` is arq's selector kwarg (a bare ``queue=`` would be
         # forwarded to the job function and crash it — see jobs/domain.py).
-        try:
-            pool = await _get_pool()
-            await pool.enqueue_job(
-                GROWTH_DISPATCH_JOB_NAME,
-                draft_id,
-                channel,
-                _queue_name=GROWTH_QUEUE_NAME,
-            )
-        except Exception:  # noqa: BLE001 — enqueue failure is a failed outcome
-            logger.exception("growth: dispatch enqueue failed for draft %s", draft_id)
-            await _fail("dispatch enqueue failed — draft approved but not queued")
-            return
+        from pocketpaw_ee.cloud.growth import mock_delivery
+
+        if channel in MOCK_DELIVERY_CHANNELS and await mock_delivery.is_mock_delivery_on(
+            workspace_id
+        ):
+            mock_delivery.start_mock_delivery(workspace_id, draft_id, channel)
+            detail = f"growth.mock_delivery started for draft {draft_id} ({channel})"
+        else:
+            try:
+                pool = await _get_pool()
+                await pool.enqueue_job(
+                    GROWTH_DISPATCH_JOB_NAME,
+                    draft_id,
+                    channel,
+                    _queue_name=GROWTH_QUEUE_NAME,
+                )
+            except Exception:  # noqa: BLE001 — enqueue failure is a failed outcome
+                logger.exception("growth: dispatch enqueue failed for draft %s", draft_id)
+                await _fail("dispatch enqueue failed — draft approved but not queued")
+                return
+            detail = f"growth.dispatch enqueued for draft {draft_id} ({channel})"
 
         # (7) Success: outcome, terminal, chain close — exactly once.
-        detail = f"growth.dispatch enqueued for draft {draft_id} ({channel})"
         await _persist_outcome(
             store=store, action_id=action_id, blob=blob, status="executed", detail=detail
         )

@@ -4199,8 +4199,10 @@ and Instinct-gated sends on the dedicated `growth` arq queue
 the license gate. Reads (`GET /growth/prospects`, `GET /growth/drafts`, …)
 require `growth.read` (MEMBER); authoring writes — create/update/delete a
 prospect, bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
-(MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose` and
-`POST /growth/drafts/propose-batch` — require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
+(MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose`,
+`POST /growth/drafts/propose-batch`, `POST /growth/linkedin/{id}/mark-sent`,
+`POST /growth/queue/{channel}/deliver-approved` and `PATCH /growth/settings` —
+require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
 `growth.executor` re-checks that same action against the proposer's *current*
 role at dispatch time, so a member-filed proposal would always fail closed at
 approve. A caller below the required tier gets
@@ -4694,7 +4696,10 @@ Instinct Tray) the growth executor flips the draft to `approved` and
 enqueues the `growth.dispatch` job `{draft_id, channel}` on the dedicated
 `growth` arq queue — with an execute-time re-check that the proposer STILL
 holds `growth.manage` (a since-demoted proposer's approved send fails
-closed), and `mark_failed` on the Action if the enqueue fails. On
+closed), and `mark_failed` on the Action if the enqueue fails. In a
+workspace with mock delivery on (*Growth — Delivery queues*), an approved
+`email` or `whatsapp` draft is delivered in-process by a fake provider
+instead, and nothing is enqueued. On
 **reject** the draft flips to `rejected` and nothing is enqueued. The
 `email` branch is live (below) and the `whatsapp` branch is live (*Growth —
 WhatsApp dispatch*); `linkedin` keeps the logging stub on purpose — it is
@@ -4772,8 +4777,11 @@ failure record.
 
 **`MessageLog`** (collection `growth_message_logs`, one row per delivery
 **attempt**): `workspace`, `draft_id`, `prospect_id`, `channel`, `provider`
-(`"mailtrap"`), `provider_message_id`, `to_address`, `sent_at`, `outcome`
-(`sent | failed`), `error`. Written only by the growth service.
+(`"mailtrap"`, `"msg91"`, or `"mock"` for mock delivery),
+`provider_message_id`, `to_address`, `sent_at`, `outcome`
+(`sending | sent | failed | blocked`), `blocked_reason`, `error`. Email rows
+are written `sent` / `failed` directly; WhatsApp and mock rows start as
+`sending` and are finalised. Written only by the growth service.
 
 **Config — `GROWTH_SENDING_DOMAIN` (required to send).** The secondary
 sending domain outreach rides. Unset means nothing goes out; the dispatcher
@@ -4836,6 +4844,94 @@ gate seam rather than the public status route; the structural guarantee is
 unchanged (only an `approved` draft can move, and `approved` is reachable
 only through an approved `_growth_send` proposal). The queue read requires
 `growth.read` (MEMBER).
+
+## Growth — Delivery queues
+
+One outbound queue per channel, plus a per-workspace **mock delivery** mode
+that lets the whole prospect → draft → approve → send loop run without a real
+provider. Same gates as the rest of `/growth`.
+
+### `GET /api/v1/growth/queue/{channel}`
+
+`channel` is `email`, `whatsapp` or `linkedin` (anything else is a `422`).
+Query: `limit` (default 100, max 500). Requires `growth.read` (MEMBER).
+
+Returns that channel's drafts in `proposed`, `approved` or `sent`, newest
+first. Drafts whose prospect has been deleted are left out. Each item:
+
+```json
+{
+  "draft": { "id": "…", "channel": "email", "status": "approved", "…": "…" },
+  "prospect_name": "Sam Founder",
+  "prospect_company": "Acme Dental",
+  "prospect_domain": "acme-dental.com",
+  "tier": "a",
+  "to": "sam@acme-dental.com",
+  "opted_in": false,
+  "delivery": {
+    "outcome": "sent",
+    "provider": "mock",
+    "mock": true,
+    "error": null,
+    "sent_at": "2026-10-01T09:30:03+00:00",
+    "at": "2026-10-01T09:30:03+00:00"
+  }
+}
+```
+
+`to` is the recipient the delivery path would use: the prospect's first email
+entry containing `@`, its WhatsApp number, or its LinkedIn URL. `opted_in` is
+the prospect's WhatsApp opt-in. `delivery` is the newest `MessageLog` row for
+the draft (`null` before the first attempt); `at` is when that row last
+changed. The LinkedIn manual queue below is unchanged.
+
+### `GET /api/v1/growth/settings` / `PATCH /api/v1/growth/settings`
+
+The active workspace's growth settings: `{"mock_delivery": false}`. `PATCH`
+takes the same body and returns the stored value. It writes only
+`settings.growth_mock_delivery` on the workspace, leaving every other setting
+as it was, and records a `workspace.settings_updated` audit row. `GET`
+requires `growth.read` (MEMBER); `PATCH` requires `growth.manage` (ADMIN),
+because it decides whether an approval reaches a real provider. `404` when the
+workspace cannot be found.
+
+**What mock delivery does.** With it on, approving an `email` or `whatsapp`
+draft in the Tray no longer enqueues `growth.dispatch`. The executor starts an
+in-process delivery instead, and the Action's outcome reads
+`growth.mock_delivery started for draft <id> (<channel>)`. That delivery
+applies the same eligibility checks as real sending (email needs an address
+with `@`, a subject and a body; WhatsApp needs an opt-in and a number). A
+failed check writes a `blocked` `MessageLog` row with a readable `error` and
+leaves the draft `approved`. Otherwise it writes a `sending` row, waits
+`GROWTH_MOCK_DELIVERY_SECONDS`, finalises the row to `sent` with `sent_at` and
+a `mock-…` provider message id, and moves the draft to `sent`. Every row
+carries `provider: "mock"`. Nothing is sent to anyone. Mock rows never count
+toward the WhatsApp hourly cap, and a mock-sent draft gets follow-ups exactly
+like a real one. LinkedIn is never mock-delivered; it stays manual. With the
+setting off (the default), sending is unchanged.
+
+The delivery runs inside the web process, so a restart during the wait loses
+it. A graceful shutdown records the row as `failed`; a hard kill leaves it at
+`sending`.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `GROWTH_MOCK_DELIVERY_SECONDS` | `3` | Simulated provider latency between the `sending` and `sent` rows, in seconds (a float; `0` is allowed). A negative or non-numeric value falls back to the default. |
+
+### `POST /api/v1/growth/queue/{channel}/deliver-approved`
+
+Starts mock delivery for every `approved` draft on `email` or `whatsapp`
+whose newest `MessageLog` row is not `sending`. Use it for drafts approved
+before mock delivery was switched on, or whose delivery failed. No body.
+Requires `growth.manage` (ADMIN).
+
+```json
+{ "started": ["66a1…f3", "66a1…f4"] }
+```
+
+`linkedin` returns `422 queue.not_deliverable`. With mock delivery off it
+returns `409 growth.mock_delivery_off`. A draft that already has a delivery
+running in this process is not started twice.
 
 ## Growth — Follow-ups
 
@@ -5011,7 +5107,7 @@ the same prospect never learns someone else's outreach got a reply.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
+| `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts and mock-delivery rows (provider `"mock"`) do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
 | `GROWTH_MSG91_WEBHOOK_SECRET` | *(unset)* | Shared secret for the inbound webhook HMAC. **Required** — while unset, `POST /growth/webhooks/msg91` rejects every request with 403. |
 | `CLOUD_ENCRYPTION_KEY` | *(unset)* | Existing deployment-wide Fernet key. Needed to store the MSG91 authkey as `authkey_enc` rather than plaintext. |
 

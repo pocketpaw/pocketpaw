@@ -8,7 +8,9 @@ them, and the split is load-bearing:
   (``retention_days``, validated to ``None`` or a positive day count so the
   retention endpoint and the generic settings merge cannot persist 0;
   ``site_transfers_allowed``, which gates only the OUTBOUND half of a site
-  transfer — the receiving side is governed by consent at the accept step).
+  transfer — the receiving side is governed by consent at the accept step;
+  ``growth_mock_delivery``, which makes an approved /growth email or WhatsApp
+  draft deliver through an in-process fake provider instead of the real one).
 * ``Branding`` — per-tenant IDENTITY for white-label theming. Deliberately not
   folded into settings. Every sub-field is optional and an unset one falls back
   to the Paw default at RENDER time, so nothing here stores a default.
@@ -60,6 +62,12 @@ class WorkspaceSettings(BaseModel):
     # choice, and only the SOURCE side is gated — receiving a site is governed by
     # the recipient's own consent, which is the accept step.
     site_transfers_allowed: bool = True
+    # /growth demo mode. When on, approving an email or WhatsApp draft delivers
+    # it in-process through a staged fake provider (MessageLog provider "mock")
+    # rather than enqueueing the real dispatch job, so the whole outbound loop
+    # can be shown without Mailtrap, MSG91 or a growth worker. Off by default:
+    # a workspace that never touches it sends for real, exactly as before.
+    growth_mock_delivery: bool = False
 
     @field_validator("retention_days")
     @classmethod
