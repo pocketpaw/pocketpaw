@@ -12,18 +12,24 @@
 # Updated 2026-10-02 (quality review): HTTP-level tests for the operator switch
 # (now /platform/workspaces/{id}/partner) and the client-route action guards,
 # a seam that REFUSES (badge removal), empty-PATCH no-op and GSTIN validation.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): offers per country, selling a
+# yearly plan through the publish path (exact debit, redeploy, idempotent, short
+# wallet changes nothing, partner/client/site guards), the renewal sweep on a
+# yearly rung, partner-tier entitlements, the per-year quota window, and the
+# sold-sites list with and without ``due_within_days``.
 # Updated 2026-10-02: the autouse fixture clears the shared
 # ``read_model.default_journal_store`` cache (``service._default_store`` now
 # delegates to it) and points the per-workspace stores at tmp_path.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import pytest_asyncio
+from dateutil.relativedelta import relativedelta
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
@@ -489,3 +495,404 @@ async def test_http_non_member_cannot_read_or_write_clients(partners_http) -> No
     assert r.status_code == 403
     assert (await client.get("/api/v1/partners/clients")).status_code == 403
     assert (await client.get("/api/v1/partners/me")).status_code == 403
+
+
+# ---------------------------------------------------------------- selling (PH-2)
+#
+# A sale runs the ordinary paid-publish path (``publish_pocket``), so these use the
+# same local-deploy seam as tests/cloud/sites/test_credits_publish.py. Partner
+# workspaces are on ``go`` (the sites feature) with the plan's site slot left
+# EMPTY on purpose: a partner-only tier must never be plan-carried, and an open
+# slot is what would carry it.
+
+
+def _sell_seams(monkeypatch) -> list[str]:
+    """Local deploy + a bundle reader that needs no build, injected through the
+    module attribute ``sell_site_plan`` calls."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    from tests.cloud.sites.test_credits_publish import _local_deploy
+
+    deploys = _local_deploy(monkeypatch)
+    real = sites_service.publish_pocket
+
+    async def _publish(**kw):
+        return await real(**kw, _bundle_reader=lambda d: b"x")
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _publish)
+    return deploys
+
+
+async def _partner_ws(slug: str, *, country: str = "IN", status: str = "active") -> str:
+    ws = WorkspaceDoc(name=slug, slug=slug, owner="u1", plan="go")
+    ws.partner = PartnerProfile(
+        status=status, footer_name=f"{slug} Prints", billing_country=country
+    )
+    await ws.insert()
+    return str(ws.id)
+
+
+async def _fund(workspace_id: str, credits: int) -> None:
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    await credits_service.grant(
+        workspace=workspace_id,
+        amount=credits,
+        cause="top_up",
+        idempotency_key=f"seed-{workspace_id}",
+    )
+
+
+async def _balance(workspace_id: str) -> int:
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    return await credits_service.balance(workspace_id)
+
+
+async def _free_site(workspace_id: str) -> str:
+    """A pocket published on the free floor — what a partner builds before selling."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+    from pocketpaw_ee.sites import service as sites_service
+
+    pocket = Pocket(
+        workspace=workspace_id, name="Ravi Stores", owner="u1", type="site", pattern="landing"
+    )
+    await pocket.insert()
+    doc = await sites_service.publish_pocket(
+        workspace_id=workspace_id, user_id="u1", pocket_id=str(pocket.id), site_plan_key="free"
+    )
+    assert doc.deployed is True and doc.plan_tier == "free"
+    return str(doc.id)
+
+
+async def _client(ctx: RequestContext, store) -> str:
+    return (
+        await service.create_client(ctx, body={"name": "Ravi", "whatsapp": PHONE}, store=store)
+    ).id
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def test_offers_are_priced_for_the_partner_country(mongo_db) -> None:
+    india = _ctx(await _partner_ws("in-shop", country="IN"))
+    elsewhere = _ctx(await _partner_ws("us-shop", country="US"))
+
+    offers = {o.sku: o for o in await service.list_offers(india)}
+    assert {k: o.price_credits for k, o in offers.items()} == {
+        "site_year": 1700,
+        "staff_year": 5600,
+    }
+    assert offers["staff_year"].conversation_allowance == 1200
+    assert offers["site_year"].period_months == 12
+    assert {o.sku: o.price_credits for o in await service.list_offers(elsewhere)} == {
+        "site_year": 2900,
+        "staff_year": 8900,
+    }
+    with pytest.raises(Forbidden):
+        await service.list_offers(_ctx(str((await _workspace("plain")).id)))
+
+
+async def test_partner_tiers_stay_out_of_the_public_storefront() -> None:
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    public = {t.key for t in site_plans.list_site_plans()}
+    assert public == {"free", "site", "staff"}
+    assert {t.key for t in site_plans.list_site_scoped_plans()} == public
+    assert all(t.partner_only for t in site_plans.list_partner_plans())
+
+
+async def test_selling_site_year_debits_the_partner_price_and_redeploys(
+    mongo_db, store, monkeypatch
+) -> None:
+    deploys = _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    client_id = await _client(ctx, store)
+    deploys.clear()
+
+    sale = await service.sell(
+        ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
+    )
+
+    assert await _balance(wid) == 5000 - 1700, "exactly the IN price, not plan-carried"
+    assert sale.plan_tier == "site_year"
+    assert sale.subscription_status == "active"
+    assert sale.partner_client_id == client_id
+    assert deploys, "a sale redeploys the site through the publish path"
+    from pocketpaw_ee.cloud.models.site import Site
+
+    doc = await Site.get(site_id)
+    assert doc.billing_rail == "credits"
+    assert doc.period_paid_usd == 17
+    assert doc.partner_client_id == client_id
+    expected = datetime.now(UTC) + relativedelta(months=12)
+    assert abs((_aware(doc.renewal_date) - expected).total_seconds()) < 3600
+
+    # Same sku, same day: one debit, no second deploy.
+    deploys.clear()
+    again = await service.sell(
+        ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
+    )
+    assert await _balance(wid) == 5000 - 1700
+    assert again.plan_tier == "site_year"
+    assert not deploys
+
+
+async def test_selling_a_year_to_a_monthly_site_charges_the_gap_and_restarts_the_period(
+    mongo_db, store, monkeypatch
+) -> None:
+    """A site already paying $7 for the month moves to a year: it pays the $10 gap to
+    the IN year price, and the year starts today (not at the old monthly date)."""
+    from pocketpaw_ee.cloud.models.site import Site
+
+    deploys = _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    doc = await Site.get(site_id)
+    doc.plan_tier, doc.subscription_status, doc.billing_rail = "site", "active", "credits"
+    doc.period_paid_usd = 7
+    doc.renewal_date = datetime.now(UTC) + timedelta(days=20)
+    await doc.save()
+    deploys.clear()
+
+    await service.sell(
+        ctx,
+        body={"client_id": await _client(ctx, store), "site_id": site_id, "sku": "site_year"},
+        store=store,
+    )
+
+    fresh = await Site.get(site_id)
+    assert await _balance(wid) == 5000 - 1000
+    assert fresh.plan_tier == "site_year"
+    assert fresh.period_paid_usd == 17
+    expected = datetime.now(UTC) + relativedelta(months=12)
+    assert abs((_aware(fresh.renewal_date) - expected).total_seconds()) < 3600
+    assert deploys
+
+
+async def test_a_short_wallet_refuses_the_sale_and_changes_nothing(
+    mongo_db, store, monkeypatch
+) -> None:
+    from pocketpaw_ee.cloud._core.errors import InsufficientCredits
+    from pocketpaw_ee.cloud.models.site import Site
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 1000)
+    site_id = await _free_site(wid)
+    client_id = await _client(ctx, store)
+
+    with pytest.raises(InsufficientCredits) as exc:
+        await service.sell(
+            ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
+        )
+    assert exc.value.status_code == 402
+
+    doc = await Site.get(site_id)
+    assert await _balance(wid) == 1000
+    assert doc.plan_tier == "free"
+    assert doc.subscription_status == "none"
+    assert doc.deployed is True
+    assert doc.partner_client_id is None
+
+
+async def test_selling_needs_an_active_partner_and_its_own_client_and_site(
+    mongo_db, store, monkeypatch
+) -> None:
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    other = await _partner_ws("other-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    client_id = await _client(ctx, store)
+    body = {"client_id": client_id, "site_id": site_id, "sku": "site_year"}
+
+    plain = str((await _workspace("plain")).id)
+    for status_ws in (plain, await _partner_ws("sus-shop", status="suspended")):
+        with pytest.raises(Forbidden):
+            await service.sell(_ctx(status_ws), body=body, store=store)
+    with pytest.raises(NotFound):  # another partner's client
+        await service.sell(
+            _ctx(other), body={**body, "site_id": await _free_site(other)}, store=store
+        )
+    other_client = await _client(_ctx(other), store)
+    with pytest.raises(NotFound):  # another workspace's site
+        await service.sell(_ctx(other), body={**body, "client_id": other_client}, store=store)
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    with pytest.raises(ValidationError):  # a public tier is not a partner sku
+        await service.sell(ctx, body={**body, "sku": "staff"}, store=store)
+    assert await _balance(wid) == 5000
+
+
+async def test_a_partner_tier_cannot_be_bought_through_a_normal_publish(
+    mongo_db, monkeypatch
+) -> None:
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+    from pocketpaw_ee.sites import service as sites_service
+
+    from tests.cloud.sites.test_credits_publish import _local_deploy
+
+    _local_deploy(monkeypatch)
+    ws = WorkspaceDoc(name="plain", slug="plain-go", owner="u1", plan="go")
+    await ws.insert()
+    wid = str(ws.id)
+    await _fund(wid, 10_000)
+    pocket = Pocket(workspace=wid, name="P", owner="u1", type="site", pattern="landing")
+    await pocket.insert()
+
+    with pytest.raises(Forbidden) as exc:
+        await sites_service.publish_pocket(
+            workspace_id=wid,
+            user_id="u1",
+            pocket_id=str(pocket.id),
+            site_plan_key="site_year",
+            purchase_authorized=True,
+            _bundle_reader=lambda d: b"x",
+        )
+    assert exc.value.code == "sites.partner_plan_only"
+    assert await _balance(wid) == 10_000
+
+
+async def _sold_site(
+    workspace_id: str, *, tier: str, renewal_date: datetime | None, client_id: str | None = "c1"
+):
+    from pocketpaw_ee.cloud.models.site import Site
+
+    doc = Site(
+        workspace=workspace_id,
+        pocket_id=f"pk_{tier}_{renewal_date}",
+        owner="u1",
+        name=f"Sold {tier}",
+        deployed=True,
+        url="http://local/sold/",
+        plan_tier=tier,
+        subscription_status="active",
+        billing_rail="credits",
+        renewal_date=renewal_date,
+        period_paid_usd=17,
+        partner_client_id=client_id,
+    )
+    await doc.insert()
+    return doc
+
+
+async def test_the_renewal_sweeper_renews_a_year_at_the_partner_price(mongo_db) -> None:
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+
+    wid = await _partner_ws("in-shop")
+    await _fund(wid, 2000)
+    due = datetime.now(UTC) - timedelta(days=1)
+    doc = await _sold_site(wid, tier="site_year", renewal_date=due)
+
+    assert (await sweep_site_renewals())["renewed"] == 1
+    fresh = await Site.get(doc.id)
+    assert await _balance(wid) == 2000 - 1700
+    step = _aware(fresh.renewal_date) - (_aware(due) + relativedelta(months=12))
+    assert abs(step.total_seconds()) < 1  # BSON keeps milliseconds only
+    assert fresh.period_paid_usd == 17
+
+
+async def test_a_short_wallet_lapses_a_partner_site_and_keeps_it_up(mongo_db) -> None:
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+
+    wid = await _partner_ws("in-shop")
+    await _fund(wid, 1000)
+    doc = await _sold_site(
+        wid, tier="staff_year", renewal_date=datetime.now(UTC) - timedelta(days=1)
+    )
+
+    assert (await sweep_site_renewals())["lapsed"] == 1
+    fresh = await Site.get(doc.id)
+    assert fresh.subscription_status == "cancelled"
+    assert fresh.deployed is True
+    assert await _balance(wid) == 1000
+
+
+def test_partner_tiers_resolve_their_entitlements() -> None:
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.entitlements import service as ent
+
+    def resolve(tier: str):
+        return ent.resolve_site_entitlements(
+            site_id="s",
+            workspace_id="w",
+            plan_tier=tier,
+            subscription_status="active",
+            concierge_enabled=True,
+        )
+
+    staff_year = resolve("staff_year")
+    assert staff_year.concierge_entitled is True
+    assert site_plans.site_scoped_tier("staff_year").conversation_allowance == 1200
+    site_year = resolve("site_year")
+    assert site_year.badge_required is False
+    assert site_year.custom_domain is True
+    assert site_year.concierge_entitled is False
+
+
+async def test_the_staff_year_quota_counts_over_the_paid_year(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: SimpleNamespace(billing_enforced=True, sites_billing_enforced=False),
+    )
+    seen: list[datetime] = []
+
+    class _Store:
+        async def count_conversations_started_since(self, widget_id, since, workspace_id):
+            seen.append(since)
+            return 1199
+
+    renewal = datetime(2027, 3, 15, tzinfo=UTC)
+    site = SimpleNamespace(plan_tier="staff_year", renewal_date=renewal)
+    exceeded = await enforcement.concierge_conversation_quota_exceeded(
+        site, widget_id="w", workspace_id="ws", store=_Store()
+    )
+    assert exceeded is False  # 1,199 of 1,200 for the year
+    expected = (renewal - relativedelta(months=12)).astimezone().replace(tzinfo=None)
+    assert seen == [expected]
+
+
+async def test_partner_sites_list_all_or_only_the_due(mongo_db, store) -> None:
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    client_id = await _client(ctx, store)
+    soon = await _sold_site(
+        wid,
+        tier="site_year",
+        renewal_date=datetime.now(UTC) + timedelta(days=10),
+        client_id=client_id,
+    )
+    later = await _sold_site(
+        wid, tier="staff_year", renewal_date=datetime.now(UTC) + timedelta(days=200)
+    )
+    lapsed = await _sold_site(wid, tier="site_year", renewal_date=None)
+    await _sold_site(wid, tier="site", renewal_date=datetime.now(UTC), client_id=None)  # not sold
+
+    every = await service.list_sites(ctx, store=store)
+    assert {s.site_id for s in every} == {str(soon.id), str(later.id), str(lapsed.id)}
+    due = await service.list_sites(ctx, due_within_days=30, store=store)
+    assert [s.site_id for s in due] == [str(soon.id)]
+    assert due[0].client_name == "Ravi"
+
+
+async def test_http_selling_needs_the_buy_plan_action(partners_http) -> None:
+    client, holder, wid = partners_http
+    body = {"client_id": "c", "site_id": "s", "sku": "nope"}
+    holder["user"] = _user(wid, "member")
+    assert (await client.post("/api/v1/partners/sell", json=body)).status_code == 403
+    assert (await client.get("/api/v1/partners/offers")).status_code == 200
+    assert (await client.get("/api/v1/partners/sites?due_within_days=30")).status_code == 200
+    holder["user"] = _user(wid, "admin")
+    r = await client.post("/api/v1/partners/sell", json=body)
+    assert r.status_code == 422, r.text  # past the guard, refused on the unknown sku
