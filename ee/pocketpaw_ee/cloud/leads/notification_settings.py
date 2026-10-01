@@ -52,7 +52,7 @@ from typing import Any
 
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud._core.errors import NotFound, RateLimited, ValidationError
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, RateLimited, ValidationError
 from pocketpaw_ee.cloud.models.lead_notifications import (
     DEFAULT_EVENT_SINKS,
     LEAD_EVENTS,
@@ -759,7 +759,10 @@ async def partner_whatsapp_target(workspace_id: str, site: _SiteDoc | None) -> s
             started_at=_now(),
         )
         client = await partners_service.get_client(ctx, client_id=client_id)
-    except Exception:  # NotFound (archived/deleted), Forbidden (partner inactive), …
+    except (NotFound, Forbidden):  # archived / deleted client, or partner not active
+        return None
+    except Exception:
+        logger.warning("partner client lookup failed for site %s", site.id, exc_info=True)
         return None
     if client.whatsapp and client.whatsapp_opt_in_at:
         return client.whatsapp
