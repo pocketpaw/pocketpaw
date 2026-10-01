@@ -11,7 +11,8 @@
 # a BATCH instead, applied atomically as one undo step. `add_motion_graphic` is
 # the one way to CREATE footage here: the agent writes a HyperFrames composition
 # (one self-contained HTML file), this validates it, and the browser renders it
-# to an MP4 and places it. Same one-call dispatch shape as the other two.
+# to an MP4 and places it — or, given ``replace_asset_id``, swaps it in for an
+# earlier render in place. Same one-call dispatch shape as the other two.
 #
 # There is deliberately no read tool. The document lives in the browser, so the
 # server has nothing to read; the /studio/editor preamble carries the timeline
@@ -269,9 +270,29 @@ async def _export_timeline_handler(args: dict) -> dict:
     )
 
 
+def _resolve_replace_asset(raw: str, known: set[str]) -> tuple[str | None, str | None]:
+    """Resolve ``replace_asset_id`` (a full id or the tail the prompt showed)."""
+    from pocketpaw_ee.agent.mcp_servers.timeline_ops import _suggest
+    from pocketpaw_ee.cloud.pockets.id_resolve import AmbiguousId, resolve_id
+
+    try:
+        return resolve_id(raw, [{"id": i} for i in known]), None
+    except AmbiguousId:
+        return None, (
+            f"replace_asset_id {raw!r} matches more than one asset on the media rail, "
+            "so it is not safe to guess which. Ask the user which motion graphic they mean."
+        )
+    except KeyError:
+        return None, (
+            f"replace_asset_id {raw!r} is not an asset on the media rail.{_suggest(raw, known)} "
+            "Copy the id from the MOTION GRAPHICS block, or omit it to add a new one."
+        )
+
+
 async def _add_motion_graphic_handler(args: dict) -> dict:
     """Validate a HyperFrames composition and hand it to the editor tab to render."""
-    if not _current_summary().has_timeline:
+    summary = _current_summary()
+    if not summary.has_timeline:
         return _error_response(
             "No timeline is open, so there is nowhere to put a motion graphic. Ask the "
             "user to open a project in the editor."
@@ -283,24 +304,34 @@ async def _add_motion_graphic_handler(args: dict) -> dict:
         return _error_response(error)
     assert shape is not None
 
+    replace_raw = str(args.get("replace_asset_id") or "").strip()
+    replace_id = None
+    if replace_raw:
+        replace_id, error = _resolve_replace_asset(replace_raw, summary.asset_ids)
+        if error is not None:
+            return _error_response(error)
+
     name = str(args.get("name") or "").strip() or "Motion graphic"
-    return _success_response(
-        {
-            "ok": True,
-            "motion_graphic": {
-                "html": html,
-                "name": name,
-                "fps": shape["fps"],
-                "durationS": shape["durationS"],
-                "width": shape["width"],
-                "height": shape["height"],
-            },
-            "note": (
-                "Rendering in the user's browser, then it lands on the timeline. Do "
-                "not claim it is finished; say it is rendering."
-            ),
-        }
-    )
+    motion_graphic: dict[str, Any] = {
+        "html": html,
+        "name": name,
+        "fps": shape["fps"],
+        "durationS": shape["durationS"],
+        "width": shape["width"],
+        "height": shape["height"],
+    }
+    if replace_id:
+        motion_graphic["replaceAssetId"] = replace_id
+        note = (
+            "Re-rendering in the user's browser; the new render replaces the old one "
+            "in place on the timeline. Do not claim it is finished; say it is rendering."
+        )
+    else:
+        note = (
+            "Rendering in the user's browser, then it lands on the timeline. Do "
+            "not claim it is finished; say it is rendering."
+        )
+    return _success_response({"ok": True, "motion_graphic": motion_graphic, "note": note})
 
 
 EDIT_TIMELINE_DESCRIPTION = """\
@@ -336,6 +367,9 @@ It renders with no base URL, so every asset is inline or absolute:
 - fonts via absolute Google Fonts URLs or data: URLs
 - no audio (use place_audio via edit_timeline), no WebGL / three.js, no
   backdrop-filter
+
+To EDIT an existing motion graphic, rewrite its source from the MOTION GRAPHICS
+block and pass its id as replace_asset_id; never add a second one.
 
 Returns once the composition is validated and dispatched, NOT once it has
 rendered. Tell the user it is rendering, never that it is done."""
@@ -420,6 +454,14 @@ def _add_motion_graphic_parameters() -> dict[str, Any]:
                 "type": "integer",
                 "enum": list(MOTION_GRAPHIC_FPS),
                 "description": "Optional render frame rate: 24, 25, 30 (default) or 60.",
+            },
+            "replace_asset_id": {
+                "type": "string",
+                "description": (
+                    "To EDIT an existing motion graphic, pass its asset id from the "
+                    "MOTION GRAPHICS block; the new render replaces it in place on the "
+                    "timeline. Omit to add a new one."
+                ),
             },
         },
         "required": ["html"],

@@ -258,3 +258,21 @@ async def test_motion_graphic_output_survives_the_run_core_extractor(open_timeli
     assert payload is not None, "run_core no longer recognises add_motion_graphic's envelope"
     assert payload["html"] == COMPOSITION
     assert (payload["fps"], payload["width"], payload["name"]) == (60, 1920, "Motion graphic")
+
+
+async def test_a_replacement_resolves_the_asset_it_rewrites(open_timeline) -> None:
+    """Editing a motion graphic re-renders it in place: the tail the agent saw
+    resolves to the full asset id the browser swaps."""
+    from pocketpaw_ee.cloud.chat.runs.run_core import _timeline_payload
+
+    result = await _add_motion_graphic_handler(
+        {"html": COMPOSITION, "replace_asset_id": ASSET_TAIL}
+    )
+    payload = _timeline_payload(text(result), "motion_graphic")
+    assert payload is not None
+    assert payload["replaceAssetId"] == "ast_V1StGXR8Z5jdHi6B0"
+
+
+async def test_a_replacement_of_an_unknown_asset_is_refused(open_timeline) -> None:
+    result = await _add_motion_graphic_handler({"html": COMPOSITION, "replace_asset_id": "ghost"})
+    assert result.get("is_error") is True

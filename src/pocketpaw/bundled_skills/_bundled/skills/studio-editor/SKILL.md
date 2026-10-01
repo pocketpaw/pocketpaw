@@ -217,3 +217,12 @@ third, write a HyperFrames composition and call
   project's frame shape.
 - **Say it is rendering, not done.** The tool returns once the composition is
   dispatched, before a single frame exists.
+
+### Editing a motion graphic
+
+The MOTION GRAPHICS block in your context lists each motion graphic you
+authored, with its id and HTML source. To change one, edit that source and
+call `add_motion_graphic` with `replace_asset_id` set to its id: the new
+render replaces the old one in place on the timeline. Never add a second one
+alongside it. If the block says the source is too large to include, write a
+fresh composition and still pass `replace_asset_id`.
