@@ -18,12 +18,16 @@
 #     deleted;
 #   * the three pocket-backed lanes are untouched: a hosted site still reads its
 #     pocket and a foreign one never does.
+#   * a connected site's FIRST card picture is taken here: a crawl that reached the
+#     verified origin schedules a background screenshot when the site has none yet,
+#     and that schedule can never change the sync's own result.
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
 from pocketpaw_ee.sites import foreign_grounding, kb_ingest
+from pocketpaw_ee.sites import screenshot as screenshot_mod
 from pocketpaw_ee.sites.foreign_grounding import ForeignHarvest
 
 _LONG = (
@@ -50,6 +54,15 @@ class _FakeSite:
         self.set_calls.append(dict(updates))
         for key, value in updates.items():
             setattr(self, key, value)
+
+
+@pytest.fixture(autouse=True)
+def scheduled_shots(monkeypatch) -> list[Any]:
+    """Record the background screenshots a sync schedules instead of running them,
+    so no test here leaves a capture task loose on the loop."""
+    shots: list[Any] = []
+    monkeypatch.setattr(screenshot_mod, "schedule_site_screenshot", shots.append)
+    return shots
 
 
 def _page(title: str, body: str) -> str:
@@ -405,3 +418,67 @@ async def test_a_hosted_site_still_reads_its_pocket_and_never_crawls(monkeypatch
 
     assert report.ingested == 1
     assert calls["ingest"][0][0] == "pocket:pocket-1"
+
+
+# --------------------------------------------------------------------------- #
+# The first card picture of a connected site
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_crawl_that_reached_the_origin_schedules_the_first_screenshot(
+    monkeypatch, scheduled_shots
+):
+    """A connected site never deploys, so the post-deploy capture never runs for
+    it. The sync is the moment its verified origin is known to be up."""
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(host="customer.example", source=_HARVEST_SOURCE))
+    _forbid_pocket_read(monkeypatch)
+    site = _FakeSite(preview_image_url="")
+
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert scheduled_shots == [site]
+
+
+@pytest.mark.asyncio
+async def test_a_site_that_already_has_a_picture_is_not_reshot_by_a_sync(
+    monkeypatch, scheduled_shots
+):
+    """A re-sync is about knowledge. Replacing the picture is the owner's refresh."""
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(host="customer.example", source=_HARVEST_SOURCE))
+    _forbid_pocket_read(monkeypatch)
+
+    await kb_ingest.sync_site_knowledge(_FakeSite(preview_image_url="/api/v1/uploads/x"))
+
+    assert scheduled_shots == []
+
+
+@pytest.mark.asyncio
+async def test_a_crawl_that_never_reached_the_origin_schedules_no_screenshot(
+    monkeypatch, scheduled_shots
+):
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(error="origin_unverified"))
+    _forbid_pocket_read(monkeypatch)
+
+    await kb_ingest.sync_site_knowledge(_FakeSite(preview_image_url=""))
+
+    assert scheduled_shots == []
+
+
+@pytest.mark.asyncio
+async def test_a_screenshot_schedule_that_raises_cannot_change_the_sync_result(monkeypatch):
+    def _boom(_site):
+        raise RuntimeError("scheduler exploded")
+
+    monkeypatch.setattr(screenshot_mod, "schedule_site_screenshot", _boom)
+    _patch_kb(monkeypatch)
+    _patch_harvest(monkeypatch, ForeignHarvest(host="customer.example", source=_HARVEST_SOURCE))
+    _forbid_pocket_read(monkeypatch)
+
+    report = await kb_ingest.sync_site_knowledge(_FakeSite(preview_image_url=""))
+
+    assert report.error == ""
+    assert report.ingested == 2
