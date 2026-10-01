@@ -1,8 +1,9 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
-# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — a new test pins the
-# create preamble's WhatsApp orders step (wa.me link, supplied number only,
-# primary + sticky mobile button) on every engine branch.
+# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — new tests pin the
+# shared `_WHATSAPP_ORDERS_RULE` (when, number handling, no-number, layout) and
+# that it reaches every create branch (step 5a), every refine branch and the
+# brief-driven frontend preamble.
 #
 # Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — the concierge block
 # no longer says a site "ships with" a concierge that is created automatically and
@@ -2559,8 +2560,39 @@ async def test_every_create_branch_builds_whatsapp_orders_from_a_supplied_number
     """
     for engine in (None, "html", "svelte", "react", "ripple"):
         preamble = await _preamble_for(engine)
-        assert "5a. WHATSAPP ORDERS." in preamble, engine
-        assert "https://wa.me/<digits-with-country-code>?text=" in preamble, engine
-        assert "ONLY from a number the user supplied" in preamble, engine
-        assert "never an invented one" in preamble, engine
-        assert "sticky button on mobile" in preamble, engine
+        assert f"5a. {sites_handler._WHATSAPP_ORDERS_RULE}" in preamble, engine
+
+
+async def test_the_whatsapp_rule_covers_when_number_handling_and_layout() -> None:
+    """The rule's four parts, pinned on the one constant every preamble shares."""
+    rule = sites_handler._WHATSAPP_ORDERS_RULE
+    # WHEN: only if the user wants WhatsApp orders, not whenever a card shows a number.
+    assert "When the user wants orders or enquiries on WhatsApp" in rule
+    assert "`https://wa.me/<digits>?text=<url-encoded" in rule
+    assert "ONLY from a number the user supplied" in rule
+    # Number handling.
+    assert "Show the number as written" in rule
+    assert "drop +, spaces, dashes and a leading trunk 0" in rule
+    assert "the address doesn't make it certain, ask" in rule
+    # No number.
+    assert "never ship a placeholder wa.me link" in rule
+    # Layout.
+    assert "sticky button on mobile" in rule
+    assert "never covers the lead form's submit or the footer" in rule
+
+
+@pytest.mark.parametrize("engine", ALL_REFINE_ENGINES)
+async def test_every_refine_branch_carries_the_whatsapp_rule(engine: str | None) -> None:
+    """A request to add a WhatsApp button is a refine too, so every branch gets it."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    assert sites_handler._WHATSAPP_ORDERS_RULE in preamble, engine
+    if engine != "ripple":  # ripple keeps its own widget-rule CTA line
+        assert "(or `tel:` / `mailto:` / `https://wa.me/…`)" in preamble, engine
+
+
+@pytest.mark.parametrize("engine", ["svelte", "ripple"])
+async def test_the_frontend_preamble_carries_the_whatsapp_rule(engine: str) -> None:
+    preamble = sites_handler._frontend_preamble(
+        SurfaceMeta(route_path="/sites"), _landing_brief(engine=engine)
+    )
+    assert sites_handler._WHATSAPP_ORDERS_RULE in preamble
