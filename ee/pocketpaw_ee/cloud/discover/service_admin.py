@@ -16,6 +16,12 @@
 #
 # Updated 2026-10-01 (feat/discover-index): unhiding a listing clears its
 # reports, so one new report can't instantly re-hide it. Hiding keeps them.
+#
+# Updated 2026-10-02 (feat/discover-index, hardening): a hide / unhide here
+# reaches the source item (``sources.hide_at_source``), so the owner can't undo
+# a Discover hide by toggling the template private -> public. A public but
+# hidden template keeps a HIDDEN listing (``upsert_from_source(hide=True)``)
+# instead of losing it, so staff can unhide by listing id; reindex does the same.
 
 from __future__ import annotations
 
@@ -41,7 +47,7 @@ from pocketpaw_ee.cloud.discover.dto import (
     PublicListingResponse,
     UpsertListingRequest,
 )
-from pocketpaw_ee.cloud.discover.sources import get_source
+from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.site_templates import service_admin as site_templates_admin
 
@@ -172,11 +178,13 @@ async def get_public(listing_id: str) -> dict:
 
 
 async def upsert_from_source(
-    source: str, source_id: str, fields: UpsertListingRequest | dict
+    source: str, source_id: str, fields: UpsertListingRequest | dict, *, hide: bool = False
 ) -> str:
     """Create or refresh the listing for ``(source, source_id)`` with the
     source-owned ``fields``; returns its id. Discover-owned state (featured,
-    hidden, reports, remix_count) is set on insert only."""
+    hidden, reports, remix_count) is set on insert only, except that ``hide``
+    (the source item itself is hidden) forces ``hidden`` on. A sync never
+    unhides."""
     # admin-cross-tenant: a source sync writes the one listing keyed by
     # (source, source_id), whatever workspace owns the source item.
     body = UpsertListingRequest.model_validate(fields)
@@ -184,20 +192,21 @@ async def upsert_from_source(
         raise ValidationError("discover.bad_kind", f"{source} listings cannot be {body.kind!r}")
     now = datetime.now(UTC)
     key = {"source": source, "source_id": source_id}
+    set_fields: dict[str, Any] = {**body.model_dump(), "updatedAt": now}
+    on_insert: dict[str, Any] = {
+        **key,
+        "featured": False,
+        "hidden": False,
+        "reports": [],
+        "remix_count": 0,
+        "createdAt": now,
+    }
+    if hide:
+        # Mongo refuses one path in both $set and $setOnInsert.
+        del on_insert["hidden"]
+        set_fields["hidden"] = True
     await DiscoverListing.get_pymongo_collection().update_one(
-        key,
-        {
-            "$set": {**body.model_dump(), "updatedAt": now},
-            "$setOnInsert": {
-                **key,
-                "featured": False,
-                "hidden": False,
-                "reports": [],
-                "remix_count": 0,
-                "createdAt": now,
-            },
-        },
-        upsert=True,
+        key, {"$set": set_fields, "$setOnInsert": on_insert}, upsert=True
     )
     doc = await DiscoverListing.find_one(key)
     await emit(DiscoverListingUpserted(data=_ref(doc)))
@@ -218,27 +227,32 @@ async def remove_from_source(source: str, source_id: str) -> bool:
 
 
 async def sync_site_template(template_id: str) -> None:
-    """List the template when it is public and unhidden; otherwise (private,
-    hidden, deleted) remove its listing."""
+    """List the template when it is public (a hidden one as a hidden listing,
+    so staff can unhide it); otherwise (private, workspace, deleted) remove its
+    listing."""
     # admin-cross-tenant: reacts to template events from every workspace.
     row = await site_templates_admin.get_for_discover(template_id)
     if row is not None and row["public"]:
-        await upsert_from_source(SITE_TEMPLATE, template_id, _site_template_fields(row))
+        await upsert_from_source(
+            SITE_TEMPLATE, template_id, _site_template_fields(row), hide=row["hidden"]
+        )
     else:
         await remove_from_source(SITE_TEMPLATE, template_id)
 
 
 async def reindex(source: str) -> dict:
-    """Idempotent backfill: upsert every public, unhidden item of ``source`` and
-    remove listings whose item is gone, private or hidden. Only
-    ``site_template`` is supported."""
+    """Idempotent backfill: upsert every public item of ``source`` (a hidden
+    one as a hidden listing) and remove listings whose item is gone or no longer
+    public. Only ``site_template`` is supported."""
     # admin-cross-tenant: rebuilds the public index across every workspace.
     if source != SITE_TEMPLATE:
         raise ValidationError("discover.reindex_unsupported", f"Cannot reindex {source!r}")
     rows = await site_templates_admin.iter_public_for_discover()
     keep = {row["id"] for row in rows}
     for row in rows:
-        await upsert_from_source(SITE_TEMPLATE, row["id"], _site_template_fields(row))
+        await upsert_from_source(
+            SITE_TEMPLATE, row["id"], _site_template_fields(row), hide=row["hidden"]
+        )
     stale = await DiscoverListing.find(
         {"source": SITE_TEMPLATE, "source_id": {"$nin": sorted(keep)}}
     ).to_list()
@@ -252,8 +266,8 @@ async def reindex(source: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _moderate(listing_id: str, fields: dict[str, Any]) -> dict:
-    doc = await _any_doc(listing_id)
+async def _moderate(doc: DiscoverListing, fields: dict[str, Any]) -> dict:
+    listing_id = str(doc.id)
     await doc.set({**fields, "updatedAt": datetime.now(UTC)})
     await emit(
         DiscoverListingModerated(data={**_ref(doc), "featured": doc.featured, "hidden": doc.hidden})
@@ -264,16 +278,20 @@ async def _moderate(listing_id: str, fields: dict[str, Any]) -> dict:
 async def set_featured(listing_id: str, featured: bool) -> dict:
     """Feature or unfeature a listing (hidden ones included)."""
     # admin-cross-tenant: platform moderation acts on any workspace's listing.
-    return await _moderate(listing_id, {"featured": featured})
+    return await _moderate(await _any_doc(listing_id), {"featured": featured})
 
 
 async def set_hidden(listing_id: str, hidden: bool) -> dict:
-    """Hide or unhide a listing. Unhiding clears its reports so the next single
-    report can't re-hide it (see ``service.report_listing``); hiding keeps them."""
+    """Hide or unhide a listing, and its source item (``hide_at_source``), so
+    the owner can't re-list a hidden item by re-publishing it. Unhiding clears
+    the reports so the next single report can't re-hide it (see
+    ``service.report_listing``); hiding keeps them. The listing is written first,
+    so the source's own re-sync event finds it already in the new state."""
     # admin-cross-tenant: platform moderation acts on any workspace's listing.
-    return await _moderate(
-        listing_id, {"hidden": True} if hidden else {"hidden": False, "reports": []}
-    )
+    doc = await _any_doc(listing_id)
+    result = await _moderate(doc, {"hidden": True} if hidden else {"hidden": False, "reports": []})
+    await hide_at_source(doc.source, doc.source_id, hidden)
+    return result
 
 
 __all__ = [
