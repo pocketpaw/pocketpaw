@@ -449,6 +449,49 @@ async def test_v2_prompt_describes_actions_as_data_not_tools(concierge_client, m
     assert "calling the matching tool" not in prompt
 
 
+@pytest.mark.asyncio
+async def test_v2_prompt_makes_catalog_products_a_card_not_a_table(
+    concierge_client, model, monkeypatch
+):
+    """Products the reply mentions go in ONE product-card (Add to cart buttons
+    render there), never in a markdown table or a list of names and prices."""
+    client, store = concierge_client
+    _seed_kb(monkeypatch, {})
+    await _site()
+    spec = _spec(
+        catalog=[
+            PawBarCatalogItem(id="espresso", name="Espresso", price_cents=350),
+            PawBarCatalogItem(id="matcha", name="Matcha", price_cents=450),
+        ],
+    )
+    widget = await store.create_widget(_widget(spec=spec))
+
+    res = await _chat(client, widget.id, message="What drinks do you have?")
+    assert res.status_code == 200, res.text
+    prompt = model.user_prompt()
+    assert "names, compares or recommends products from the catalog" in prompt
+    assert "show them in ONE product-card with their catalog ids" in prompt
+    assert "never put products, prices or comparisons in a markdown table or list" in prompt
+
+
+@pytest.mark.asyncio
+async def test_v2_prompt_without_a_catalog_has_no_product_card_directive(
+    concierge_client, model, monkeypatch
+):
+    client, store = concierge_client
+    _seed_kb(monkeypatch, {})
+    await _site()
+    spec = _spec(
+        actions=[PawBarActionSpec(verb="add_to_cart", policy="auto", label="Add to cart")],
+    )
+    widget = await store.create_widget(_widget(spec=spec))
+
+    res = await _chat(client, widget.id)
+    assert res.status_code == 200, res.text
+    prompt = model.user_prompt()
+    assert "show them in ONE product-card" not in prompt
+
+
 # --------------------------------------------------------------------------- #
 # 3. The frame is first and constant
 # --------------------------------------------------------------------------- #
@@ -501,6 +544,13 @@ def test_frame_is_a_constant_that_states_the_rules():
     lowered = frame.lower()
     for rule in ("this site", "knowledge", "code", "instructions", "data"):
         assert rule in lowered
+
+
+def test_both_frames_allow_a_product_card_alongside_short_answers():
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    for frame in (concierge_runtime.FRAME, concierge_runtime.FRAME_DOC_CODE):
+        assert "a few sentences of plain text, plus a product card when you show products" in frame
 
 
 # --------------------------------------------------------------------------- #

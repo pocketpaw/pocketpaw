@@ -79,8 +79,9 @@ FRAME = (
     "5. You cannot call tools or take actions yourself. When the visitor wants to "
     "buy, book or send something, point them to the widget's own buttons and forms "
     "or to contacting the business.\n"
-    "6. Keep answers short: a few sentences of plain text, in the visitor's language "
-    "unless <owner-settings> says otherwise."
+    "6. Keep answers short: a few sentences of plain text, plus a product card when "
+    "you show products, in the visitor's language unless <owner-settings> says "
+    "otherwise."
 )
 
 # The frame for a site whose owner turned on "Answer with code examples from your
@@ -600,14 +601,17 @@ def _catalog_and_actions_block(widget: Any) -> str:
                 else "sent to the business for a person to approve"
             )
             parts.append(f"   - {a['verb']} ({label}): {behavior}.")
-    parts.append(_cards_paragraph(declared))
+    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog)))
     parts.append("</catalog>")
     return _data_block(parts)
 
 
-def _cards_paragraph(declared: Sequence[dict[str, Any]]) -> str:
+def _cards_paragraph(declared: Sequence[dict[str, Any]], *, has_catalog: bool = False) -> str:
     """How to write a ```pawbar-card: the compact manifest (one line per widget),
-    the host events a button may emit, and each gated verb's form fields.
+    the host events a button may emit, and each gated verb's form fields. With a
+    catalog it also makes the product-card mandatory for any product the reply
+    names: the widget renders GFM tables, so without this the model lists
+    products as a table and the visitor gets no Add to cart buttons.
 
     This replaces the legacy ``_form_block``, which teaches the old
     ``{"kind": "form"}`` card and tells the model to call an action tool."""
@@ -628,6 +632,15 @@ def _cards_paragraph(declared: Sequence[dict[str, Any]]) -> str:
         'state, or emit add_to_cart (value {"product_id": "<id>"}) or checkout, '
         "nothing else.",
     ]
+    if has_catalog:
+        lines.append(
+            "   Whenever your reply names, compares or recommends products from the "
+            "catalog, show them in ONE product-card with their catalog ids (most "
+            "relevant first) after a sentence or two of text; "
+            "never put products, prices or comparisons in a markdown table or list. "
+            "When the <page> block names this page's product and the visitor asks "
+            'about "this", answer about that product; a card for it is fine.'
+        )
     gated = [
         a
         for a in declared
