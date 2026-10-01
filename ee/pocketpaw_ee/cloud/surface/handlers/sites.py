@@ -1,5 +1,12 @@
 # sites.py — /sites surface preamble.
 #
+# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — `_create_preamble`
+# gains BUILD step 5a: a "WhatsApp orders" call-to-action is a
+# `https://wa.me/<digits>?text=<prefilled order>` link built only from a number
+# the user supplied (typed or on an attached card), shown as the primary button
+# and as a sticky button on mobile. Pairs with the chat attachment entry, which
+# now treats a photographed visiting card as a source rather than page content.
+#
 # Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — `_CONCIERGE_NOTE`
 # no longer says a published site "ships with" a concierge that is "provisioned
 # automatically" and "ON by default". None of that is true any more: the OWNER
@@ -1754,6 +1761,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "'A one-page site for the studio that leads with the work and "
         "pushes to the enquiry form.' Then build.\n"
         f"5. {build_step}\n"
+        "5a. WHATSAPP ORDERS. A 'WhatsApp orders' call-to-action is a link to "
+        "`https://wa.me/<digits-with-country-code>?text=<url-encoded prefilled "
+        "order>`, built ONLY from a number the user supplied (typed, or on a card "
+        "they attached) and never an invented one; show it as the primary button "
+        "and as a sticky button on mobile.\n"
         "5b. " + _LOOK_RULE + "`sites-ship-fixes` lists the defects that most "
         "often come back as a first revision if you want a checklist.\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "

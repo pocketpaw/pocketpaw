@@ -1,6 +1,9 @@
 # tests/cloud/chat/test_attachment_media_publishing.py — the surface gate on
 # republishing a chat attachment to the WORLD-READABLE bucket.
 # Created 2026-08-31 (feat/sites-public-asset-uploads). New file.
+# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — a new test pins that
+# the sites entry lets the model treat a document photo (visiting card, menu) as a
+# SOURCE and drops the unconditional "so the site can show it" wording.
 #
 # Under test: ``chat.agent_service._publish_media_attachment``.
 #
@@ -115,6 +118,33 @@ async def test_a_sites_image_is_published_with_an_embeddable_instruction(monkeyp
     # whole feature exists to prevent.
     assert "do not substitute a stock asset" in out
     assert store.calls[0]["workspace_id"] == "ws1"
+
+
+@pytest.mark.asyncio
+async def test_a_sites_image_may_be_a_source_rather_than_page_content(monkeypatch, png) -> None:
+    """PH-10: a photographed visiting card must not end up ON the website.
+
+    The entry used to tell the model every attached image was there "so the site
+    can show it", so a card attached to build the site from got embedded. The
+    model now decides from the pixels: a document is a source to copy from, and
+    anything else keeps the verbatim-embed rule.
+    """
+    _install(monkeypatch, FakeStore())
+
+    out = await agent_service._publish_media_attachment(
+        FakeCtx(), FakeRec("card.jpg", "image/png", 40), png, surface="sites"
+    )
+
+    assert out is not None
+    assert "The user attached this so the site can show it" not in out
+    assert "If it is a DOCUMENT" in out
+    assert "visiting card" in out
+    assert "it is a SOURCE, not page content" in out
+    assert "exactly as written" in out
+    assert "do NOT embed the photo unless the user asks" in out
+    # The embed branch is intact.
+    assert "Otherwise (a logo, a product or a shop photo)" in out
+    assert "use it VERBATIM as <img src=" in out
 
 
 @pytest.mark.asyncio

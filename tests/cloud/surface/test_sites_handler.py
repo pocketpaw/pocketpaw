@@ -1,5 +1,9 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
+# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — a new test pins the
+# create preamble's WhatsApp orders step (wa.me link, supplied number only,
+# primary + sticky mobile button) on every engine branch.
+#
 # Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — the concierge block
 # no longer says a site "ships with" a concierge that is created automatically and
 # on by default; the owner creates it in the dashboard. A new test pins that the
@@ -2546,3 +2550,17 @@ async def test_every_create_branch_forbids_the_re_create() -> None:
             f"the {engine or 'default'} create branch never forbids the re-create, "
             "so a follow-up change in the same conversation mints a second site"
         )
+
+
+async def test_every_create_branch_builds_whatsapp_orders_from_a_supplied_number() -> None:
+    """PH-10: a shop's WhatsApp order button is a wa.me link, never an invented one.
+
+    The step lives beside the engine build step, so it must reach every engine.
+    """
+    for engine in (None, "html", "svelte", "react", "ripple"):
+        preamble = await _preamble_for(engine)
+        assert "5a. WHATSAPP ORDERS." in preamble, engine
+        assert "https://wa.me/<digits-with-country-code>?text=" in preamble, engine
+        assert "ONLY from a number the user supplied" in preamble, engine
+        assert "never an invented one" in preamble, engine
+        assert "sticky button on mobile" in preamble, engine
