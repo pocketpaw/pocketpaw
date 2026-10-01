@@ -17,7 +17,6 @@ from pocketpaw_ee.cloud.metering import service as metering
 from pocketpaw_ee.cloud.metering.domain import DailyMeter
 from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
-
 _W = {"subject_type": "workspace"}
 
 
