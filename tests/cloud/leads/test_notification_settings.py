@@ -13,6 +13,11 @@
 #     the MockTransport); only ``send_template`` is spied. No opt-in, no
 #     ``partner_client_id``, an archived client (before or after queueing) and
 #     missing platform credentials each send nothing and leave email alone.
+#     Review fixes (same day): the 30-a-day cap per number, consent follows the
+#     number (a PATCH that changes it clears the opt-in), opt-out or a number
+#     change after queueing kills the row, a failed send-time lookup retries,
+#     MSG91 4xx is dead and 5xx retries (no PII in last_error), and visitor
+#     text is defanged (no formatting marks, no live links) and length-capped.
 
 from __future__ import annotations
 
@@ -996,11 +1001,33 @@ async def test_wa_opted_in_partner_client_gets_one_whatsapp(
 
 async def test_wa_body_is_one_line_and_capped() -> None:
     text = outbox.whatsapp_lead_text(
-        {"site_name": "S", "name": "N\nX", "message": "word " * 2000, "email": "a@b.co"}
+        {
+            "site_name": "S" * 300,
+            "name": "N\nX" * 200,
+            "message": "word " * 2000,
+            "phone": "+91 98765 43210",
+        }
     )
     assert len(text) <= outbox.WHATSAPP_BODY_CAP
     assert "\n" not in text and "     " not in text
-    assert text.startswith("New enquiry for S via Paw Sites by PocketPaw: N X — word")
+    # The contact survives a huge message; the message is what gets cut.
+    assert text.endswith("… Contact: +91 98765 43210")
+    assert text.startswith("New enquiry for " + "S" * 79 + "…")
+
+
+async def test_wa_visitor_text_is_defanged() -> None:
+    text = outbox.whatsapp_lead_text(
+        {
+            "site_name": "Shop",
+            "name": "*Boss* _Ravi_ ~x~ `y`",
+            "message": "pay at https://evil.example/x or HTTP://a.b",
+            "email": "ravi_k@x.com",
+        }
+    )
+    assert text == (
+        "New enquiry for Shop via Paw Sites by PocketPaw: Boss Ravi x y — "
+        "pay at hxxps://evil.example/x or HxxP://a.b Contact: ravi_k@x.com"
+    )
 
 
 @pytest.mark.parametrize("case", ["no_opt_in", "not_sold", "archived"])
@@ -1057,3 +1084,127 @@ async def test_wa_missing_platform_credentials_warns_once_and_keeps_other_sinks(
     assert wa_spy == [] and await _wa_rows() == []
     assert [m["to"] for m in _emails(net)] == [[OWNER_EMAIL]]
     assert len(_hooks(net, SITE_HOOK)) == 1
+
+
+def _msg91_answers(monkeypatch, status: int) -> list[httpx.Request]:
+    """MSG91 answers ``status``; everything else 200 (email off the hook)."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if "msg91" in request.headers.get("host", ""):
+            return httpx.Response(status, json={"status": "error", "to": SHOP_PHONE})
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    real = httpx.AsyncClient.__init__
+
+    def init(self, *args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+    return seen
+
+
+async def test_wa_daily_cap_per_number(net, partner_journal, msg91_on, wa_spy, caplog) -> None:
+    from datetime import UTC, datetime
+
+    ws, site, _ = await _partner_site()
+    now = datetime.now(UTC)
+    for _ in range(ns.WHATSAPP_DAILY_CAP):
+        await NotificationOutboxItem(
+            workspace=ws,
+            kind="lead_captured",
+            sink="whatsapp",
+            target=SHOP_PHONE,
+            payload={},
+            status="sent",
+            created_at=now,
+            next_at=now,
+        ).insert()
+    lead_id = await _lead(ws, site, full_name="Priya", message="hi")
+    with caplog.at_level("WARNING", logger=ns.logger.name):
+        await _capture(ws, site, lead_id)
+    await outbox.process_due()
+
+    assert wa_spy == [] and len(await _wa_rows()) == ns.WHATSAPP_DAILY_CAP
+    warnings = [r.getMessage() for r in caplog.records if "daily cap" in r.getMessage()]
+    assert len(warnings) == 1 and SHOP_PHONE not in warnings[0]
+    assert [m["to"] for m in _emails(net)] == [[OWNER_EMAIL]]
+
+
+@pytest.mark.parametrize("re_opt_in", [False, True])
+async def test_wa_consent_follows_the_number(
+    net, partner_journal, msg91_on, wa_spy, re_opt_in
+) -> None:
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    ws, site, client_id = await _partner_site()
+    new_number = "+919811122233"
+    body: dict = {"whatsapp": new_number}
+    if re_opt_in:
+        body["whatsapp_opt_in_at"] = datetime.now(UTC)
+    updated = await partners_service.update_client(_ctx(ws), client_id=client_id, body=body)
+    assert (updated.whatsapp_opt_in_at is not None) is re_opt_in
+
+    lead_id = await _lead(ws, site, full_name="Priya", message="hi")
+    await _capture(ws, site, lead_id)
+    await outbox.process_due()
+    assert [c["to_number"] for c in wa_spy] == ([new_number] if re_opt_in else [])
+
+
+@pytest.mark.parametrize("change", ["opt_out", "new_number"])
+async def test_wa_consent_change_after_queueing_kills_the_row(
+    net, partner_journal, msg91_on, wa_spy, change
+) -> None:
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    ws, site, client_id = await _partner_site()
+    lead_id = await _lead(ws, site, full_name="Priya", message="hi")
+    await _capture(ws, site, lead_id)
+    body = {"whatsapp_opt_in_at": None} if change == "opt_out" else {"whatsapp": "+919811122233"}
+    await partners_service.update_client(_ctx(ws), client_id=client_id, body=body)
+    await outbox.process_due()
+
+    assert wa_spy == []  # neither the old nor the new number is messaged
+    [row] = await _wa_rows()
+    assert row.status == "dead" and row.last_error == "recipient no longer allowed"
+
+
+async def test_wa_send_time_lookup_failure_retries(
+    net, partner_journal, msg91_on, wa_spy, monkeypatch
+) -> None:
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    ws, site, _ = await _partner_site()
+    lead_id = await _lead(ws, site, full_name="Priya", message="hi")
+    await _capture(ws, site, lead_id)
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("journal down")
+
+    monkeypatch.setattr(partners_service, "get_client", broken)
+    await outbox.process_due()
+
+    assert wa_spy == []
+    [row] = await _wa_rows()
+    assert row.status == "pending" and row.attempts == 1
+
+
+@pytest.mark.parametrize(("status", "outcome"), [(400, "dead"), (429, "pending"), (503, "pending")])
+async def test_wa_msg91_4xx_is_dead_and_5xx_retries(
+    partner_journal, email_on, msg91_on, wa_spy, monkeypatch, status, outcome
+) -> None:
+    ws, site, _ = await _partner_site()
+    lead_id = await _lead(ws, site, full_name="Priya", phone="555 010 1234", message="hi")
+    await _capture(ws, site, lead_id)
+    _msg91_answers(monkeypatch, status)
+    await outbox.process_due()
+
+    assert len(wa_spy) == 1
+    [row] = await _wa_rows()
+    assert row.status == outcome
+    assert row.last_error == f"msg91: msg91.http_error {status}"
+    assert SHOP_PHONE not in row.last_error and "555" not in row.last_error

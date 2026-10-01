@@ -37,7 +37,9 @@
 # settings (``POCKETPAW_MSG91_PLATFORM_*``), for one product message: a new lead
 # on a partner-sold site, sent to the shop owner who opted in. It is not a tenant
 # key, so the "never env-inline" rule above (which is about tenant traffic)
-# doesn't apply to it; ``resolve_credentials`` is unchanged.
+# doesn't apply to it; ``resolve_credentials`` is unchanged. ``Msg91Error`` gained
+# an optional ``status`` (the HTTP status of an ``msg91.http_error``) so a caller
+# can tell a permanent 4xx from a retryable 429/5xx.
 
 from __future__ import annotations
 
@@ -87,13 +89,14 @@ class Msg91Error(Exception):
     ``code`` is machine-readable so the send log can record WHY without
     re-parsing prose. The message is truncated by the caller before it reaches
     the log — a provider error body must never carry the request headers back
-    into storage.
+    into storage. ``status`` is the HTTP status for ``msg91.http_error``, else None.
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, status: int | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.status = status
 
 
 class Msg91NotConfigured(Exception):
@@ -259,8 +262,9 @@ class Msg91WhatsAppClient:
     async def send_template(self, *, to_number: str, body_text: str) -> str:
         """Send the pre-approved template to one number; return the provider id.
 
-        ``body_text`` fills the template's first body variable — the draft copy
-        a human approved in the Tray. Raises ``Msg91Error`` on a non-2xx or an
+        ``body_text`` fills the template's first body variable: the draft copy a
+        human approved in the Tray (/growth), or the partner-lead text the
+        notification outbox builds. Raises ``Msg91Error`` on a non-2xx or an
         error-shaped 2xx body.
         """
         import httpx
@@ -306,6 +310,7 @@ class Msg91WhatsAppClient:
             raise Msg91Error(
                 "msg91.http_error",
                 f"MSG91 returned {resp.status_code}: {_scrub(resp.text, creds.authkey)[:300]}",
+                status=resp.status_code,
             )
         return _extract_message_id(resp, creds.authkey)
 
