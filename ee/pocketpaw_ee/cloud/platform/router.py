@@ -23,6 +23,9 @@ alongside its siblings (credits < users < workspaces).
 
 Updated 2026-09-16 (feat/platform-entitlements, chunk 7): mounted
 ``entitlements_router`` — plan & entitlement-override reads/writes.
+
+Updated 2026-10-02 (feat/discover-moderation, DS-5): mounted ``discover_router``
+— staff list and feature / hide / unhide / reindex for the Discover index.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from pocketpaw_ee.cloud._core.platform_deps import require_platform
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.platform.credits import router as credits_router
+from pocketpaw_ee.cloud.platform.discover import router as discover_router
 from pocketpaw_ee.cloud.platform.entitlements import router as entitlements_router
 from pocketpaw_ee.cloud.platform.health import router as health_router
 from pocketpaw_ee.cloud.platform.revenue import router as revenue_router
@@ -55,6 +59,7 @@ router = APIRouter(prefix="/platform", tags=["platform"])
 # reaches their routes too — a sub-router that forgot require_platform fails
 # there rather than shipping.
 router.include_router(credits_router)
+router.include_router(discover_router)
 router.include_router(entitlements_router)
 router.include_router(health_router)
 router.include_router(revenue_router)
