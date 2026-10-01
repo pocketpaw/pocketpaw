@@ -118,6 +118,13 @@ def is_safe_webhook_url(url: str | None) -> bool:
     hostname = (parsed.hostname or "").lower()
     if not hostname or hostname in _FORBIDDEN_HOSTNAMES:
         return False
+    # Any port 1-65535, the same rule the send path (SafeFetcher.post) applies.
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port is not None and not 1 <= port <= 65535:
+        return False
     literal_ip = _host_as_literal_ip(hostname)
     if literal_ip is not None and _ip_is_unsafe(literal_ip):
         return False
