@@ -658,6 +658,78 @@ async def test_the_read_never_returns_the_pockets_published_site(store):  # noqa
 
 
 # --------------------------------------------------------------------------- #
+# Plan vs switch: the read must say WHICH half is missing
+# --------------------------------------------------------------------------- #
+
+
+def _sites_billing_on():
+    """Turn the sites paywall on, so the plan half is actually consulted."""
+    return patch("pocketpaw_ee.cloud.billing.enforcement.sites_enforced", return_value=True)
+
+
+async def _created_but_switched_off(workspace_id: str, **fields: Any) -> None:
+    """A concierge the owner created and has not switched on yet. CR-12 creates
+    every concierge switched OFF, so this is the state right after a create."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    site = await sites_service.foreign_site_for_pocket(workspace_id, _POCKET)
+    assert site is not None, "bind first"
+    site.concierge_created_at = datetime.now(UTC)
+    site.concierge_enabled = False
+    for name, value in fields.items():
+        setattr(site, name, value)
+    await site.save()
+
+
+async def test_a_paid_concierge_switched_off_reads_as_entitled_not_as_unsold(store):  # noqa: ARG001
+    """The reported bug: a paid, created concierge showed the "your plan does not
+    include it" copy, because the only field the panel had was
+    ``concierge_available``, which is also False for a switched-off concierge."""
+    ws = "ws-ep-plan-vs-switch"
+    await _fund(ws)
+    await _verify_origin(ws)
+    app = _build_app(ws)
+    async with _client(app) as c:
+        assert (await _bind(c, ws)).status_code == 200
+    await _created_but_switched_off(ws)
+
+    with _sites_billing_on():
+        async with _client(app) as c:
+            resp = await _read(c, ws)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["subscription_status"] == "active", "the control: the month was bought"
+    assert body["concierge_entitled"] is True, "the plan sells a concierge"
+    assert body["concierge_enabled"] is False
+    assert body["concierge_exists"] is True
+    assert body["concierge_available"] is False, "still off, so not available"
+    assert body["embed_snippet"] == ""
+
+
+async def test_an_unpaid_concierge_reads_as_not_entitled(store):  # noqa: ARG001
+    """The other half: with no live subscription the plan half is False, whatever
+    the switch says."""
+    ws = "ws-ep-plan-unpaid"
+    await _fund(ws)
+    await _verify_origin(ws)
+    app = _build_app(ws)
+    async with _client(app) as c:
+        assert (await _bind(c, ws)).status_code == 200
+    await _created_but_switched_off(ws, concierge_enabled=True, subscription_status="none")
+
+    with _sites_billing_on():
+        async with _client(app) as c:
+            body = (await _read(c, ws)).json()
+
+    assert body["concierge_entitled"] is False
+    assert body["concierge_enabled"] is True
+    assert body["concierge_exists"] is True
+    assert body["concierge_available"] is False
+    assert body["embed_snippet"] == ""
+
+
+# --------------------------------------------------------------------------- #
 # The wiring itself
 # --------------------------------------------------------------------------- #
 
