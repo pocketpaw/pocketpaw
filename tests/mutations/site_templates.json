@@ -457,8 +457,8 @@
   {
     "label": "refresh: let a non-owner refresh",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    doc = await _owned(workspace_id, user_id, template_id)\n    asset = await _copy_source_preview(doc)\n",
-    "replace": "    doc = await _fetch_visible(workspace_id, user_id, template_id)\n    asset = await _copy_source_preview(doc)\n",
+    "find": "    doc = await _owned(workspace_id, user_id, template_id)\n    # Re-check the owner can still read the source site, through the same rule\n",
+    "replace": "    doc = await _fetch_visible(workspace_id, user_id, template_id)\n    # Re-check the owner can still read the source site, through the same rule\n",
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_only_the_owner_may_refresh",
       "tests/cloud/site_templates/test_site_templates.py::test_route_preview_refresh"
