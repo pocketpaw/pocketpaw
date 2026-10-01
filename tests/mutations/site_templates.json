@@ -2,55 +2,20 @@
   {
     "label": "meta: put the snapshot into the response",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    return SiteTemplateResponse.model_validate(meta, from_attributes=True).model_dump(mode=\"json\")\n",
-    "replace": "    return {\n        **SiteTemplateResponse.model_validate(meta, from_attributes=True).model_dump(mode=\"json\"),\n        \"snapshot\": doc.snapshot,\n    }\n",
+    "find": "    return SiteTemplateResponse.model_validate(fields).model_dump(mode=\"json\")\n",
+    "replace": "    return {\n        **SiteTemplateResponse.model_validate(fields).model_dump(mode=\"json\"),\n        \"snapshot\": doc.snapshot,\n    }\n",
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_save_list_get_use_round_trip",
       "tests/cloud/site_templates/test_site_templates.py::test_events_carry_meta_never_the_snapshot",
-      "tests/cloud/site_templates/test_site_templates.py::test_routes_happy_path"
-    ]
-  },
-  {
-    "label": "list: drop the workspace filter",
-    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "        SiteTemplate.workspace == workspace_id,\n        SiteTemplate.owner == user_id,\n        SiteTemplate.visibility == \"private\",\n",
-    "replace": "        SiteTemplate.owner == user_id,\n        SiteTemplate.visibility == \"private\",\n",
-    "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_list_excludes_another_workspaces_templates"
-    ]
-  },
-  {
-    "label": "list: drop the owner filter",
-    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "        SiteTemplate.owner == user_id,\n        SiteTemplate.visibility == \"private\",\n",
-    "replace": "        SiteTemplate.visibility == \"private\",\n",
-    "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_list_excludes_another_users_templates"
-    ]
-  },
-  {
-    "label": "get: let a non-owner read a private template",
-    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    return doc.owner == user_id\n",
-    "replace": "    return True\n",
-    "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_peer_cannot_get_or_use"
-    ]
-  },
-  {
-    "label": "get: drop the workspace filter",
-    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "        SiteTemplate.id == _oid(template_id), SiteTemplate.workspace == workspace_id\n",
-    "replace": "        SiteTemplate.id == _oid(template_id)\n",
-    "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_other_workspace_is_not_found"
+      "tests/cloud/site_templates/test_site_templates.py::test_routes_happy_path",
+      "tests/cloud/site_templates/test_site_templates.py::test_owner_is_hidden_from_non_owners"
     ]
   },
   {
     "label": "save: skip the Sites plan gate",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "    await sites_service.require_sites_plan(workspace_id)\n",
-    "replace": "",
+    "find": "\n    await sites_service.require_sites_plan(workspace_id)\n    source = ",
+    "replace": "\n    source = ",
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_free_plan_cannot_save",
       "tests/cloud/site_templates/test_site_templates.py::test_routes_refusals"
@@ -84,15 +49,6 @@
     ]
   },
   {
-    "label": "delete: let a non-owner delete",
-    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
-    "find": "        SiteTemplate.owner == user_id,\n    )\n    if doc is None:\n",
-    "replace": "    )\n    if doc is None:\n",
-    "tests": [
-      "tests/cloud/site_templates/test_site_templates.py::test_peer_cannot_delete"
-    ]
-  },
-  {
     "label": "use: drop the template id from the new pocket",
     "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
     "find": "        template_id=str(doc.id),\n",
@@ -120,12 +76,353 @@
     ]
   },
   {
+    "label": "list mine: drop the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        filters: list[Any] = [SiteTemplate.workspace == workspace_id, SiteTemplate.owner == user_id]\n",
+    "replace": "        filters: list[Any] = [SiteTemplate.owner == user_id]\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_list_excludes_another_workspaces_templates"
+    ]
+  },
+  {
+    "label": "list mine: drop the owner filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        filters: list[Any] = [SiteTemplate.workspace == workspace_id, SiteTemplate.owner == user_id]\n",
+    "replace": "        filters: list[Any] = [SiteTemplate.workspace == workspace_id]\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_list_excludes_another_users_templates"
+    ]
+  },
+  {
+    "label": "list workspace: drop the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        filters = [SiteTemplate.workspace == workspace_id, SiteTemplate.visibility == \"workspace\"]\n",
+    "replace": "        filters = [SiteTemplate.visibility == \"workspace\"]\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_visibility_matrix"
+    ]
+  },
+  {
+    "label": "list public: drop the hidden filter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        filters = [SiteTemplate.visibility == \"public\", {\"hidden\": {\"$ne\": True}}]\n",
+    "replace": "        filters = [SiteTemplate.visibility == \"public\"]\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_third_distinct_report_hides",
+      "tests/cloud/site_templates/test_site_templates.py::test_public_list_paginates_newest_first"
+    ]
+  },
+  {
+    "label": "list: ignore the cursor",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "            filters.append({\"_id\": {\"$lt\": PydanticObjectId(body.cursor)}})\n",
+    "replace": "            PydanticObjectId(body.cursor)\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_public_list_paginates_newest_first"
+    ]
+  },
+  {
+    "label": "visibility: ignore the template's workspace (non-member reads a workspace template)",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if doc.workspace == workspace_id:\n        if doc.owner == user_id or doc.visibility == \"workspace\":\n",
+    "replace": "    if True:\n        if doc.owner == user_id or doc.visibility == \"workspace\":\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_visibility_matrix",
+      "tests/cloud/site_templates/test_site_templates.py::test_other_workspace_is_not_found"
+    ]
+  },
+  {
+    "label": "visibility: a same-workspace non-owner reads/uses a private template",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        if doc.owner == user_id or doc.visibility == \"workspace\":\n",
+    "replace": "        if True:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_peer_cannot_get_or_use",
+      "tests/cloud/site_templates/test_site_templates.py::test_visibility_matrix"
+    ]
+  },
+  {
+    "label": "visibility: drop the hidden check on get / use",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    return doc.visibility == \"public\" and not doc.hidden\n",
+    "replace": "    return doc.visibility == \"public\"\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_third_distinct_report_hides"
+    ]
+  },
+  {
+    "label": "patch/delete: let a non-owner act",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        SiteTemplate.owner == user_id,\n    )\n    if doc is None:\n",
+    "replace": "    )\n    if doc is None:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_peer_cannot_delete",
+      "tests/cloud/site_templates/test_site_templates.py::test_visibility_matrix",
+      "tests/cloud/site_templates/test_site_templates.py::test_routes_sharing"
+    ]
+  },
+  {
+    "label": "meta: expose the owner id to non-owners",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "owner=meta.owner if mine else None,",
+    "replace": "owner=meta.owner,",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_owner_is_hidden_from_non_owners",
+      "tests/cloud/site_templates/test_site_templates.py::test_routes_sharing",
+      "tests/cloud/site_templates/test_site_templates.py::test_public_use_lands_in_the_callers_workspace"
+    ]
+  },
+  {
+    "label": "meta: show hidden to non-owners",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "hidden=meta.hidden and mine)",
+    "replace": "hidden=meta.hidden)",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_hidden_flag_is_shown_to_the_owner_only"
+    ]
+  },
+  {
+    "label": "publish: skip find_private_asset_refs",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    refs = find_private_asset_refs(snapshot)\n",
+    "replace": "    refs = []\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_a_private_asset",
+      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_private_assets",
+      "tests/cloud/site_templates/test_site_templates.py::test_route_publish_refusal_code"
+    ]
+  },
+  {
+    "label": "publish: skip the source-gate check",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if not await pockets_service.snapshot_source_visible(\n",
+    "replace": "    if False and not await pockets_service.snapshot_source_visible(\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_gated_source",
+      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_gated_source"
+    ]
+  },
+  {
+    "label": "publish: save public without the checks",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if body.visibility == \"public\":\n        await _check_publishable(workspace_id, snapshot)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_a_private_asset",
+      "tests/cloud/site_templates/test_site_templates.py::test_publish_refuses_gated_source"
+    ]
+  },
+  {
+    "label": "patch: make public without the checks",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        _check_size(doc.snapshot)\n        await _check_publishable(workspace_id, doc.snapshot)\n",
+    "replace": "        _check_size(doc.snapshot)\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_private_assets",
+      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_refuses_gated_source"
+    ]
+  },
+  {
+    "label": "patch: skip the plan gate on going public",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        await sites_service.require_sites_plan(workspace_id)\n        _check_size(doc.snapshot)\n",
+    "replace": "        _check_size(doc.snapshot)\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_patch_to_public_runs_the_plan_gate"
+    ]
+  },
+  {
+    "label": "report: allow the owner to report",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if doc.owner == user_id:\n        raise Forbidden(\"site_templates.own_template\"",
+    "replace": "    if False:\n        raise Forbidden(\"site_templates.own_template\"",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_owner_cannot_report",
+      "tests/cloud/site_templates/test_site_templates.py::test_routes_sharing"
+    ]
+  },
+  {
+    "label": "report: count duplicate reports from one user",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "            \"reports.user\": {\"$ne\": user_id},\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_report_is_idempotent_per_user",
+      "tests/cloud/site_templates/test_site_templates.py::test_duplicate_reports_do_not_reach_the_threshold"
+    ]
+  },
+  {
+    "label": "report: allow reporting a workspace template",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "    if doc.visibility != \"public\":\n        raise NotFound(\"site_template\", template_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_reporting_a_template_you_cannot_see_is_not_found"
+    ]
+  },
+  {
+    "label": "report: drop the cap",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "            f\"reports.{MAX_REPORTS - 1}\": {\"$exists\": False},\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_reports_stop_at_the_cap"
+    ]
+  },
+  {
+    "label": "report: never hide",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "len(fresh.reports) >= HIDE_THRESHOLD",
+    "replace": "len(fresh.reports) >= HIDE_THRESHOLD + 100",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_third_distinct_report_hides"
+    ]
+  },
+  {
+    "label": "report: hide audit names the reporter",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "                    \"system\",\n",
+    "replace": "                    user_id,\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_third_distinct_report_hides"
+    ]
+  },
+  {
+    "label": "use: copy into the template's workspace instead of the caller's",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "        workspace_id=workspace_id,\n        owner=user_id,\n",
+    "replace": "        workspace_id=doc.workspace,\n        owner=user_id,\n",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_public_use_lands_in_the_callers_workspace",
+      "tests/cloud/site_templates/test_site_templates.py::test_visibility_matrix",
+      "tests/cloud/site_templates/test_site_templates.py::test_public_use_obeys_the_callers_plan"
+    ]
+  },
+  {
+    "label": "use: leak the template's workspace id into a foreign audit row",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": " if doc.workspace == workspace_id else {}",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_public_use_lands_in_the_callers_workspace"
+    ]
+  },
+  {
     "label": "events: fan template events out to the workspace",
     "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
-    "find": "            if owner := d.get(\"owner\"):\n                return [owner]\n",
-    "replace": "            if owner := d.get(\"owner\"):\n                return [owner, \"someone-else\"]\n",
+    "find": "            if recipient := d.get(\"user_id\"):\n                return [recipient]\n",
+    "replace": "            if recipient := d.get(\"user_id\"):\n                return [recipient, \"someone-else\"]\n",
     "tests": [
       "tests/cloud/site_templates/test_site_templates.py::test_template_events_reach_only_the_owner"
+    ]
+  },
+  {
+    "label": "events: send used to the template owner, not the caller",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/service.py",
+    "find": "SiteTemplateUsed(data=_event_data(doc, user_id, workspace_id, pocket_id=pocket_id))",
+    "replace": "SiteTemplateUsed(data=_event_data(doc, doc.owner, workspace_id, pocket_id=pocket_id))",
+    "tests": [
+      "tests/cloud/site_templates/test_site_templates.py::test_public_use_lands_in_the_callers_workspace"
+    ]
+  },
+  {
+    "label": "assets: drop the uploads_api shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    (\"uploads_api\", re.compile(_HOST + r\"/api/v1/uploads/[A-Za-z0-9]\" + _TAIL)),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_uploads_api"
+    ]
+  },
+  {
+    "label": "assets: drop the files_api shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    (\"files_api\", re.compile(_HOST + r\"/api/v1/files(?:/[A-Za-z0-9]|\\?)\" + _TAIL)),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_files_api"
+    ]
+  },
+  {
+    "label": "assets: drop the media_api shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    (\"media_api\", re.compile(_HOST + r\"/api/v1/media/[A-Za-z0-9]\" + _TAIL)),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_media_api_from_studio_save_generated"
+    ]
+  },
+  {
+    "label": "assets: drop the avatar_api shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    (\"avatar_api\", re.compile(_HOST + r\"/api/v1/auth/avatar/[A-Za-z0-9]\" + _TAIL)),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_avatar_api"
+    ]
+  },
+  {
+    "label": "assets: drop the uploads_mount shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    (\"uploads_mount\", re.compile(r\"(?<![\\w.~%/-])/uploads/[A-Za-z0-9]\" + _TAIL)),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_uploads_mount_relative"
+    ]
+  },
+  {
+    "label": "assets: drop the uploads storage-key shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "(?:[a-z][a-z0-9_-]*/\\d{6}/[0-9a-f]{32}\"",
+    "replace": "(?:NEVERMATCH\"",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_uploads_storage_key"
+    ]
+  },
+  {
+    "label": "assets: drop the media storage-key shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "            r\"|generated/\\d{13}-[0-9a-f]{12})\" + _TAIL\n",
+    "replace": "            r\")\" + _TAIL\n",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_media_storage_key"
+    ]
+  },
+  {
+    "label": "assets: drop the presigned shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "r\"[?&](?:X-Amz-Signature|X-Goog-Signature|Signature)=\"",
+    "replace": "r\"[?&](?:NEVERMATCH)=\"",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_presigned_s3",
+      "tests/cloud/site_templates/test_private_assets.py::test_presigned_r2_lowercase"
+    ]
+  },
+  {
+    "label": "assets: presigned match is case-sensitive",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "            re.IGNORECASE,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_presigned_r2_lowercase"
+    ]
+  },
+  {
+    "label": "assets: drop the own-host uploads shape",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    return [re.compile(r\"(?:https?:)?//\" + host + r\"/uploads/[A-Za-z0-9]\" + _TAIL, re.I)]\n",
+    "replace": "    return []\n",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_uploads_mount_on_the_deployments_own_host"
+    ]
+  },
+  {
+    "label": "assets: stop walking into nested lists",
+    "file": "ee/pocketpaw_ee/cloud/site_templates/assets.py",
+    "find": "    elif isinstance(value, list | tuple):\n",
+    "replace": "    elif False:\n",
+    "tests": [
+      "tests/cloud/site_templates/test_private_assets.py::test_found_anywhere_in_the_ripple_spec"
     ]
   }
 ]

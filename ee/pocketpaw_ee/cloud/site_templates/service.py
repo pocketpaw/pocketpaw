@@ -5,15 +5,22 @@
 # stamp). This module never imports the Pocket model: it reads the source through
 # ``pockets.service.read_site_snapshot`` (workspace filter, read access, site
 # check) and creates pockets through ``pockets.service.copy_site_snapshot``
-# (Sites plan gate, pocket cap, draft Site mint).
+# (Sites plan gate, pocket cap, draft Site mint) in the CALLER's workspace.
 #
 # Invariants a reader must not break:
 #   * The snapshot never leaves this module. Responses and events are built by
-#     ``_meta`` from ``SiteTemplateResponse``, which has no snapshot field.
-#   * Every read filters on ``workspace``. A template the caller may not see is
-#     NotFound, never Forbidden, so ids are not an existence oracle.
-#   * Templates are private (owner-only) for now; ``_visible_to`` is the one
-#     place that decides who may read one, and ``delete`` is owner-only by query.
+#     ``_meta`` from ``SiteTemplateResponse``, which has no snapshot field, and
+#     ``_meta`` nulls ``owner`` for anyone but the owner.
+#   * ``_visible_to`` is the one place that decides who may read a template:
+#     the owner (in its workspace), any member for "workspace", anyone for a
+#     "public" template that reports have not hidden. Everyone else gets
+#     NotFound, never Forbidden, so ids are not an existence oracle. Delete and
+#     PATCH are owner-only by query (``_owned``).
+#   * Making a template public runs ``_check_publishable``: no reference to a
+#     workspace's private files (``assets.find_private_asset_refs``) and no
+#     source the owner's workspace may not read under SF-2.
+#   * Reports: one per user (enforced by the conditional ``$push``), at most
+#     ``MAX_REPORTS`` stored; ``HIDE_THRESHOLD`` of them set ``hidden``.
 #   * Caps: a snapshot over ``MAX_SNAPSHOT_BYTES`` of JSON is refused
 #     (``site_templates.too_large``), and so is a workspace's template number
 #     ``MAX_TEMPLATES_PER_WORKSPACE + 1`` (``site_templates.limit``).
@@ -21,22 +28,32 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
+from datetime import UTC, datetime
+from typing import Any
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
+from pydantic import BaseModel, Field
 
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     SiteTemplateDeleted,
     SiteTemplateSaved,
+    SiteTemplateUpdated,
     SiteTemplateUsed,
 )
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.pockets import service as pockets_service
+from pocketpaw_ee.cloud.site_templates.assets import find_private_asset_refs
 from pocketpaw_ee.cloud.site_templates.domain import SiteTemplateMeta
 from pocketpaw_ee.cloud.site_templates.dto import (
+    ListSiteTemplatesRequest,
+    PatchSiteTemplateRequest,
+    ReportSiteTemplateRequest,
     SaveSiteTemplateRequest,
+    SiteTemplateListResponse,
     SiteTemplateResponse,
     UseSiteTemplateRequest,
     UseSiteTemplateResponse,
@@ -46,14 +63,36 @@ from pocketpaw_ee.cloud.site_templates.dto import (
 MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
 #: Most templates one workspace may hold, across all owners.
 MAX_TEMPLATES_PER_WORKSPACE = 50
+#: Distinct reporters that hide a public template.
+HIDE_THRESHOLD = 3
+#: Most reports one template stores; later reports are accepted and dropped.
+MAX_REPORTS = 20
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
 
-def _meta(doc: SiteTemplate) -> dict:
-    """The template's wire dict: metadata only, never the snapshot."""
+class _MetaRow(BaseModel):
+    """List projection: every metadata field, never the snapshot or reports."""
+
+    id: PydanticObjectId = Field(alias="_id")
+    workspace: str
+    owner: str
+    name: str
+    description: str = ""
+    visibility: str = "private"
+    version: int = 1
+    engine: str | None = None
+    pattern: str | None = None
+    hidden: bool = False
+    createdAt: datetime | None = None
+    updatedAt: datetime | None = None
+
+
+def _meta(doc: SiteTemplate | _MetaRow, viewer: str) -> dict:
+    """The template's wire dict as ``viewer`` sees it: metadata only, never the
+    snapshot; ``owner`` and ``hidden`` only for the owner."""
     meta = SiteTemplateMeta(
         workspace_id=doc.workspace,
         owner=doc.owner,
@@ -64,19 +103,28 @@ def _meta(doc: SiteTemplate) -> dict:
         version=doc.version,
         engine=doc.engine,
         pattern=doc.pattern,
+        hidden=doc.hidden,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
-    return SiteTemplateResponse.model_validate(meta, from_attributes=True).model_dump(mode="json")
+    mine = meta.owner == viewer
+    fields = asdict(meta)
+    del fields["workspace_id"]
+    fields.update(owner=meta.owner if mine else None, is_mine=mine, hidden=meta.hidden and mine)
+    return SiteTemplateResponse.model_validate(fields).model_dump(mode="json")
 
 
-def _event_data(doc: SiteTemplate, **extra: str) -> dict:
-    return {**_meta(doc), "workspace_id": doc.workspace, **extra}
+def _event_data(doc: SiteTemplate, recipient: str, workspace_id: str, **extra: str) -> dict:
+    """Event payload for its one recipient (``user_id``, read by the audience)."""
+    return {**_meta(doc, recipient), "workspace_id": workspace_id, "user_id": recipient, **extra}
 
 
-def _visible_to(doc: SiteTemplate, user_id: str) -> bool:
-    """May ``user_id`` read this template? Private templates: the owner only."""
-    return doc.owner == user_id
+def _visible_to(doc: SiteTemplate | _MetaRow, workspace_id: str, user_id: str) -> bool:
+    """May ``user_id``, acting in ``workspace_id``, read this template?"""
+    if doc.workspace == workspace_id:
+        if doc.owner == user_id or doc.visibility == "workspace":
+            return True
+    return doc.visibility == "public" and not doc.hidden
 
 
 def _oid(template_id: str) -> PydanticObjectId:
@@ -87,12 +135,50 @@ def _oid(template_id: str) -> PydanticObjectId:
 
 
 async def _fetch_visible(workspace_id: str, user_id: str, template_id: str) -> SiteTemplate:
-    doc = await SiteTemplate.find_one(
-        SiteTemplate.id == _oid(template_id), SiteTemplate.workspace == workspace_id
-    )
-    if doc is None or not _visible_to(doc, user_id):
+    # global-read: a public template is readable from every workspace;
+    # ``_visible_to`` applies the workspace rule to everything else.
+    doc = await SiteTemplate.get(_oid(template_id))
+    if doc is None or not _visible_to(doc, workspace_id, user_id):
         raise NotFound("site_template", template_id)
     return doc
+
+
+async def _owned(workspace_id: str, user_id: str, template_id: str) -> SiteTemplate:
+    doc = await SiteTemplate.find_one(
+        SiteTemplate.id == _oid(template_id),
+        SiteTemplate.workspace == workspace_id,
+        SiteTemplate.owner == user_id,
+    )
+    if doc is None:
+        raise NotFound("site_template", template_id)
+    return doc
+
+
+def _check_size(snapshot: dict) -> None:
+    if len(json.dumps(snapshot, default=str).encode("utf-8")) > MAX_SNAPSHOT_BYTES:
+        raise ValidationError(
+            "site_templates.too_large",
+            f"This site is too large to save as a template (limit {MAX_SNAPSHOT_BYTES} bytes)",
+        )
+
+
+async def _check_publishable(workspace_id: str, snapshot: dict) -> None:
+    """Refuse to make ``snapshot`` public if it points at the workspace's own files
+    or carries source the workspace may not read (SF-2)."""
+    refs = find_private_asset_refs(snapshot)
+    if refs:
+        raise ValidationError(
+            "site_templates.private_assets",
+            f"This site references {len(refs)} private workspace file(s), which other "
+            "workspaces cannot load. Replace them with public images before sharing it publicly.",
+        )
+    if not await pockets_service.snapshot_source_visible(
+        workspace_id, bool(snapshot.get("source_gated"))
+    ):
+        raise Forbidden(
+            "site_templates.source_not_shareable",
+            "This site's source is not available on your plan, so it can't be shared publicly",
+        )
 
 
 async def _audit(workspace_id: str, user_id: str, action: str, target_id: str, **meta: str) -> None:
@@ -116,13 +202,14 @@ async def _audit(workspace_id: str, user_id: str, action: str, target_id: str, *
 async def save_template(
     workspace_id: str, user_id: str, body: SaveSiteTemplateRequest | dict
 ) -> dict:
-    """Save the site pocket ``body.pocket_id`` as a private template the caller owns.
+    """Save the site pocket ``body.pocket_id`` as a template the caller owns.
 
     Refused, before any write: no Sites on the plan (Forbidden
     ``plan.feature_denied``); a pocket the caller cannot read, in another
     workspace, or not a site (via ``read_site_snapshot``); a snapshot over
     ``MAX_SNAPSHOT_BYTES`` (``site_templates.too_large``); a workspace already
-    holding ``MAX_TEMPLATES_PER_WORKSPACE`` templates (``site_templates.limit``).
+    holding ``MAX_TEMPLATES_PER_WORKSPACE`` templates (``site_templates.limit``);
+    and for ``visibility="public"``, ``_check_publishable``.
     """
     body = SaveSiteTemplateRequest.model_validate(body)
     # Function-local import: sites.service reads pockets (cycle).
@@ -133,24 +220,22 @@ async def save_template(
     snapshot = {key: source[key] for key in pockets_service.SITE_SNAPSHOT_FIELDS}
     snapshot["source_gated"] = source["source_gated"]
 
-    if len(json.dumps(snapshot, default=str).encode("utf-8")) > MAX_SNAPSHOT_BYTES:
-        raise ValidationError(
-            "site_templates.too_large",
-            f"This site is too large to save as a template (limit {MAX_SNAPSHOT_BYTES} bytes)",
-        )
+    _check_size(snapshot)
     count = await SiteTemplate.find(SiteTemplate.workspace == workspace_id).count()
     if count >= MAX_TEMPLATES_PER_WORKSPACE:
         raise ValidationError(
             "site_templates.limit",
             f"This workspace already has {MAX_TEMPLATES_PER_WORKSPACE} templates",
         )
+    if body.visibility == "public":
+        await _check_publishable(workspace_id, snapshot)
 
     doc = SiteTemplate(
         workspace=workspace_id,
         owner=user_id,
         name=body.name,
         description=body.description,
-        visibility="private",
+        visibility=body.visibility,
         version=1,
         source_pocket_id=body.pocket_id,
         engine=snapshot["engine"],
@@ -158,40 +243,89 @@ async def save_template(
         snapshot=snapshot,
     )
     await doc.insert()
-    await emit(SiteTemplateSaved(data=_event_data(doc)))
+    await emit(SiteTemplateSaved(data=_event_data(doc, user_id, workspace_id)))
     await _audit(
         workspace_id, user_id, "site_template.saved", str(doc.id), source_pocket_id=body.pocket_id
     )
-    return _meta(doc)
+    return _meta(doc, user_id)
 
 
-async def list_templates(workspace_id: str, user_id: str) -> list[dict]:
-    """The caller's own private templates in this workspace, newest first."""
-    cursor = SiteTemplate.find(
-        SiteTemplate.workspace == workspace_id,
-        SiteTemplate.owner == user_id,
-        SiteTemplate.visibility == "private",
-    ).sort([("createdAt", -1), ("_id", -1)])
-    return [_meta(doc) async for doc in cursor]
+async def list_templates(
+    workspace_id: str, user_id: str, body: ListSiteTemplatesRequest | dict | None = None
+) -> dict:
+    """A page of templates, newest first, for ``body.scope``.
+
+    ``mine``: the caller's own in this workspace, any visibility. ``workspace``:
+    workspace-visibility templates in this workspace (the caller's included).
+    ``public``: public, non-hidden templates from every workspace.
+    """
+    body = ListSiteTemplatesRequest.model_validate(body or {})
+    if body.scope == "mine":
+        filters: list[Any] = [SiteTemplate.workspace == workspace_id, SiteTemplate.owner == user_id]
+    elif body.scope == "workspace":
+        filters = [SiteTemplate.workspace == workspace_id, SiteTemplate.visibility == "workspace"]
+    else:
+        # global-read: public templates are readable by every user
+        filters = [SiteTemplate.visibility == "public", {"hidden": {"$ne": True}}]
+    if body.cursor:
+        try:
+            filters.append({"_id": {"$lt": PydanticObjectId(body.cursor)}})
+        except (InvalidId, TypeError, ValueError):
+            raise ValidationError("site_templates.bad_cursor", "Invalid cursor") from None
+
+    rows = (
+        await SiteTemplate.find(*filters)
+        .sort([("_id", -1)])
+        .limit(body.limit + 1)
+        .project(_MetaRow)
+        .to_list()
+    )
+    next_cursor = str(rows[body.limit - 1].id) if len(rows) > body.limit else None
+    templates = [_meta(row, user_id) for row in rows[: body.limit]]
+    return SiteTemplateListResponse(templates=templates, next_cursor=next_cursor).model_dump(
+        mode="json"
+    )
 
 
 async def get_template(workspace_id: str, user_id: str, template_id: str) -> dict:
-    """One template's metadata. NotFound unless it is in this workspace and
-    visible to the caller."""
-    return _meta(await _fetch_visible(workspace_id, user_id, template_id))
+    """One template's metadata. NotFound unless ``_visible_to`` the caller."""
+    return _meta(await _fetch_visible(workspace_id, user_id, template_id), user_id)
+
+
+async def update_template(
+    workspace_id: str, user_id: str, template_id: str, body: PatchSiteTemplateRequest | dict
+) -> dict:
+    """Change a template's name, description or visibility (owner only; anyone
+    else gets NotFound). Setting ``visibility="public"`` runs the Sites plan
+    gate, the size cap and ``_check_publishable`` first. ``version`` is unchanged:
+    the snapshot is."""
+    body = PatchSiteTemplateRequest.model_validate(body)
+    doc = await _owned(workspace_id, user_id, template_id)
+    if body.visibility == "public":
+        from pocketpaw_ee.sites import service as sites_service
+
+        await sites_service.require_sites_plan(workspace_id)
+        _check_size(doc.snapshot)
+        await _check_publishable(workspace_id, doc.snapshot)
+
+    changes = body.model_dump(exclude_none=True)
+    if changes:
+        changes["updatedAt"] = datetime.now(UTC)
+        # ``$set`` of the changed fields only: a whole-doc save could drop a
+        # report pushed concurrently.
+        await doc.set(changes)
+        await emit(SiteTemplateUpdated(data=_event_data(doc, user_id, workspace_id)))
+        await _audit(
+            workspace_id, user_id, "site_template.updated", template_id, visibility=doc.visibility
+        )
+    return _meta(doc, user_id)
 
 
 async def delete_template(workspace_id: str, user_id: str, template_id: str) -> dict:
     """Delete a template the caller owns (anyone else gets NotFound). Pockets
     made from it are untouched: they hold their own copy of the snapshot."""
-    doc = await SiteTemplate.find_one(
-        SiteTemplate.id == _oid(template_id),
-        SiteTemplate.workspace == workspace_id,
-        SiteTemplate.owner == user_id,
-    )
-    if doc is None:
-        raise NotFound("site_template", template_id)
-    data = _event_data(doc)
+    doc = await _owned(workspace_id, user_id, template_id)
+    data = _event_data(doc, user_id, workspace_id)
     await doc.delete()
     await emit(SiteTemplateDeleted(data=data))
     await _audit(workspace_id, user_id, "site_template.deleted", template_id)
@@ -201,11 +335,13 @@ async def delete_template(workspace_id: str, user_id: str, template_id: str) -> 
 async def use_template(
     workspace_id: str, user_id: str, template_id: str, body: UseSiteTemplateRequest | dict
 ) -> dict:
-    """Start a new private site pocket, owned by the caller, from a template.
+    """Start a new private site pocket, owned by the caller, in the CALLER's
+    workspace, from a template the caller can see.
 
-    ``copy_site_snapshot`` applies the Sites plan gate (Forbidden) and the
+    ``copy_site_snapshot`` applies the caller's Sites plan gate (Forbidden) and
     pocket cap (402) before any write, and mints the draft Site. The new pocket
-    records ``template_id`` and ``template_version``.
+    records ``template_id`` and ``template_version``. The audit row names the
+    template's workspace only when it is the caller's own.
     """
     body = UseSiteTemplateRequest.model_validate(body)
     doc = await _fetch_visible(workspace_id, user_id, template_id)
@@ -222,17 +358,81 @@ async def use_template(
         visibility="private",
     )
     pocket_id = wire["_id"]
-    await emit(SiteTemplateUsed(data=_event_data(doc, pocket_id=pocket_id)))
-    await _audit(workspace_id, user_id, "site_template.used", str(doc.id), pocket_id=pocket_id)
+    await emit(SiteTemplateUsed(data=_event_data(doc, user_id, workspace_id, pocket_id=pocket_id)))
+    same_workspace = (
+        {"template_workspace_id": doc.workspace} if doc.workspace == workspace_id else {}
+    )
+    await _audit(
+        workspace_id,
+        user_id,
+        "site_template.used",
+        str(doc.id),
+        pocket_id=pocket_id,
+        **same_workspace,
+    )
     return UseSiteTemplateResponse(pocket_id=pocket_id).model_dump(mode="json")
 
 
+async def report_template(
+    workspace_id: str, user_id: str, template_id: str, body: ReportSiteTemplateRequest | dict
+) -> dict:
+    """Report a public template the caller can see. One report per user (a repeat
+    is a no-op); the owner cannot report their own (Forbidden
+    ``site_templates.own_template``); anything not public and visible is NotFound.
+    ``HIDE_THRESHOLD`` distinct reporters set ``hidden``, which takes the template
+    out of the public list and out of get / use for everyone but the owner."""
+    body = ReportSiteTemplateRequest.model_validate(body)
+    doc = await _fetch_visible(workspace_id, user_id, template_id)
+    if doc.visibility != "public":
+        raise NotFound("site_template", template_id)
+    if doc.owner == user_id:
+        raise Forbidden("site_templates.own_template", "You can't report your own template")
+
+    collection = SiteTemplate.get_pymongo_collection()
+    report = {"user": user_id, "reason": body.reason, "at": datetime.now(UTC)}
+    pushed = await collection.update_one(
+        {
+            "_id": doc.id,
+            "reports.user": {"$ne": user_id},
+            f"reports.{MAX_REPORTS - 1}": {"$exists": False},
+        },
+        {"$push": {"reports": report}},
+    )
+    if pushed.modified_count:
+        # no-event: a report is moderation state; the owner hears only of a hide.
+        await _audit(workspace_id, user_id, "site_template.reported", template_id)
+        fresh = await SiteTemplate.get(doc.id)
+        if fresh is not None and len(fresh.reports) >= HIDE_THRESHOLD:
+            hid = await collection.update_one(
+                {"_id": doc.id, "hidden": {"$ne": True}}, {"$set": {"hidden": True}}
+            )
+            if hid.modified_count:
+                fresh.hidden = True
+                await emit(
+                    SiteTemplateUpdated(data=_event_data(fresh, fresh.owner, fresh.workspace))
+                )
+                # Actor "system": the reporters are other tenants' users, and their
+                # ids must not land in the owner's audit log.
+                await _audit(
+                    fresh.workspace,
+                    "system",
+                    "site_template.hidden",
+                    template_id,
+                    reports=str(len(fresh.reports)),
+                )
+    return {"id": template_id, "reported": True}
+
+
 __all__ = [
+    "HIDE_THRESHOLD",
+    "MAX_REPORTS",
     "MAX_SNAPSHOT_BYTES",
     "MAX_TEMPLATES_PER_WORKSPACE",
     "delete_template",
     "get_template",
     "list_templates",
+    "report_template",
     "save_template",
+    "update_template",
     "use_template",
 ]

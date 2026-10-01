@@ -444,12 +444,18 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
-        # --- Site templates (user-saved, private to their owner) ----------------
-        # Owner-only: a private template's name must not reach the rest of the
-        # workspace, so this never fans out on ``workspace_id``.
-        if t in {"site_template.saved", "site_template.deleted", "site_template.used"}:
-            if owner := d.get("owner"):
-                return [owner]
+        # --- Site templates (user-saved; private, workspace or public) ----------
+        # One recipient, named by the service in ``user_id`` (the owner, or the
+        # caller for ``used``). Never fans out on ``workspace_id``: a public
+        # template must not broadcast, and a private one's name must not leak.
+        if t in {
+            "site_template.saved",
+            "site_template.deleted",
+            "site_template.used",
+            "site_template.updated",
+        }:
+            if recipient := d.get("user_id"):
+                return [recipient]
             return []
 
         # --- Workspace jobs (durable ARQ job lifecycle) -------------------------

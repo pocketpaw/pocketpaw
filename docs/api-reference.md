@@ -954,58 +954,104 @@ copies, plus the source's source-gate stamp), stored on its own. Editing or
 deleting the source site does not change the template, and deleting the template
 does not touch sites made from it.
 
-Templates are private: only the owner can list, read, use or delete one. A
-template that is not yours, or is in another workspace, is `404`, never `403`.
+### Visibility
+
+| `visibility` | Who can list, read and use it |
+|---|---|
+| `private` (default) | The owner, in the template's workspace |
+| `workspace` | Every member of the template's workspace |
+| `public` | Every signed-in user in every workspace, unless reports have hidden it |
+
+Only the owner can change or delete a template. Anyone who can't see a template
+gets `404`, never `403`, whatever the operation.
+
+Making a template public (on save or with `PATCH`) runs these checks first:
+
+- **No private files.** Every string in the site's ripple spec and source files is
+  scanned for addresses of the workspace's own files: `/api/v1/uploads/...`,
+  `/api/v1/files...`, `/api/v1/media/...` (studio output), `/api/v1/auth/avatar/...`,
+  `/uploads/...` (relative, or on this deployment's host), bare upload and media
+  storage keys, and presigned object-storage links (`X-Amz-Signature`,
+  `X-Goog-Signature`, `Signature=`). Any match is `422`
+  `site_templates.private_assets`, and the message says how many. External
+  images (`https://images.unsplash.com/...`) and the public Sites asset rail are
+  allowed.
+- **No locked source.** If the source gate would withhold this source from the
+  owner's workspace, the request is `403` `site_templates.source_not_shareable`.
+- The Sites plan gate and the 2 MB size cap, as on save.
 
 Every response and event carries the template's metadata only, never its
-content:
+content. `owner` is the owner's user id for the owner and `null` for everyone
+else, and nothing names the owner's workspace. `hidden` is only ever `true` for
+the owner:
 
 ```json
 {
   "id": "665f1c...",
   "name": "Bakery",
   "description": "",
-  "visibility": "private",
+  "visibility": "public",
   "version": 1,
   "engine": "svelte",
   "pattern": "landing",
-  "owner": "u1",
+  "owner": null,
+  "is_mine": false,
+  "hidden": false,
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
 ```
 
-Events: `site_template.saved`, `site_template.deleted`, `site_template.used`
-(the last also carries the new `pocket_id`), delivered to the owner only. Audit:
-one workspace audit event per save, use and delete (`site_template.saved`,
-`site_template.used`, `site_template.deleted`), best-effort.
+Events: `site_template.saved`, `site_template.updated`, `site_template.deleted`
+(to the owner) and `site_template.used` (to the user who used it, with the new
+`pocket_id`). Nothing fans out to a workspace or to all users. Audit,
+best-effort: `site_template.saved`, `.updated`, `.deleted` in the owner's
+workspace; `site_template.used` and `.reported` in the acting user's workspace
+(`used` names the template's workspace only when it is the same one);
+`site_template.hidden` in the owner's workspace, with actor `system`.
 
 ### `POST /site-templates`
 
-Save a site pocket as a private template the caller owns.
+Save a site pocket as a template the caller owns.
 
 ```json
-{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars" }
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private" }
 ```
 
-`name` is 1 to 100 characters. The caller needs read access to the pocket, as
-for a duplicate. Response `200`: the template's metadata.
+`name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
+needs read access to the pocket, as for a duplicate. Response `200`: the
+template's metadata.
 
 Errors: `403` (`plan.feature_denied`) when the plan does not include Sites; `404`
 for a missing or cross-tenant pocket; `403` (`pocket.access_denied`) for a
 private pocket the caller can't read; `422` for `pocket.not_a_site`,
 `site_templates.too_large` (the content is over 2 MB as JSON) and
-`site_templates.limit` (the workspace already has 50 templates). Nothing is
-written on any error.
+`site_templates.limit` (the workspace already has 50 templates); and for
+`public`, the publish checks above. Nothing is written on any error.
 
 ### `GET /site-templates`
 
-The caller's own templates in this workspace, newest first. Response `200`: a
-list of metadata objects.
+Query: `scope` (`mine`, the default: your own templates in this workspace, any
+visibility; `workspace`: workspace-visibility templates in this workspace,
+yours included; `public`: public, non-hidden templates from every workspace),
+`limit` (1 to 50, default 50), `cursor`. Newest first. Response `200`:
+
+```json
+{ "templates": [ { "id": "..." } ], "next_cursor": "665f..." }
+```
+
+Pass `next_cursor` back as `cursor` for the next page; `null` marks the last one.
+A malformed cursor is `422` `site_templates.bad_cursor`.
 
 ### `GET /site-templates/{template_id}`
 
-One template's metadata. `404` unless it is in this workspace and yours.
+One template's metadata, if you can see it; otherwise `404`.
+
+### `PATCH /site-templates/{template_id}`
+
+Change any of `name`, `description`, `visibility`. Owner only (`404` for anyone
+else). Setting `visibility` to `public` runs the publish checks. `version` does
+not change. Response `200`: the metadata.
 
 ### `DELETE /site-templates/{template_id}`
 
@@ -1014,7 +1060,8 @@ Delete a template you own. Response `200`: `{"id": "...", "deleted": true}`.
 
 ### `POST /site-templates/{template_id}/use`
 
-Start a new private site pocket, owned by the caller, from the template.
+Start a new private site pocket, owned by the caller, in the caller's own
+workspace, from a template the caller can see.
 
 ```json
 { "name": "Second bakery" }
@@ -1026,9 +1073,27 @@ fresh draft Site row so it lists in the sites gallery (nothing is built or
 deployed). It is source-gated if the template's source was, or if the source
 gate is on now. Response `200`: `{"pocket_id": "..."}`.
 
-Errors: `404` for a template that is not yours or not in this workspace; `403`
-(`plan.feature_denied`) when the plan does not include Sites; `402`
-(`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
+Errors: `404` for a template you can't see; `403` (`plan.feature_denied`) when
+your plan does not include Sites; `402` (`billing.pocket_limit`) when your
+workspace is at its plan's pocket cap. Both are checked against the caller's
+workspace, not the template's.
+
+### `POST /site-templates/{template_id}/report`
+
+Report a public template.
+
+```json
+{ "reason": "Spam, up to 500 chars" }
+```
+
+Response `200`: `{"id": "...", "reported": true}`. One report per user counts; a
+repeat is accepted and changes nothing. When three different users have
+reported a template it is hidden: it leaves the public list, and get and use
+return `404` for everyone but the owner, who still sees it with
+`"hidden": true`. There is no un-hide endpoint yet.
+
+Errors: `404` for a template you can't see or that is not public; `403`
+(`site_templates.own_template`) for the owner reporting their own.
 
 ## Skills — Per-Backend API Skills
 
