@@ -4,8 +4,10 @@
 # list / button / form / divider, no raw HTML, no script paths) inside a
 # ``PawBarSpec``, plus the visitor-commerce declarations on that spec: ``actions``
 # (unique snake_case verbs; only the cart verbs may be ``auto``, everything else is
-# ``gated`` to an Instinct proposal; the built-in ``send_to_team`` is reserved and
-# can't be declared) and an http(s) ``checkout_url``. The product
+# ``gated`` to an Instinct proposal; the built-in ``send_to_team`` is reserved: a
+# stored spec that declares it loads with that action dropped and a warning, and
+# the owner save paths refuse it via ``reserved_verbs_dropped``) and an http(s)
+# ``checkout_url``. The product
 # catalog lives in its own table (``paw_bar.catalog_store``, rows read back as
 # ``PawBarCatalogRow``); ``PawBarSpec.catalog`` is DEPRECATED, kept one release so
 # an older editor's spec PATCH still works: the store adds a non-empty one to the
@@ -40,7 +42,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from pocketpaw.fabric.models import _gen_id
 from pocketpaw.money import normalize_currency
@@ -346,7 +348,7 @@ class PawBarSpec(BaseModel):
                 raise ValueError(f"duplicate action verb {action.verb!r} — verbs must be unique")
             seen.add(action.verb)
             if action.verb in _RESERVED_VERBS:
-                raise ValueError(f"action verb {action.verb!r} is built in and can't be declared")
+                continue  # dropped by _drop_reserved_verbs below
             # SS-2: a non-cart verb must never be "auto" — only visitor-scoped
             # cart verbs auto-fire; everything else is gated to an Instinct proposal.
             if action.policy == "auto" and action.verb not in _AUTO_VERBS:
@@ -356,6 +358,29 @@ class PawBarSpec(BaseModel):
                     "every other verb must be 'gated'"
                 )
         return value
+
+    # The reserved verbs this spec declared and validation dropped. Never stored
+    # (a private attribute); the owner save paths read it to refuse the save.
+    _reserved_dropped: list[str] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="after")
+    def _drop_reserved_verbs(self) -> PawBarSpec:
+        """Coerce, don't fail: a stored spec is re-validated on every load, so one
+        declared built-in verb must not make the widget unloadable. The action is
+        dropped with a warning; saving such a spec is refused at the route."""
+        dropped = [a.verb for a in self.actions if a.verb in _RESERVED_VERBS]
+        if dropped:
+            logger.warning(
+                "paw-bar spec %s declared reserved verb(s) %s; dropped", self.widget_id, dropped
+            )
+            self.actions = [a for a in self.actions if a.verb not in _RESERVED_VERBS]
+            self._reserved_dropped = dropped
+        return self
+
+    @property
+    def reserved_verbs_dropped(self) -> list[str]:
+        """Reserved verbs this spec declared (and validation dropped)."""
+        return list(self._reserved_dropped)
 
     @field_validator("catalog")
     @classmethod

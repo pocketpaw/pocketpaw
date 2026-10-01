@@ -1,4 +1,5 @@
 # tests/cloud/test_paw_bar_send_to_team.py — the built-in ``send_to_team`` verb.
+# (The reserved-verb save refusal is pinned in test_paw_bar_reserved_verb.py.)
 #
 # The concierge offers a lead card (a ``form`` whose verb is ``send_to_team``,
 # prefilled from the conversation). Nothing is stored until the visitor taps
@@ -12,8 +13,8 @@
 #   * caps (name 120, message 2000), email and/or phone via contact_form;
 #   * rate limits: 3 per visitor per 10 minutes, 30 per site per hour;
 #   * the HIGH injection screen; the owner's ``concierge_lead_capture`` switch;
-#   * the verb is reserved (an owner can't declare it) and only the public route
-#     reaches it (the agent's tool path passes no site);
+#   * the verb is reserved (a stored spec declaring it loads with it dropped) and
+#     only the public route reaches it (the agent's tool path passes no site);
 #   * a marker event and a ledger row, as other actions record.
 
 # Fixtures are imported from a sibling suite; naming one as a test parameter is
@@ -232,13 +233,24 @@ async def test_a_marker_and_a_ledger_row_are_recorded(action_client, monkeypatch
     assert rows[0]["workspace_id"] == "ws-1"
 
 
-def test_owners_cannot_declare_the_reserved_verb():
-    with pytest.raises(Exception):
-        PawBarSpec(
+def test_a_stored_spec_declaring_the_reserved_verb_loads_without_it(caplog):
+    """Coerce on load: specs are re-validated on every read, so a declared
+    send_to_team is dropped with a warning instead of breaking the widget."""
+    with caplog.at_level("WARNING"):
+        spec = PawBarSpec(
             widget_id="w",
             pocket_id="p",
-            actions=[{"verb": "send_to_team", "policy": "gated", "args": {"email": "str"}}],
+            actions=[
+                {"verb": "send_to_team", "policy": "auto", "args": {"email": "str"}},
+                {"verb": "book_visit", "policy": "gated", "args": {"name": "str"}},
+            ],
         )
+    assert [a.verb for a in spec.actions] == ["book_visit"]
+    assert spec.reserved_verbs_dropped == ["send_to_team"]
+    assert "send_to_team" in caplog.text
+    # The dropped action never round-trips into storage.
+    assert "send_to_team" not in spec.model_dump_json()
+    assert PawBarSpec.model_validate_json(spec.model_dump_json()).reserved_verbs_dropped == []
 
 
 @pytest.mark.asyncio

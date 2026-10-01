@@ -1273,6 +1273,7 @@ async def create_widget(
     # exists only once its owner creates one via POST .../concierge. A widget is
     # a bar, not a decision to publish an assistant. The spec is held to the same
     # size cap as a spec PATCH, and a (deprecated) catalog in it to the item cap.
+    _refuse_reserved_verbs(req.spec)
     _check_spec_size(req.spec)
     try:
         return await _store().create_widget(widget)
@@ -1333,9 +1334,18 @@ async def update_spec(
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    _refuse_reserved_verbs(spec)
     _refuse_outdated_money_client(spec, x_paw_money_units)
     updated = await _save_widget_spec(widget_id, spec, workspace_id)
     return PawBarWidgetPublic.from_widget(updated)
+
+
+def _refuse_reserved_verbs(spec: PawBarSpec) -> None:
+    """422 ``reserved_verb`` when an owner saves a spec declaring a built-in verb
+    (``send_to_team``). On load such an action is dropped instead (see
+    ``PawBarSpec._drop_reserved_verbs``); a save is where the owner can fix it."""
+    if spec.reserved_verbs_dropped:
+        raise HTTPException(status_code=422, detail="reserved_verb")
 
 
 def _refuse_outdated_money_client(spec: PawBarSpec, money_units: str | None) -> None:
@@ -1977,6 +1987,7 @@ async def update_site_widget_spec(
     _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
         raise HTTPException(status_code=404, detail="no_concierge_widget")
+    _refuse_reserved_verbs(req.spec)
     _refuse_outdated_money_client(req.spec, x_paw_money_units)
     # The widget is chosen by the SITE, so the spec's own identity keys are pinned
     # to that widget's row, not taken from the body. Overwritten, not rejected: the
