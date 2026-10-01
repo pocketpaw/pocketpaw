@@ -5,8 +5,11 @@
 # welcome: lower max_count in the same PR. Stdlib only.
 # Updated 2026-10-01: added the FabricJournalStore( construction row, which
 # closes the `from pocketpaw.fabric import FabricJournalStore` re-export gap
-# the Fabric import-linter contract can't see.
-# Plan: paw-workspace/docs/design/drafts/2026-10-01-canonicalization-plan.md §3.
+# the Fabric import-linter contract can't see. Review pass: comment lines are
+# skipped, rows for the audit-store and InstinctApproval re-export paths, hmac
+# row excludes inbound verifiers, and a "lower max_count" hint when a count drops.
+# Why: copies of a primitive drift apart (different floors, caps, SSRF checks),
+# so new code must reuse the canonical one instead of adding another.
 """Fail on new copies of primitives we already have.
 
 Usage: scripts/dup-ratchet [repo_root]   (exit 1 on growth)
@@ -77,16 +80,23 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         "hand-rolled HMAC in cloud",
         r"hmac\.new\(",
         ("ee/pocketpaw_ee/cloud/*",),
-        ("ee/pocketpaw_ee/cloud/notifications/webhook_signing.py",),
-        4,
-        "cloud/notifications/webhook_signing",
+        # Outbound signing only. Excluded: the canonical signer and the inbound
+        # verifiers (growth, Recall), which must check a provider's own scheme.
+        # Still counted: audit/webhooks (outbound copy) and _core/ee_auth_bridge.
+        (
+            "ee/pocketpaw_ee/cloud/notifications/webhook_signing.py",
+            "ee/pocketpaw_ee/cloud/growth/webhooks.py",
+            "ee/pocketpaw_ee/cloud/meetings/providers/recall/webhooks.py",
+        ),
+        2,
+        "cloud/notifications/webhook_signing for outbound signatures",
     ),
     (
         "hand-rolled /v1/chat/completions call",
         r"/v1/chat/completions",
         ("*",),
         ("ee/pocketpaw_ee/catalog/litellm_client.py",),
-        10,
+        8,
         "a completion helper beside ee/pocketpaw_ee/catalog/litellm_client.py",
     ),
     (
@@ -152,7 +162,26 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         ("*",),
         ("src/pocketpaw/fabric/*",),
         1,
-        "journal writes go through the shared journal_store helper; see canonicalization plan A1",
+        "the shared journal_store helper (canonicalization plan A1)",
+    ),
+    (
+        "cloud SQLite audit-store access",
+        r"get_audit_store\(|AuditStore\(",
+        ("ee/pocketpaw_ee/cloud/*",),
+        (
+            "ee/pocketpaw_ee/cloud/audit/listeners.py",
+            "ee/pocketpaw_ee/cloud/audit/service.py",
+        ),
+        0,
+        "mcp_servers/_audit (cloud never writes the SQLite AuditStore)",
+    ),
+    (
+        "InstinctApproval via the models re-export",
+        r"cloud\.models import[^\n]*\bInstinctApproval\b",
+        ("*",),
+        ("ee/pocketpaw_ee/cloud/models/__init__.py",),
+        0,
+        "InstinctStore (propose through the instinct ledger)",
     ),
 ]
 
@@ -170,7 +199,11 @@ def count(root: Path, regex: str, include: tuple[str, ...], exclude: tuple[str, 
             if not _match(rel, include) or _match(rel, exclude):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            n += sum(1 for line in text.splitlines() if rx.search(line))
+            n += sum(
+                1
+                for line in text.splitlines()
+                if rx.search(line) and not line.lstrip().startswith("#")
+            )
     return n
 
 
@@ -186,6 +219,8 @@ def main(root: Path, verbose: bool = False) -> list[str]:
                 f"{name}: {n} > {max_count}. new copy of {name} — use {canonical}; "
                 "if you consolidated copies, lower max_count"
             )
+        elif n < max_count:
+            print(f"hint: lower max_count for {name} to {n}")
     return failures
 
 
