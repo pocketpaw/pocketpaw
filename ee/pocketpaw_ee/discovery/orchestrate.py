@@ -63,7 +63,8 @@
 # Pocket writes.
 #
 # Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
-#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
+#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -641,19 +642,15 @@ async def _stamp_discovery_marker(
     reject it). A failed stamp must NOT fail the proposal that was already filed.
     """
 
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(blob_key)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob[DISCOVERY_MARKER_KEY] = dict(marker)
-        params[blob_key] = blob
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
 
-        await store.update_parameters(action_id, params)
+    try:
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key=blob_key,
+            updates={DISCOVERY_MARKER_KEY: dict(marker)},
+        )
     except Exception:  # noqa: BLE001 — marker stamp is best-effort
         logger.warning(
             "discovery: failed to stamp discovery_run marker onto action %s "

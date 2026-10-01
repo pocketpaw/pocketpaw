@@ -35,7 +35,8 @@
 # ``_core.errors`` CloudError subclasses (never HTTPException).
 #
 # Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
-#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
+#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -991,21 +992,16 @@ async def _persist_plan_chain_ids(*, store: Any, action_id: str, proposed_event_
     correct). Store-API write — the same pattern the belt MCP propose uses.
     Best-effort."""
 
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
     try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(BELT_PLAN_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["proposed_event_id"] = proposed_event_id
-        params[BELT_PLAN_PARAM_KEY] = blob
-
-        await store.update_parameters(action_id, params)
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key=BELT_PLAN_PARAM_KEY,
+            updates={"proposed_event_id": proposed_event_id},
+        )
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "mandate: failed to persist chain ids onto action %s — human.corrected "
