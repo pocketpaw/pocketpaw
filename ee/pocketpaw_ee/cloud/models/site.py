@@ -336,6 +336,7 @@ from pymongo import IndexModel
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw.paw_bar.concierge_fields import ConciergeEscalation, ConciergeTone
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
+from pocketpaw_ee.cloud.models.lead_notifications import LeadNotificationSettings
 
 
 class SiteDomain(BaseModel):
@@ -1027,6 +1028,11 @@ class Site(TimestampedDocument):
     client_contact: str = ""
     client_notes: str = ""
     client_invoices: list[SiteInvoice] = Field(default_factory=list)
+    # Who hears about this site's leads, handoffs and bookings, and how
+    # (``models/lead_notifications.py``). None = never configured: the workspace
+    # owner's account email plus push for every event. Written only by
+    # ``cloud.leads.notification_settings``.
+    lead_notifications: LeadNotificationSettings | None = None
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).
