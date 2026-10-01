@@ -301,3 +301,42 @@ class TestChatRouteFastReject:
         resp = await self._post(str(guest.id), monkeypatch)
         assert resp.status_code == 402
         assert resp.json()["code"] == "guest_key_required"
+
+
+async def test_the_executor_spend_fails_closed_on_an_unreadable_counter(mongo_db, monkeypatch):
+    """``reject_if_guest_over_limit`` makes the real claim; the counter raises,
+    so the run is refused rather than becoming an unmetered free tier."""
+    from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+
+    guest = await _mk_guest(turns=5)
+    await _store_key("w_g")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("counter unavailable")
+
+    monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+
+    class _T:
+        def __init__(self):
+            self.events: list[tuple[str, dict]] = []
+
+        async def append_event(self, _run_id, kind, data):
+            self.events.append((kind, data))
+
+        async def set_ttl(self, *_a, **_k):
+            return None
+
+    async def _noop(*_a, **_k):
+        return None
+
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    monkeypatch.setattr(run_service, "mark_terminal", _noop)
+    transport = _T()
+
+    rejected = await guest_gates.reject_if_guest_over_limit(
+        str(guest.id), "w_g", run_id="r1", transport=transport
+    )
+
+    assert rejected is True
+    assert transport.events and transport.events[0][1]["code"] == "guest_limit_reached"

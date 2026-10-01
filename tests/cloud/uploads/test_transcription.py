@@ -549,6 +549,27 @@ class TestTheDailyCap:
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "one hundred")
         assert metering.file_transcription_cap() == 100
 
+    async def test_an_unreadable_counter_stops_the_spend(
+        self, tmp_path, beanie_with_budget, monkeypatch
+    ):
+        """``transcribe_media``'s own claim fails CLOSED: the counter raises,
+        so the paid endpoint is never reached."""
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+
+        fal = _FakeFal()
+        monkeypatch.setattr(transcription, "_call_fal", fal)
+        monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "10")
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("counter unavailable")
+
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+
+        result = await _transcribe(_media_file(tmp_path, _mp3_bytes(60)))
+
+        assert result is None
+        assert fal.calls == [], "an unreadable counter let the paid call through"
+
     async def test_an_exhausted_budget_stops_the_spend(
         self, tmp_path, beanie_with_budget, monkeypatch
     ):

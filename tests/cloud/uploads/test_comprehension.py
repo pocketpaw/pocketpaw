@@ -621,6 +621,35 @@ class TestTheListener:
         assert doc.tags
         ingest.assert_awaited_once()
 
+    async def test_an_unreadable_counter_stops_the_listener_calling_the_model(
+        self, budget_store, monkeypatch, proxy, tmp_path
+    ):
+        """The listener's own claim fails CLOSED: the counter raises, so no
+        model call, and the file is still indexed. Drives the real call path
+        rather than re-encoding its arguments."""
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+        from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+        monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "10")
+        cap = proxy(_model_reply("Never sent.", ["deck"]))
+        await budget_store.save_scoped(_record(), workspace="w1")
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("counter unavailable")
+
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+
+        path = tmp_path / "deck.pdf"
+        path.write_bytes(b"unused")
+        chain = _FakeChain(ExtractionResult(title="Deck", text="revenue", backend="local"))
+        ingest = AsyncMock(return_value={"article": "a1"})
+        _wire(monkeypatch, chain=chain, adapter=_FakeAdapter(path), ingest=ingest)
+
+        await index_uploaded_file(_event())
+
+        assert cap.requests == [], "an unreadable counter let the model call through"
+        ingest.assert_awaited_once()
+
     async def test_an_existing_shelf_is_not_removed_by_comprehension(
         self, budget_store, monkeypatch, proxy, tmp_path
     ):

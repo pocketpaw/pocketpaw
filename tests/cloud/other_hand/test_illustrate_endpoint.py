@@ -179,6 +179,40 @@ class TestTheRouteHonoursTheDailyBudget:
 # ---------------------------------------------------------------------------
 
 
+class TestTheRouteFailsClosedOnItsOwnClaim:
+    @pytest.mark.asyncio
+    async def test_an_unreadable_counter_refuses_the_platform_paid_drawing(self, monkeypatch):
+        """The real claim (``try_spend`` NOT patched): the counter raises, the
+        route answers 429 and the generator is never paid."""
+        from pocketpaw_ee.cloud._core.errors import CloudError
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+        from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _not_a_guest(_user_id):
+            return None
+
+        async def _platform_grant(_workspace_id, *, is_guest):
+            return creds.IllustrationGrant(api_key="platform-key", byok=False)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("counter unavailable")
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the route paid the generator on an unreadable counter")
+
+        monkeypatch.setattr(guest_budget, "load_guest", _not_a_guest)
+        monkeypatch.setattr(creds, "resolve", _platform_grant)
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+        monkeypatch.setattr(ill, "illustrate_as_ops", _must_not_run)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        with pytest.raises(CloudError) as caught:
+            await oh_router.illustrate(body=body, workspace_id="ws-1", user_id="u-real")
+        assert caught.value.code == "other_hand.illustration_limit"
+
+
 class TestGuestsCannotSpendPlatformMoneyOnPictures:
     @pytest.mark.asyncio
     async def test_the_route_refuses_a_guest_before_claiming_budget(self, monkeypatch):
