@@ -12,7 +12,8 @@
 #   custom domains). The pin guarded a key that is public in page source and only
 #   bound browsers, so as a default gate it mostly 403'd real visitors.
 #
-# Owner routes ("sites" plan feature + ``fabric.read``, workspace-scoped; another
+# Owner routes ("sites" plan feature; reads need ``fabric.read``, writes
+# ``fabric.write`` like the sites router's mutations; workspace-scoped, another
 # workspace's lead is a 404). ``site_id`` is the site's script_name, as on the Lead:
 #   * GET   /sites/{site_id}/leads
 #   * PATCH /sites/{site_id}/leads/{lead_id}  {status?, read?}
@@ -294,16 +295,16 @@ async def list_leads(
     return [lead_to_dto(lead) for lead in leads]
 
 
-_OWNER_DEPS = [
+_OWNER_WRITE_DEPS = [
     Depends(require_plan_feature("sites")),
-    Depends(require_action_any_workspace("fabric.read")),
+    Depends(require_action_any_workspace("fabric.write")),
 ]
 
 
 @router.patch(
     "/sites/{site_id}/leads/{lead_id}",
     response_model=LeadOut,
-    dependencies=_OWNER_DEPS,
+    dependencies=_OWNER_WRITE_DEPS,
 )
 async def update_lead(
     site_id: str,
@@ -324,7 +325,7 @@ async def update_lead(
 @router.post(
     "/sites/{site_id}/leads/read-all",
     response_model=ReadAllResponse,
-    dependencies=_OWNER_DEPS,
+    dependencies=_OWNER_WRITE_DEPS,
 )
 async def read_all_leads(
     site_id: str,

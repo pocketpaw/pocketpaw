@@ -380,3 +380,49 @@ async def test_the_bridge_skips_a_handoff_lead(mongo_db, monkeypatch):
     await bridge._on_lead_captured({**base, "source_kind": "concierge"})
     await bridge._on_lead_captured(base)
     assert len(calls) == 2
+
+
+# --------------------------------------------------------------------------- #
+# RBAC: reads need fabric.read, writes fabric.write
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def writes_need_editor(monkeypatch):
+    """No built-in workspace role is read-only for Fabric today (``member`` holds
+    both fabric.read and fabric.write), so raise fabric.write to EDITOR for the
+    test. A member is then a read-only caller, which proves the write routes
+    are gated on fabric.write and the list stays on fabric.read."""
+    from pocketpaw_ee.guards.actions import ACTIONS, ActionRule
+    from pocketpaw_ee.guards.rbac import WorkspaceRole
+
+    monkeypatch.setitem(
+        ACTIONS, "fabric.write", ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_caller_can_list_but_not_write(mongo_db, writes_need_editor):
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    site = await _site()
+    lead_id = await _lead(site)
+    app = _app(role="member")
+    add_error_handler(app)
+
+    assert (await _call(app, "GET", f"/sites/{SITE_ID}/leads")).status_code == 200
+    patch = await _call(app, "PATCH", f"/sites/{SITE_ID}/leads/{lead_id}", json={"status": "won"})
+    assert patch.status_code == 403
+    assert (await _call(app, "POST", f"/sites/{SITE_ID}/leads/read-all")).status_code == 403
+    doc = await LeadDoc.get(lead_id)
+    assert doc.status == "new" and doc.read_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_writer_can_write(mongo_db, writes_need_editor):
+    site = await _site()
+    lead_id = await _lead(site)
+    app = _app(role="editor")
+    patch = await _call(app, "PATCH", f"/sites/{SITE_ID}/leads/{lead_id}", json={"status": "won"})
+    assert patch.status_code == 200, patch.text
+    assert (await _call(app, "POST", f"/sites/{SITE_ID}/leads/read-all")).status_code == 200
