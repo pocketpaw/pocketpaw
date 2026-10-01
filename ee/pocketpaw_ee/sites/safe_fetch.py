@@ -45,7 +45,7 @@ import ipaddress
 import logging
 import socket
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -196,12 +196,14 @@ async def _default_resolve(host: str) -> list[str]:
 
 @dataclass
 class FetchResult:
-    """One completed (post-redirect) fetch."""
+    """One completed (post-redirect) fetch. ``headers`` are the final response's,
+    lower-cased, without ``set-cookie`` (the fetcher keeps no cookies)."""
 
     url: str
     status: int
     content_type: str
     body: bytes
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 class SafeFetcher:
@@ -299,7 +301,7 @@ class SafeFetcher:
         for _hop in range(MAX_REDIRECTS + 1):
             parsed = validate_fetch_url(current)
             ip = await self._checked_ip(parsed.hostname)
-            status, content_type, location, body = await self._pinned_get(parsed, ip)
+            status, content_type, location, body, headers = await self._pinned_get(parsed, ip)
             if status in _REDIRECT_STATUSES:
                 if not location:
                     raise FetchError("redirect response carried no Location header")
@@ -311,10 +313,14 @@ class SafeFetcher:
                         code="sites.import_crawl_offsite_redirect",
                     )
                 continue
-            return FetchResult(url=current, status=status, content_type=content_type, body=body)
+            return FetchResult(
+                url=current, status=status, content_type=content_type, body=body, headers=headers
+            )
         raise FetchError(f"too many redirects (max {MAX_REDIRECTS})")
 
-    async def _pinned_get(self, parsed: Any, ip: str) -> tuple[int, str, str, bytes]:
+    async def _pinned_get(
+        self, parsed: Any, ip: str
+    ) -> tuple[int, str, str, bytes, dict[str, str]]:
         """One GET pinned to ``ip``: URL host swapped for the validated address,
         original Host header (and SNI hostname for https) supplied explicitly."""
         port = parsed.port
@@ -351,7 +357,9 @@ class SafeFetcher:
             self._client.cookies.clear()
         self.bytes_fetched += len(buf)
         content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        return response.status_code, content_type, response.headers.get("location", ""), bytes(buf)
+        headers = {k.lower(): v for k, v in response.headers.items() if k.lower() != "set-cookie"}
+        location = response.headers.get("location", "")
+        return response.status_code, content_type, location, bytes(buf), headers
 
 
 # --------------------------------------------------------------------------- #
