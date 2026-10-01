@@ -6,7 +6,10 @@ workspace to ``create_room`` so a scheduled start goes through the plan's daily
 call budget (it used to skip it), and it records the room name and the budget
 deadline on the meeting's own row instead of letting ``create_room`` insert a
 second "Instant call" row. ``create()`` refuses a ``group_id`` the caller is
-not a member of in their workspace (``livekit.room_forbidden``)."""
+not a member of in their workspace (``livekit.room_forbidden``).
+
+2026-10-01 (feat/meetings-instant): ``end()`` passes the workspace to
+``end_room`` so every in_progress row for the room closes, not only this one."""
 
 from __future__ import annotations
 
@@ -95,7 +98,7 @@ class LiveKitProvider:
         """Stop agent + delete room."""
         group_id = meeting.raw_provider_payload.get("group_id")
         if group_id:
-            await livekit_service.end_room(group_id)
+            await livekit_service.end_room(group_id, ctx.workspace_id)
 
     # ----- SupportsRecording -----
 

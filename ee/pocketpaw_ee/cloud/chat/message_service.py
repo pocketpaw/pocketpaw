@@ -26,6 +26,9 @@ Invariants a reader must not break:
 - Reads stay bounded and index-shaped: thread and reply lists page on the
   ``(thread_id|reply_to, createdAt)`` indexes with a limit, search escapes the
   user's text (``re.escape``) and caps the result count.
+- Member-gated reads check ``MEMBER_ONLY_GROUP_TYPES`` (private, dm, meeting).
+  A ``meeting`` room is hidden: a user mention in one only notifies members.
+  (2026-10-01, feat/meetings-instant)
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.chat import group_service, unread_service
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
 from pocketpaw_ee.cloud.chat.domain import Attachment as _AttachmentDomain
 from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
 from pocketpaw_ee.cloud.chat.domain import Message as _MessageDomain
@@ -573,7 +577,12 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         mtype = mention.get("type")
         if mtype == "user":
             target = mention.get("id")
-            if target and target != user_id:
+            # A meeting room is hidden: a mention never reaches a non-member.
+            if (
+                target
+                and target != user_id
+                and (group_type != MEETING_GROUP_TYPE or target in group.members)
+            ):
                 recipients.add(target)
         elif mtype in broadcast_types:
             for member in group.members:
@@ -874,7 +883,7 @@ async def get_messages(
     from pocketpaw_ee.cloud.chat.runs import service as run_service
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     before_time: datetime | None = None
@@ -946,7 +955,7 @@ async def get_thread(
 
     msg = await _get_group_message_domain_or_404(message_id)
     group = await _get_group_or_404(cast(str, msg.group))
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     limit = max(1, min(limit, THREAD_REPLY_LIMIT))
@@ -1011,7 +1020,7 @@ async def get_active_threads(group_id: str, user_id: str) -> list[dict]:
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     if not group.active_threads:
@@ -1145,7 +1154,7 @@ async def get_thread_messages(
         raise NotFound("thread", thread_id)
 
     group = await _get_group_or_404(parent.group)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     # Build response: parent + thread replies
@@ -1228,7 +1237,7 @@ async def search_messages(group_id: str, user_id: str, query: str) -> list[dict]
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     domain_messages = await _search_in_group(group_id, query, limit=50)

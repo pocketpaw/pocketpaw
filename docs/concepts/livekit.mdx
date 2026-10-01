@@ -96,6 +96,33 @@ Starting a call goes through the workspace plan's daily call-time budget, whethe
 
 A guest invite link never starts a call. Guests of a scheduled meeting can join only after a member has joined the call; until then the join page gets `meeting_invite.call_ended`.
 
+Ending a call closes every in-progress LiveKit meeting row for that room. If a scheduled meeting started while an instant call was already running in the same group, both rows end together, and the daily call budget counts the overlapping time once.
+
+## Instant Meetings
+
+`POST /api/v1/meetings/instant` starts a meeting right away, Google Meet style. It does not need an existing chat group: it creates one of type `meeting` with the host as owner and only member, named after the meeting title. Because the meeting has its own room, everything keyed on a room works unchanged: the LiveKit room `group-call-<room_group_id>`, the call-bot, meeting notes posted to the room's chat, the transcript sent to the KB, recording, and in-call chat.
+
+Meeting rooms are hidden. They never show up in the room list (`GET /chat/groups`), workspace message search, unread badges, the @-mention channel picker, or the workspace room count, and only members can read them. They can't be edited or retyped through the chat API, and a mention of a non-member in a meeting room sends no notification.
+
+Request body (both fields optional):
+
+```json
+{ "title": "Design sync", "description": "Q4 roadmap" }
+```
+
+The title defaults to `"Instant meeting"`. The response is the usual meeting object with these fields added:
+
+| Field | Meaning |
+|-------|---------|
+| `code` | Meeting code in display form, `xxx-xxxx-xxx`: 10 lowercase letters, never `l`, `i` or `o`. Stored without dashes; a code lookup should strip dashes and lowercase, so both forms work |
+| `link` | `<POCKETPAW_FRONTEND_BASE_URL>/m/<code>`, also stored as `join_url` |
+| `room_group_id` | The hidden meeting room (also mirrored in `group_id`) |
+| `host_user_id` | The member who started it |
+| `access` | `"ask"` (default) or `"open"`: whether people outside the room wait for the host. The lobby that enforces this comes later |
+| `description` | Optional description |
+
+The meeting row starts as `status: "in_progress"` with `source: "livekit"`, and there is exactly one row per meeting. The call goes through the daily call-time budget like any other call. When the plan has no call time left, the endpoint returns 402 `billing.call_limit` and neither the room nor the meeting row is created.
+
 ## Soul Memory Integration
 
 PR #1112 wired soul memory recall into the meeting agent path. When an agent joins a call (via the subprocess agent lifecycle managed in `service.py`'s `_SubprocessAgentRef`), the agent's bootstrap pulls relevant soul memories into context:

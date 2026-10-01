@@ -10,12 +10,23 @@
 #   §7  Every read filters by workspace_id.
 #   §9  Every write emits an event (or carries a ``# no-event`` justification).
 #   §10 Errors via CloudError, never HTTPException.
+#
+# 2026-10-01 (feat/meetings-instant, MC-1): ``start_instant_meeting`` backs
+# ``POST /meetings/instant`` — a hidden ``type="meeting"`` chat room, one Meeting
+# row with a meeting code, and a live LiveKit call, all or nothing. Meeting codes
+# are 10 letters from an alphabet without l/i/o, stored WITHOUT dashes and shown
+# / linked as ``xxx-xxxx-xxx`` (a lookup should strip dashes and lowercase, so
+# both forms resolve). ``MeetingResponse`` carries ``code``, ``link``,
+# ``room_group_id``, ``access``, ``host_user_id`` and ``description``.
 
 from __future__ import annotations
 
 import logging
 import os
+import secrets
 from datetime import UTC, datetime, timedelta
+
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.connectors.protocol import ActionResult
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
@@ -25,6 +36,7 @@ from pocketpaw_ee.cloud.meetings.dto import (
     ListMeetingsRequest,
     MeetingDetailResponse,
     MeetingResponse,
+    StartInstantMeetingRequest,
     TranscriptResponse,
 )
 from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
@@ -45,6 +57,31 @@ TRANSCRIPT_KB_VERSION = 1
 # ---------------------------------------------------------------------------
 # Mapping helpers (rule §8 — same-file private helpers, not separate module)
 # ---------------------------------------------------------------------------
+
+
+# Meeting codes: 10 letters, no l / i / o (they read as 1 / 0 when typed from
+# a screen). 23**10 ≈ 4e13 codes, so a collision on the unique index is rare;
+# the insert retries a few times.
+_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz"
+_CODE_LENGTH = 10
+_CODE_ATTEMPTS = 5
+INSTANT_MEETING_TITLE = "Instant meeting"
+
+
+def _new_code() -> str:
+    """A canonical (dash-less) meeting code."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
+
+
+def display_code(code: str) -> str:
+    """``abcdefghjk`` → ``abc-defg-hjk``."""
+    return f"{code[:3]}-{code[3:7]}-{code[7:]}"
+
+
+def _meeting_link(code: str) -> str:
+    """``<frontend base>/m/<display code>`` — same base the OAuth redirects use."""
+    base = os.environ.get("POCKETPAW_FRONTEND_BASE_URL", "http://localhost:1420").rstrip("/")
+    return f"{base}/m/{display_code(code)}"
 
 
 def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) -> MeetingResponse:
@@ -73,6 +110,12 @@ def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) ->
         bot_status_at=doc.bot_status_at,
         auto_created_from_calendar=payload.get("auto_created_by") == "calendar_bridge",
         calendar_event_id=payload.get("calendar_event_id"),
+        code=display_code(doc.code) if doc.code else None,
+        link=_meeting_link(doc.code) if doc.code else None,
+        room_group_id=doc.room_group_id,
+        access=doc.access,
+        host_user_id=doc.host_user_id,
+        description=doc.description,
     )
 
 
@@ -454,6 +497,100 @@ async def create_meeting(
         logger.exception("Failed to emit realtime meeting.scheduled for %s", doc.id)
 
     return _doc_to_response(doc, transcript_available=False)
+
+
+async def _insert_with_code(fields: dict) -> _MeetingDoc:
+    """Insert a Meeting with a fresh code, retrying on a unique-index collision."""
+    for attempt in range(_CODE_ATTEMPTS):
+        doc = _MeetingDoc(**fields, code=_new_code())
+        try:
+            await doc.insert()
+            return doc
+        except DuplicateKeyError:
+            if attempt == _CODE_ATTEMPTS - 1:
+                raise
+            logger.info("Meeting code collision, retrying")
+    raise AssertionError("unreachable")
+
+
+async def start_instant_meeting(
+    workspace_id: str, user_id: str, body: StartInstantMeetingRequest
+) -> MeetingResponse:
+    """Start a meeting now: hidden room + Meeting row + live call.
+
+    The room is a ``type="meeting"`` chat group with the host as its only
+    member, so the room-keyed call pieces (call-bot, notes, recording, in-call
+    chat) work unchanged. ``create_room`` runs with ``record_meeting=False`` so
+    this row is the call's only Meeting row, and it applies the plan's daily
+    call budget: if it refuses (``CallLimitError``) or fails, the room and the
+    row are deleted and the error propagates, so nothing is left behind.
+    """
+    from pocketpaw_ee.cloud.chat import group_service
+    from pocketpaw_ee.cloud.livekit import service as livekit_service
+
+    body = StartInstantMeetingRequest.model_validate(body)
+    title = (body.title or "").strip() or INSTANT_MEETING_TITLE
+    description = (body.description or "").strip() or None
+
+    room_id = await group_service.create_meeting_room(workspace_id, user_id, title)
+    room_name = livekit_service.room_name_for_group(room_id)
+    now = datetime.now(UTC)
+    doc: _MeetingDoc | None = None
+    try:
+        doc = await _insert_with_code(
+            {
+                "workspace": workspace_id,
+                "source": "livekit",
+                "provider_meeting_id": room_name,
+                "title": title,
+                "description": description,
+                "join_url": "",
+                "scheduled_start": now,
+                "actual_start": now,
+                "status": "in_progress",
+                "room_group_id": room_id,
+                # Back-compat: older readers take the room from the payload.
+                "raw_provider_payload": {"group_id": room_id, "room_name": room_name},
+                "created_by_user_id": user_id,
+                "host_user_id": user_id,
+                "access": "ask",
+            }
+        )
+        result = await livekit_service.create_room(
+            room_id, workspace_id, user_id, record_meeting=False
+        )
+    except Exception:
+        if doc is not None:
+            await doc.delete()  # no-event: never announced
+        await group_service.delete_meeting_room(room_id)
+        raise
+
+    doc.join_url = _meeting_link(doc.code or "")
+    doc.call_budget_deadline = result.get("call_budget_deadline")
+    await doc.save()
+
+    # Realtime only, like create_room's own instant-call path: the audience is
+    # the room's members (just the host). The bus ``meeting.started`` would
+    # notify the host about the meeting they just started.
+    try:
+        from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+        from pocketpaw_ee.cloud.meetings.events import MeetingStarted
+
+        await _emit_realtime(
+            MeetingStarted(
+                data={
+                    "workspace_id": workspace_id,
+                    "meeting_id": str(doc.id),
+                    "source": "livekit",
+                    "group_id": room_id,
+                    "join_url": doc.join_url,
+                }
+            )
+        )
+    except Exception:
+        logger.exception("Failed to emit realtime meeting.started for %s", doc.id)
+
+    return _doc_to_response(doc)
 
 
 async def cancel_meeting(workspace_id: str, meeting_id: str, user_id: str = "") -> MeetingResponse:

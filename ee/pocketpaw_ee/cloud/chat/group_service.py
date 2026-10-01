@@ -9,6 +9,12 @@ now gates on ``agents.service.ensure_can_use`` in addition to the
 workspace-membership check, so a group admin can no longer attach another
 user's PRIVATE agent (the DM path already enforced this in
 ``get_or_create_agent_dm``).
+
+Updated: 2026-10-01 (feat/meetings-instant, MC-1) — ``type="meeting"`` rooms
+back meetings. ``create_meeting_room`` / ``delete_meeting_room`` are their only
+writers; the room list (and the workspace message search that reuses it) leaves
+them out, ``get_group`` needs membership, and ``update_group`` refuses them so a
+host can't retype one into a listed room.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from typing import Any, Literal
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
 from pocketpaw_ee.cloud.chat.domain import Group as _GroupDomain
 from pocketpaw_ee.cloud.chat.domain import GroupAgent as _GroupAgentDomain
 from pocketpaw_ee.cloud.chat.schemas import (
@@ -324,11 +331,13 @@ async def _populate_lookups_for_domain_groups(
 async def _list_visible_in_workspace(workspace_id: str, user_id: str) -> list[_GroupDomain]:
     """Channels (public) and public groups in the workspace + private/DM groups
     the user is a member of. Excludes archived. Private channels are only
-    surfaced to members who have been granted access."""
+    surfaced to members who have been granted access. Meeting rooms are
+    hidden: they never appear here, even to their members."""
     docs = await _GroupDoc.find(
         {
             "workspace": workspace_id,
             "archived": False,
+            "type": {"$ne": MEETING_GROUP_TYPE},
             "$or": [
                 # Public groups and channels visible to all workspace members
                 {"type": "public"},
@@ -634,6 +643,30 @@ async def create_group(workspace_id: str, user_id: str, body: CreateGroupRequest
     return resp
 
 
+async def create_meeting_room(workspace_id: str, host_id: str, name: str) -> str:
+    """Create the hidden ``type="meeting"`` room behind a meeting; returns its id.
+
+    The host is owner and only member. No ``group.created`` event: the room is
+    hidden, so nothing should add it to a sidebar.
+    """
+    group = await _create_group_doc(
+        workspace_id=workspace_id,
+        name=name,
+        slug=_generate_slug(name),
+        owner=host_id,
+        type=MEETING_GROUP_TYPE,
+        members=[host_id],
+    )
+    return group.id  # no-event: hidden room, see docstring
+
+
+async def delete_meeting_room(group_id: str) -> None:
+    """Hard-delete a meeting room that never went live (instant-start rollback)."""
+    doc = await _GroupDoc.get(PydanticObjectId(group_id))
+    if doc is not None and doc.type == MEETING_GROUP_TYPE:
+        await doc.delete()  # no-event: its creation emitted none either
+
+
 async def list_groups(workspace_id: str, user_id: str) -> list[dict]:
     """List groups visible to the user.
 
@@ -657,7 +690,7 @@ async def get_group(group_id: str, user_id: str) -> dict:
     from pocketpaw_ee.cloud.chat.dto import group_to_wire_dict
 
     group = await _get_group_domain_or_404(group_id)
-    if group.type in ("private", "dm") or (
+    if group.type in MEMBER_ONLY_GROUP_TYPES or (
         group.type == "channel" and group.visibility == "private"
     ):
         _require_domain_group_member(group, user_id)
@@ -672,6 +705,10 @@ async def update_group(group_id: str, user_id: str, body: UpdateGroupRequest) ->
     group = await _get_group_domain_or_404(group_id)
     if group.type == "dm":
         raise Forbidden("group.cannot_update_dm", "DM groups cannot be updated")
+    if group.type == MEETING_GROUP_TYPE:
+        # Retyping would put the hidden room in everyone's list; the meeting's
+        # title is edited through the meetings API.
+        raise Forbidden("group.cannot_update_meeting", "Meeting rooms cannot be updated")
     _require_domain_group_admin(group, user_id)
 
     new_slug = _generate_slug(body.name) if body.name is not None else None

@@ -31,6 +31,11 @@ Change log:
 - ``require_call_group()`` (same branch): the shared, audited check that a
   group exists, is in the caller's workspace and has the caller as a member.
   Used by the LiveKit routes and by scheduling a LiveKit meeting.
+- ``end_room()`` closes EVERY in_progress LiveKit meeting row for the room, not
+  just the first (feat/meetings-instant, 2026-10-01): a scheduled start landing
+  on a running instant call left two rows, and ending the call half-closed
+  them. ``_daily_call_usage`` merges overlapping spans per room so those two
+  rows count one call's time once.
 """
 
 from __future__ import annotations
@@ -676,15 +681,26 @@ async def _daily_call_usage(workspace_id: str) -> int:
         }
     ).to_list()
     now = datetime.now(UTC)
-    total = 0
+    # Clip each row's span to today's window, grouped by room: two rows for one
+    # room (a scheduled start on a running call) overlap, and one call's time
+    # must count once. A row with no room name stands alone.
+    spans: dict[str, list[tuple[datetime, datetime]]] = {}
     for doc in docs:
-        s = _as_utc(doc.actual_start or now)
-        e = _as_utc(doc.actual_end or now)
-        # Clip the call's span to today's window.
-        s = max(s, start)
-        e = min(e, end)
+        s = max(_as_utc(doc.actual_start or now), start)
+        e = min(_as_utc(doc.actual_end or now), end)
         if e > s:
-            total += int((e - s).total_seconds())
+            spans.setdefault(doc.provider_meeting_id or str(doc.id), []).append((s, e))
+    total = 0
+    for room_spans in spans.values():
+        cur_s, cur_e = None, None
+        for s, e in sorted(room_spans):
+            if cur_e is None or s > cur_e:
+                if cur_e is not None:
+                    total += int((cur_e - cur_s).total_seconds())
+                cur_s, cur_e = s, e
+            else:
+                cur_e = max(cur_e, e)
+        total += int((cur_e - cur_s).total_seconds())
     return total
 
 
@@ -1037,17 +1053,19 @@ async def end_room(group_id: str, workspace_id: str = "", reason: str = "") -> d
         ended_data["reason"] = reason
     await emit(CallEnded(data=ended_data))
 
-    # Transition the Meeting doc to ended so the call shows as "Over".
+    # Transition the call's Meeting rows to ended so the call shows as "Over".
+    # All of them: a scheduled start on a running call leaves two in_progress
+    # rows for one room, and closing only one strands the other as "Live".
     if workspace_id:
         try:
             now = datetime.now(UTC)
-            meeting = await MeetingDoc.find_one(
+            meetings = await MeetingDoc.find(
                 MeetingDoc.workspace == workspace_id,
                 MeetingDoc.provider_meeting_id == room_name,
                 MeetingDoc.source == "livekit",
                 MeetingDoc.status == "in_progress",
-            )
-            if meeting is not None:
+            ).to_list()
+            for meeting in meetings:
                 meeting.status = "ended"
                 meeting.actual_end = now
                 await meeting.save()
