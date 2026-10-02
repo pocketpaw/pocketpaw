@@ -7,6 +7,8 @@
 # Updated 2026-10-02 (feat/partners-sell, PH-2): GET /partners/offers and
 #   GET /partners/sites (fabric.read), POST /partners/sell — guarded by
 #   ``sites.buy_plan`` (ADMIN) because a sale spends the workspace wallet.
+# Updated 2026-10-02 (feat/partners-earnings, PH-11): GET /partners/summary and
+#   GET /partners/earnings?months= (fabric.read, active partner).
 
 from __future__ import annotations
 
@@ -21,11 +23,13 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
+    PartnerEarningsMonthOut,
     PartnerOfferOut,
     PartnerProfileOut,
     PartnerSaleOut,
     PartnerSellRequest,
     PartnerSiteOut,
+    PartnerSummaryOut,
 )
 
 router = APIRouter(prefix="/partners", tags=["partners"])
@@ -82,3 +86,15 @@ async def list_sites(
     ctx: Ctx, due_within_days: Annotated[int | None, Query(ge=0, le=3660)] = None
 ) -> list[PartnerSiteOut]:
     return await service.list_sites(ctx, due_within_days=due_within_days)
+
+
+@router.get("/summary", response_model=PartnerSummaryOut, dependencies=_READ)
+async def get_summary(ctx: Ctx) -> PartnerSummaryOut:
+    return await service.summary(ctx)
+
+
+@router.get("/earnings", response_model=list[PartnerEarningsMonthOut], dependencies=_READ)
+async def get_earnings(
+    ctx: Ctx, months: Annotated[int, Query(ge=1, le=24)] = 12
+) -> list[PartnerEarningsMonthOut]:
+    return await service.earnings(ctx, months=months)

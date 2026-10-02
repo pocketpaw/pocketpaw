@@ -7,6 +7,12 @@
 # plans at the caller's country price), ``sell`` (validates the client, then
 # ``sites.service.sell_site_plan`` — the ordinary paid-publish path — debits the
 # wallet, redeploys and stamps ``partner_client_id``) and ``list_sites``.
+# Updated 2026-10-02 (feat/partners-earnings, PH-11): ``sell`` optionally records
+# what the partner charged its client as a PAID receipt on the site's existing
+# client record (``sites.service.record_site_invoice`` — no second writer), only
+# when the sale really happened. ``summary`` and ``earnings`` read the sold sites'
+# paid receipts (per currency, never FX-mixed) and their ``site_plan`` debits
+# (through ``credits.service.history``) for the partner earnings view.
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -23,6 +29,9 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -46,11 +55,14 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
+    PartnerEarningsMonthOut,
+    PartnerMoneyOut,
     PartnerOfferOut,
     PartnerProfileOut,
     PartnerSaleOut,
     PartnerSellRequest,
     PartnerSiteOut,
+    PartnerSummaryOut,
 )
 
 
@@ -285,22 +297,42 @@ async def sell(
     ctx: RequestContext, *, body: Any, store: FabricJournalStore | None = None
 ) -> PartnerSaleOut:
     body = PartnerSellRequest.model_validate(body)
-    workspace_id = await _require_active(ctx)
-    if body.sku not in {tier.key for tier in site_plans.list_partner_plans()}:
+    profile = await _active_profile(ctx)
+    workspace_id: str = ctx.workspace_id  # type: ignore[assignment]  # active ⇒ resolved
+    tier = next((t for t in site_plans.list_partner_plans() if t.key == body.sku), None)
+    if tier is None:
         raise ValidationError("partners.unknown_sku", f"'{body.sku}' is not a partner plan")
     # Scoped read: another workspace's client is a 404 here.
     await get_client(ctx, client_id=body.client_id, store=store)
 
     from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.dto import SiteInvoiceCreate
 
-    doc = await sites_service.sell_site_plan(
+    doc, sold = await sites_service.sell_site_plan(
         workspace_id=workspace_id,
         user_id=ctx.user_id,
         site_id=body.site_id,
         tier_key=body.sku,
         partner_client_id=body.client_id,
     )
-    # no-event: the sale runs the publish path, which emits SitePublished on deploy.
+    invoice_id: str | None = None
+    # Only a real sale gets a receipt: a refused one raised above, and the
+    # idempotent re-sell (``sold`` False) must not book the price twice.
+    if sold and body.price_minor is not None:
+        record = await sites_service.record_site_invoice(
+            workspace_id=workspace_id,
+            site_id=str(doc.id),
+            body=SiteInvoiceCreate(
+                amount_cents=body.price_minor,
+                currency=body.currency or ("INR" if profile.billing_country == "IN" else "USD"),
+                paid=True,
+                note=f"Paw Partners sale · {tier.display_name}",
+            ),
+            minor_units=True,
+        )
+        invoice_id = record.invoices[0].id  # newest first
+    # no-event: the sale runs the publish path, which emits SitePublished on deploy;
+    # the receipt is the owner's own bookkeeping (see record_site_invoice).
     return PartnerSaleOut(
         site_id=str(doc.id),
         name=doc.name,
@@ -309,6 +341,7 @@ async def sell(
         renewal_date=doc.renewal_date,
         partner_client_id=body.client_id,
         subscription_status=doc.subscription_status,
+        invoice_id=invoice_id,
     )
 
 
@@ -336,3 +369,104 @@ async def list_sites(
         )
         for d in docs
     ]
+
+
+# ---------------------------------------------------------------- earnings (PH-11)
+
+
+def _aware(value: datetime) -> datetime:
+    # Mongo hands datetimes back naive; every stored timestamp here is UTC.
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _month(value: datetime) -> str:
+    value = _aware(value)
+    return f"{value.year:04d}-{value.month:02d}"
+
+
+def _money(invoices: Iterable[Any]) -> list[PartnerMoneyOut]:
+    """Sum receipts per currency. Never FX-mixed: one row per currency."""
+    totals: dict[str, int] = defaultdict(int)
+    for inv in invoices:
+        totals[inv.currency] += inv.amount_cents
+    return [PartnerMoneyOut(currency=c, amount_minor=a) for c, a in sorted(totals.items())]
+
+
+def _paid_receipts(docs: list[Any]) -> list[Any]:
+    """The PAID client receipts on the sold sites (the partner's revenue)."""
+    return [inv for d in docs for inv in d.client_invoices if inv.paid]
+
+
+async def _site_plan_debits(workspace_id: str, site_ids: set[str]) -> list[Any]:
+    """Applied ``site_plan`` debits for ``site_ids`` (purchases, renewals, changes)."""
+    from pocketpaw_ee.cloud.billing.service import SITE_PLAN_DEBIT_CAUSE
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    out: list[Any] = []
+    cursor: str | None = None
+    # ponytail: walks the whole site_plan history (a handful of rows per site a
+    # year); add a since-bounded credits read if a partner's history gets long.
+    while True:
+        page, cursor = await credits_service.history(
+            workspace_id, limit=200, cursor=cursor, cause=SITE_PLAN_DEBIT_CAUSE
+        )
+        out += [
+            e
+            for e in page
+            # A phantom (applied False) never moved the wallet.
+            if e.applied and e.amount_delta_micro < 0 and e.ref.get("site_id") in site_ids
+        ]
+        if cursor is None:
+            return out
+
+
+async def summary(
+    ctx: RequestContext, *, store: FabricJournalStore | None = None
+) -> PartnerSummaryOut:
+    workspace_id = await _require_active(ctx)
+    from pocketpaw_ee.sites import service as sites_service
+
+    docs = await sites_service.list_partner_sites(workspace_id)
+    due = await sites_service.list_partner_sites(workspace_id, due_within_days=30)
+    debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
+    receipts = _paid_receipts(docs)
+    since = datetime.now(UTC) - timedelta(days=30)
+    return PartnerSummaryOut(
+        clients=len(await list_clients(ctx, store=store)),
+        sites_sold=len(docs),
+        active_sites=sum(1 for d in docs if d.subscription_status == "active"),
+        renewals_due_30d=len(due),
+        spent_credits_30d=sum(-e.amount_delta for e in debits if _aware(e.created_at) >= since),
+        spent_credits_total=sum(-e.amount_delta for e in debits),
+        revenue_30d=_money(r for r in receipts if _aware(r.issued_at) >= since),
+        revenue_total=_money(receipts),
+    )
+
+
+async def earnings(ctx: RequestContext, *, months: int = 12) -> list[PartnerEarningsMonthOut]:
+    """One row per UTC calendar month, newest first, empty months included."""
+    if not 1 <= months <= 24:
+        raise ValidationError("partners.invalid_months", "months must be between 1 and 24")
+    workspace_id = await _require_active(ctx)
+    from pocketpaw_ee.sites import service as sites_service
+
+    now = datetime.now(UTC)
+    keys = [
+        f"{y:04d}-{m + 1:02d}"
+        for y, m in (divmod(now.year * 12 + now.month - 1 - i, 12) for i in range(months))
+    ]
+    docs = await sites_service.list_partner_sites(workspace_id)
+    debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
+    receipts = _paid_receipts(docs)
+    rows = []
+    for key in keys:
+        month_debits = [e for e in debits if _month(e.created_at) == key]
+        rows.append(
+            PartnerEarningsMonthOut(
+                month=key,
+                sales=len(month_debits),
+                revenue=_money(r for r in receipts if _month(r.issued_at) == key),
+                spent_credits=sum(-e.amount_delta for e in month_debits),
+            )
+        )
+    return rows

@@ -1,6 +1,10 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-02 (feat/partners-earnings, PH-11): ``sell_site_plan`` returns
+# ``(doc, sold)`` — ``sold`` is False on the idempotent re-sell no-op — so the
+# partner sale records its client receipt only once.
+#
 # Updated 2026-10-02 (feat/partners-cobrand, PH-5): ``_stamp_free_badge`` stamps
 # the partner CO-BRAND mark ("Made by <footer_name> · Paw Sites by PocketPaw" ->
 # the Paw Partners page) on a partner-sold site (``partner_client_id``) riding an
@@ -8624,7 +8628,7 @@ async def sell_site_plan(
     site_id: str,
     tier_key: str,
     partner_client_id: str,
-) -> _SiteDoc:
+) -> tuple[_SiteDoc, bool]:
     """A Paw Partner sells one of its sites a partner-only plan (PH-2).
 
     NOT a second purchase path: it runs ``publish_pocket`` for the site's pocket
@@ -8634,7 +8638,8 @@ async def sell_site_plan(
     adds is the tenant check, two refusals, and the ``partner_client_id`` stamp.
 
     Re-selling the tier a site already holds and pays for is a no-op apart from
-    the stamp — no second debit, no redeploy.
+    the stamp — no second debit, no redeploy. Returns ``(doc, sold)``; ``sold`` is
+    False on that no-op (PH-11: the caller records a receipt only for a real sale).
     """
     doc = await _load(workspace_id, site_id)
     if getattr(doc, "foreign_origin", False):
@@ -8663,8 +8668,8 @@ async def sell_site_plan(
     prior_client_id = getattr(doc, "partner_client_id", None)
     await doc.set({"partner_client_id": partner_client_id})
     if already_sold:
-        return doc
-    sold = False
+        return doc, False
+    completed = False
     try:
         doc = await publish_pocket(
             workspace_id=workspace_id,
@@ -8673,11 +8678,11 @@ async def sell_site_plan(
             site_plan_key=tier_key,
             purchase_authorized=True,
         )
-        sold = True
+        completed = True
     finally:
-        if not sold:
+        if not completed:
             await doc.set({"partner_client_id": prior_client_id})
-    return doc
+    return doc, True
 
 
 async def list_partner_sites(
