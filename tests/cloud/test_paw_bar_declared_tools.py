@@ -6,8 +6,9 @@
 # ```pawbar-action fence ``{"do": "tool", "name", "args", "label"}``. Pinned here:
 #   * ``action_spec.valid_tools``: the contract's limits (at most ``TOOLS_MAX``,
 #     the name regex, a short description, a small flat object schema), each bad
-#     tool dropped on its own, with text and schema size measured as the
-#     frame measures them in JavaScript;
+#     tool dropped on its own, and the schema verdicts shared with paw-bar's
+#     frame (tests/fixtures/action_parity/tool_schemas.json), with text and
+#     schema size measured as JavaScript measures them;
 #   * ``render_action`` for ``do: "tool"``: the name is one of this turn's tools
 #     and the args match its schema (types, required, no extra keys, string
 #     length, enum, minimum / maximum);
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -192,6 +194,28 @@ def test_at_most_twelve_tools_are_read():
 def test_a_repeated_name_keeps_the_first():
     second = _tool(description="Something else")
     assert _valid([_CART, second]) == [_CART]
+
+
+# The schema verdicts shared with paw-bar's frame (tool_schemas.json).
+_PARITY = Path(__file__).resolve().parents[1] / "fixtures" / "action_parity"
+_TOOL_SCHEMAS = json.loads((_PARITY / "tool_schemas.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "case", _TOOL_SCHEMAS["cases"], ids=[c["name"] for c in _TOOL_SCHEMAS["cases"]]
+)
+def test_valid_tools_matches_the_paw_bar_schema_verdicts(case):
+    assert bool(_valid([case["tool"]])) is case["accept"]
+
+
+@pytest.mark.parametrize(
+    "case", _TOOL_SCHEMAS["lists"], ids=[c["name"] for c in _TOOL_SCHEMAS["lists"]]
+)
+def test_valid_tools_matches_the_paw_bar_list_verdicts(case):
+    kept = _valid(case["tools"])
+    assert [t["name"] for t in kept] == case["kept"]
+    if "kept_descriptions" in case:
+        assert [t["description"] for t in kept] == case["kept_descriptions"]
 
 
 # Lengths and whitespace are measured as the frame measures them in JavaScript.

@@ -108,5 +108,140 @@
     "name": "unknown_verb",
     "about": "A verb outside the allowlist.",
     "body": "{\"do\":\"click\",\"target\":\"#buy\",\"label\":\"Buy\"}"
+  },
+  {
+    "name": "tool_valid",
+    "about": "A declared tool with good args.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"quantity\":1},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_optional_omitted",
+    "about": "An optional arg left out.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"CAIRN-45\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_extra_keys_dropped",
+    "about": "Keys outside the contract are not forwarded.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\",\"to\":\"/x\",\"why\":\"y\"}"
+  },
+  {
+    "name": "tool_integer_written_as_float",
+    "about": "An integer arg written 2.0 is the integer 2 (JSON has one number type).",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"CAIRN-45\",\"quantity\":2.0},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_at_maximum",
+    "about": "maximum is inclusive.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"CAIRN-45\",\"quantity\":20},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_at_minimum",
+    "about": "minimum is inclusive.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"CAIRN-45\",\"quantity\":1},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_enum_boolean_number",
+    "about": "enum, boolean and number args.",
+    "body": "{\"do\":\"tool\",\"name\":\"pick_size\",\"args\":{\"size\":\"M\",\"gift\":true,\"weight\":0.5},\"label\":\"Pick a size\"}"
+  },
+  {
+    "name": "tool_string_at_limit",
+    "about": "A 200-char string arg.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_max_length_at_limit",
+    "about": "A string at its own maxLength.",
+    "body": "{\"do\":\"tool\",\"name\":\"pick_size\",\"args\":{\"size\":\"S\",\"note\":\"nnnnnnnnnn\"},\"label\":\"Pick a size\"}"
+  },
+  {
+    "name": "tool_unknown_name",
+    "about": "A tool this page did not declare.",
+    "body": "{\"do\":\"tool\",\"name\":\"remove_from_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_bad_name",
+    "about": "A name outside the tool name pattern.",
+    "body": "{\"do\":\"tool\",\"name\":\"Add-To-Cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_args_missing",
+    "about": "No args reads as {}, so the required product is missing.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_args_not_object",
+    "about": "args must be an object.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":[\"CAIRN-45\"],\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_required_missing",
+    "about": "A required arg left out.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"quantity\":1},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_extra_arg",
+    "about": "An arg the schema does not name.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"color\":\"red\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_wrong_type_string_for_integer",
+    "about": "A numeric string is not an integer.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"quantity\":\"2\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_wrong_type_fraction",
+    "about": "1.5 is not an integer.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"quantity\":1.5},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_wrong_type_boolean_for_integer",
+    "about": "true is not an integer.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"quantity\":true},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_wrong_type_string_for_boolean",
+    "about": "\"yes\" is not a boolean.",
+    "body": "{\"do\":\"tool\",\"name\":\"pick_size\",\"args\":{\"size\":\"M\",\"gift\":\"yes\"},\"label\":\"Pick a size\"}"
+  },
+  {
+    "name": "tool_null_arg",
+    "about": "null fits no type.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":null},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_enum_miss",
+    "about": "A value outside the enum.",
+    "body": "{\"do\":\"tool\",\"name\":\"pick_size\",\"args\":{\"size\":\"XL\"},\"label\":\"Pick a size\"}"
+  },
+  {
+    "name": "tool_below_minimum",
+    "about": "Under minimum.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"quantity\":0},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_above_maximum",
+    "about": "Over maximum.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\",\"quantity\":21},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_number_below_minimum",
+    "about": "A number under its fractional minimum.",
+    "body": "{\"do\":\"tool\",\"name\":\"pick_size\",\"args\":{\"size\":\"M\",\"weight\":0.4},\"label\":\"Pick a size\"}"
+  },
+  {
+    "name": "tool_string_too_long",
+    "about": "A string arg over 200 chars.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\"},\"label\":\"Add Cairn 45 Trekking Pack to your cart\"}"
+  },
+  {
+    "name": "tool_over_max_length",
+    "about": "A string over its own maxLength.",
+    "body": "{\"do\":\"tool\",\"name\":\"pick_size\",\"args\":{\"size\":\"S\",\"note\":\"nnnnnnnnnnn\"},\"label\":\"Pick a size\"}"
+  },
+  {
+    "name": "tool_label_missing",
+    "about": "label is required for tools too.",
+    "body": "{\"do\":\"tool\",\"name\":\"add_to_cart\",\"args\":{\"product\":\"/products/cairn-45-trekking-pack/\"}}"
   }
 ]

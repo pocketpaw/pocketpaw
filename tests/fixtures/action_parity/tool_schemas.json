@@ -1,0 +1,1799 @@
+{
+  "_about": [
+    "Shared verdicts for site-declared tool definitions. Same file in pocketpaw (tests/fixtures/action_parity/) and paw-bar (app/tests/fixtures/action_parity/); change them in both. The limits are in expected.json bounds.",
+    "Each case is one tool as the server receives it in page.tools ({name, description, input_schema}); the frame gets the same tool as {name, description, inputSchema, confirm}. accept: kept | dropped.",
+    "Size is the length in characters of the compact JSON of input_schema (JS JSON.stringify(schema).length, Python len(json.dumps(schema, separators=(\",\", \":\"), ensure_ascii=False))). Size cases use integers and BMP text only, so both count alike. Text (tool and property descriptions) is measured after whitespace runs collapse to one space and the ends are trimmed.",
+    "lists: a whole page.tools list and the names kept, in order. Only the first tools_max entries are read, bad ones included; a bad tool drops alone; a repeated name keeps the first.",
+    "actions.js on the host page checks only an outline of these rules (name, description, execute, object schema, property names, size, count) to stay inside its gzip budget; the frame and the server apply all of them.",
+    "Never edit a verdict to make one side pass."
+  ],
+  "cases": [
+    {
+      "name": "valid",
+      "about": "The add_to_cart example.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "no_properties",
+      "about": "An empty property list is a tool with no args.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "schema_missing_properties",
+      "about": "properties may be left out: a tool with no args.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object"
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "all_prop_keys",
+      "about": "Every allowed property key.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string",
+              "enum": [
+                "S",
+                "M",
+                "L"
+              ]
+            },
+            "gift": {
+              "type": "boolean"
+            },
+            "weight": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 10
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 10
+            }
+          },
+          "required": [
+            "size"
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "name_at_limit",
+      "about": "A 40-char name.",
+      "tool": {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "name_too_long",
+      "about": "A 41-char name.",
+      "tool": {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "name_uppercase",
+      "about": "Uppercase is outside the name pattern.",
+      "tool": {
+        "name": "Add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "name_leading_digit",
+      "about": "A name must start with a letter.",
+      "tool": {
+        "name": "1add",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "description_empty",
+      "about": "A blank description.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "   ",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "description_at_limit",
+      "about": "200 chars.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "description_too_long",
+      "about": "201 chars.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "description_whitespace_collapsed",
+      "about": "Measured after whitespace runs collapse to one space and the ends are trimmed.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd      ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  ",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "description_control_char",
+      "about": "No control characters.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add\u0007 it",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "schema_not_object",
+      "about": "The schema must be type object.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "array",
+          "properties": {}
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "schema_extra_key",
+      "about": "Top-level keys are type, properties, required only.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_nested_object",
+      "about": "Flat schemas only.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_array",
+      "about": "Arrays are not a property type.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "array"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_missing_type",
+      "about": "Every property has a type.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "description": "x"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_unknown_key",
+      "about": "pattern is not an allowed property key.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "pattern": "^a"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_name_bad",
+      "about": "Property names match bounds.arg_name_re.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "1x": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_name_dash",
+      "about": "No dashes in property names.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product-id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_name_at_limit",
+      "about": "A 40-char property name, capitals allowed.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "Pxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "prop_name_too_long",
+      "about": "A 41-char property name.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ppppppppppppppppppppppppppppppppppppppppp": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_description_blank",
+      "about": "A property description, when given, is non-blank one-line text of at most 200.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "description": "   "
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "prop_description_too_long",
+      "about": "201 chars.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "description": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "description_not_string",
+      "about": "A property description is text.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "description": 5
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "enum_wrong_type",
+      "about": "enum values must fit the property type.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "enum_fraction_for_integer",
+      "about": "An integer enum cannot hold 1.5.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "enum": [
+                1,
+                1.5
+              ]
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "enum_empty",
+      "about": "An empty enum allows nothing.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "enum": []
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "enum_at_limit",
+      "about": "50 values.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "enum": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+                28,
+                29,
+                30,
+                31,
+                32,
+                33,
+                34,
+                35,
+                36,
+                37,
+                38,
+                39,
+                40,
+                41,
+                42,
+                43,
+                44,
+                45,
+                46,
+                47,
+                48,
+                49
+              ]
+            }
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "enum_too_many",
+      "about": "51 values.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "enum": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+                28,
+                29,
+                30,
+                31,
+                32,
+                33,
+                34,
+                35,
+                36,
+                37,
+                38,
+                39,
+                40,
+                41,
+                42,
+                43,
+                44,
+                45,
+                46,
+                47,
+                48,
+                49,
+                50
+              ]
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "enum_string_too_long",
+      "about": "A string enum value over 200 chars.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "enum": [
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              ]
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "minimum_on_string",
+      "about": "minimum/maximum belong to number and integer.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "maximum_not_number",
+      "about": "maximum must be a number.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "maximum": "5"
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "minimum_above_maximum",
+      "about": "minimum cannot exceed maximum.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 4
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "minimum_equals_maximum",
+      "about": "minimum may equal maximum.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "integer",
+              "minimum": 4,
+              "maximum": 4
+            }
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "max_length_on_number",
+      "about": "maxLength belongs to string.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number",
+              "maxLength": 3
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "max_length_fraction",
+      "about": "maxLength is a whole number.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "maxLength": 2.5
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "max_length_negative",
+      "about": "maxLength is not negative.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string",
+              "maxLength": -1
+            }
+          }
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "required_unknown",
+      "about": "required names only known properties.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "sku"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "required_not_list",
+      "about": "required is a list.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": "product"
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "required_repeated",
+      "about": "required names each property once.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product",
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "schema_at_limit",
+      "about": "Compact JSON exactly 2048 characters.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "enum": [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              ]
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": true
+    },
+    {
+      "name": "schema_over_limit",
+      "about": "Compact JSON 2049 characters.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "enum": [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              ]
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": false
+    },
+    {
+      "name": "schema_at_limit_accented",
+      "about": "Counted in characters, not UTF-8 bytes: 2048 characters with accents is still in.",
+      "tool": {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "enum": [
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+                "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+              ]
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      "accept": true
+    }
+  ],
+  "lists": [
+    {
+      "name": "over_max",
+      "about": "13 good tools: the first 12 are kept.",
+      "tools": [
+        {
+          "name": "tool_1",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_2",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_3",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_4",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_5",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_6",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_7",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_8",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_9",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_10",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_11",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_12",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_13",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        }
+      ],
+      "kept": [
+        "tool_1",
+        "tool_2",
+        "tool_3",
+        "tool_4",
+        "tool_5",
+        "tool_6",
+        "tool_7",
+        "tool_8",
+        "tool_9",
+        "tool_10",
+        "tool_11",
+        "tool_12"
+      ]
+    },
+    {
+      "name": "bad_counts_toward_max",
+      "about": "A bad tool still uses one of the 12 reads, so the 13th entry is never read.",
+      "tools": [
+        {
+          "name": "Bad",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_2",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_3",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_4",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_5",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_6",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_7",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_8",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_9",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_10",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_11",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_12",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "tool_13",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        }
+      ],
+      "kept": [
+        "tool_2",
+        "tool_3",
+        "tool_4",
+        "tool_5",
+        "tool_6",
+        "tool_7",
+        "tool_8",
+        "tool_9",
+        "tool_10",
+        "tool_11",
+        "tool_12"
+      ]
+    },
+    {
+      "name": "bad_dropped_alone",
+      "about": "One bad tool does not sink the list.",
+      "tools": [
+        {
+          "name": "pick_size",
+          "description": "",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "add_to_cart",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        }
+      ],
+      "kept": [
+        "add_to_cart"
+      ]
+    },
+    {
+      "name": "repeated_name",
+      "about": "The first definition wins.",
+      "tools": [
+        {
+          "name": "add_to_cart",
+          "description": "first",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "pick_size",
+          "description": "Add a product to the cart",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        },
+        {
+          "name": "add_to_cart",
+          "description": "second",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "description": "Product page path or SKU"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "product"
+            ]
+          }
+        }
+      ],
+      "kept": [
+        "add_to_cart",
+        "pick_size"
+      ],
+      "kept_descriptions": [
+        "first",
+        "Add a product to the cart"
+      ]
+    }
+  ]
+}
