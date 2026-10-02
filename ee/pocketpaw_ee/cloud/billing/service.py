@@ -273,11 +273,26 @@
 #   (fail closed: if Dodo ever re-keyed a payment, the shop's money would
 #   otherwise land in the partner's wallet as a top-up).
 #
+#   Review fixes (same branch): the CLAWBACK IS ANCHORED ON THE LEDGER, not the
+#   Site record (a deleted site took its records with it and kept the
+#   commission): the reversal finds the partner's workspace through the Payment
+#   row, the 60-day window runs from the commission's ledger entry, and the
+#   running clawback is claimed on the Payment row (``commission_reversed``)
+#   before the debit, so refund + dispute or several partial refunds never take
+#   more than was granted. A PARTIAL refund takes a pro-rata share and leaves the
+#   site's year; only a full refund or a lost dispute lapses it. A refund before
+#   the payment is processed voids the pending record. Pay links pin their charge
+#   currency; a discounted payment is a mismatch; no commission is granted while
+#   the partner is not ACTIVE (the record is flagged ``partner_inactive``, the
+#   shop's year still activates).
+#
 #   SUBSCRIPTION PAYMENTS NO LONGER GRANT AS TOP-UPS. A ``payment.succeeded``
 #   carrying a ``subscription_id`` is a subscription's charge (the subscription
 #   events grant its allotment); it is recorded and acked, never granted as
 #   credits. Before this, nothing stopped the generic top-up grant from also
-#   crediting a subscription payment whose metadata named a workspace.
+#   crediting a subscription payment whose metadata named a workspace. The row is
+#   stamped ``subscription_id``, so a refund of it alarms "needs a human" instead
+#   of reading as a top-up with nothing left to reverse.
 from __future__ import annotations
 
 import logging
@@ -570,6 +585,9 @@ async def create_partner_client_checkout(
             "user_id": user_id or "",
         },
         currency=currency,
+        # The payment must be charged exactly as the link was made: no adaptive
+        # local-currency pricing, which would turn a $228 link into a EUR charge.
+        pin_currency=True,
     )
     if not checkout.gateway_ref:
         raise ValidationError(
@@ -1403,6 +1421,7 @@ async def _record_payment(event: GatewayEvent) -> None:
         # Audit: Dodo's own settlement figure, as the verified body stated it.
         settlement_amount=event.settlement_amount or None,
         settlement_currency=event.settlement_currency or None,
+        subscription_id=str((event.raw.get("data") or {}).get("subscription_id") or "") or None,
     )
     try:
         await doc.insert()
@@ -1585,13 +1604,14 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     rejects at <= 0) until it is settled. Writing the shortfall off instead would
     make disputing profitable.
 
-    KNOWN GAP — a subscription RENEWAL cannot be reversed here, and the reason is
-    structural rather than unfinished. A renewal writes no ``Payment`` row
-    because ``subscription.active`` / ``.renewed`` carry no ``payment_id``
-    anywhere in their body, so nothing links a refunded renewal charge back to
-    the grant it paid for; and that grant is the tier's monthly ALLOTMENT, not
-    the cash, so the money on the refund is not the figure to claw back either.
-    Such a delivery is logged at ERROR with the payment id and left for a human.
+    KNOWN GAP — a subscription charge cannot be reversed here, and the reason is
+    structural rather than unfinished. The charge's own ``payment.succeeded``
+    writes a ``Payment`` row stamped ``subscription_id`` (never granted), but
+    nothing links it to the grant it paid for — ``subscription.active`` /
+    ``.renewed`` carry no ``payment_id`` — and that grant is the tier's monthly
+    ALLOTMENT, not the cash, so the money on the refund is not the figure to
+    claw back either. Such a delivery is logged at ERROR with the payment id and
+    the subscription and left for a human (so is one that matches no row).
     Reversing a number nobody can derive would be worse than alarming.
     """
     if event.type not in _REVERSAL_EVENTS:
@@ -1624,11 +1644,22 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     if doc is None:
         logger.error(
             "billing.webhook: %s for payment=%s (event_id=%s) matches no recorded payment — "
-            "NOT clawing back. A subscription renewal writes no Payment row (its webhook "
-            "carries no payment_id), so a renewal reversal lands here and needs a human",
+            "NOT clawing back; needs a human",
             event.type,
             event.payment_id,
             event.event_id,
+        )
+        return _reversal_ack()
+    if doc.subscription_id:
+        # A SUBSCRIPTION's charge: it granted no credits here (the subscription
+        # events grant the tier's allotment), so there is no figure to derive.
+        logger.error(
+            "billing.webhook: %s for payment=%s (event_id=%s) is a charge of subscription=%s "
+            "— NOT clawing back; the allotment it paid for needs a human",
+            event.type,
+            event.payment_id,
+            event.event_id,
+            doc.subscription_id,
         )
         return _reversal_ack()
 
@@ -1904,7 +1935,12 @@ def _partner_payment_mismatch(event: GatewayEvent, rec: Any) -> str:
 
     if event.currency.upper() != rec.currency.upper():
         return "currency"
-    tax = _int_field(event.raw.get("data") or {}, "tax")
+    data = event.raw.get("data") or {}
+    # A payment link cannot switch discount codes off at Dodo; a discounted
+    # payment is not the list price the link was made for.
+    if data.get("discount_id") or data.get("discounts"):
+        return "discount"
+    tax = _int_field(data, "tax")
     # Tax-inclusive: the total IS the list price. Tax-exclusive: Dodo adds tax on top.
     if rec.amount_minor not in (event.amount_credits, event.amount_credits - tax):
         return "amount"
@@ -1965,12 +2001,16 @@ async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any
             paid_at=now,
             tier=rec.sku,
         )
+        # The shop paid, so its year activates whatever the partner's state; a
+        # partner that is not ACTIVE earns nothing automatically (manual review).
+        active = profile is not None and profile.status == "active"
         outcome = await sites_service.activate_client_paid_site(
             site_id=site_id,
             payment_id=payment_id,
             paid_at=now,
-            commission_credits=_calc.commission_credits(paid_cents, rate),
-            rate_bps=rate,
+            commission_credits=_calc.commission_credits(paid_cents, rate) if active else 0,
+            rate_bps=rate if active else 0,
+            flag_reason="" if active else "partner_inactive",
         )
         if outcome == "flagged":
             logger.error(
@@ -2027,61 +2067,157 @@ async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any
 
 
 async def _reverse_partner_commission(event: ReversalEvent) -> None:
-    """Claw back a client payment's commission once, inside the 60-day window.
+    """Claw back a client payment's commission for a refund / lost dispute.
 
-    The record flips paid -> reversed (and the site lapses to free) in the sites
-    owner; the debit then takes exactly what the ledger shows was granted under
-    ``<payment_id>:commission``, keyed ``<payment_id>:commission:reversal`` so a
-    refund AND a lost dispute on one payment take it once. A redelivery whose
-    record is already reversed re-drives the same idempotent debit (it heals a
-    crash between claim and debit). Allowed to go negative, like M1 reversals.
+    ANCHORED ON THE LEDGER. The site's record says which partner was paid, but a
+    deleted site takes its records with it, so the partner's workspace comes
+    from the ``Payment`` row (written against the partner) and the 60-day window
+    runs from the commission's own ledger entry. The site side — voiding a
+    pending record, lapsing the year — is best-effort and only when the record
+    still exists.
+
+    THE AMOUNT mirrors ``_handle_reversal_event``: a stated amount in the
+    payment's currency takes ``commission * refunded // paid`` (a partial refund
+    takes its share and the site keeps its year); a partial with no usable
+    amount takes nothing and alarms; otherwise the whole remainder goes. Only a
+    full refund or a lost dispute lapses the site.
+
+    THE CLAIM runs first on the Payment row (``commission_reversed``, capped at
+    what the ledger shows was granted, plus the event id), then the debit keyed
+    ``<payment_id>:commission:reversal:<event_id>``; a debit that raises
+    releases the claim so the redelivery re-drives. Allowed to go negative,
+    like M1 reversals.
     """
     if event.type not in _REVERSAL_EVENTS:
         return
     from pocketpaw_ee.sites import service as sites_service
 
-    found = await sites_service.find_partner_payment(event.payment_id)
-    if found is None:
-        return
-    doc, rec = found
-    outcome = await sites_service.reverse_client_paid_site(
-        site_id=str(doc.id),
-        payment_id=rec.payment_id,
-        paid_since=datetime.now(UTC) - _PARTNER_CLAWBACK,
+    pid = event.payment_id
+    now = datetime.now(UTC)
+    # The OLDEST row: a redelivery under a new webhook id records a second row
+    # for the same payment, and every reversal must claim against the same one.
+    payment = (
+        await Payment.find(Payment.gateway == _GATEWAY, Payment.gateway_ref == pid)
+        .sort("+_id")
+        .first_or_none()
     )
-    if outcome != "reversed":
+    paid = int(payment.amount_credits or 0) if payment is not None else 0
+    same_currency = (
+        payment is not None
+        and bool(event.currency)
+        and event.currency.upper() == (payment.currency or "").upper()
+    )
+    full = event.type == _DISPUTE_LOST or not (
+        event.is_partial or (same_currency and 0 < event.amount_credits < paid)
+    )
+
+    found = await sites_service.find_partner_payment(pid)
+    workspace = payment.workspace if payment is not None else None
+    if found is not None:
+        doc, rec = found
+        workspace = doc.workspace
+        if rec.status == "pending":
+            # Refunded before we processed it: nothing was granted or activated,
+            # and the late payment.succeeded must not do either.
+            await sites_service.void_pending_partner_payment(site_id=str(doc.id), payment_id=pid)
+            return
+        if full:
+            await sites_service.reverse_client_paid_site(
+                site_id=str(doc.id), payment_id=pid, paid_since=now - _PARTNER_CLAWBACK
+            )
+    if not workspace:
+        return
+
+    entry = await credits_service.find_by_key(workspace, f"{pid}:commission")
+    granted = entry.amount_delta if entry is not None and entry.applied else 0
+    if granted <= 0 or payment is None:
+        return
+    if _as_utc(entry.created_at) < now - _PARTNER_CLAWBACK:
         logger.info(
-            "billing.webhook: %s for partner client payment=%s (event_id=%s) — no commission "
-            "clawback (%s)",
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+            "paid over 60 days ago, not clawed back",
             event.type,
-            rec.payment_id,
+            pid,
             event.event_id,
-            outcome,
         )
         return
-    entry = await credits_service.find_by_key(doc.workspace, f"{rec.payment_id}:commission")
-    amount = entry.amount_delta if entry is not None and entry.applied else 0
+    if event.event_id in (payment.commission_reversal_event_ids or []):
+        return
+    already = int(payment.commission_reversed or 0)
+    remaining = max(granted - already, 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        amount = min(granted * min(event.amount_credits, paid) // paid, remaining)
+    elif event.is_partial:
+        logger.error(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) is PARTIAL with "
+            "no usable amount — commission NOT clawed back; needs a human",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return
+    else:
+        amount = remaining
     if amount <= 0:
         return
-    await credits_service.debit(
-        workspace=doc.workspace,
-        amount=amount,
-        cause=PARTNER_COMMISSION_REVERSAL_CAUSE,
-        idempotency_key=f"{rec.payment_id}:commission:reversal",
-        allow_negative=True,
-        ref={
-            "gateway": _GATEWAY,
-            "event_id": event.event_id,
-            "payment_id": rec.payment_id,
-            "site_id": str(doc.id),
-            "reason": event.type,
+
+    col = Payment.get_pymongo_collection()
+    claimed = await col.find_one_and_update(
+        {
+            "_id": payment.id,
+            "commission_reversal_event_ids": {"$ne": event.event_id},
+            "$or": [
+                {"commission_reversed": {"$lte": granted - amount}},
+                {"commission_reversed": {"$exists": False}},
+            ],
+        },
+        {
+            "$inc": {"commission_reversed": amount},
+            "$push": {"commission_reversal_event_ids": event.event_id},
+            "$currentDate": {"updatedAt": True},
         },
     )
+    if claimed is None:
+        logger.info(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+            "already clawed back (or claimed by a concurrent reversal)",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return
+    try:
+        await credits_service.debit(
+            workspace=workspace,
+            amount=amount,
+            cause=PARTNER_COMMISSION_REVERSAL_CAUSE,
+            idempotency_key=f"{pid}:commission:reversal:{event.event_id}",
+            allow_negative=True,
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": pid,
+                "reason": event.type,
+            },
+        )
+    except Exception:
+        key = f"{pid}:commission:reversal:{event.event_id}"
+        if not await credits_service.is_recorded(workspace, key):
+            await col.update_one(
+                {"_id": payment.id, "commission_reversal_event_ids": event.event_id},
+                {
+                    "$inc": {"commission_reversed": -amount},
+                    "$pull": {"commission_reversal_event_ids": event.event_id},
+                },
+            )
+        raise
     logger.warning(
-        "billing.webhook: %s reversed partner commission for payment=%s (site=%s, event_id=%s)",
+        "billing.webhook: %s clawed back %d commission credits from workspace=%s "
+        "(payment=%s, event_id=%s)",
         event.type,
-        rec.payment_id,
-        str(doc.id),
+        amount,
+        workspace,
+        pid,
         event.event_id,
     )
 

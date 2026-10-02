@@ -39,6 +39,13 @@
 #   and ``conversion`` + ``fx_inr_per_usd`` (the source and rate the base credits
 #   were granted at, from the ledger entry). Defaulted,
 #   so every existing row and writer is unchanged.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``subscription_id``
+#   stamps a subscription's own charge (recorded, never granted) so a refund of
+#   it can be told from a top-up with nothing left to reverse.
+#   ``commission_reversed`` + ``commission_reversal_event_ids`` are the running
+#   clawback of a partner client payment's commission — the claim a reversal
+#   wins before it debits, so a refund and a lost dispute (or several partial
+#   refunds) can never take back more than was granted. Defaulted; no migration.
 
 from __future__ import annotations
 
@@ -106,6 +113,12 @@ class Payment(TimestampedDocument):
     # ``succeeded`` with ``credits_granted == 0``.
     # ``succeeded`` | ``failed`` | ``pending``.
     status: str = "succeeded"
+    # PH-13: set when the payment was a SUBSCRIPTION's charge (never a top-up).
+    subscription_id: str | None = None
+    # PH-13: partner commission clawed back from this client payment so far, and
+    # the reversal deliveries that took it (the claim, as for ``credits_reversed``).
+    commission_reversed: int = 0
+    commission_reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
 
     class Settings:
         name = "billing_payments"

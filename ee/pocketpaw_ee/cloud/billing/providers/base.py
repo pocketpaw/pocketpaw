@@ -8,6 +8,10 @@
 # The billing service depends only on this ABC, so swapping Dodo for Razorpay (or
 # running both) never touches the service.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``create_one_time``
+# takes ``pin_currency`` — a partner client pay link pins its charge currency
+# (``billing_currency``) so the payment matches the link exactly. Top-ups unchanged.
+#
 # Every method speaks in the framework-free ``domain`` value objects
 # (``OneTimeCheckout`` / ``GatewayEvent`` / ``SubscriptionCheckout`` /
 # ``SubscriptionEvent``), never a vendor SDK type — that is the whole point of the
@@ -66,6 +70,7 @@ class IPaymentsProvider(ABC):
         customer_email: str | None,
         metadata: dict,
         currency: str = "USD",
+        pin_currency: bool = False,
     ) -> OneTimeCheckout:
         """Create a one-time payment and return its hosted checkout.
 

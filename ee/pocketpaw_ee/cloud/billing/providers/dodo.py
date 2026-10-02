@@ -105,6 +105,10 @@
 #   return a ``SubscriptionEvent`` for a verified ``subscription.*`` delivery
 #   (plan_key from metadata, with a product_id reverse-map fallback off the
 #   configured plan->product mapping).
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``create_one_time``
+# takes ``pin_currency`` — a partner client pay link pins its charge currency
+# (``billing_currency``) so the payment matches the link exactly. Top-ups unchanged.
+#
 # Updated 2026-06-24 (BC-9): ``verify_and_parse_webhook`` now also reads
 #   ``data.metadata.site_id`` onto the ``SubscriptionEvent`` — the discriminator
 #   that tells a PER-SITE annual sub (each published site has its own plan) from a
@@ -401,6 +405,7 @@ class DodoProvider:
         customer_email: str | None,
         metadata: dict,
         currency: str = "USD",
+        pin_currency: bool = False,
     ) -> OneTimeCheckout:
         if (
             not isinstance(amount_credits, int)
@@ -443,7 +448,9 @@ class DodoProvider:
         # INR only: pin the charge currency so Dodo refuses rather than converting.
         # The USD path sends nothing here, exactly as before — pinning it would
         # switch off Dodo's adaptive local-currency display for existing buyers.
-        extra = {"billing_currency": "INR"} if currency == "INR" else {}
+        # ``pin_currency`` (PH-13 partner pay links) pins USD too: the payment must
+        # be charged in exactly the currency and amount the link was made for.
+        extra = {"billing_currency": currency} if currency == "INR" or pin_currency else {}
 
         client = self._client()
         try:
