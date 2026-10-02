@@ -5,7 +5,8 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 Updated: 2026-10-02 (feat/partners-earnings, PH-11) — Paw Partners: POST /partners/sell
   takes an optional price_minor + currency (booked as a paid receipt on the site's
   client record) and returns invoice_id; new GET /partners/summary and
-  GET /partners/earnings.
+  GET /partners/earnings. Review fixes: a receipt only when the sale recorded a new
+  debit, idempotent under a double submit, spend/sales semantics spelled out.
 Updated: 2026-10-02 (feat/partners-cobrand, PH-5) — "Hide the PocketPaw badge":
   partner-sold sites carry the partner co-brand mark instead of the badge.
 Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
@@ -1048,12 +1049,18 @@ renewal_date, partner_client_id, subscription_status, invoice_id}`.
   site receipt) is what the partner charged its client. `currency` is a 3-letter
   code, upper-cased; it defaults to `INR` when the profile's `billing_country` is
   `IN`, else `USD`. Both are validated before the wallet is touched (**422**).
-  When the sale goes through, the price is booked as a PAID receipt on the site's
-  client record (the same list `GET /sites/{site_id}/client` returns, note
-  `Paw Partners sale · <plan label>`) and its id comes back as `invoice_id`. It is
-  the partner's private bookkeeping: nothing bills from it and the client never
-  sees it. A refused sale and the no-op re-sell below book nothing
-  (`invoice_id: null`), and so does a sale without `price_minor`.
+  When the sale records a NEW wallet debit, the price is booked as a PAID receipt
+  on the site's client record (the same list `GET /sites/{site_id}/client`
+  returns, note `Paw Partners sale · <plan label>`) and its id comes back as
+  `invoice_id`. It is the partner's private bookkeeping: nothing bills from it and
+  the client never sees it. No new debit means no receipt (`invoice_id: null`): a
+  refused sale, the no-op re-sell below, moving back to a plan already paid for
+  this period, resuming a site that was set to close, and a sale without
+  `price_minor`. The receipt id is derived from the debit, so a double-submitted
+  sale books one receipt and both responses carry the same `invoice_id`.
+- If the receipt cannot be written after the sale went through, the sale still
+  stands and `invoice_id` is `null`. Add the receipt yourself with
+  `POST /sites/{site_id}/invoices`.
 
 - Needs `sites.buy_plan` (workspace admin): a sale spends the wallet. **403**
   for a member, and **403** `partner.not_active` without an ACTIVE profile.
@@ -1107,19 +1114,21 @@ The partner's earnings at a glance:
 (`subscription_status` active) and `renewals_due_30d` (same rule as
 `GET /partners/sites?due_within_days=30`) count the sold sites. Revenue is the sum
 of PAID receipts on the sold sites' client records (sale prices and any receipt
-added through `/sites/{site_id}/client/invoices`), one row per currency, never
+added through `POST /sites/{site_id}/invoices`), one row per currency, never
 converted or mixed; `revenue_30d` keeps receipts issued in the last 30 days.
-Spend is the `site_plan` wallet debits (purchases, renewals, plan changes) for
-the sold sites, in credits (1 credit = $0.01). Needs `fabric.read`; **403**
+Spend is every `site_plan` wallet debit (purchases, renewals, plan changes) on
+the sites that are sold to a client NOW, in credits (1 credit = $0.01). That
+includes debits made before the site was sold, for example the partner's own
+earlier paid publish of that site. Needs `fabric.read`; **403**
 `partner.not_active` without an ACTIVE profile.
 
 ### `GET /partners/earnings?months=12`
 
 One row per UTC calendar month, newest first, including months with no
 activity: `[{month: "YYYY-MM", sales, revenue: [{currency, amount_minor}],
-spent_credits}]`. `sales` is the number of `site_plan` debits on sold sites that
-month (purchases, renewals and plan changes); `revenue` and `spent_credits`
-follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
+spent_credits}]`. `sales` is the number of `site_plan` debits on currently-sold
+sites that month: purchases, renewals AND plan changes each count as one, so an
+upgrade is a sale. `revenue` and `spent_credits` follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
 Needs `fabric.read` and an ACTIVE profile.
 
 ## Site templates
