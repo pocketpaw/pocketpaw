@@ -28,6 +28,8 @@
 # Review fix: the pay link reserves its slot through
 # ``sites.reserve_client_pay_link`` (a conditional push), so a double submit opens
 # one Dodo payment; a failed checkout releases the reservation.
+# Re-check fix: a reservation that went stale while Dodo answered is released
+# and refused (409 ``partners.link_in_progress``), never handed out.
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -58,7 +60,7 @@ from soul_protocol.spec.journal import Actor
 from pocketpaw.fabric.journal_store import FabricJournalStore
 from pocketpaw.fabric.models import FabricObject, FabricQuery
 from pocketpaw_ee.cloud._core.context import RequestContext
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
@@ -371,12 +373,19 @@ async def create_pay_link(
         except BaseException:
             await sites_service.release_client_pay_link(site_id=str(doc.id), token=token)
             raise
-        await sites_service.fill_client_pay_link(
+        filled = await sites_service.fill_client_pay_link(
             site_id=str(doc.id),
             token=token,
             payment_id=checkout.gateway_ref,
             checkout_url=checkout.checkout_url,
         )
+        if not filled:
+            # The reservation went stale while Dodo answered; another request may
+            # hold a link now, so this one is never handed out.
+            await sites_service.release_client_pay_link(site_id=str(doc.id), token=token)
+            raise ConflictError(
+                "partners.link_in_progress", "A pay link for this site is being created; retry."
+            )
         checkout_url = checkout.checkout_url
     # no-event: a pending link changes nothing anyone sees until it is paid.
     return PartnerPayLinkOut(

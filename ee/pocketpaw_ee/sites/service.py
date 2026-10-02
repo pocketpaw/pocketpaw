@@ -1,6 +1,11 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 re-check):
+# ``fill_client_pay_link`` fills only a reservation younger than
+# ``_RESERVATION_TTL`` and returns whether it did, so a slow request whose slot
+# another request already read as crashed cannot leave a second payable link.
+#
 # Updated 2026-10-02 (feat/partners-commissions, PH-13): client-paid partner
 # sites. ``_CLIENT_RAIL`` ("client") is the rail of a site whose YEAR the
 # partner's client paid us through a one-time pay link — no wallet debit, no
@@ -8942,10 +8947,23 @@ async def reserve_client_pay_link(
 
 async def fill_client_pay_link(
     *, site_id: str, token: str, payment_id: str, checkout_url: str
-) -> None:
-    """Turn a reservation into the real pending record (Dodo's payment id + link)."""
-    await _SiteDoc.get_pymongo_collection().update_one(
-        {"_id": ObjectId(site_id), "partner_payments.payment_id": token},
+) -> bool:
+    """Turn a reservation into the real pending record (Dodo's payment id + link).
+
+    False when the reservation is older than ``_RESERVATION_TTL``: by then another
+    request may have read it as crashed and minted its own link, so filling it
+    would leave two payable links. The caller releases it and refuses.
+    """
+    res = await _SiteDoc.get_pymongo_collection().update_one(
+        {
+            "_id": ObjectId(site_id),
+            "partner_payments": {
+                "$elemMatch": {
+                    "payment_id": token,
+                    "created_at": {"$gte": datetime.now(UTC) - _RESERVATION_TTL},
+                }
+            },
+        },
         {
             "$set": {
                 "partner_payments.$.payment_id": payment_id,
@@ -8953,6 +8971,7 @@ async def fill_client_pay_link(
             }
         },
     )
+    return res.modified_count == 1
 
 
 async def release_client_pay_link(*, site_id: str, token: str) -> None:

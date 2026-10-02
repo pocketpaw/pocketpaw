@@ -46,6 +46,9 @@
 #   clawback of a partner client payment's commission — the claim a reversal
 #   wins before it debits, so a refund and a lost dispute (or several partial
 #   refunds) can never take back more than was granted. Defaulted; no migration.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 re-check): ``refunded_minor``
+#   sums the refunds those claims counted, so cumulative partials reaching the
+#   amount paid lapse the client-paid year. Defaulted; no migration.
 
 from __future__ import annotations
 
@@ -119,6 +122,9 @@ class Payment(TimestampedDocument):
     # the reversal deliveries that took it (the claim, as for ``credits_reversed``).
     commission_reversed: int = 0
     commission_reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
+    # PH-13: the client's refunds counted by those claims, summed, so partial
+    # refunds that reach ``amount_credits`` lapse the site like a full one.
+    refunded_minor: int = 0
 
     class Settings:
         name = "billing_payments"

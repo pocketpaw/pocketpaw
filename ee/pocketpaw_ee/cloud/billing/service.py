@@ -293,6 +293,16 @@
 #   crediting a subscription payment whose metadata named a workspace. The row is
 #   stamped ``subscription_id``, so a refund of it alarms "needs a human" instead
 #   of reading as a top-up with nothing left to reverse.
+#
+#   Re-check fixes (same branch): partial refunds are SUMMED on the Payment row
+#   (``refunded_minor``, bumped inside the commission claim), so partials that
+#   reach the full amount lapse the year like a full refund; the site lapses
+#   AFTER the claim and before the debit. A claim that loses the cap race re-reads
+#   the row and retries once with the fresh remainder, then alarms (ERROR). The
+#   claim is released on ANY exception (CancelledError too), and a redelivery of
+#   a listed event with no ledger movement alarms. A PARTIAL refund before the
+#   payment is processed no longer voids the record (alarms, left pending). The
+#   flagged-payment alarm names the actual flag.
 from __future__ import annotations
 
 import logging
@@ -2013,13 +2023,15 @@ async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any
             flag_reason="" if active else "partner_inactive",
         )
         if outcome == "flagged":
+            again = await sites_service.find_partner_payment(payment_id)
             logger.error(
-                "billing.webhook: partner client payment=%s (site=%s, event_id=%s) arrived for a "
-                "site already paid on another rail — flagged; nothing activated, no commission. "
-                "The client's payment needs a refund",
+                "billing.webhook: partner client payment=%s (site=%s, event_id=%s) cannot "
+                "activate the site (%s) — flagged; nothing activated, no commission. The "
+                "client's payment needs a refund",
                 payment_id,
                 site_id,
                 event.event_id,
+                again[1].flag_reason if again is not None else "unknown",
             )
     else:
         outcome = rec.status
@@ -2079,14 +2091,16 @@ async def _reverse_partner_commission(event: ReversalEvent) -> None:
     THE AMOUNT mirrors ``_handle_reversal_event``: a stated amount in the
     payment's currency takes ``commission * refunded // paid`` (a partial refund
     takes its share and the site keeps its year); a partial with no usable
-    amount takes nothing and alarms; otherwise the whole remainder goes. Only a
-    full refund or a lost dispute lapses the site.
+    amount takes nothing and alarms; otherwise the whole remainder goes. A full
+    refund, a lost dispute, or partials whose running total (``refunded_minor``)
+    reaches the amount paid lapse the site.
 
-    THE CLAIM runs first on the Payment row (``commission_reversed``, capped at
-    what the ledger shows was granted, plus the event id), then the debit keyed
-    ``<payment_id>:commission:reversal:<event_id>``; a debit that raises
-    releases the claim so the redelivery re-drives. Allowed to go negative,
-    like M1 reversals.
+    THE CLAIM runs first on the Payment row (``commission_reversed`` capped at
+    what the ledger shows was granted, ``refunded_minor``, plus the event id),
+    then the site lapses, then the debit keyed
+    ``<payment_id>:commission:reversal:<event_id>``; a debit that raises (or is
+    cancelled) releases the claim so the redelivery re-drives. Allowed to go
+    negative, like M1 reversals.
     """
     if event.type not in _REVERSAL_EVENTS:
         return
@@ -2115,83 +2129,53 @@ async def _reverse_partner_commission(event: ReversalEvent) -> None:
     workspace = payment.workspace if payment is not None else None
     if found is not None:
         doc, rec = found
-        workspace = doc.workspace
+        workspace = workspace or doc.workspace
         if rec.status == "pending":
-            # Refunded before we processed it: nothing was granted or activated,
-            # and the late payment.succeeded must not do either.
-            await sites_service.void_pending_partner_payment(site_id=str(doc.id), payment_id=pid)
+            # Refunded before we processed it. A FULL refund voids the record so
+            # the late payment.succeeded activates and pays nothing; a partial one
+            # leaves a mostly-paid year to activate, and a human to settle.
+            if full:
+                await sites_service.void_pending_partner_payment(
+                    site_id=str(doc.id), payment_id=pid
+                )
+            else:
+                logger.error(
+                    "billing.webhook: %s for partner client payment=%s (event_id=%s) is a "
+                    "PARTIAL refund of %d landing before the payment was processed — record "
+                    "left pending (the year will still activate, full commission); needs a human",
+                    event.type,
+                    pid,
+                    event.event_id,
+                    event.amount_credits,
+                )
             return
-        if full:
-            await sites_service.reverse_client_paid_site(
-                site_id=str(doc.id), payment_id=pid, paid_since=now - _PARTNER_CLAWBACK
-            )
-    if not workspace:
+
+    claim = None
+    if workspace and payment is not None:
+        refunded = (paid if full else min(event.amount_credits, paid)) if same_currency else 0
+        claim = await _claim_commission_reversal(
+            event, payment, workspace, paid=paid, same_currency=same_currency, refunded=refunded
+        )
+    # ponytail: ``refunded_minor`` moves only on a commission claim, so partials
+    # summing to full on a site with NO commission to claw (inactive partner)
+    # keep the year; widen with a separate refund claim if that ever matters.
+    if claim is not None and paid > 0 and int(claim[0].get("refunded_minor") or 0) >= paid:
+        full = True
+    if found is not None and full:
+        await sites_service.reverse_client_paid_site(
+            site_id=str(found[0].id), payment_id=pid, paid_since=now - _PARTNER_CLAWBACK
+        )
+    if claim is None:
         return
 
-    entry = await credits_service.find_by_key(workspace, f"{pid}:commission")
-    granted = entry.amount_delta if entry is not None and entry.applied else 0
-    if granted <= 0 or payment is None:
-        return
-    if _as_utc(entry.created_at) < now - _PARTNER_CLAWBACK:
-        logger.info(
-            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
-            "paid over 60 days ago, not clawed back",
-            event.type,
-            pid,
-            event.event_id,
-        )
-        return
-    if event.event_id in (payment.commission_reversal_event_ids or []):
-        return
-    already = int(payment.commission_reversed or 0)
-    remaining = max(granted - already, 0)
-    if event.amount_credits > 0 and same_currency and paid > 0:
-        amount = min(granted * min(event.amount_credits, paid) // paid, remaining)
-    elif event.is_partial:
-        logger.error(
-            "billing.webhook: %s for partner client payment=%s (event_id=%s) is PARTIAL with "
-            "no usable amount — commission NOT clawed back; needs a human",
-            event.type,
-            pid,
-            event.event_id,
-        )
-        return
-    else:
-        amount = remaining
-    if amount <= 0:
-        return
-
-    col = Payment.get_pymongo_collection()
-    claimed = await col.find_one_and_update(
-        {
-            "_id": payment.id,
-            "commission_reversal_event_ids": {"$ne": event.event_id},
-            "$or": [
-                {"commission_reversed": {"$lte": granted - amount}},
-                {"commission_reversed": {"$exists": False}},
-            ],
-        },
-        {
-            "$inc": {"commission_reversed": amount},
-            "$push": {"commission_reversal_event_ids": event.event_id},
-            "$currentDate": {"updatedAt": True},
-        },
-    )
-    if claimed is None:
-        logger.info(
-            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
-            "already clawed back (or claimed by a concurrent reversal)",
-            event.type,
-            pid,
-            event.event_id,
-        )
-        return
+    amount = claim[1]
+    key = f"{pid}:commission:reversal:{event.event_id}"
     try:
         await credits_service.debit(
             workspace=workspace,
             amount=amount,
             cause=PARTNER_COMMISSION_REVERSAL_CAUSE,
-            idempotency_key=f"{pid}:commission:reversal:{event.event_id}",
+            idempotency_key=key,
             allow_negative=True,
             ref={
                 "gateway": _GATEWAY,
@@ -2200,13 +2184,15 @@ async def _reverse_partner_commission(event: ReversalEvent) -> None:
                 "reason": event.type,
             },
         )
-    except Exception:
-        key = f"{pid}:commission:reversal:{event.event_id}"
+    except BaseException:
+        # BaseException: a CancelledError mid-debit must release too, or the
+        # redelivery finds its id listed and stops (the alarm below catches only
+        # what no release could).
         if not await credits_service.is_recorded(workspace, key):
-            await col.update_one(
+            await Payment.get_pymongo_collection().update_one(
                 {"_id": payment.id, "commission_reversal_event_ids": event.event_id},
                 {
-                    "$inc": {"commission_reversed": -amount},
+                    "$inc": {"commission_reversed": -amount, "refunded_minor": -claim[2]},
                     "$pull": {"commission_reversal_event_ids": event.event_id},
                 },
             )
@@ -2220,6 +2206,120 @@ async def _reverse_partner_commission(event: ReversalEvent) -> None:
         pid,
         event.event_id,
     )
+
+
+async def _claim_commission_reversal(
+    event: ReversalEvent,
+    payment: Payment,
+    workspace: str,
+    *,
+    paid: int,
+    same_currency: bool,
+    refunded: int,
+) -> tuple[dict, int, int] | None:
+    """Claim this reversal's commission share on the Payment row.
+
+    Returns ``(row after the claim, amount claimed, refunded counted)``, or None
+    when there is nothing to claw back (no grant, outside 60 days, already
+    claimed, nothing left) — the caller then debits nothing.
+    """
+    pid = event.payment_id
+    key = f"{pid}:commission:reversal:{event.event_id}"
+    entry = await credits_service.find_by_key(workspace, f"{pid}:commission")
+    granted = entry.amount_delta if entry is not None and entry.applied else 0
+    if granted <= 0:
+        return None
+    if _as_utc(entry.created_at) < datetime.now(UTC) - _PARTNER_CLAWBACK:
+        logger.info(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+            "paid over 60 days ago, not clawed back",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return None
+    if event.event_id in (payment.commission_reversal_event_ids or []):
+        # Every listed id is a claim that had something to debit, so a listed id
+        # with no ledger movement is a reversal that died between claim and
+        # debit (mirrors the general path's alarm, with its in-flight caveat).
+        if not await credits_service.is_recorded(workspace, key):
+            logger.error(
+                "billing.webhook: %s for partner client payment=%s (event_id=%s) is RECORDED "
+                "ON THE PAYMENT ROW WITH NO LEDGER MOVEMENT BEHIND IT — the commission "
+                "clawback died between claim and debit, workspace=%s still holds it, and "
+                "nothing retries it. CHECK THE LEDGER BEFORE SETTLING BY HAND: a duplicate "
+                "delivery still in flight reads identically for about one round-trip",
+                event.type,
+                pid,
+                event.event_id,
+                workspace,
+            )
+        return None
+    already = int(payment.commission_reversed or 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        share = granted * min(event.amount_credits, paid) // paid
+    elif event.is_partial:
+        logger.error(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) is PARTIAL with "
+            "no usable amount — commission NOT clawed back; needs a human",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return None
+    else:
+        share = granted
+    amount = min(share, max(granted - already, 0))
+    if amount <= 0:
+        return None
+
+    col = Payment.get_pymongo_collection()
+    for _attempt in range(2):
+        claimed = await col.find_one_and_update(
+            {
+                "_id": payment.id,
+                "commission_reversal_event_ids": {"$ne": event.event_id},
+                "$or": [
+                    {"commission_reversed": {"$lte": granted - amount}},
+                    {"commission_reversed": {"$exists": False}},
+                ],
+            },
+            {
+                "$inc": {"commission_reversed": amount, "refunded_minor": refunded},
+                "$push": {"commission_reversal_event_ids": event.event_id},
+                "$currentDate": {"updatedAt": True},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if claimed is not None:
+            return claimed, amount, refunded
+        # Refused: a redelivery of this event (routine), or a concurrent reversal
+        # took part of the remainder first — retry ONCE with what is left.
+        current = await col.find_one({"_id": payment.id}) or {}
+        if event.event_id in (current.get("commission_reversal_event_ids") or []):
+            logger.info(
+                "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+                "already clawed back by this event",
+                event.type,
+                pid,
+                event.event_id,
+            )
+            return None
+        already = int(current.get("commission_reversed") or 0)
+        amount = min(share, max(granted - already, 0))
+        if amount <= 0:
+            break
+    logger.error(
+        "billing.webhook: %s for partner client payment=%s (event_id=%s) could not claim its "
+        "commission share — REFUSED before debiting. granted=%d, already reversed=%d: a "
+        "concurrent reversal on the same payment claimed the remainder first",
+        event.type,
+        pid,
+        event.event_id,
+        int(granted),
+        already,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
