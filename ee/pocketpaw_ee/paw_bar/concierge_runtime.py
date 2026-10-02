@@ -1628,8 +1628,11 @@ async def run_concierge_v2(
         contact = is_contact_request(message)
         # One retry, only for a transient failure and only while the visitor has
         # seen nothing: a retry after text would repeat what they already read.
-        # A failure that stands still ends the turn normally when the reply was
-        # cut off at the output cap after text, or the visitor asked for a person.
+        # A failure that stands still ends the turn normally only when the visitor
+        # asked for a person (the route below follows); any other turn raises and
+        # ends as ``unavailable``. A reply cut off at the output cap after text
+        # never gets here: pydantic_ai raises its token-limit error only when no
+        # text came back, and this agent has no tools to cut off mid-call.
         for attempt in (1, 2):
             fences = _new_fences()
             try:
@@ -1642,7 +1645,7 @@ async def run_concierge_v2(
                 break
             except Exception as exc:
                 if attempt > 1 or full_text or not _is_transient(exc):
-                    if not (contact or (full_text and _hit_output_cap(exc))):
+                    if not contact:
                         if _hit_output_cap(exc):
                             logger.warning(
                                 "concierge v2: run %s hit the output cap before any text",

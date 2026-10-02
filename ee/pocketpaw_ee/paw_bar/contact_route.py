@@ -3,9 +3,10 @@
 # A visitor who asks for a person must leave the turn with a way to reach the
 # team whatever the model did: wrote no lead card, ran out of tokens thinking,
 # or failed outright. ``is_contact_request`` is a small, conservative phrase
-# check (a person / human / the team / a callback / contact me), not a
-# classifier: a miss just leaves the turn to the model, a false hit only adds a
-# form the visitor can ignore. ``contact_reply`` is what the runner appends when
+# check for a first-person request to reach a person ("can I talk to someone",
+# "call me back", "get in touch"), not a classifier. It stays narrow on purpose:
+# a missed request still has the bar's "Talk to a person" button, while a false
+# hit puts a form under an ordinary answer. ``contact_reply`` is what the runner appends when
 # such a turn has no valid lead card:
 #
 #   * lead capture on: a server-built send_to_team form card, prefilled with
@@ -25,29 +26,44 @@ TALK_TO_A_PERSON_LINE = (
     'Tap "Talk to a person" and leave your email, and someone will get back to you.'
 )
 
-# Who a visitor may ask for, after "talk to" and friends.
+# Who a visitor may ask for, after "talk to" and friends. Bare "you" is not on
+# the list: "how do I reach you from the station?" asks for directions.
 _WHO = (
+    r"(?:you\s+guys\b|"
     r"(?:a\s+|an\s+|the\s+|your\s+|some\s+|one\s+of\s+your\s+)?"
     r"(?:real\s+|live\s+|actual\s+)?"
     r"(?:person|people|human|humans|someone|somebody|team|manager|agent|"
-    r"representative|rep|staff|owner|support|sales|employee|operator)\b"
+    r"representative|rep|staff|owner|support|sales|employee|operator)\b)"
+)
+# A first-person request lead-in: the visitor asking for themselves.
+_LEAD_IN = (
+    r"\b(?:(?:can|could|may)\s+i|i\s+(?:want|need|would\s+like)\s+to|"
+    r"i['’]?d\s+like\s+to|i\s+wanna|let\s+me|please|how\s+(?:do|can)\s+i)"
+    r"\s+(?:please\s+|just\s+)?"
+)
+# Whole-message requests: "talk to a human", "human please", "Representative".
+# Anchored, so "does it support a talk to a human handoff?" is not one.
+_ALONE = (
+    r"^\W*(?:please\s+)?(?:"
+    rf"(?:talk|speak|chat)\s+(?:to|with)\s+{_WHO}"
+    r"|(?:a\s+)?(?:human|person|agent|operator|representative|manager|"
+    r"real\s+person|live\s+agent|call\s*-?\s*back)"
+    r")(?:\s+please)?\W*$"
 )
 _CONTACT_RE = re.compile(
     "|".join(
         [
-            rf"\b(?:talk|speak|chat)\s+(?:to|with)\s+{_WHO}",
-            rf"\breach\s+(?:{_WHO}|you\b)",
+            rf"{_LEAD_IN}(?:(?:talk|speak|chat)\s+(?:to|with)|reach)\s+{_WHO}",
+            _ALONE,
+            r"\bcall\s+me\b",
+            r"\bcontact\s+me\b",
             r"\bconnect\s+me\s+(?:to|with)\b",
-            r"\b(?:call|ring|phone|text|email|e-mail|contact)\s+me\b",
-            r"\bcall\s*-?\s*back\b",
-            r"\b(?:get|be|keep)\s+in\s+(?:touch|contact)\b",
-            r"\b(?:real|live|actual)\s+(?:person|human|agent|people)\b",
-            r"\b(?:someone|somebody)\s+(?:from|on|at)\s+(?:your|the)\b",
-            r"\b(?:how|who)\s+(?:do|can|should|could)\s+i\s+(?:contact|reach|call|email)\b",
-            r"\bcontact\s+(?:you|your\s+team|the\s+team|support|someone|somebody)\b",
-            r"\b(?:get|want|need)\s+(?:a|the|your)\s+(?:manager|human|person|representative)\b",
-            r"^\W*(?:a\s+)?(?:human|person|agent|operator|representative|manager|"
-            r"real\s+person|live\s+agent)\W*$",
+            r"\bget\s+in\s+touch\b",
+            r"\b(?:i\s+(?:need|want|would\s+like)|i['’]?d\s+like|"
+            r"(?:can|could|may)\s+i\s+(?:get|have|request)|request)\s+a\s+call\s*-?\s*back\b",
+            r"\bhow\s+(?:do|can|could|should)\s+i\s+contact\b",
+            r"\b(?:person|human|someone|somebody|one)\s+i\s+(?:can|could)\s+"
+            r"(?:talk|speak|chat)\s+(?:to|with)\b",
         ]
     ),
     re.IGNORECASE,
