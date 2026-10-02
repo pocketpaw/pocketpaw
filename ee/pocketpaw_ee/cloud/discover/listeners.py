@@ -24,6 +24,10 @@
 # ``service_admin.sync_source("site_template", id)``. The periodic loop and the
 # startup backfill reindex every registered source that has ``iter_public``; a
 # failing source is logged and the others still run.
+#
+# Updated 2026-10-02 (feat/studio-templates): ``studio_template.saved`` /
+# ``.updated`` / ``.deleted`` call ``sync_source("studio_template", id)`` the
+# same way (logged and swallowed on failure).
 
 from __future__ import annotations
 
@@ -38,6 +42,9 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     SiteTemplateDeleted,
     SiteTemplateSaved,
     SiteTemplateUpdated,
+    StudioTemplateDeleted,
+    StudioTemplateSaved,
+    StudioTemplateUpdated,
 )
 from pocketpaw_ee.cloud.discover import service_admin
 from pocketpaw_ee.cloud.discover.sources import registered_sources
@@ -61,11 +68,25 @@ async def on_site_template_changed(event: Event) -> None:
         logger.exception("discover: sync of site template %s failed", template_id)
 
 
+async def on_studio_template_changed(event: Event) -> None:
+    """Sync the studio template named by ``event.data["id"]`` into Discover."""
+    data = getattr(event, "data", None) or {}
+    template_id = data.get("id")
+    if not template_id:
+        return
+    try:
+        await service_admin.sync_source(service_admin.STUDIO_TEMPLATE, str(template_id))
+    except Exception:
+        logger.exception("discover: sync of studio template %s failed", template_id)
+
+
 def register_discover_listeners() -> None:
-    """Subscribe the site-template sync. Called once from ``mount_cloud``."""
+    """Subscribe the site- and studio-template syncs. Called once from ``mount_cloud``."""
     bus = get_bus()
     for event_cls in (SiteTemplateSaved, SiteTemplateUpdated, SiteTemplateDeleted):
         bus.subscribe(event_cls.EVENT_TYPE, on_site_template_changed)
+    for event_cls in (StudioTemplateSaved, StudioTemplateUpdated, StudioTemplateDeleted):
+        bus.subscribe(event_cls.EVENT_TYPE, on_studio_template_changed)
 
 
 async def _reindex_once() -> None:
@@ -130,6 +151,7 @@ async def stop_discover_reindex(app: Any) -> None:
 
 __all__ = [
     "on_site_template_changed",
+    "on_studio_template_changed",
     "register_discover_listeners",
     "start_discover_backfill",
     "start_discover_reindex",

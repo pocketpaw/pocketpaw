@@ -7,6 +7,9 @@
 # kind the source doesn't declare is refused; an unknown source or one without
 # ``iter_public`` is ``discover.reindex_unsupported``; and the periodic pass
 # reindexes every registered source, carrying on past one that raises.
+#
+# Updated 2026-10-02 (feat/studio-templates): the builtin sources now include
+# ``studio_template``.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -140,6 +143,11 @@ async def test_the_pass_reindexes_every_source_past_a_failing_one(rows, caplog) 
 
     await listeners._reindex_once()
 
-    assert [s.name for s in sources.registered_sources()] == ["site_template", "boom", FAKE]
+    assert [s.name for s in sources.registered_sources()] == [
+        "site_template",
+        "studio_template",
+        "boom",
+        FAKE,
+    ]
     assert await _listing("a") is not None
     assert "discover: reindex failed for boom" in caplog.text
