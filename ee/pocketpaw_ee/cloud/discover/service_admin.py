@@ -28,6 +28,12 @@
 # (sites emit no rename / unpublish / delete events), so a stale URL heals on
 # the next reindex. ``set_featured`` / ``set_hidden`` write audit rows (actor
 # "staff") in the listing owner's workspace.
+#
+# Updated 2026-10-02 (feat/discover-index, review): the listing reads and writes
+# behind ``service.use_listing`` / ``report_listing`` live here as named
+# functions (``increment_remix``, ``push_report``, ``count_reports``,
+# ``hide_listing``), so ``service`` touches no listing collection directly.
+# ``_audit`` is public as ``record_audit`` (``service`` calls it too).
 
 from __future__ import annotations
 
@@ -108,7 +114,9 @@ async def _any_doc(listing_id: str) -> DiscoverListing:
     return doc
 
 
-async def _audit(workspace_id: str, user_id: str, action: str, target_id: str, **meta: str) -> None:
+async def record_audit(
+    workspace_id: str, user_id: str, action: str, target_id: str, **meta: str
+) -> None:
     from pocketpaw_ee.cloud.audit import service as audit_service
 
     await audit_service.record(
@@ -189,6 +197,55 @@ async def get_public(listing_id: str) -> dict:
     """One unhidden listing's public card, else NotFound."""
     # admin-cross-tenant: a public listing is readable by anyone.
     return _public(await public_doc(listing_id))
+
+
+# ---------------------------------------------------------------------------
+# Use / report writes (called by ``service``)
+# ---------------------------------------------------------------------------
+
+
+async def increment_remix(listing_id: str) -> None:
+    """Count one remix with an atomic ``$inc``."""
+    # admin-cross-tenant: a user in any workspace remixes another's listing.
+    # no-event: the caller emits DiscoverListingUsed.
+    await DiscoverListing.get_pymongo_collection().update_one(
+        {"_id": _oid(listing_id)}, {"$inc": {"remix_count": 1}}
+    )
+
+
+async def push_report(listing_id: str, user_id: str, reason: str, *, max_reports: int) -> bool:
+    """Store ``user_id``'s report unless they already reported, were dismissed,
+    or the listing holds ``max_reports``. ``True`` when it was stored."""
+    # admin-cross-tenant: a user in any workspace reports another's listing.
+    # no-event: the caller emits DiscoverListingReported.
+    report = {"user": user_id, "reason": reason, "at": datetime.now(UTC)}
+    pushed = await DiscoverListing.get_pymongo_collection().update_one(
+        {
+            "_id": _oid(listing_id),
+            "reports.user": {"$ne": user_id},
+            "dismissed_reporters": {"$ne": user_id},
+            f"reports.{max_reports - 1}": {"$exists": False},
+        },
+        {"$push": {"reports": report}},
+    )
+    return bool(pushed.modified_count)
+
+
+async def count_reports(listing_id: str) -> int:
+    """How many reports the listing holds (0 when it is gone)."""
+    # admin-cross-tenant: the report threshold reads another workspace's listing.
+    doc = await DiscoverListing.get(_oid(listing_id))
+    return len(doc.reports) if doc is not None else 0
+
+
+async def hide_listing(listing_id: str) -> bool:
+    """Hide the listing; ``True`` only when this call hid it."""
+    # admin-cross-tenant: the report threshold hides another workspace's listing.
+    # no-event: the caller emits DiscoverListingReported(hidden=True).
+    hid = await DiscoverListing.get_pymongo_collection().update_one(
+        {"_id": _oid(listing_id), "hidden": {"$ne": True}}, {"$set": {"hidden": True}}
+    )
+    return bool(hid.modified_count)
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +362,7 @@ async def set_featured(listing_id: str, featured: bool) -> dict:
     doc = await _any_doc(listing_id)
     result = await _moderate(doc, {"featured": featured})
     action = "discover.listing_featured" if featured else "discover.listing_unfeatured"
-    await _audit(doc.workspace, "staff", action, listing_id, featured=str(featured))
+    await record_audit(doc.workspace, "staff", action, listing_id, featured=str(featured))
     return result
 
 
@@ -326,15 +383,20 @@ async def set_hidden(listing_id: str, hidden: bool) -> dict:
     result = await _moderate(doc, fields)
     await hide_at_source(doc.source, doc.source_id, hidden)
     action = "discover.listing_hidden" if hidden else "discover.listing_unhidden"
-    await _audit(doc.workspace, "staff", action, listing_id, hidden=str(hidden))
+    await record_audit(doc.workspace, "staff", action, listing_id, hidden=str(hidden))
     return result
 
 
 __all__ = [
     "SITE_TEMPLATE",
+    "count_reports",
     "get_public",
+    "hide_listing",
+    "increment_remix",
     "list_public",
     "public_doc",
+    "push_report",
+    "record_audit",
     "reindex",
     "remove_from_source",
     "set_featured",

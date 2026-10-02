@@ -19,10 +19,13 @@
 # report from a ``dismissed_reporters`` user (staff unhid over their reports)
 # is a no-op. ``use_listing`` writes a ``discover.listing_used`` audit row in the
 # caller's workspace.
+#
+# Updated 2026-10-02 (feat/discover-index, review): no direct listing reads or
+# writes here; the remix ``$inc``, report ``$push``, report count and auto-hide
+# go through named ``service_admin`` functions (each marked cross-tenant), and
+# audit rows through the public ``service_admin.record_audit``.
 
 from __future__ import annotations
-
-from datetime import UTC, datetime
 
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -32,9 +35,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.discover import service_admin
 from pocketpaw_ee.cloud.discover.dto import ReportListingRequest, UseListingResponse
-from pocketpaw_ee.cloud.discover.service_admin import _audit
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
-from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 
 #: Distinct reporters that hide a listing.
 HIDE_THRESHOLD = 3
@@ -50,10 +51,10 @@ async def use_listing(
     listing (or an item the source no longer lets the caller see)."""
     doc = await service_admin.public_doc(listing_id)
     result = await get_source(doc.source).use(workspace_id, user_id, doc.source_id, name)
-    await DiscoverListing.get_pymongo_collection().update_one(
-        {"_id": doc.id}, {"$inc": {"remix_count": 1}}
+    await service_admin.increment_remix(listing_id)
+    await service_admin.record_audit(
+        workspace_id, user_id, "discover.listing_used", listing_id, source=doc.source
     )
-    await _audit(workspace_id, user_id, "discover.listing_used", listing_id, source=doc.source)
     await emit(
         DiscoverListingUsed(
             data={
@@ -80,40 +81,28 @@ async def report_listing(
     if doc.owner == user_id:
         raise Forbidden("discover.own_listing", "You can't report your own listing")
 
-    collection = DiscoverListing.get_pymongo_collection()
-    report = {"user": user_id, "reason": body.reason, "at": datetime.now(UTC)}
-    pushed = await collection.update_one(
-        {
-            "_id": doc.id,
-            "reports.user": {"$ne": user_id},
-            "dismissed_reporters": {"$ne": user_id},
-            f"reports.{MAX_REPORTS - 1}": {"$exists": False},
-        },
-        {"$push": {"reports": report}},
-    )
-    if not pushed.modified_count:
+    if not await service_admin.push_report(
+        listing_id, user_id, body.reason, max_reports=MAX_REPORTS
+    ):
         # no-event: a repeat report, a dismissed reporter's, or one past
         # MAX_REPORTS changes nothing.
         return {"id": listing_id, "reported": True}
 
-    await _audit(workspace_id, user_id, "discover.listing_reported", listing_id)
+    await service_admin.record_audit(workspace_id, user_id, "discover.listing_reported", listing_id)
     hidden = False
-    fresh = await DiscoverListing.get(doc.id)
-    if fresh is not None and len(fresh.reports) >= HIDE_THRESHOLD:
-        hid = await collection.update_one(
-            {"_id": doc.id, "hidden": {"$ne": True}}, {"$set": {"hidden": True}}
-        )
-        hidden = bool(hid.modified_count)
+    reports = await service_admin.count_reports(listing_id)
+    if reports >= HIDE_THRESHOLD:
+        hidden = await service_admin.hide_listing(listing_id)
         if hidden:
             await hide_at_source(doc.source, doc.source_id, True)
             # Actor "system": the reporters are other tenants' users, and their
             # ids must not land in the owner's audit log.
-            await _audit(
-                fresh.workspace,
+            await service_admin.record_audit(
+                doc.workspace,
                 "system",
                 "discover.listing_hidden",
                 listing_id,
-                reports=str(len(fresh.reports)),
+                reports=str(reports),
             )
     await emit(
         DiscoverListingReported(
