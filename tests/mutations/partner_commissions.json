@@ -139,8 +139,8 @@
   {
     "label": "a second reversal on one payment claws the commission back again (no claim)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "            \"commission_reversal_event_ids\": {\"$ne\": event.event_id},\n            \"$or\": [\n                {\"commission_reversed\": {\"$lte\": granted - amount}},\n                {\"commission_reversed\": {\"$exists\": False}},\n            ],",
-    "replace": "            \"commission_reversal_event_ids\": {\"$ne\": event.event_id},",
+    "find": "                \"commission_reversal_event_ids\": {\"$ne\": event.event_id},\n                \"$or\": [\n                    {\"commission_reversed\": {\"$lte\": granted - amount}},\n                    {\"commission_reversed\": {\"$exists\": False}},\n                ],",
+    "replace": "                \"commission_reversal_event_ids\": {\"$ne\": event.event_id},",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_refund_within_60_days_reverses_once_and_lapses",
       "tests/cloud/partners/test_partner_commissions.py::test_a_deleted_site_still_has_its_commission_clawed_back",
@@ -204,8 +204,8 @@
   {
     "label": "C1: a deleted site's refund keeps the commission (clawback reads only the Site record)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "    if not workspace:\n        return\n\n    entry = await credits_service.find_by_key(",
-    "replace": "    if found is None:\n        return\n\n    entry = await credits_service.find_by_key(",
+    "find": "    if workspace and payment is not None:\n        refunded =",
+    "replace": "    if found is not None and payment is not None:\n        refunded =",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_deleted_site_still_has_its_commission_clawed_back"
     ]
@@ -213,7 +213,7 @@
   {
     "label": "C1: the ledger-anchored window never closes",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "    if _as_utc(entry.created_at) < now - _PARTNER_CLAWBACK:",
+    "find": "    if _as_utc(entry.created_at) < datetime.now(UTC) - _PARTNER_CLAWBACK:",
     "replace": "    if False:",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_deleted_site_refunded_after_60_days_keeps_the_commission",
@@ -277,8 +277,8 @@
   {
     "label": "I4: a partial refund takes the whole commission",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "        amount = min(granted * min(event.amount_credits, paid) // paid, remaining)\n    elif event.is_partial:\n        logger.error(\n            \"billing.webhook: %s for partner client payment",
-    "replace": "        amount = remaining\n    elif event.is_partial:\n        logger.error(\n            \"billing.webhook: %s for partner client payment",
+    "find": "        share = granted * min(event.amount_credits, paid) // paid\n",
+    "replace": "        share = granted\n",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_partial_refund_takes_its_share_and_keeps_the_year"
     ]
@@ -331,8 +331,8 @@
   {
     "label": "minor: a failed checkout leaves its reservation blocking the site",
     "file": "ee/pocketpaw_ee/cloud/partners/service.py",
-    "find": "            await sites_service.release_client_pay_link(site_id=str(doc.id), token=token)\n",
-    "replace": "            pass\n",
+    "find": "        except BaseException:\n            await sites_service.release_client_pay_link(site_id=str(doc.id), token=token)\n",
+    "replace": "        except BaseException:\n            pass\n",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_failed_checkout_releases_the_reservation"
     ]
@@ -353,6 +353,105 @@
     "replace": "@router.post(\"/pay-link\", response_model=PartnerPayLinkOut, dependencies=_WRITE)",
     "tests": [
       "tests/cloud/partners/test_partners.py::test_http_pay_link_needs_the_buy_plan_action"
+    ]
+  },
+  {
+    "label": "N1: partials reaching the full amount keep the year",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if claim is not None and paid > 0 and int(claim[0].get(\"refunded_minor\") or 0) >= paid:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_partials_that_reach_the_full_amount_lapse_the_year"
+    ]
+  },
+  {
+    "label": "N1: the running refund total is read from before this claim",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "            return_document=ReturnDocument.AFTER,\n        )\n        if claimed is not None:",
+    "replace": "            return_document=ReturnDocument.BEFORE,\n        )\n        if claimed is not None:",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_partials_that_reach_the_full_amount_lapse_the_year"
+    ]
+  },
+  {
+    "label": "N2: a reversal that loses the claim race takes nothing (no retry)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    for _attempt in range(2):",
+    "replace": "    for _attempt in range(1):",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_dispute_that_loses_the_claim_race_retries_with_the_remainder"
+    ]
+  },
+  {
+    "label": "N2: a refused reversal logs at INFO",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    logger.error(\n        \"billing.webhook: %s for partner client payment=%s (event_id=%s) could not claim its \"",
+    "replace": "    logger.info(\n        \"billing.webhook: %s for partner client payment=%s (event_id=%s) could not claim its \"",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_reversal_refused_after_its_retry_alarms"
+    ]
+  },
+  {
+    "label": "N3: a cancelled debit keeps its claim",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    except BaseException:\n        # BaseException: a CancelledError",
+    "replace": "    except Exception:\n        # BaseException: a CancelledError",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_cancelled_clawback_releases_its_claim"
+    ]
+  },
+  {
+    "label": "N3: an orphaned commission claim is silent on redelivery",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if not await credits_service.is_recorded(workspace, key):\n            logger.error(\n                \"billing.webhook: %s for partner client payment=%s (event_id=%s) is RECORDED \"",
+    "replace": "        if False:\n            logger.error(\n                \"billing.webhook: %s for partner client payment=%s (event_id=%s) is RECORDED \"",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_claimed_but_undebited_clawback_alarms_on_redelivery"
+    ]
+  },
+  {
+    "label": "N4: an early partial refund voids the whole record",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "            if full:\n                await sites_service.void_pending_partner_payment(",
+    "replace": "            if True:\n                await sites_service.void_pending_partner_payment(",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_an_early_partial_refund_leaves_the_record_to_activate"
+    ]
+  },
+  {
+    "label": "N4: an early full refund no longer voids the record",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "            if full:\n                await sites_service.void_pending_partner_payment(",
+    "replace": "            if False:\n                await sites_service.void_pending_partner_payment(",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_refund_before_the_payment_voids_it"
+    ]
+  },
+  {
+    "label": "N5: a stale reservation is filled late",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                    \"payment_id\": token,\n                    \"created_at\": {\"$gte\": datetime.now(UTC) - _RESERVATION_TTL},\n",
+    "replace": "                    \"payment_id\": token,\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_stale_reservation_is_never_filled"
+    ]
+  },
+  {
+    "label": "N5: a pay link whose reservation went stale is handed out",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "        if not filled:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_pay_link_whose_reservation_went_stale_is_refused"
+    ]
+  },
+  {
+    "label": "minor: the flagged alarm names the wrong flag",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "again[1].flag_reason if again is not None else \"unknown\",",
+    "replace": "\"site_already_paid\",",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_flagged_payment_alarm_names_its_flag"
     ]
   }
 ]
