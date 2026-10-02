@@ -40,6 +40,9 @@
 # path, never both (double-closing a Decision chain corrupts it).
 #
 # Created 2026-07-22 (feat/ship-4-agent-surface, SHIP-4): new module.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -174,23 +177,13 @@ async def _persist_outcome(
     Action's own terminal status is the authoritative record.
     """
     try:
-        import json as _json
-
-        import aiosqlite
-
         blob["outcome"] = {
             "status": status,
             "detail": detail[:500],
             "executed_at": datetime.now(UTC).isoformat(),
         }
         params = {SHIP_ACTION_PARAM_KEY: blob}
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — structured outcome is best-effort
         logger.warning(
             "ship: failed to persist outcome onto action %s (the Action's "
