@@ -36,6 +36,11 @@
 # Updated 2026-10-02: the autouse fixture clears the shared
 # ``read_model.default_journal_store`` cache (``service._default_store`` now
 # delegates to it) and points the per-workspace stores at tmp_path.
+# Updated 2026-10-02 (feat/partners-earnings, PH-11): a priced sale books ONE paid
+# receipt (none on the idempotent re-sell, none on a refused sale, a bad currency
+# is refused before the wallet moves); summary + monthly earnings over seeded
+# receipts and site_plan debits (per-currency, phantom / unsold / other-tenant
+# rows excluded); 403 for a non-partner; the HTTP routes and months bounds.
 
 from __future__ import annotations
 
@@ -744,7 +749,14 @@ async def test_a_short_wallet_refuses_the_sale_and_changes_nothing(
 
     with pytest.raises(InsufficientCredits) as exc:
         await service.sell(
-            ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
+            ctx,
+            body={
+                "client_id": client_id,
+                "site_id": site_id,
+                "sku": "site_year",
+                "price_minor": 299900,
+            },
+            store=store,
         )
     assert exc.value.status_code == 402
 
@@ -754,6 +766,7 @@ async def test_a_short_wallet_refuses_the_sale_and_changes_nothing(
     assert doc.subscription_status == "none"
     assert doc.deployed is True
     assert doc.partner_client_id is None
+    assert doc.client_invoices == [], "a refused sale books no receipt"
 
 
 @pytest.mark.parametrize("error", [RuntimeError("deploy failed"), asyncio.CancelledError()])
@@ -985,6 +998,31 @@ async def test_http_selling_needs_the_buy_plan_action(partners_http) -> None:
     holder["user"] = _user(wid, "admin")
     r = await client.post("/api/v1/partners/sell", json=body)
     assert r.status_code == 422, r.text  # past the guard, refused on the unknown sku
+
+
+async def test_http_summary_and_earnings(partners_http) -> None:
+    client, holder, wid = partners_http
+    holder["user"] = _user(wid, "member")
+    r = await client.get("/api/v1/partners/summary")
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "clients": 0,
+        "sites_sold": 0,
+        "active_sites": 0,
+        "renewals_due_30d": 0,
+        "spent_credits_30d": 0,
+        "spent_credits_total": 0,
+        "revenue_30d": [],
+        "revenue_total": [],
+    }
+    r = await client.get("/api/v1/partners/earnings?months=2")
+    assert r.status_code == 200, r.text
+    assert [row["sales"] for row in r.json()] == [0, 0]
+    assert len((await client.get("/api/v1/partners/earnings")).json()) == 12
+    for bad in (0, 25):
+        assert (await client.get(f"/api/v1/partners/earnings?months={bad}")).status_code == 422
+    holder["user"] = _user(wid, None)
+    assert (await client.get("/api/v1/partners/summary")).status_code == 403
 
 
 # ------------------------------------------------- period changes (review B1)
@@ -1474,3 +1512,187 @@ async def test_change_terms_after_the_period_ended_is_a_fresh_purchase() -> None
             already_bought_today=True,
         )
     assert exc.value.code == "sites.plan_already_bought_today"
+
+
+# ------------------------------------------------- earnings (PH-11)
+
+
+async def test_a_priced_sale_books_one_paid_receipt(mongo_db, store, monkeypatch) -> None:
+    from pocketpaw_ee.cloud.models.site import Site
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    body = {
+        "client_id": await _client(ctx, store),
+        "site_id": site_id,
+        "sku": "site_year",
+        "price_minor": 299900,
+    }
+
+    sale = await service.sell(ctx, body=body, store=store)
+
+    receipts = (await Site.get(site_id)).client_invoices
+    assert [(r.id, r.amount_cents, r.currency, r.paid) for r in receipts] == [
+        (sale.invoice_id, 299900, "INR", True)
+    ], "an IN partner defaults to INR, stored as ISO minor units unconverted"
+    assert receipts[0].amount_unit == "iso4217"
+    assert "Site · 1 year" in receipts[0].note
+
+    again = await service.sell(ctx, body=body, store=store)
+    assert again.invoice_id is None
+    assert len((await Site.get(site_id)).client_invoices) == 1, "re-sell books nothing"
+    assert await _balance(wid) == 5000 - 1700
+
+
+async def test_a_bad_currency_is_refused_before_the_wallet_moves(
+    mongo_db, store, monkeypatch
+) -> None:
+    from pocketpaw_ee.cloud.models.site import Site
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("us-shop", country="US")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    body = {"client_id": await _client(ctx, store), "site_id": site_id, "sku": "site_year"}
+    for bad in ({"currency": "RUPEE", "price_minor": 1}, {"price_minor": -1}):
+        with pytest.raises(PydanticValidationError):
+            await service.sell(ctx, body={**body, **bad}, store=store)
+    assert await _balance(wid) == 5000
+
+    # A zero-decimal currency proves the amount is stored as ISO minor units as
+    # given (the legacy path would divide yen by 100).
+    sale = await service.sell(
+        ctx, body={**body, "price_minor": 1500, "currency": "jpy"}, store=store
+    )
+    [receipt] = (await Site.get(site_id)).client_invoices
+    assert (receipt.id, receipt.currency, receipt.amount_cents) == (sale.invoice_id, "JPY", 1500)
+    assert await _balance(wid) == 5000 - 2900
+
+
+async def _debit(wid: str, site_id: str, usd: int, *, at: datetime, applied: bool = True) -> None:
+    """A real ``site_plan`` debit through billing, then backdated to ``at``."""
+    from pocketpaw_ee.cloud.billing.service import (
+        charge_site_plan_credits,
+        site_plan_debit_key,
+    )
+    from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
+
+    await charge_site_plan_credits(
+        workspace_id=wid, site_id=site_id, tier_key="site_year", amount_usd=usd, period_start=at
+    )
+    key = site_plan_debit_key(site_id, "site_year", at)
+    entry = await CreditLedgerEntry.find_one({"workspace": wid, "idempotency_key": key})
+    await entry.set({"createdAt": at, "applied": applied})
+    assert _aware((await CreditLedgerEntry.get(entry.id)).createdAt) == at
+
+
+def _receipt(amount: int, currency: str, at: datetime, *, paid: bool = True):
+    from pocketpaw_ee.cloud.models.site import SiteInvoice
+
+    return SiteInvoice(
+        id=f"inv_{amount}_{currency}",
+        issued_at=at,
+        amount_cents=amount,
+        currency=currency,
+        paid=paid,
+        amount_unit="iso4217",
+    )
+
+
+async def _seed_book(wid: str, client_id: str, *, now: datetime) -> None:
+    """Site A: sold this month, INR receipt (+ an unpaid one), a phantom debit.
+    Site B: sold two months ago with a USD receipt, renewed this month.
+    Site C: sold, lapsed, nothing else. Site D: NOT sold, but debited."""
+    two_ago = now - relativedelta(months=2)
+    a = await _sold_site(
+        wid, tier="site_year", renewal_date=now + timedelta(days=10), client_id=client_id
+    )
+    a.client_invoices = [_receipt(299900, "INR", now), _receipt(100, "INR", now, paid=False)]
+    await a.save()
+    b = await _sold_site(
+        wid, tier="staff_year", renewal_date=now + timedelta(days=300), client_id=client_id
+    )
+    b.client_invoices = [_receipt(5000, "USD", two_ago)]
+    await b.save()
+    c = await _sold_site(wid, tier="site", renewal_date=None, client_id=client_id)
+    c.subscription_status = "none"
+    await c.save()
+    d = await _sold_site(wid, tier="site", renewal_date=now, client_id=None)
+
+    await _fund(wid, 100_000)
+    await _debit(wid, str(a.id), 17, at=now)
+    await _debit(wid, str(a.id), 50, at=now - timedelta(days=3), applied=False)  # phantom
+    await _debit(wid, str(b.id), 29, at=two_ago)
+    await _debit(wid, str(b.id), 29, at=now)  # the renewal
+    await _debit(wid, str(d.id), 11, at=now)
+
+
+async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _seed_book(wid, await _client(ctx, store), now=now)
+    # Another partner's book must not leak in.
+    other = await _partner_ws("other-shop", country="US")
+    await _seed_book(other, await _client(_ctx(other), store), now=now)
+
+    got = await service.summary(ctx, store=store)
+    assert got.model_dump() == {
+        "clients": 1,
+        "sites_sold": 3,
+        "active_sites": 2,
+        "renewals_due_30d": 1,
+        "spent_credits_30d": 1700 + 2900,
+        "spent_credits_total": 1700 + 2900 + 2900,
+        "revenue_30d": [{"currency": "INR", "amount_minor": 299900}],
+        "revenue_total": [
+            {"currency": "INR", "amount_minor": 299900},
+            {"currency": "USD", "amount_minor": 5000},
+        ],
+    }
+
+    def key(dt: datetime) -> str:
+        return f"{dt.year:04d}-{dt.month:02d}"
+
+    rows = [r.model_dump() for r in await service.earnings(ctx, months=3)]
+    assert rows == [
+        {
+            "month": key(now),
+            "sales": 2,
+            "revenue": [{"currency": "INR", "amount_minor": 299900}],
+            "spent_credits": 1700 + 2900,
+        },
+        {
+            "month": key(now - relativedelta(months=1)),
+            "sales": 0,
+            "revenue": [],
+            "spent_credits": 0,
+        },
+        {
+            "month": key(now - relativedelta(months=2)),
+            "sales": 1,
+            "revenue": [{"currency": "USD", "amount_minor": 5000}],
+            "spent_credits": 2900,
+        },
+    ]
+    assert len(await service.earnings(ctx, months=24)) == 24
+    assert [r.month for r in await service.earnings(ctx, months=1)] == [key(now)]
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    for bad in (0, 25):
+        with pytest.raises(ValidationError):
+            await service.earnings(ctx, months=bad)
+
+
+async def test_summary_and_earnings_need_an_active_partner(mongo_db, store) -> None:
+    plain = _ctx(str((await _workspace("plain")).id))
+    suspended = _ctx(await _partner_ws("sus-shop", status="suspended"))
+    for ctx in (plain, suspended):
+        with pytest.raises(Forbidden):
+            await service.summary(ctx, store=store)
+        with pytest.raises(Forbidden):
+            await service.earnings(ctx)

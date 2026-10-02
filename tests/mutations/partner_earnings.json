@@ -1,0 +1,101 @@
+[
+  {
+    "label": "a re-sell books the client price a second time",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    if sold and body.price_minor is not None:",
+    "replace": "    if body.price_minor is not None:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_priced_sale_books_one_paid_receipt"
+    ]
+  },
+  {
+    "label": "the sale price goes through the legacy major-x-100 conversion",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "            minor_units=True,",
+    "replace": "            minor_units=False,",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_bad_currency_is_refused_before_the_wallet_moves"
+    ]
+  },
+  {
+    "label": "an IN partner's receipt defaults to USD",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "(\"INR\" if profile.billing_country == \"IN\" else \"USD\")",
+    "replace": "\"USD\"",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_priced_sale_books_one_paid_receipt"
+    ]
+  },
+  {
+    "label": "phantom (unapplied) debits count as spend",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "if e.applied and e.amount_delta_micro < 0",
+    "replace": "if e.amount_delta_micro < 0",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "debits on sites the partner never sold count as spend",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": " and e.ref.get(\"site_id\") in site_ids",
+    "replace": "",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "unpaid receipts count as revenue",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "for inv in d.client_invoices if inv.paid]",
+    "replace": "for inv in d.client_invoices]",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "the 30-day window covers everything",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    since = datetime.now(UTC) - timedelta(days=30)",
+    "replace": "    since = datetime.now(UTC) - timedelta(days=3650)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "lapsed sold sites count as active",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "if d.subscription_status == \"active\")",
+    "replace": "if True)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "earnings months come oldest first",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "for i in range(months))",
+    "replace": "for i in reversed(range(months)))",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "earnings accept an unbounded months value",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    if not 1 <= months <= 24:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "earnings lose the active-partner guard",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "\"months must be between 1 and 24\")\n    workspace_id = await _require_active(ctx)",
+    "replace": "\"months must be between 1 and 24\")\n    workspace_id = ctx.workspace_id",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_need_an_active_partner"
+    ]
+  }
+]
