@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-commissions, PH-13 review) — pay-link needs
+  sites.buy_plan; one open link per site (409 partners.link_open /
+  partners.link_in_progress); partial refunds take a pro-rata share of the
+  commission; clawback survives a deleted site.
 Updated: 2026-10-02 (feat/partners-commissions, PH-13) — Paw Partners: new
   POST /partners/pay-link (the partner's client pays a site's year through a
   one-time link; the partner earns a commission in credits). Offers carry the
@@ -1117,10 +1121,17 @@ that site's first client payment. The partner's wallet is never charged for a
 client-paid site, and the renewal sweep does not renew it: at `renewal_date` the
 site drops to the free tier and stays published, unless the client has paid a new
 link. A refund or lost dispute within 60 days of the payment takes that payment's
-commission back (the wallet can go negative) and drops the site to the free tier.
-After 60 days nothing is taken back.
+commission back (the wallet can go negative); a partial refund takes the same
+share of the commission and leaves the site on its plan, while a full refund or
+a lost dispute also drops the site to the free tier. This still happens if the
+site has been deleted since. After 60 days nothing is taken back. A refund that
+arrives before the payment was processed cancels the link: the late payment
+activates nothing and earns nothing. If the partner is no longer active when the
+payment lands, the site still gets its year but no commission is paid (the
+payment is flagged `partner_inactive` for review).
 
-- Needs `fabric.write` and an ACTIVE profile (**403** `partner.not_active`).
+- Needs `sites.buy_plan` (workspace admin, like `/partners/sell`: a paid link
+  changes the site's plan) and an ACTIVE profile (**403** `partner.not_active`).
   Another workspace's client or site is **404**.
 - **409** `partners.site_already_paid` when the site is already on a paid plan,
   paid by the wallet or by a client. The one exception is the renewal: a
@@ -1129,12 +1140,21 @@ After 60 days nothing is taken back.
 - **409** `partners.site_on_plan` (carried by the workspace plan),
   `partners.foreign_site` (concierge-only site), `partners.site_not_live` (not
   published yet).
-- Asking again for the same plan and price within 7 days returns the open link
-  instead of making a second one.
+- One open link per site. Asking again for the same plan and price within 7
+  days returns the open link instead of making a second one (a double submit
+  opens one payment). A link for a different plan while one is open is **409**
+  `partners.link_open`; a request racing another one still being created is
+  **409** `partners.link_in_progress` (retry).
+- The link is charged in exactly its currency (no local-currency conversion at
+  checkout).
 - Only a payment for a link created here counts, matched on Dodo's payment id.
-  If the amount, currency or product Dodo reports differs from the link, or the
-  site was bought with the wallet in the meantime, the payment is flagged:
-  nothing is activated and no commission is paid. Those need a refund by hand.
+  If the amount, currency or product Dodo reports differs from the link, a
+  discount was applied, the site was bought with the wallet in the meantime, or
+  the site is already on a client-paid year of a different plan, the payment is
+  flagged: nothing is activated and no commission is paid. Those need a refund
+  by hand.
+- Changing the plan of a client-paid site through `POST /sites/publish` is
+  **409** `sites.client_paid_plan`.
 
 ### `GET /partners/sites`
 

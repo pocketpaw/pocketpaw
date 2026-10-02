@@ -459,11 +459,26 @@ The renewal sweep never debits a `client` site. Once `renewal_date` passes, it
 drops the site to `free` / `none` and leaves it published. A new paid link in
 the last 30 days of the year adds a year from `renewal_date`.
 
-A `refund.succeeded` or `dispute.lost` within 60 days of `paid_at` flips the
-record to `reversed`, drops the site to free, and debits the commission the
-ledger shows was granted (cause `partner_commission_reversal`, key
-`<payment_id>:commission:reversal`, may go negative). A refund and a dispute on
-the same payment take it once. After 60 days the commission stays.
+A `refund.succeeded` or `dispute.lost` takes the commission back when the
+commission's ledger entry is less than 60 days old. The clawback is anchored on
+the ledger, not the Site: the partner's workspace comes from the `Payment` row,
+so it works after the site is deleted. A stated refund amount takes
+`commission * refunded // paid` (a partial refund takes its share); a partial
+with no usable amount takes nothing and logs ERROR. The running total is claimed
+on the Payment row (`commission_reversed`, `commission_reversal_event_ids`)
+before the debit (cause `partner_commission_reversal`, key
+`<payment_id>:commission:reversal:<event_id>`, may go negative), so a refund and
+a dispute, or several partials, never take more than was granted. Only a full
+refund or a lost dispute (within 60 days of `paid_at`) flips the record to
+`reversed` and drops the site to free. A refund that lands while the record is
+still `pending` marks it `reversed` (`refunded_before_processed`), so the late
+payment does nothing.
+
+Other flags on a record: `discount` (a discount code was used; payment links
+cannot switch codes off), `sku_mismatch` (a payment for another plan than the
+client-paid year running), `partner_inactive` (the year activated, no commission
+paid; review by hand). Pay links pin `billing_currency`, so a USD link is never
+charged in EUR.
 
 Things to know:
 
@@ -473,9 +488,16 @@ Things to know:
   here instead of becoming top-ups in the partner's wallet. Check the log, find
   the site by `metadata.site_id`, and settle by hand.
 - Changing the plan of a `client` site through publish is refused with
-  `sites.legacy_billing_rail`, whose message talks about "the old payment
-  provider". The refusal is intended (a plan change would need a second client
-  payment); the wording is out of date.
+  `sites.client_paid_plan` (a plan change would need a second client payment).
+- A pay link is reserved on the Site before Dodo is called (a record whose
+  `payment_id` starts `reserving:` and has no `checkout_url`). One left behind by
+  a crash stops blocking new links after 5 minutes.
+- Subscription charges: their `payment.succeeded` writes a Payment row stamped
+  `subscription_id` and grants nothing. A refund of one logs ERROR with the
+  subscription id; settle the allotment by hand.
+- Not fixed, by design: a refund racing the commission grant can leave the
+  grant standing (the refund reads no ledger entry yet); the founding 24-month
+  window is per site, from that site's first client payment.
 - A refund of an earlier payment inside 60 days of a later renewal payment still
   drops the site to free, although the later year was paid. Restore the row by
   hand if that happens.

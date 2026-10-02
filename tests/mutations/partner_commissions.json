@@ -112,8 +112,8 @@
   {
     "label": "a site the wallet already pays for is activated again by the client",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        if tier is None or (paying and doc.billing_rail != _CLIENT_RAIL):",
-    "replace": "        if tier is None:",
+    "find": "        elif paying and doc.billing_rail != _CLIENT_RAIL:\n            reason = \"site_already_paid\"",
+    "replace": "        elif False:\n            reason = \"site_already_paid\"",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_site_the_wallet_bought_meanwhile_is_flagged"
     ]
@@ -137,12 +137,14 @@
     ]
   },
   {
-    "label": "each reversal event claws the commission back again",
+    "label": "a second reversal on one payment claws the commission back again (no claim)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "        idempotency_key=f\"{rec.payment_id}:commission:reversal\",",
-    "replace": "        idempotency_key=event.event_id,",
+    "find": "            \"commission_reversal_event_ids\": {\"$ne\": event.event_id},\n            \"$or\": [\n                {\"commission_reversed\": {\"$lte\": granted - amount}},\n                {\"commission_reversed\": {\"$exists\": False}},\n            ],",
+    "replace": "            \"commission_reversal_event_ids\": {\"$ne\": event.event_id},",
     "tests": [
-      "tests/cloud/partners/test_partner_commissions.py::test_a_refund_within_60_days_reverses_once_and_lapses"
+      "tests/cloud/partners/test_partner_commissions.py::test_a_refund_within_60_days_reverses_once_and_lapses",
+      "tests/cloud/partners/test_partner_commissions.py::test_a_deleted_site_still_has_its_commission_clawed_back",
+      "tests/cloud/partners/test_partner_commissions.py::test_a_refund_and_a_dispute_racing_claw_back_once"
     ]
   },
   {
@@ -197,6 +199,160 @@
     "replace": "    if rail not in (_CREDITS_RAIL, _PLAN_RAIL):",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_deleting_a_client_paid_site_stops_cleanly"
+    ]
+  },
+  {
+    "label": "C1: a deleted site's refund keeps the commission (clawback reads only the Site record)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if not workspace:\n        return\n\n    entry = await credits_service.find_by_key(",
+    "replace": "    if found is None:\n        return\n\n    entry = await credits_service.find_by_key(",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_deleted_site_still_has_its_commission_clawed_back"
+    ]
+  },
+  {
+    "label": "C1: the ledger-anchored window never closes",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if _as_utc(entry.created_at) < now - _PARTNER_CLAWBACK:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_deleted_site_refunded_after_60_days_keeps_the_commission",
+      "tests/cloud/partners/test_partner_commissions.py::test_a_refund_after_60_days_claws_nothing_back"
+    ]
+  },
+  {
+    "label": "I1: the compare-and-set misses rows without a billing_rail key",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return {\"$in\": [default, None]} if value == default else value",
+    "replace": "    return value",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_row_without_a_billing_rail_key_still_activates"
+    ]
+  },
+  {
+    "label": "I2: pay links do not pin the charge currency",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        pin_currency=True,\n",
+    "replace": "        pin_currency=False,\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_pay_links_pin_the_charge_currency"
+    ]
+  },
+  {
+    "label": "I2: the provider ignores pin_currency",
+    "file": "ee/pocketpaw_ee/cloud/billing/providers/dodo.py",
+    "find": "extra = {\"billing_currency\": currency} if currency == \"INR\" or pin_currency else {}",
+    "replace": "extra = {\"billing_currency\": currency} if currency == \"INR\" else {}",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_dodo_pins_usd_only_when_asked"
+    ]
+  },
+  {
+    "label": "I2: a discounted payment activates",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if data.get(\"discount_id\") or data.get(\"discounts\"):\n        return \"discount\"",
+    "replace": "    if False:\n        return \"discount\"",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_discounted_or_local_currency_payment_is_flagged"
+    ]
+  },
+  {
+    "label": "I3: a payment for another plan upgrades a running client-paid year",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        elif paying and doc.plan_tier != tier.key:",
+    "replace": "        elif False:",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_second_plan_cannot_upgrade_a_client_paid_year"
+    ]
+  },
+  {
+    "label": "I3: a second link for another plan is minted while one is open",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        raise ConflictError(\n            \"partners.link_open\",",
+    "replace": "        return doc, p, None\n        raise ConflictError(\n            \"partners.link_open\",",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_second_plan_cannot_upgrade_a_client_paid_year"
+    ]
+  },
+  {
+    "label": "I4: a partial refund takes the whole commission",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        amount = min(granted * min(event.amount_credits, paid) // paid, remaining)\n    elif event.is_partial:\n        logger.error(\n            \"billing.webhook: %s for partner client payment",
+    "replace": "        amount = remaining\n    elif event.is_partial:\n        logger.error(\n            \"billing.webhook: %s for partner client payment",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_partial_refund_takes_its_share_and_keeps_the_year"
+    ]
+  },
+  {
+    "label": "I4: a partial refund lapses the year",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    full = event.type == _DISPUTE_LOST or not (",
+    "replace": "    full = True or not (",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_partial_refund_takes_its_share_and_keeps_the_year"
+    ]
+  },
+  {
+    "label": "I5: a subscription charge's refund reads as nothing to reverse",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if doc.subscription_id:\n        # A SUBSCRIPTION",
+    "replace": "    if False:\n        # A SUBSCRIPTION",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_subscription_charge_refund_alarms_for_a_human"
+    ]
+  },
+  {
+    "label": "minor: a refund before processing leaves the link payable",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if rec.status == \"pending\":\n            # Refunded before",
+    "replace": "        if False:\n            # Refunded before",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_refund_before_the_payment_voids_it"
+    ]
+  },
+  {
+    "label": "minor: an inactive partner still earns commission",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        active = profile is not None and profile.status == \"active\"",
+    "replace": "        active = True",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_an_inactive_partner_earns_nothing_but_the_shop_gets_its_year"
+    ]
+  },
+  {
+    "label": "minor: the link reservation is not conditional (double submit = two payments)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        {\"_id\": doc.id, \"workspace\": workspace_id, \"$nor\": [{\"partner_payments\": open_link}]},",
+    "replace": "        {\"_id\": doc.id, \"workspace\": workspace_id},",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_double_submitted_link_is_one_payment"
+    ]
+  },
+  {
+    "label": "minor: a failed checkout leaves its reservation blocking the site",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "            await sites_service.release_client_pay_link(site_id=str(doc.id), token=token)\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_failed_checkout_releases_the_reservation"
+    ]
+  },
+  {
+    "label": "minor: a client-paid plan change gets the legacy-rail message",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if tier_change_requested and existing_doc.billing_rail == _CLIENT_RAIL:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_a_client_paid_site_plan_change_names_the_client_rail"
+    ]
+  },
+  {
+    "label": "minor: a member (fabric.write) can open a pay link",
+    "file": "ee/pocketpaw_ee/cloud/partners/router.py",
+    "find": "@router.post(\"/pay-link\", response_model=PartnerPayLinkOut, dependencies=_BUY)",
+    "replace": "@router.post(\"/pay-link\", response_model=PartnerPayLinkOut, dependencies=_WRITE)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_http_pay_link_needs_the_buy_plan_action"
     ]
   }
 ]

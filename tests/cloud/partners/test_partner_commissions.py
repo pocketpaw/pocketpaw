@@ -1123,3 +1123,33 @@ async def test_a_client_paid_site_plan_change_names_the_client_rail(mongo_db) ->
             purchase_authorized=True,
         )
     assert exc.value.code == "sites.client_paid_plan"
+
+
+async def test_a_refund_and_a_dispute_racing_claw_back_once(mongo_db, store, monkeypatch) -> None:
+    """Both reversals read the Payment row before either claims (forced): the
+    capped claim lets only one of them take the commission."""
+    import asyncio
+
+    wid = await _partner("us-shop")
+    await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    real = credits.find_by_key
+    arrived: list[str] = []
+    gate = asyncio.Event()
+
+    async def find_by_key(ws: str, key: str):
+        if key.endswith(":commission"):
+            arrived.append(key)
+            if len(arrived) >= 2:
+                gate.set()
+            await asyncio.wait_for(gate.wait(), 2)
+        return await real(ws, key)
+
+    monkeypatch.setattr(credits, "find_by_key", find_by_key)
+    await asyncio.gather(
+        _refund("pay_link_1", event_id="evt_ref"),
+        _refund("pay_link_1", event_id="evt_dis", event_type="dispute.lost"),
+    )
+    assert len(arrived) == 2
+    assert await _lines(wid, "partner_commission_reversal") == [-5_700]
+    assert await credits.balance(wid) == 0
