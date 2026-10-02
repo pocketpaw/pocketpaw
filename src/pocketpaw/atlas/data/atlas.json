@@ -481,6 +481,27 @@
     },
     {
       "gist": "",
+      "how": "HTTP only, no agent tool: POST /api/v1/studio-templates {generation_id, asset_id?, title, description?, audiences?, visibility?}; GET /api/v1/studio-templates?limit&cursor (your own); PATCH {title?, description?, audiences?, visibility?} or DELETE /api/v1/studio-templates/{id}; POST /api/v1/discover/{id}/use on a studio listing returns {source, result: {recipe, uses_input_images}}",
+      "id": "capability:studio.publish_template",
+      "keywords": [
+        "studio template",
+        "publish a generation",
+        "share a generation",
+        "publish to discover",
+        "reuse a prompt",
+        "remix a generation"
+      ],
+      "kind": "capability",
+      "name": "Publish a Studio generation as a template",
+      "narrative": "Publishes one asset of a finished Studio generation as a template: the asset becomes the cover and the prompt, model and settings become the recipe. A template is private (owner only), workspace or public; a public one is listed on Discover with its media, without the owner's name. Input images used by the original run are never published: the recipe drops them and only notes that the run had some, so whoever reuses it adds their own. Using a Studio template from Discover returns the recipe to run in Studio and copies nothing. Making it private or deleting it takes the listing down; three reports from different users hide it. Only a generation that succeeded can be published, and only from your own workspace.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Publish a finished Studio generation as a template, and share it on Discover when public.",
+      "surface": "/studio"
+    },
+    {
+      "gist": "",
       "how": "mcp__pocketpaw_surfaces__open_surface (route: /files | /studio/editor | /chat | /pockets | /knowledge; params: optional flat string map; reason: optional one line shown to the user)",
       "id": "capability:surface.open",
       "keywords": [
