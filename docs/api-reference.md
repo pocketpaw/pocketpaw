@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
+  startup (and then every 30 minutes with the cloud scheduler on); the owner
+  using their own listing doesn't raise `remix_count`.
 Updated: 2026-10-02 (feat/discover-index, hardening) — Discover reports are
   limited to 10 an hour per user (`429 discover.report_rate_limited`); a
   Discover hide also hides the source template (so re-publishing it doesn't
@@ -1030,7 +1033,8 @@ still succeeds. Deleting the template removes the image.
 `design`, `everyone`, `fun`; default `[]`) describe the template for the
 Discover index. `live_url` is the source site's live URL when that site is
 deployed, else `null`; it is re-read on save, on every `PATCH` and on every
-Discover reindex (every 30 minutes when the cloud scheduler is on), so a renamed
+Discover reindex (once at startup, then every 30 minutes when the cloud
+scheduler is on), so a renamed
 or unpublished site's URL catches up within one reindex. A public template is
 listed in Discover; making it private or deleting it removes the listing. A
 hidden template (reported here or on Discover) keeps a hidden listing, and a
@@ -1196,7 +1200,8 @@ optional; `name` defaults to the item's name.
 
 Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
 The source's own checks apply (a site template needs a plan with Sites), and
-`remix_count` goes up by one only when the copy succeeded. `404` for a missing
+`remix_count` goes up by one only when the copy succeeded, and not when the
+listing's owner uses their own listing. `404` for a missing
 or hidden listing.
 
 ### `POST /discover/{listing_id}/report` (signed in)
