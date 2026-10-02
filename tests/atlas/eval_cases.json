@@ -1,5 +1,5 @@
 {
-  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Updated 2026-07-05 (fix/atlas-data-accuracy-and-relevance): nine cases added pinning the data-accuracy + relevance fixes — the /settings/billing, /deep-work, and /security surfaces (new/repointed authored entries), the 'user' member-card vocabulary, the IDF name-weight damper that stops a destructive card ranking first, the five new instruction-filler stopwords, and the orientation query. Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py. Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): eight cases added — the model grew to 267 entries (two authored primitives, primitive:source-truth + primitive:verify-loop, and two member-level fabric capability cards). Four pin source-truth #1 on provenance / dispute / freshness / which-source-wins intents, three pin verify-loop #1 on outcome-verification intents, and one regression pin ('what is fabric') proves the new neighbours do not steal primitive:fabric's definitional intent (the instinct pins 'I want a human to approve what the agent does' / 'how do I approve what the agent does' already cover the other guarded primitive and are not duplicated). Updated 2026-09-05 (feat/files-links): two cases pin surface:files on note-linking intents ('which notes link to this one', 'show my notes as a graph') now that the surface carries wikilink / backlink / graph vocabulary and the two link routes. Updated 2026-09-30 (feat/open-surface-tool): three cases pin capability:surface.open (two forward, one reverse keeping surface:studio_editor on its own intent). Updated 2026-10-01 (feat/rooms-read-tool): four cases pin capability:chat.read_rooms on catch-up intents and, in reverse, keep surface:chat on 'open the chat' / 'start a dm' (the first draft named the entry '... chat room' and carried a 'dm history' keyword, which stole both; the entry was narrowed instead).",
+  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Updated 2026-07-05 (fix/atlas-data-accuracy-and-relevance): nine cases added pinning the data-accuracy + relevance fixes — the /settings/billing, /deep-work, and /security surfaces (new/repointed authored entries), the 'user' member-card vocabulary, the IDF name-weight damper that stops a destructive card ranking first, the five new instruction-filler stopwords, and the orientation query. Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py. Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): eight cases added — the model grew to 267 entries (two authored primitives, primitive:source-truth + primitive:verify-loop, and two member-level fabric capability cards). Four pin source-truth #1 on provenance / dispute / freshness / which-source-wins intents, three pin verify-loop #1 on outcome-verification intents, and one regression pin ('what is fabric') proves the new neighbours do not steal primitive:fabric's definitional intent (the instinct pins 'I want a human to approve what the agent does' / 'how do I approve what the agent does' already cover the other guarded primitive and are not duplicated). Updated 2026-09-05 (feat/files-links): two cases pin surface:files on note-linking intents ('which notes link to this one', 'show my notes as a graph') now that the surface carries wikilink / backlink / graph vocabulary and the two link routes. Updated 2026-09-30 (feat/open-surface-tool): three cases pin capability:surface.open (two forward, one reverse keeping surface:studio_editor on its own intent). Updated 2026-10-01 (feat/rooms-read-tool): four cases pin capability:chat.read_rooms on catch-up intents and, in reverse, keep surface:chat on 'open the chat' / 'start a dm' (the first draft named the entry '... chat room' and carried a 'dm history' keyword, which stole both; the entry was narrowed instead). Updated 2026-10-02 (feat/discover-index, review): four cases pin the new surface:discover and capability:discover.remix (free tool / game / community-template / remix intents); the reverse direction ('save my site as a template', 'share my site template with everyone' -> capability:sites.save_as_template, 'publish this as a website' -> primitive:sites) is already pinned and still holds.",
   "cases": [
     {
       "intent": "build me an app to track tasks",
@@ -510,6 +510,30 @@
       "expected_id": "capability:sites.save_as_template",
       "rank_within": 1,
       "note": "Added 2026-10-01 (feat/sites-templates-st3): template sharing (workspace / public) lives on the same capability."
+    },
+    {
+      "intent": "find a free QR code tool",
+      "expected_id": "surface:discover",
+      "rank_within": 3,
+      "note": "Added 2026-10-02 (feat/discover-index, review): the public Discover index. The capability card ranks first on the same vocabulary; both point at /discover."
+    },
+    {
+      "intent": "browse site templates people published",
+      "expected_id": "surface:discover",
+      "rank_within": 3,
+      "note": "Added 2026-10-02 (feat/discover-index, review): the public Discover index."
+    },
+    {
+      "intent": "show me free games people made",
+      "expected_id": "surface:discover",
+      "rank_within": 1,
+      "note": "Added 2026-10-02 (feat/discover-index, review): the public Discover index."
+    },
+    {
+      "intent": "remix a template someone shared",
+      "expected_id": "capability:discover.remix",
+      "rank_within": 1,
+      "note": "Added 2026-10-02 (feat/discover-index, review): the public Discover index."
     }
   ]
 }

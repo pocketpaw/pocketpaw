@@ -1,6 +1,17 @@
 # vetted_pins.py — the toolchain dependency pins, read from the generator instead of
 # hand-mirrored.
 #
+# Updated: 2026-10-02 (fix/canon-cross-repo-pins, CN-8). The fallback is no longer a
+# hand dict. ``paw-sites-allowlist.json`` (beside this file) is ``paw-sites-gen
+# allowlist``'s output vendored byte-for-byte at a recorded paw-sites commit
+# (``paw-sites-allowlist.pin.json``, hash-pinned by
+# tests/ee/sites/test_paw_sites_allowlist_vendored.py; refresh with
+# scripts/vendor-paw-sites-allowlist.sh). ``FALLBACK_PINS`` is its ``vetted`` map,
+# and ``VENDORED_ALLOWLIST`` hands its reserved-name and package-cap rules to
+# ``dependency_manifest`` so those stop being a second hand copy too. The old hand
+# dict matched the 11 names it carried; the vendored map adds the rest of
+# VETTED_DEPENDENCIES (valibot, gsap, ...), so ``pin_for`` now answers for them.
+#
 # Created: 2026-09-24 (feat/sites-author-dependencies, PP-1). Two places in this
 # package named versions that belong to paw-sites' ``VETTED_DEPENDENCIES``:
 # ``project_zip._VETTED_PINS`` (the downloadable build shell) and
@@ -29,22 +40,15 @@ ALLOWLIST_ENV = "PAW_SITES_ALLOWLIST_JSON"
 #: File name the vendor script and the image write next to the generator.
 ALLOWLIST_FILE = "allowlist.json"
 
-#: Used for any name the vendored allowlist does not carry. Mirrored from
-#: paw-sites/src/allowlist.ts ``VETTED_DEPENDENCIES``; ``test_vetted_pins`` checks
-#: every entry against the sibling checkout when there is one.
-FALLBACK_PINS: dict[str, str] = {
-    "@sveltejs/adapter-static": "^3.0.10",
-    "@sveltejs/kit": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^6.0.0",
-    "@tailwindcss/vite": "^4.2.2",
-    "@vitejs/plugin-react": "^4.3.4",
-    "motion": "^12.40.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "svelte": "^5.0.0",
-    "tailwindcss": "^4.2.2",
-    "vite": "^6.0.0",
-}
+#: ``paw-sites-gen allowlist`` output, vendored into the package at a pinned
+#: paw-sites commit (see the header). Committed package data, so always present.
+VENDORED_ALLOWLIST: dict = json.loads(
+    Path(__file__).with_name("paw-sites-allowlist.json").read_text(encoding="utf-8")
+)
+
+#: Used for any name the deployed allowlist does not carry: the vendored ``vetted``
+#: map (paw-sites ``VETTED_DEPENDENCIES``).
+FALLBACK_PINS: dict[str, str] = dict(VENDORED_ALLOWLIST["vetted"])
 
 
 def _candidate_paths() -> list[Path]:
@@ -96,4 +100,4 @@ def pin_for(name: str) -> str:
     return vetted_pins()[name]
 
 
-__all__ = ["ALLOWLIST_ENV", "FALLBACK_PINS", "pin_for", "vetted_pins"]
+__all__ = ["ALLOWLIST_ENV", "FALLBACK_PINS", "VENDORED_ALLOWLIST", "pin_for", "vetted_pins"]

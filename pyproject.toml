@@ -1,4 +1,6 @@
-# Updated: 2026-06-10 — Add langchain-ollama to the deep-agents dependency block (and its
+# Updated: 2026-10-01 — Add Wave 0 import-linter guards (Fabric journal store, SQLite AuditStore)
+# that stop new duplicate primitives; today's importers are ignored and the list only shrinks.
+# Prior: 2026-06-10 — Add langchain-ollama to the deep-agents dependency block (and its
 # mirrored bundle/dev copies) so the local / bring-your-own-model (Ollama) lane works:
 # DeepAgentsBackend/LangchainReactBackend build a ChatOllama via init_chat_model("ollama:..."),
 # which needs this binding. Fixes the self-hosted local-only path for the compliance ICP.
@@ -787,4 +789,33 @@ ignore_imports = [
     # only stdlib, and a community install has no workspaces to bill, so it
     # returns None and the request goes out untagged exactly as before.
     "pocketpaw.agents.spend_attribution -> pocketpaw_ee.cloud.chat.agent_service",
+]
+
+# Canonicalization Wave 0 guards (CN-1, 2026-10-01). Each lands green with
+# today's violators in ignore_imports; that list is the ratchet and only shrinks.
+# unmatched alerting is off so PRs that remove a violator merge in any order.
+# These forbid `pocketpaw.*` submodules, so they live here (both root packages)
+# rather than in ee/pyproject.toml, where `pocketpaw` is external.
+# Why: copies of a primitive drift apart, so new code reuses the canonical one.
+[[tool.importlinter.contracts]]
+name = "Fabric — object writes through one store"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw.fabric.journal_store"]
+ignore_imports = [
+    "pocketpaw_ee.cloud.people.service -> pocketpaw.fabric.journal_store",
+]
+
+[[tool.importlinter.contracts]]
+name = "Audit — cloud never writes SQLite AuditStore"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw.audit.store"]
+ignore_imports = [
+    "pocketpaw_ee.cloud.audit.listeners -> pocketpaw.audit.store",
+    "pocketpaw_ee.cloud.audit.service -> pocketpaw.audit.store",
 ]

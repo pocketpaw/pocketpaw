@@ -29,6 +29,12 @@
 #     never the source pocket's prefix (a site delete purges that) and never the
 #     source site's private ``/api/v1/uploads/...`` URL. The copy is best-effort
 #     on save; delete purges the template prefix, also best-effort.
+#   * ``live_url`` is the source site's deployed URL (``_source_live_url``),
+#     re-read on save and on every metadata update; ``None`` when not deployed.
+#
+# Updated 2026-10-01 (feat/discover-index): save / PATCH store ``kind`` and
+# ``audiences`` and stamp ``live_url``; responses carry all three. The Discover
+# index syncs from the existing events; this module never imports discover.
 
 from __future__ import annotations
 
@@ -99,6 +105,9 @@ class _MetaRow(BaseModel):
     pattern: str | None = None
     hidden: bool = False
     preview_image_url: str | None = None
+    kind: str = "site"
+    audiences: list[str] = Field(default_factory=list)
+    live_url: str | None = None
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
 
@@ -118,6 +127,9 @@ def _meta(doc: SiteTemplate | _MetaRow, viewer: str) -> dict:
         pattern=doc.pattern,
         hidden=doc.hidden,
         preview_image_url=doc.preview_image_url,
+        kind=doc.kind,
+        audiences=tuple(doc.audiences),
+        live_url=doc.live_url,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -193,6 +205,17 @@ async def _check_publishable(workspace_id: str, snapshot: dict) -> None:
             "site_templates.source_not_shareable",
             "This site's source is not available on your plan, so it can't be shared publicly",
         )
+
+
+async def _source_live_url(workspace_id: str, pocket_id: str) -> str | None:
+    """The source pocket's live site URL, or ``None`` when it has no deployed site."""
+    # Function-local import: sites.service reads pockets (cycle).
+    from pocketpaw_ee.sites import service as sites_service
+
+    site = await sites_service.canonical_site_for_pocket(workspace_id, pocket_id)
+    if site is None or not site.deployed:
+        return None
+    return site.url or None
 
 
 def _template_assets_id(doc: SiteTemplate) -> str:
@@ -305,6 +328,9 @@ async def save_template(
         engine=snapshot["engine"],
         pattern=snapshot["pattern"],
         snapshot=snapshot,
+        kind=body.kind,
+        audiences=body.audiences,
+        live_url=await _source_live_url(workspace_id, body.pocket_id),
     )
     await doc.insert()
     asset = await _copy_source_preview(doc)
@@ -377,6 +403,7 @@ async def update_template(
 
     changes = body.model_dump(exclude_none=True)
     if changes:
+        changes["live_url"] = await _source_live_url(doc.workspace, doc.source_pocket_id)
         changes["updatedAt"] = datetime.now(UTC)
         # ``$set`` of the changed fields only: a whole-doc save could drop a
         # report pushed concurrently.

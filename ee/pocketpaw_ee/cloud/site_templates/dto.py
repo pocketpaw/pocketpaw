@@ -6,6 +6,9 @@
 # than a leak. ``owner`` is ``None`` for anyone but the owner, so a public
 # template does not reveal who made it or where. ``preview_image_url`` is a
 # public-rail https URL or ``None``, safe to show to any viewer.
+#
+# Updated 2026-10-01 (feat/discover-index): save and PATCH accept ``kind`` and
+# ``audiences``; the response carries ``kind``, ``audiences`` and ``live_url``.
 
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 Visibility = Literal["private", "workspace", "public"]
+Kind = Literal["site", "tool", "game"]
+Audience = Literal["shop", "design", "everyone", "fun"]
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -31,6 +36,8 @@ class SaveSiteTemplateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
     visibility: Visibility = "private"
+    kind: Kind = "site"
+    audiences: list[Audience] = Field(default_factory=list, max_length=4)
 
 
 class PatchSiteTemplateRequest(BaseModel):
@@ -41,6 +48,8 @@ class PatchSiteTemplateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     visibility: Visibility | None = None
+    kind: Kind | None = None
+    audiences: list[Audience] | None = Field(default=None, max_length=4)
 
 
 class ListSiteTemplatesRequest(BaseModel):
@@ -93,6 +102,9 @@ class SiteTemplateResponse(BaseModel):
     is_mine: bool
     hidden: bool = False
     preview_image_url: str | None = None
+    kind: str = "site"
+    audiences: list[str] = Field(default_factory=list)
+    live_url: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -3,7 +3,9 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:loader` in the
 // paw-bar repo (loader/dist/loader.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar loader/src/loader.ts @ 636e413 (main)
+// Source: qbtrix/paw-bar loader/src/loader.ts. The source commit and the sha256 of
+// everything below this header live in ../paw-bar-loader.pin.json, and
+// tests/cloud/test_paw_bar_widget_js.py fails when the body stops matching it.
 //
 // It used to be hand-transcribed TypeScript with the annotations stripped by
 // hand. That drifts silently: this copy predated a whole session of loader
@@ -28,9 +30,14 @@
 // to dock the icon launcher in its corner, and the frame is sent
 // {pawbar:viewport,w,h} on load and on every host resize.
 //
-// To update: rebuild in paw-bar, copy loader/dist/loader.readable.js over this
-// file, and restore this header. tests/cloud/test_paw_bar_widget_js.py checks
-// the copy has not fallen behind the behaviours the backend depends on.
+// 2026-10-02 (fix/canon-cross-repo-pins, CN-8): re-vendored from paw-bar main
+// 25cd5ce. The only body change is the iframe's allow attribute, which now reads
+// "clipboard-write; microphone" (paw-bar e50b593, voice dictation). The copy had
+// drifted because nothing pinned it; it is now hash-pinned.
+//
+// To update: run scripts/vendor-paw-bar-loader.sh. It builds paw-bar origin/main in
+// a throwaway worktree, replaces everything below this header with
+// loader/dist/loader.readable.js, and rewrites the pin file.
 "use strict";
 (() => {
   // loader/src/loader.ts
@@ -88,7 +95,7 @@
     const src = endpoint + FRAME_PATH + "?key=" + encodeURIComponent(siteKey) + "&w=" + encodeURIComponent(widgetId) + "&po=" + encodeURIComponent(parentOrigin) + "&s=" + hostScheme(win);
     const iframe = doc.createElement("iframe");
     iframe.title = "Site concierge";
-    iframe.setAttribute("allow", "clipboard-write");
+    iframe.setAttribute("allow", "clipboard-write; microphone");
     iframe.setAttribute("sandbox", FRAME_SANDBOX);
     iframe.style.cssText = frameStyle();
     iframe.src = src;

@@ -39,6 +39,9 @@
 # alternative — refusing on any drift — turns an ordinary price change into a
 # pile of dead Tray cards, and the identity hash already covers the thing that
 # must not move (which workspace, which site, which tier).
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -129,9 +132,6 @@ async def _persist_outcome(
     failure the free-text ``mark_executed`` / ``mark_failed`` outcome still
     records what happened.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -149,13 +149,7 @@ async def _persist_outcome(
         }
         params[SITE_PLAN_REQUEST_PARAM_KEY] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — back-write is best-effort
         logger.warning(
             "site_plan_request: failed to persist outcome onto action %s",
