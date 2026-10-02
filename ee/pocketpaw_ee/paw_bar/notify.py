@@ -4,6 +4,9 @@
 #   * ``paw_bar_conversation_new``  — the first turn of a NEW conversation.
 #   * ``paw_bar_needs_human``       — a raised handoff (see ``handoff.py``).
 #   * ``paw_bar_visitor_reply``     — a visitor wrote while the bot was muted.
+# Plus one site-level kind, ``paw_bar_spend_cap``: the v2 concierge hit the
+# site's daily spend cap. At most once per site per UTC day
+# (``notify_spend_cap_reached``), however many visitors land on the cap.
 #
 # Fan-out is the WORKSPACE OWNER (design §10 Q4). The new-conversation and
 # visitor-reply kinds go through ``notifications_service.create`` (bell, push,
@@ -31,6 +34,10 @@ logger = logging.getLogger(__name__)
 NOTIFY_NEW_CONVERSATION = "paw_bar_conversation_new"
 NOTIFY_NEEDS_HUMAN = "paw_bar_needs_human"
 NOTIFY_VISITOR_REPLY = "paw_bar_visitor_reply"
+NOTIFY_SPEND_CAP = "paw_bar_spend_cap"
+# Its source: ``id`` = "<pocket_id>:<YYYY-MM-DD>", the site and the UTC day, which
+# is also the dedupe key.
+NOTIFY_SPEND_CAP_SOURCE_TYPE = "paw_bar_site"
 
 # The notification source ``type``, with ``id`` = "<widget_id>:<customer_ref>" —
 # the exact pair the owner inbox is keyed by, so a click can resolve the thread.
@@ -223,11 +230,83 @@ async def notify_workspace_owner(
         return False
 
 
+# (workspace, source id) pairs this process already notified or found notified,
+# so a capped site costs one Mongo read per process per day, not one per turn.
+_spend_cap_noted: set[tuple[str, str]] = set()
+
+
+async def notify_spend_cap_reached(
+    *, workspace_id: str, pocket_id: str, site_name: str = "", widget_id: str = ""
+) -> bool:
+    """Tell the workspace owner the site's concierge hit today's spend cap, once
+    per site per UTC day. Never raises; returns whether a notification was created.
+
+    The dedupe is today's notification row itself (same kind, recipient and source
+    id), checked before writing and remembered per process. Two workers reaching
+    the cap in the same instant can each write one; that is the whole race."""
+    from datetime import UTC, datetime
+
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    source_id = f"{pocket_id}:{day}"
+    key = (workspace_id, source_id)
+    if key in _spend_cap_noted:
+        return False
+    try:
+        recipient = await resolve_workspace_owner(workspace_id)
+        if not recipient:
+            return False
+
+        from pocketpaw_ee.cloud.models.notification import Notification as NotificationDoc
+        from pocketpaw_ee.cloud.notifications import service as notifications_service
+        from pocketpaw_ee.cloud.notifications.domain import NotificationSource
+
+        existing = await NotificationDoc.find_one(
+            {
+                "workspace": workspace_id,
+                "recipient": recipient,
+                "type": NOTIFY_SPEND_CAP,
+                "source.id": source_id,
+            }
+        )
+        _spend_cap_noted.add(key)
+        if existing is not None:
+            return False
+        name = safe_preview(site_name, cap=80)
+        await notifications_service.create(
+            workspace_id=workspace_id,
+            recipient=recipient,
+            kind=NOTIFY_SPEND_CAP,
+            title=(
+                f"{name}: the concierge reached today's spend cap"
+                if name
+                else "Your site's concierge reached today's spend cap"
+            ),
+            body=(
+                "Visitors are told the assistant is unavailable until the cap resets "
+                "at midnight UTC. Raise the cap to keep answering today."
+            ),
+            source=NotificationSource(
+                type=NOTIFY_SPEND_CAP_SOURCE_TYPE,
+                id=source_id,
+                pocket_id=pocket_id or None,
+            ),
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a visitor's turn never fails on this
+        logger.warning(
+            "paw-bar spend-cap notification failed (widget=%s)", widget_id, exc_info=True
+        )
+        return False
+
+
 __all__ = [
     "NOTIFY_NEEDS_HUMAN",
     "NOTIFY_NEW_CONVERSATION",
     "NOTIFY_SOURCE_TYPE",
+    "NOTIFY_SPEND_CAP",
+    "NOTIFY_SPEND_CAP_SOURCE_TYPE",
     "NOTIFY_VISITOR_REPLY",
+    "notify_spend_cap_reached",
     "notify_workspace_owner",
     "resolve_widget_agent",
     "resolve_widget_site",

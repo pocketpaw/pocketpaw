@@ -15,6 +15,12 @@
 # still just a strange name. Enums (tone, escalation mode) pick a sentence and
 # never reach the prompt as text; language codes are re-checked against BCP-47.
 #
+# Escalation picks the contact ROUTE, never whether to offer one: any mode renders
+# the "don't know, here's what I can help with" line without a contact offer, then
+# the route for a visitor who asks for a person or whose request needs the
+# business (the send_to_team form card when lead capture is on, else the "Talk to
+# a person" button or the owner's address; "none" offers nothing).
+#
 # A site with none of the fields set renders "", so its prompt is unchanged.
 
 from __future__ import annotations
@@ -46,12 +52,44 @@ _TONE_SENTENCES = {
     "playful": "Sound light, with a bit of fun, never at the visitor's expense.",
 }
 
-_UNKNOWN = "When the answer is not in the knowledge or the catalog below, say you don't know"
-_ESCALATION_SENTENCES = {
-    "handoff": _UNKNOWN + " and offer to pass the question to a person from the team.",
-    "none": _UNKNOWN
-    + " and suggest looking around the site. Do not offer a person or a contact address.",
-}
+_DONT_KNOW = (
+    "When the answer is not in the knowledge or the catalog below, say briefly that "
+    "you don't have it and offer what you can help with instead, with no contact "
+    "details and no offer of a person."
+)
+_ONLY_WHEN = (
+    "Only when the visitor asks for a person, contact details or a callback, or the "
+    "request needs the business itself (an existing order, a complaint, a custom "
+    "quote),"
+)
+_ROUTE_FORM = f"{_ONLY_WHEN} offer the send_to_team form so the team can get back to them."
+_ROUTE_BUTTON = f'{_ONLY_WHEN} tell them the chat\'s "Talk to a person" button reaches the team.'
+_ROUTE_NONE = (
+    "Do not offer a person or a contact address, even when asked; suggest looking "
+    "around the site instead."
+)
+
+
+def _escalation_lines(site: Any) -> list[str]:
+    """The don't-know line and the contact route for the owner's escalation mode,
+    or [] when no mode is set. Lead capture (on unless explicitly False) makes the
+    form card the route for "handoff" and "email" alike."""
+    escalation = getattr(site, "concierge_escalation", None)
+    mode = str(getattr(escalation, "mode", "") or "")
+    if mode not in ("handoff", "email", "none"):
+        return []
+    if mode == "none":
+        return [_DONT_KNOW, _ROUTE_NONE]
+    if getattr(site, "concierge_lead_capture", True) is not False:
+        return [_DONT_KNOW, _ROUTE_FORM]
+    contact = one_line(str(getattr(escalation, "contact", "") or ""))
+    if mode == "email" and contact:
+        address = quote(contact, CONTACT_MAX_CHARS)
+        return [
+            _DONT_KNOW,
+            f"{_ONLY_WHEN} share this contact address in one short sentence: {address}.",
+        ]
+    return [_DONT_KNOW, _ROUTE_BUTTON]
 
 
 def quote(text: str, cap: int) -> str:
@@ -104,15 +142,7 @@ def render_owner_block(site: Any) -> str:
             "politely and steer back to the site."
         )
 
-    escalation = getattr(site, "concierge_escalation", None)
-    mode = str(getattr(escalation, "mode", "") or "")
-    contact = one_line(str(getattr(escalation, "contact", "") or ""))
-    if mode == "email" and contact:
-        lines.append(
-            f"{_UNKNOWN} and share this contact address: {quote(contact, CONTACT_MAX_CHARS)}."
-        )
-    elif mode in _ESCALATION_SENTENCES:
-        lines.append(_ESCALATION_SENTENCES[mode])
+    lines.extend(_escalation_lines(site))
 
     about = one_line(str(getattr(site, "concierge_about", "") or ""))
     if about:

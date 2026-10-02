@@ -425,7 +425,7 @@
     "find": "    return spent >= cap\n",
     "replace": "    return spent > cap\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_gets_the_degrade_reply_and_no_model_call"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_is_unavailable_with_no_model_call"
     ]
   },
   {
@@ -434,7 +434,7 @@
     "find": "    if await _over_spend_cap(settings, workspace_id, pocket_id):\n",
     "replace": "    if False:\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_gets_the_degrade_reply_and_no_model_call"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_is_unavailable_with_no_model_call"
     ]
   },
   {
@@ -479,7 +479,7 @@
     "find": "            if runtime != \"v2\":\n                raise HTTPException(403, \"concierge_quota_exceeded\")\n",
     "replace": "            if True:\n                raise HTTPException(403, \"concierge_quota_exceeded\")\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_v2_quota_hit_is_the_degrade_reply_with_no_model_call"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_v2_quota_hit_is_unavailable_limit_with_no_model_call"
     ]
   },
   {
@@ -492,7 +492,7 @@
     ]
   },
   {
-    "label": "CR-5 quota: the degrade reply skips the rate limit — an unmetered handoff writer",
+    "label": "CR-5 quota: the unavailable reply skips the rate limit — an unmetered served turn",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
     "find": "    if not await _admit_chat_turn(store, widget, body.customer_ref):\n        raise HTTPException(429, \"Rate limit exceeded\")\n\n    # (7c, v2)",
     "replace": "    if not quota_exhausted and not await _admit_chat_turn(store, widget, body.customer_ref):\n        raise HTTPException(429, \"Rate limit exceeded\")\n\n    # (7c, v2)",
@@ -506,7 +506,7 @@
     "find": "        reason = \"provider_timeout\" if _is_timeout(exc) else \"provider_error\"\n",
     "replace": "        reason = \"provider_error\"\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_provider_timeout_is_the_degrade_reply"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_provider_that_keeps_failing_is_unavailable_with_no_handoff"
     ]
   },
   {
@@ -519,48 +519,12 @@
     ]
   },
   {
-    "label": "CR-5 error arm: a provider failure is the generic error frame again, no degrade",
+    "label": "CR-5 error arm: a provider failure is the generic error frame again, no unavailable frame",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        async for frame in degrade_reply(\n            widget,\n            reason,\n",
-    "replace": "        for frame in [_sse(\"error\", {\"code\": \"agent.error\", \"message\": \"x\"})] or degrade_reply(\n            widget,\n            reason,\n",
+    "find": "        async for frame in degrade_reply(widget, reason):\n",
+    "replace": "        for frame in [_sse(\"error\", {\"code\": \"agent.error\", \"message\": \"x\"})]:\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_provider_error_is_the_degrade_reply"
-    ]
-  },
-  {
-    "label": "CR-5 cap arm: the handoff carries the raw message — retention-off sites leak the visitor line",
-    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "            question=stored_user_text,\n            conversation=conversation,\n            store=store,\n        ):\n            yield frame\n        return\n",
-    "replace": "            question=message,\n            conversation=conversation,\n            store=store,\n        ):\n            yield frame\n        return\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
-    ]
-  },
-  {
-    "label": "CR-5: the router stops handing its store to the runner — handoffs write to another store",
-    "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "                stored_user_text=stored_user_text,\n                store=store,\n",
-    "replace": "                stored_user_text=stored_user_text,\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
-    ]
-  },
-  {
-    "label": "CR-5 degrade: a conversation already waiting on a person is handed off (and notified) again",
-    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    handed_off = getattr(conversation, \"state\", None) == ConversationState.NEEDS_HUMAN\n",
-    "replace": "    handed_off = False\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_conversation_already_waiting_on_a_person_is_not_handed_off_again"
-    ]
-  },
-  {
-    "label": "CR-5 degrade: the reply claims the team has the message when the handoff failed",
-    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    text = DEGRADE_HANDED_OFF if handed_off else DEGRADE_LEAVE_MESSAGE\n",
-    "replace": "    text = DEGRADE_HANDED_OFF\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_handoff_that_did_not_land_says_leave_a_message"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_failure_after_text_streamed_keeps_the_text_and_is_not_retried"
     ]
   },
   {
@@ -591,39 +555,57 @@
     ]
   },
   {
-    "label": "CR-5 error arm: the handoff carries the raw message — retention-off sites leak the visitor line",
+    "label": "CR-5 degrade: the canned leave-a-message text is back instead of the unavailable frame",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "            reason,\n            workspace_id=workspace_id,\n            customer_ref=customer_ref,\n            question=stored_user_text,\n",
-    "replace": "            reason,\n            workspace_id=workspace_id,\n            customer_ref=customer_ref,\n            question=message,\n",
+    "find": "    yield _sse(\"unavailable\", {\"type\": \"unavailable\", \"reason\": visible})\n",
+    "replace": "    yield _sse(\"chunk\", {\"content\": \"I can't answer right now.\", \"type\": \"text\"})\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_a_provider_error_handoff"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_degrade_reply_is_the_unavailable_frame_and_never_a_handoff"
     ]
   },
   {
-    "label": "CR-5 quota arm: the handoff carries the raw message — retention-off sites leak the visitor line",
-    "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "                question=(\n                    body.message[:_STORED_USER_TEXT_CHARS]\n                    if site.concierge_store_transcripts\n                    else \"\"\n                ),\n",
-    "replace": "                question=body.message[:_STORED_USER_TEXT_CHARS],\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_a_quota_handoff"
-    ]
-  },
-  {
-    "label": "CR-5 quota arm: the handoff drops the visitor line even when the site keeps transcripts",
-    "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "                question=(\n                    body.message[:_STORED_USER_TEXT_CHARS]\n                    if site.concierge_store_transcripts\n                    else \"\"\n                ),\n",
-    "replace": "                question=\"\",\n",
-    "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_on_puts_the_visitor_line_on_the_handoff"
-    ]
-  },
-  {
-    "label": "CR-5 degrade: the handoff is filed as the agent escalating itself — capped turns pollute the escalation metric",
+    "label": "CR-5 degrade: the spend cap reads as temporary — the widget invites a pointless retry",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                source=f\"degrade:{reason}\",\n",
-    "replace": "                source=\"agent\",\n",
+    "find": "    \"spend_cap\": \"limit\",\n",
+    "replace": "    \"spend_cap\": \"temporary\",\n",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_retention_off_keeps_the_visitor_line_off_the_handoff"
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_site_at_its_daily_cap_is_unavailable_with_no_model_call"
+    ]
+  },
+  {
+    "label": "CR-5 retry: a transient provider blip is never retried — visitors see random failures",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                if attempt > 1 or full_text or not _is_transient(exc):\n",
+    "replace": "                if True:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_transient_failure_is_retried_once_and_answered"
+    ]
+  },
+  {
+    "label": "CR-5 retry: a failure after text is retried — the visitor reads the answer twice",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                if attempt > 1 or full_text or not _is_transient(exc):\n",
+    "replace": "                if attempt > 1 or not _is_transient(exc):\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_transient_failure_mid_stream_is_not_retried"
+    ]
+  },
+  {
+    "label": "CR-5 retry: every HTTP status is retried — a bad request or bad key is billed twice",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            return status in _TRANSIENT_STATUS or status >= 500\n",
+    "replace": "            return True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_a_permanent_failure_is_not_retried"
+    ]
+  },
+  {
+    "label": "CR-5 cap notice: today's notification is not checked — the owner is notified per worker restart",
+    "file": "ee/pocketpaw_ee/paw_bar/notify.py",
+    "find": "        if existing is not None:\n            return False\n",
+    "replace": "        if False:\n            return False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_the_owner_hears_about_the_cap_once_per_site_per_day"
     ]
   }
 ]

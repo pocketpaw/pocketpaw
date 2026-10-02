@@ -379,6 +379,50 @@ async def test_v2_streams_one_action_frame_before_stream_end(concierge_client, m
 
 
 @pytest.mark.asyncio
+async def test_v2_a_turn_that_fails_after_a_valid_action_drops_the_action(
+    concierge_client, model, monkeypatch
+):
+    """The action rides only a completed reply. A turn that streams text and a
+    valid fence, then fails, keeps the text, sends ``unavailable`` (temporary)
+    and no ``action``: the widget never acts on a reply that broke off."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    from tests.cloud.test_paw_bar_concierge_v2_degrade import _FailingModel
+
+    client, store = concierge_client
+    _seed_kb(monkeypatch, {})
+    await _site(
+        concierge_page_actions=True,
+        kb_page_index={"returns": {"id": "a1", "title": "Returns"}},
+    )
+    widget = await store.create_widget(_widget())
+    rec = _FailingModel(
+        RuntimeError("upstream model exploded"),
+        reply=["Taking you to our returns page.\n", _fence(_ACTION), "\nAnything"],
+    )
+    monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
+
+    res = await _chat(
+        client,
+        widget.id,
+        message="take me to returns",
+        page={"url": "https://brewco.com/", "title": ""},
+    )
+    assert res.status_code == 200, res.text
+    frames = _frames(res.text)
+    events = [e for e, _ in frames]
+    assert "action" not in events
+    assert frames[-2:] == [
+        ("unavailable", {"type": "unavailable", "reason": "temporary"}),
+        ("stream_end", {"assistant_message_id": None, "cancelled": False}),
+    ]
+    text = "".join(d["content"] for e, d in frames if e == "chunk")
+    assert text.startswith("Taking you to our returns page.")
+    assert "pawbar-action" not in text
+    assert len(rec.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_v2_navigate_on_the_visitors_own_page_keeps_the_fragment(
     concierge_client, model, monkeypatch
 ):

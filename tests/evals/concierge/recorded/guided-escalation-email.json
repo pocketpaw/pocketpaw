@@ -2,9 +2,9 @@
   "case_id": "guided-escalation-email",
   "mode": "recorded",
   "authored_by": "hand",
-  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved email escalation. Replace with `run --real --record`.",
+  "note": "HAND-AUTHORED, not captured from a model. well-behaved email route for a visitor who asked who to contact. Replace with `run --real --record`.",
   "model_spec": null,
   "captured_at": null,
   "prompt_fingerprint": "611664873626fb4d",
-  "raw_model_output": "I don't have that information. You can write to hello@brewco.test and the team will help."
+  "raw_model_output": "You can write to hello@brewco.test about a wholesale order and the team will help."
 }
