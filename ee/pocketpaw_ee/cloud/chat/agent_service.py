@@ -16,6 +16,16 @@ handles *what the agent sees*:
   connected it. ``warm_session_key_for`` is the per-member key that slot and the
   warm process live under.
 
+Changes: 2026-10-02 (feat/sites-card-photo-source, PH-10) — the sites entry
+``_publish_media_attachment`` returns no longer says every image is there "so
+the site can show it". The model now decides from the pixels: a DOCUMENT
+(visiting card, menu, flyer, signboard, price list) is a SOURCE whose name,
+phone, WhatsApp number, address, hours and services go into the page exactly as
+written, and the photo is not embedded unless asked; a logo, product or shop
+photo is still embedded by its verbatim public URL, and a storefront photo can
+be both. The clause is image-only: a video keeps the plain embed text.
+Prompt-only: publishing and the surface gate are unchanged.
+
 Changes: 2026-09-27 (fix/chat-run-heartbeat) — a run that does not complete
 now persists its partial reply as a real ``Message`` carrying ``run_status``, and
 ``find_stranded_replies`` skips runs that point at such a Message. So the
@@ -2990,13 +3000,33 @@ async def _publish_media_attachment(
         if asset.kind == "video"
         else f'<img src="{asset.url}" alt="…">'
     )
+    embed = (
+        f"the URL above is permanent and world-readable — use it VERBATIM as "
+        f"{element}. Do not copy the file into the source map, do not rewrite the "
+        f"URL, and do not substitute a stock asset for it."
+    )
+    if asset.kind != "image":
+        return (
+            f"### {rec.filename} ({asset.mime}, {asset.size} bytes)\n"
+            f"PUBLIC URL: {asset.url}\n"
+            f"The user attached this so the site can show it: {embed}"
+        )
+    # Not every attached picture is page content. A shop owner photographs their
+    # visiting card so the site can be built FROM it, and embedding that photo
+    # puts the card on the website. Only the pixels say which kind this is, so
+    # the model decides; the embed branch keeps the verbatim-URL rule. A video is
+    # never a card, so it keeps the plain embed text above.
     return (
         f"### {rec.filename} ({asset.mime}, {asset.size} bytes)\n"
         f"PUBLIC URL: {asset.url}\n"
-        f"The user attached this so the site can show it. The URL above is "
-        f"permanent and world-readable — use it VERBATIM as {element}. "
-        f"Do not copy the file into the source map, do not rewrite the URL, and "
-        f"do not substitute a stock asset for it."
+        "Look at it first and decide what it is. If it is a DOCUMENT — a visiting "
+        "card, a menu, a flyer, a signboard, a price list — it is a SOURCE, not page "
+        "content: copy the business name, phone, WhatsApp number, address, hours and "
+        "services from it into the page exactly as written (ask about anything you "
+        "cannot read rather than guessing), and do NOT embed the photo unless the "
+        "user asks for it. Otherwise (a logo, a product or a shop photo) it is there "
+        "for the site to show. A storefront photo can be both — copy its facts, and "
+        f"you may also show it. To show it: {embed}"
     )
 
 

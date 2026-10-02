@@ -1,5 +1,18 @@
 # sites.py — /sites surface preamble.
 #
+# Updated: 2026-10-02 (feat/sites-card-photo-source, PH-10) — new
+# `_WHATSAPP_ORDERS_RULE`, used by `_create_preamble` (BUILD step 5a), every
+# refine branch (`_REFINE_SHARED_RULES`, and appended to ripple's own rules) and
+# `_frontend_preamble`. When the
+# user wants WhatsApp orders, the CTA is a `https://wa.me/<digits>?text=<prefilled
+# order>` link built only from a number they supplied (typed or on an attached
+# card): digits only with the country code (ask if it is not certain), no
+# placeholder link when there is no number, primary button plus a sticky mobile
+# button that leaves the lead form's submit and the footer uncovered. The refine
+# CTA rule now lists `https://wa.me/…` beside `tel:` / `mailto:`. Pairs with the
+# chat attachment entry, which treats a photographed visiting card as a source
+# rather than page content.
+#
 # Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — `_CONCIERGE_NOTE`
 # no longer says a published site "ships with" a concierge that is "provisioned
 # automatically" and "ON by default". None of that is true any more: the OWNER
@@ -1754,6 +1767,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "'A one-page site for the studio that leads with the work and "
         "pushes to the enquiry form.' Then build.\n"
         f"5. {build_step}\n"
+        f"5a. {_WHATSAPP_ORDERS_RULE}"
         "5b. " + _LOOK_RULE + "`sites-ship-fixes` lists the defects that most "
         "often come back as a first revision if you want a checklist.\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
@@ -1869,6 +1883,26 @@ _LOOK_RULE = (
     "rather than implying it was. "
 )
 
+# Added 2026-10-02 (feat/sites-card-photo-source, PH-10). One rule, three
+# readers: the create preamble (step 5a), every refine branch (via
+# ``_REFINE_SHARED_RULES``; ripple appends it to its own rules) and the
+# brief-driven ``_frontend_preamble``. A shop
+# built from a photographed visiting card mostly sells over WhatsApp, and the
+# failure modes are an invented number, a placeholder link that ships, and a
+# sticky mobile button that sits on top of the lead form's submit.
+_WHATSAPP_ORDERS_RULE = (
+    "WHATSAPP ORDERS. When the user wants orders or enquiries on WhatsApp, the "
+    "call-to-action is a link to `https://wa.me/<digits>?text=<url-encoded "
+    "prefilled order>`, built ONLY from a number the user supplied (typed, or on a "
+    "card they attached). Show the number as written; in the link use digits only "
+    "(drop +, spaces, dashes and a leading trunk 0) with the country code first — "
+    "if the country code isn't on the number and the address doesn't make it "
+    "certain, ask. If no number was supplied, ask or leave the WhatsApp button out "
+    "— never ship a placeholder wa.me link. Make it the primary button, and repeat "
+    "it as a sticky button on mobile that reserves bottom padding so it never "
+    "covers the lead form's submit or the footer.\n"
+)
+
 _REFINE_SHARED_RULES = (
     "PRESERVE the landing funnel (nav → hero → services → proof → pricing → "
     "call-to-action → lead form → footer): a refine changes a section, it does not "
@@ -1876,8 +1910,8 @@ _REFINE_SHARED_RULES = (
     "REAL COPY ONLY. Never invent a testimonial, a statistic, a price, an address, "
     "or a phone number to fill a section you are editing — ask, or keep what is "
     "there.\n"
-    "Every CTA stays an anchor `href` (or `tel:` / `mailto:`), never a click "
-    "handler that needs JavaScript to navigate.\n"
+    "Every CTA stays an anchor `href` (or `tel:` / `mailto:` / `https://wa.me/…`), "
+    "never a click handler that needs JavaScript to navigate.\n"
     "The lead form stays a FLAT native `<form>` — real `name=` on every "
     '`input`/`textarea` and a `button type="submit"`. Never nest a form inside a '
     "form, and never replace it with a widget that does.\n"
@@ -1890,7 +1924,7 @@ _REFINE_SHARED_RULES = (
     "and every hidden `paw_*` input (including any `__TOKEN__` placeholder value — "
     "those are resolved at publish and are NOT stale placeholders to clean up). "
     "They are what deliver the lead; a form that keeps its fields but loses its "
-    "action still looks right and captures nothing.\n"
+    "action still looks right and captures nothing.\n" + _WHATSAPP_ORDERS_RULE
 )
 
 
@@ -2111,7 +2145,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         )
         # The five rules are ripple's and stay ripple's: each names a widget type,
         # and the other three engines have no widgets. Byte-identical to the text
-        # that shipped before the fork.
+        # that shipped before the fork, plus the engine-neutral WhatsApp rule
+        # (PH-10), which this branch does not get through _REFINE_SHARED_RULES.
         rules = (
             "PRESERVE the landing structure (nav → hero → services → proof → "
             "pricing → flat lead form → footer) and keep the 5 static-site (SSR) "
@@ -2134,7 +2169,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
             "`parallax`, or `spotlight` (they need client JS and hide content on a "
             "static page).\n"
-        )
+        ) + _WHATSAPP_ORDERS_RULE
     elif engine == "svelte":
         render_truth = (
             " The page is hand-written SvelteKit components PRERENDERED to static "
@@ -2537,7 +2572,8 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
         "`parallax`, or `spotlight` (they need client JS and hide content on a "
         "static page).\n"
-        "After it publishes, relay any publish error — never claim a phantom "
+        + _WHATSAPP_ORDERS_RULE
+        + "After it publishes, relay any publish error — never claim a phantom "
         "publish — and SHOW the live `url` plus a link to /sites. Keep talking "
         "'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>\n"
