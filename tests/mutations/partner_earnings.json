@@ -29,8 +29,8 @@
   {
     "label": "phantom (unapplied) debits count as spend",
     "file": "ee/pocketpaw_ee/cloud/partners/service.py",
-    "find": "if e.applied and e.amount_delta_micro < 0",
-    "replace": "if e.amount_delta_micro < 0",
+    "find": "            out += [e for e in page if e.applied]",
+    "replace": "            out += list(page)",
     "tests": [
       "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
     ]

@@ -20,8 +20,8 @@
   {
     "label": "the base rate drifts",
     "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
-    "find": "BASE_RATE_BPS = 2_500",
-    "replace": "BASE_RATE_BPS = 2_600",
+    "find": "    Tier(\"bronze\", 0, 0, 2_500),",
+    "replace": "    Tier(\"bronze\", 0, 0, 2_600),",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_a_matched_payment_activates_the_year_and_pays_25_percent"
     ]
@@ -186,8 +186,8 @@
   {
     "label": "commission clawbacks are not netted",
     "file": "ee/pocketpaw_ee/cloud/partners/service.py",
-    "find": "    for cause in (PARTNER_COMMISSION_CAUSE, PARTNER_COMMISSION_REVERSAL_CAUSE):",
-    "replace": "    for cause in (PARTNER_COMMISSION_CAUSE,):",
+    "find": "    return await _entries(workspace_id, PARTNER_COMMISSION_CAUSE, PARTNER_COMMISSION_REVERSAL_CAUSE)",
+    "replace": "    return await _entries(workspace_id, PARTNER_COMMISSION_CAUSE)",
     "tests": [
       "tests/cloud/partners/test_partner_commissions.py::test_summary_earnings_sites_and_offers_show_the_client_side"
     ]
