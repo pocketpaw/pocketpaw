@@ -42,6 +42,13 @@
 # ``src/lib/`` (a svelte site only takes writes under ``src/``, and the component
 # usage imports ``$lib/_fx/...``). A pre-#24 item (top-level snippet/usage, no
 # ``targets``) is read as an html-only item.
+# Updated: 2026-10-02 (CN-7 review) — svelte is all-or-nothing. With a svelte
+# target the component imports ./index.js, which imports the vendored bundle, so
+# the _fx/vendor files ship under src/lib/_fx/vendor/ and there is no
+# dependencies/onMount advice. Without one (bundler-unsafe vendors like
+# tsParticles, whose markup also links /_fx/ paths SvelteKit never serves) the
+# answer is the ``engine_unsupported`` refusal with the engines it does ship.
+# The neutral-files + ``markup`` path is react-only.
 """Agent-side MCP surface for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -258,15 +265,21 @@ async def _get_handler(args: dict) -> dict:
         return _structured_error(
             {"error": "engine_unsupported", "needs": needs, "engine": engine, "pattern": pattern}
         )
+    if engine == "svelte" and not isinstance(target, dict):
+        # No svelte target means the effect cannot run under a bundler (its vendor
+        # only publishes a global) and its markup links /_fx/ paths a svelte site
+        # does not serve. Handing back files would ship a silently dead section.
+        return _structured_error(
+            {"error": "engine_unsupported", "engine": engine, "engines": item["engines"]}
+        )
     item["engine"] = engine
     notes = []
-    if engine != "html" and needs:
+    if engine == "react" and needs:
         item["dependencies"] = [{"name": n} for n in needs]
-        mount = "onMount" if engine == "svelte" else "a useEffect dynamic import()"
         notes.append(
             "Declare `dependencies` with set_site_dependencies before using this effect, "
-            f"import them inside {mount} (never at top level), and skip the _fx/vendor "
-            "copies."
+            "import them inside a useEffect dynamic import() (never at top level), and "
+            "skip the _fx/vendor copies."
         )
     if not isinstance(target, dict):
         shipped = ", ".join(str(e) for e in item["engines"]) or "none"
@@ -340,14 +353,16 @@ def build_fx_server() -> tuple[str, Any] | None:
             "default html): its files (write each `path` verbatim into the site: "
             "under `_fx/` on html/react, under `src/lib/_fx/` on svelte), `options`, "
             "and that engine's delivery: on html the `snippet` to place plus `usage`; "
-            "on svelte a component file plus `usage` showing the `$lib/_fx` import. "
-            "`engines` lists what the effect ships; an engine without a target gets "
-            "the neutral files, the html snippet as `markup`, and a `note`. Optional "
-            "`pattern` (pass 'dynamic' for a dynamic svelte site). On svelte/react an "
-            "effect with `needs` returns "
-            "`dependencies` to declare via set_site_dependencies plus a `note`. "
-            "Errors are structured: {error:'unknown_effect', suggestions} or, on a "
-            "dynamic svelte site, {error:'engine_unsupported', needs}."
+            "on svelte a component file plus `usage` showing the `$lib/_fx` import "
+            "(its vendored libraries come with it; declare nothing). `engines` lists "
+            "what the effect ships. On react an effect has no target: you get the "
+            "neutral files, the html snippet as `markup`, a `note`, and for `needs` "
+            "the `dependencies` to declare via set_site_dependencies. Optional "
+            "`pattern` (pass 'dynamic' for a dynamic svelte site). Errors are "
+            "structured: {error:'unknown_effect', suggestions}; on svelte, an effect "
+            "without a svelte target gives {error:'engine_unsupported', engines}, and "
+            "a dynamic svelte site refuses `needs` with {error:'engine_unsupported', "
+            "needs}."
         ),
         {
             "type": "object",

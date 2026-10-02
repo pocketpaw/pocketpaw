@@ -16,6 +16,9 @@
 # cover html/svelte target flattening, svelte paths under src/lib/, an engine
 # with no target (neutral files + html snippet as `markup`), a pre-#24 item, no
 # `demo` in the answer, and the path check over target files.
+# Updated: 2026-10-02 (CN-7 review) — svelte is all-or-nothing: a svelte target
+# with `needs` ships its vendor files (no dependencies, no skip/onMount note); no
+# svelte target is an engine_unsupported refusal. markup is react-only.
 """MCP server registration + handler tests for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -235,12 +238,49 @@ class TestGetEffect:
 
     @pytest.mark.asyncio
     async def test_engine_without_target_gets_the_html_markup(self, registry) -> None:
-        """confetti ships html only; svelte gets the neutral files plus the markup."""
-        body = _decode(await fx_mcp._get_handler({"name": "confetti", "engine": "svelte"}))
+        """confetti ships html only; react gets the neutral files plus the markup."""
+        body = _decode(await fx_mcp._get_handler({"name": "confetti", "engine": "react"}))
         assert body["markup"] == "<section data-fx='confetti'></section>"
-        assert "no svelte target (it ships: html)" in body["note"]
+        assert "no react target (it ships: html)" in body["note"]
         assert "render `markup`" in body["note"]
-        assert all(f["path"].startswith("src/lib/_fx/") for f in body["files"])
+        assert all(f["path"].startswith("_fx/") for f in body["files"])
+
+    @pytest.mark.asyncio
+    async def test_svelte_without_a_target_is_refused(self, registry) -> None:
+        """bokeh-drift style: a tsParticles effect ships no svelte target. Its vendor
+        never publishes under a bundler and its markup links /_fx/ paths a svelte
+        site does not serve, so svelte refuses instead of shipping a dead section."""
+        out = await fx_mcp._get_handler({"name": "confetti", "engine": "svelte"})
+        assert out["is_error"]
+        assert _decode(out) == {
+            "error": "engine_unsupported",
+            "engine": "svelte",
+            "engines": ["html"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_svelte_target_with_needs_ships_its_vendor_files(self, registry) -> None:
+        """clip-hover style: needs anime AND has a svelte target. The component
+        imports ./index.js, which imports the vendored bundle, so the vendor files
+        must come along and nothing should say to skip them or declare packages."""
+        clip = _item("clip-hover", "menu", [], "Clip hover", ["anime"])
+        clip["engines"] = ["html", "svelte"]
+        clip["targets"]["svelte"] = {
+            "files": [{"path": "_fx/effects/clip-hover/ClipHover.svelte", "content": "<div/>"}],
+            "usage": "import ClipHover from '$lib/_fx/effects/clip-hover/ClipHover.svelte'",
+        }
+        _write_registry(registry, [clip])
+        os.utime(registry / "registry.json", (0, 4_000_000_004))
+        out = await fx_mcp._get_handler({"name": "clip-hover", "engine": "svelte"})
+        assert not out.get("is_error")
+        body = _decode(out)
+        assert [f["path"] for f in body["files"]] == [
+            "src/lib/_fx/effects/clip-hover/index.js",
+            "src/lib/_fx/vendor/anime.js",
+            "src/lib/_fx/effects/clip-hover/ClipHover.svelte",
+        ]
+        assert "dependencies" not in body
+        assert "note" not in body
 
     @pytest.mark.asyncio
     async def test_pre_targets_registry_item_reads_as_html_only(self, registry) -> None:
@@ -270,15 +310,14 @@ class TestGetEffect:
     async def test_svelte_returns_needs_to_declare(self, registry) -> None:
         """svelte/react now take npm packages, so an effect with `needs` is served
         with the packages to declare instead of refused."""
-        for engine in ("svelte", "react"):
-            out = await fx_mcp._get_handler({"name": "paper-waves", "engine": engine})
-            assert not out.get("is_error")
-            body = _decode(out)
-            assert body["engine"] == engine
-            assert body["needs"] == ["paper"]
-            assert body["dependencies"] == [{"name": "paper"}]
-            assert "set_site_dependencies" in body["note"]
-            assert "onMount" in body["note"] or "useEffect" in body["note"]
+        out = await fx_mcp._get_handler({"name": "paper-waves", "engine": "react"})
+        assert not out.get("is_error")
+        body = _decode(out)
+        assert body["engine"] == "react"
+        assert body["needs"] == ["paper"]
+        assert body["dependencies"] == [{"name": "paper"}]
+        assert "set_site_dependencies" in body["note"]
+        assert "useEffect" in body["note"]
         body = _decode(await fx_mcp._get_handler({"name": "aurora-css", "engine": "react"}))
         assert body["engine"] == "react"
         assert "dependencies" not in body

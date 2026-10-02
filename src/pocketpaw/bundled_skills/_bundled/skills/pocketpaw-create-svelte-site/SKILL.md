@@ -703,8 +703,8 @@ D1 + wires the read/write layer. Done.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
 - `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
-  Pass `engine="svelte"`: an effect with `needs` comes back with
-  `dependencies` to declare via `set_site_dependencies`, imported in `onMount`.
-  Its file paths come back under `src/lib/_fx/` (write them verbatim); the
-  component's `usage` imports it from `$lib/_fx/...`.
+  Pass `engine="svelte"`: you get a component plus every file it needs
+  (vendored libraries included) under `src/lib/_fx/`; write them verbatim and
+  import the component as its `usage` shows (`$lib/_fx/...`). Declare nothing.
+  An effect with no svelte target comes back `engine_unsupported`: pick another.
   On a dynamic site pass `pattern="dynamic"` and `needs_js=false`.
