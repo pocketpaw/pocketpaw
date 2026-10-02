@@ -595,12 +595,42 @@ async def test_reindex_is_idempotent() -> None:
     second = await service_admin.reindex("site_template")
     again = await DiscoverListing.find_all().to_list()
 
-    assert (first["upserted"], first["removed"]) == (1, 1)
-    assert (second["upserted"], second["removed"]) == (1, 0)
+    assert first == {
+        "source": "site_template",
+        "created": 1,
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 1,
+    }
+    assert (second["created"], second["updated"], second["unchanged"], second["removed"]) == (
+        0,
+        0,
+        1,
+        0,
+    )
     assert [(r.source_id, r.kind) for r in rows] == [(public["id"], "game")]
     assert [(r.id, r.source_id) for r in again] == [(rows[0].id, public["id"])]
     with pytest.raises(ValidationError):
         await service_admin.reindex("nope")
+
+
+@pytest.mark.asyncio
+async def test_a_no_op_reindex_writes_and_emits_nothing(recording_bus) -> None:
+    meta = await _template(visibility="public")
+    await service_admin.reindex("site_template")
+    before = await _listing(meta["id"])
+    recording_bus.events[:] = []
+
+    result = await service_admin.reindex("site_template")
+    assert (result["updated"], result["unchanged"]) == (0, 1)
+    assert recording_bus.events == []
+    assert (await _listing(meta["id"])).updatedAt == before.updatedAt
+
+    await (await SiteTemplate.get(meta["id"])).set({"description": "Fresh bread"})
+    result = await service_admin.reindex("site_template")
+    assert (result["updated"], result["unchanged"]) == (1, 0)
+    assert (await _listing(meta["id"])).description == "Fresh bread"
+    assert [e.type for e in recording_bus.events] == ["discover.listing.upserted"]
 
 
 @pytest.mark.asyncio
