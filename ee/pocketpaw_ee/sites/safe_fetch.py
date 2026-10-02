@@ -6,11 +6,16 @@
 # it forgets. Add a caller, not a parallel implementation.
 #
 # `fetch_single_url` is the entry point for one fetch; it owns the client
-# lifecycle. `SafeFetcher` is the multi-fetch form, for a caller that wants one
-# connection pool across many requests. Both run the same pipeline:
+# lifecycle. `SafeFetcher` is the multi-fetch form, for a caller that wants
+# pooled connections across many requests (one pool per hostname, never shared
+# across hosts: pinned requests would otherwise reuse a TLS session checked for
+# a different name on the same IP); its `post` (no redirects, no keep-alive,
+# any port) is how the notification outbox delivers webhooks. All run the same
+# pipeline:
 #
 #   * URL SHAPE (`validate_fetch_url`): http(s) only, a real hostname, NO
-#     credentials, NO port beyond 80/443/default, length-capped. A literal-IP
+#     credentials, NO port beyond 80/443/default (`post` allows 1-65535),
+#     length-capped. A literal-IP
 #     host is checked here, so http://169.254.169.254/ dies before any socket.
 #   * DNS IS RESOLVED HERE AND THE CONNECTION IS PINNED TO THE VALIDATED IP — the
 #     request rides scheme://ip/... with the original Host header and, for https,
@@ -45,7 +50,7 @@ import ipaddress
 import logging
 import socket
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -97,7 +102,7 @@ class FetchBudgetExceeded(FetchError):
 # --------------------------------------------------------------------------- #
 
 
-def validate_fetch_url(url: str) -> Any:
+def validate_fetch_url(url: str, *, any_port: bool = False) -> Any:
     """Validate one fetch-target URL's SHAPE and return its ``urlparse`` result.
 
     Enforced (each raises ``ValidationError`` → 422 at the endpoint, a failed
@@ -125,7 +130,10 @@ def validate_fetch_url(url: str) -> Any:
         raise ValidationError(
             "sites.import_url_invalid", "The import URL port is invalid."
         ) from exc
-    if port not in (None, 80, 443):
+    if any_port:
+        if port is not None and not 1 <= port <= 65535:
+            raise ValidationError("sites.import_url_invalid", "The URL port is invalid.")
+    elif port not in (None, 80, 443):
         raise ValidationError(
             "sites.import_url_forbidden",
             "Only the standard web ports (80/443) can be imported.",
@@ -196,12 +204,14 @@ async def _default_resolve(host: str) -> list[str]:
 
 @dataclass
 class FetchResult:
-    """One completed (post-redirect) fetch."""
+    """One completed (post-redirect) fetch. ``headers`` are the final response's,
+    lower-cased, without ``set-cookie`` (the fetcher keeps no cookies)."""
 
     url: str
     status: int
     content_type: str
     body: bytes
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 class SafeFetcher:
@@ -232,16 +242,37 @@ class SafeFetcher:
         self._per_fetch_cap = per_fetch_cap
         self._resolver = resolver or _default_resolve
         self.bytes_fetched = 0
-        self._client = httpx.AsyncClient(
-            transport=transport,
-            timeout=httpx.Timeout(timeout_sec),
-            follow_redirects=False,  # hops are validated manually
-            trust_env=False,  # no env proxies — the pin must not be bypassed
-            headers={"User-Agent": user_agent, "Accept": "*/*"},
-        )
+        self._transport = transport
+        self._timeout_sec = timeout_sec
+        self._user_agent = user_agent
+        # One client (one connection pool) PER HOSTNAME, and for POSTs one with
+        # no keep-alive at all. Requests are pinned to an IP, and httpcore keys
+        # its pool on scheme + IP + port and ignores ``sni_hostname``: a shared
+        # pool would hand a TLS session certificate-checked for host A to a
+        # request for host B on the same IP. Per-host pools make that
+        # impossible while keeping keep-alive within one host for the crawler.
+        # (An explicitly passed ``transport`` is a test seam and is shared.)
+        self._clients: dict[tuple[str, str], httpx.AsyncClient] = {}
+
+    def _client_for(self, hostname: str, *, keepalive: bool = True) -> httpx.AsyncClient:
+        key = (hostname.lower(), "keepalive" if keepalive else "oneshot")
+        client = self._clients.get(key)
+        if client is None:
+            client = httpx.AsyncClient(
+                transport=self._transport,
+                timeout=httpx.Timeout(self._timeout_sec),
+                follow_redirects=False,  # hops are validated manually
+                trust_env=False,  # no env proxies — the pin must not be bypassed
+                headers={"User-Agent": self._user_agent, "Accept": "*/*"},
+                limits=httpx.Limits() if keepalive else httpx.Limits(max_keepalive_connections=0),
+            )
+            self._clients[key] = client
+        return client
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        for client in self._clients.values():
+            await client.aclose()
+        self._clients.clear()
 
     async def _checked_ip(self, host: str) -> str:
         """Resolve ``host`` and return a validated connect address. ALL resolved
@@ -299,7 +330,7 @@ class SafeFetcher:
         for _hop in range(MAX_REDIRECTS + 1):
             parsed = validate_fetch_url(current)
             ip = await self._checked_ip(parsed.hostname)
-            status, content_type, location, body = await self._pinned_get(parsed, ip)
+            status, content_type, location, body, headers = await self._pinned_get(parsed, ip)
             if status in _REDIRECT_STATUSES:
                 if not location:
                     raise FetchError("redirect response carried no Location header")
@@ -311,26 +342,69 @@ class SafeFetcher:
                         code="sites.import_crawl_offsite_redirect",
                     )
                 continue
-            return FetchResult(url=current, status=status, content_type=content_type, body=body)
+            return FetchResult(
+                url=current, status=status, content_type=content_type, body=body, headers=headers
+            )
         raise FetchError(f"too many redirects (max {MAX_REDIRECTS})")
 
-    async def _pinned_get(self, parsed: Any, ip: str) -> tuple[int, str, str, bytes]:
-        """One GET pinned to ``ip``: URL host swapped for the validated address,
-        original Host header (and SNI hostname for https) supplied explicitly."""
+    async def post(
+        self, url: str, *, content: str | bytes, headers: dict[str, str] | None = None
+    ) -> FetchResult:
+        """POST ``content`` to ``url`` through the same URL + DNS + IP checks and
+        the same pinned connection as ``fetch``. Redirects are NOT followed: a
+        3xx comes back as the result's status (a webhook receiver that redirects
+        body to wherever it points). Any port 1-65535 is allowed here (webhook
+        receivers often listen on 8443 etc.); the pinned address is still
+        checked as public, which is what the SSRF guard rests on. Connections
+        are never kept alive. A response body past ``per_fetch_cap`` is cut
+        off, not an error: a webhook's reply is only read for its status.
+        DNS failure raises ``FetchError``; a forbidden target raises
+        ``ValidationError`` — both before any socket."""
+        parsed = validate_fetch_url(url, any_port=True)
+        ip = await self._checked_ip(parsed.hostname)
+        status, content_type, _location, body, resp_headers = await self._pinned_request(
+            "POST", parsed, ip, content=content, headers=headers, keepalive=False, truncate=True
+        )
+        return FetchResult(
+            url=url, status=status, content_type=content_type, body=body, headers=resp_headers
+        )
+
+    async def _pinned_get(
+        self, parsed: Any, ip: str
+    ) -> tuple[int, str, str, bytes, dict[str, str]]:
+        return await self._pinned_request("GET", parsed, ip)
+
+    async def _pinned_request(
+        self,
+        method: str,
+        parsed: Any,
+        ip: str,
+        *,
+        content: str | bytes | None = None,
+        headers: dict[str, str] | None = None,
+        keepalive: bool = True,
+        truncate: bool = False,
+    ) -> tuple[int, str, str, bytes, dict[str, str]]:
+        """One request pinned to ``ip``: URL host swapped for the validated
+        address, original Host header (and SNI hostname for https) supplied
+        explicitly, on the client that belongs to that hostname."""
+        client = self._client_for(parsed.hostname, keepalive=keepalive)
         port = parsed.port
         default_port = port is None or (parsed.scheme, port) in (("http", 80), ("https", 443))
         host_header = parsed.hostname if default_port else f"{parsed.hostname}:{port}"
         ip_host = f"[{ip}]" if ":" in ip else ip
         netloc = ip_host if default_port else f"{ip_host}:{port}"
         pinned = urlunparse((parsed.scheme, netloc, parsed.path or "/", "", parsed.query, ""))
-        request = self._client.build_request("GET", pinned, headers={"Host": host_header})
+        request = client.build_request(
+            method, pinned, content=content, headers={**(headers or {}), "Host": host_header}
+        )
         if parsed.scheme == "https":
             # TLS must negotiate + verify against the REAL name, not the IP.
             request.extensions["sni_hostname"] = parsed.hostname
-        response = await self._client.send(request, stream=True)
+        response = await client.send(request, stream=True)
         try:
             declared = response.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > self._per_fetch_cap:
+            if not truncate and declared.isdigit() and int(declared) > self._per_fetch_cap:
                 raise FetchError(
                     "response exceeds the per-fetch size cap",
                     code="sites.import_crawl_response_too_large",
@@ -339,6 +413,9 @@ class SafeFetcher:
             async for chunk in response.aiter_bytes():
                 buf += chunk
                 if len(buf) > self._per_fetch_cap:
+                    if truncate:
+                        del buf[self._per_fetch_cap :]
+                        break
                     raise FetchError(
                         "response exceeds the per-fetch size cap",
                         code="sites.import_crawl_response_too_large",
@@ -348,10 +425,12 @@ class SafeFetcher:
         finally:
             await response.aclose()
             # No cookie persistence — the crawler is stateless by design.
-            self._client.cookies.clear()
+            client.cookies.clear()
         self.bytes_fetched += len(buf)
         content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        return response.status_code, content_type, response.headers.get("location", ""), bytes(buf)
+        headers = {k.lower(): v for k, v in response.headers.items() if k.lower() != "set-cookie"}
+        location = response.headers.get("location", "")
+        return response.status_code, content_type, location, bytes(buf), headers
 
 
 # --------------------------------------------------------------------------- #

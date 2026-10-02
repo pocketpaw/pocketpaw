@@ -1,16 +1,16 @@
-# Agent ledger store — append-only, agent-keyed SQLite for the value board.
-# Created: 2026-07-31 (AL-1, ledger spine) — the table that makes "what did my
-#   agents do for me?" a query instead of a manual reconciliation across three
-#   stores. Follows the InstinctStore / PawBarStore shape exactly (module-level
-#   SCHEMA_SQL, lazy _ensure_schema, a connection per call, an aclose() the
-#   workspace-keyed factory runs on LRU eviction) so the wiring is familiar and
-#   the per-workspace factory in pocketpaw/stores.py can drive it unchanged.
+# Agent ledger store — append-only, agent-keyed SQLite for the value board: the
+# table that makes "what did my agents do for me?" a query. Same shape as
+# InstinctStore / PawBarStore (module-level SCHEMA_SQL, lazy _ensure_schema, a
+# connection per call, an aclose() the workspace-keyed factory in
+# pocketpaw/stores.py runs on LRU eviction).
 #
 # Three properties this store is built around:
 #
 #   * APPEND-ONLY. There is no update and no delete. A value board that can be
 #     edited is not evidence, and the reconcile alarm (AL-4) can only compare
-#     two counts if one of them cannot be quietly revised.
+#     two counts if one of them cannot be quietly revised. The one exception is
+#     the one-shot money_minor_units_v1 data migration, run lazily the first
+#     time each ledger file is opened (amounts are ISO 4217 minor units).
 #
 #   * UNIQUE(kind, ref) IS THE IDEMPOTENCY GUARD, enforced by the database
 #     rather than by every caller remembering. Approvals replay (a retried
@@ -39,13 +39,16 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-from pocketpaw.agent_ledger.models import LedgerRow
+from pocketpaw.agent_ledger.models import ATTR_CART_CURRENCY, ATTR_CART_VALUE_CENTS, LedgerRow
+from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent
+from pocketpaw.sqlite_migrations import run_once
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +65,8 @@ CREATE TABLE IF NOT EXISTS agent_ledger_events (
     kind TEXT NOT NULL,
     -- OutcomeStatus value on verdict rows, NULL everywhere else.
     outcome TEXT,
-    -- Attributed value in minor units + its currency, when genuinely known.
+    -- Attributed value in ISO 4217 minor units + its upper-case currency, when
+    -- genuinely known (the _cents name is historical).
     value_cents INTEGER,
     currency TEXT,
     -- The producing record's stable id — half of the dedupe key.
@@ -85,6 +89,55 @@ CREATE INDEX IF NOT EXISTS idx_agent_ledger_workspace_ts
 CREATE INDEX IF NOT EXISTS idx_agent_ledger_kind_ts
     ON agent_ledger_events(kind, ts DESC);
 """
+
+# The money data migration's marker in ``schema_migrations``.
+MONEY_MIGRATION = "money_minor_units_v1"
+
+
+async def _migrate_money_minor_units(db: aiosqlite.Connection) -> None:
+    """Old amounts were "major × 100" for every currency; make them ISO minor units.
+
+    Rewrites ``value_cents`` (keyed by the row's ``currency``) and the cart-add
+    attr ``paw.cart.value_cents`` (keyed by ``paw.cart.currency``) wherever that
+    currency's exponent is not 2. Rows with unparseable attrs keep them as found.
+    """
+    counts: Counter = Counter()
+    async with db.execute(
+        "SELECT id, value_cents, currency, attrs FROM agent_ledger_events"
+        " WHERE value_cents IS NOT NULL OR attrs LIKE ?",
+        (f"%{ATTR_CART_VALUE_CENTS}%",),
+    ) as cur:
+        rows = await cur.fetchall()
+    for row_id, value, currency, raw_attrs in rows:
+        new_value = value
+        if isinstance(value, int) and exponent(currency) != DEFAULT_EXPONENT:
+            new_value = convert_legacy_minor(value, currency)
+            counts[("value_cents", str(currency).strip().upper())] += 1
+        new_attrs = None
+        try:
+            attrs = json.loads(raw_attrs) if raw_attrs else {}
+        except (TypeError, ValueError):
+            attrs = None
+        if isinstance(attrs, dict):
+            cart_value = attrs.get(ATTR_CART_VALUE_CENTS)
+            cart_currency = attrs.get(ATTR_CART_CURRENCY) or currency or "USD"
+            if (
+                isinstance(cart_value, int)
+                and not isinstance(cart_value, bool)
+                and exponent(cart_currency) != DEFAULT_EXPONENT
+            ):
+                attrs[ATTR_CART_VALUE_CENTS] = convert_legacy_minor(cart_value, cart_currency)
+                counts[(ATTR_CART_VALUE_CENTS, str(cart_currency).strip().upper())] += 1
+                new_attrs = json.dumps(attrs, sort_keys=True)
+        if new_value != value or new_attrs is not None:
+            await db.execute(
+                "UPDATE agent_ledger_events SET value_cents = ?, attrs = COALESCE(?, attrs)"
+                " WHERE id = ?",
+                (new_value, new_attrs, row_id),
+            )
+    for (field, code), n in sorted(counts.items()):
+        logger.info("agent_ledger money migration: %s %s: %d amount(s) converted", field, code, n)
+
 
 # Ceiling on any single read. The board pages; nothing on this store should ever
 # load a whole tenant's history into memory because a caller forgot a limit.
@@ -129,6 +182,17 @@ class AgentLedgerStore:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.executescript(SCHEMA_SQL)
             await db.commit()
+            # One-shot, per file, under the schema_migrations marker. A failure
+            # rolls the file back and is retried on the next open; it must not
+            # stop the ledger from recording.
+            try:
+                await run_once(db, MONEY_MIGRATION, _migrate_money_minor_units)
+            except Exception:
+                logger.exception(
+                    "agent_ledger: %s failed for %s; left unmigrated",
+                    MONEY_MIGRATION,
+                    self._db_path,
+                )
         self._initialized = True
 
     def _conn(self) -> aiosqlite.Connection:
@@ -180,7 +244,7 @@ class AgentLedgerStore:
                     row.kind,
                     row.outcome,
                     row.value_cents,
-                    row.currency,
+                    row.currency.strip().upper() if row.currency else row.currency,
                     row.ref,
                     row.actor,
                     json.dumps(row.attrs or {}, sort_keys=True),
@@ -385,7 +449,8 @@ class AgentLedgerStore:
         Grouped by currency rather than returning one total on purpose: adding
         cents to pence produces a number that is wrong in a way nobody can see.
         A caller that wants a single headline figure picks the currency itself
-        and is forced to notice when there is more than one.
+        and is forced to notice when there is more than one. Codes group
+        case-insensitively (``usd`` and ``USD`` are one bucket, keyed upper-case).
         """
         where, params = self._filters(
             agent_id=agent_id,
@@ -400,8 +465,9 @@ class AgentLedgerStore:
         await self._ensure_schema()
         async with self._conn() as db:
             async with db.execute(
-                f"SELECT COALESCE(currency, ''), SUM(value_cents)"
-                f" FROM agent_ledger_events {clause} GROUP BY COALESCE(currency, '')",
+                f"SELECT UPPER(TRIM(COALESCE(currency, ''))), SUM(value_cents)"
+                f" FROM agent_ledger_events {clause}"
+                f" GROUP BY UPPER(TRIM(COALESCE(currency, '')))",
                 params,
             ) as cur:
                 return {row[0]: int(row[1] or 0) async for row in cur}

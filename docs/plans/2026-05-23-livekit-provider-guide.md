@@ -390,7 +390,7 @@ uses its own JWT-signed webhook scheme; see livekit-api docs).
 from fastapi import APIRouter, Request
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.events import MeetingRecordingReady
-from pocketpaw_ee.cloud.realtime.bus import emit
+from pocketpaw_ee.cloud._core.realtime.emit import emit
 
 router = APIRouter(prefix="/meetings/webhooks", tags=["Meetings"])
 

@@ -1,148 +1,38 @@
 """Workspace domain — business logic service.
 
 Sole owner of writes to the ``Workspace`` and ``Invite`` Beanie documents.
-Module-level ``async def`` API. Membership operations touch the User
-document (members are stored as embedded ``WorkspaceMembership`` rows on
-User), so workspace-scoped User queries live here too.
+Module-level ``async def`` API. Members are embedded ``WorkspaceMembership``
+rows on User, so workspace-scoped User queries live here too.
 
-Public API:
-- ``create(ctx, body)``, ``get(ctx, workspace_id)``, ``update(ctx, ...)``,
-  ``delete(ctx, ...)``, ``list_for_user(ctx)``
-- ``list_members(ctx, workspace_id)``, ``update_member_role(...)``,
-  ``remove_member(...)``
-- ``list_invites(workspace_id)``, ``create_invite(...)``,
-  ``validate_invite(token)``, ``accept_invite(...)``,
-  ``revoke_invite(...)``
-- ``list_member_ids(workspace_id)``, ``list_admin_ids(workspace_id)``,
-  ``list_peer_ids(user_id)`` — used as function refs by the realtime
-  audience resolver
-- ``get_default_workspace_id()`` — id of the instance's first-created
-  (operator) workspace; used by the OSS operational-alert bridge
-  (``notifications/bridges/alerts.py``) to route instance-scoped alerts
-  that carry no tenant attribution (added 2026-08-06, T-10)
-- ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
-  the plan-feature gate dependency; returns None when the workspace is
-  missing/soft-deleted/malformed (the gate maps that to a 404) and
-  re-raises DB errors rather than silently downgrading a paying customer.
-- ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
-  tier (BC-7). The billing subscription webhook is the only caller: a
-  verified ``subscription.active`` upgrades to the subscribed tier and a
-  ``subscription.cancelled`` reverts to ``free``. Returns True on a write,
-  False when the workspace is missing/soft-deleted.
-- ``raise_seats_for_plan(workspace_id, plan_key)`` — UPGRADE-ONLY resync of
-  the stored ``Workspace.seats`` up to the new plan's ``max_seats`` (never
-  down). The subscription.active webhook calls it after set_workspace_plan so
-  an upgrade actually lifts the seat cap; a downgrade/cancel never strips
-  seats a workspace already has.
+Surface: workspace CRUD (``create`` also rejects reserved slugs via
+``slug_reason``, which backs the live slug-available check), members, invites,
+retention, branding, the instinct approval level, plan/seat/override helpers,
+and the id lists the realtime audience resolver uses as function refs.
 
-Changes: added get_workspace_plan helper for plan-feature gate dep; added
-slug_reason() (format + reserved + uniqueness) backing the live
-slug-available check, and create() now also rejects reserved slugs.
-2026-06-07: _mint_invite_for_email now maps a DuplicateKeyError on insert to
-a ConflictError (409) instead of letting it escape as an unhandled 500 — the
-leftover unique index on the nullable legacy ``token`` column made every
-second invite collide on ``token=null``.
-2026-06-08 (Phase B chunk 7): remove_member now runs a 4th best-effort cascade
-— purge_member_data — so an offboarded member's personal Gmail/calendar (their
-private ``user:{id}`` KB scope), per-user OAuth tokens, connector rows, and
-ingest-state are deleted. The purge counts land in the audit row's cascade
-metadata.
-2026-06-09: accept_invite is now self-healing. The atomic claim and the
-membership write aren't transactional, so an accept interrupted mid-flight
-(backend restart) could leave an invite accepted=True with no membership,
-locking the invitee out of every workspace read. Both already_accepted
-raise-sites now route through _heal_or_conflict: a rightful invitee missing
-the membership gets it added (idempotent) instead of a 409; a genuine
-duplicate (already a member) still raises invite.already_accepted.
-2026-06-14 (WB-1): update() now accepts an optional branding patch. A
-BrandingPatch merges onto the workspace's existing Branding (partial patches
-don't wipe set fields). logo_asset / favicon_asset are ownership-checked
-against the workspace via _assert_asset_owned (mirrors the uploads
-workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
-Forbidden (workspace.branding_asset_not_owned). accent_color format is
-validated upstream by BrandingPatch (422). _workspace_to_domain now carries
-branding through to the domain object so it serializes onto WorkspaceOut.
-2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
-set_instinct_approval_level() — the dedicated, OWNER-gated writer for a
-workspace's layered-Instinct-gate triager level. Validates against the
-ApprovalLevel enum (422 on a bad value, nothing written), kept off the
-general update() path on purpose (a non-ASK level enables auto-approval of
-agent writes), and emits a WARNING-severity append-only audit event with the
-old→new level. The write goes through this service per the import-linter
-Beanie-writes-only-from-service contract.
-2026-06-26 (feat/litellm-billing-cutover, WU-F): create() now also fires the
-per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
-ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
-swallowed (workspace creation NEVER fails on a provisioning error); the call is
-idempotent, so a later workspace touch can mint a key that didn't mint here.
-Mirrors the best-effort seed_default_agent step.
-2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the note above used to say
-the billing-cutover sweep back-filled a key that failed to mint here. It never
-did — the sweep started from the workspaces that ALREADY had one, so a swallowed
-mint failure meant a workspace nothing swept, and its chat spend was served free.
-The sweep now discovers such a workspace from the proxy's customer list and bills
-it without a key, so a failed mint costs the tenant their per-key budget ceiling
-rather than costing us the entire bill. Minting is still not retried here.
-2026-07-05 (fix/atlas-admin-security-hardening, FINDING A): privilege-escalation
-guard on ownership. ``update_member_role`` now refuses to GRANT the ``owner``
-role unless the ACTOR already holds owner (code ``owner_grant_requires_owner``),
-and ``remove_member`` refuses to REMOVE an owner-role member unless the actor
-holds owner (code ``owner_removal_requires_owner``). The admin-tool RBAC action
-(workspace.member.role_change / .remove) is only ADMIN-gated, so without the
-actor-role check an ADMIN could self-promote to owner or evict a sitting owner on
-approval. The guard lives in the service so every caller (admin tool, executor,
-route) inherits it; it mirrors the existing "an invite can never mint an owner"
-rule. The last-owner + cannot_demote/remove-doc-owner guards are unchanged.
-2026-07-10 (compliance-starter): retention setting is now real. update()'s
-settings write MERGES via ``_merge_settings`` instead of the destructive
-``WorkspaceSettings(**body.settings)`` full-replace (a partial patch no longer
-wipes sibling settings — recon-flagged bug). Added ``get_retention`` /
-``set_retention`` (the clean, no-clobber compliance read/write for
-``settings.retention_days``, owner/admin-gated at the route) and
-``enforce_retention`` (again-callable purge of audit rows older than the
-policy cutoff; delegates the delete to ``audit.service.purge_workspace_audit``
-so the AuditEvent-write contract stays in the audit module).
-2026-07-08 (feat/billing-smb-caps): the three seat gates (create_invite,
-bulk_create_invites, accept_invite) now source their ceiling from the workspace's
-RESOLVED PLAN, not the flat ``doc.seats`` alone. ``_effective_seat_limit`` returns
-``max(doc.seats, plan.max_seats)`` (an uncapped Enterprise plan keeps the
-negotiated ``doc.seats``) so a plan upgrade lifts the cap while a workspace that
-already carries a higher custom seat count never regresses. Seat enforcement stays
-ALWAYS-ON (not behind ``billing_enforced``), unchanged from before; the Free
-``max_seats`` == the model default (5) means a free tenant sees the identical
-limit. ``raise_seats_for_plan`` (upgrade-only) keeps the stored ``doc.seats`` in
-step with the plan on a subscription.active.
-2026-08-08 (feat/billing-rbac-member-caps): the seat gate became plan-AUTHORITATIVE.
-``_effective_seat_limit`` now returns the resolved plan's ``max_seats`` directly
-(only an uncapped Enterprise plan defers to ``doc.seats``), so the approved
-CONSUMER member caps hold on downgrade too: Free = 0 (no invitations allowed),
-Paw Go = 5, Paw Pro = 10, Paw Pro Max = 50 total workspace members (owner
-included). A Free workspace — even one that still holds members from a cancelled
-plan — can no longer invite anyone new; existing members are never removed.
-``raise_seats_for_plan`` is unchanged (upgrade-only, keeps the persisted
-``doc.seats`` display ceiling in step).
-2026-08-20 (feat/coupling-alerts-to-bell review): get_default_workspace_id now
-filters ``deleted_at == None`` so a soft-deleted first workspace is skipped and
-the next-oldest LIVE workspace receives instance-scoped alerts, instead of
-routing them to a tombstone.
-2026-09-16 (Paw Admin chunk 7, Decision 7): added
-``get_workspace_plan_and_overrides(workspace_id)`` — plan + entitlement
-overrides in one fetch, the same by-id/soft-delete contract as
-``get_workspace_plan``, for the platform entitlements route only. Also added
-``get_workspace_overrides(workspace_id)`` — overrides alone, same contract —
-after the combined call turned out to break ``resolve_entitlements``: its
-own tests (and every other consumer's) monkeypatch ``get_workspace_plan``
-against workspace ids that are not real Mongo ids, and the combined fetch's
-doc lookup nulled out that mocked plan on those ids (44 failures across
-``tests/cloud`` before the split). ``resolve_entitlements`` now calls
-``get_workspace_plan`` and ``get_workspace_overrides`` separately; the
-combined function stays for the platform route, which always addresses a
-real doc by path parameter and has no such mock to protect. Also added
-``platform_set_workspace_overrides(workspace_id, overrides)`` — the
-platform-only writer that sets or clears (``overrides=None``) a workspace's
-overrides; no membership check, workspace_id is a caller-supplied path
-parameter, so it is listed in test_platform_boundary.py's
-``_CROSS_TENANT_HELPERS`` alongside the read-side platform_* helpers.
+Invariants a reader must not break:
+- ``create`` seeds the default agent inline and mints the LiteLLM tenant key in
+  a background task (``llm_provisioning.schedule_ensure_tenant_key``). Both are
+  best-effort; neither may fail or stall workspace creation.
+- Only an owner actor may grant the owner role or remove an owner
+  (``owner_grant_requires_owner`` / ``owner_removal_requires_owner``). The
+  guard lives here so every caller inherits it.
+- Seat gates use ``_effective_seat_limit``: the resolved plan's ``max_seats`` is
+  authoritative (Free = 0 blocks all invites); only an uncapped plan defers to
+  ``doc.seats``. Always on, not gated on ``billing_enforced``.
+  ``raise_seats_for_plan`` is upgrade-only.
+- ``update`` merges settings via ``_merge_settings``; a partial patch never
+  wipes sibling settings. Branding assets are ownership-checked. The instinct
+  approval level is written only by the owner-gated
+  ``set_instinct_approval_level``, never through ``update``.
+- ``accept_invite`` self-heals an accepted invite that lost its membership
+  (``_heal_or_conflict``). ``remove_member`` cascades ``purge_member_data``.
+- ``get_workspace_plan`` and ``get_workspace_overrides`` stay separate calls:
+  ``resolve_entitlements`` tests mock the former on non-ObjectId ids.
+- ``platform_*`` helpers take no membership check and are listed in
+  test_platform_boundary.py's ``_CROSS_TENANT_HELPERS``.
+- ``get_default_workspace_id`` skips soft-deleted workspaces.
+- ``get_delete_preview``'s ``room_count`` leaves out hidden ``type="meeting"``
+  rooms (2026-10-01, feat/meetings-instant): users never see them as rooms.
 """
 
 from __future__ import annotations
@@ -466,20 +356,20 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     except Exception as exc:
         logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
 
-    # Provision the per-tenant LiteLLM virtual key (WU-F / MCG-8). BEST-EFFORT and
-    # NON-BLOCKING: if the proxy is unreachable or the mint fails, log + continue —
-    # workspace creation must NEVER fail on a provisioning error. ``ensure_tenant_key``
-    # is idempotent, so the cutover sweep (which iterates provisioned tenants) and a
-    # later workspace touch both back-fill a key that didn't get minted here. Lazy
-    # import keeps the workspace service free of an llm_provisioning dependency at
-    # module load.
+    # Mint the per-tenant LiteLLM virtual key in a BACKGROUND task, off the
+    # request path: a mint is one proxy round trip, up to the admin client's 30 s
+    # timeout when the proxy is down. Best-effort — the task logs a failure and
+    # never raises into this request. This is the only mint point and nothing
+    # retries it; until a key exists, media/studio fall back to the master key.
+    # Lazy import keeps the workspace service free of an llm_provisioning
+    # dependency at module load.
     try:
         from pocketpaw_ee.cloud.llm_provisioning import service as llm_provisioning_service
 
-        await llm_provisioning_service.ensure_tenant_key(str(doc.id))
+        llm_provisioning_service.schedule_ensure_tenant_key(str(doc.id))
     except Exception as exc:  # noqa: BLE001 — provisioning is best-effort, never fatal
         logger.warning(
-            "Failed to provision LiteLLM tenant key for workspace %s (non-fatal): %s",
+            "Failed to schedule LiteLLM tenant key mint for workspace %s (non-fatal): %s",
             doc.id,
             exc,
         )
@@ -849,7 +739,10 @@ async def get_delete_preview(workspace_id: str) -> dict:
         raise NotFound("workspace", workspace_id)
 
     member_count = await _count_members(workspace_id)
-    room_count = await _GroupDoc.find({"workspace": workspace_id}).count()
+    # Meeting rooms are hidden behind their meetings; not counted as rooms.
+    room_count = await _GroupDoc.find(
+        {"workspace": workspace_id, "type": {"$ne": "meeting"}}
+    ).count()
     agent_count = await _AgentDoc.find({"workspace": workspace_id}).count()
     file_count = await _FileUploadDoc.find({"workspace": workspace_id, "deleted_at": None}).count()
     invite_count = await _InviteDoc.find(

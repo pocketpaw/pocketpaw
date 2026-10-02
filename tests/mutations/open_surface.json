@@ -1,0 +1,128 @@
+[
+  {
+    "label": "open_surface: run_core trusts a forged marker without re-validating",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "_os_clean, _ = validate_open_surface(_os_payload)",
+    "replace": "_os_clean = _os_payload",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: run_core never emits the event",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                        yield (\"open_surface\", _os_clean)",
+    "replace": "                        pass",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: params key cap dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "if len(params) > MAX_PARAMS:",
+    "replace": "if False:",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: route allowlist dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "    if route not in routes:",
+    "replace": "    if not route:",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: run_core promotes from any tool (name gate dropped)",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                    if name in OPEN_SURFACE_TOOL_NAMES\n",
+    "replace": "                    if True\n",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: editor src shape check dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "not _EDITOR_SRC_RE.fullmatch(src)",
+    "replace": "False",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: dropped from the /studio/editor allow-list",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "timeline_allow=frozenset(TIMELINE_TOOL_IDS) | frozenset(SURFACES_TOOL_IDS),",
+    "replace": "timeline_allow=frozenset(TIMELINE_TOOL_IDS),",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: leaks onto the /studio allow-list",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "studio_allow=frozenset(MEDIA_TOOL_IDS),",
+    "replace": "studio_allow=frozenset(MEDIA_TOOL_IDS) | frozenset(SURFACES_TOOL_IDS),",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: allowlist ignores atlas agent_openable (every surface openable)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "            and e.agent_openable is True\n",
+    "replace": "",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: allowlist hard-coded again instead of read from atlas",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "        from pocketpaw.atlas.store import get_atlas_store\n\n        return tuple(",
+    "replace": "        from pocketpaw.atlas.store import get_atlas_store\n\n        return (\"/files\", \"/studio/editor\", \"/chat\", \"/pockets\", \"/knowledge\")\n        return tuple(",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: atlas load failure fails open",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "        logger.warning(\"open_surface: atlas unavailable, no routes allowed\", exc_info=True)\n        return ()",
+    "replace": "        logger.warning(\"open_surface: atlas unavailable, no routes allowed\", exc_info=True)\n        return (\"/files\", \"/settings\")",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: code-level denylist dropped from allowed_routes",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "            and not never_agent_openable(e.surface)\n",
+    "replace": "",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "open_surface: server built with an empty route enum",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/surfaces.py",
+    "find": "    if not allowed_routes():\n",
+    "replace": "    if False:\n",
+    "tests": ["tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "atlas compile: agent_openable denylist check dropped",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "e.agent_openable and never_agent_openable(e.surface)",
+    "replace": "False",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  },
+  {
+    "label": "atlas compile: surface route shape check dropped",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "if not is_valid_route(e.surface)]",
+    "replace": "if False]",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  },
+  {
+    "label": "atlas compile: missing slash key accepted",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "if e.get(\"kind\") == \"surface\" and \"slash\" not in e",
+    "replace": "if False",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  },
+  {
+    "label": "atlas: denylist no longer covers /settings sub-pages",
+    "file": "src/pocketpaw/atlas/model.py",
+    "find": "_NEVER_OPENABLE_PREFIXES = (\"/settings/\", ",
+    "replace": "_NEVER_OPENABLE_PREFIXES = (",
+    "tests": ["tests/atlas/test_surfaces_verbs.py", "tests/ee/agent/test_surfaces_mcp_server.py"]
+  },
+  {
+    "label": "atlas compile: slash/route match check dropped",
+    "file": "src/pocketpaw/atlas/compile.py",
+    "find": "if e.slash is not None and e.slash != expected_slash(e.surface)",
+    "replace": "if False",
+    "tests": ["tests/atlas/test_surfaces_verbs.py"]
+  }
+]

@@ -1,24 +1,16 @@
 # router.py — Knowledge base domain router for ee/cloud.
-# Updated: 2026-08-04 — Ingest hardening: the two ingest routes
-# (POST /kb/ingest/text, POST /kb/ingest/url) now route through
-# ``KnowledgeService.ingest_text_to_scope`` instead of calling ``_kb`` directly.
-# They were the last ingest paths outside the hardened funnel — direct ``_kb``
-# calls got no agent-backend compile on keyless boxes and no verbatim-fallback
-# rejection, re-opening the silent-poisoning hole the funnel closed. Routing
-# through the service also moves the subprocess call off the event loop
-# (``asyncio.to_thread`` inside the service) — the direct calls blocked the
-# async handler for the whole kb run.
-# Updated: 2026-06-08 (VIP Onboarding Phase B) — bound the client ``scope``
-# override to the caller. The four override-accepting endpoints (search,
-# ingest/text, ingest/url, lint) now resolve ``body.scope`` through
-# ``kb.service.validate_scope_override``, an allowlist (own workspace + visible
-# pockets + workspace agents + the caller's OWN user:) that rejects anything
-# else with Forbidden("kb.scope_forbidden"). This closes the cross-member leak
-# where any authenticated member could read or poison another member's private
-# ``user:{victim}`` KB via the REST door — the same boundary the chat-path gate
-# enforces. Denials are audit-logged at ALERT via ``log_denial``.
-# Updated: 2026-04-07 — Switched from Python knowledge_base package to kb Go binary.
-# All operations delegate to the kb binary via subprocess. Same REST API surface.
+#
+# Workspace-scoped REST door onto the kb Go binary. Invariants:
+# - Every kb-go subprocess runs off the event loop: ingest goes through
+#   ``KnowledgeService.ingest_document_to_scope`` (the sectioned ingest over the
+#   hardened funnel with the verbatim-fallback rejection; never call ``_kb`` for
+#   ingest here), and every
+#   read route wraps ``_kb`` in ``asyncio.to_thread``. One process serves every
+#   user, so a sync ``_kb`` call here stalls all of them.
+# - A client ``scope`` override is resolved through
+#   ``kb.service.validate_scope_override`` (own workspace + visible pockets +
+#   workspace agents + the caller's own ``user:`` scope). Anything else is
+#   Forbidden("kb.scope_forbidden") and audit-logged via ``log_denial``.
 """Knowledge base domain — FastAPI router.
 
 Workspace-scoped knowledge base endpoints consumed by the wiki pocket template
@@ -27,6 +19,7 @@ and other KB-aware UI components. Delegates to the kb Go binary.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends
@@ -106,7 +99,9 @@ async def search_kb(
 ) -> dict:
     """Search KB articles — returns metadata + snippet."""
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.read")
-    results = _kb("search", body.query, "--scope", scope, "--limit", str(body.limit))
+    results = await asyncio.to_thread(
+        _kb, "search", body.query, "--scope", scope, "--limit", str(body.limit)
+    )
     if not isinstance(results, list):
         results = []
     return {"results": results, "total": len(results)}
@@ -125,14 +120,15 @@ async def ingest_text(
 ) -> dict:
     """Ingest plain text into the workspace knowledge base.
 
-    Routes through :meth:`KnowledgeService.ingest_text_to_scope` — the
+    Routes through :meth:`KnowledgeService.ingest_document_to_scope`: a long
+    document is compiled section by section, each section through the
     hardened funnel (agent-backend compile on keyless boxes, verbatim-
     fallback rejection, subprocess off the event loop). Never call ``_kb``
     for ingest directly.
     """
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
-        return await KnowledgeService.ingest_text_to_scope(scope, body.text, body.source)
+        return await KnowledgeService.ingest_document_to_scope(scope, body.text, body.source)
     except Exception as exc:
         logger.error("KB text ingest failed: %s", exc, exc_info=True)
         raise CloudError(500, "kb.ingest_failed", str(exc)) from exc
@@ -152,7 +148,7 @@ async def ingest_url(
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
         text = await _extract_url(body.url)
-        return await KnowledgeService.ingest_text_to_scope(scope, text, body.url)
+        return await KnowledgeService.ingest_document_to_scope(scope, text, body.url)
     except Exception as exc:
         logger.error("KB URL ingest failed: %s", exc, exc_info=True)
         raise CloudError(500, "kb.ingest_failed", str(exc)) from exc
@@ -171,7 +167,7 @@ async def lint_kb(
 ) -> dict:
     """Run health checks on the knowledge base."""
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.read")
-    issues = _kb("lint", "--scope", scope)
+    issues = await asyncio.to_thread(_kb, "lint", "--scope", scope)
     if not isinstance(issues, list):
         issues = []
     return {"issues": issues, "total": len(issues)}
@@ -194,7 +190,7 @@ async def get_article(
     """Get a full article by ID (includes content)."""
     scope = _scope(workspace_id)
     try:
-        result = _kb("show", article_id, "--scope", scope)
+        result = await asyncio.to_thread(_kb, "show", article_id, "--scope", scope)
         if isinstance(result, dict):
             return result
         raise NotFound("article", article_id)
@@ -213,7 +209,7 @@ async def get_concept_articles(
 ) -> dict:
     """Get all articles associated with a concept."""
     scope = _scope(workspace_id)
-    results = _kb("search", name, "--scope", scope, "--limit", "20")
+    results = await asyncio.to_thread(_kb, "search", name, "--scope", scope, "--limit", "20")
     if not isinstance(results, list):
         results = []
     return {"concept": name, "articles": results, "total": len(results)}
@@ -231,7 +227,7 @@ async def kb_stats(
 ) -> dict:
     """Get knowledge base statistics."""
     scope = _scope(workspace_id)
-    return _kb("stats", "--scope", scope)
+    return await asyncio.to_thread(_kb, "stats", "--scope", scope)
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +242,7 @@ async def list_articles(
 ) -> dict:
     """List all articles (metadata only)."""
     scope = _scope(workspace_id)
-    articles = _kb("list", "--scope", scope)
+    articles = await asyncio.to_thread(_kb, "list", "--scope", scope)
     if not isinstance(articles, list):
         articles = []
     return {"articles": articles, "total": len(articles)}
@@ -259,5 +255,5 @@ async def list_concepts(
 ) -> dict:
     """List all concepts."""
     scope = _scope(workspace_id)
-    stats = _kb("stats", "--scope", scope)
+    stats = await asyncio.to_thread(_kb, "stats", "--scope", scope)
     return {"concepts": stats.get("concepts", 0) if isinstance(stats, dict) else 0}

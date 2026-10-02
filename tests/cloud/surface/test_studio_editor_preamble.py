@@ -311,3 +311,20 @@ async def test_no_timeline_still_short_circuits() -> None:
     assert not _has_block(preamble, "ATTACHED THIS TURN")
     assert not _has_block(preamble, "ATTACHMENTS THAT FAILED")
     assert "No timeline is open" in preamble
+
+
+# --- motion graphics carry their source ---
+
+
+async def test_a_motion_graphic_lists_its_id_and_source() -> None:
+    """The agent edits a motion graphic by rewriting its HTML, so the preamble
+    hands it the source and the id add_motion_graphic's replace_asset_id takes."""
+    html = '<div data-composition-id="intro">Launch</div>'
+    preamble = await _render(
+        _timeline(motion_graphics=[{"asset_id": ASSET_OLD, "name": "Intro title", "html": html}])
+    )
+
+    assert _has_block(preamble, "MOTION GRAPHICS")
+    block = preamble.split("MOTION GRAPHICS", 1)[1]
+    assert ASSET_OLD[-8:] in block
+    assert html in block

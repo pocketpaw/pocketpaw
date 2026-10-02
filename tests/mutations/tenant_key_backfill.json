@@ -1,0 +1,56 @@
+[
+  {
+    "label": "backfill soft-deleted workspaces too",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "Workspace.find({\"deleted_at\": None, \"_id\": {\"$nin\": keyed}})",
+    "replace": "Workspace.find({\"_id\": {\"$nin\": keyed}})",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
+    ]
+  },
+  {
+    "label": "no per-pass cap",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "        .limit(limit)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
+    ]
+  },
+  {
+    "label": "one failing mint ends the pass",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "                \"(retried next tick)\",\n                workspace,\n                exc_info=True,\n            )\n            continue",
+    "replace": "                \"(retried next tick)\",\n                workspace,\n                exc_info=True,\n            )\n            break",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
+    ]
+  },
+  {
+    "label": "the sweep loop never calls the backfill",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "        sweep_subscription_grace,\n        backfill_tenant_keys,\n",
+    "replace": "        sweep_subscription_grace,\n",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
+    ]
+  },
+  {
+    "label": "a raising drain skips the other",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "                drain_pending_mints(timeout), drain_pending(timeout), return_exceptions=True\n",
+    "replace": "                drain_pending_mints(timeout), drain_pending(timeout)\n",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
+    ]
+  },
+  {
+    "label": "the shutdown drain is not registered",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "        await _drain_llm_provisioning()\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/llm_provisioning/test_tenant_key_backfill.py"
+    ]
+  }
+]

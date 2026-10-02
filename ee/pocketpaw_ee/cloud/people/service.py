@@ -1,6 +1,12 @@
 """People domain — materialize and read a workspace member's Fabric ``Person``.
 
 Created: 2026-06-08 (feat/vip-fabric-person, pp#1366).
+Changes: 2026-10-01 (CN-6) — ``_default_store`` now returns
+``pocketpaw.fabric.read_model.default_journal_store()``: the same journal
+write path, but every Person write is also projected into the member's
+per-workspace SQLite FabricStore (the read model), so the Fabric API, the
+agents' Fabric MCP and Ripple sources see workspace members. Journal = write
+path, FabricStore = read model; reads here still come from the journal.
 Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — added the read side,
 :func:`get_person`, that queries the journal projection for a member's
 deterministic Person id (workspace-scoped) and maps the projected object's
@@ -49,7 +55,6 @@ work) — that is a different axis. Keep them separate.
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 
 from soul_protocol.spec.journal import Actor
 
@@ -71,25 +76,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
 def _default_store() -> FabricJournalStore:
     """Build the process-wide ``FabricJournalStore`` over the org journal.
 
-    Lazily imports ``get_journal`` (the same dependency the decisions +
-    pockets paths use) so importing this module doesn't drag the journal
-    open in test / smoke contexts that never materialize a Person. The
-    store is cached for the life of the process; ``bootstrap()`` warms the
-    projection from genesis so a read-after-write sees prior rows.
+    Delegates to the shared ``default_journal_store()`` (CN-6), which opens
+    the org journal lazily, bootstraps the projection from genesis, and
+    projects every write into ``get_fabric_store(workspace_id=<ws>)`` so
+    agents' Fabric readers see the Person. Cached for the life of the process.
 
     Tests override the store by passing ``store=`` to
     :func:`materialize_person_from_invite`; they should not poke this cache.
     """
 
-    from pocketpaw.journal_dep import get_journal
+    from pocketpaw.fabric import default_journal_store
 
-    store = FabricJournalStore(get_journal())
-    store.bootstrap()
-    return store
+    return default_journal_store()
 
 
 def _person_object_id(workspace_id: str, user_id: str) -> str:

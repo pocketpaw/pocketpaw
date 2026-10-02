@@ -227,9 +227,9 @@ async def test_entitlements_say_whether_this_site_may_take_a_domain(mongo_db, mo
 
 
 async def test_a_free_site_reports_its_floor_allowance_not_a_flat_no(mongo_db, monkeypatch):
-    """Free includes a custom domain on ONE site. "you cannot" and "you already
-    used your one" are different sentences, and the UI can only tell them apart if
-    the allowance and the usage both come back."""
+    """Free includes a custom domain on every site. The plan's per-site grant comes
+    back beside the slot answer, and ``domained_sites_used`` stays on the wire at 0
+    for older clients."""
     _enforce(monkeypatch)
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -239,17 +239,17 @@ async def test_a_free_site_reports_its_floor_allowance_not_a_flat_no(mongo_db, m
 
     ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
 
-    assert ent.custom_domain is True, "the free floor includes one domained site"
+    assert ent.custom_domain is True, "the free floor includes a domain on every site"
     assert ent.max_domained_sites == 1
     assert ent.domained_sites_used == 0
     assert ent.domain_slots_available is True
 
 
-async def test_the_free_allowance_reads_as_spent_once_another_site_holds_a_domain(
+async def test_the_free_allowance_stays_open_while_another_site_holds_a_domain(
     mongo_db, monkeypatch
 ):
-    """The cap counts SITES, not hostnames, and it excludes the site being asked
-    about. Without the usage count the UI cannot grey the button before the 402."""
+    """The allowance is per site: a sibling holding a domain never spends this
+    site's. The button must stay enabled, because the gate will let it through."""
     _enforce(monkeypatch)
     ws = await _make_workspace()
     other_pocket = await _make_pocket(workspace_id=ws)
@@ -268,11 +268,30 @@ async def test_the_free_allowance_reads_as_spent_once_another_site_holds_a_domai
 
     ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
 
-    assert ent.domained_sites_used == 1
-    assert ent.domain_slots_available is False, (
-        "the workspace's one free domained site is spent — the UI must say so "
-        "instead of offering a button that 402s"
+    assert ent.domained_sites_used == 0
+    assert ent.domain_slots_available is True, (
+        "a sibling's domain must not grey this site's button — the free domain is per site"
     )
+
+
+async def test_the_free_allowance_reads_as_spent_once_this_site_is_full(mongo_db, monkeypatch):
+    """Apex + www on THIS site closes the slot, so the UI greys the button before
+    the 402 instead of offering it."""
+    _enforce(monkeypatch)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(
+        workspace_id=ws,
+        pocket_id=pocket_id,
+        plan_tier="free",
+        subscription_status="none",
+        domains=["acme.com", "www.acme.com"],
+    )
+
+    ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+
+    assert ent.domained_sites_used == 0
+    assert ent.domain_slots_available is False
 
 
 async def test_a_paid_site_is_not_capped_by_the_free_allowance(mongo_db, monkeypatch):
@@ -317,6 +336,30 @@ async def test_a_lapsed_paid_site_loses_the_capability_and_says_so(mongo_db, mon
     assert ent.plan_tier == "site", "the tier is still recorded; only the payment stopped"
 
 
+async def _concierge_entitled(monkeypatch, *, enforced: bool, plan_tier: str, status: str) -> bool:
+    _enforce(monkeypatch, on=enforced)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(
+        workspace_id=ws, pocket_id=pocket_id, plan_tier=plan_tier, subscription_status=status
+    )
+    ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+    return ent.concierge_entitled
+
+
+async def test_concierge_entitled_follows_the_sites_billing_flag(mongo_db, monkeypatch):
+    """``concierge_entitled`` answers the same rule the public seams apply
+    (``site_keys.concierge_plan_entitled``). With sites billing off, every seam
+    serves a concierge on any plan, so the owner page must not read "not
+    included" and block creating one."""
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    free = site_plans.BASE_SITE_PLAN_KEY
+    assert await _concierge_entitled(monkeypatch, enforced=False, plan_tier=free, status="none")
+    assert not await _concierge_entitled(monkeypatch, enforced=True, plan_tier=free, status="none")
+    assert await _concierge_entitled(monkeypatch, enforced=True, plan_tier="staff", status="active")
+
+
 async def test_another_workspace_cannot_read_this_site_s_entitlements(mongo_db, monkeypatch):
     """Entitlements describe what someone is paying for. The read is tenant-scoped
     through ``_load`` like every other site read; a raw ``find_one`` on the id
@@ -339,7 +382,7 @@ async def test_no_capability_means_no_slot_however_empty_the_workspace(mongo_db,
     """A tier that cannot hold a domain at all must not be offered a slot.
 
     No tier in today's catalog can reach this: every one of them inherits the free
-    floor's single domained site, so ``custom_domain`` is True everywhere and the
+    floor's per-site domain, so ``custom_domain`` is True everywhere and the
     guard is unreachable by construction. It is still the correct rule — the cap
     answers "how many more", not "may you at all", and a tier mapped to 0 would
     otherwise be handed a slot and then refused with

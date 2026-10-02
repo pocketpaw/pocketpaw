@@ -235,19 +235,31 @@ async def test_starting_with_no_lanes_is_an_error_not_an_idle_process():
 
 
 async def test_the_deployed_lanes_are_chat_and_site_builds(monkeypatch):
-    """Both queues have a consumer, and they are the two that exist.
+    """Without the growth flag, only the chat and site-build lanes run.
 
-    The growth lane is deliberately absent: it already has its own queue and no consumer
-    in the deployed compose file, so adding it here would not be a refactor — it would
-    start executing outbound work that is currently inert.
+    The growth lane executes live outbound sends, so it must never start by default.
     """
     monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.delenv("POCKETPAW_GROWTH_WORKER_ENABLED", raising=False)
     from arq.constants import default_queue_name
     from pocketpaw_ee.sites.build_job import SITE_BUILD_QUEUE_NAME
 
     names = [sup.lane_name(cls) for cls in sup.default_lanes()]
 
     assert names == [default_queue_name, SITE_BUILD_QUEUE_NAME]
+
+
+async def test_the_growth_flag_adds_the_growth_lane(monkeypatch):
+    """The flag that lets the web process enqueue growth sends also starts their consumer."""
+    monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("POCKETPAW_GROWTH_WORKER_ENABLED", "true")
+    from arq.constants import default_queue_name
+    from pocketpaw_ee.cloud.growth.domain import GROWTH_QUEUE_NAME
+    from pocketpaw_ee.sites.build_job import SITE_BUILD_QUEUE_NAME
+
+    names = [sup.lane_name(cls) for cls in sup.default_lanes()]
+
+    assert names == [default_queue_name, SITE_BUILD_QUEUE_NAME, GROWTH_QUEUE_NAME]
 
 
 async def test_a_lane_without_its_own_queue_is_named_after_arqs_default():

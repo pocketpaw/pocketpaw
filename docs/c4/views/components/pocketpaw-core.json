@@ -6,7 +6,6 @@
     "api",
     "agents",
     "llm",
-    "knowledge",
     "memory",
     "adapters",
     "tools",
@@ -95,11 +94,6 @@
     },
     {
       "source": "integrations",
-      "target": "pocketpaw",
-      "description": "imports pocketpaw"
-    },
-    {
-      "source": "knowledge",
       "target": "pocketpaw",
       "description": "imports pocketpaw"
     },

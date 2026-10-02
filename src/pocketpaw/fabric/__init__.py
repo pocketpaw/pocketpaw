@@ -12,6 +12,9 @@
 # surface (ConflictRecord, detect_open_conflicts): the un-rankable残り the trust
 # ladder cannot order, recomputed from statements (no conflicts table). The EE
 # stewardship sweep and a future "disputed facts" view read it from here.
+# Updated: 2026-10-01 (CN-6) — exported default_journal_store(): the process-wide
+# FabricJournalStore wired to the per-workspace FabricStore read model. Journal =
+# object write path, FabricStore = read model (see fabric/read_model.py).
 
 from pocketpaw.fabric.conflicts import ConflictRecord, detect_open_conflicts
 from pocketpaw.fabric.events import (
@@ -40,6 +43,7 @@ from pocketpaw.fabric.policy import (
     visible,
 )
 from pocketpaw.fabric.projection import FabricProjection
+from pocketpaw.fabric.read_model import default_journal_store
 from pocketpaw.fabric.store import FabricStore
 
 __all__ = [
@@ -51,6 +55,8 @@ __all__ = [
     # Journal-backed object lifecycle (Wave 3).
     "FabricJournalStore",
     "FabricProjection",
+    # Wired journal store: writes project into the per-workspace read model.
+    "default_journal_store",
     # Event payload shape — callers emitting Fabric events out of band should
     # use these helpers instead of building payload dicts by hand.
     "ACTION_OBJECT_ARCHIVED",

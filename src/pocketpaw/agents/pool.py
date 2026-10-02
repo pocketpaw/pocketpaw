@@ -1,7 +1,18 @@
 """Agent Pool — on-demand instantiation of cloud agents.
 
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
-Instances are cached and evicted when idle (default 5 minutes).
+Instances are cached and evicted when idle (default 5 minutes). Every backend
+the pool drops is torn down: an evicted or invalidated instance (a busy one after
+its last run), and the private backend a BYOK turn runs on, which also carries
+the agent's own ToolPolicy.
+
+Per-turn prompt layers: ``legacy_tail`` (the KB wrapper carrying scope,
+participants, current pocket, member briefing and uploaded-file text) and
+``retrieval`` (soul recall) change every turn. A backend whose ``run`` declares
+``turn_context`` gets them there and a ``system_prompt`` holding only the stable,
+keyed layers (``_TURN_CONTEXT_LAYERS``, ``AssembledPrompt.split``); ``prewarm``
+connects it with the same stable text. The digest is unchanged by the split.
+Every other backend keeps the single assembled prompt.
 
 Updated: 2026-09-27 (fix/concierge-web-tool-deny) — ``run`` takes
   ``exclusive_tools`` and forwards an explicit True to a backend whose ``run``
@@ -43,7 +54,9 @@ Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards 
   the warm-client key now hashing the digest, a prewarm that withheld it would
   key under the OLD rule and be evicted by the very turn it spent ~12s connecting
   for. Both entry points read the digest off the SAME ``AssembledPrompt``, which
-  is the only way the two keys can be equal.
+  is the only way the two keys can be equal. ``prewarm`` forwards the run's
+  ``history`` only to a ``prewarm`` that declares it; the Claude SDK's no longer
+  does, since history rides each turn's query text.
 Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
   gains ``atlas`` and ``user`` directly under ``identity``, and
   ``_assemble_system_prompt`` grows the four plain-data fields that feed them
@@ -204,6 +217,7 @@ from pocketpaw.agents.backend import (
     _accepts_prompt_digest,
     _accepts_prompt_digest_kwarg,
     _accepts_tools_enabled_kwarg,
+    _accepts_turn_context_kwarg,
 )
 from pocketpaw.agents.errors import (
     AgentBackendUnavailable,
@@ -300,6 +314,14 @@ _SYSTEM_PROMPT_LAYERS = (
     "retrieval",
 )
 
+# The per-turn layers: the knowledge-base wrapper (KB hits, <scope>,
+# <participants>, <current-pocket>, the member briefing, <uploaded-files>) and
+# the soul recall. Both are unkeyed and change every turn. A backend that
+# declares ``turn_context`` gets them there instead of in ``system_prompt``: the
+# Claude SDK applies its system prompt only at connect, so on a reused warm
+# client these would otherwise stay whatever the connecting turn carried.
+_TURN_CONTEXT_LAYERS = frozenset({"legacy_tail", "retrieval"})
+
 
 def _resolve_agent_model() -> Any:
     """Resolve the cloud ``Agent`` Beanie document class via the model registry.
@@ -340,6 +362,30 @@ class AgentInstance:
     # forced onto when ``backend`` is something else. Built on first use by
     # ``AgentPool._deny_by_default_backend``; stopped in ``_teardown``.
     deny_by_default_backend: Any = None
+    # Set by ``invalidate`` on an instance dropped mid-run; the last run tears
+    # it down.
+    retired: bool = False
+
+
+async def _release_backend(backend: Any) -> None:
+    """Release a backend built for a single turn. Best-effort, never raises."""
+    release = getattr(backend, "cleanup", None) or getattr(backend, "stop", None)
+    if release is None:
+        return
+    try:
+        await release()
+    except Exception:
+        logger.debug("releasing a per-turn backend failed", exc_info=True)
+
+
+def _declares_param(func: Any, name: str) -> bool:
+    """Does ``func`` name ``name`` in its signature (``**kwargs`` does not count)?"""
+    import inspect
+
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
 
 
 def _accepts_policy(backend_cls: type) -> bool:
@@ -479,12 +525,18 @@ class AgentPool:
         cache invalidation — the staleness check in ``get`` is a fallback, but a
         disabled agent must be revoked the instant the flag flips, not on the
         next config-bump-detecting request. Idempotent: a no-op if uncached.
-        Does NOT tear down the backend (no ``_teardown``) so an instance with an
-        in-flight run is not aborted mid-stream — the entry is simply removed
-        from the cache and the live ``run`` retains its own reference until it
-        completes; the NEXT ``get`` rebuilds (or raises ``AgentDisabled``).
+        The dropped instance is torn down (its backend may hold a CLI
+        subprocess): at once when idle, and by its last run's ``finally`` when a
+        run is in flight, so a live stream is never aborted. The NEXT ``get``
+        rebuilds (or raises ``AgentDisabled``).
         """
-        self._instances.pop(agent_id, None)
+        instance = self._instances.pop(agent_id, None)
+        if instance is None:
+            return
+        if instance.active_runs > 0:
+            instance.retired = True
+            return
+        await self._teardown(instance)
 
     async def _assemble_system_prompt(
         self,
@@ -598,6 +650,8 @@ class AgentPool:
         exclusive_mcp_tools: bool = False,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
+        model_override: str | None = None,
+        tools_enabled: bool = True,
     ) -> None:
         """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
         first turn, so the first ``run`` reuses it instead of paying the cold
@@ -621,6 +675,9 @@ class AgentPool:
         model is classified from the message, which prewarm doesn't have, so a
         prewarm could warm the wrong model tier and cause evict-churn. The
         run_core trigger gates on this.
+
+        It takes no history: the Claude SDK sends history in each turn's query
+        text, so a prewarmed client needs none.
         """
         try:
             instance = await self.get(agent_id)
@@ -663,9 +720,14 @@ class AgentPool:
 
         # The backend's prewarm swallows ALL of its own errors, so this is
         # already safe; the outer guards above cover instance/prompt failures.
+        # A backend that takes per-turn context separately is connected with the
+        # stable layers only, exactly what its turns will send as system prompt.
+        system_prompt = assembled.text
+        if _accepts_turn_context_kwarg(getattr(instance.backend, "run", None)):
+            system_prompt = assembled.split(_TURN_CONTEXT_LAYERS)[0]
         prewarm_kwargs: dict[str, Any] = {
             "session_key": session_key,
-            "system_prompt": assembled.text,
+            "system_prompt": system_prompt,
         }
         # PA-6: the digest is now what the warm-client key hashes, so a prewarm
         # that withheld it would key under ``t:`` and turn 1 would key under
@@ -689,6 +751,13 @@ class AgentPool:
         # True; the caller passes the agent's declared ids as ``allow_mcp_tool_ids``.
         if exclusive_mcp_tools:
             prewarm_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+        # The turn's per-send model pick and tool switch change the model and
+        # ``allowed_tools``, so the cache key. Withheld when default, and only to
+        # a prewarm that declares them.
+        if model_override and _declares_param(backend_prewarm, "model_override"):
+            prewarm_kwargs["model_override"] = model_override
+        if tools_enabled is False and _declares_param(backend_prewarm, "tools_enabled"):
+            prewarm_kwargs["tools_enabled"] = False
         await backend_prewarm(**prewarm_kwargs)
 
     async def run(
@@ -862,6 +931,9 @@ class AgentPool:
         # ``active_runs > 0`` is the authoritative "busy" flag the GC and
         # LRU evictor honor.
         instance.active_runs += 1
+        # The backend serving THIS turn. A BYOK turn swaps in a private one built
+        # for the turn alone, which the ``finally`` below releases.
+        run_backend = instance.backend
         try:
             # Only forward the deny set when non-empty: the Claude SDK backend
             # accepts ``deny_mcp_tool_ids``, but the other backends keep the
@@ -997,6 +1069,13 @@ class AgentPool:
                         settings_override=(
                             byok_settings_override or {"byok_provider_api_key": byok_api_key}
                         ),
+                        # The agent's own ToolPolicy (planner opt-ins, narrowed
+                        # profile), not the process-wide one a bare build gets.
+                        policy=(
+                            instance.backend.get_tool_policy()
+                            if hasattr(instance.backend, "get_tool_policy")
+                            else None
+                        ),
                     )
                 except Exception:
                     logger.warning(
@@ -1045,6 +1124,14 @@ class AgentPool:
             # rather than running with its full tool set.
             if exclusive_tools and _accepts_exclusive_tools_kwarg(run_backend.run):
                 run_kwargs["exclusive_tools"] = True
+            # Per-turn layers ride ``turn_context`` for a backend that declares
+            # it (see ``_TURN_CONTEXT_LAYERS``); the digest is unchanged, since
+            # both layers are unkeyed. Asked of ``run_backend`` like the rest.
+            if _accepts_turn_context_kwarg(run_backend.run):
+                stable_text, turn_context = assembled.split(_TURN_CONTEXT_LAYERS)
+                run_kwargs["system_prompt"] = stable_text
+                if turn_context:
+                    run_kwargs["turn_context"] = turn_context
 
             async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
@@ -1052,6 +1139,17 @@ class AgentPool:
         finally:
             instance.active_runs -= 1
             instance.last_active = datetime.now(UTC)
+            # A backend built for this turn alone (BYOK) is released here: a
+            # Claude SDK backend otherwise keeps its CLI subprocess forever. The
+            # instance's own and its cached deny-by-default backend are shared.
+            if run_backend is not instance.backend and run_backend is not getattr(
+                instance, "deny_by_default_backend", None
+            ):
+                await _release_backend(run_backend)
+            # ``invalidate`` dropped this instance while it was busy; the last
+            # run to finish tears it down.
+            if getattr(instance, "retired", False) and instance.active_runs == 0:
+                await self._teardown(instance)
 
     async def observe(self, agent_id: str, user_input: str, agent_output: str) -> None:
         """Observe an interaction for soul learning."""
@@ -1065,15 +1163,17 @@ class AgentPool:
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
         from pocketpaw.agents.registry import _LEGACY_BACKENDS, get_backend_class
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
         from pocketpaw.llm.providers.base import route_model
         from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
         config = agent_doc.config.model_dump()
 
-        # Clone settings and override with agent config
-        settings = Settings.load()
+        # Clone the cached settings (``Settings.load()`` re-parses config + env
+        # on every build) and override with agent config. Deep copy: the cached
+        # instance is shared process-wide and is mutated below.
+        settings = get_settings().model_copy(deep=True)
         # The literal stays ``claude_agent_sdk`` on purpose, and is NOT the
         # cloud default (``pocketpaw_ee.cloud.agents.defaults``, which OSS core
         # cannot import anyway). ``AgentConfig`` carries a default, so

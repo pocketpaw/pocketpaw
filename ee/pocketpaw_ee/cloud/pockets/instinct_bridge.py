@@ -70,6 +70,10 @@
 #   already persisted; the worst case is a chain without a policy →
 #   human causation, which the Slice 4 reconciler / abandon-sweeper
 #   will eventually surface).
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
+#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -381,35 +385,22 @@ async def _persist_parked_policy_event_id(
 
     The Instinct store has no field-level mutator for ``parameters``
     (it's a JSON TEXT column); ``_update_status`` flips status too, which
-    we don't want here (the action must stay ``pending``). Direct SQL
-    update — same pattern as ``router._persist_edits``. Best-effort:
+    we don't want here (the action must stay ``pending``). Goes through the
+    shared ``update_action_blob`` (status-preserving). Best-effort:
     failure leaves the field None and the eventual ``human.corrected``
     emits without a causation_id (the chain still folds; causation_id
     is optional on EventEntry).
     """
-    import json as _json
 
-    import aiosqlite
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
 
     try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get("_pocket_write")
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["parked_policy_event_id"] = event_id
-        params["_pocket_write"] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key="_pocket_write",
+            updates={"parked_policy_event_id": event_id},
+        )
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "failed to persist parked_policy_event_id=%s onto action %s — "

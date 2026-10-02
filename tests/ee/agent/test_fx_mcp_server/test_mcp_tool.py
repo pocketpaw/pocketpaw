@@ -11,6 +11,14 @@
 # no longer refuses svelte/react effects with `needs`; it returns them with a
 # `dependencies` list and a note pointing at set_site_dependencies. Dynamic
 # svelte (pattern=dynamic) still refuses with engine_unsupported.
+# Updated: 2026-10-01 (CN-7, H9) — fixture items take the shape paw-fx's
+# build-registry.mjs emits (neutral files + engines + targets.<engine>); tests
+# cover html/svelte target flattening, svelte paths under src/lib/, an engine
+# with no target (neutral files + html snippet as `markup`), a pre-#24 item, no
+# `demo` in the answer, and the path check over target files.
+# Updated: 2026-10-02 (CN-7 review) — svelte is all-or-nothing: a svelte target
+# with `needs` ships its vendor files (no dependencies, no skip/onMount note); no
+# svelte target is an engine_unsupported refusal. markup is react-only.
 """MCP server registration + handler tests for the paw-fx effects registry."""
 
 from __future__ import annotations
@@ -44,8 +52,28 @@ def _item(name: str, category: str, tags: list[str], summary: str, needs: list[s
         "options": {},
         "files": [{"path": f"_fx/effects/{name}/index.js", "content": "export {}"}]
         + [{"path": f"_fx/vendor/{n}.js", "content": ""} for n in needs],
-        "snippet": f"<section data-fx='{name}'></section>",
-        "usage": "place the snippet",
+        # The shape paw-fx's build-registry.mjs emits: delivery lives under
+        # targets.<engine>. Here (as with paw-fx's non-bundler-safe vendors) an
+        # effect with `needs` ships no svelte target.
+        "engines": ["html"] if needs else ["html", "svelte"],
+        "targets": {
+            "html": {
+                "files": [],
+                "snippet": f"<section data-fx='{name}'></section>",
+                "usage": "place the snippet",
+                "demo": [],
+            },
+            **(
+                {}
+                if needs
+                else {
+                    "svelte": {
+                        "files": [{"path": f"_fx/effects/{name}/Fx.svelte", "content": "<div/>"}],
+                        "usage": "import Fx from '$lib/_fx/...'",
+                    }
+                }
+            ),
+        },
     }
 
 
@@ -179,11 +207,94 @@ class TestGetEffect:
         assert body["engine"] == "html"
         assert body["needs"] == ["paper"]
         assert body["snippet"].startswith("<section")
+        assert body["usage"] == "place the snippet"
+        assert "targets" not in body
         assert {f["path"] for f in body["files"]} == {
             "_fx/effects/paper-waves/index.js",
             "_fx/vendor/paper.js",
         }
         assert "note" not in body
+
+    @pytest.mark.asyncio
+    async def test_svelte_target_is_flattened_into_the_body(self, registry) -> None:
+        body = _decode(await fx_mcp._get_handler({"name": "aurora-css", "engine": "svelte"}))
+        assert body["engine"] == "svelte"
+        assert body["engines"] == ["html", "svelte"]
+        assert body["usage"].startswith("import Fx")
+        assert "snippet" not in body  # html delivery stays out of a svelte answer
+        assert "targets" not in body
+        # A svelte site only takes writes under src/, and the usage imports $lib/_fx.
+        assert [f["path"] for f in body["files"]] == [
+            "src/lib/_fx/effects/aurora-css/index.js",
+            "src/lib/_fx/effects/aurora-css/Fx.svelte",
+        ]
+        assert "note" not in body
+
+    @pytest.mark.asyncio
+    async def test_html_answer_leaves_out_demo_pages(self, registry) -> None:
+        body = _decode(await fx_mcp._get_handler({"name": "aurora-css"}))
+        assert "demo" not in body
+        assert all(f["path"].startswith("_fx/") for f in body["files"])
+
+    @pytest.mark.asyncio
+    async def test_engine_without_target_gets_the_html_markup(self, registry) -> None:
+        """confetti ships html only; react gets the neutral files plus the markup."""
+        body = _decode(await fx_mcp._get_handler({"name": "confetti", "engine": "react"}))
+        assert body["markup"] == "<section data-fx='confetti'></section>"
+        assert "no react target (it ships: html)" in body["note"]
+        assert "render `markup`" in body["note"]
+        assert all(f["path"].startswith("_fx/") for f in body["files"])
+
+    @pytest.mark.asyncio
+    async def test_svelte_without_a_target_is_refused(self, registry) -> None:
+        """bokeh-drift style: a tsParticles effect ships no svelte target. Its vendor
+        never publishes under a bundler and its markup links /_fx/ paths a svelte
+        site does not serve, so svelte refuses instead of shipping a dead section."""
+        out = await fx_mcp._get_handler({"name": "confetti", "engine": "svelte"})
+        assert out["is_error"]
+        assert _decode(out) == {
+            "error": "engine_unsupported",
+            "engine": "svelte",
+            "engines": ["html"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_svelte_target_with_needs_ships_its_vendor_files(self, registry) -> None:
+        """clip-hover style: needs anime AND has a svelte target. The component
+        imports ./index.js, which imports the vendored bundle, so the vendor files
+        must come along and nothing should say to skip them or declare packages."""
+        clip = _item("clip-hover", "menu", [], "Clip hover", ["anime"])
+        clip["engines"] = ["html", "svelte"]
+        clip["targets"]["svelte"] = {
+            "files": [{"path": "_fx/effects/clip-hover/ClipHover.svelte", "content": "<div/>"}],
+            "usage": "import ClipHover from '$lib/_fx/effects/clip-hover/ClipHover.svelte'",
+        }
+        _write_registry(registry, [clip])
+        os.utime(registry / "registry.json", (0, 4_000_000_004))
+        out = await fx_mcp._get_handler({"name": "clip-hover", "engine": "svelte"})
+        assert not out.get("is_error")
+        body = _decode(out)
+        assert [f["path"] for f in body["files"]] == [
+            "src/lib/_fx/effects/clip-hover/index.js",
+            "src/lib/_fx/vendor/anime.js",
+            "src/lib/_fx/effects/clip-hover/ClipHover.svelte",
+        ]
+        assert "dependencies" not in body
+        assert "note" not in body
+
+    @pytest.mark.asyncio
+    async def test_pre_targets_registry_item_reads_as_html_only(self, registry) -> None:
+        old = _item("legacy-glow", "backgrounds", [], "Old shape", [])
+        del old["targets"], old["engines"]
+        old.update(snippet="<section data-fx='legacy-glow'></section>", usage="u", demo=[])
+        _write_registry(registry, [old])
+        os.utime(registry / "registry.json", (0, 4_000_000_003))
+        html = _decode(await fx_mcp._get_handler({"name": "legacy-glow"}))
+        assert html["snippet"].startswith("<section") and html["engines"] == ["html"]
+        assert "note" not in html and "demo" not in html
+        react = _decode(await fx_mcp._get_handler({"name": "legacy-glow", "engine": "react"}))
+        assert react["markup"].startswith("<section") and "snippet" not in react
+        assert "no react target (it ships: html)" in react["note"]
 
     @pytest.mark.asyncio
     async def test_unknown_name_gives_suggestions(self, registry) -> None:
@@ -199,19 +310,20 @@ class TestGetEffect:
     async def test_svelte_returns_needs_to_declare(self, registry) -> None:
         """svelte/react now take npm packages, so an effect with `needs` is served
         with the packages to declare instead of refused."""
-        for engine in ("svelte", "react"):
-            out = await fx_mcp._get_handler({"name": "paper-waves", "engine": engine})
-            assert not out.get("is_error")
-            body = _decode(out)
-            assert body["engine"] == engine
-            assert body["needs"] == ["paper"]
-            assert body["dependencies"] == [{"name": "paper"}]
-            assert "set_site_dependencies" in body["note"]
-            assert "onMount" in body["note"] or "useEffect" in body["note"]
+        out = await fx_mcp._get_handler({"name": "paper-waves", "engine": "react"})
+        assert not out.get("is_error")
+        body = _decode(out)
+        assert body["engine"] == "react"
+        assert body["needs"] == ["paper"]
+        assert body["dependencies"] == [{"name": "paper"}]
+        assert "set_site_dependencies" in body["note"]
+        assert "useEffect" in body["note"]
         body = _decode(await fx_mcp._get_handler({"name": "aurora-css", "engine": "react"}))
         assert body["engine"] == "react"
         assert "dependencies" not in body
-        assert body["note"].startswith("svelte/react shells not yet available")
+        assert "snippet" not in body and "usage" not in body
+        assert "no react target (it ships: html, svelte)" in body["note"]
+        assert "not yet available" not in body["note"]
 
     @pytest.mark.asyncio
     async def test_dynamic_svelte_refuses_needs(self, registry) -> None:
@@ -250,6 +362,17 @@ class TestGetEffect:
         body = _decode(await fx_mcp._get_handler({"name": "evil"}))
         assert body["error"] == "unsafe_item_paths"
         assert set(body["paths"]) == {"_fx/../../etc/passwd", "index.html"}
+
+    @pytest.mark.asyncio
+    async def test_unsafe_target_file_rejected(self, registry) -> None:
+        """Target files get written into the site too, so the path check covers them."""
+        evil = _item("evil-svelte", "cursor", [], "bad", [])
+        evil["targets"]["svelte"]["files"] = [{"path": "src/routes/+page.svelte", "content": ""}]
+        _write_registry(registry, [evil])
+        os.utime(registry / "registry.json", (0, 4_000_000_002))
+        body = _decode(await fx_mcp._get_handler({"name": "evil-svelte", "engine": "svelte"}))
+        assert body["error"] == "unsafe_item_paths"
+        assert body["paths"] == ["src/routes/+page.svelte"]
 
 
 class TestCategories:

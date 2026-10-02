@@ -3,6 +3,16 @@
 # token-usage, resolves its real USD compute cost, converts that to integer
 # credits via the rate card, and debits the workspace wallet EXACTLY ONCE.
 #
+# Updated 2026-10-01 (fix/canon-daily-caps, CN-3): this module also owns the ONE
+#   daily usage primitive — ``try_spend`` / ``refund`` / ``used`` over the single
+#   ``DailyUsage`` collection — plus the per-meter cap resolvers. It replaces six
+#   copy-pasted ``$inc``-upsert-and-rollback budgets (turn, upload, file
+#   comprehension, transcription, illustration, guest turn). Cap semantics are
+#   now one rule for every meter: ``None`` = uncapped, ``0`` = disabled,
+#   ``n > 0`` = cap. Each meter still reads its old env var, and the resolvers
+#   translate the legacy values so no deployment changes behaviour (a turn or
+#   upload env of ``0`` still means uncapped). See "DAILY CAPS" below.
+#
 # Module-level ``async def`` API (NOT a class, per EE cloud rule, mirroring
 # ``credits.service`` / ``billing.service``). Public API:
 #   * ``resolve_cost(usage, at=)`` — the Meter: a run's ``usage`` dict ->
@@ -87,16 +97,20 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import os
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+
+from pymongo import ReturnDocument
 
 from pocketpaw_ee.cloud.chat.runs import service as chat_runs_service
 from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.credits.domain import micro_to_credits
-from pocketpaw_ee.cloud.metering.domain import ComputeCost, RateCard
+from pocketpaw_ee.cloud.metering.domain import ComputeCost, DailyMeter, RateCard, SubjectType
 from pocketpaw_ee.cloud.metering.dto import BillResult
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
 logger = logging.getLogger(__name__)
 
@@ -455,10 +469,251 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
 # does not depend on its own sweeper module.
 _TERMINAL_STATES_FOR_IMMEDIATE_BILLING = ("completed", "interrupted", "failed", "cancelled")
 
+
+# ─── DAILY CAPS ────────────────────────────────────────────────────────────────
+#
+# One counter per (subject, meter, UTC day), claimed by ``try_spend`` in ONE
+# atomic ``$inc`` upsert. Increment FIRST and compare after: a check-then-
+# increment lets two concurrent claims both read cap-1 and both spend. An
+# over-cap claim is rolled back so a refusal does not hold a slot a later claim
+# could have used. It is a cost/abuse ceiling, not billing.
+#
+# Cap semantics, one rule for every meter: ``None`` = uncapped (no counter is
+# touched), ``0`` = disabled (every claim refused), ``n > 0`` = cap.
+#
+# Failure mode is per meter, so it is a parameter: ``fail_open=True`` for the
+# chat-turn and upload meters (the run / upload writes to the same Mongo on the
+# next statement, so refusing protects nothing and traps hermetic harnesses),
+# ``False`` for the platform-paid extras (comprehension, transcription,
+# illustration) and guests, where a degraded database must not become an open
+# tab.
+#
+# ``get_pymongo_collection``, NOT ``get_motor_collection``: the latter is beanie
+# 1.x, raises AttributeError on 2.x, and inside a fail-closed meter that reads as
+# "the feature is off" rather than as a bug. That exact bug shipped twice.
+
+# TODO(BC-6): no ``Entitlements`` field carries a per-plan daily cap for any of
+# these meters yet, so every resolver below reads the deployment env only. When
+# BC-6 adds them, resolve the plan value via ``entitlements.resolve_entitlements``
+# and keep the env as the override.
+
+_logged_legacy_zero: set[str] = set()
+
+
+def _env_cap(name: str, default: int, *, zero_means_uncapped: bool) -> int | None:
+    """Read a daily cap from ``name``. Unset -> ``default``.
+
+    A non-integer is a misconfiguration, not an instruction: warn and use the
+    default rather than reading ``"five hundred"`` as ``0``.
+
+    ``zero_means_uncapped`` is the LEGACY meaning of ``0``/negative for the
+    chat-turn and upload meters (an env typo must not take chat or upload off
+    the air). It maps to ``None`` with a one-time info log. Without it, ``0`` /
+    negative is ``0`` = disabled, as it always was for the paid extras.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s is not an integer (%r) — using the default", name, raw)
+        return default
+    if value > 0:
+        return value
+    if zero_means_uncapped:
+        if name not in _logged_legacy_zero:
+            _logged_legacy_zero.add(name)
+            logger.info(
+                "%s=%r keeps its legacy meaning: no daily cap (0 means disabled on other meters)",
+                name,
+                raw,
+            )
+        return None
+    return 0
+
+
+def workspace_turns_cap() -> int | None:
+    """Agent runs per workspace per UTC day (``POCKETPAW_WORKSPACE_TURNS_DAILY``,
+    default 500 — well past a heavy human day, well short of a loop)."""
+    return _env_cap("POCKETPAW_WORKSPACE_TURNS_DAILY", 500, zero_means_uncapped=True)
+
+
+def upload_files_cap() -> int | None:
+    """Files per workspace per UTC day (``POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY``,
+    default 2000 — about forty full 50-file batches)."""
+    return _env_cap("POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY", 2000, zero_means_uncapped=True)
+
+
+def upload_bytes_cap() -> int | None:
+    """Bytes per workspace per UTC day (``POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY``,
+    default 20 GB — four times the Free plan's whole storage cap)."""
+    return _env_cap(
+        "POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY", 20_000_000_000, zero_means_uncapped=True
+    )
+
+
+def file_comprehension_cap() -> int | None:
+    """Comprehensions per workspace per UTC day (``POCKETPAW_FILE_COMPREHENSION_DAILY``,
+    default 500). ``0`` disables comprehension."""
+    return _env_cap("POCKETPAW_FILE_COMPREHENSION_DAILY", 500, zero_means_uncapped=False)
+
+
+def file_transcription_cap() -> int | None:
+    """Transcriptions per workspace per UTC day (``POCKETPAW_FILE_TRANSCRIPTION_DAILY``,
+    default 100 — the pricier call of the two). ``0`` disables transcription."""
+    return _env_cap("POCKETPAW_FILE_TRANSCRIPTION_DAILY", 100, zero_means_uncapped=False)
+
+
+def illustration_cap() -> int | None:
+    """Illustrations per workspace per UTC day
+    (``POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS``, default 20). ``0`` disables."""
+    return _env_cap("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", 20, zero_means_uncapped=False)
+
+
+def today() -> str:
+    """The UTC day a claim made right now is charged to. Public because a caller
+    holding a claim across requests (multipart uploads) must persist the day it
+    spent on in order to refund it there."""
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def _key(subject_type: SubjectType, subject_id: str, meter: DailyMeter, day: str) -> dict:
+    return {
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "meter": str(meter),
+        "day": day,
+    }
+
+
+async def try_spend(
+    *,
+    subject_type: SubjectType,
+    subject_id: str | None,
+    meter: DailyMeter,
+    amount: int = 1,
+    cap: int | None,
+    fail_open: bool = False,
+) -> bool:
+    """Claim ``amount`` of ``meter`` for ``subject_id`` today. True = allowed.
+
+    ``cap``: ``None`` uncapped (nothing is counted), ``0`` disabled, ``n`` cap.
+    A missing ``subject_id`` is refused: an uncharged claim is exactly what a
+    cap exists to prevent. A storage failure answers ``fail_open``.
+    """
+    if cap is None or amount <= 0:
+        return True
+    if cap <= 0:
+        return False
+    if not subject_id:
+        logger.warning("daily %s refused — no %s to charge", meter, subject_type)
+        return False
+
+    key = _key(subject_type, subject_id, meter, today())
+    now = datetime.now(UTC)
+    try:
+        coll = DailyUsage.get_pymongo_collection()
+        doc = await coll.find_one_and_update(
+            key,
+            {
+                "$inc": {"used": int(amount)},
+                "$setOnInsert": {"createdAt": now},
+                "$set": {"updatedAt": now},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        # A successful update with no returned document should not happen, but
+        # reading it as "0 spent" would be a permanently open gate.
+        spent = int((doc or {}).get("used", cap + 1))
+    except Exception:
+        logger.warning(
+            "daily %s counter unavailable for %s=%s; %s",
+            meter,
+            subject_type,
+            subject_id,
+            "allowing" if fail_open else "refusing",
+            exc_info=True,
+        )
+        return fail_open
+
+    if spent > cap:
+        try:
+            await coll.update_one(key, {"$inc": {"used": -int(amount)}})
+        except Exception:
+            logger.debug("could not roll back an over-cap %s claim", meter, exc_info=True)
+        return False
+    # no-event: a per-day abuse counter, not domain state; nothing downstream
+    # listens for it, and an event per chat turn would be pure noise.
+    return True
+
+
+async def refund(
+    *,
+    subject_type: SubjectType,
+    subject_id: str | None,
+    meter: DailyMeter,
+    amount: int,
+    day: str,
+) -> None:
+    """Give back ``amount`` claimed on ``day``. Best-effort and silent.
+
+    ``day`` is explicit: a multipart session lives for days, and refunding
+    against "today" would decrement a row the claim was never made against.
+    Never upserts (no row = nothing to refund — a fail-open claim may hold no
+    row) and clamps at zero, so a double refund cannot mint quota.
+    """
+    if not subject_id or not day or amount <= 0:
+        return
+    key = _key(subject_type, subject_id, meter, day)
+    try:
+        coll = DailyUsage.get_pymongo_collection()
+        doc = await coll.find_one_and_update(
+            key,
+            {"$inc": {"used": -int(amount)}, "$set": {"updatedAt": datetime.now(UTC)}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if doc is not None and int(doc.get("used", 0)) < 0:
+            await coll.update_one(key, {"$set": {"used": 0}})
+    except Exception:
+        logger.warning(
+            "could not refund a daily %s claim for %s=%s day=%s",
+            meter,
+            subject_type,
+            subject_id,
+            day,
+            exc_info=True,
+        )
+    # no-event: see ``try_spend``.
+
+
+async def used(
+    *, subject_type: SubjectType, subject_id: str, meter: DailyMeter, day: str | None = None
+) -> int:
+    """Read-only: how much of ``meter`` ``subject_id`` has used (today by
+    default). 0 when there is no row. Raises on a storage error — each read-only
+    caller decides its own failure mode."""
+    doc = await DailyUsage.get_pymongo_collection().find_one(
+        _key(subject_type, subject_id, meter, day or today())
+    )
+    return int((doc or {}).get("used", 0))
+
+
 __all__ = [
     "bill_run",
     "bill_run_now",
+    "file_comprehension_cap",
+    "file_transcription_cap",
+    "illustration_cap",
     "load_rate_card",
+    "refund",
     "resolve_cost",
     "run_moment",
+    "today",
+    "try_spend",
+    "upload_bytes_cap",
+    "upload_files_cap",
+    "used",
+    "workspace_turns_cap",
 ]

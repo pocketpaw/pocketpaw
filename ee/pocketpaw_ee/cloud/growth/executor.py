@@ -23,6 +23,13 @@
 #      the blob's ``requested_by`` — see ``_resolve_proposer`` (security
 #      review F2): a blob-supplied id would let whoever wrote the blob choose
 #      whose role gets checked.
+#   3b. Refuse when no growth worker consumes the ``growth`` queue. The
+#      deployed worker container runs only the chat and site-build lanes
+#      (``cloud/worker_supervisor.py``), so an enqueued dispatch would wait in
+#      Redis forever while the Action reads "executed". Unless
+#      ``POCKETPAW_GROWTH_WORKER_ENABLED`` says a growth worker is deployed
+#      (``arq pocketpaw_ee.cloud.growth.worker.WorkerSettings``), the Action is
+#      failed with that reason and the draft stays ``proposed``.
 #   4. Flip the draft proposed→approved through the service's gate seam
 #      (``gate_transition`` — the only caller allowed onto a gate-owned edge).
 #      A draft that moved meanwhile (rejected / already approved) fails the
@@ -41,12 +48,16 @@
 # terminal path goes through the single ``_fail`` chokepoint or the one success
 # path, never both.
 #
-# Created 2026-07-27 (feat/growth-g4): new module.
+# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
+# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -60,6 +71,17 @@ logger = logging.getLogger(__name__)
 # id; module-level is right because the executor is only ever driven from the
 # web process's approve path (mirrors ship.executor).
 _LOCKS: dict[str, asyncio.Lock] = {}
+
+
+# Opt-in: set only where a growth worker actually consumes the ``growth`` queue.
+GROWTH_WORKER_ENV = "POCKETPAW_GROWTH_WORKER_ENABLED"
+NO_GROWTH_WORKER_REASON = (
+    "no growth worker is running on this deployment, so the send cannot be dispatched"
+)
+
+
+def _growth_worker_enabled() -> bool:
+    return os.environ.get(GROWTH_WORKER_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _lock_for(action_id: str) -> asyncio.Lock:
@@ -210,23 +232,13 @@ async def _persist_outcome(
     Action's own terminal status is the authoritative record.
     """
     try:
-        import json as _json
-
-        import aiosqlite
-
         blob["outcome"] = {
             "status": status,
             "detail": detail[:500],
             "executed_at": datetime.now(UTC).isoformat(),
         }
         params = {GROWTH_SEND_PARAM_KEY: blob}
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — structured outcome is best-effort
         logger.warning(
             "growth: failed to persist outcome onto action %s (the Action's "
@@ -241,9 +253,9 @@ async def _get_pool() -> Any:
     ``growth`` queue at enqueue). Module-level indirection so tests inject a
     fake pool by monkeypatching this function — the ship ``pool_factory`` seam
     by another name."""
-    from pocketpaw_ee.cloud.chat.runs.arq_executor import _get_pool as _shared_pool
+    from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 
-    return await _shared_pool()
+    return await get_arq_pool()
 
 
 async def execute_approved_growth_send(
@@ -331,6 +343,18 @@ async def execute_approved_growth_send(
             return
         if not await _proposer_still_authorized(workspace_id, proposer_id):
             await _fail("proposer is no longer authorized in this workspace")
+            return
+
+        # Nothing consumes the growth queue unless a growth worker is deployed.
+        # Checked before the draft flips, so a refused send leaves it proposed.
+        if not _growth_worker_enabled():
+            logger.warning(
+                "growth: refusing to enqueue draft %s: %s is not set, and the deployed "
+                "worker runs no growth lane",
+                draft_id,
+                GROWTH_WORKER_ENV,
+            )
+            await _fail(NO_GROWTH_WORKER_REASON)
             return
 
         # (5) Flip the draft proposed→approved through the gate seam. A draft

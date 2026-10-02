@@ -46,7 +46,13 @@ async def test_loop_emits_trace_lifecycle_and_normalized_token_usage(
     router = MagicMock()
 
     async def run_with_usage(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         _ = message, system_prompt, history, session_key, system_prompt_digest
         yield AgentEvent(type="message", content="hello")

@@ -312,6 +312,7 @@ class TestLoopThinkingIntegration:
                 history=None,
                 session_key=None,
                 system_prompt_digest="",
+                turn_split=None,
             ):
                 from pocketpaw.agents.protocol import AgentEvent
 
@@ -386,6 +387,7 @@ class TestLoopThinkingIntegration:
                 history=None,
                 session_key=None,
                 system_prompt_digest="",
+                turn_split=None,
             ):
                 from pocketpaw.agents.protocol import AgentEvent
 

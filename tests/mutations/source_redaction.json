@@ -112,8 +112,8 @@
   {
     "label": "the gallery resolves the entitlement per row instead of once per page, putting two workspace lookups behind every card",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "            *(_resolved_wire_dict(d, user_id, workspace_entitled=workspace_entitled) for d in docs)",
-    "replace": "            *(_resolved_wire_dict(d, user_id) for d in docs)",
+    "find": "                    workspace_entitled=workspace_entitled,\n                    resolve_memo=resolve_memo,",
+    "replace": "                    resolve_memo=resolve_memo,",
     "tests": [
       "tests/cloud/pockets/test_source_redaction_gate.py::test_e_list_resolves_the_entitlement_once_for_the_page"
     ]

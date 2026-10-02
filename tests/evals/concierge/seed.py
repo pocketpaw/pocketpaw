@@ -13,9 +13,10 @@
 #     on and KB articles holding real code examples.
 #
 # ``make_site(name, overrides)`` returns a fresh site each case, so a case's guided
-# fields never leak into the next. The KB is served by ``FakeKnowledge``, which
-# stands in for kb-go at the ``KnowledgeService`` boundary (the same seam the v2
-# tests fake): ranking is plain keyword overlap, deterministic, no binary needed.
+# fields never leak into the next. Lead capture is on, as on a real Site. The KB
+# is served by ``FakeKnowledge``, which stands in for kb-go at the
+# ``KnowledgeService`` boundary (the same seam the v2 tests fake): ranking is plain
+# keyword overlap, deterministic, no binary needed.
 
 from __future__ import annotations
 
@@ -189,6 +190,8 @@ def make_site(name: str, overrides: dict[str, Any] | None = None) -> SimpleNames
         kb_page_index=dict(seed["page_index"]),
         concierge_runtime="v2",
         concierge_allow_doc_code=seed["allow_doc_code"],
+        # The Site default: the concierge may offer the send_to_team lead card.
+        concierge_lead_capture=True,
         concierge_name="",
         concierge_tone=None,
         concierge_languages=[],

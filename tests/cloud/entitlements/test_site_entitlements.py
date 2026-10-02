@@ -12,18 +12,14 @@
 # the site's billing fields because ``entitlements`` may not import ``models.site``
 # (EE cloud rule 2).
 #
-# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1). Several assertions here
-# INVERTED, and the inversion is the change, not a regression: free now includes a
-# custom domain ("only 1 site is allowed to have a custom domain in free" —
-# captain, 2026-08-21), so a site resolving to the floor gets ``custom_domain
-# True`` and ``max_domained_sites == 1`` where it used to get False and nothing.
-# Badge removal, the concierge, and the UNCAPPED allowance are untouched: those are
-# still paid grants and still need an active subscription, which is why the
-# badge half of every one of these tests still reads exactly as it did.
+# Free includes a custom domain on every site, so a site resolving to the floor
+# gets ``custom_domain True`` and ``max_domained_sites == 1``. Badge removal, the
+# concierge, and the UNCAPPED allowance are paid grants and still need an active
+# subscription.
 #
-# ``custom_domain`` answers "may this site have one at all" and is now True almost
-# everywhere. The question with teeth moved to the attach seam, which counts SITES
-# already holding a domain — see tests/cloud/sites/test_custom_domain_entitlement.py.
+# ``custom_domain`` answers "may this site have one at all" and is True almost
+# everywhere. The question with teeth is at the attach seam, which caps the
+# hostnames on THIS site (apex + www) — see tests/cloud/sites/test_custom_domain_cap.py.
 
 from __future__ import annotations
 

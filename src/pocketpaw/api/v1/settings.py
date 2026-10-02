@@ -129,7 +129,7 @@ def _refuse_global_write_in_cloud(request: Request) -> None:
 @router.put("/settings", dependencies=[Depends(require_scope("settings:write"))])
 async def update_settings(request: Request):
     """Update settings fields. Only provided fields are changed."""
-    from pocketpaw.config import Settings, get_settings, validate_api_key
+    from pocketpaw.config import Settings, validate_api_key
 
     _refuse_global_write_in_cloud(request)
 
@@ -166,7 +166,9 @@ async def update_settings(request: Request):
             if hasattr(settings, key) and not key.startswith("_"):
                 setattr(settings, key, value)
         settings.save()
-        get_settings.cache_clear()
+        from pocketpaw.cache_invalidation import clear_settings_cache
+
+        clear_settings_cache()
 
     # Sync user_display_name into USER.md so the agent knows the user's name
     if "user_display_name" in settings_data and settings_data["user_display_name"]:

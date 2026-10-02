@@ -52,22 +52,22 @@
 # blew the SSH argv limit and broke every deploy (paw-workspace #193/#194). A delete is
 # bounded work that shares the lane's four slots with builds, which is the right trade:
 # the alternative is a queue with no consumer, which is worse than no split at all.
+#
+# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
+# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
 
 """The delete job: force the export, run the cascade, remove the row."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 import os
 import uuid
 from typing import Any
 
-from arq import create_pool
-from arq.connections import ArqRedis, RedisSettings
-
 from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.build_job import SITE_BUILD_QUEUE_NAME
 
@@ -316,30 +316,10 @@ async def run_site_delete(
 # The enqueue
 # ---------------------------------------------------------------------------
 
-_pool: ArqRedis | None = None
-_pool_lock = asyncio.Lock()
-
-
-async def _get_pool() -> ArqRedis:
-    """The process's arq pool — the same lazy double-checked pattern the build lane
-    uses, for the same reason: one pool per process, and concurrent first-enqueues must
-    not leak two."""
-    global _pool
-    if _pool is None:
-        async with _pool_lock:
-            if _pool is None:
-                url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
-                if not url:
-                    raise RuntimeError(
-                        "POCKETPAW_REDIS_URL is not set — the site-delete lane needs Redis."
-                    )
-                _pool = await create_pool(RedisSettings.from_dsn(url))
-    return _pool
-
-
-def _reset_for_tests() -> None:
-    global _pool
-    _pool = None
+# The process-wide arq pool (one pool, closed on shutdown) lives in
+# _core.redis_client. ``_get_pool`` is this module's name for it: callers and
+# tests monkeypatch it here.
+_get_pool = get_arq_pool
 
 
 def _mint_job_id(site_id: str) -> str:

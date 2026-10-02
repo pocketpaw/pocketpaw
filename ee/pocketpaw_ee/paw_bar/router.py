@@ -1,625 +1,57 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
-# Updated: 2026-09-28 (feat/concierge-page-aware, CR-3) — ``ConciergeChatRequest``
-#   takes an optional ``page: {url, title}`` (the host page paw-bar's loader
-#   reports). Optional because cached bundles predate it, and never a 422: a page
-#   that is not an object with a string url reads as absent, so a broken bundle
-#   still gets its answer. The v2 runner validates it (``resolve_page``); the legacy
-#   path ignores it. The v2 ``sources`` event now comes from the runner itself (the
-#   knowledge it gave the model), not from ``_concierge_sources``.
-# Updated: 2026-09-28 (feat/concierge-guided-fields, CR-4) — the settings GET/PATCH
-#   carry the owner's guided fields: ``concierge_name`` (<=40),
-#   ``concierge_tone`` (friendly|professional|concise|playful),
-#   ``concierge_languages`` (1-10 BCP-47 codes), ``concierge_about`` (<=600),
-#   ``concierge_avoid_topics`` (<=10 x 80) and ``concierge_escalation``
-#   ({mode: handoff|email|none, contact <=120}, sent whole). Partial PATCH as
-#   before; a cap or enum miss is a 422 (``pocketpaw.paw_bar.concierge_fields``).
-# Updated: 2026-09-28 (feat/concierge-spend-cap, CR-5) — on a v2 site, a used-up
-#   monthly conversation allowance no longer refuses the visitor with a 403: after
-#   the rate limit (the reply writes a handoff, so it must spend a slot), POST
-#   /paw-bar/chat answers with ``concierge_runtime.degrade_reply`` (a fixed
-#   leave-a-message line as ``chunk`` + ``stream_end``) and hands the visitor to
-#   the owner. Legacy sites still get the 403. The v2 runner now receives the
-#   handler's ``store`` so the handoffs it raises write where the turn reads.
-# Updated: 2026-09-28 (feat/concierge-v2-output, CR-2) — the settings GET/PATCH
-#   carry ``concierge_allow_doc_code`` (partial PATCH, default False): with it on,
-#   a v2 reply may show code copied verbatim from the site's knowledge.
-# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — owners create and
-#   delete the concierge; nothing creates one automatically. New
-#   ``POST /paw-bar/admin/site/{id}/concierge`` (``paw_bar.manage``, workspace-
-#   scoped, 409 when one exists) stamps ``Site.concierge_created_at``, leaves it
-#   OFF, mints the widget if missing with an empty spec and no actions, sets the
-#   runtime from CR-6's gate (``concierge_gate.default_concierge_runtime``, "legacy"
-#   until that PR merges and the gate passes) and,
-#   for legacy, binds its agent through ``ensure_site_agent`` explicitly. ``DELETE``
-#   clears the marker, turns it off, unbinds (never deletes) a legacy agent, and
-#   purges conversations only with ``delete_conversations=true``. Removed the
-#   auto-provisioning in ``create_widget`` and the enable PATCH. The settings and
-#   overview responses carry ``concierge_exists`` (and overview ``concierge_runtime``),
-#   and the settings snippet asks the marker, not the agent.
-#   DELETE also clears CR-8's pinned answers (``knowledge_routes.delete_faqs``) and
-#   CR-9's uploaded files and links (``knowledge_routes.delete_sources``), each
-#   when present, since both ship in their own PRs.
-# Updated: 2026-09-27 (feat/concierge-v2-runner, CR-1) — POST /paw-bar/chat can
-#   answer through the v2 runner (``paw_bar.concierge_runtime.run_concierge_v2``):
-#   one streamed pydantic_ai call with no tools, grounded in the site KB, written
-#   to the same concierge run store and over the same visitor SSE frames. It is
-#   chosen per site by ``Site.concierge_runtime`` ("legacy" default), which the
-#   settings GET/PATCH now expose (partial PATCH as before, 422 on any other
-#   value). Every public gate still runs, in the same order, before the branch;
-#   v2 only skips the bound-agent 409 and the connector 409, because it has no
-#   agent and no tool surface for a connector to reach. The legacy dispatch is
-#   unchanged. ``session_key``/``stored_user_text``/``prior_history`` are computed
-#   once above the branch so both paths share them.
-# Updated: 2026-09-26 (fix/pawbar-frame-sandbox-header) — every frame document is
-#   now sandboxed by the BROWSER, whoever embeds it. The public frame, the dead
-#   shell (disabled concierge / no usable allowlist) and the owner preview all send
-#   a CSP ``sandbox`` directive built from the one ``PAWBAR_FRAME_SANDBOX`` constant
-#   through ``_frame_csp``, so no frame path can miss it. frame-ancestors is
-#   byte-identical and still leads the header; the dead shell, which never had
-#   one, gains the sandbox alone. No flag grants top navigation — steering the
-#   customer's page is the attack the sandbox exists to block. The paw-bar loader
-#   puts the same flags on its <iframe sandbox>; the two strings must match.
-# Updated: 2026-09-27 (feat/bulk-grants-conversations) — new
-#   POST /paw-bar/admin/sites/conversations reads the conversation lists of many
-#   sites in one call ({site_ids 1..50, limit, state} → {sites, errors}), so the
-#   chat sidebar stops sending one GET per site. Same ``_require_paw_bar_read``
-#   gate as the per-site GET and the same per-site work
-#   (``_resolve_site_and_widget`` then ``_list_conversations`` from the newest
-#   page); ids are deduped and read at most ``_SITES_CONVERSATIONS_CONCURRENCY``
-#   at a time. One site's failure lands in ``errors`` and never fails the rest: a
-#   404 (absent, malformed or another workspace's site) is ``not_found``, anything
-#   else is logged and reported as ``error``.
-# Updated: 2026-09-26 (fix/pawbar-public-starters-sync-status) — GET /paw-bar/frame
-#   carries the bound agent's conversation starters. It hard-coded ``starters=[]``
-#   on the stale belief that the Agent model had no such field, so owners saw
-#   starters in the preview that visitors never got. ``w`` is untrusted there, so
-#   new ``_public_frame_starters`` binds the widget to the key's Site
-#   (``_authenticate_widget_key``'s workspace + pocket rule) and
-#   ``_bound_agent_starters`` now also requires the agent to be in that workspace;
-#   any miss is [] and the frame still renders, as is a lookup slower than
-#   ``_FRAME_STARTERS_TIMEOUT_S`` (1s). The settings GET/PATCH also hand
-#   out ``embed_snippet`` only to a caller who can read the site's pocket
-#   (``pockets_service.can_read``), as sites.router's foreign-concierge surface
-#   does; the role gate moves into a parameter on both routes to supply the user.
-# Updated: 2026-09-26 (fix/pawbar-public-route-gates) — anonymous callers can no
-#   longer 429 a site's chat or write into its owner's queue. Ingested events use
-#   their own ``events`` rate bucket; a widget with a concierge agent needs
-#   ``signed_key`` on events and the decision poll (the glass app never posts
-#   events and already keys the poll; only the frozen key-less ``src/`` widget,
-#   which serves unbound widgets, does). Per-(IP, widget) bucket on every public
-#   route; chat/ingest admit atomically (``store.admit_event``); chat bounds
-#   customer_ref and message; the visitor transcript drops author_* and the
-#   visitor error frame is always ``agent.error``.
-# Updated: 2026-09-26 (feat/pawbar-admin-widget-spec-route) — the owner can save
-#   the concierge's Catalog & Actions again, and gets a snippet that works. New
-#   PATCH /paw-bar/admin/site/{site_id}/widget/spec takes {spec} behind
-#   ``paw_bar.manage`` with the widget resolved from the site (no X-Paw-Bar-Token,
-#   which the dashboard never holds) and writes through ``_save_widget_spec``, the
-#   archiving write ``update_spec`` now shares. The settings GET/PATCH gained
-#   ``embed_snippet``: ``embed.concierge_snippet`` on PAW_CAPTURE_API_BASE, the
-#   same tag publish injects. Token-gated routes unchanged. The admin route pins
-#   spec.widget_id / spec.pocket_id to the site's widget row (body values ignored).
-# Updated: 2026-09-26 (fix/pawbar-visitor-stream-allowlist) — POST /paw-bar/chat
-#   stopped relaying every run-engine frame to anonymous visitors. It forwarded
-#   ``thinking``, ``tool_start`` / ``tool_result`` (tool names, arguments,
-#   outputs), ``token_usage`` and ``stream_end.usage`` (model, cost) and raw
-#   exception text on ``error``. The relay is now default-deny through
-#   ``_visitor_frame``: only ``chunk`` (text), ``stream_end``
-#   (assistant_message_id + cancelled), ``error`` (safe code + generic message)
-#   and ``interrupted`` (reason) pass, each rebuilt from the fields the widget
-#   reads. The owner's dashboard stream and run_core are untouched.
-# Updated: 2026-09-02 (fix/metering-dated-pricing) — the concierge stats panel
-#   prices each run at the moment it RAN, not at the moment somebody opened the
-#   page. ``resolve_cost`` now requires that timestamp because LLM prices are
-#   effective-dated (``claude-sonnet-5`` went from $2.00 to $3.00 per MTok on
-#   2026-09-01), and this endpoint reads a WINDOW OF HISTORY. Pricing at request
-#   time meant the same past week restated itself at the current rates on every
-#   refresh, so the panel and the wallet could quote different numbers for the
-#   same runs. One-line change; the tokens and the run counting are untouched.
-# Updated: 2026-08-26 (the row an owner can see must open, and say what it cost)
-#   (1) THE DRILL-IN AGREED WITH THE LIST AGAIN. ``_load_transcript`` narrowed to
-#   one conversation by REBUILDING an exact ``session_key`` from the conversation
-#   id plus the widget's CURRENT agent, then matching runs on equality. Every run
-#   whose key was spelled any other way was invisible to it, and two of those
-#   spellings are ordinary: a conversation that predates identity carries the
-#   VISITOR's handle in the conversation slot, and a widget bound to its dedicated
-#   agent after it started answering has older runs carrying the previous agent id
-#   in the last segment. The list has always read that token POSITIONALLY
-#   (``_conversation_of_run``) and files an unattributable one under the visitor's
-#   ACTIVE conversation — so the list showed a row and the drill-in 404'd on it,
-#   which the owner reads as "nothing to show here". The transcript now attributes
-#   through the same two helpers plus the new ``_conversation_membership``, so
-#   there is ONE definition of which conversation a turn belongs to. Owner lines
-#   are attributed here for the same reason rather than by the store's filter,
-#   which stays strict for the visitor's own poll. A conversation the visitor
-#   really holds now returns an EMPTY transcript rather than a 404 when it has
-#   nothing in it — the client renders a 404 as "nothing stored for this VISITOR",
-#   a different and here false claim.
-#   (2) + GET .../site/{id}/stats — the owner's concierge scoreboard over one
-#   window: conversations, distinct visitors, runs, messages, token volume and USD
-#   cost. Tokens and cost resolve through ``metering.service``, the same pair the
-#   workspace wallet bills with, so this panel and the invoice cannot show two
-#   arithmetics. The agent ledger is deliberately NOT the source — it excludes
-#   tokens and cost by rule. Bounded scan, and ``truncated`` says so rather than
-#   passing a partial count off as a total; a malformed window is a 422.
-# Updated: 2026-08-24 (inbox freshness + who typed it) — the owner's conversation
-#   list stopped freezing the moment a human took over, and the thread learned to
-#   name them.
-#   (1) FRESHNESS. ``_list_conversations`` was built purely from ``ChatRunDoc``, and
-#   the two kinds of line that have NO run — an owner's takeover reply and the
-#   visitor's answer to it, which is the whole point of muting — live in
-#   ``paw_bar_owner_messages``. So a row kept the bot's last sentence at the bot's
-#   timestamp, and ordered by run recency it BURIED exactly the conversations a
-#   person was working. New ``_latest_out_of_band`` joins the newest such line per
-#   conversation (one bounded read for the page, like the state and decision joins),
-#   the row takes whichever of the two is later, and the page re-sorts on that
-#   merged clock. SYSTEM lines are excluded from the merge — see the store.
-#   (2) ONE CLOCK. New ``_as_utc`` / ``_newer``: run stamps come back from Mongo
-#   NAIVE (the client is not ``tz_aware``) while owner lines are aware-UTC ISO
-#   strings, so comparing them raw is wrong by the host's offset — and that
-#   comparison decides which line a row shows. ``last_message_at`` now goes out
-#   aware-UTC, which also fixes relative times reading wrong in any browser
-#   outside UTC.
-#   (3) A TOTAL ORDER. The run scan is re-sorted in Python with the ObjectId as the
-#   tie-break: Windows' clock advances in ~15.6ms steps, so a question and its
-#   follow-up routinely share a ``createdAt`` and the dedupe picked between them
-#   arbitrarily — which read as a flaky test rather than as a row showing the older
-#   sentence.
-#   (4) WHO TYPED IT. ``TranscriptMessage`` grows ``author_id`` / ``author_name`` /
-#   ``author_avatar``, resolved from the stored author id through the new
-#   ``auth.service.resolve_identities`` (batched per transcript, best-effort) and
-#   carried on the reply echo through the SAME resolver so the composer's optimistic
-#   append and the refetched line agree. OWNER lines only. The VISITOR's public poll
-#   is untouched and stays role + content + time — a stranger learns that a human
-#   replied, never which one.
-# Updated: 2026-08-21 (fix/paw-bar-preview-frame-ancestors) — the bar renders in the
-#   builder's site preview. GET /paw-bar/frame gated the embedder on the Site's
-#   ``allowed_origins`` alone, but the builder previews a site by framing its real
-#   published page, so the bar's iframe sits TWO deep — dashboard → site page → bar —
-#   and ``frame-ancestors`` is matched against EVERY ancestor, not just the immediate
-#   parent. Nothing in the publish path knows the dashboard exists, so no Site
-#   allowlist ever named it and every preview logged "Framing '<backend>' violates
-#   ... frame-ancestors" and showed an empty box. New ``_public_frame_ancestors``
-#   appends the dashboard origin — ``PAWBAR_DASHBOARD_ORIGIN`` or, unset (the state
-#   every deploy we ship is in), the already-declared
-#   ``POCKETPAW_API_CORS_ALLOWED_ORIGINS`` — through the SAME sanitizer, and new
-#   ``_ancestor_sources`` dedupes so a dashboard that is also an allowlist entry
-#   lists once. Deliberately NOT a widening of ``allowed_origins``: that list also
-#   gates chat and lead capture via ``origin_allowed``, so this widens the render
-#   gate and nothing else. Fail-closed still reads the Site's allowlist alone, so a
-#   Site with no embedders stays unrenderable. Neither var set → the header is
-#   byte-identical to before. The session-authed owner preview
-#   (``/paw-bar/admin/site/{id}/preview-frame``) is untouched and still framed by
-#   ``_dashboard_origin`` alone.
-# Updated: 2026-08-16 (fix/paw-bar-role-gates) — the last nine ``require_scope`` gates
-#   in this router become ROLE gates, so the ``require_scope`` import is gone. The
-#   two admin site-settings routes (the concierge kill switch) and the seven widget
-#   CRUD routes now take ``_require_paw_bar_read`` on the two GETs and
-#   ``_require_paw_bar_manage`` on every mutation — the same pair the D2 reads and
-#   the knowledge endpoints already used, so the whole admin surface of this router
-#   is finally gated one way. ``_require_paw_bar_manage`` moved up beside its read
-#   sibling because widget CRUD is now its first caller.
-#   ``require_scope("admin")`` is an OSS SINGLE-TENANT primitive: it accepts
-#   ``request.state.full_access`` (master token / session cookie / localhost, and in
-#   cloud only an ``is_superuser`` platform admin), a file-backed ``pp_`` API key, or
-#   a ``ppat_`` OAuth token. A CLOUD workspace admin presents none of those, so
-#   PATCH /paw-bar/admin/site/{site_id}/settings answered its intended caller with
-#   403 "Missing required scope: admin" — the kill switch was unreachable for the
-#   owner it belongs to. The same line failed the opposite way on self-hosted: a
-#   session cookie sets ``full_access``, so ANY signed-in dashboard user, member
-#   role included, could rotate a widget's token or delete it. One swap closes both.
-#   No new actions: ``paw_bar.read`` / ``paw_bar.manage`` already sit at ADMIN in
-#   guards/actions.py.
-# Updated: 2026-08-01 (AL-2, paw-bar emitters) — three conversation write paths
-#   now record their agent-ledger beats through ``paw_bar/ledger.py`` (fail-soft,
-#   never raises, ~4 lines each):
-#     ~ POST /paw-bar/chat — ``paw.conversation.started``. Fired on every turn
-#       and deduped by the ledger on ``widget:customer`` rather than gated on the
-#       handler's ``is_new_conversation`` flag: that flag comes from a read this
-#       handler is explicitly allowed to lose (the fail-closed mute arm), and a
-#       "conversations started" count that drops those is worse than one absorbed
-#       insert per turn.
-#     ~ PATCH .../conversations/{ref} and POST .../conversations/{ref}/reply —
-#       both hand the BEFORE and AFTER rows to
-#       ``ledger.emit_conversation_transition``, which records
-#       ``paw.conversation.takeover`` when the mute goes on and
-#       ``paw.handoff.resolved`` when the thread leaves ``needs_human``. Read as
-#       a row diff, not from the request body, so the two endpoints cannot record
-#       the same transition differently and a no-op patch records nothing.
-#   All three route the ledger FILE by ``workspace_id`` / ``ctx.workspace_id`` —
-#   the authenticated tenant these handlers already scope every other store read
-#   by, and a store-path-safe token (the widget OWNER label is not).
-# Updated: 2026-07-31 (in-thread approvals) — the admin transcript now carries
-#   ``pending_actions`` (this visitor's still-PENDING decisions, mapped to the
-#   same DecisionItem shape the decisions tab serves) and ``bot_paused``, and
-#   DecisionItem gains ``customer_ref``. The dashboard's ConversationThread has
-#   had the approval card since slices 2+4, with TWO wire sources — transcript
-#   ``pending_actions`` preferred, decisions-list-filtered-by-ref as fallback —
-#   and this deployment served NEITHER, so a real approval sat behind the
-#   "approve it from Decisions" notice (found live 2026-07-31). Both new reads
-#   are failure-soft: a broken decisions read costs the thread its cards, never
-#   the transcript. Settled decisions stay absent from pending_actions on
-#   purpose — the card list is a to-do, not a log.
-# Updated: 2026-07-31 (owner inbox, slice 3) — THE ESCAPE HATCH. A visitor can
-#   always reach a person, and the owner is told when it happens:
-#     + POST /paw-bar/request-human — {key, w, customer_ref, message?, contact?}
-#       → {ok, handoff_id, state, message}. PUBLIC, same ``_front_gate_for_key``
-#       chain as chat/action/articles (404 → 429 → 401 → 403 origin, 403 binding,
-#       plus the site kill switch inside the key resolver) and the same injection
-#       screen on the free-text note. It runs the SHARED producer
-#       (``paw_bar.handoff.raise_handoff``) the concierge's own
-#       ``pawbar_request_human`` tool runs, so a visitor-raised and an
-#       agent-raised handoff are one record. Accepted in EVERY conversation
-#       state, including while the bot is answering confidently — the whole point
-#       is that reaching a human never depends on the agent offering it.
-#     ~ GET .../site/{id}/handoffs — unchanged in shape, no longer always empty.
-#     ~ POST /paw-bar/chat — notifies the workspace owner on the FIRST turn of a
-#       new conversation (the row's absence before the upsert is the signal), and
-#       the muted-bot branch notifies on a visitor reply while a human holds the
-#       thread. Both awaited but never-raising (``paw_bar.notify``), so a dead
-#       notifier costs the owner a badge, never the visitor an answer.
-#   Notification fan-out is the WORKSPACE OWNER ALONE in v1 (design §10 Q4).
-# Updated: 2026-07-30 (owner inbox, slice 2) — TYPE-TO-TAKEOVER. The owner types,
-#   the bot shuts up, and the visitor sees a human:
-#     + POST .../site/{id}/conversations/{customer_ref}/reply — {text} →
-#       {ok, message, conversation}. One call does all of it: persists an ``owner``
-#       line, mutes the bot (``bot_paused``, stamped so the idle clock starts),
-#       stamps ``last_owner_at``, clears the unread counter, and REOPENS a
-#       closed/snoozed thread. ``message`` is a TranscriptMessage (the shape the
-#       thread already renders); ``conversation`` is the same ConversationRow the
-#       PATCH echoes. Gated on ``paw_bar.manage``, workspace-scoped like its
-#       siblings. NOT a run: an owner reply never becomes a ChatRunDoc, so the
-#       metering sweeper can't bill the owner for typing.
-#     ~ POST /paw-bar/chat — the MUTE, checked BEFORE the run is created: when the
-#       conversation is paused, the visitor's line is kept (under the same
-#       retention toggle), the thread flips to ``needs_human``, and the response is
-#       exactly two SSE frames — ``human_replying`` {"message": …} then
-#       ``stream_end`` — with NO run dispatched, no metering, no tool surface.
-#       Never an empty stream: the glass app reads clean-but-empty as "No reply."
-#     + GET /paw-bar/messages/{widget_id}/{customer_ref}?signed_key=&after= — the
-#       visitor-side poll, PUBLIC, same ``_front_gate_for_key`` chain as articles
-#       (404 → 429 → 401 → 403) and the same ``_request_origin`` same-origin fix.
-#       Returns {messages:[{role,content,at}], bot_paused} and NOTHING else — no
-#       notes, tags, assignee, contact_email, or queue state ever cross to a
-#       visitor, and a visitor's own stored lines are not echoed back.
-#     ~ GET .../conversations/{customer_ref} — the transcript now MERGES two
-#       sources by timestamp: ChatRunDoc (user/assistant) and the new
-#       paw_bar_owner_messages rows (owner/system, plus muted-turn visitor lines
-#       presented as "user"). ``TranscriptMessage.role`` widens from
-#       user|assistant to user|assistant|owner|system — ADDITIVE.
-#   IDLE AUTO-RESUME (§10 Q2 — 4h, hard-coded): a mute with no owner activity for
-#   4h ends itself. Computed on READ in the store, so chat and the poll agree, and
-#   materialized by both with one system message explaining the hand-back.
-# Updated: 2026-07-30 (owner inbox, slice 1) — the concierge LOG becomes a QUEUE.
-#   A lifecycle row (``paw_bar_conversations``) is now upserted on every visitor
-#   turn from ``concierge_chat`` (failure-soft — inbox bookkeeping never costs a
-#   visitor their answer) and joined onto the owner reads:
-#     ~ GET  .../site/{id}/conversations — ADDITIVE. Every existing field keeps
-#       its name and meaning; each item GAINS state / bot_paused /
-#       unread_for_owner / tags / snooze_until / contact_email / display_name /
-#       has_pending_action, all with safe defaults so a LEGACY conversation with
-#       no state row still lists (no backfill, ever). The response gains
-#       ``counts`` (per-state totals, UNFILTERED so the filter chips stay stable)
-#       and an optional ``?state=`` filter (unknown value → 422).
-#     + PATCH .../site/{id}/conversations/{customer_ref} — {state?, snooze_until?,
-#       tags?, note?, bot_paused?} → {ok, conversation}. ``note`` APPENDS a
-#       private operator note attributed to the caller; ``tags`` replaces. Gated
-#       on ``paw_bar.manage`` (this router's existing write action — there is no
-#       ``paw_bar.write``). A conversation with no row yet gets one minted on this
-#       first owner action; a ref with no concierge runs on the site 404s.
-#     + GET  .../agent/{agent_id}/conversations — the agent-scoped union (D1): the
-#       concierge IS a normal agent, so its widgets' sites are unioned into one
-#       list, each item carrying site_id + site_name. ``widget_count`` / ``sites``
-#       are the positive binding signal (an ordinary agent answers 200 with 0).
-#   Snooze expiry is computed on READ in the store, so a snooze always ends on
-#   time with no sweeper. ``has_pending_action`` reuses the decision rows the
-#   Decisions list already reads — never a second query into Instinct.
-# Updated: 2026-07-30 (reply sources + articles) — visible grounding for the
-#   concierge. (1) ``concierge_chat`` now emits at most ONE ``event: sources``
-#   SSE frame ({"sources": [{title, url}]}, max 3, deduped by url) after the
-#   model stream completes and immediately BEFORE the terminal ``stream_end``
-#   frame. Attribution is deliberately APPROXIMATE (Crisp-style): a server-side
-#   KB search of the visitor's message against the SAME ``pocket:<pocket_id>``
-#   scope the concierge run reads, filtered to the articles the site's page sync
-#   produced (``Site.kb_article_ids``) and mapped back to public page URLs via
-#   the ``site-<slug>`` article-id convention — NOT an exact tool trace. The
-#   search runs CONCURRENTLY with the model stream so it adds ~0ms; fail-soft
-#   (any error / timeout emits nothing). (2) GET /paw-bar/articles — a public
-#   listing of the site's synced KB pages ({title, url, snippet ≤160}), capped
-#   at 20, behind the SAME ``_front_gate_for_key`` chain as chat (404 → 429 →
-#   401 → 403); no injection screen because there is no free text. The shared
-#   front-gate now resolves via ``resolve_site_key_with_site`` and hands back
-#   the Site too, so articles (and any future public read) can use owner-set
-#   Site fields without a second query.
-# Updated: 2026-07-30 (async decision delivery) — added POST
-#   /paw-bar/decision-contact: a visitor whose request is still PENDING leaves
-#   an optional email before closing the tab; the delivery hook later emails
-#   them the same customer-facing reply the poll returns. Same fail-closed
-#   armor as chat/action via the shared ``_front_gate_for_key``; email is
-#   validated (RFC-ish regex + 254 cap → 422), stamped onto PENDING rows only,
-#   and NEVER echoed back on any public read (the poll response omits it).
-# Updated: 2026-07-30 (feat/paw-bar-autoembed) — added GET /paw-bar/widget.js, the
-#   PUBLIC loader route. The glass bar could only ever be embedded by hand, and the
-#   snippet the dashboard printed pointed at ``https://pp.pocketpaw.dev/widget.js``
-#   — a placeholder host nobody provisioned, so even a pasted snippet 404'd. There
-#   was no way to load the bar from anywhere. This route serves the loader bundle
-#   off the SAME origin as the rest of the API, which is what lets ``sites.service``
-#   embed it into a published site automatically (see ``paw_bar/embed.py``). The
-#   file is resolved by ``paw_bar_widget_file()``: ``PAW_BAR_WIDGET_JS`` when set,
-#   else the copy vendored in this package (``static/paw-bar.js``) so the route
-#   resolves on any machine rather than depending on a sibling checkout. A missing
-#   bundle returns a clean 404 naming the env var, never a stack trace. PUBLIC by
-#   design and deliberately tenant-BLIND: it is a world-visible script served
-#   byte-identically to every visitor of every site, so it takes no key, reads no
-#   Site, and carries nothing tenant-specific — the per-site config rides on the
-#   embedding ``<script>`` tag's data attributes, and the credential check happens
-#   downstream at /paw-bar/frame.
-# Updated: 2026-07-29 (concierge conversation memory) — a concierge turn is no
-#   longer answered cold. ``concierge_chat`` built its ``RunSpec`` with
-#   ``history=[]``, so the agent forgot the visitor's name between one message and
-#   the next: the visitor is anonymous and has no ``Message`` rows, so the authed
-#   surfaces' ``load_history_for_scope`` had nothing to read. The stored run docs
-#   (``user_text`` + ``partial_text``, from the transcript work below) are now ALSO
-#   the memory. (1) ``_concierge_runs_for_visitor`` extracts the (workspace,
-#   context_type, scope_id, user_id) query that ``_load_transcript`` already used,
-#   so the owner's transcript read and the agent's rehydration share ONE definition
-#   of "this visitor's turns" — per-visitor, per-site, per-tenant isolation lives in
-#   exactly one place. (2) ``_load_concierge_history`` shapes those rows into
-#   ``[{"role","content"}]`` oldest-first (the shape ``load_history_for_scope``
-#   returns), bounded by ``_HISTORY_TURN_CAP`` exchanges / ``_HISTORY_MESSAGE_CHARS``
-#   per line / ``_HISTORY_TOTAL_CHARS`` overall — fitted newest-first so the budget
-#   drops the OLDEST turns and the replay stays contiguous. Failure-soft: a read
-#   error answers without memory instead of 500-ing the visitor. (3) The read
-#   happens BEFORE ``create_run`` writes this turn's doc, so the current message
-#   rides in ``content`` exactly once. (4) Gated on the SAME
-#   ``concierge_store_transcripts`` toggle as the write — retention off means no
-#   memory, which is the owner's privacy choice working rather than a gap to route
-#   around.
-# Updated: 2026-07-26 (site knowledge sync) — two owner endpoints over the site's
-#   own knowledge: GET /paw-bar/admin/site/{id}/knowledge reports how many articles
-#   the concierge can quote and how the last sync went, and POST
-#   .../knowledge/sync re-reads the site's pages into pocket:<pocket_id> (the ONE
-#   scope a concierge reads) without needing a re-publish. The sync also runs
-#   automatically on publish and on agent provisioning; this is the manual handle.
-#   The read gates on paw_bar.read, the sync on the new paw_bar.manage — both ADMIN,
-#   but a mutation that spends compute does not ride a read gate. The sync is
-#   awaited here (the owner clicked a button and wants the result) while the
-#   automatic triggers are backgrounded.
-# Updated: 2026-07-26 (concierge transcripts) — the visitor half of a conversation
-#   is now written down, so an owner's transcript is a dialogue instead of the
-#   agent talking to itself. (1) concierge_chat resolves the embed key through
-#   ``resolve_site_key_with_site`` (same gates, hands back the Site the gate
-#   already loaded) and sets ``RunSpec.persist_user_text`` — the visitor's message,
-#   capped at ``_STORED_USER_TEXT_CHARS``, and ONLY when the site's
-#   ``concierge_store_transcripts`` is on. The agent always receives the full
-#   message; the toggle governs storage, not the answer. (2) ``_load_transcript``
-#   emits the user turn (``ChatRunDoc.user_text``, stamped at run creation) before
-#   the assistant turn (``partial_text``, stamped at completion); either may be
-#   absent and the other still renders, so a retention-off site reads exactly as it
-#   did before. (3) the conversations list falls back to the visitor's question
-#   when a run produced no reply, instead of rendering a blank row. (4) the
-#   settings GET/PATCH carry ``concierge_store_transcripts``. Turning the toggle
-#   off stops collection on the next message; it does NOT purge stored lines.
-# Updated: 2026-07-23 (feat/site-dedicated-agent) — auto-provision a DEDICATED
-#   concierge agent per site. (1) create_widget: when the request carries NO
-#   agent_id and the pocket resolves to a published Site, provision + bind one
-#   dedicated agent after insert (via agent_provisioning.provision_widget_on_create)
-#   and return the widget with agent_id set; a plain (non-site) widget stays unbound;
-#   FAILURE-SOFT (a provision error logs + returns the widget unbound, never 500s
-#   the create). A manual agent_id is honored and never replaced. (2)
-#   update_site_concierge_settings: ANY PATCH that sets concierge_enabled=true
-#   provisions the site's widget when it is still unbound (not only a false->true
-#   transition — the E2 one-click "create dedicated agent" re-PATCHes enabled=true
-#   on an already-enabled site as its provision hook), via
-#   provision_on_concierge_enable; idempotent + a no-op on a bound widget; also
-#   failure-soft. (3) _pawbar_frame_config now carries ``starters`` (the bound
-#   agent's conversation starters, capped 4, empty default) — the owner preview
-#   frame threads the bound agent's starters (via _bound_agent_starters); the public
-#   frame passes []. (4) GET /paw-bar/admin/site/{id}/overview's widget block now
-#   carries ``agent_name`` (the bound agent's display name, resolved via the agents
-#   service) so the E2 dashboard card can show the concierge name + detect the
-#   "<x> Concierge" dedicated pattern; empty when unbound or the agent no longer
-#   resolves (a dangling agent_id degrades to absent, never 500s the overview). The
-#   ASG-1 identity fields (welcome_message/conversation_starters) and agent free-form
-#   tags are ABSENT on this branch, so their seeding degrades to a graceful no-op
-#   (the unbound-chat 409 invariant is unchanged).
-# Updated: 2026-07-17 (D5 owner preview frame) — added GET
-#   /paw-bar/admin/site/{site_id}/preview-frame → the concierge bar frame HTML for
-#   the OWNER to test inside the dashboard. SESSION-authed (paw_bar.read role gate)
-#   sibling of the public /paw-bar/frame: REUSES ``_pawbar_bootstrap_html`` + a new
-#   shared ``_pawbar_frame_config`` builder (the public frame now calls the same
-#   builder — behavior unchanged, just no forked config dict). Two differences from
-#   the public frame: (1) CSP ``frame-ancestors`` = the dashboard origin from the new
-#   ``PAWBAR_DASHBOARD_ORIGIN`` env (default http://localhost:5173), sanitized to a
-#   single host[:port] — never the Site allowlist, never ``*``/Origin/Referer; (2)
-#   served REGARDLESS of ``concierge_enabled`` so a paused bar can be previewed
-#   (chat/action still obey the kill switch, unchanged). The public visitor frame's
-#   security (CSP from allowed_origins, kill-switch 403) is untouched.
-# Updated: 2026-07-17 (D2 conversation transcript) — added GET
-#   /paw-bar/admin/site/{site_id}/conversations/{customer_ref} → {customer_ref,
-#   messages:[{role,content,created_at}], count}. Same role gate (paw_bar.read) +
-#   site→widget→pocket resolution as the other reads; the transcript is the
-#   concierge ``ChatRunDoc`` runs for (pocket, customer_ref), most-recent 200,
-#   oldest-first; 400 on a bad customer_ref, 404 when the ref has no conversation
-#   here. (The v1 caveat that every turn was role "assistant" no longer holds —
-#   see the 2026-07-26 entry above; visitor lines are stored when the site's
-#   retention toggle allows.)
-# Updated: 2026-07-16 (D2 security review — role gate + empty-pocket guard) —
-#   the four D2 reads now gate on ``require_action("paw_bar.read")`` (ADMIN — the
-#   caller's WORKSPACE ROLE), NOT the coarse ``require_scope("admin")`` that
-#   admitted any authenticated dashboard user (a member/viewer could read another
-#   owner's visitor conversations). The role check binds to the SESSION workspace
-#   (``workspace_dep=current_workspace_id``), the same one the reads scope data to,
-#   so tenancy stays session-derived. Also ``_resolve_site_and_widget`` now returns
-#   no widget on an empty ``Site.pocket_id`` (finding #2 — an empty pocket_id would
-#   otherwise widen ``list_widgets`` and resolve a sibling's widget).
-# Updated: 2026-07-16 (Paw Bar concierge dashboard reads, D2) — added four OWNER
-#   aggregation reads for the per-site Concierge dashboard, all under
-#   /paw-bar/admin/site/{site_id}/*, role-gated (``require_action("paw_bar.read")``)
-#   + workspace-scoped: (1) GET /overview — {widget, enabled, greeting, counts} with
-#   cheap COUNT/distinct counters; (2) GET /conversations — recent concierge
-#   ``ChatRunDoc`` runs grouped by customer_ref (LISTABLE via the run model's
-#   (workspace, context_type, scope_id, createdAt) index; bounded scan + optional
-#   cursor); (3) GET /decisions — the site widget's paw_bar ``DecisionStatus`` rows
-#   (``WHERE widget_id = ?``); (4) GET /handoffs — ``_paw_handoffs`` reserved Fabric
-#   objects scoped to the widget (no producer yet → empty in v1). Tenancy runs at
-#   TWO gates: the Site is loaded workspace-scoped (cross-tenant id → 404), then its
-#   paw-bar widget is resolved from ``Site.pocket_id`` ALSO workspace-scoped; the
-#   decisions/conversations/handoffs filters then bind to THAT widget/pocket — never
-#   pocket-wide or workspace-wide — so a sibling site or a second widget in the same
-#   workspace can never appear (the leak surface the security review checks).
-#   Decisions read the singleton ``DecisionStatus`` table (the 1:1 mirror of the
-#   Instinct proposals) rather than the Instinct store directly, because paw-bar
-#   stamps the Instinct row's in-row ``workspace_id`` with the widget OWNER, not the
-#   physical workspace, and the Instinct proposal's physical file is
-#   ContextVar-dependent — the DecisionStatus table has neither hazard.
-# Updated: 2026-07-16 (Paw Bar concierge settings + kill switch, D1 / SS-6) — the
-#   owner's on/off toggle + greeting. (a) GET /paw-bar/frame now refuses (403
-#   ``concierge_disabled``) when the resolved Site has ``concierge_enabled=False``,
-#   mirroring the empty-allowlist 403; chat + action/cart get the SAME 403 via
-#   ``resolve_site_key`` (the shared resolver), so all three public entry points fail
-#   closed on the kill switch, re-read per request. (b) The frame's ``window.__PAWBAR__``
-#   config now carries ``greeting`` (``Site.concierge_greeting``) for the glass app.
-#   (c) New admin surface: GET + PATCH /paw-bar/admin/site/{site_id}/settings —
-#   ``require_scope("admin")`` + workspace-scoped (cross-tenant id → 404), reads/writes
-#   ONLY ``concierge_enabled`` + ``concierge_greeting`` on the Site doc (the natural
-#   owner key — the fields live on the Site, not the widget).
-# Updated: 2026-07-16 (C1 hardening) — (a) the shared front-gate now validates
-#   customer_ref against a charset+length bound (400) as its cheapest check;
-#   (b) GET /paw-bar/cart records a cart-read marker so read enumeration counts
-#   toward the rate limiter like writes; (c) concierge_chat threads the widget's
-#   catalog (capped at _MAX_PREAMBLE_CATALOG) onto surface_meta so the concierge
-#   preamble can name real products, not just the action verbs.
-# Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor commerce loop.
-#   (1) POST /paw-bar/action {key,w,customer_ref,verb,args} and GET /paw-bar/cart
-#   ?key&w&customer_ref — PUBLIC endpoints with the SAME armor as concierge chat,
-#   factored into ``_front_gate_for_key``: resolve_site_key fail-closed → dual-mode
-#   origin gate → within_rate_limit → widget↔workspace/pocket binding (403). Both
-#   call the SHARED ``actions.execute_action`` / cart store — never a parallel path.
-#   Args are structured (no free text), so no injection screen; the executor
-#   enforces the schema strictly. (2) PATCH /paw-bar/widgets/{id} — admin + owner-
-#   token, workspace-scoped (cross-tenant id → 404) partial update of agent_id +
-#   name/allowed_domains/rate limits (spec stays on update_spec). The paw-enterprise
-#   agent-binding UI drives it.
-# Updated: 2026-07-15 (glass frame asset versioning) — the frame HTML now appends
-#   ``?v=<newest bundle mtime>`` to the pawbar.js/css URLs (``_asset_version``).
-#   The StaticFiles mount sends no Cache-Control, so browsers heuristically cache
-#   the bundle and pin embedders to a STALE app after a deploy (bit the first live
-#   demo). Versioned URLs bust every embedder's cache on deploy, no restart, no
-#   hard-reload. ``pawbar_app_dir()`` is now the shared dir resolver (imported by
-#   the cloud mount — same never-drift pattern as PAWBAR_APP_MOUNT).
-# Updated: 2026-07-15 (Paw Bar glass frame, A1) — the iframe FRAME endpoint + the
-#   CSP-based origin model. (1) GET /paw-bar/frame?key=<signed_key>[&w=&po=] serves
-#   the glass app document from OUR origin: it authenticates the embed key
-#   (``lookup_site_by_key`` — the SAME chain resolve_site_key runs), FAILS CLOSED on
-#   an empty ``allowed_origins`` (403 refuse-to-render), and emits
-#   ``Content-Security-Policy: frame-ancestors <Site.allowed_origins>`` so the
-#   browser refuses to render the iframe inside any non-allowlisted parent — THIS
-#   (not a per-request Origin header) becomes the embedder gate. The body seeds
-#   ``window.__PAWBAR__`` (JSON-safe, ``<``-escaped) before loading pawbar.js/css
-#   from a configurable StaticFiles mount (``PAWBAR_APP_MOUNT`` / ``PAWBAR_APP_DIR``,
-#   wired in cloud/__init__.py). No ``X-Frame-Options`` — it is OBSOLETE beside
-#   frame-ancestors and a conflicting XFO:DENY would block the frame. (2) The
-#   /paw-bar/chat origin check is now DUAL-MODE: an inline/legacy widget request is
-#   still gated against ``Site.allowed_origins`` (fail-closed, via resolve_site_key),
-#   while an iframe-mode request (Origin == our ``PAWBAR_FRAME_ORIGIN``) is accepted
-#   because the embedder was already gated by the frame CSP at render time. The old
-#   step-2 ``_origin_allowed(widget, ...)`` footgun (empty widget.allowed_domains =
-#   allow-all) NO LONGER gates chat — the chat path converges on the fail-closed
-#   ``Site.allowed_origins`` allowlist. RESIDUAL (unchanged): CSP binds BROWSERS
-#   only; the world-visible key + a raw curl POST was always possible — the real
-#   controls remain the rate-limit + injection screen + zero-authority CONCIERGE
-#   scope. ``_origin_allowed`` stays in use for the spec/ingest/decision endpoints.
-# Updated: 2026-07-14 (Paw Bar concierge seam, T2) — added POST /paw-bar/chat, a
-#   PUBLIC, anonymous, streaming (SSE) concierge chat endpoint. Front-gate:
-#   _origin_allowed (403) → within_rate_limit (429) → injection-screen the
-#   free-text message (400 on HIGH, via the new _screen_message_for_injection).
-#   Auth: resolve_site_key (401/403 fail-closed) — the embed key is the ONLY
-#   credential. Binds the widget to the RESOLVED key's workspace+pocket (403 on
-#   mismatch — finding #2, no sibling-pocket reach), requires a bound agent (409),
-#   then dispatches a CONCIERGE-scoped RunSpec over the SAME machinery the authed
-#   chat uses (create_run + executor.submit + execute_run + transport) and relays
-#   its frames as SSE. The tool lockdown + KB pocket-scoping live in the CONCIERGE
-#   SurfaceProfile + scope, not here. Refactored the injection screen into the
-#   shared _scan_text_is_safe primitive (event ingest + chat both reuse it).
-# Updated: 2026-07-14 (concierge connector lockdown) — concierge_chat refuses
-#   fail-closed (409) when the pocket exposes any connector (checked via
-#   list_pocket_connectors), because _CONCIERGE_DENY cannot strip dynamic
-#   per-workspace composio connector tool ids. Pilot posture; the GA fix is an
-#   untrusted-mode in claude_sdk (see the guard's TODO(GA-blocker)).
-# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — CreateWidgetRequest accepts
-#   an optional agent_id; create_widget stamps it onto the PawBarWidget so a
-#   concierge widget is bound to the agent that answers its chats. Purely
-#   additive — omitting it keeps the existing "" (unbound) behavior.
-# Updated: 2026-07-11 (W4a spec revisions) — POST /paw-bar/widgets/{id}/spec/
-#   rollback (admin + owner-token, workspace-scoped like update_spec) restores
-#   the latest archived spec revision; 409 when no revision exists.
-# Updated: 2026-07-11 (W4a tenancy seam) — (1) Admin CRUD (create / list /
-#   update-spec / rotate-token / delete) now threads the caller's active
-#   workspace via Depends(current_workspace_id): create stamps the row, the
-#   rest scope lookups + mutations so a cross-tenant widget id 404s and never
-#   mutates. (2) Public-path fix (the cross-tenant Fabric leak): ingest stays
-#   token-only but derives the tenant from the widget ROW —
-#   _apply_event_mapping now calls get_fabric_store(workspace_id=
-#   widget.workspace_id or None) instead of the bare shared store; legacy
-#   unstamped rows ('' → None) keep the old single-tenant behavior.
-# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (routes /paw-print→/paw-bar,
-#   header X-Paw-Print-Token→X-Paw-Bar-Token, tag PawPrint→PawBar, source_connector
-#   "paw_print"→"paw_bar"). Hard-rename — widget has zero deployments. The separate
-#   one-word audit feed (past-tense record) is a DIFFERENT feature, unaffected.
-# Created: 2026-04-13 (Move 3 PR-B) — Spec serving (public, CORS-gated),
-# widget CRUD (owner-authed via access_token), event ingest (rate-limited,
-# domain-enforced, injection-screened, Fabric-mapped). The widget.js bundle
-# built in PR-C consumes these endpoints.
-# Updated: 2026-05-30 — Replaced the always-None Guardian no-op screen
-# (getattr(guardian, "check_input") — GuardianAgent never exposed that
-# method, so the check was a permanent accept-all) with the real
-# InjectionScanner. The stringified event payload is now heuristically
-# screened and dropped on a HIGH-or-higher threat. Renamed the helper to
-# _screen_event_for_injection and the rejection reason to
-# "injection_rejected".
-# Updated: 2026-06-10 (W0b security fix) — Closed an unauthenticated
-# access-token leak on the widget-management surface. (1) Widget CRUD
-# (create / list / update-spec / delete) now requires a fully-authenticated
-# dashboard caller via Depends(require_scope("admin")); previously these
-# routes had NO route-level auth, and the /api/v1/* mount is auth-OPTIONAL at
-# the middleware level, so an unauthenticated caller could reach them. (2) The
-# list and read responses now serialize PawBarWidgetPublic, which omits
-# access_token — the per-widget owner credential no longer leaves the server
-# in a list/read payload. The token is still returned by the explicit,
-# authenticated create + rotate-token paths so an owner can capture it once.
-# The public spec-serving and event-ingest endpoints stay unauthenticated by
-# design (origin/CORS-gated for the embedded widget bundle).
-# Updated: 2026-06-11 (gap2 — close the customer decision loop) — An accepted,
-# mapped customer event no longer dead-ends at a Fabric object: ingest now also
-# raises an Instinct proposal via decision_loop.propose_customer_decision and
-# parks a PENDING DecisionStatus row (best-effort — a loop failure never fails
-# the ingest response). Added a public, CORS-gated poll endpoint
-# (GET /paw-bar/events/{widget_id}/decision/{customer_ref}) so the rendered
-# widget can read the owner's decision back out — the back-half of the loop. The
-# approve/reject delivery hook lives in the instinct router (it owns the human
-# decision); see decision_loop.deliver_customer_decision.
 #
-# Updated 2026-08-26 (feat/concierge-conversation-quota): POST /paw-bar/chat gained
-#   gate 7c — the site's MONTHLY CONVERSATION ALLOWANCE (403
-#   ``concierge_quota_exceeded``). The ``staff`` tier sells "200 conversations a
-#   month" and until now nothing counted and nothing refused.
+# PUBLIC (anonymous visitors; the Site's ``signed_key`` is the only credential):
+#   GET /paw-bar/frame (the glass app document: CSP frame-ancestors from the Site's
+#   ``allowed_origins`` plus the dashboard origin, CSP ``sandbox`` from
+#   ``PAWBAR_FRAME_SANDBOX``, no flag grants top navigation; 403 on an empty
+#   allowlist or a switched-off concierge), GET /paw-bar/widget.js (the
+#   tenant-blind loader), POST /paw-bar/chat (SSE), POST /paw-bar/action and
+#   GET /paw-bar/cart, POST /paw-bar/request-human, POST /paw-bar/decision-contact,
+#   the decision and messages polls, articles, the visitor's own conversations,
+#   and the legacy spec + event ingest.
+#   ``_front_gate_for_key`` is the shared gate, cheapest first: per-IP bucket ->
+#   customer_ref charset/length (400) -> widget exists (404) -> rate limit (429)
+#   -> key + dual-mode origin (401/403; an iframe request from our frame origin was
+#   gated by the frame CSP) -> widget bound to the key's workspace AND pocket (403).
+#   Chat adds the injection screen on the message, the monthly conversation quota
+#   (new conversations only, checked before the row is minted; a v2 site degrades
+#   to a handoff instead of 403), and the human-takeover mute (checked before any
+#   run). It then answers through the v2 runner (``concierge_runtime``) or the
+#   legacy agent run, per ``Site.concierge_runtime``. The visitor stream is
+#   default-deny (``_visitor_frame``); visitor reads never carry author_*, notes,
+#   tags or contact_email. POST /paw-bar/action runs the shared
+#   ``actions.execute_action`` with the gate's Site, which is what makes the
+#   built-in send_to_team reachable only here; a refusal's body ``detail`` is the
+#   outcome's structured detail when it has one, else its error code.
 #
-#   IT ONLY REFUSES A TURN THAT WOULD START A CONVERSATION. A thread already under
-#   way was counted when it began, and cutting it off part-way strands a visitor
-#   mid-sentence over a number they cannot see — which an owner reads as the bot
-#   breaking, not as a plan limit. That is why the check sits here, beside
-#   ``is_new_conversation``, and not in the shared key gate that runs every turn.
+# OWNER (session-authed; reads gate on ``paw_bar.read``, mutations on
+# ``paw_bar.manage``, both bound to the session workspace; another workspace's id
+# is a 404): /paw-bar/admin/site/{id}/ settings (partial PATCH of the concierge_*
+# switches and guided fields; ``embed_snippet`` only to a caller who can read the
+# site's pocket), concierge create/delete (the only path that creates one),
+# overview, stats (runs priced at the time they ran, via metering), conversations
+# (list, transcript, PATCH, reply = type-to-takeover), decisions, handoffs,
+# knowledge read/sync, preview-frame and widget spec; plus the bulk
+# POST /paw-bar/admin/sites/conversations. Tenancy runs at two gates: the Site is
+# loaded workspace-scoped, then its widget is resolved from ``Site.pocket_id`` (an
+# empty pocket_id resolves none). Widget CRUD (/paw-bar/widgets...) takes the same
+# role gates or the widget's owner token; list/read return ``PawBarWidgetPublic``.
 #
-#   It is placed BEFORE ``upsert_conversation_on_visitor_turn``, which is what
-#   mints the row: refusing after it would spend the allowance on a conversation
-#   nobody was allowed to have and carry the ghost into the next month.
+# Invariants: one definition of "this visitor's turns" (``_concierge_runs_for_visitor``)
+# and of which conversation a run belongs to (``_conversation_of_run`` /
+# ``_conversation_membership``) is shared by the transcript, the list and the
+# concierge's memory; times are compared as aware UTC with an ObjectId tie-break.
+# ``concierge_store_transcripts`` governs storing visitor text (and so the memory),
+# never the answer. Ledger beats and owner notifications are fail-soft and never
+# cost a visitor an answer.
 #
-#   The refusal has its OWN detail. A visitor sees the same silence as a disabled
-#   or unentitled concierge, but the three are different conversations in support.
+# Changes (2026-10-01, CN-7): the legacy event ingest interpolates mappings with
+# sites_capture.ingest.interpolate; the private _interpolate/_lookup copy and
+# _PLACEHOLDER_RE are gone. The origin policy here is unchanged (fails open).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -632,12 +64,21 @@ from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from pocketpaw.money import (
+    DEFAULT_EXPONENT,
+    MONEY_UNITS_HEADER,
+    client_sends_minor_units,
+    exponent,
+)
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.catalog_store import CatalogFull
 from pocketpaw.paw_bar.concierge_fields import (
     ConciergeAbout,
     ConciergeAvoidTopics,
@@ -648,21 +89,29 @@ from pocketpaw.paw_bar.concierge_fields import (
 )
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
+    MAX_SPEC_BYTES,
     ConversationState,
     DecisionState,
     OwnerMessageRole,
+    PawBarCatalogItem,
     PawBarEvent,
     PawBarEventMapping,
     PawBarSpec,
     PawBarWidget,
     PawBarWidgetPublic,
+    spec_bytes,
 )
 from pocketpaw.security.rate_limiter import RateLimiter
+from pocketpaw.sites_capture.ingest import interpolate
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
 from pocketpaw_ee.cloud._core.rate_limit import _client_ip
+from pocketpaw_ee.paw_bar.admit import admit as admit_event
 from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
 logger = logging.getLogger(__name__)
+# What the frozen public spec carries per catalog item: the item's own fields,
+# never a row's bookkeeping (position, source, origin, updated_at).
+_PUBLIC_CATALOG_FIELDS = set(PawBarCatalogItem.model_fields)
 
 # Role gate for the D2 concierge dashboard reads. ``require_action`` enforces the
 # caller's WORKSPACE ROLE against the ``paw_bar.read`` rule (ADMIN — owner/admin
@@ -682,11 +131,20 @@ _require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current
 
 router = APIRouter(tags=["PawBar"])
 
-_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
+# The frozen public ``GET /paw-bar/spec/{id}`` still carries ``spec.catalog`` for
+# the key-less ``src/`` widget: the catalog store's first this-many items.
+_PUBLIC_SPEC_CATALOG = 200
 
-# Cap the catalog threaded into the concierge preamble so a large catalog can't
-# bloat the prompt (C1). The full catalog is still enforced by the spec cap.
-_MAX_PREAMBLE_CATALOG = 50
+
+def _catalog_full(exc: CatalogFull) -> HTTPException:
+    return HTTPException(409, detail={"code": CatalogFull.code, "limit": exc.limit})
+
+
+def _check_spec_size(spec: PawBarSpec) -> None:
+    """422 ``spec_too_large`` past ``MAX_SPEC_BYTES``, measured without the
+    catalog (``spec_bytes``), on every spec write path."""
+    if spec_bytes(spec) > MAX_SPEC_BYTES:
+        raise HTTPException(422, "spec_too_large")
 
 
 def _store():
@@ -830,25 +288,79 @@ def pawbar_app_dir() -> Path:
     return Path(os.environ.get("PAWBAR_APP_DIR", str(Path.home() / ".pocketpaw" / "pawbar-app")))
 
 
-def _asset_version() -> str:
-    """Cache-busting version stamp for the glass app assets.
+# The two files ``_asset_version`` stamps. Only these may be served ``immutable``.
+_VERSIONED_ASSETS = ("pawbar.js", "pawbar.css")
+# (dir, stat signature) -> version, so the hash is recomputed only when a file changes.
+_asset_version_memo: tuple[tuple[Any, ...], str] | None = None
+# Max-age for an asset request WITHOUT the current ``v``: an old frame asking for
+# a stale version, a hand-typed URL, the source map. Short, like the loader.
+_ASSET_SHORT_MAX_AGE = 300
 
-    The StaticFiles mount serves pawbar.js/css with no ``Cache-Control``, so
-    browsers fall back to heuristic freshness and can pin an embedder to a STALE
-    bundle after a deploy (bit the first live demo: a sizing fix shipped but the
-    browser kept replaying the old JS). The frame HTML appends ``?v=<newest
-    mtime>`` to both asset URLs so every deploy mints new URLs and busts every
-    embedder's cache with no server restart and no manual hard-reload. Two
-    ``stat`` calls per frame render — negligible next to the DB key lookup.
-    Returns "0" when the bundle isn't dropped in yet (assets 404 either way).
+
+def _asset_version() -> str:
+    """Cache-busting version stamp for the glass app assets: a content hash.
+
+    The frame HTML appends ``?v=<this>`` to both asset URLs, and ``PawBarAssets``
+    sends ``Cache-Control: immutable`` for a year when a request carries the
+    CURRENT value. So ``v`` must change whenever the bytes change. It is a hash of
+    both files' contents, not their mtime: a deploy that preserves or normalises
+    mtimes (``cp -p``, ``rsync -a``, reproducible builds, two writes in one
+    second) would otherwise mint new bytes under an old ``v`` and pin them for a
+    year. The hash is memoised on the files' (mtime, ctime, size): ctime is in the
+    signature because a same-size write with a preserved mtime would otherwise
+    hit the memo and keep the old hash (on Linux every write bumps ctime and
+    ``utime`` cannot reset it; on Windows ctime is creation time, dev only). A
+    frame render costs two ``stat`` calls. Returns "0" when the bundle isn't dropped in yet
+    (assets 404 either way).
     """
-    newest = 0
-    for name in ("pawbar.js", "pawbar.css"):
+    global _asset_version_memo
+    base = pawbar_app_dir()
+    sig: list[Any] = [str(base)]
+    for name in _VERSIONED_ASSETS:
         try:
-            newest = max(newest, int((pawbar_app_dir() / name).stat().st_mtime))
+            st = (base / name).stat()
+            sig.append((name, st.st_mtime_ns, st.st_ctime_ns, st.st_size))
+        except OSError:
+            sig.append((name, None))
+    key = tuple(sig)
+    if _asset_version_memo is not None and _asset_version_memo[0] == key:
+        return _asset_version_memo[1]
+    h = hashlib.sha256()
+    found = False
+    for name in _VERSIONED_ASSETS:
+        try:
+            data = (base / name).read_bytes()
         except OSError:
             continue
-    return str(newest)
+        found = True
+        h.update(name.encode() + b"\0" + data + b"\0")
+    version = h.hexdigest()[:16] if found else "0"
+    _asset_version_memo = (key, version)
+    return version
+
+
+class PawBarAssets(StaticFiles):
+    """The StaticFiles mount for the glass app, with an explicit caching policy.
+
+    A request for ``pawbar.js`` / ``pawbar.css`` whose ``v`` query param equals the
+    CURRENT ``_asset_version()`` gets ``public, max-age=31536000, immutable``: that
+    URL can only ever name these bytes, because ``v`` is their content hash. Any
+    other request (no ``v``, a stale ``v``, any other file in the dir) gets a short
+    public max-age, so nothing can pin old bytes for long. Mounted by
+    ``ee/cloud/__init__.py``.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code not in (200, 304):
+            return response
+        v = parse_qs(scope.get("query_string", b"").decode("latin-1")).get("v", [""])[0]
+        current = _asset_version()
+        if path in _VERSIONED_ASSETS and current != "0" and v == current:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = f"public, max-age={_ASSET_SHORT_MAX_AGE}"
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -867,8 +379,21 @@ def _asset_version() -> str:
 # but a <script src> baked into a customer's deployed page has no version stamp we
 # control, so a long max-age would pin every embedder to whatever loader shipped on
 # the day their site was published. Five minutes keeps the edge useful and keeps a
-# fix at most one coffee away.
+# fix at most one coffee away. Revalidation after that is cheap: the bytes are held
+# in memory (``_widget_js_memo``, re-read only when the file's path, mtime, ctime or size
+# changes) and carry a strong ETag, so a browser's If-None-Match gets a bodiless 304.
 _WIDGET_JS_MAX_AGE = 300
+# (path, mtime_ns, ctime_ns, size, body, etag) of the last loader read. ctime is
+# there for the same reason as in ``_asset_version``'s signature.
+_widget_js_memo: tuple[str, int, int, int, bytes, str] | None = None
+
+
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    """RFC 9110 weak comparison of an If-None-Match header against ``etag``."""
+    if if_none_match.strip() == "*":
+        return True
+    tags = (t.strip() for t in if_none_match.split(","))
+    return any((t[2:] if t.startswith("W/") else t) == etag for t in tags)
 
 
 def paw_bar_widget_file() -> Path:
@@ -888,22 +413,33 @@ def paw_bar_widget_file() -> Path:
 
 
 @router.get("/paw-bar/widget.js")
-async def widget_js() -> Response:
+async def widget_js(request: Request) -> Response:
     """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
 
     No key, no Site read, no per-caller variation: this is a world-visible static
     script, and the credential (the embed key) is presented later by the iframe it
-    mounts, at ``/paw-bar/frame``. Read from disk per request rather than cached in
-    memory so replacing the file takes effect without a restart — the file is a few
-    KB and the OS page cache absorbs the repeat reads.
+    mounts, at ``/paw-bar/frame``. Held in memory and invalidated by a ``stat`` per
+    request (path, mtime, ctime, size), not only at startup: replacing the file, or
+    pointing ``PAW_BAR_WIDGET_JS`` somewhere else, still takes effect without a
+    restart, and a stat is far cheaper than the read it saves. A matching
+    ``If-None-Match`` gets a 304.
 
     A missing bundle is a clean 404 naming the env var that fixes it, not a
     FileNotFoundError escaping as an opaque 500: the operator seeing this is
     debugging why a live site shows no bar, and the message is the answer.
     """
+    global _widget_js_memo
     path = paw_bar_widget_file()
     try:
-        body = path.read_bytes()
+        st = path.stat()
+        memo = _widget_js_memo
+        sig = (str(path), st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+        if memo is not None and memo[:4] == sig:
+            body, etag = memo[4], memo[5]
+        else:
+            body = path.read_bytes()
+            etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+            _widget_js_memo = (*sig, body, etag)
     except OSError:
         logger.warning("paw-bar: loader bundle unavailable at %s", path)
         raise HTTPException(
@@ -914,10 +450,13 @@ async def widget_js() -> Response:
                 "pocketpaw_ee/paw_bar/static/paw-bar.js."
             ),
         ) from None
+    headers = {"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}", "ETag": etag}
+    if _etag_matches(request.headers.get("if-none-match", ""), etag):
+        return Response(status_code=304, headers=headers)
     return Response(
         content=body,
         media_type="application/javascript; charset=utf-8",
-        headers={"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}"},
+        headers=headers,
     )
 
 
@@ -1278,6 +817,7 @@ def _pawbar_frame_config(
     greeting: str,
     starters: list[str] | None = None,
     appearance: ConciergeAppearance | None = None,
+    concierge_name: str = "",
     preview: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
@@ -1300,6 +840,10 @@ def _pawbar_frame_config(
     renders the defaults, which reproduce the look every bar had before this
     existed — so a Site nobody has styled is byte-identical to before apart from
     the token map now carrying the base values explicitly.
+
+    ``concierge_name`` is the owner's guided name (``Site.concierge_name``). The
+    header shows the look editor's own ``agent_name`` when set, else this name,
+    so a concierge named in setup is not headed "Concierge" by the widget.
     """
     look = appearance or ConciergeAppearance()
     return {
@@ -1342,7 +886,7 @@ def _pawbar_frame_config(
         "theme": look.surface_mode,
         # How the docked bar rests — narrow-and-widens-on-hover, or full width.
         "barResting": look.bar_resting,
-        "agentName": look.agent_name,
+        "agentName": look.agent_name or (concierge_name or "").strip(),
         "agentSubtitle": look.agent_subtitle,
         "agentAvatar": look.agent_avatar_url,
         "avatars": list(look.team_avatar_urls),
@@ -1471,6 +1015,34 @@ def _dashboard_origin() -> str:
     return os.environ.get("PAWBAR_DASHBOARD_ORIGIN", "").strip() or "http://localhost:5173"
 
 
+# How long a browser may reuse a rendered public frame, and how long this process
+# reuses a successful key -> Site lookup for it. The iframe reloads on every host-page
+# navigation, so without these each customer page view costs a Mongo read and a full
+# render. ``private`` because the frame is safe to cache per browser but not in a
+# shared cache (see ``frame``). The cost is lag: an owner turning the concierge off,
+# an entitlement lapsing, an appearance edit, or a key revocation reaches an open
+# frame within ``_FRAME_SITE_TTL_S`` + ``_FRAME_MAX_AGE_S`` (90 s worst case).
+# ``POST /paw-bar/chat`` does its own uncached lookup, so it refuses immediately.
+_FRAME_MAX_AGE_S = 60
+_FRAME_SITE_TTL_S = 30.0
+# signed_key -> (monotonic expiry, Site). Successes only: an unknown key raises and
+# is never stored, so a caller spraying random keys cannot grow this.
+_frame_site_memo: dict[str, tuple[float, Any]] = {}
+
+
+async def _frame_site_lookup(key: str) -> Any:
+    """``lookup_site_by_key`` memoised for ``_FRAME_SITE_TTL_S`` (the frame only)."""
+    from pocketpaw_ee.cloud.auth import site_keys
+
+    now = time.monotonic()
+    hit = _frame_site_memo.get(key) if isinstance(key, str) else None
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    site = await site_keys.lookup_site_by_key(key)
+    _frame_site_memo[key] = (now + _FRAME_SITE_TTL_S, site)
+    return site
+
+
 @router.get("/paw-bar/frame")
 async def frame(
     request: Request,
@@ -1501,11 +1073,12 @@ async def frame(
     the real controls stay the rate-limit + injection screen + the zero-authority
     CONCIERGE scope. CSP does not close the curl path.
     """
-    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, lookup_site_by_key
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available
 
     # (1) Authenticate the embed key. A missing/blank ``key`` query param is a
     # too-short key → 401 (never a 422), so the refusal is uniform with the chat path.
-    site = await lookup_site_by_key(key)
+    # Memoised for ``_FRAME_SITE_TTL_S``; failures are never memoised.
+    site = await _frame_site_lookup(key)
 
     # (1b) Kill switch (D1 / SS-6): the owner's ``concierge_enabled`` toggle. When
     # off, refuse to RENDER — but this response body lands inside a visible
@@ -1513,8 +1086,9 @@ async def frame(
     # (the 2026-07-30 rig showed literal {"detail":"concierge_disabled"} on the
     # page). Return the invisible shell: a blank document that tells the loader
     # to remove the iframe (``pawbar:dead``). Still 403 — curl callers see the
-    # status; browsers see nothing. Re-read per request (``lookup_site_by_key``
-    # does a fresh find_one), so toggling off silences the frame immediately.
+    # status; browsers see nothing. The Site comes from ``_frame_site_lookup``, so
+    # toggling off silences a frame within its TTL plus the browser's max-age
+    # (the dead shell itself is ``no-store``, so turning it back on is not delayed).
     # Distinct from ``revoked`` (which cuts the KEY at 401 inside
     # lookup_site_by_key — an api-shaped JSON 401 stays correct there: a revoked
     # key means the embed script itself is stale/removed on next publish).
@@ -1555,18 +1129,22 @@ async def frame(
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
         starters=await _time_boxed_frame_starters(site, w),
-        # Read off the Site every request, never cached, so an owner saving a
-        # colour sees it on the next reload rather than after a redeploy.
+        # Read off the (briefly memoised) Site, so an owner saving a colour sees
+        # it within ``_FRAME_SITE_TTL_S`` + ``_FRAME_MAX_AGE_S``, not after a redeploy.
         appearance=getattr(site, "concierge_appearance", None),
+        concierge_name=getattr(site, "concierge_name", "") or "",
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
         content=html,
         headers={
             "Content-Security-Policy": _frame_csp(csp),
-            # The embed key is baked into the loader HTML per-embedder; the frame
-            # doc itself must not be cached across keys/parents by a shared proxy.
-            "Cache-Control": "no-store",
+            # Every input that varies this document (key, w, po) is in the URL;
+            # the rest is the Site's own state. No cookie, no per-visitor field,
+            # no CSP nonce. So a browser may reuse it. ``private``, never
+            # ``public``: a shared proxy must still not store it, which was the
+            # reason this header was ``no-store`` before.
+            "Cache-Control": f"private, max-age={_FRAME_MAX_AGE_S}",
         },
     )
 
@@ -1696,8 +1274,14 @@ async def create_widget(
     )
     # No agent is provisioned here, even on a site's pocket (CR-12): a concierge
     # exists only once its owner creates one via POST .../concierge. A widget is
-    # a bar, not a decision to publish an assistant.
-    return await _store().create_widget(widget)
+    # a bar, not a decision to publish an assistant. The spec is held to the same
+    # size cap as a spec PATCH, and a (deprecated) catalog in it to the item cap.
+    _refuse_reserved_verbs(req.spec)
+    _check_spec_size(req.spec)
+    try:
+        return await _store().create_widget(widget)
+    except CatalogFull as exc:
+        raise _catalog_full(exc) from None
 
 
 @router.get(
@@ -1744,6 +1328,7 @@ async def update_spec(
     widget_id: str,
     spec: PawBarSpec,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidgetPublic:
     # W4a — the lookup is workspace-scoped: another tenant's widget id resolves
@@ -1752,8 +1337,32 @@ async def update_spec(
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    _refuse_reserved_verbs(spec)
+    _refuse_outdated_money_client(spec, x_paw_money_units)
     updated = await _save_widget_spec(widget_id, spec, workspace_id)
     return PawBarWidgetPublic.from_widget(updated)
+
+
+def _refuse_reserved_verbs(spec: PawBarSpec) -> None:
+    """422 ``reserved_verb`` when an owner saves a spec declaring a built-in verb
+    (``send_to_team``). On load such an action is dropped instead (see
+    ``PawBarSpec._drop_reserved_verbs``); a save is where the owner can fix it."""
+    if spec.reserved_verbs_dropped:
+        raise HTTPException(status_code=422, detail="reserved_verb")
+
+
+def _refuse_outdated_money_client(spec: PawBarSpec, money_units: str | None) -> None:
+    """409 ``currency_units_client_outdated`` when a client that predates ISO 4217
+    minor units (no ``X-Paw-Money-Units: iso4217``) saves a catalog holding a
+    currency whose exponent is not 2. Such a client writes major × 100, so its
+    yen and dinar prices would be stored 100× / 10× off. Refused, not converted:
+    an old client also re-sends prices it READ in minor units, and converting
+    those would shift them a second time. Two-decimal catalogs are the same in
+    both conventions and pass."""
+    if client_sends_minor_units(money_units):
+        return
+    if any(exponent(item.currency) != DEFAULT_EXPONENT for item in spec.catalog):
+        raise HTTPException(status_code=409, detail="currency_units_client_outdated")
 
 
 async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str) -> PawBarWidget:
@@ -1761,8 +1370,19 @@ async def _save_widget_spec(widget_id: str, spec: PawBarSpec, workspace_id: str)
     ``update_spec`` and the session-authed admin/site route. ``store.update_spec``
     archives the prior spec as a revision in the same transaction, so either
     caller leaves a rollback point. Workspace-scoped; a widget that vanished
-    between the caller's lookup and this write is a 404."""
-    updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
+    between the caller's lookup and this write is a 404.
+
+    422 ``spec_too_large`` past ``MAX_SPEC_BYTES`` (catalog excluded). A body that
+    still carries a non-empty ``catalog`` (an older editor) has those items ADDED
+    to the catalog store (upserted by id, nothing deleted, so an editor that
+    loaded an empty catalog cannot wipe it) and is stored without it; an empty or
+    absent one leaves the catalog alone. 409 ``catalog_full`` when the added
+    items would pass the cap. Callers run ``_refuse_outdated_money_client`` first."""
+    _check_spec_size(spec)
+    try:
+        updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
+    except CatalogFull as exc:
+        raise _catalog_full(exc) from None
     if updated is None:
         raise HTTPException(404, "Widget not found")
     return updated
@@ -1821,12 +1441,17 @@ async def rollback_spec(
     this endpoint restores the most recent one. The restore is itself an
     update that archives the current spec, so a rollback is reversible.
     Auth mirrors ``update_spec``: admin session + per-widget owner token,
-    with the lookup workspace-scoped (cross-tenant id → 404).
+    with the lookup workspace-scoped (cross-tenant id → 404). The revision's
+    ``catalog`` is ignored (the catalog is not versioned with the spec), and a
+    revision past ``MAX_SPEC_BYTES`` is 422 ``spec_too_large``.
     """
     widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
+    latest = await _store().latest_spec_revision(widget_id)
+    if latest is not None:
+        _check_spec_size(latest[1])
     restored = await _store().rollback_spec(widget_id, workspace_id=workspace_id)
     if restored is None:
         raise HTTPException(409, "No spec revision to roll back to")
@@ -1935,6 +1560,9 @@ class ConciergeSettingsUpdate(BaseModel):
     # CR-2 (2026-09-28): "Answer with code examples from your docs". On, a v2
     # reply may show a code block found verbatim in the site's knowledge.
     concierge_allow_doc_code: bool | None = None
+    # Leads from conversation: on, the v2 concierge may offer a send_to_team lead
+    # card and the visitor's Send writes a Lead. Default on.
+    concierge_lead_capture: bool | None = None
     # CR-4 (2026-09-28): the guided fields. Caps and shapes are in
     # ``pocketpaw.paw_bar.concierge_fields``; each value is normalized (one line,
     # no control characters) and refused with a 422 past its cap. Clear a text
@@ -1980,6 +1608,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
     concierge_allow_doc_code: bool = False
+    concierge_lead_capture: bool = True
     # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
     concierge_name: str = ""
     concierge_tone: ConciergeTone | None = None
@@ -2051,7 +1680,7 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
     still opens; the snippet is a convenience, the settings are the point.
     """
     try:
-        from pocketpaw_ee.cloud.auth.site_keys import concierge_available, concierge_exists
+        from pocketpaw_ee.cloud.auth.site_keys import concierge_exists, concierge_plan_entitled
         from pocketpaw_ee.cloud.pockets import service as pockets_service
         from pocketpaw_ee.paw_bar import embed
         from pocketpaw_ee.sites.service import _capture_base
@@ -2065,7 +1694,8 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
             site_key=str(getattr(site, "signed_key", "") or ""),
             api_base=_capture_base(),
             concierge_enabled=bool(getattr(site, "concierge_enabled", False)),
-            concierge_entitled=bool(concierge_available(site)),
+            # The PLAN half only; the switch is passed on its own just above.
+            concierge_entitled=bool(concierge_plan_entitled(site)),
             concierge_exists=concierge_exists(site),
         )
     except Exception:  # noqa: BLE001 — the settings response must not 500 on the bar
@@ -2103,6 +1733,8 @@ async def _concierge_settings_response(
         # getattr for the same reason: a row older than the switch reads legacy.
         concierge_runtime=_site_concierge_runtime(site),
         concierge_allow_doc_code=getattr(site, "concierge_allow_doc_code", False) is True,
+        # Only an explicit False turns it off (a row older than the field reads on).
+        concierge_lead_capture=getattr(site, "concierge_lead_capture", True) is not False,
         # getattr again: rows older than the guided fields read as unset.
         concierge_name=getattr(site, "concierge_name", "") or "",
         concierge_tone=getattr(site, "concierge_tone", None),
@@ -2179,11 +1811,18 @@ async def update_site_concierge_settings(
     # agent whenever it set concierge_enabled=true; turning a switch on is not
     # creating a concierge, and on a site with none the switch stays inert
     # (``concierge_available`` also requires the create marker).
+    previous_name = getattr(site, "concierge_name", "") or ""
     for name in req.model_fields_set:
         value = getattr(req, name)
         if value is not None:
             setattr(site, name, value)
     await site.save()
+    # A legacy concierge answers through its dedicated agent: carry a new name
+    # onto it (only where its name and persona are still the generated ones).
+    if (getattr(site, "concierge_name", "") or "") != previous_name:
+        from pocketpaw_ee.paw_bar.agent_provisioning import sync_concierge_identity
+
+        await sync_concierge_identity(site, previous_name)
     return await _concierge_settings_response(site, workspace_id, str(user.id))
 
 
@@ -2333,6 +1972,7 @@ async def _purge_concierge_runs(pocket_id: str, workspace_id: str) -> None:
 async def update_site_widget_spec(
     site_id: str,
     req: AdminWidgetSpecUpdate,
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     workspace_id: str = Depends(current_workspace_id),
 ) -> AdminWidgetSpecResponse:
     """Save the site's concierge widget spec from the owner dashboard.
@@ -2344,10 +1984,14 @@ async def update_site_widget_spec(
     malformed site id and a site with no concierge widget are both 404. The write
     is the shared ``_save_widget_spec``, so the prior spec is archived as a
     revision exactly as the token route does. The token routes are unchanged.
+    A catalog with a non-2-decimal currency needs ``X-Paw-Money-Units: iso4217``
+    (409 ``currency_units_client_outdated`` otherwise), as on the token route.
     """
     _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
         raise HTTPException(status_code=404, detail="no_concierge_widget")
+    _refuse_reserved_verbs(req.spec)
+    _refuse_outdated_money_client(req.spec, x_paw_money_units)
     # The widget is chosen by the SITE, so the spec's own identity keys are pinned
     # to that widget's row, not taken from the body. Overwritten, not rejected: the
     # editor spreads the spec it loaded, and a provisioned spec was minted with
@@ -2438,6 +2082,12 @@ class ConciergeKnowledgeResponse(BaseModel):
     connection and never finished answering, so the crawl was abandoned on its
     wall clock), ``crawl_failed``, and ``crawl_partial`` (pages were ingested but
     some could not be read, so nothing was pruned).
+
+    ``catalog_*`` is the last background catalog sync a knowledge sync scheduled
+    (``catalog_sync``): when it ran ("" never), how it ended (``catalog_status``:
+    ``ok`` / ``partial`` / ``empty``, the importer's failure reason, or
+    ``sync_failed``) and what it did to the catalog. A manual sync answers before
+    its catalog sync finishes, so these describe the previous one until a re-read.
     """
 
     site_id: str
@@ -2447,6 +2097,11 @@ class ConciergeKnowledgeResponse(BaseModel):
     ingested: int = 0
     removed: int = 0
     skipped: int = 0
+    catalog_synced_at: str = ""
+    catalog_status: str = ""
+    catalog_added: int = 0
+    catalog_updated: int = 0
+    catalog_sold_out: int = 0
 
 
 def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResponse:
@@ -2454,6 +2109,8 @@ def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResp
     status = getattr(site, "kb_sync_error", "") or ""
     if not synced_at and not status:
         status = "never_synced"
+    catalog_at = getattr(site, "catalog_synced_at", None)
+    catalog_counts = getattr(site, "catalog_sync_counts", None) or {}
     return ConciergeKnowledgeResponse(
         site_id=str(site.id),
         article_count=len(getattr(site, "kb_article_ids", None) or []),
@@ -2462,6 +2119,11 @@ def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResp
         ingested=getattr(report, "ingested", 0) or 0,
         removed=getattr(report, "removed", 0) or 0,
         skipped=getattr(report, "skipped", 0) or 0,
+        catalog_synced_at=catalog_at.isoformat() if catalog_at else "",
+        catalog_status=getattr(site, "catalog_sync_status", "") or "",
+        catalog_added=int(catalog_counts.get("added", 0) or 0),
+        catalog_updated=int(catalog_counts.get("updated", 0) or 0),
+        catalog_sold_out=int(catalog_counts.get("sold_out", 0) or 0),
     )
 
 
@@ -2679,7 +2341,10 @@ class AdminWidgetView(BaseModel):
     """The site's paw-bar widget as the owner dashboard needs it (D2 overview)."""
 
     id: str
+    # The spec WITHOUT its catalog: the catalog has its own paginated routes
+    # (``catalog_routes``); ``catalog_count`` says how many products it holds.
     spec: PawBarSpec
+    catalog_count: int = 0
     agent_id: str = ""
     # The bound agent's display name (feat/site-dedicated-agent, E2). Resolved from
     # the agents service when ``agent_id`` is set so the dashboard card can show the
@@ -3182,7 +2847,8 @@ async def get_site_overview(
     if widget is not None:
         widget_view = AdminWidgetView(
             id=widget.id,
-            spec=widget.spec,
+            spec=widget.spec.model_copy(update={"catalog": []}),
+            catalog_count=await _store().catalog_count(widget.id),
             agent_id=widget.agent_id,
             agent_name=await _bound_agent_name(widget.agent_id),
         )
@@ -3986,6 +3652,7 @@ async def get_site_preview_frame(
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id, workspace_id=workspace_id),
         appearance=getattr(site, "concierge_appearance", None),
+        concierge_name=getattr(site, "concierge_name", "") or "",
         preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
@@ -5071,7 +4738,8 @@ async def get_spec(
 
     Per-IP limited (2026-09-26). No customer_ref, so no format check: the only
     caller is the frozen key-less ``src/`` widget, and the glass app never
-    fetches it.
+    fetches it. Its ``catalog`` is filled from the catalog store (the first
+    ``_PUBLIC_SPEC_CATALOG`` items in owner order) so that client keeps working.
     """
     _public_ip_gate(request, widget_id)
     widget = await _store().get_widget(widget_id)
@@ -5082,11 +4750,18 @@ async def get_spec(
     if not _origin_allowed(widget, origin):
         raise HTTPException(403, "Origin not allowed for this widget")
 
-    headers: dict[str, str] = {}
+    # The spec is the widget's, identical for every visitor, so shared caches may
+    # hold it briefly. ``Vary: Origin`` goes on EVERY response, not only those with
+    # an Origin: a cache that stored an origin-less reply (no ACAO) must not replay
+    # it to a cross-origin fetch. Errors stay uncached.
+    headers: dict[str, str] = {"Cache-Control": "public, max-age=60", "Vary": "Origin"}
     if origin:
         headers["Access-Control-Allow-Origin"] = origin
-        headers["Vary"] = "Origin"
-    return JSONResponse(widget.spec.model_dump(), headers=headers)
+    items, _ = await _store().list_catalog(widget.id, limit=_PUBLIC_SPEC_CATALOG)
+    body = widget.spec.model_dump()
+    # The frozen public shape: the item's own fields, none of the row's bookkeeping.
+    body["catalog"] = [item.model_dump(include=_PUBLIC_CATALOG_FIELDS) for item in items]
+    return JSONResponse(body, headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -5176,12 +4851,7 @@ async def ingest_event(
     # most likely comes from. The only caller is the legacy widget, which already
     # surfaces a failed post; nothing a visitor is waiting on is lost.
     try:
-        admitted = await store.admit_event(
-            event,
-            overall_per_min=widget.rate_limit_per_min,
-            per_customer_per_min=widget.per_customer_limit_per_min,
-            bucket=_EVENTS_BUCKET,
-        )
+        admitted = await admit_event(store, event, widget, bucket=_EVENTS_BUCKET)
     except sqlite3.OperationalError:
         logger.warning("paw-bar event admit hit a locked store; refusing", exc_info=True)
         raise HTTPException(503, "Busy, try again") from None
@@ -6033,23 +5703,28 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
         for a in (widget.spec.actions or [])
     ]
-    # C1 — the catalog also rides surface_meta (capped) so the concierge preamble
-    # can name real products, prices, and ids: without it the agent knows the
-    # action verbs but not WHAT it sells and declines ("I don't have a list"). Only
-    # threaded when actions are declared; the preamble renders a compact block.
-    pawbar_catalog = (
-        [
-            {
-                "id": c.id,
-                "name": c.name,
-                "price_cents": c.price_cents,
-                "currency": c.currency,
-            }
-            for c in (widget.spec.catalog or [])[:_MAX_PREAMBLE_CATALOG]
-        ]
-        if pawbar_actions
-        else []
-    )
+    # C1 — the turn's catalog items also ride surface_meta so the concierge
+    # preamble can name real products, prices, and ids: without them the agent
+    # knows the action verbs but not WHAT it sells and declines ("I don't have a
+    # list"). Retrieved from the catalog store exactly as the v2 runner does it
+    # (``catalog_for_turn``: a small catalog whole, else the page's product plus
+    # the search hits for this message). Only threaded when actions are declared;
+    # the preamble renders a compact block.
+    pawbar_catalog: list[dict[str, Any]] = []
+    if pawbar_actions:
+        from pocketpaw_ee.paw_bar import concierge_runtime
+
+        page_ctx = await concierge_runtime.with_page_product(
+            concierge_runtime.resolve_page(widget, body.page, site=site), widget, store
+        )
+        pawbar_catalog = concierge_runtime.catalog_rows(
+            await concierge_runtime.catalog_for_turn(
+                store,
+                widget,
+                concierge_runtime._retrieval_query(body.message, prior_history, page_ctx),
+                page_ctx,
+            )
+        )
     # The run is bound to the KEY's pocket (ctx.pocket_id — the authenticated
     # authority), the KEY's workspace, and the widget's agent. ``user_id`` is the
     # anonymous customer handle (session / rate-limit key, never a principal).
@@ -6196,11 +5871,7 @@ async def _admit_chat_turn(store: Any, widget: PawBarWidget, customer_ref: str) 
         widget_id=widget.id, type="concierge_message", payload={}, customer_ref=customer_ref
     )
     try:
-        return await store.admit_event(
-            marker,
-            overall_per_min=widget.rate_limit_per_min,
-            per_customer_per_min=widget.per_customer_limit_per_min,
-        )
+        return await admit_event(store, marker, widget)
     except sqlite3.OperationalError:
         logger.warning("paw-bar chat admit hit a locked store; failing open", exc_info=True)
     try:
@@ -6342,9 +6013,11 @@ async def post_action(body: PawBarActionRequest, request: Request) -> JSONRespon
     agent's per-verb tools use. SS-2: a gated verb never executes; it raises an
     Instinct proposal and returns a pending result the visitor polls on the
     decision endpoint. The executor's status hint becomes the HTTP status on
-    failure (422 bad verb/args, 409 empty cart / unavailable)."""
+    failure (422 bad verb/args, 409 empty cart / unavailable, 429 a rate cap); the
+    body's ``detail`` is the outcome's structured detail when it has one
+    (send_to_team: {code, field, message}), else its error code string."""
     origin = request.headers.get("origin")
-    widget, ctx, _site = await _front_gate_for_key(
+    widget, ctx, site = await _front_gate_for_key(
         widget_id=body.w,
         signed_key=body.key,
         customer_ref=body.customer_ref,
@@ -6353,6 +6026,8 @@ async def post_action(body: PawBarActionRequest, request: Request) -> JSONRespon
     )
     from pocketpaw_ee.paw_bar.actions import execute_action
 
+    # The gate's Site is what makes the built-in send_to_team reachable: only this
+    # public route passes it, never the agent's tool path.
     outcome = await execute_action(
         widget,
         ctx.workspace_id,
@@ -6360,9 +6035,10 @@ async def post_action(body: PawBarActionRequest, request: Request) -> JSONRespon
         body.verb,
         body.args,
         store=_store(),
+        site=site,
     )
     if not outcome.ok:
-        raise HTTPException(outcome.http_status, outcome.error)
+        raise HTTPException(outcome.http_status, outcome.detail or outcome.error)
     return JSONResponse({"ok": True, "result": outcome.result, "cart": outcome.cart})
 
 
@@ -7208,7 +6884,7 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
         return None
 
     context = {"payload": event.payload, "customer_ref": event.customer_ref}
-    properties = {k: _interpolate(v, context) for k, v in mapping.fields.items()}
+    properties = {k: interpolate(v, context) for k, v in mapping.fields.items()}
     try:
         obj = FabricObject(
             type_name=mapping.creates,
@@ -7221,31 +6897,3 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
     except Exception:
         logger.exception("Failed to create Fabric object from paw-bar event")
         return None
-
-
-def _interpolate(template: str, context: dict[str, Any]) -> Any:
-    """Resolve `{{ a.b }}` placeholders against the context dict.
-
-    If the entire template is a single placeholder (`{{ payload.item }}`), the
-    raw value is returned (preserving non-string types). Mixed strings fall back
-    to stringified substitution.
-    """
-    full_match = re.fullmatch(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}", template)
-    if full_match:
-        return _lookup(full_match.group(1), context)
-
-    def _replace(m: re.Match[str]) -> str:
-        val = _lookup(m.group(1), context)
-        return "" if val is None else str(val)
-
-    return _PLACEHOLDER_RE.sub(_replace, template)
-
-
-def _lookup(path: str, context: dict[str, Any]) -> Any:
-    cur: Any = context
-    for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return None
-    return cur

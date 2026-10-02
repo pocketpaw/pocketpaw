@@ -27,6 +27,9 @@
 #      stderr tail and assert it reaches the log and not the row.
 #
 # Mutations in tests/mutations/sl2_build_job.json, run and caught.
+#
+# Changes (2026-10-01, CN-4): the arq pool moved to _core.redis_client, so the
+# unset-URL test resets it there.
 
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.sites import build_job as bj
 from pocketpaw_ee.sites import build_state as bs
@@ -967,7 +971,7 @@ class TestTheEnqueueNeedsRedisConfigured:
         self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
-        bj._reset_for_tests()
+        redis_client._reset_for_tests()
         try:
             site = await _insert_site()
             with pytest.raises(RuntimeError, match="POCKETPAW_REDIS_URL"):
@@ -979,7 +983,7 @@ class TestTheEnqueueNeedsRedisConfigured:
             assert fresh.build_reason == "enqueue_failed:pool_or_enqueue_raised"
         finally:
             # A cached pool would outlive this test and be handed to every later enqueue.
-            bj._reset_for_tests()
+            redis_client._reset_for_tests()
 
 
 class TestTheBuildLaneCannotRollBackAConcurrentPublish:

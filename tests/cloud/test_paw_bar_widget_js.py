@@ -16,6 +16,11 @@
 # The vendored default is also syntax-relevant: it is served raw to a foreign page,
 # so the last test asserts it stays wrapped in one IIFE and keeps its globals to
 # window.PawBar.
+# Updated 2026-10-02 (CN-8, fix/canon-cross-repo-pins): the vendored loader is now
+#   hash-pinned to a paw-bar build (paw-bar-loader.pin.json), so drift from
+#   paw-bar fails here; the re-vendor picked up the microphone iframe permission.
+#   The pin test reads the package copy directly (not via PAW_BAR_WIDGET_JS) and
+#   relies on the sha alone, with no hardcoded loader strings.
 # Updated 2026-09-27 (new Paw Bar): the vendored loader must speak the two
 #   additions the rebuilt bar relies on, pawbar:viewport and a corner `side` on
 #   pawbar:resize.
@@ -267,6 +272,22 @@ def test_the_vendored_loader_speaks_the_new_bar_additions():
     assert "data.side" in code, "the icon launcher's corner rides on pawbar:resize"
 
 
+def test_the_vendored_loader_follows_spa_navigation():
+    """The concierge answers about the visitor's page from ``pawbar:page``. On a
+    client-routed store the frame never reloads, so a loader that posts the page
+    only on load leaves the concierge on the first page forever: a visitor on a
+    product asks "should I buy it?" and is asked which product (paw-bar #32).
+    The loader re-posts on back/forward and polls for path or title changes."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:page" in code
+    assert '"popstate"' in code, "back/forward re-sends the page"
+    assert "setInterval" in code, "a pushState navigation is caught by the poll"
+
+
 def test_the_vendored_loader_is_generated_not_hand_edited():
     """A header that says where it came from is the only thing standing between
     this file and the silent drift above. If someone hand-edits it again, the
@@ -277,6 +298,33 @@ def test_the_vendored_loader_is_generated_not_hand_edited():
 
     assert "GENERATED, DO NOT EDIT BY HAND" in header
     assert "loader/src/loader.ts" in header
+
+
+def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
+    """The header names the source; this proves the body IS that build. The pin
+    records the paw-bar commit and the sha256 of loader/dist/loader.readable.js
+    built there, so a hand edit or a stale copy fails here instead of shipping
+    (the copy missed paw-bar e50b593's microphone permission for exactly that
+    reason). Refresh with scripts/vendor-paw-bar-loader.sh."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    import pocketpaw_ee.paw_bar as paw_bar
+
+    # The package's own copy, not paw_bar_widget_file(): that follows
+    # PAW_BAR_WIDGET_JS, and the pin is about what we commit.
+    package = Path(paw_bar.__file__).parent
+    path = package / "static" / "paw-bar.js"
+    pin = json.loads((package / "paw-bar-loader.pin.json").read_text("utf-8"))
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    body = text[text.index('"use strict";') :]
+
+    assert hashlib.sha256(body.encode()).hexdigest() == pin["sha256"], (
+        "static/paw-bar.js drifted from paw-bar-loader.pin.json; "
+        "run scripts/vendor-paw-bar-loader.sh"
+    )
+    assert pin["source_repo"] == "qbtrix/paw-bar" and len(pin["source_commit"]) == 40
 
 
 # --------------------------------------------------------------------------- #

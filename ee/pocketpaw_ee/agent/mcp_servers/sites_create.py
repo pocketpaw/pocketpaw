@@ -75,8 +75,10 @@
 # built-ins. So the only reachable form was a blind ``new_source`` rewrite — the shape
 # that silently drops a capture form's hidden ``paw_*`` inputs. All three descriptions
 # now name ``read_site_source`` and spell out the read → copy → ``edits`` flow, because
-# a description is the only prompt real estate this surface has. Two modes (manifest vs
-# one file) keep a react source map from flooding the context the edit itself needs.
+# a description is the only prompt real estate this surface has. Two modes: a manifest
+# (paths + sizes), or a batch read (``file_paths``) that returns a JSON metadata block
+# plus one plain-text block per file with the contents verbatim, never JSON-escaped, so
+# a large file is not inflated past Claude Code's MCP output cap.
 #
 # Updated: 2026-08-11 (RX-3 — the react track gets an EDIT lane) — added a SEVENTH
 # tool ``edit_react_component`` plus its handler, mirroring
@@ -2679,10 +2681,16 @@ async def _read_site_source_handler(args: dict) -> dict:
     rewrite composed from memory, which is how a site loses its capture-form
     plumbing without a single error being raised.
 
-    Two modes, mirroring the built-in Read instinct the edit descriptions invoke:
-    no ``file_path`` returns the cheap MANIFEST (paths + byte sizes, no contents —
-    a react source map would otherwise flood the context), and a ``file_path``
-    returns that one file VERBATIM so an ``old_string`` copied out of it matches.
+    Two modes. With neither ``file_path`` nor ``file_paths`` it returns the cheap
+    MANIFEST (paths + byte sizes, no contents) as one JSON block. With either (or
+    both: combined, deduplicated, request order kept) it returns a short JSON
+    metadata block (``ok``, ``pocket_id``, ``engine``, ``files`` as path + bytes,
+    ``message``) followed by ONE plain-text block per file: a
+    ``=== FILE: <path> (<n> bytes) ===`` header line, a newline, then the file's
+    contents byte-for-byte. The contents are never JSON-escaped: escaping every
+    newline and quote inflated large files past Claude Code's MCP output cap, the
+    agent got a truncated file, and it re-read in a loop. An unknown path fails the
+    whole call with a NotFound naming the missing paths and the real ones.
 
     Plan-gated like its edit siblings: reading is a step of the edit flow, so a
     workspace whose plan no longer unlocks Sites should not keep using it.
@@ -2719,6 +2727,16 @@ async def _read_site_source_handler(args: dict) -> dict:
             "read_site_source `file_path` must be a non-empty string (the relative "
             "path of one file). Omit it entirely to list the site's files instead."
         )
+    file_paths = args.get("file_paths")
+    if file_paths is not None and (
+        not isinstance(file_paths, list)
+        or not file_paths
+        or not all(isinstance(p, str) and p for p in file_paths)
+    ):
+        return _error_response(
+            "read_site_source `file_paths` must be a non-empty list of non-empty "
+            "strings (relative file paths). Omit it to list the site's files instead."
+        )
 
     if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
         return gate
@@ -2731,6 +2749,7 @@ async def _read_site_source_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             file_path=file_path,
+            file_paths=file_paths,
         )
     except CloudError as exc:
         # ValidationError (a ripple pocket has no source map) or NotFound (unknown
@@ -2740,21 +2759,40 @@ async def _read_site_source_handler(args: dict) -> dict:
         logger.warning("read_site_source failed", exc_info=True)
         return _error_response(f"read failed: {exc}")
 
-    body: dict[str, Any] = {"ok": True, **result}
-    body["message"] = (
-        (
-            "These are the site's files. Read the one you need with `file_path` "
-            "before you edit it, then copy `old_string` out of what comes back."
+    if file_path is None and file_paths is None:
+        body: dict[str, Any] = {"ok": True, **result}
+        body["message"] = (
+            "These are the site's files. Read every file you plan to change in ONE "
+            "call with `file_paths`, then copy `old_string` out of what comes back."
         )
-        if file_path is None
-        else (
-            "This is the file's CURRENT content. Copy `old_string` from it "
-            "VERBATIM for the matching edit tool's `edits`, and prefer that over "
-            "`new_source` — a full rewrite drops anything you did not carry over, "
-            "including the capture form's hidden paw_* inputs."
+        return _success_response(body)
+
+    read = result["files"]
+    meta = {
+        "ok": True,
+        "pocket_id": result["pocket_id"],
+        "engine": result["engine"],
+        "files": [{"path": f["path"], "bytes": f["bytes"]} for f in read],
+        "message": (
+            "Each file follows in its own block, COMPLETE and VERBATIM after its "
+            "`=== FILE: <path> (<n> bytes) ===` header line (the header is not part "
+            "of the file). Copy `old_string` from it exactly for the matching edit "
+            "tool's `edits`, and prefer that over `new_source` — a full rewrite "
+            "drops anything you did not carry over, including the capture form's "
+            "hidden paw_* inputs. Do not re-read these files this turn."
+        ),
+    }
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": json.dumps(meta, separators=(",", ":"), default=str)}
+    ]
+    for f in read:
+        content.append(
+            {
+                "type": "text",
+                "text": f"=== FILE: {f['path']} ({f['bytes']} bytes) ===\n{f['contents']}",
+            }
         )
-    )
-    return _success_response(body)
+    return {"content": content}
 
 
 async def _edit_html_file_handler(args: dict) -> dict:
@@ -3345,22 +3383,28 @@ def make_read_site_source_tool(tool: Any) -> Any:
             "`paw_key` / `paw_redirect` inputs, after which the page still renders, "
             "still submits, and every future enquiry goes nowhere.\n"
             "TWO MODES:\n"
-            "  * NO `file_path` — the MANIFEST: every file's path and byte size, no "
-            "contents. Start here when you do not know what the site contains; it is "
-            "cheap and it tells you the real paths (html sites keep `index.html` at "
-            "the ROOT, react sites live under `src/`).\n"
-            "  * WITH `file_path` — that ONE file's exact current contents. Read only "
-            "the files you intend to change; a whole react site at once wastes the "
-            "context you need for the edit itself.\n"
-            "Args: `pocket_id` (required — the site pocket) and optional `file_path`. "
-            "Returns {ok, pocket_id, engine, ...}: the manifest carries {files:[{path, "
-            "bytes}], file_count, bindings}, a single read carries {file_path, bytes, "
-            "contents}. `bindings` names a DYNAMIC svelte site's live-data keys "
-            "(objects / sources / actions / auth) — they are configuration, NOT files, "
-            "so never pass one as a `file_path`. ok=false means nothing was read: "
-            "`pocket.no_source_map` means it is a ripple site (use the pocket tools), "
-            "and a not-found names the paths that DO exist — use one of them rather "
-            "than guessing again."
+            "  * NO `file_path` / `file_paths` — the MANIFEST: every file's path and "
+            "byte size, no contents. Start here when you do not know what the site "
+            "contains; it is cheap and it tells you the real paths (html sites keep "
+            "`index.html` at the ROOT, react sites live under `src/`).\n"
+            "  * WITH `file_paths` — read ALL the files you plan to change in ONE "
+            "call, e.g. file_paths=['index.html', 'styles.css']. Each comes back "
+            "COMPLETE and VERBATIM, however large, so never re-read a file you "
+            "already have and never read files one call at a time. (`file_path` "
+            "reads a single file and still works; both may be given.)\n"
+            "Args: `pocket_id` (required — the site pocket), optional `file_paths` "
+            "and/or `file_path`. The manifest returns JSON {ok, pocket_id, engine, "
+            "files:[{path, bytes}], file_count, bindings, keeps_client_bundle}. A "
+            "file read returns a JSON block {ok, pocket_id, engine, files:[{path, "
+            "bytes}], message} followed by one text block per file: a header line "
+            "`=== FILE: <path> (<n> bytes) ===`, then the file's exact contents (the "
+            "header is not part of the file). `bindings` names a DYNAMIC svelte "
+            "site's live-data keys (objects / sources / actions / auth) — they are "
+            "configuration, NOT files, so never ask for one as a path. ok=false "
+            "means nothing was read: `pocket.no_source_map` means it is a ripple site "
+            "(use the pocket tools), and a not-found (any unknown path fails the "
+            "whole call) names the missing paths and the paths that DO exist — "
+            "retry with real ones rather than guessing again."
         ),
         {
             "type": "object",
@@ -3375,8 +3419,19 @@ def make_read_site_source_tool(tool: Any) -> Any:
                     "minLength": 1,
                     "description": (
                         "Optional. The relative path of ONE file to read in full "
-                        "(e.g. 'index.html', 'src/App.tsx'). OMIT it to list the "
+                        "(e.g. 'index.html', 'src/App.tsx'). Prefer `file_paths` "
+                        "when you need more than one file. OMIT both to list the "
                         "site's files with their sizes and no contents."
+                    ),
+                },
+                "file_paths": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": (
+                        "Optional. Relative paths of EVERY file you plan to change, "
+                        "read in full in one call (e.g. ['index.html', "
+                        "'styles.css']). Duplicates are ignored; order is kept."
                     ),
                 },
             },

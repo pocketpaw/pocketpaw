@@ -1,14 +1,28 @@
 """Tier 2: ArqExecutor enqueues a job for the worker pool instead of
-running the agent inline."""
+running the agent inline.
+
+Changes (2026-10-01, CN-4): the pool now lives in ``_core.redis_client``;
+resets and the ``create_pool`` patch target that module.
+"""
 
 from __future__ import annotations
 
 import pytest
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.chat.runs import arq_executor
 from pocketpaw_ee.cloud.chat.runs.arq_executor import ArqExecutor
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _memory_transport(monkeypatch):
+    """``submit`` writes a ``queued`` frame first; keep it off a real Redis."""
+    from pocketpaw_ee.cloud.chat.runs import transport
+    from pocketpaw_ee.cloud.chat.runs.memory_stream import InMemoryStreamTransport
+
+    monkeypatch.setattr(transport, "_transport", InMemoryStreamTransport())
 
 
 def _spec(run_id: str = "r1") -> RunSpec:
@@ -40,7 +54,7 @@ async def test_arq_executor_enqueues_execute_run_job(monkeypatch):
         return _FakePool()
 
     monkeypatch.setattr(arq_executor, "_get_pool", _fake_pool)
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     ex = ArqExecutor()
     await ex.submit(_spec())
@@ -67,16 +81,20 @@ async def test_arq_executor_reuses_pool(monkeypatch):
         calls += 1
         return _FakePool()
 
-    monkeypatch.setattr(arq_executor, "create_pool", _make_create_pool(_fake_pool))
+    monkeypatch.setattr(redis_client, "create_pool", _make_create_pool(_fake_pool))
     monkeypatch.setenv("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
-    ex = ArqExecutor()
-    await ex.submit(_spec("a"))
-    await ex.submit(_spec("b"))
+    try:
+        ex = ArqExecutor()
+        await ex.submit(_spec("a"))
+        await ex.submit(_spec("b"))
 
-    # _get_pool is memoised — the underlying pool factory runs exactly once.
-    assert calls == 1
+        # _get_pool is memoised — the underlying pool factory runs exactly once.
+        assert calls == 1
+    finally:
+        # Don't leave the fake pool cached for later tests.
+        redis_client._reset_for_tests()
 
 
 def _make_create_pool(factory):

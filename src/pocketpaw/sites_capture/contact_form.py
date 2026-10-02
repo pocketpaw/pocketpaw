@@ -149,6 +149,11 @@ def _alias_index() -> dict[str, str]:
 _ALIASES = _alias_index()
 
 
+def canonical_name(raw: str) -> str | None:
+    """The canonical contact field a submitted name resolves to, or None."""
+    return _ALIASES.get(_key(str(raw)))
+
+
 def default_event_mapping() -> dict[str, dict[str, object]]:
     """The seeded ``event_mapping`` for a freshly published site, derived from
     ``CONTACT_FIELDS`` rather than restated.

@@ -24,6 +24,9 @@ Updates:
     axes don't carry, so the resolved envelope needs its own slot. The field
     is optional (default ``None``) and trailing, so every existing keyword
     construction is unaffected — no caller passes it yet.
+  - 2026-10-01 (CN-2): deleted the ee ``require_scope``. It let every JWT
+    caller through (``ctx.scopes is None``) and had no production importers;
+    the fail-closed ``pocketpaw.api.deps.require_scope`` is the one scope gate.
 """
 
 from __future__ import annotations
@@ -81,9 +84,10 @@ class RequestContext:
         started_at: Timezone-aware UTC timestamp recorded at dependency
             resolution time. Used by the timing middleware and downstream
             log correlation.
-        scopes: ``None`` for JWT/cookie auth (full access). A concrete
-            list when the caller authed with an API key — ``require_scope``
-            checks against this list.
+        scopes: ``None`` for JWT/cookie auth. A concrete list when the caller
+            authed with a workspace API key (``paw_``). Informational: no
+            dependency enforces it today (route scope checks go through
+            ``pocketpaw.api.deps.require_scope``, which does not read it).
         pocket_id: The pocket a scope is bound to, when the scope carries one.
             ``None`` for the workspace/user-axis scopes (WORKSPACE, SESSION,
             NONE, …). Set by ``site_keys.resolve_site_key`` for a CONCIERGE
@@ -379,23 +383,6 @@ async def _maybe_emit_api_key_use(token: str, workspace_id: str, user_id: str) -
         pass
 
 
-def require_scope(scope: str):
-    """Build a FastAPI dep that enforces a scope on the resolved context.
-
-    JWT-authed callers (``ctx.scopes is None``) always pass — they hold
-    full session credentials. API-key callers must have the scope present.
-    """
-
-    async def _dep(ctx: Annotated[RequestContext, Depends(request_context)]) -> RequestContext:
-        if ctx.scopes is None:
-            return ctx
-        if scope not in ctx.scopes:
-            raise HTTPException(status_code=403, detail=f"missing_scope:{scope}")
-        return ctx
-
-    return _dep
-
-
 __all__ = [
     "INTERNAL_HEADER",
     "RequestContext",
@@ -404,5 +391,4 @@ __all__ = [
     "WORKSPACE_HEADER",
     "loopback_or_request_context",
     "request_context",
-    "require_scope",
 ]

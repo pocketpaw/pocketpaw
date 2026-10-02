@@ -10,6 +10,9 @@
 # say so.
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+#
+# Changes (2026-10-01, CN-4): ``arq_pool`` patches _core.redis_client.get_arq_pool,
+# which ship.enqueue now resolves directly.
 
 from __future__ import annotations
 
@@ -115,9 +118,9 @@ def arq_pool(monkeypatch) -> FakePool:
     async def _get_pool():
         return pool
 
-    from pocketpaw_ee.cloud.chat.runs import arq_executor
+    from pocketpaw_ee.cloud._core import redis_client
 
-    monkeypatch.setattr(arq_executor, "_get_pool", _get_pool)
+    monkeypatch.setattr(redis_client, "get_arq_pool", _get_pool)
     return pool
 
 

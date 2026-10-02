@@ -1,47 +1,31 @@
-# ee/paw_bar/handoff.py — the human-handoff PRODUCER (owner inbox, slice 3).
-# Updated: 2026-08-01 (AL-2, paw-bar emitters) — ``raise_handoff`` now records
-#   ``paw.handoff.raised`` in the agent ledger (via paw_bar/ledger.py), so "how
-#   often does this concierge hand people to me, and is that falling?" is a
-#   query instead of a reconstruction from Fabric objects. Recorded AFTER the
-#   both-surfaces-failed arm, so a 503 is not counted as an ask that reached
-#   anyone, and keyed on the Fabric handoff id so a record and its ledger row
-#   share one identity.
-#   WHERE THE OTHER HALF LIVES: ``paw.handoff.resolved`` is NOT emitted here,
-#   because nothing in the product resolves a handoff through this module — a
-#   handoff ends when the owner moves the conversation OUT of ``needs_human``,
-#   which happens in the inbox PATCH endpoint. That transition is where the
-#   resolved beat fires (``ledger.emit_conversation_transition``). Putting an
-#   uncalled ``resolve_handoff`` here would have looked tidier and recorded
-#   nothing. Both kinds are defined and documented together in
-#   ``paw_bar/ledger.py`` so the pair cannot drift.
-# Created: 2026-07-31 (owner inbox, slice 3 — the escape hatch) — ``GET
-#   /paw-bar/admin/site/{id}/handoffs`` has read ``_paw_handoffs`` Fabric objects
-#   since D2 and has always returned ``[]``, because nothing ever wrote one. This
-#   module is the missing writer, and it is the ONLY one: both the visitor's own
-#   "talk to a human" request and the concierge agent's ``pawbar_request_human``
-#   tool land here, so the two paths cannot drift about what a handoff is.
+# ee/paw_bar/handoff.py — the human-handoff PRODUCER (owner inbox).
 #
-#   ``raise_handoff`` does four things, in the order that keeps the promise even
-#   when part of the stack is down:
-#     1. escalates the conversation to ``needs_human`` (the state the owner's
-#        inbox actually filters on),
-#     2. writes the ``_paw_handoffs`` Fabric object the existing read consumes —
-#        the SAME {widget_id, contact, question, transcript_ref} shape, with
-#        ``transcript_ref`` = the ``customer_ref`` the transcript endpoint is
-#        keyed by, so a handoff row is a working link into the thread,
-#     3. records a rate-limit / audit marker through the layer's event mechanism,
-#     4. notifies the workspace owner (fail-soft — see ``notify``).
-#   Steps 1 and 2 are independently fail-soft and the call reports success when
-#   EITHER landed: the two are separate owner-visible surfaces (the queue and the
-#   handoffs list), and telling a visitor "we couldn't reach anyone" while their
-#   conversation is sitting escalated in the inbox would be a lie.
+# The ONLY writer of handoffs: the visitor's "talk to a person" button
+# (POST /paw-bar/request-human), the legacy agent's ``pawbar_request_human`` tool
+# and the v2 runner's degrade path all land in ``raise_handoff``, so they can't
+# drift about what a handoff is. In order, each step fail-soft:
+#   1. escalate the conversation to ``needs_human`` (the state the inbox filters on);
+#   2. write the ``_paw_handoffs`` Fabric object the handoffs read consumes:
+#      {widget_id, contact, question, transcript_ref = customer_ref};
+#   3. when the visitor left a usable email or phone, write ONE Lead for the
+#      conversation (form_type and source.kind "handoff", the question as
+#      ``message``, conversation_ref "<widget_id>:<customer_ref>"), so every way a
+#      visitor leaves contact details lands on the site's Leads page. A second
+#      handoff in the same conversation adds no second lead (a partial unique
+#      index on the Lead decides, so concurrent handoffs can't both insert). Its
+#      ``lead.captured`` carries source_kind "handoff", which the leads bridge
+#      skips: step 6 already tells the owner;
+#   4. record the rate-limit / audit marker;
+#   5. record ``paw.handoff.raised`` in the agent ledger, keyed on the Fabric id
+#      (``paw.handoff.resolved`` fires where a thread leaves needs_human, in the
+#      inbox PATCH, via ``ledger.emit_conversation_transition``);
+#   6. notify the workspace owner (``notify``).
+# The call succeeds when step 1 OR 2 landed (two separate owner-visible surfaces);
+# only when both fail does the visitor hear 503.
 #
-#   ZERO AUTHORITY (SS-2, non-negotiable): this is not an action executor. It
-#   writes ONE reserved Fabric type with a fixed property set, one SQLite state
-#   row, and one notification — all scoped to the widget's own workspace. It runs
-#   no declared verb, touches no catalog, no cart, no pocket, and no tenant data.
-#   A concierge run reaching it can escalate itself to a human and nothing else,
-#   which is exactly what a zero-authority public agent should be able to do.
+# ZERO AUTHORITY (SS-2): this runs no declared verb and touches no catalog, cart,
+# pocket or other tenant data. A concierge reaching it can escalate itself to a
+# human and nothing else; every write is scoped to the widget's own workspace.
 
 from __future__ import annotations
 
@@ -224,6 +208,48 @@ async def _record_marker(store: Any, widget_id: str, customer_ref: str, source: 
         logger.debug("handoff marker record failed (non-fatal)", exc_info=True)
 
 
+async def _write_handoff_lead(
+    widget: Any, workspace_id: str, customer_ref: str, question: str, contact: str
+) -> None:
+    """Step 3 of the module header. Never raises: the handoff already landed."""
+    from pocketpaw.sites_capture.contact_form import looks_like_email, looks_like_phone
+
+    if looks_like_email(contact):
+        properties = {"email": contact}
+    elif looks_like_phone(contact):
+        properties = {"phone": contact}
+    else:
+        return
+    if question:
+        properties["message"] = question
+    widget_id = str(getattr(widget, "id", "") or "")
+    pocket_id = str(getattr(widget, "pocket_id", "") or "")
+    if not (widget_id and pocket_id and workspace_id):
+        return
+    try:
+        from pocketpaw_ee.cloud.leads import service as leads_service
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.paw_bar.ledger import conversation_id
+
+        site = await Site.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+        if site is None:
+            return
+        ref = conversation_id(widget_id, customer_ref)
+        if await leads_service.has_conversation_lead(
+            workspace_id, site.script_name, "handoff", ref
+        ):
+            return
+        await leads_service.capture_internal(
+            site=site,
+            form_type="handoff",
+            kind="handoff",
+            properties=properties,
+            conversation_ref=ref,
+        )
+    except Exception:  # noqa: BLE001 — a lead is bookkeeping; the handoff stands
+        logger.warning("handoff lead write failed for widget %s", widget_id, exc_info=True)
+
+
 async def raise_handoff(
     *,
     widget: Any,
@@ -284,6 +310,8 @@ async def raise_handoff(
         # Both owner-visible surfaces failed — say so rather than telling a
         # visitor a person is coming when nothing recorded that they asked.
         return HandoffOutcome(ok=False, error="handoff_unavailable", http_status=503)
+
+    await _write_handoff_lead(widget, workspace_id, customer_ref, question_text, contact_text)
 
     logger.info(
         "paw_bar.handoff.raised widget=%s source=%s escalated=%s object=%s",

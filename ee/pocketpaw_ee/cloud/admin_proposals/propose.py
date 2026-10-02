@@ -1,5 +1,7 @@
 # ee/cloud/admin_proposals/propose.py — propose a gated workspace-admin action.
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 #
 # What this module does (the propose half of the admin-action gate): a
 # workspace-admin tool (e.g. ``member_update_role`` in the workspace_admin MCP
@@ -49,6 +51,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator for an admin-action proposal. The
@@ -83,112 +87,6 @@ def compute_args_hash(action: str, args: dict[str, Any]) -> str:
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    rbac_action: str,
-    workspace_id: str,
-    user_id: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for an admin action.
-
-    Mirrors external_actions.propose's ``_emit_agent_proposed``: the proposing
-    caller is the actor (``kind="agent"`` with the requesting user on its id, the
-    workspace on its scope_context). An admin action isn't bound to a pocket — its
-    tenancy is the workspace — so ``pocket_id`` on the chain carries the workspace
-    id.
-
-    Returns the emitted event id so the caller can persist it on the blob's
-    ``proposed_event_id`` field for the ``human.corrected`` causation chain, or
-    ``None`` when the emit raised — best-effort; the reconciler picks up orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    intent = f"workspace-admin action '{rbac_action}'"
-    payload: dict[str, Any] = {
-        "intent": intent,
-        "action": "admin_action",
-        "pocket_id": workspace_id,
-        "inputs": [],
-        "proposal_kind": "admin_action",
-        "proposal": {"rbac_action": rbac_action},
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "admin_action agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._admin_action`` blob after ``agent.proposed`` fired.
-
-    Direct SQL update — the same pattern external_actions.propose's
-    ``_persist_chain_ids`` uses. Best-effort: a write failure leaves
-    ``proposed_event_id`` None and the eventual ``human.corrected`` emits without
-    a causation_id (the chain still folds; causation_id is optional).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(ADMIN_ACTION_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[ADMIN_ACTION_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "admin_action: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 async def propose_admin_action(
@@ -310,19 +208,23 @@ async def propose_admin_action(
 
     # Open the Decision-Graph chain now that the Action is stored. Best-effort: a
     # wiring failure must NOT fail the propose response.
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
-        rbac_action=action,
+        kind="admin_action",
+        intent=f"workspace-admin action '{action}'",
+        proposal={"rbac_action": action},
         workspace_id=workspace_id,
         user_id=proposer_user_id,
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=ADMIN_ACTION_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="admin_action",
         )
 
     return action_obj.id

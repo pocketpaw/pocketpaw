@@ -96,8 +96,8 @@
   {
     "label": "IMG-13: the legacy persistent send goes back to a bare string, so in a default deployment (POCKETPAW_SESSION_SUPERVISOR off, no leased client) every attached image is dropped and the model sees the filename without the pixels (the 2026-09-15 live report)",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "                    await _persistent_client.query(\n                        stream_one_message(build_streaming_user_message(message, image_attachments))\n                        if image_attachments\n                        else message\n                    )",
-    "replace": "                    await _persistent_client.query(message)",
+    "find": "                    await _persistent_client.query(\n                        stream_one_message(\n                            build_streaming_user_message(turn_text, image_attachments)\n                        )\n                        if image_attachments\n                        else turn_text\n                    )",
+    "replace": "                    await _persistent_client.query(turn_text)",
     "tests": [
       "tests/test_claude_sdk_persistent_client_images.py"
     ]

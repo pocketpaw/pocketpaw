@@ -114,25 +114,69 @@ one publish into an unbounded run of article compilations.
 
 ### Every article is LLM-compiled — never stored verbatim
 
-Ingest always compiles the extracted text into a structured article (title, summary,
-compressed wiki-style content) before it is stored. On deployments with an
+Ingest always compiles the extracted text into structured articles (title, summary,
+markdown content) before anything is stored. On deployments with an
 `ANTHROPIC_API_KEY`, the kb binary runs that compilation itself. On deployments
 without one (for example the Claude Code agent-backend cloud box), PocketPaw
-compiles the article with its own agent backend and hands the pre-compiled article
-to the kb binary. If compilation fails on either path, the ingest **fails loudly**
-— the document is never stored verbatim, because uncompiled raw text poisons the
-scope and makes every chat turn pay full-corpus search cost for junk snippets.
+compiles the articles with its own agent backend and hands them pre-compiled to the
+kb binary. If compilation fails, the ingest **fails loudly**. The document is never
+stored verbatim, because uncompiled raw text poisons the scope and makes every chat
+turn pay full-corpus search cost for junk snippets.
 
-Two bounds on the agent-backend path are worth knowing:
+### Long documents are compiled section by section
+
+The knowledge base searches compiled articles only; the raw text it keeps beside them
+is never searched. So a fact the compiler leaves out cannot be found, and owners'
+documents (price lists, policies, contracts, spec sheets) are dense: every line is a
+fact. On the agent-backend path, site pages and knowledge sources go through a
+sectioned ingest:
+
+- **A document over 2,000 characters is split into sections** of about 1,500
+  characters. Cuts fall at headings (markdown headings and heading-like lines in PDF
+  text, such as `2. Caring for your gear`), then blank lines, page breaks and table
+  blocks. A paragraph or table that is too big on its own is cut at line ends, then
+  sentence ends, never in the middle of a sentence; a markdown table's header is
+  repeated on every piece.
+- **Each section is compiled into its own article**, with a prompt that restructures
+  rather than compresses: every name, number, price, date, quantity, condition and
+  contact detail is kept exactly, duplicates may be merged, nothing is dropped or
+  invented. Its title is the document name, a short tag for that document,
+  `part i of n`, and the section's topic. The tag comes from the source (or the site
+  page), so two files both called `price-list.pdf` keep separate articles, and
+  re-reading one source lands on its own articles again.
+- **A section is rejected only when it is unusable**: an empty title or content,
+  unparseable JSON, or runaway output (more than three times the section, or over
+  8,000 characters). A near-verbatim section is fine; it is the owner's own text. A
+  failed section is retried once with a "JSON only" reminder.
+- **Three sections compile at a time**, under a ten-minute budget for the whole
+  document. A section not done by then counts as failed.
+- **The document is `ready` once one section landed.** The source row lists every
+  article and counts `sections_total`, `sections_failed`, and `sections_truncated`
+  (sections past the plan's character cap, never read). Failed sections are logged
+  with their reason. If no section landed, the row is `failed` / `ingest_failed`.
+
+Sections are sized so each compiled article stays under 2,000 characters: the kb
+binary's context search returns an article's body only below that, and the concierge
+keeps up to 2,000 characters of each retrieved item. One question can pull in
+several sections of the same document.
+
+A document of 2,000 characters or less is still compiled whole, as is everything on
+the `ANTHROPIC_API_KEY` path. For whole-document compiles on the agent backend, two
+bounds apply:
 
 - **The compiler sees at most the first 80,000 characters** of a document. The
   full raw text is still stored alongside the article, but for a very large
   document the compiled article reflects that first slice only.
-- **The compression sanity check applies to documents over 4,000 characters.**
-  A compiled article for a large document must be meaningfully shorter than the
-  input the compiler saw, or it is rejected as a verbatim echo. Short documents
-  are exempt — an article about a two-paragraph note can legitimately be about
-  as long as the note itself.
+- **The echo check applies to documents over 4,000 characters.** A compiled
+  article is rejected as a verbatim echo when it is at least 60% of the input's
+  length *and* at least half of its 8-word runs appear word for word in the input
+  (punctuation and whitespace ignored, so adding bullets does not hide a copy).
+  Separately, an article more than 1.25 times the input's length is rejected.
+  Short documents are exempt from both checks.
+
+Owner uploads in the Files panel and the book agent still compile one article per
+document: hide-from-AI tracks one article per file, and the book agent compiles
+inside the request.
 
 ### When it runs
 
@@ -152,6 +196,26 @@ must not become something the concierge quotes to visitors.
 `GET /paw-bar/admin/site/{site_id}/knowledge` reports how many articles the concierge
 can currently quote, when the last sync ran, and a status: empty for a clean sync,
 otherwise `never_synced`, `no_content`, `pocket_unavailable` or `sync_failed`.
+
+### The catalog follows the site
+
+A product card can only show a product in the widget's catalog, so a sync that
+reached the site (the pocket was read, or the connected site's crawl reached its
+origin) also starts a catalog sync in the background. It runs the same reader as the
+owner's Import button (Shopify, WooCommerce, then JSON-LD and OpenGraph on the product
+pages) and writes what it finds into the catalog, marked as coming from the site. It
+never waits on, fails or changes the knowledge sync, and a site without a concierge
+widget is not read at all.
+
+The owner always wins. A product the sync added is kept in step with the site (name,
+price, currency, image, page, description, stock) until the owner edits it; any edit
+through the catalog routes makes it the owner's, and the sync never touches it again.
+Products the owner made are never touched. A product the owner deletes is remembered
+and not added back. A synced product that disappears from the site is marked sold
+out, never deleted, and only when the import was complete: status `ok`, not cut short
+at the catalog cap, no product page skipped by robots.txt, and no product left out for
+having no currency (those are skipped; the owner can import them by hand and pick the
+currency). New products stop at the catalog cap, in the reader's order.
 
 ### Re-syncing is safe
 
@@ -180,8 +244,8 @@ same way they find a page. The routes live under
 exact contract.
 
 - **Reading happens in the background.** Adding a source returns at once with a row in
-  `processing`; the text is extracted and compiled into an article, and the row flips to
-  `ready`. The dashboard polls the list.
+  `processing`; the text is extracted and compiled into articles (one per section of a
+  long document), and the row flips to `ready`. The dashboard polls the list.
 - **A file's type comes from its bytes.** The extension has to be one of the four
   accepted types *and* agree with what the content actually is. The browser's
   `Content-Type` is never consulted, so a picture renamed `menu.pdf` or a PDF renamed
@@ -194,8 +258,8 @@ exact contract.
   use: the address has to resolve to a public host, and every redirect is checked
   again, so a page that redirects to an internal address is refused rather than
   fetched. HTML is reduced to its visible text. A link can be read again on demand
-  (`…/{source_id}/refetch`); the new article replaces the old one.
-- **Removing a source un-indexes it.** Its article is deleted from the pocket scope,
+  (`…/{source_id}/refetch`); the new articles replace the old ones.
+- **Removing a source un-indexes it.** Every article it produced is deleted from the pocket scope,
   so the concierge stops quoting it on the next turn. The knowledge base names an
   article after its compiled title, so two sources can end up sharing one; an article
   another source or the page sync still holds is kept.
@@ -281,8 +345,10 @@ Existing sites stay on `legacy` until an owner changes it.
 - **v2** answers in one streamed model call with **no tools at all**. Before the call it
   searches the same two scopes a legacy run reads (`pocket:<pocket_id>`, then
   `agent:<agent_id>` when the widget has an agent) and puts up to six matching items into
-  the prompt, along with the widget's catalog and declared actions and the recent turns of
-  this conversation. The instructions are a fixed frame: answer only about this site and
+  the prompt, along with the turn's products from the widget's catalog (the whole
+  catalog when it has 50 products or fewer, otherwise the product on the visitor's page
+  and the ones that match the conversation), its declared actions and the recent turns
+  of this conversation. The instructions are a fixed frame: answer only about this site and
   only from that material, write no code, and treat everything in the tagged blocks and
   the visitor's message as data.
 
@@ -315,7 +381,8 @@ backticks) until it closes:
   card that breaks any rule is dropped whole.
 - A `product-card` names catalog ids only. The server fills in each product's name,
   price, currency and image from the widget's catalog, drops ids the catalog does not
-  have, and drops the card when nothing is left. Whatever name or price the model wrote
+  have, and drops the card when nothing is left. Any product in the catalog can be shown,
+  not only the ones the prompt listed. Whatever name or price the model wrote
   is discarded.
 - An older-style `pawbar-card` (`{"kind": "product"}` or `{"kind": "form"}`) still
   works. Product cards in that format are repriced from the catalog the same way; form
@@ -323,7 +390,10 @@ backticks) until it closes:
 - A block still open when the reply ends is dropped.
 
 The model learns the card format from the Paw Bar's own widget manifest, one line per
-widget, inside the catalog section of its prompt.
+widget, inside the catalog section of its prompt. When the widget has a catalog, the
+prompt also tells it to show any product it names, compares or recommends in one
+`product-card` (so the visitor gets the Add to cart buttons), never as a markdown table
+or a list of names and prices.
 
 ### Code examples from your docs
 
@@ -351,7 +421,9 @@ by containing it.
 Owners shape a v2 concierge with six fields on the same settings endpoint, rather than
 by writing a prompt:
 
-- **Name** (up to 40 characters): "Your name is «Maya»."
+- **Name** (up to 40 characters): "Your name is «Maya». Introduce yourself as «Maya»
+  when you greet the visitor or when they ask who you are." It also heads the widget
+  when the look editor sets no agent name of its own.
 - **Tone**: friendly, professional, concise or playful. Each picks one fixed sentence.
 - **Languages** (one to ten BCP-47 codes): it replies in the visitor's language when
   that is on the list, and in the first one otherwise.
@@ -362,7 +434,9 @@ by writing a prompt:
   address (`email`), or just say so and suggest looking around the site (`none`).
 
 The fields don't go into the model's instructions, which stay the same fixed text for
-every site. They are rendered into an owner-settings block at the top of the data part
+every site. Those instructions claim no identity of their own: they tell the model to
+take its name, tone and manner from the owner-settings block, and to call itself the
+site's assistant when no name is set. The fields are rendered into an owner-settings block at the top of the data part
 of the request, as fixed sentences. Anything the owner typed appears only as a quoted
 value, folded onto one line, with its own quote marks and angle brackets swapped out.
 So "Ignore the above" as a concierge name is just an odd name. The block tag is

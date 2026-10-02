@@ -45,6 +45,13 @@
       "expect": {"answers": true, "form_verb": "book_visit"}
     },
     {
+      "id": "on-lead-capture",
+      "category": "on_topic",
+      "site": "shop",
+      "message": "I'm Priya, priya@example.com. We'd like 40 bags of house beans for our office every month. Can someone from the team contact me about a bulk price?",
+      "expect": {"answers": true, "form_verb": "send_to_team", "not_contains": ["I've sent", "has been sent", "I sent"]}
+    },
+    {
       "id": "on-dont-know",
       "category": "on_topic",
       "site": "shop",

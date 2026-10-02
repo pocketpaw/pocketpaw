@@ -1,0 +1,344 @@
+[
+  {
+    "label": "ics: no backslash escape",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": "text.replace(\"\\\\\", \"\\\\\\\\\")",
+    "replace": "text",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: no semicolon escape",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": ".replace(\";\", \"\\\\;\")",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: fold at 76 octets",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": "if size + n > 75:",
+    "replace": "if size + n > 76:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: fold counts characters, not octets",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": "n = len(ch.encode(\"utf-8\"))",
+    "replace": "n = 1",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: naive time read as server-local",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": "return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)",
+    "replace": "return dt.astimezone(UTC)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "joining info: same-day format across midnight",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": "if start.date() == end.date():",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "joining info: no code line",
+    "file": "ee/pocketpaw_ee/cloud/meetings/ics.py",
+    "find": "f\"Join: {link}\", f\"Meeting code: {code}\"]",
+    "replace": "f\"Join: {link}\"]",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "joining info: not on the meeting JSON",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "joining_info=joining_info_for(doc),",
+    "replace": "joining_info=None,",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "joining info/ics: no workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "doc = await _MeetingDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    return doc",
+    "replace": "doc = await _MeetingDoc.find_one({\"_id\": oid})\n    if doc is None:\n        raise NotFound(\"meeting\", meeting_id)\n    return doc",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: undated not refused",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if doc.scheduled_start is None:\n        raise ConflictError(\"meeting.not_scheduled\"",
+    "replace": "if False:\n        raise ConflictError(\"meeting.not_scheduled\"",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: UID without the frontend host",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "host = urlparse(_frontend_base()).hostname or \"pocketpaw\"",
+    "replace": "host = \"pocketpaw\"",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "ics: served inline",
+    "file": "ee/pocketpaw_ee/cloud/meetings/router.py",
+    "find": "f'attachment; filename=\"{filename}\"'",
+    "replace": "f'inline; filename=\"{filename}\"'",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: any status",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if doc.source != \"livekit\" or doc.status != \"scheduled\" or doc.actual_start is not None:",
+    "replace": "if doc.source != \"livekit\" or doc.actual_start is not None:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: started meeting allowed",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if doc.source != \"livekit\" or doc.status != \"scheduled\" or doc.actual_start is not None:",
+    "replace": "if doc.source != \"livekit\" or doc.status != \"scheduled\":",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: recall meeting allowed",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if doc.source != \"livekit\" or doc.status != \"scheduled\" or doc.actual_start is not None:",
+    "replace": "if doc.status != \"scheduled\" or doc.actual_start is not None:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: duration ignored",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "duration = schedule.get(\"duration_minutes\") or payload.get(\"duration_minutes\", 30)",
+    "replace": "duration = payload.get(\"duration_minutes\", 30)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: link expiry not moved",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "        doc.link_expires_at = doc.scheduled_end\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: old jobs kept",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "        unschedule_meeting_jobs(str(doc.id))\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: jobs not re-set",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "        schedule_meeting_jobs(doc)\n\n    fields",
+    "replace": "\n    fields",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "reschedule: calendar not told",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "\"meeting.edited\",\n        {\"workspace_id\"",
+    "replace": "\"meeting.updated\",\n        {\"workspace_id\"",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "jobs: aware start relabelled as UTC",
+    "file": "ee/pocketpaw_ee/cloud/meetings/scheduling/reminders.py",
+    "find": "return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)",
+    "replace": "return dt.replace(tzinfo=UTC)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "calendar: plain description for meeting rooms",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/calendar.py",
+    "find": "if getattr(doc, \"room_group_id\", None) and getattr(doc, \"code\", None):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "calendar: dated-later meeting never minted",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/calendar.py",
+    "find": "        await _on_meeting_scheduled(data)  # idempotent; skips an undated meeting\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "calendar: edit updates as the wrong user",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/calendar.py",
+    "find": "ctx = RequestContext(workspace_id=workspace_id, user_id=doc.created_by_user_id or \"system\")",
+    "replace": "ctx = RequestContext(workspace_id=workspace_id, user_id=\"system\")",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "calendar: edit not subscribed",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/calendar.py",
+    "find": "    event_bus.subscribe(\"meeting.edited\", _on_meeting_edited)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py::test_calendar_registers_edit_listener"
+    ]
+  },
+  {
+    "label": "left: reaper never releases the meeting room",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "await meetings_service.release_meeting_room(workspace_id, group_id)",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: released while someone is still in the call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if not docs or await _room_is_live(group_id):",
+    "replace": "if not docs:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: chat-room call rows released too",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "{\"workspace\": workspace_id, \"room_group_id\": group_id, \"status\": \"in_progress\"}",
+    "replace": "{\"workspace\": workspace_id, \"status\": \"in_progress\"}",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: marked ended instead of scheduled",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    doc.status = \"scheduled\"\n    doc.call_budget_deadline = None",
+    "replace": "    doc.status = \"ended\"\n    doc.call_budget_deadline = None",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: budget deadline kept",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    doc.call_budget_deadline = None  # belonged to the call that just ended\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "left: list not told",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "\"group_id\": doc.room_group_id,",
+    "replace": "\"group_id\": None,",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "list heal: no grace",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if _call_started(doc) + LIVE_GRACE < now_utc and not await _room_is_live(doc.room_group_id):",
+    "replace": "if not await _room_is_live(doc.room_group_id):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "list heal: ignores people in the room",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "if _call_started(doc) + LIVE_GRACE < now_utc and not await _room_is_live(doc.room_group_id):",
+    "replace": "if _call_started(doc) + LIVE_GRACE < now_utc:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "list heal: grace from the first call",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "doc.raw_provider_payload = {\n            **(doc.raw_provider_payload or {}),\n            \"call_started_at\": now.isoformat(),\n        }",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_schedule.py"
+    ]
+  },
+  {
+    "label": "guest poll: admitted knock not told it ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n    ):",
+    "replace": "        \"waiting\",\n        \"expired\",\n    ):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest poll: waiting knock not told it ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n    ):",
+    "replace": "        \"admitted\",\n    ):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest poll: a denial turns into ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n    ):",
+    "replace": "        \"waiting\",\n        \"admitted\",\n        \"expired\",\n        \"denied\",\n    ):",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  },
+  {
+    "label": "guest poll: ended only for status ended",
+    "file": "ee/pocketpaw_ee/cloud/meetings/lobby_service.py",
+    "find": "if meetings_service._is_closed(meeting, _now()) and knock_row.status in (",
+    "replace": "if meeting.status == \"ended\" and knock_row.status in (",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_lobby.py"
+    ]
+  }
+]

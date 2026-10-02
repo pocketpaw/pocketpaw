@@ -1,27 +1,15 @@
 # ee/pocketpaw_ee/cloud/auth/guest.py — server-minted anonymous guests
 # (BYOK-first onboarding) and the upgrade that turns one into a real account.
 #
-# Created 2026-09-01 (feat/byok-guest-backend).
-#
-# Updated 2026-09-09 (feat/byok-custom-gateway): a guest may also arrive with a
-# key for an OpenAI-compatible gateway, which brings its own ``base_url`` and
-# ``model``. Both ride through to validation and storage unchanged; the
-# provider gate below is now the only thing deciding what is accepted, and it
-# reads ``byok_service.SUPPORTED_PROVIDERS`` rather than naming a provider.
-#
-# Updated 2026-09-13 (feat/guest-social-upgrade): added
-# ``upgrade_guest_via_social`` — the same in-place promotion as
-# ``upgrade_guest`` for the door that has no password. A guest signing up with
-# Google or GitHub used to run the LOGIN flow, which creates a new user when it
-# cannot match an identity, stranding their pages and stored key on an id
-# nobody could reach. They now come through the link flow instead.
-#
-# Updated 2026-09-11 (review S6): ``mint_guest`` now stores the base URL
-# ``validate_key`` hands back rather than the raw body string. The validator
-# normalizes (``strip().rstrip("/")``) before it guards, and writing the
-# un-normalized copy meant the value in the database was not the value that
-# passed the check. This route also does not go through ``ByokSetRequest``, so
-# ``validate_key`` is the whole guard here, not a second opinion on one.
+# Providers: ``byok_service.SUPPORTED_PROVIDERS`` is the only gate; an
+# OpenAI-compatible gateway key brings its own ``base_url`` and ``model``.
+# ``mint_guest`` stores the base URL ``validate_key`` hands back (normalized
+# before it was guarded), never the raw body string: this route skips
+# ``ByokSetRequest``, so ``validate_key`` is the whole guard.
+# ``upgrade_guest`` / ``upgrade_guest_via_social`` promote the SAME user id in
+# place (password or social identity), so pages and the stored key survive.
+# Password hashes use the shared ``auth.password_hashing`` helper, off the loop.
+# ``upgrade_guest`` runs the register password policy (incl. HIBP) first.
 #
 # Flow (the order is the security property):
 #   rate-limit -> validate the key against the provider -> mint user ->
@@ -49,15 +37,13 @@ import logging
 import secrets
 import uuid
 
-from fastapi_users.password import PasswordHelper
-
 from pocketpaw_ee.cloud._core.errors import CloudError, ValidationError
+from pocketpaw_ee.cloud.auth.password_hashing import hash_password
+from pocketpaw_ee.cloud.auth.password_policy import validate_password_async
 from pocketpaw_ee.cloud.byok import service as byok_service
 from pocketpaw_ee.cloud.models.user import GuestLimits, User
 
 logger = logging.getLogger(__name__)
-
-_pwd_helper = PasswordHelper()
 
 #: Synthetic-address domain for guest rows. ``.invalid`` is RFC 2606 reserved —
 #: it can never resolve, so a guest row can never receive (or leak into) mail.
@@ -123,7 +109,7 @@ async def mint_guest(
     tag = uuid.uuid4().hex[:12]
     user = User(
         email=f"guest-{tag}@{_GUEST_EMAIL_DOMAIN}",
-        hashed_password=_pwd_helper.hash(secrets.token_urlsafe(32)),
+        hashed_password=await hash_password(secrets.token_urlsafe(32)),
         full_name="Guest",
         is_active=True,
         is_verified=False,
@@ -192,9 +178,12 @@ async def upgrade_guest(user: User, *, email: str, password: str) -> User:
     existing = await User.find_one(User.email == email)
     if existing is not None and existing.id != user.id:
         raise CloudError(409, "auth.email_taken", "That email already has an account — sign in.")
+    # Same policy (and HIBP check) as /auth/register; raises
+    # InvalidPasswordException, which the route maps to register's 400 shape.
+    await validate_password_async(password, email=email)
 
     user.email = email
-    user.hashed_password = _pwd_helper.hash(password)
+    user.hashed_password = await hash_password(password)
     user.is_guest = False
     user.guest_limits = None
     await user.save()

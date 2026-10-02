@@ -1,40 +1,36 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Chat domain — message business logic (CRUD, reactions, threads, pins, search).
 
 Sole owner of writes to the ``Message`` Beanie document. Module-level
-``async def`` API. The doc → domain mapping helpers (formerly in
-``repositories.py``) live alongside the public API as private helpers.
+``async def`` API; the doc -> domain mapping helpers live here as private helpers.
 
-Updated 2026-07-31 (Paw Bar inbox, slice 0): a CONCIERGE turn now persists NO
-``Message`` at all. ``ContextType`` has no "concierge" value, so those turns
-used to fall through to the group branch and write
-``Message(context_type="group", group=<pocket_id>)`` — an orphan row no surface
-reads, keyed by a pocket id in a field that means "room id". Concierge
-transcripts derive from ``ChatRunDoc`` instead, so
-``persist_assistant_message_for_scope`` returns an unsaved doc for that kind and
-the caller keeps the id and timestamp it needs. Consequence for anything built
-later: a message-id-addressable feature (reactions, thumbs writeback) must key
-off the RUN doc for concierge, because that id has no row behind it.
+Invariants a reader must not break:
 
-Updated 2026-09-09: ``MessageReaction`` now carries the post-toggle
-``reactions`` array. The event used to ship only the delta (emoji + user_id),
-which is enough to know something changed but not enough to draw the chips —
-so peers in the room got the event and rendered nothing until they reloaded
-the page. The array is serialized in the same shape as
-``dto.message_to_wire_dict`` so the realtime path and the REST response patch
-a client's message row identically.
-
-Updated 2026-09-27 (fix/chat-run-heartbeat): ``persist_assistant_message_for_scope``
-takes an optional ``run_status``. ``execute_run`` now persists the text a failed /
-cancelled / interrupted run had already streamed as an assistant Message instead
-of leaving it on the run doc only, and ``run_status`` marks that row as cut off.
-The doc -> domain mapper and ``_message_response`` carry it, and emit the wire
-key only when it is set, so a normal message's payload is unchanged.
-
-Updated 2026-09-28 (feat/persist-tool-steps): ``persist_assistant_message_for_scope``
-and ``create_agent_message`` take optional ``steps`` / ``steps_omitted`` (the
-thinking blocks and tool calls the reply streamed, from ``StepRecorder``), and the
-doc -> domain mapper and ``_message_response`` carry them. The wire keys go
-through the shared ``steps_wire_fields`` and appear only when non-empty.
+- A CONCIERGE turn persists no ``Message``: ``persist_assistant_message_for_scope``
+  returns an unsaved doc for that kind (its transcript derives from ``ChatRunDoc``),
+  so a message-id-addressable feature must key concierge off the RUN doc.
+- ``MessageReaction`` carries the post-toggle ``reactions`` array in the same shape
+  as ``dto.message_to_wire_dict``, so realtime peers and the REST response patch a
+  message row identically.
+- ``run_status`` marks an assistant row a failed / cancelled / interrupted run cut
+  off; ``steps`` / ``steps_omitted`` carry the reply's thinking and tool calls via
+  ``steps_wire_fields``. Both wire keys appear only when set.
+- Per-member fan-out on send is batched or bounded: notifications (message and
+  mention kinds) go through ``notifications_service.create_many`` (one
+  ``insert_many``, external webhook delivery in a background task), and the
+  per-member unread / mention-counter writes go through ``map_bounded``. One room
+  can hold thousands of members; an unbounded gather opens that many Mongo
+  writes at once on the loop every user shares.
+- ``send_message`` is the only place that bumps group stats and writes mention
+  notifications for a user message. The ``message.sent`` bus event it emits is
+  for agent routing, not for a second stats or mention write.
+- Reads stay bounded and index-shaped: thread and reply lists page on the
+  ``(thread_id|reply_to, createdAt)`` indexes with a limit, search escapes the
+  user's text (``re.escape``) and caps the result count.
+- Member-gated reads check ``MEMBER_ONLY_GROUP_TYPES`` (private, dm, meeting).
+  A ``meeting`` room is hidden: a user mention in one only notifies members.
+  (2026-10-01, feat/meetings-instant)
 """
 
 from __future__ import annotations
@@ -47,7 +43,22 @@ from typing import cast
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    GroupUpdated,
+    MessageDeleted,
+    MessageEdited,
+    MessageNew,
+    MessageReaction,
+    MessageSent,
+    MessageUiStateUpdated,
+    ThreadClosed,
+    ThreadCreated,
+    UnreadUpdate,
+)
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.chat import group_service, unread_service
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
 from pocketpaw_ee.cloud.chat.domain import Attachment as _AttachmentDomain
 from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
 from pocketpaw_ee.cloud.chat.domain import Message as _MessageDomain
@@ -71,24 +82,14 @@ from pocketpaw_ee.cloud.models.message import Reaction as _ReactionDoc
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.notifications import service as notifications_service
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
-    GroupUpdated,
-    MessageDeleted,
-    MessageEdited,
-    MessageNew,
-    MessageReaction,
-    MessageSent,
-    MessageUiStateUpdated,
-    ThreadClosed,
-    ThreadCreated,
-    UnreadUpdate,
-)
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.time import iso_utc
 
 logger = logging.getLogger(__name__)
+
+# Ceiling on one page of ``GET /messages/{id}/thread`` replies.
+THREAD_REPLY_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -206,15 +207,40 @@ async def _list_for_group_paged(
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
-async def _list_replies(parent_message_id: str) -> list[_MessageDomain]:
-    """All non-deleted group-context replies to a parent, oldest first."""
-    cursor = _MessageDoc.find(
-        {
-            "context_type": "group",
-            "reply_to": parent_message_id,
-            "deleted": False,
-        }
-    ).sort([("createdAt", 1)])  # type: ignore[list-item]
+def _parse_cursor(cursor: str | None) -> tuple[datetime | None, PydanticObjectId | None]:
+    """``"{iso_timestamp}|{object_id}"`` -> ``(time, oid)``; ``(None, None)`` if malformed."""
+    if not cursor:
+        return None, None
+    parts = cursor.split("|", 1)
+    if len(parts) != 2:
+        return None, None
+    try:
+        return datetime.fromisoformat(parts[0]), PydanticObjectId(parts[1])
+    except Exception:
+        return None, None
+
+
+async def _list_replies(
+    parent_message_id: str, *, after: str | None = None, limit: int = 200
+) -> list[_MessageDomain]:
+    """Non-deleted group-context replies to a parent, oldest first, at most
+    ``limit``, starting after the ``after`` cursor when given."""
+    query: dict = {
+        "context_type": "group",
+        "reply_to": parent_message_id,
+        "deleted": False,
+    }
+    after_time, after_oid = _parse_cursor(after)
+    if after_time is not None:
+        query["$or"] = [
+            {"createdAt": {"$gt": after_time}},
+            {"createdAt": after_time, "_id": {"$gt": after_oid}},
+        ]
+    cursor = (
+        _MessageDoc.find(query)
+        .sort([("createdAt", 1), ("_id", 1)])  # type: ignore[list-item]
+        .limit(limit)
+    )
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
@@ -494,19 +520,23 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
     await emit(MessageNew(data={**response, "group_id": group_id}))
     await emit(MessageSent(data={**response, "group_id": group_id, "sender_id": user_id}))
 
-    unread_tasks = [
-        emit(UnreadUpdate(data={"group_id": group_id, "user_id": member, "delta": 1}))
-        for member in group.members
-        if member != user_id
-    ]
-    if unread_tasks:
-        await asyncio.gather(*unread_tasks)
+    others = [member for member in group.members if member != user_id]
+    await map_bounded(
+        others,
+        lambda member: emit(
+            UnreadUpdate(data={"group_id": group_id, "user_id": member, "delta": 1})
+        ),
+    )
 
     group_name = getattr(group, "name", "") or ""
 
     # --- In-app notification: create for DM and group messages ---
     group_type = getattr(group, "type", "")
     is_dm = group_type == "dm"
+
+    # Every notification this message creates, delivered externally as ONE
+    # background batch (one delivery-config read per message).
+    created_notifs: list = []
 
     # Only create notifications for non-self messages
     notif_recipients = [m for m in group.members if m != user_id]
@@ -525,24 +555,21 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
             else sender_name
         )
 
-        notif_tasks = [
-            notifications_service.create(
-                workspace_id=str(group.workspace),
-                recipient=member,
-                kind="message",
-                title=title,
-                body=body.content[:200],
-                actor_id=user_id,
-                source=NotificationSource(
-                    type="message",
-                    id=domain_msg.id,
-                    pocket_id=None,
-                    room_id=group_id,
-                ),
-            )
-            for member in notif_recipients
-        ]
-        await asyncio.gather(*notif_tasks)
+        created_notifs += await notifications_service.create_many(
+            workspace_id=str(group.workspace),
+            recipients=notif_recipients,
+            kind="message",
+            title=title,
+            body=body.content[:200],
+            actor_id=user_id,
+            source=NotificationSource(
+                type="message",
+                id=domain_msg.id,
+                pocket_id=None,
+                room_id=group_id,
+            ),
+            deliver_external=False,
+        )
     broadcast_types = {"here", "channel", "everyone"}
     recipients: set[str] = set()
 
@@ -552,17 +579,23 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         mtype = mention.get("type")
         if mtype == "user":
             target = mention.get("id")
-            if target and target != user_id:
+            # A meeting room is hidden: a mention never reaches a non-member.
+            if (
+                target
+                and target != user_id
+                and (group_type != MEETING_GROUP_TYPE or target in group.members)
+            ):
                 recipients.add(target)
         elif mtype in broadcast_types:
             for member in group.members:
                 if member != user_id:
                     recipients.add(member)
 
-    async def _fan_out_mention(target: str) -> None:
-        await notifications_service.create(
+    if recipients:
+        mentioned = sorted(recipients)
+        created_notifs += await notifications_service.create_many(
             workspace_id=str(group.workspace),
-            recipient=target,
+            recipients=mentioned,
             kind="mention",
             title=(f"You were mentioned in #{group_name}" if group_name else "You were mentioned"),
             body=body.content[:200],
@@ -573,11 +606,11 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 pocket_id=None,
                 room_id=group_id,
             ),
+            deliver_external=False,
         )
-        await unread_service.bump_mention(target, group_id)
+        await map_bounded(mentioned, lambda target: unread_service.bump_mention(target, group_id))
 
-    if recipients:
-        await asyncio.gather(*(_fan_out_mention(t) for t in recipients))
+    notifications_service.schedule_external_many(created_notifs)
 
     return response
 
@@ -852,7 +885,7 @@ async def get_messages(
     from pocketpaw_ee.cloud.chat.runs import service as run_service
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     before_time: datetime | None = None
@@ -867,11 +900,19 @@ async def get_messages(
                 before_time = None
                 before_id = None
 
-    messages = await _list_for_group_paged(
-        group_id,
-        before_time=before_time,
-        before_id=before_id,
-        limit=limit + 1,
+    # History and the active-run lookup are independent reads.
+    messages, active = await asyncio.gather(
+        _list_for_group_paged(
+            group_id,
+            before_time=before_time,
+            before_id=before_id,
+            limit=limit + 1,
+        ),
+        run_service.find_active_run_for_scope(
+            workspace_id=group.workspace,
+            context_type=("dm", "group"),
+            scope_id=group_id,
+        ),
     )
     has_more = len(messages) > limit
     if has_more:
@@ -892,11 +933,6 @@ async def get_messages(
         if last.created_at is not None:
             next_cursor = f"{last.created_at.isoformat()}|{last.id}"
 
-    active = await run_service.find_active_run_for_scope(
-        workspace_id=group.workspace,
-        context_type=("dm", "group"),
-        scope_id=group_id,
-    )
     active_run = {"run_id": active.run_id, "status": active.status} if active else None
 
     return {
@@ -907,16 +943,25 @@ async def get_messages(
     }
 
 
-async def get_thread(message_id: str, user_id: str) -> list[dict]:
-    """Get all replies to a message, sorted ascending by creation time."""
+async def get_thread(
+    message_id: str,
+    user_id: str,
+    *,
+    after: str | None = None,
+    limit: int = THREAD_REPLY_LIMIT,
+) -> list[dict]:
+    """Replies to a message, oldest first: at most ``limit`` (capped at
+    ``THREAD_REPLY_LIMIT``), after the ``"{createdAt}|{_id}"`` cursor of the
+    last reply seen. The response stays a plain list."""
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     msg = await _get_group_message_domain_or_404(message_id)
     group = await _get_group_or_404(cast(str, msg.group))
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
-    replies = await _list_replies(msg.id)
+    limit = max(1, min(limit, THREAD_REPLY_LIMIT))
+    replies = await _list_replies(msg.id, after=after, limit=limit)
     return [message_to_wire_dict(r) for r in replies]
 
 
@@ -977,7 +1022,7 @@ async def get_active_threads(group_id: str, user_id: str) -> list[dict]:
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     if not group.active_threads:
@@ -1111,7 +1156,7 @@ async def get_thread_messages(
         raise NotFound("thread", thread_id)
 
     group = await _get_group_or_404(parent.group)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     # Build response: parent + thread replies
@@ -1194,7 +1239,7 @@ async def search_messages(group_id: str, user_id: str, query: str) -> list[dict]
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     domain_messages = await _search_in_group(group_id, query, limit=50)

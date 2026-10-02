@@ -454,6 +454,7 @@ async def test_capture_emits_lead_captured(mongo_db, lead_events):
         "site_id": SITE_ID,
         "site_name": SITE_NAME,
         "form_type": "AppointmentRequest",
+        "source_kind": "form",
     }
 
 

@@ -2,6 +2,9 @@
 # tool (``pocketpaw_other_hand`` → ``illustrate``).
 #
 # Created 2026-08-28 (feat/other-hand-illustrate-tool).
+# Updated 2026-10-01 (CN-3): the platform's daily ceiling is claimed through the
+# shared ``metering.service.try_spend`` primitive (``illustration_budget`` is
+# gone). The workspace is resolved here once and charged explicitly.
 #
 # Why a tool at all: the notebook's real job is explaining, and a lot of
 # explanations want a picture the pen cannot draw — a bee's wing venation, a
@@ -101,7 +104,8 @@ async def _illustrate_handler(args: dict) -> dict:
     if len(subject) < 2:
         return _error("Say what to illustrate — a subject of at least two characters.")
 
-    from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
     from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
 
     # Who pays, and whether this may happen at all. Both entry points ask the
@@ -112,7 +116,8 @@ async def _illustrate_handler(args: dict) -> dict:
     # there alone would leave the whole feature reachable by simply ASKING the
     # agent to draw, which is the more natural way in.
     is_guest = await _guest_or_none() is not None
-    grant = await creds.resolve(_workspace_or_none(), is_guest=is_guest)
+    workspace_id = _workspace_or_none()
+    grant = await creds.resolve(workspace_id, is_guest=is_guest)
     if isinstance(grant, creds.IllustrationRefusal):
         # Not an error the agent should retry or apologise at length for.
         return _error(grant.reason)
@@ -122,10 +127,15 @@ async def _illustrate_handler(args: dict) -> dict:
     # workspace on its own key is spending its own money and has no reason to
     # be inside our quota.
     if not grant.byok:
-        allowed, spent, cap = await budget.try_spend()
-        if not allowed:
+        cap = metering.illustration_cap()
+        if not await metering.try_spend(
+            subject_type="workspace",
+            subject_id=workspace_id,
+            meter=DailyMeter.ILLUSTRATION,
+            cap=cap,
+        ):
             return _error(
-                f"Today's illustration limit is used up ({spent}/{cap}). Explain in "
+                f"Today's illustration limit is used up ({cap}/{cap}). Explain in "
                 "words and with your own drawing instead; do not try again today."
             )
 

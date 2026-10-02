@@ -1,26 +1,13 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — every Paw Site's concierge is
 # answered by an agent that exists FOR that site, never a shared/universal one.
 #
-# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): NOTHING HERE RUNS
-#   AUTOMATICALLY ANY MORE (captain rule: a concierge is never created as a side
-#   effect). Removed the four triggers that minted a concierge on the way past —
-#   ``provision_widget_on_create`` (widget create), ``provision_on_concierge_enable``
-#   (the enable PATCH), the publish-time ``ensure_site_widget`` and
-#   ``provision_foreign_concierge`` (connected-site attach) — along with the
-#   default ``booking_request`` action the publish mint added. ``rebind_site_agent``
-#   lost its empty-id re-provision arm: an empty ``agent_id`` is now a 422.
-#   What remains is called by the OWNER's explicit create
-#   (``POST /paw-bar/admin/site/{id}/concierge``): ``ensure_site_widget_row``
-#   resolves-or-mints the bar with an empty spec and no actions, and
-#   ``ensure_site_agent`` binds a legacy agent while legacy is the create default.
-# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): comments only. The
-#   ASG-1 identity fields exist on the Agent model and create DTO, so
-#   ``_seed_identity`` does seed welcome_message + conversation_starters (and
-#   ``_seed_tags`` the tags); the notes below that called them no-ops were stale.
-#
-# ``ensure_site_agent(site, widget)`` is the funnel, and the single place "which
-# agent is this pocket's canonical concierge?" is decided. Its ONE caller is the
-# owner's explicit create; adding another means asking whether the owner asked.
+# Nothing here runs automatically: a concierge is never created as a side effect.
+# The owner's explicit create (``POST /paw-bar/admin/site/{id}/concierge``) calls
+# ``ensure_site_widget_row`` (resolve-or-mint the bar, empty spec, no actions) and,
+# on the legacy runtime, ``ensure_site_agent`` (bind the site's dedicated agent).
+# ``rebind_site_agent`` points a bar at a different, named agent (an empty id is a
+# 422). ``sync_concierge_identity`` keeps the dedicated agent's name and persona in
+# step with the owner's ``Site.concierge_name``.
 #
 # INVARIANTS:
 #   * IDEMPOTENT. A widget already bound to a LIVE agent is returned unchanged,
@@ -29,16 +16,18 @@
 #     caller asked for that by name.
 #   * THE SLUG IS DETERMINISTIC on the site id (``concierge-<site_id>``), so a
 #     create that races or retries after a failed bind RESOLVES the same agent
-#     instead of duplicating it. A lost create race adopts the winner.
+#     instead of duplicating it. The slug and the ``concierge`` + ``site:<id>``
+#     tags are also what keeps the agent off tenant listings
+#     (``agents.service.is_concierge_agent``).
 #   * AGENTS ARE CREATED THROUGH THE AGENTS SERVICE, never by a direct Beanie
 #     write, and in the SITE's workspace owned by the site's owner — the bind is
 #     workspace-scoped at every step so it can never reach across tenants.
+#   * A RENAME TOUCHES ONLY GENERATED VALUES. ``sync_concierge_identity`` changes
+#     the dedicated agent's name or persona only while it still reads as the one
+#     this module generated, so an owner's own edit and a hand-bound agent are
+#     never overwritten.
 #   * ``widget_for_agent`` is the REVERSE lookup and reads the real binding
 #     (``widget.agent_id``), not the slug, so a hand-bound agent counts too.
-#
-# ASG-1 identity fields (welcome_message, conversation_starters) are seeded on
-# create by ``_seed_identity``; both it and ``_seed_tags`` guard on ``hasattr`` of
-# the create body, so a DTO without a field degrades to a logged no-op.
 
 from __future__ import annotations
 
@@ -78,35 +67,55 @@ def concierge_slug(site_id: str) -> str:
     return f"concierge-{site_id}"
 
 
-def concierge_name(site_name: str) -> str:
-    """The agent display name: ``<Site name> Concierge`` (``Site Concierge`` when
-    the site has no name). Truncated to the Agent.name cap."""
+def concierge_name(site_name: str, guided_name: str = "") -> str:
+    """The agent display name: the owner's guided name (``Site.concierge_name``)
+    when set, else ``<Site name> Concierge`` (``Site Concierge`` when the site has
+    no name). Truncated to the Agent.name cap."""
+    chosen = " ".join((guided_name or "").split())
+    if chosen:
+        return chosen[:_MAX_AGENT_NAME]
     stripped = (site_name or "").strip()
     name = f"{stripped} Concierge" if stripped else "Site Concierge"
     return name[:_MAX_AGENT_NAME]
 
 
-def concierge_persona(site_name: str) -> str:
-    """The soul persona seeded on the concierge agent."""
+def concierge_persona(site_name: str, guided_name: str = "") -> str:
+    """The soul persona seeded on the concierge agent. It names the concierge
+    when the owner gave it a name, so it introduces itself by that name."""
     subject = (site_name or "").strip() or "this site"
+    chosen = " ".join((guided_name or "").split())[:_MAX_AGENT_NAME]
+    if chosen:
+        return (
+            f"You are {chosen}, the concierge for {subject}. Introduce yourself as "
+            f"{chosen}. You answer visitors' questions about this site, grounded in "
+            "its own knowledge."
+        )
     return (
         f"You are the concierge for {subject}. You answer visitors' questions "
         "about this site, grounded in its own knowledge."
     )
 
 
-def derive_conversation_starters(widget: Any) -> list[str]:
-    """Derive up to four plain visitor questions from the widget spec.
+def _guided_name(site: Any) -> str:
+    return str(getattr(site, "concierge_name", "") or "")
+
+
+def derive_conversation_starters(widget: Any, *, catalog_count: int | None = None) -> list[str]:
+    """Derive up to four plain visitor questions from the widget.
 
     Rules (order preserved, capped at ``_MAX_STARTERS``):
-      * a non-empty catalog adds ``"What do you sell?"``;
+      * a non-empty catalog adds ``"What do you sell?"``. ``catalog_count`` is the
+        catalog store's count; without it a (deprecated) spec catalog decides;
       * each GATED action carrying a label adds ``"<label>?"`` (e.g. a
         ``book_table`` action labelled "Book a table" → "Book a table?");
       * if nothing derived, a single generic ``"What can you help me with?"``.
     """
     spec = getattr(widget, "spec", None)
     starters: list[str] = []
-    if spec is not None and getattr(spec, "catalog", None):
+    has_catalog = (
+        catalog_count > 0 if catalog_count is not None else bool(getattr(spec, "catalog", None))
+    )
+    if has_catalog:
         starters.append("What do you sell?")
     for action in getattr(spec, "actions", None) or []:
         if len(starters) >= _MAX_STARTERS:
@@ -119,7 +128,7 @@ def derive_conversation_starters(widget: Any) -> list[str]:
     return starters[:_MAX_STARTERS]
 
 
-def _seed_identity(body: Any, site: Any, widget: Any) -> None:
+def _seed_identity(body: Any, site: Any, widget: Any, catalog_count: int | None = None) -> None:
     """Seed the ASG-1 identity fields on a create body IF the model supports them.
 
     ``welcome_message`` ← ``Site.concierge_greeting`` (when non-empty),
@@ -128,7 +137,7 @@ def _seed_identity(body: Any, site: Any, widget: Any) -> None:
     guards only matter for a body that lacks one, which degrades to a debug log.
     """
     greeting = (getattr(site, "concierge_greeting", "") or "").strip()
-    starters = derive_conversation_starters(widget)
+    starters = derive_conversation_starters(widget, catalog_count=catalog_count)
 
     seeded = False
     if greeting and hasattr(body, "welcome_message"):
@@ -219,15 +228,21 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
 
     if agent is None:
         body = CreateAgentRequest(
-            name=concierge_name(site.name),
+            name=concierge_name(site.name, _guided_name(site)),
             slug=slug,
             visibility="workspace",
-            persona=concierge_persona(site.name),
+            persona=concierge_persona(site.name, _guided_name(site)),
             soul_archetype=_CONCIERGE_ARCHETYPE,
             # soul_enabled defaults True — the concierge carries a soul.
         )
         _seed_tags(body, site_id)
-        _seed_identity(body, site, widget)
+        catalog_count: int | None = None
+        if getattr(widget, "id", ""):
+            try:
+                catalog_count = await _store().catalog_count(widget.id)
+            except Exception:  # noqa: BLE001 — a starter is cosmetic; never block the bind
+                logger.warning("paw-bar concierge: catalog count failed for %s", widget.id)
+        _seed_identity(body, site, widget, catalog_count)
         try:
             agent = await agents_service.create(ctx, workspace_id, body)
         except ConflictError:
@@ -256,6 +271,53 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
     # the natural catch-up point. Background + failure-soft: never a gate on a bind.
     _schedule_knowledge_sync(site)
     return agent.id
+
+
+async def sync_concierge_identity(site: Any, previous_name: str) -> None:
+    """Carry a change of ``Site.concierge_name`` onto the site's dedicated agent.
+
+    The legacy runtime answers through that agent, and its name and persona are
+    what the dashboard and the agent's soul show. Only the DEDICATED agent (slug
+    ``concierge-<site_id>``, in the site's workspace) is touched, never an agent
+    the owner bound by hand, and each of the two fields only while it still equals
+    what this module generated from ``previous_name``: an owner who renamed the
+    agent or rewrote its persona keeps their edit.
+
+    Failure-soft: the settings save has already happened, so a missing agent or a
+    failed write is logged, never raised.
+    """
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import UpdateAgentRequest
+
+    workspace_id = str(getattr(site, "workspace", "") or "")
+    site_id = str(getattr(site, "id", "") or "")
+    if not workspace_id or not site_id:
+        return
+    try:
+        agent = await agents_service.get_by_slug(workspace_id, concierge_slug(site_id))
+    except NotFound:
+        return
+    site_name = str(getattr(site, "name", "") or "")
+    new_name = _guided_name(site)
+    body = UpdateAgentRequest()
+    if agent.name == concierge_name(site_name, previous_name):
+        body.name = concierge_name(site_name, new_name)
+    if agent.config.soul_persona == concierge_persona(site_name, previous_name):
+        body.persona = concierge_persona(site_name, new_name)
+    if body.name in (None, agent.name) and body.persona in (None, agent.config.soul_persona):
+        return
+    try:
+        # The agent is the site owner's; the caller already passed the site's
+        # manage gate, so the write is made as the agent's owner.
+        ctx = agents_service.legacy_ctx(str(agent.owner), workspace_id)
+        await agents_service.update(ctx, agent.id, body)
+    except Exception:  # noqa: BLE001 — the settings are saved; the agent can lag
+        logger.warning(
+            "paw-bar concierge: could not rename the concierge agent for site %s",
+            site_id,
+            exc_info=True,
+        )
 
 
 def _schedule_knowledge_sync(site: Any) -> None:
@@ -463,5 +525,6 @@ __all__ = [
     "ensure_site_widget_row",
     "rebind_site_agent",
     "site_widget",
+    "sync_concierge_identity",
     "widget_for_agent",
 ]

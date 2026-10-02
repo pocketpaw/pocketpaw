@@ -95,7 +95,6 @@ async def _build(sdk, *, message="hello", model_override=None):
             built = await sdk._build_options(
                 message,
                 system_prompt="identity",
-                history=None,
                 session_key="s1",
                 deny_mcp_tool_ids=frozenset(),
                 allow_sdk_tools=frozenset(),

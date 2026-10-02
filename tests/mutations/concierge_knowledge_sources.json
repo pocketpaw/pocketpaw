@@ -176,7 +176,7 @@
   {
     "label": "a source removed mid-ingest leaves its article orphaned in the pocket",
     "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
-    "find": "        await _unindex(scope, [article_id], site_id)",
+    "find": "        await _unindex(scope, article_ids, site_id)",
     "replace": "        pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_sources.py::test_a_source_removed_mid_ingest_leaves_no_orphan_article"

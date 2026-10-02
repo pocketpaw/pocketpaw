@@ -299,12 +299,12 @@
     {
       "type": "form",
       "category": "input",
-      "description": "Collects the details a gated action needs, then submits it for the business to approve. verb must be a declared gated action and every field name one of its args.",
+      "description": "Collects details and submits them. verb is either a declared gated action (every field name one of its args; the business approves it) or \"send_to_team\": when the visitor shares contact details or asks to be contacted, offer a send_to_team form with fields from name, email, phone, message (email or phone required), prefilled with what they said. Nothing is sent until the visitor taps the button, so never claim it was sent.",
       "props": {
         "verb": {
           "type": "string",
           "required": true,
-          "description": "The gated action, e.g. \"book_visit\"."
+          "description": "A declared gated action, e.g. \"book_visit\", or \"send_to_team\"."
         },
         "title": {
           "type": "string",
@@ -317,29 +317,80 @@
           "description": "Button text."
         },
         "fields": {
-          "type": "Array<{ name: string; label: string; type: \"text\" | \"tel\" | \"email\" | \"number\" | \"textarea\" }>",
+          "type": "Array<{ name: string; label: string; type: \"text\" | \"tel\" | \"email\" | \"number\" | \"textarea\"; value?: string }>",
           "required": true,
-          "description": "At most 8 fields, names unique."
+          "description": "At most 8 fields, names unique. value (optional, at most 500 characters) prefills the field from the conversation; the visitor can edit it."
         }
       },
       "example": {
         "type": "form",
         "props": {
-          "verb": "book_visit",
-          "title": "Book a fitting",
-          "submit_label": "Request",
+          "verb": "send_to_team",
+          "submit_label": "Send",
           "fields": [
             {
               "name": "name",
               "label": "Name",
-              "type": "text"
+              "type": "text",
+              "value": "Priya"
             },
             {
-              "name": "phone",
-              "label": "Phone",
-              "type": "tel"
+              "name": "email",
+              "label": "Email",
+              "type": "email",
+              "value": "priya@example.com"
+            },
+            {
+              "name": "message",
+              "label": "Message",
+              "type": "textarea",
+              "value": "20 jackets for a team trip"
             }
           ]
+        }
+      }
+    },
+    {
+      "type": "book_slot",
+      "category": "input",
+      "description": "Books a session in the conversation. Offer it when the visitor leans towards one of the open times in <availability>. Give slot_ids from that block only; the server fills in the times. The visitor picks one and confirms; never claim a session is booked before the card says so.",
+      "props": {
+        "session_type": {
+          "type": "string",
+          "required": true,
+          "description": "The session type id from <availability>."
+        },
+        "slot_ids": {
+          "type": "string[]",
+          "required": true,
+          "description": "1 to 4 slot ids from <availability>, the best fit first."
+        },
+        "name": {
+          "type": "string",
+          "required": false,
+          "description": "The visitor's name, if they gave it."
+        },
+        "email": {
+          "type": "string",
+          "required": false,
+          "description": "The visitor's email, if they gave it."
+        },
+        "notes": {
+          "type": "string",
+          "required": false,
+          "description": "What the session is about, in a sentence."
+        }
+      },
+      "example": {
+        "type": "book_slot",
+        "props": {
+          "session_type": "intro-30",
+          "slot_ids": [
+            "s1",
+            "s2"
+          ],
+          "name": "Priya",
+          "email": "priya@example.com"
         }
       }
     }

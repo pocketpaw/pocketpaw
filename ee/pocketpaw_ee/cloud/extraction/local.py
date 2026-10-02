@@ -1,13 +1,15 @@
 # local.py — Local extraction adapter (pypdf + python-docx + pytesseract +
 # python-pptx + openpyxl + trafilatura + Pillow/pillow-heif).
-# Created: 2026-04-30 — Phase 1 of "Files as Knowledge" plan, Stage 1.A.
-# Updated: 2026-08-29 (files-intelligence Track 1) — the dispatch table gained
-#   .pptx (slides + speaker notes), .xlsx (sheet names + cell text), .html
-#   (trafilatura), and the raster set .webp/.tif/.tiff/.heic/.heif routed into
-#   the existing OCR path. Every new branch carries a size ceiling checked
-#   BEFORE the library is handed the file. The old "line-for-line port of
-#   _extract_file" framing no longer holds: the PDF/DOCX/image/VTT branches are
-#   still that port untouched, but the module is now a superset of it.
+# The chain's catch-all fallback. Every parser here is synchronous and CPU- or
+# subprocess-bound (pytesseract shells out), so `extract` runs the whole
+# dispatch in a worker thread: callers (the upload indexer, chat attachments,
+# the files MCP tool, the book agent, KnowledgeService.ingest_file) share one
+# event loop and must never block it. Every branch carries a size ceiling
+# checked BEFORE the library is handed the file, and the raw-text fallback reads
+# at most `_MAX_TEXT_BYTES` so an unknown binary is never slurped whole.
+#
+# Changes (2026-10-01, CN-7): two docstring pointers at the deleted
+# src/pocketpaw/knowledge/ingest.py no longer cite it.
 """LocalExtractor — wraps the traditional extraction libraries.
 
 The PDF, DOCX, image and VTT branches remain a behavior-preserving port of the
@@ -16,8 +18,9 @@ later. `supports_mimes = {"*"}` keeps Local the chain's catch-all fallback.
 
 Size ceilings — why they are byte checks, and why they run first
 ---------------------------------------------------------------
-Extraction runs inside a bus listener (`uploads/listeners.py`) that catches
-everything and continues, on a request-path thread. A pathological input
+Extraction runs inside a background upload-indexing task
+(`uploads/listeners.py`) that catches everything and continues, in a worker
+thread of the web process. A pathological input
 therefore cannot be allowed to consume the box; it has to be refused before any
 library touches it. A timeout is the wrong instrument: by the time it fires the
 memory is already allocated, and `openpyxl`/`python-pptx` do their damage in a
@@ -50,7 +53,10 @@ Two different over-limit behaviours, deliberately:
   mid-parse, where partial text is strictly more useful than none, and the
   output carries a visible ``[truncated: ...]`` marker so a reader can tell
   a cap from a short document. ``_MAX_EXTRACTED_CHARS`` (100_000) matches the
-  existing precedent in `pocketpaw/knowledge/ingest.py`.
+  cap the old file-wiki ingest used (removed 2026-10-01; kb-go is the
+  KB). The raw-text read
+  (VTT and the unmatched-suffix fallback) stops at ``_MAX_TEXT_BYTES`` (10 MB)
+  the same way: a big ``.csv`` still yields its first 10 MB of text.
 
 The caps apply to the branches added in 2026-08; the ported PDF/DOCX/image
 branches are left exactly as they were so their parity tests keep meaning what
@@ -59,6 +65,7 @@ they say.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
@@ -67,6 +74,7 @@ from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 _MAX_OFFICE_BYTES = 50 * 1024 * 1024
 _MAX_HTML_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_BYTES = 25 * 1024 * 1024
+_MAX_TEXT_BYTES = 10 * 1024 * 1024
 
 # Structural caps — hit mid-parse, so these truncate rather than raise.
 _MAX_XLSX_SHEETS = 50
@@ -101,6 +109,16 @@ def _refuse_if_too_big(path: Path, ceiling: int, kind: str) -> None:
         )
 
 
+def _read_text_capped(path: Path, limit: int = _MAX_TEXT_BYTES) -> str:
+    """Read at most ``limit`` bytes as text, marking a cut with ``[truncated: ...]``."""
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    text = data[:limit].decode("utf-8", errors="replace")
+    if len(data) > limit:
+        text += f"\n[truncated: only the first {limit} bytes were read]"
+    return text
+
+
 def _budgeted(parts: list[str], limit: int = _MAX_EXTRACTED_CHARS) -> str:
     """Join collected text and truncate to the global budget with a marker."""
     text = "\n".join(parts)
@@ -122,7 +140,8 @@ class LocalExtractor:
     requires_network = False
 
     async def extract(self, path: Path, mime: str) -> ExtractionResult:
-        text = await _extract_text(path, mime)
+        # Every parser below is blocking; keep the event loop free.
+        text = await asyncio.to_thread(_extract_text, path, mime)
         return ExtractionResult(
             text=text,
             metadata={"path": str(path), "mime": mime},
@@ -130,10 +149,12 @@ class LocalExtractor:
         )
 
 
-async def _extract_text(path: Path, mime: str = "") -> str:
+def _extract_text(path: Path, mime: str = "") -> str:
     """Extract text from PDF, DOCX, PPTX, XLSX, HTML, image or VTT.
 
-    Anything unmatched falls back to a raw text read, as before.
+    Synchronous on purpose — ``LocalExtractor.extract`` runs it in a thread.
+    Anything unmatched falls back to a raw text read capped at
+    ``_MAX_TEXT_BYTES``.
 
     Routing precedence: explicit ``mime`` first, then file suffix. Mime
     wins because callers sometimes hand us a temp file whose extension
@@ -234,9 +255,9 @@ async def _extract_text(path: Path, mime: str = "") -> str:
         return pytesseract.image_to_string(Image.open(file_path))
 
     if suffix == ".vtt" or norm_mime == "text/vtt":
-        return _vtt_to_plain(path.read_text(encoding="utf-8", errors="replace"))
+        return _vtt_to_plain(_read_text_capped(path))
 
-    return path.read_text(encoding="utf-8", errors="replace")
+    return _read_text_capped(path)
 
 
 def _extract_pptx(presentation) -> str:
@@ -334,10 +355,9 @@ def _extract_html(html: str) -> str:
       would hide a broken image behind slightly-worse output.
     * trafilatura **returning None** is normal. It is tuned for articles and
       declines boilerplate-only or very short documents. That is a content
-      outcome, not a fault, so fall back to stripping tags (the idiom from
-      `pocketpaw/knowledge/ingest.py`) rather than returning raw markup —
-      before this branch existed, raw markup with all its tags is precisely
-      what `.html` uploads were indexing into the KB.
+      outcome, not a fault, so fall back to stripping tags rather than
+      returning raw markup — before this branch existed, raw markup with all
+      its tags is precisely what `.html` uploads were indexing into the KB.
     """
     import re
 

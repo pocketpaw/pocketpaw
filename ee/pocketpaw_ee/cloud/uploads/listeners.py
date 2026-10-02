@@ -1,146 +1,38 @@
 # listeners.py — In-process subscribers for upload-related bus events.
-# 2026-09-05: the tag and comprehension writes now emit file.updated (workspace
-#   audience) so /files refetches the row; file.ready fires before those writes.
-# Updated: 2026-09-05 — files vault (feat/files-links). (1) For text notes (text/markdown,
-#   text/plain) the listener parses ``[[wikilinks]]``, ``#hashtags`` and frontmatter tags out of
-#   the extracted text right after ``persist_extracted_text`` (same ``ExtractionResult`` that
-#   was just persisted; ``uploads.links``) and persists ``link_names`` in the SAME write as the
-#   auto-tags. ``summary`` is untouched; note tags rank as human tags (they win over derived
-#   keyword tags at the MAX_TAGS cap). Sits under the hide_from_ai gate; a parser error is
-#   logged and the file stays indexed. (2) Idempotent re-index: the editor now emits FileReady
-#   on every note save, so when the fresh ingest lands under a DIFFERENT article id than the row
-#   already tracks, the old article is removed from kb-go before the tracking is overwritten.
-#   One file, one article.
-# Updated: 2026-08-29 — T2 "Audio/video transcription at ingest". ``audio/*``
-#   and ``video/*`` no longer go through the extraction chain at all; they go
-#   to ``uploads.transcription``, which returns the transcript as an ordinary
-#   ``ExtractionResult``. Three things follow, and only the first is the
-#   feature:
-#   (1) everything after this point is UNCHANGED — the same persist, the same
-#       auto-tag, the same comprehension, the same KB ingest — so a recording
-#       gets a summary, tags and content search with no new code in any of
-#       those paths. That payoff is the reason T0 (persist the extraction) had
-#       to land first;
-#   (2) it FIXES a live bug rather than adding beside it. ``LocalExtractor``
-#       advertises ``supports_mimes = {"*"}`` and ends in
-#       ``path.read_text(errors="replace")``, so an uploaded video was being
-#       read whole into a string of replacement characters and that string was
-#       persisted, summarised, tagged and indexed. The branch is exclusive, so
-#       the binary is never read as text again;
-#   (3) it is contained in both directions. A textless result carrying a
-#       recorded ``skipped`` reason (too long, no speech) is persisted like any
-#       empty extraction — comprehension and tagging no-op on it and the KB
-#       ingest is skipped by the existing empty-text check. ``None`` means
-#       transcription itself was unavailable, and the listener returns without
-#       persisting so the next ingest retries.
-# Updated: 2026-08-29 — T0 "Persist the extracted text". Immediately after
-#   ``chain.run`` and BEFORE anything consumes the result, the listener now
-#   persists the whole ``ExtractionResult`` via ``uploads.extracted_text`` so
-#   no later consumer re-runs the chain over the same bytes (the book agent
-#   did; transcription was about to). Three properties:
-#   (1) it runs before comprehension and before the KB ingest, so the text is
-#       already durable if either of those dies mid-flight;
-#   (2) it fails OPEN by contract — ``persist_extracted_text`` returns False
-#       instead of raising, so a storage failure costs a future re-extraction
-#       and cannot lose the ingest, the tags or the comprehension that follow.
-#       That is the same containment rule the FL-6 tag write and the FL-11b
-#       tracking write already follow;
-#   (3) ``content_version`` is read from the row BEFORE extraction starts, so a
-#       concurrent inline edit makes the stored text look STALE (the reader
-#       then re-extracts) rather than making edited bytes look described.
-#   ``_write_comprehension`` now takes the typed ``ExtractionResult`` rather
-#   than an untyped ``result`` — the same type ``load_extracted_text`` returns,
-#   so a future backfill can feed it a stored blob. It deliberately does not
-#   read that blob back here; see the function's own note.
-# Updated: 2026-08-28 — FC-3 "File comprehension". After the FL-6 auto-tag pass
-#   the listener now also asks a model what the file IS (``_write_comprehension``,
-#   beside ``_write_auto_tags``) and persists a ``summary`` plus merged
-#   ``collections`` through ``MongoFileStore.set_library_metadata``. Four
-#   properties, three of which the auto-tag path already modelled:
-#   (1) the ``hide_from_ai`` gate above still runs FIRST and returns before any
-#       of this, so a hidden file is never sent to a model — same fail-CLOSED
-#       privacy gate, no second copy of it;
-#   (2) fail-OPEN on everything else: a failed, empty or capped comprehension
-#       leaves the file indexed, tagged and usable. The user asked to store a
-#       file, not to have it understood;
-#   (3) a non-empty ``summary`` is never overwritten, so a human's correction
-#       survives every re-ingest;
-#   (4) a per-workspace daily cap (``uploads.comprehension_budget``) is claimed
-#       BEFORE the call, and that one gate fails CLOSED — the cost of skipping a
-#       summary is a missing summary, the cost of an unbounded ingest is money.
-# Updated: 2026-08-04 (living-wiki review follow-up) — _extract_article_id now
-#   delegates to knowledge.extract_ingest_article_id: kb-go's real ingest
-#   receipt keys the id as "article" (finishIngest), which the inline
-#   id/article_id lookup never matched — so FL-11b tracking and the vector
-#   path silently never ran on real receipts.
-# Created: 2026-04-30 — Stage 1.B of "Files as Knowledge". Wires FileReady
-#   into the extraction chain and ingests the resulting text into the
-#   workspace KB scope. Pocket-scope routing lands in Stage 3.E.
-# Updated: 2026-04-30 evening — Stage 1.B follow-up. Remote storage
-#   adapters (S3, GCS) don't expose a local path; the listener now streams
-#   the blob into a NamedTemporaryFile via the adapter's async open() and
-#   runs extraction on the temp file, cleaning up afterwards. Local-disk
-#   adapters keep using the direct path with no extra I/O.
-# Updated: 2026-04-30 — Stage 2.D of "Files as Knowledge". Added the
-#   vector path: after text-ingest succeeds, optionally compute an
-#   embedding via the configured EmbeddingAdapter and pipe it to kb-go's
-#   `kb ingest --vec <path>` surface. Cap-tracking via CostTracker keeps
-#   a runaway loop from draining the budget. Vector failures are
-#   contained — text-only KB still wins.
-# Updated: 2026-05-03 — Stage 3.E of "Files as Knowledge". The listener
-#   now reads ``pocket_id`` off the FileReady payload and routes the
-#   article into ``pocket:{id}`` instead of the workspace pool. The
-#   vector path inherits the same scope variable so embeddings land in
-#   the same kb-go scope as the text article. Workspace uploads (no
-#   ``pocket_id``) keep the previous ``workspace:{wid}`` behaviour.
-# Updated: 2026-07-03 — FL-6 "Auto-tagging on ingest". The listener now
-#   (1) loads the FileUpload row up front and, if ``hide_from_ai`` is set,
-#   returns early — a hidden file is neither KB-indexed nor tagged (this
-#   gate also lands in FL-11b; the two agree). (2) After extraction produces
-#   text it derives a small set of free-form tags from title + captions +
-#   text (reusing what extraction already produced — no new LLM call) via
-#   ``uploads.tagging``, unions them with any pre-existing user tags, and
-#   writes the result back through ``MongoFileStore.set_library_metadata``.
-#   Tag derivation/write failures are contained: a broken tag write must
-#   never lose the KB ingest that already succeeded.
-# Updated: 2026-07-03 — FL-11b "hide-from-AI enforcement". Hardened the hide
-#   gate to fail CLOSED: if the FileUpload row can't be resolved to confirm
-#   ``hide_from_ai``, the listener SKIPS indexing/tagging instead of proceeding
-#   (FL-6 failed open, which could index a hidden file on a metadata hiccup).
-#   NOTE: purging content ALREADY indexed when a file is later hidden requires
-#   a kb-go ``delete`` subcommand that does not exist yet — tracked as a
-#   follow-up; this change guarantees hidden files are never indexed going
-#   forward.
-# Updated: 2026-07-03 — FL-11b "hide-from-AI purge" (retroactive). After a
-#   successful KB ingest the listener now records the kb-go ``article_id`` and
-#   the ``scope`` it landed in onto the FileUpload row (via
-#   ``MongoFileStore.set_kb_article``). This lets the PATCH route retroactively
-#   purge exactly that article when the file is later hidden from AI (the
-#   companion delete path lives in ``uploads/router.py``). The tracking write is
-#   contained — a failure logs but never undoes the ingest that succeeded.
+# `file.ready` is subscribed by `schedule_index_uploaded_file`, which only
+# spawns a background task and returns: `bus.publish` awaits handlers inline,
+# so running the pipeline in the handler held every upload request for the
+# whole index (10-60 s per PDF, up to 10 min for media). Tasks are held in a
+# strong-ref set, bounded by `_INDEX_SLOTS`, and their errors are logged.
+# `drain_pending_indexing` finishes (then cancels) them at shutdown. Work in
+# flight is lost on a crash; the durable fix is moving this to the arq worker.
+#
+# `index_uploaded_file` is the pipeline itself, in order:
+#   hide_from_ai gate (fail CLOSED: an unresolvable row is never indexed) ->
+#   materialize the blob to a local path -> extract (audio/video go to
+#   `uploads.transcription` instead of the chain) -> persist the whole
+#   ExtractionResult (fail OPEN) -> note links/tags + derived auto-tags ->
+#   comprehension summary (daily cap claimed first, fails CLOSED; a human
+#   summary is never overwritten) -> kb-go ingest into `pocket:{id}` or
+#   `workspace:{wid}` -> record `kb_article_id` (None means "not indexed", so
+#   it is the index status the client sees) -> optional vector ingest.
+# Every step after extraction is contained: a failure there logs and leaves
+# the steps that already succeeded in place. Tag and comprehension writes emit
+# `file.updated` so /files refetches the row. A re-index that lands under a new
+# article id removes the old article first: one file, one article.
+# Updated 2026-10-01 (CN-3): the comprehension cap claims through the shared
+# `metering.service.try_spend` daily primitive (comprehension_budget is gone).
 """Upload bus subscribers.
 
 The upload pipeline emits :class:`FileReady` on every successful upload.
-This module subscribes that event and runs the indexing flow:
-
-  1. Resolve a Path the extractor can read — either the adapter's local
-     path (local-disk deployments) or a temp file streamed from the
-     adapter's ``open()`` (S3, GCS, any remote adapter).
-  2. Run the configured extraction chain to produce searchable text.
-  3. Ingest the text into the kb-go scope ``workspace:{wid}``.
-  4. Clean up the temp file on the way out, regardless of success.
-
-Failures are isolated — a broken extraction or a missing kb binary must not
-propagate back to the upload publisher. The bus already wraps each handler
-in a try/except, but we keep the listener defensive so the failure mode is
-"file uploads, but doesn't auto-index" rather than "upload aborts".
-
-Pocket-scope routing arrives in Stage 3.E: the listener will check
-``event.data.get("pocket_id")`` and route into ``pocket:{id}`` when set.
+``schedule_index_uploaded_file`` hands it to a bounded background task running
+``index_uploaded_file``, so the upload request never waits on indexing and an
+indexing failure can only ever mean "file uploads, but doesn't auto-index".
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -153,6 +45,51 @@ from pocketpaw_ee.cloud.uploads.resolver import materialize_to_local_path
 from pocketpaw_ee.cloud.uploads.transcription import is_transcribable, transcribe_media
 
 logger = logging.getLogger(__name__)
+
+# ponytail: in-process and bounded per web process; the arq worker is the
+# durable, horizontally scaled home for this pipeline.
+_INDEX_CONCURRENCY = 4
+_INDEX_SLOTS = asyncio.Semaphore(_INDEX_CONCURRENCY)
+_pending_index_tasks: set[asyncio.Task] = set()
+
+
+async def schedule_index_uploaded_file(event: Event) -> None:
+    """``file.ready`` subscriber: start indexing in the background and return.
+
+    The bus awaits this inline inside the upload request, so it must not do
+    the work itself.
+    """
+    file_id = (event.data or {}).get("file_id")
+    task = asyncio.create_task(_index_in_background(event), name=f"index-upload:{file_id}")
+    _pending_index_tasks.add(task)
+    task.add_done_callback(_pending_index_tasks.discard)
+
+
+async def _index_in_background(event: Event) -> None:
+    async with _INDEX_SLOTS:
+        try:
+            await index_uploaded_file(event)
+        except Exception:
+            logger.exception(
+                "background index failed for file_id=%s", (event.data or {}).get("file_id")
+            )
+
+
+async def drain_pending_indexing(timeout: float = 30.0) -> int:
+    """Wait up to ``timeout`` s for in-flight indexing, then cancel the rest.
+
+    Returns how many tasks were cancelled. Meant for the cloud shutdown hooks.
+    """
+    pending = set(_pending_index_tasks)
+    if not pending:
+        return 0
+    _, not_done = await asyncio.wait(pending, timeout=timeout)
+    for task in not_done:
+        task.cancel()
+    if not_done:
+        await asyncio.gather(*not_done, return_exceptions=True)
+        logger.warning("cancelled %d upload index task(s) at shutdown", len(not_done))
+    return len(not_done)
 
 
 async def index_uploaded_file(event: Event) -> None:
@@ -729,7 +666,7 @@ async def _write_comprehension(
        merging cannot destroy anything.
     2. **The daily cap is claimed before the call, and refuses fail-CLOSED.**
        This is the one gate in the whole path that fails closed; see
-       ``comprehension_budget``'s module note for why the asymmetry is
+       the DAILY CAPS note in ``metering.service`` for why the asymmetry is
        deliberate.
     3. **Everything after that fails OPEN.** A dead proxy, a 404 model id, a
        model that answers in prose — ``comprehend`` returns None and this
@@ -746,17 +683,24 @@ async def _write_comprehension(
             logger.debug("file_id=%s already has a summary; leaving it alone", file_id)
             return
 
-        from pocketpaw_ee.cloud.uploads import comprehension_budget
+        from pocketpaw_ee.cloud.metering import service as metering
+        from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
-        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)
-        if not allowed:
+        cap = metering.file_comprehension_cap()
+        # Fails CLOSED (the default): a degraded database must not become an
+        # open tab at the model for unrequested, platform-paid calls.
+        if not await metering.try_spend(
+            subject_type="workspace",
+            subject_id=workspace_id,
+            meter=DailyMeter.FILE_COMPREHENSION,
+            cap=cap,
+        ):
             logger.info(
                 "file comprehension skipped for file_id=%s: workspace %s is at "
-                "%d/%d for today (or the counter was unreadable). The file is "
-                "still indexed and tagged.",
+                "its daily cap of %s (or the counter was unreadable). The file "
+                "is still indexed and tagged.",
                 file_id,
                 workspace_id,
-                spent,
                 cap,
             )
             return
@@ -861,7 +805,12 @@ def register_upload_listeners() -> None:
     it exactly once.
     """
     bus = get_bus()
-    bus.subscribe(FileReady.EVENT_TYPE, index_uploaded_file)
+    bus.subscribe(FileReady.EVENT_TYPE, schedule_index_uploaded_file)
 
 
-__all__ = ["index_uploaded_file", "register_upload_listeners"]
+__all__ = [
+    "drain_pending_indexing",
+    "index_uploaded_file",
+    "register_upload_listeners",
+    "schedule_index_uploaded_file",
+]

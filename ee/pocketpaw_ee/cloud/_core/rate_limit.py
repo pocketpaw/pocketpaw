@@ -15,6 +15,25 @@ a per-user bucket (30/min) on ``GET /sites/slug-available``. The check reads Mon
 and the Cloudflare account listing on every keystroke of an address field, and
 it answers "is this name taken" for names in any workspace, so it must not be a
 free enumeration oracle.
+
+Updated: 2026-10-01 (MC-2, feat/meetings-by-code) — added
+``rate_limit_meeting_lookup``, a per-IP bucket (30/min) on the unauthenticated
+``GET /meetings/by-code/{code}`` so the lookup can't be used to sweep codes.
+
+Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added
+``rate_limit_meeting_knock`` (per IP 10/min AND per meeting code 30/min on the
+public ``POST /meetings/by-code/{code}/knock``) and
+``rate_limit_meeting_knock_poll`` (per IP 120/min on the guest's knock status
+poll and cancel). ``client_ip`` is public so the knock route can key the
+one-minute re-knock cooldown after a denial on the same address.
+
+Updated: 2026-10-01 (feat/discover-index, DS-1) — added
+``rate_limit_discover_public``, a per-IP bucket (60/min) on the unauthenticated
+``GET /discover`` and ``GET /discover/{id}`` reads.
+
+Updated: 2026-10-02 (feat/discover-index, hardening) — added
+``rate_limit_discover_report``, a per-user bucket (10/hour across all listings)
+on ``POST /discover/{id}/report``, so one account can't spray reports.
 """
 
 from __future__ import annotations
@@ -25,6 +44,7 @@ from fastapi import Depends, Request
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import current_user_id
 from pocketpaw_ee.cloud._core.errors import RateLimited
 
 # 50 invites per workspace per actor per day. Burst capped at 50, refill at
@@ -49,6 +69,30 @@ _social_exchange_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
 # owner types, so the burst is generous; the refill still stops a script walking the
 # namespace to learn which site addresses exist.
 _slug_check_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+
+
+# 30 meeting-code lookups per minute per IP. The lookup is public (the /m/<code>
+# page calls it before sign-in); a person opening links needs a handful, a script
+# guessing codes gets 30 tries a minute out of ~4e13.
+_meeting_lookup_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+
+# 60 public Discover reads per minute per IP. The index is browsed before sign-in;
+# a person paging and opening cards needs a few dozen, a scraper gets 60 a minute.
+_discover_public_limiter = RateLimiter(rate=60.0 / 60.0, capacity=60)
+
+# 10 Discover reports per hour per user, across every listing. Three reporters
+# hide a listing, so a person reporting what they see needs a handful; a sock
+# account sweeping the index gets 10 an hour.
+_discover_report_limiter = RateLimiter(rate=10.0 / 3600.0, capacity=10)
+
+# Knocks (a guest asking to join). Per IP: a guest knocks once, maybe again after
+# a denial. Per code: every knock puts a card in front of the people in the call,
+# so one meeting can't be flooded by many addresses either.
+_meeting_knock_ip_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
+_meeting_knock_code_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
+# The waiting screen polls every 2s (30/min); 120 leaves room for a few guests
+# behind one NAT.
+_meeting_knock_poll_limiter = RateLimiter(rate=120.0 / 60.0, capacity=120)
 
 
 def _client_ip(request: Request) -> str:
@@ -86,6 +130,11 @@ def _client_ip(request: Request) -> str:
         return peer
 
 
+def client_ip(request: Request) -> str:
+    """Public name for ``_client_ip`` (same rightmost-XFF rule)."""
+    return _client_ip(request)
+
+
 async def rate_limit_social_exchange(request: Request) -> None:
     """Per-IP bucket guarding POST /auth/social/exchange."""
     client = _client_ip(request)
@@ -94,6 +143,57 @@ async def rate_limit_social_exchange(request: Request) -> None:
             "social.exchange_rate_limited",
             "Too many attempts - try again shortly.",
         )
+
+
+async def rate_limit_meeting_lookup(request: Request) -> None:
+    """Per-IP bucket guarding GET /meetings/by-code/{code} (unauthenticated)."""
+    if not _meeting_lookup_limiter.check(f"meeting-lookup:{_client_ip(request)}").allowed:
+        raise RateLimited(
+            "meetings.lookup_rate_limited",
+            "Too many meeting lookups - wait a moment and try again.",
+        )
+
+
+async def rate_limit_discover_public(request: Request) -> None:
+    """Per-IP bucket guarding the public Discover reads (unauthenticated)."""
+    if not _discover_public_limiter.check(f"discover-public:{_client_ip(request)}").allowed:
+        raise RateLimited(
+            "discover.rate_limited",
+            "Too many requests - wait a moment and try again.",
+        )
+
+
+async def rate_limit_discover_report(user_id: str = Depends(current_user_id)) -> None:
+    """Per-user bucket guarding POST /discover/{id}/report (10/hour)."""
+    if not _discover_report_limiter.check(f"discover-report:{user_id}").allowed:
+        raise RateLimited(
+            "discover.report_rate_limited",
+            "Too many reports - try again later.",
+        )
+
+
+def _knock_limited() -> RateLimited:
+    return RateLimited(
+        "meetings.knock_rate_limited",
+        "Too many requests to join - wait a moment and try again.",
+    )
+
+
+async def rate_limit_meeting_knock(request: Request) -> None:
+    """Per-IP and per-code buckets guarding POST /meetings/by-code/{code}/knock."""
+    if not _meeting_knock_ip_limiter.check(f"meeting-knock:{_client_ip(request)}").allowed:
+        raise _knock_limited()
+    # One bucket per code however it's spelled; capped so junk paths can't mint
+    # unbounded keys (the per-IP check above already ran).
+    code = str(request.path_params.get("code", "")).replace("-", "").strip().lower()[:16]
+    if not _meeting_knock_code_limiter.check(f"meeting-knock-code:{code}").allowed:
+        raise _knock_limited()
+
+
+async def rate_limit_meeting_knock_poll(request: Request) -> None:
+    """Per-IP bucket guarding the guest's knock status poll and cancel."""
+    if not _meeting_knock_poll_limiter.check(f"meeting-knock-poll:{_client_ip(request)}").allowed:
+        raise _knock_limited()
 
 
 async def rate_limit_invite_create(
@@ -164,8 +264,14 @@ async def rate_limit_slug_check(ctx: RequestContext = Depends(request_context)) 
 
 
 __all__ = [
+    "client_ip",
     "consume_invite_create_tokens",
+    "rate_limit_discover_public",
+    "rate_limit_discover_report",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
+    "rate_limit_meeting_knock",
+    "rate_limit_meeting_knock_poll",
+    "rate_limit_meeting_lookup",
     "rate_limit_slug_check",
 ]

@@ -131,9 +131,17 @@ CHANNEL_PROMPT_LAYERS: tuple[str, ...] = (
     "channel.health_state",
 )
 
+# The channel layers retrieved for THIS message (``cache_key=None``). A backend
+# that applies its system prompt only at connect (the Claude SDK's warm client)
+# is sent these per turn as ``turn_context`` instead, or it would keep turn 1's.
+CHANNEL_TURN_CONTEXT_LAYERS: frozenset[str] = frozenset(
+    {"channel.memory_context", "channel.kb_context"}
+)
+
 __all__ = [
     "CHANNEL_LAYER_TYPES",
     "CHANNEL_PROMPT_LAYERS",
+    "CHANNEL_TURN_CONTEXT_LAYERS",
     "ChannelAgentsMdLayer",
     "ChannelAtlasPrimerLayer",
     "ChannelCurrentPocketLayer",

@@ -266,6 +266,25 @@ and response headers, HTTP bodies and Redis statements are never captured, since
 those carry bearer tokens and customer content. The health and version routes are
 not traced, so a container probe does not bill for itself.
 
+### Owner notification email (optional)
+
+Lead and handoff email to site owners goes through Cloudflare Email Service's
+REST API. It stays off, with one log line saying so, until the first three
+variables are set:
+
+```bash
+POCKETPAW_CF_EMAIL_ACCOUNT_ID=...      # account that owns the sending domain
+POCKETPAW_CF_EMAIL_API_TOKEN=...       # token allowed to send email (secret)
+POCKETPAW_CF_EMAIL_FROM=notifications@example.com
+POCKETPAW_CF_EMAIL_FROM_NAME=PocketPaw # optional
+```
+
+Onboard the sending domain once (it must use Cloudflare DNS; this adds SPF and
+DKIM): `npx wrangler email sending enable example.com`. Links in the email use
+`POCKETPAW_FRONTEND_BASE_URL`, and recipient confirm links use
+`POCKETPAW_PUBLIC_BASE_URL`. Routes, webhook signing and payloads are in the API
+reference under "Owner notifications".
+
 ### Security Hardening
 
 1. **Run as a dedicated user** -- Don't run as root

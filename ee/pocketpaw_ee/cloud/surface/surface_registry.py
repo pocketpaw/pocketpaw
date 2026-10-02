@@ -1,4 +1,7 @@
 # surface_registry.py — The declarative surface registry (SR-1 + SR-2).
+# Updated: 2026-09-30 (feat/open-surface-tool) — /studio/editor's allow-list also
+# carries ``open_surface`` so the agent can send the user to /files to pick or
+# upload another clip. No other allow-listed surface gets it.
 # Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the concierge profile sets
 # ``exclusive_tools=True``: it is offered only its allow-listed pawbar tools. This
 # closes the RESIDUAL GAP recorded above ``_CONCIERGE_DENY`` for both backends.
@@ -516,7 +519,7 @@ class _McpToolIds(NamedTuple):
     # through ``browser_tool_ids()``, which loads the ids on its own. See that
     # function for why the two must not share an import fate.
     browser_allow: frozenset[str] | None = None
-    # /studio/editor — the timeline edit + export verbs.
+    # /studio/editor — the timeline edit + export verbs, plus open_surface.
     timeline_allow: frozenset[str] | None = None
 
 
@@ -584,6 +587,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.surfaces import SURFACES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.timeline import TIMELINE_TOOL_IDS
 
         # /sites scopes to the sites-manager tools PLUS the authoring TOOLBELT the
@@ -655,7 +659,10 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # /browser scopes to the agentic-browser verbs. Crossed over as a
             # plain frozenset[str] — no pocketpaw_ee symbol leaks into OSS.
             browser_allow=frozenset(BROWSER_TOOL_IDS),
-            timeline_allow=frozenset(TIMELINE_TOOL_IDS),
+            # open_surface rides along: "pick another clip" is a trip to /files,
+            # and this list is a hard whitelist, so the ambient server alone
+            # would be filtered out here.
+            timeline_allow=frozenset(TIMELINE_TOOL_IDS) | frozenset(SURFACES_TOOL_IDS),
         )
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
@@ -766,11 +773,12 @@ def _studio_editor_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     # reason /studio is — the deliverable is a cut, not a dashboard. Scoped to
     # the timeline verbs, which deliberately EXCLUDES the media-generation tools:
     # this surface arranges what exists, and generating here would answer
-    # "arrange these clips" with a new clip.
+    # "arrange these clips" with a new clip. The one thing it creates is a
+    # HyperFrames motion graphic (add_motion_graphic), hence hyperframes-core.
     return SurfaceProfile(
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().timeline_allow,
-        skill_names=frozenset({"studio-editor"}),
+        skill_names=frozenset({"studio-editor", "hyperframes-core"}),
     )
 
 

@@ -493,7 +493,22 @@ class MongoMemoryStore:
             return None
         return await Session.find_one(scoped)
 
-    async def _load_session_index_async(self, *, workspace_id: str, owner_id: str) -> dict:
+    @staticmethod
+    def _session_index_filter(workspace_id: str, owner_id: str) -> dict:
+        return {
+            "context_type": "pocket",
+            "deleted_at": None,
+            "workspace": workspace_id,
+            "owner": owner_id,
+        }
+
+    async def _count_session_index_async(self, *, workspace_id: str, owner_id: str) -> int:
+        """How many rows the unlimited :meth:`_load_session_index_async` holds."""
+        return await Session.find(self._session_index_filter(workspace_id, owner_id)).count()
+
+    async def _load_session_index_async(
+        self, *, workspace_id: str, owner_id: str, limit: int | None = None
+    ) -> dict:
         """Build a session-index dict from one owner's pocket-context Sessions.
 
         Shape-compatible with ``FileMemoryStore._load_session_index`` so the
@@ -507,15 +522,13 @@ class MongoMemoryStore:
         unscoped form cannot reappear by omission — a caller that forgets the
         scope fails to call at all, rather than silently querying across
         tenants.
+
+        ``limit`` keeps only the ``limit`` most recently active rows.
         """
-        docs = await Session.find(
-            {
-                "context_type": "pocket",
-                "deleted_at": None,
-                "workspace": workspace_id,
-                "owner": owner_id,
-            }
-        ).to_list()
+        query = Session.find(self._session_index_filter(workspace_id, owner_id))
+        if limit is not None:
+            query = query.sort([("lastActivity", -1)]).limit(limit)
+        docs = await query.to_list()
 
         index: dict[str, dict] = {}
         for doc in docs:
