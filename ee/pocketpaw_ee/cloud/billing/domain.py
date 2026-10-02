@@ -81,6 +81,16 @@ class GatewayEvent:
     workspace_id: str
     currency: str
     raw: dict = field(default_factory=dict)
+    # What Dodo will credit to OUR balance for this charge, in the lowest
+    # denomination of ``settlement_currency``. For a non-USD charge (INR) a USD
+    # settlement figure is the auditable USD value of the payment — the grant
+    # prefers it over a configured FX rate. 0 / "" when the body carried none.
+    settlement_amount: int = 0
+    settlement_currency: str = ""
+    # Dodo's own ``product_cart`` product ids, in cart order. Set by the gateway
+    # from what was actually BOUGHT — unlike metadata, which a buyer can write
+    # through a static payment link — so it is what routes an INR top-up.
+    product_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

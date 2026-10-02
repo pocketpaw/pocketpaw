@@ -1,5 +1,8 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-10-02 (feat/studio-templates) — added ``StudioTemplate`` (a Studio
+generation published as a template; see studio_templates/service.py).
+
 Updated: 2026-10-01 (DS-1, feat/discover-index) — added ``DiscoverListing`` (one
 public Discover card per source item; see discover/service_admin.py).
 Updated: 2026-10-01 (CN-3, fix/canon-daily-caps) — the six per-meter daily
@@ -304,6 +307,7 @@ from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
+from pocketpaw_ee.cloud.models.studio_template import StudioTemplate
 from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
@@ -487,6 +491,7 @@ __all__ = [
     "SiteOriginClaim",
     "SiteRateCounter",
     "SiteTemplate",
+    "StudioTemplate",
     "DiscoverListing",
     "SpendReconciliation",
     "StudioGeneration",
@@ -640,6 +645,9 @@ def get_all_documents():
         # Discover index (DS-1): one public card per source item. Only
         # ``ee.cloud.discover.service`` / ``service_admin`` write it.
         DiscoverListing,
+        # Studio generations published as templates. Only
+        # ``ee.cloud.studio_templates.service`` / ``service_admin`` write it.
+        StudioTemplate,
         SiteDesignBrief,
         SiteExport,
         # SF-8 — the proof that a workspace controls an origin. The later

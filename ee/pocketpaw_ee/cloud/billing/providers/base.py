@@ -8,6 +8,10 @@
 # The billing service depends only on this ABC, so swapping Dodo for Razorpay (or
 # running both) never touches the service.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``create_one_time``
+# takes ``pin_currency`` — a partner client pay link pins its charge currency
+# (``billing_currency``) so the payment matches the link exactly. Top-ups unchanged.
+#
 # Every method speaks in the framework-free ``domain`` value objects
 # (``OneTimeCheckout`` / ``GatewayEvent`` / ``SubscriptionCheckout`` /
 # ``SubscriptionEvent``), never a vendor SDK type — that is the whole point of the
@@ -18,6 +22,8 @@
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
 # Updated 2026-06-24 (security): name the bad-signature exception in the port
 #   docstring — ``BadRequest`` (400), not ``ValidationError`` (422).
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): ``create_one_time`` takes a
+#   ``currency`` ("USD" default, or "INR"); for INR the amount is paise.
 # Updated 2026-06-24 (BC-7): added the subscription surface —
 #   ``create_subscription`` + ``cancel_subscription``, and documented that
 #   ``verify_and_parse_webhook`` now also returns a ``SubscriptionEvent`` for a
@@ -63,11 +69,14 @@ class IPaymentsProvider(ABC):
         workspace_id: str,
         customer_email: str | None,
         metadata: dict,
+        currency: str = "USD",
+        pin_currency: bool = False,
     ) -> OneTimeCheckout:
         """Create a one-time payment and return its hosted checkout.
 
-        ``amount_credits`` is integer credits (1 credit == $0.01). The provider
-        converts to the gateway's money amount, attaches ``metadata`` (which MUST
+        ``amount_credits`` is the charge in ``currency``'s lowest denomination:
+        integer credits for USD (1 credit == $0.01 == 1 cent), paise for INR.
+        The provider charges it in ``currency``, attaches ``metadata`` (which MUST
         carry ``workspace_id`` so the webhook can route the grant), and returns
         the hosted ``checkout_url`` plus the ``gateway_ref``.
         """

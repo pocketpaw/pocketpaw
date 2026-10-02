@@ -1218,9 +1218,22 @@ class Settings(BaseSettings):
         ),
     )
     pawbar_concierge_max_tokens: int = Field(
-        default=600,
+        default=2000,
         ge=1,
-        description="Max output tokens for one v2 Paw Bar concierge reply.",
+        description=(
+            "Max output tokens for one v2 Paw Bar concierge reply. A reasoning "
+            "model's thinking counts against it, so it must hold thinking plus a card."
+        ),
+    )
+    pawbar_concierge_reasoning_effort: Literal["", "none", "minimal", "low", "medium", "high"] = (
+        Field(
+            default="",
+            description=(
+                "Reasoning effort for the v2 Paw Bar concierge, sent as OpenAI's "
+                "reasoning_effort. Empty sends nothing; set it only for a model "
+                "(or proxy) that accepts the field."
+            ),
+        )
     )
     # Pinned FAQs (``pocketpaw_ee.paw_bar.knowledge_routes``). Every pinned answer
     # rides ahead of the KB hits in the v2 runner's ~12,000-char knowledge budget,
@@ -1274,15 +1287,18 @@ class Settings(BaseSettings):
             "may show, on sites that allow it. Code past this is replaced."
         ),
     )
-    # The v2 rollout gate (``pocketpaw_ee.paw_bar.concierge_gate``). What a NEW
-    # concierge gets: "v2" here is only a request, honoured when the committed
-    # eval report for the configured model clears every threshold below.
-    # Thresholds are the captain's call; these are the PRD's placeholders.
+    # The v2 rollout gate (``pocketpaw_ee.paw_bar.concierge_gate``). "v2" is the
+    # default request, honoured only when the committed eval report for the
+    # configured model clears every threshold below; until then new concierges
+    # get legacy, and ``sites.migrate_concierge_v2`` moves no existing one.
+    # "legacy" opts a deployment out. Thresholds are the captain's call.
     pawbar_concierge_default_runtime: Literal["legacy", "v2"] = Field(
-        default="legacy",
+        default="v2",
         description=(
-            "Runtime a newly created Paw Bar concierge asks for. 'v2' takes effect "
-            "only when the committed v2 eval report passes the thresholds below."
+            "Runtime Paw Bar concierges ask for: new ones at create, existing ones "
+            "through the v2 move at boot. 'v2' (the default) takes effect only when "
+            "the committed v2 eval report passes the thresholds below; 'legacy' "
+            "keeps every concierge on the agent runtime."
         ),
     )
     pawbar_concierge_eval_max_false_refusal_pct: float = Field(
@@ -1313,8 +1329,9 @@ class Settings(BaseSettings):
         ge=0,
         description=(
             "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
-            "day, in USD at provider cost. Past it, visitors get the leave-a-message "
-            "reply and no model call is made. 0 turns the cap off."
+            "day, in USD at provider cost. Past it, visitors get the `unavailable` "
+            "frame with reason limit, no model call is made, and the owner is "
+            "notified once that day. 0 turns the cap off."
         ),
     )
     # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan
@@ -2412,6 +2429,25 @@ class Settings(BaseSettings):
             "product to the cart with a pay-what-you-want amount equal to the "
             "purchased credits (1 credit == $0.01 == 1 cent, the currency's lowest "
             "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
+        ),
+    )
+    dodo_credit_product_id_inr: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the INR-priced credits SKU (Paw Partners). An INR "
+            "top-up puts this product in the cart with a pay-what-you-want amount in "
+            "PAISE (a pay-what-you-want amount is denominated in the product's own "
+            "currency, so the USD product cannot carry it). Unset disables INR "
+            "top-ups. Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID_INR."
+        ),
+    )
+    fx_inr_per_usd: float = Field(
+        default=89.0,
+        gt=0,
+        description=(
+            "Rupees per US dollar, used ONLY as the fallback when a verified INR "
+            "payment.succeeded carries no USD settlement figure from Dodo: credits "
+            "= floor(paise / rate). Set via POCKETPAW_FX_INR_PER_USD."
         ),
     )
     dodo_plan_products: Annotated[dict[str, str], NoDecode] = Field(

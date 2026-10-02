@@ -27,6 +27,11 @@
 # is created pending (``pending_deploy_inputs``) until payment confirms.
 # ``partner_client_id`` (PH-2, 2026-10-02) is the Paw Partners client (a Fabric
 # ``Customer`` object id) a partner sold this site to; None on every other site.
+# ``partner_payments`` (PH-13, 2026-10-02) are the one-time pay links a partner
+# sent its client for this site: the SERVER-SIDE record a verified payment must
+# match (by Dodo payment id) before it activates anything or earns a commission.
+# Metadata alone never qualifies. Indexed on ``partner_payments.payment_id``
+# because the webhook looks the payment up globally.
 #
 # Writes from background jobs (builds, provisioning, screenshots, KB sync) use
 # targeted ``set()``, never ``save()``, so a late job can't roll back a concurrent
@@ -89,6 +94,30 @@ class SiteInvoice(BaseModel):
     paid: bool = True
     note: str = ""
     amount_unit: str = ""
+
+
+class PartnerClientPayment(BaseModel):
+    """One pay link a partner sent its client for a yearly partner plan (PH-13).
+
+    Created by the pay-link route with the Dodo ``payment_id`` returned at
+    creation; the ``payment.succeeded`` webhook matches on that id and nothing
+    else. ``status``: pending -> paid | flagged; paid -> reversed (refund or lost
+    dispute within 60 days). ``commission_credits`` / ``rate_bps`` are frozen at
+    the moment the payment is claimed so a redelivery never recomputes them.
+    """
+
+    payment_id: str
+    sku: str
+    amount_minor: int
+    currency: str
+    client_id: str
+    checkout_url: str = ""
+    created_at: datetime
+    status: str = "pending"
+    paid_at: datetime | None = None
+    commission_credits: int = 0
+    rate_bps: int = 0
+    flag_reason: str = ""
 
 
 class ConciergeFaq(BaseModel):
@@ -439,6 +468,9 @@ class Site(TimestampedDocument):
     # Paw Partners (PH-2): the partner's client this site was sold to — a Fabric
     # ``Customer`` object id, stamped by ``sites.service.sell_site_plan``.
     partner_client_id: str | None = None
+    # Paw Partners (PH-13): client pay links for this site, newest last. See
+    # ``PartnerClientPayment``.
+    partner_payments: list[PartnerClientPayment] = Field(default_factory=list)
     # charge-first: the deploy inputs captured at publish time for a PENDING paid
     # site, so the ``subscription.active`` webhook can run the deferred deploy
     # without re-reading the pocket (the webhook carries only workspace_id +
@@ -689,6 +721,13 @@ class Site(TimestampedDocument):
     # visitor's tap on Send writes a Lead (``paw_bar.actions``). Off: no lead card
     # is offered or accepted.
     concierge_lead_capture: bool = True
+    # "Guide visitors around your site". On: the v2 concierge may suggest one
+    # page action per reply (navigate to a known page of this site, scroll to or
+    # highlight a section), validated by ``paw_bar.action_spec`` and run by the
+    # owner's paw-bar actions script. Off (the default, and for rows older than
+    # the field): the model is never told about actions and any it writes is
+    # dropped.
+    concierge_page_actions: bool = False
     # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
     # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
     # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
@@ -794,6 +833,11 @@ class Site(TimestampedDocument):
             # be, since the row still belongs to the source until it is accepted
             # -- so without this it scans the whole collection.
             [("transfer_to_workspace", 1), ("transfer_status", 1)],
+            # PH-13: the payment webhook finds a client pay link by Dodo payment id.
+            IndexModel(
+                [("partner_payments.payment_id", 1)],
+                partialFilterExpression={"partner_payments.payment_id": {"$exists": True}},
+            ),
             # VS-2: one site per address. PARTIAL, not sparse -- see the header note:
             # every slug-less row stores ``slug: null``, which a sparse index would
             # still index and treat as a duplicate.

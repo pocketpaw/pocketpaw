@@ -2,6 +2,10 @@
 # cloud.realtime re-export shim is deleted.
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated 2026-10-02 (feat/studio-templates): mounts the studio templates router
+(``/api/v1/studio-templates``) next to site templates; Discover lists public
+studio templates through its ``studio_template`` source.
+
 Updated 2026-10-01 (feat/discover-index): ``mount_cloud`` registers the Discover
 sources and the site-template -> listing sync after ``init_realtime``, and mounts
 the Discover router (``/api/v1/discover``) next to site templates.
@@ -323,6 +327,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.site_templates.router import router as site_templates_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.storage.router import router as storage_router
+    from pocketpaw_ee.cloud.studio_templates.router import router as studio_templates_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
@@ -408,6 +413,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Site templates — save a site pocket as a private template, list / get /
     # delete them, and start a new site from one (POST /site-templates/{id}/use).
     app.include_router(site_templates_router, prefix="/api/v1")
+    # Studio templates — publish a Studio generation as a template; a public one
+    # is listed on Discover (POST/GET /studio-templates, PATCH/DELETE /{id}).
+    app.include_router(studio_templates_router, prefix="/api/v1")
     # Discover (DS-1) — the public index of shareable items (GET /discover,
     # GET /discover/{id}, no sign-in, per-IP limited) plus signed-in use / report.
     app.include_router(discover_router, prefix="/api/v1")

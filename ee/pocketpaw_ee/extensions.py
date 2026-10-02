@@ -26,6 +26,8 @@ With several web processes (`POCKETPAW_REALTIME_BUS=redis-streams`) the
 scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
 cluster, and the jail GC once per host. `on_shutdown` stops what it started.
 
+Changes (2026-10-02, PH-15): ``_sweeps`` runs ``sweep_partner_tiers``.
+
 Changes (2026-10-01, CN-4): `on_shutdown` closes the shared arq pool via
 `_core.redis_client.close_arq_pool` (was the chat-runs-only `close_pool`), then
 the shared and blocking Redis clients via `close_redis` (never called before).
@@ -111,6 +113,9 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     - ``sweep_pending_sites``: log paid sites stuck pending (visibility only).
     - ``sweep_site_renewals``: charge wallet-paid site plans that came due; an
       unaffordable site drops to the free floor and stays live.
+    - ``sweep_partner_tiers``: PH-15 monthly Paw Partners tier review (lowers a
+      tier the active sold sites no longer earn); acts once per partner per month.
+      After the renewals, so a site that just lapsed no longer counts.
     - ``sweep_subscription_grace``: M5 dunning, revoke plans held past grace.
     - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
       live workspaces with none, since workspace create never retries a failed
@@ -124,6 +129,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
+    from pocketpaw_ee.cloud.partners.service import sweep_partner_tiers
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
@@ -133,6 +139,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
         run_cutover_sweep,
         sweep_pending_sites,
         sweep_site_renewals,
+        sweep_partner_tiers,
         sweep_subscription_grace,
         backfill_tenant_keys,
     ]

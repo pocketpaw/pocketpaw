@@ -2,6 +2,34 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
+  Studio generation as a template: POST / GET /studio-templates, PATCH / DELETE
+  /studio-templates/{id}). Discover gains a second source, `studio_template`,
+  and two public listing fields, `media_kind` and `media_url`.
+Updated: 2026-10-02 (feat/partners-tiers, PH-15) — Paw Partners volume tiers and
+  milestone rewards: GET /partners/me adds tier standing and benefits, offers and
+  sales are priced at the tier discount, commissions use the tier rate, summary /
+  earnings add reward credits and lifetime sites sold, new GET /partners/rewards.
+Updated: 2026-10-02 (feat/partners-commissions, PH-13 re-check) — partial refunds
+  that add up to the full amount lapse the site; a partial refund before the
+  payment is processed no longer cancels the link; a pay link whose reservation
+  went stale while the checkout was created is a 409 partners.link_in_progress.
+Updated: 2026-10-02 (feat/partners-commissions, PH-13 review) — pay-link needs
+  sites.buy_plan; one open link per site (409 partners.link_open /
+  partners.link_in_progress); partial refunds take a pro-rata share of the
+  commission; clawback survives a deleted site.
+Updated: 2026-10-02 (feat/partners-commissions, PH-13) — Paw Partners: new
+  POST /partners/pay-link (the partner's client pays a site's year through a
+  one-time link; the partner earns a commission in credits). Offers carry the
+  client's list price, sold sites carry billing_mode, summary and earnings carry
+  commission credits.
+Updated: 2026-10-02 (feat/partners-earnings, PH-11) — Paw Partners: POST /partners/sell
+  takes an optional price_minor + currency (booked as a paid receipt on the site's
+  client record) and returns invoice_id; new GET /partners/summary and
+  GET /partners/earnings. Review fixes: a receipt only when the sale recorded a new
+  debit, idempotent under a double submit, spend/sales semantics spelled out.
+Updated: 2026-10-02 (feat/partners-cobrand, PH-5) — "Hide the PocketPaw badge":
+  partner-sold sites carry the partner co-brand mark instead of the badge.
 Updated: 2026-10-02 (feat/partners-whatsapp-leads, PH-6) — "Partner leads on
   WhatsApp" under Owner notifications: a lead on a partner-sold site goes to the
   opted-in shop owner on WhatsApp through the platform MSG91 account
@@ -987,9 +1015,58 @@ All paths are under `/api/v1`. Errors use the standard CloudError JSON shape.
 
 ### `GET /partners/me`
 
-The caller's workspace partner profile: `status` (`applied` | `active` |
-`suspended`), `tier`, `footer_name`, `billing_country` (ISO-2), `founding`,
-`joined_at`. **404** when the workspace is not a partner.
+The caller's workspace partner profile and where it stands on the volume tiers:
+
+```json
+{
+  "status": "active", "tier": "silver", "footer_name": "Ravi Prints",
+  "billing_country": "IN", "founding": false, "joined_at": "2026-10-01T09:00:00Z",
+  "active_sites": 12, "lifetime_sites_sold": 15,
+  "next_tier": {"name": "gold", "at": 25, "remaining": 13},
+  "benefits": {"wholesale_discount_pct": 10.0, "commission_pct": 30.0}
+}
+```
+
+`status` is `applied` | `active` | `suspended`. `next_tier` is `null` at gold.
+`benefits.commission_pct` is the tier rate; a founding partner's site earns
+max(40%, that rate) for 24 months after the site's first client payment. Needs
+`fabric.read`. **404** when the workspace is not a partner (a suspended partner
+can still read it).
+
+### Volume tiers and milestone rewards
+
+The tier is worked out from **active sold sites**: sites with a client
+(`partner_client_id`) on an active paid plan, whoever paid (the wallet or the
+client). The same count is `active_sites` on `/me` and on the summary.
+
+| Tier | Active sold sites | Wholesale discount | Commission |
+|---|---|---|---|
+| bronze | 0–9 | 0% | 25% |
+| silver | 10–24 | 10% | 30% |
+| gold | 25+ | 20% | 35% |
+
+- **Up right away, down once a month.** After every sale and every paid client
+  payment the tier is recomputed and only raised. The sale or payment that
+  crosses a threshold is priced at the old tier; the next one gets the new
+  discount or rate. A monthly review (the first sweep tick of each UTC month)
+  recomputes with downgrade, so a lapse never costs a tier mid-month.
+- **Discount:** the partner pays floor(price × (1 − discount)) in whole USD. It
+  applies wherever the wallet pays for a partner plan: the sale, a plan change and
+  the renewal, and the offers show it. IN `site_year` is 1,700 / 1,500 / 1,300
+  credits; elsewhere 2,900 / 2,600 / 2,300. `staff_year` IN 5,600 / 5,000 / 4,400;
+  elsewhere 8,900 / 8,000 / 7,100.
+- **Who owns the tier:** the system. The operator PUT below can still set `tier`
+  (a manual promotion); it stands until the next recompute moves it, which is the
+  next upgrade or the next monthly review.
+
+**Milestone rewards** are one-time credit grants on **lifetime distinct sites
+sold**: 1st site +200, 10th +1,000, 25th +3,000, 50th +7,500 credits. A site
+counts once the wallet paid a partner plan for it or its client's payment earned a
+commission. Lifetime never goes down: a refund, a lapse or a deleted site does not
+lower it, does not re-trigger a milestone and does not take a reward back. Each
+milestone is granted once per workspace (ledger cause `partner_reward`, key
+`partner_reward:<workspace_id>:<sites>`), checked after every sale, paid client
+payment and monthly review.
 
 ### `GET /partners/clients` · `POST /partners/clients`
 
@@ -1018,7 +1095,8 @@ erasure path yet.
 Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
 session cookie; bearer tokens are refused). PUT requires a body: `status`,
 `footer_name`, `reason` (required, non-blank), optional `tier` (`bronze` |
-`silver` | `gold`, default `bronze`), `billing_country` (ISO-2, default `IN`,
+`silver` | `gold`, default `bronze`; system-owned, see the tier section above),
+`billing_country` (ISO-2, default `IN`,
 upper-cased), `founding`, `joined_at` (kept from the previous profile when
 omitted). A missing body is **422**. DELETE takes `{"reason": "..."}` and clears
 the profile. Both return `{workspace_id, partner}` and write a platform audit row.
@@ -1030,21 +1108,42 @@ the profile. Both return `{workspace_id, partner}` and write a platform audit ro
 ### `GET /partners/offers`
 
 The partner-only yearly plans at the caller's `billing_country` price:
-`[{sku, period_months, price_credits, conversation_allowance, label}]`
-(1 credit = $0.01). Today: `site_year` (1,700 credits in IN, 2,900 elsewhere) and
-`staff_year` (5,600 / 8,900; 1,200 conversations a year). Needs `fabric.read`;
+`[{sku, period_months, price_credits, conversation_allowance, label,
+client_price_minor, client_currency}]` (1 credit = $0.01). Today: `site_year`
+(1,700 credits in IN, 2,900 elsewhere) and `staff_year` (5,600 / 8,900; 1,200
+conversations a year), at bronze. `price_credits` already has the partner's tier
+discount applied. `client_price_minor` + `client_currency` are what the
+partner's client pays through a pay link: `site_year` ₹3,588 (`358800`, `INR`) in
+IN, $84 (`8400`, `USD`) elsewhere; `staff_year` ₹11,988 / $228. Needs `fabric.read`;
 **403** `partner.not_active` unless the profile is ACTIVE. These plans are not in
 the public plan catalog.
 
 ### `POST /partners/sell`
 
-Body `{client_id, site_id, sku}`. Sells one of the workspace's sites a partner
+Body `{client_id, site_id, sku, price_minor?, currency?}`. Sells one of the workspace's sites a partner
 plan, paid from the workspace credit wallet. The client must be this partner's
 (**404** otherwise), the site must belong to this workspace (**404**), and `sku`
 must be a partner plan (**422** `partners.unknown_sku`). It runs the ordinary
 paid-publish path for the site's pocket — wallet debit, then redeploy — and
 stamps the site's `partner_client_id`. Returns `{site_id, name, url, plan_tier,
-renewal_date, partner_client_id, subscription_status}`.
+renewal_date, partner_client_id, subscription_status, invoice_id}`.
+
+- `price_minor` (optional, integer ≥ 0, ISO-4217 minor units, same ceiling as a
+  site receipt) is what the partner charged its client. `currency` is a 3-letter
+  code, upper-cased; it defaults to `INR` when the profile's `billing_country` is
+  `IN`, else `USD`. Both are validated before the wallet is touched (**422**).
+  When the sale records a NEW wallet debit, the price is booked as a PAID receipt
+  on the site's client record (the same list `GET /sites/{site_id}/client`
+  returns, note `Paw Partners sale · <plan label>`) and its id comes back as
+  `invoice_id`. It is the partner's private bookkeeping: nothing bills from it and
+  the client never sees it. No new debit means no receipt (`invoice_id: null`): a
+  refused sale, the no-op re-sell below, moving back to a plan already paid for
+  this period, resuming a site that was set to close, and a sale without
+  `price_minor`. The receipt id is derived from the debit, so a double-submitted
+  sale books one receipt and both responses carry the same `invoice_id`.
+- If the receipt cannot be written after the sale went through, the sale still
+  stands and `invoice_id` is `null`. Add the receipt yourself with
+  `POST /sites/{site_id}/invoices`.
 
 - Needs `sites.buy_plan` (workspace admin): a sale spends the wallet. **403**
   for a member, and **403** `partner.not_active` without an ACTIVE profile.
@@ -1064,21 +1163,142 @@ renewal_date, partner_client_id, subscription_status}`.
   sale: **403** `sites.partner_plan_only` if the partner is no longer active.
 - Renewals happen on their own: the site-renewal sweep debits the partner price
   when `renewal_date` passes and steps it 12 months, or lapses the site to the
-  free tier (still published) when the wallet is short. If the partner profile has
+  free tier (still published) when the wallet is short. The renewal is priced at
+  the partner's tier on the renewal day. If the partner profile has
   been removed, the renewal reuses the price last paid only when that is a real
-  price of the plan; otherwise the site lapses to the free tier (still published),
+  price of the plan (any country, any tier discount); otherwise the site lapses to the free tier (still published),
   never charged at a guessed price.
 - A plan change after `renewal_date` has passed (before the renewal sweep runs) is
   charged as one fresh period of the new plan, starting now.
 
+### `POST /partners/pay-link`
+
+Body `{client_id, site_id, sku}`, `sku` one of `site_year` | `staff_year`
+(**422** otherwise). Opens a one-time payment link the partner sends its client.
+The client pays the plan's list price for one year in the partner's billing
+currency (see `client_price_minor` on the offers). Returns:
+
+```json
+{"checkout_url": "https://...", "site_id": "...", "sku": "staff_year",
+ "amount_minor": 1198800, "currency": "INR"}
+```
+
+Nothing changes on the site until the payment lands. When Dodo confirms it, the
+site goes on the plan for 12 months (`billing_rail` `client`), its
+`partner_client_id` is set, and the partner's wallet gets a commission in credits:
+the partner's tier rate (25% / 30% / 35%) of the amount paid net of tax, in US
+cents (an INR payment converts through Dodo's USD settlement figure, or the
+configured FX rate when that is missing or implausible). Founding partners get
+max(40%, the tier rate) on payments made within 24 months of that site's first
+client payment. The rate is fixed when the payment lands. The partner's wallet is never charged for a
+client-paid site, and the renewal sweep does not renew it: at `renewal_date` the
+site drops to the free tier and stays published, unless the client has paid a new
+link. A refund or lost dispute within 60 days of the payment takes that payment's
+commission back (the wallet can go negative); a partial refund takes the same
+share of the commission and leaves the site on its plan, while a full refund, a
+lost dispute, or partial refunds that add up to the full amount also drop the
+site to the free tier. This still happens if the site has been deleted since.
+After 60 days nothing is taken back. A full refund that arrives before the
+payment was processed cancels the link: the late payment activates nothing and
+earns nothing. A partial refund that arrives that early leaves the link alone (the
+payment still activates and pays the full commission) and is logged as an error
+for someone to settle by hand. If the partner is no longer active when the
+payment lands, the site still gets its year but no commission is paid (the
+payment is flagged `partner_inactive` for review).
+
+- Needs `sites.buy_plan` (workspace admin, like `/partners/sell`: a paid link
+  changes the site's plan) and an ACTIVE profile (**403** `partner.not_active`).
+  Another workspace's client or site is **404**.
+- **409** `partners.site_already_paid` when the site is already on a paid plan,
+  paid by the wallet or by a client. The one exception is the renewal: a
+  client-paid site in the last 30 days of its year can take a link for the same
+  plan, and that payment adds a year from the current `renewal_date`.
+- **409** `partners.site_on_plan` (carried by the workspace plan),
+  `partners.foreign_site` (concierge-only site), `partners.site_not_live` (not
+  published yet).
+- One open link per site. Asking again for the same plan and price within 7
+  days returns the open link instead of making a second one (a double submit
+  opens one payment). A link for a different plan while one is open is **409**
+  `partners.link_open`; a request racing another one still being created is
+  **409** `partners.link_in_progress` (retry).
+- The link is charged in exactly its currency (no local-currency conversion at
+  checkout).
+- Only a payment for a link created here counts, matched on Dodo's payment id.
+  If the amount, currency or product Dodo reports differs from the link, a
+  discount was applied, the site was bought with the wallet in the meantime, or
+  the site is already on a client-paid year of a different plan, the payment is
+  flagged: nothing is activated and no commission is paid. Those need a refund
+  by hand.
+- Changing the plan of a client-paid site through `POST /sites/publish` is
+  **409** `sites.client_paid_plan`.
+
 ### `GET /partners/sites`
 
 The workspace's sold sites: `[{site_id, name, url, plan_tier, renewal_date,
-partner_client_id, client_name}]`, ordered by `renewal_date` (sites with none come first). Optional
+partner_client_id, client_name, billing_mode}]`, where `billing_mode` is `client`
+when the client paid the year through a pay link and `partner` when the wallet
+bought it, ordered by `renewal_date` (sites with none come first). Optional
 `due_within_days` (0–3660) keeps only sites whose `renewal_date` is within that
 many days (a site with no renewal date is never due); without it, every sold
 site is returned, including lapsed ones with a null date. Needs `fabric.read` and
 an ACTIVE profile.
+
+### `GET /partners/summary`
+
+The partner's earnings at a glance:
+
+```json
+{
+  "clients": 4, "sites_sold": 6, "active_sites": 5, "renewals_due_30d": 1,
+  "spent_credits_30d": 1700, "spent_credits_total": 10200,
+  "revenue_30d": [{"currency": "INR", "amount_minor": 299900}],
+  "revenue_total": [{"currency": "INR", "amount_minor": 1499500},
+                    {"currency": "USD", "amount_minor": 5000}],
+  "commission_credits_30d": 3350, "commission_credits_total": 9120,
+  "rewards_credits_30d": 200, "rewards_credits_total": 1200,
+  "lifetime_sites_sold": 10
+}
+```
+
+`clients` counts the partner's client records; `sites_sold`, `active_sites`
+(`subscription_status` active) and `renewals_due_30d` (same rule as
+`GET /partners/sites?due_within_days=30`) count the sold sites. Revenue is the sum
+of PAID receipts on the sold sites' client records (sale prices and any receipt
+added through `POST /sites/{site_id}/invoices`), one row per currency, never
+converted or mixed; `revenue_30d` keeps receipts issued in the last 30 days.
+Spend is every `site_plan` wallet debit (purchases, renewals, plan changes) on
+the sites that are sold to a client NOW, in credits (1 credit = $0.01). That
+includes debits made before the site was sold, for example the partner's own
+earlier paid publish of that site. Needs `fabric.read`; **403**
+`partner.not_active` without an ACTIVE profile.
+`commission_credits_30d` / `commission_credits_total` are the credits earned on
+client pay-link payments, minus any taken back after a refund or lost dispute.
+`rewards_credits_30d` / `rewards_credits_total` are milestone rewards credited,
+and `lifetime_sites_sold` is the milestone count (see the tier section).
+
+### `GET /partners/earnings?months=12`
+
+One row per UTC calendar month, newest first, including months with no
+activity: `[{month: "YYYY-MM", sales, revenue: [{currency, amount_minor}],
+spent_credits, commission_credits, rewards_credits}]`. `commission_credits` is that month's
+commissions minus that month's clawbacks; `rewards_credits` is the milestone
+rewards credited that month. `sales` is the number of `site_plan` debits on currently-sold
+sites that month: purchases, renewals AND plan changes each count as one, so an
+upgrade is a sale. `revenue` and `spent_credits` follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
+Needs `fabric.read` and an ACTIVE profile.
+
+### `GET /partners/rewards`
+
+The milestone ladder with when each reward was credited:
+
+```json
+[{"sites": 1, "credits": 200, "reached_at": "2026-10-02T10:15:00Z"},
+ {"sites": 10, "credits": 1000, "reached_at": null},
+ {"sites": 25, "credits": 3000, "reached_at": null},
+ {"sites": 50, "credits": 7500, "reached_at": null}]
+```
+
+Needs `fabric.read` and an ACTIVE profile (**403** `partner.not_active`).
 
 ## Site templates
 
@@ -1265,11 +1485,73 @@ return `404` for everyone but the owner, who still sees it with
 Errors: `404` for a template you can't see or that is not public; `403`
 (`site_templates.own_template`) for the owner reporting their own.
 
+## Studio templates
+
+Publish one asset of a finished Studio generation as a template. The template
+is a frozen copy: the asset becomes `cover` and the generation's prompt, model
+and settings become `recipe`. Editing or deleting the generation later doesn't
+change it. Input images are never published: `recipe.params` drops
+`inputImageCount` and any other input-image, reference or upload field, and
+`uses_input_images` only says the original run had some. `visibility` is
+`private` (default), `workspace` or `public`; a public template is listed on
+Discover (`source: "studio_template"`), private or deleted takes the listing
+down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
+`music`). Cover URLs stay backend-relative (`/api/v1/media/...`) here.
+
+```json
+{
+  "id": "6661b2...",
+  "owner": "u1",
+  "template_type": "generation",
+  "source_generation_id": "gen_abc",
+  "kind": "image",
+  "title": "Red fox",
+  "description": "",
+  "audiences": ["design"],
+  "visibility": "public",
+  "cover": {"url": "/api/v1/media/fox.png", "mime": "image/png", "width": 1024, "height": 1024, "poster_url": null},
+  "recipe": {"kind": "image", "model": "flux", "prompt": "a red fox", "params": {"aspectRatio": "1:1", "count": 1}},
+  "uses_input_images": false,
+  "hidden": false,
+  "created_at": "2026-10-02T09:00:00Z",
+  "updated_at": "2026-10-02T09:00:00Z"
+}
+```
+
+### `POST /studio-templates`
+
+```json
+{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public" }
+```
+
+`asset_id` is optional (default: the generation's first asset). Response `200`:
+the template. Errors: `404` for a generation that isn't in your workspace or an
+unknown `asset_id`; `409` (`studio_templates.not_ready`) unless the generation
+succeeded.
+
+### `GET /studio-templates`
+
+Your own templates in this workspace, newest first. Query: `limit` (1-50,
+default 50), `cursor`. Response `200`:
+`{"templates": [<template>, ...], "next_cursor": "..." | null}`.
+
+### `PATCH /studio-templates/{template_id}`
+
+Any of `title`, `description`, `audiences`, `visibility`. Owner only; anyone
+else gets `404`. The cover and recipe never change. A template hidden by
+Discover reports stays hidden after a private and public round trip.
+
+### `DELETE /studio-templates/{template_id}`
+
+Owner only. Response `200`: `{"id": "...", "deleted": true}`. The generation is
+untouched.
+
 ## Discover — Public Index
 
-One index of shareable items from every workspace, newest first. Today the only
-source is public site templates (`source: "site_template"`); a public template
-has one listing, hidden when the template is hidden. The two reads need no sign-in and
+One index of shareable items from every workspace, newest first. Sources are
+public site templates (`source: "site_template"`) and public studio templates
+(`source: "studio_template"`); a public template has one listing, hidden when
+the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
 return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
 user and act in the caller's active workspace.
@@ -1289,13 +1571,22 @@ reports or the source item's id):
   "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
   "live_url": "https://bakery.pawsites.workers.dev",
   "remix_count": 3,
-  "created_at": "2026-10-01T09:00:00Z"
+  "created_at": "2026-10-01T09:00:00Z",
+  "media_kind": null,
+  "media_url": null
 }
 ```
 
+`media_kind` (`image`, `video`, `audio`) and `media_url` are set on studio
+template listings and `null` on site templates. Studio listings carry absolute
+URLs built from `POCKETPAW_PUBLIC_BASE_URL`: `media_url` is the asset,
+`preview_image_url` the image itself or a video's poster (`null` for music),
+and `live_url` is always `null`.
+
 ### `GET /discover` (public)
 
-Query params, all optional: `source`, `kind` (`site`, `tool`, `game`),
+Query params, all optional: `source`, `kind` (`site`, `tool`, `game`, `image`,
+`video`, `music`),
 `audience` (matches one of a listing's `audiences`), `q` (case-insensitive
 substring of title or description, up to 100 chars), `featured` (`true` /
 `false`), `cursor`, `limit` (1-50, default 24).
@@ -1319,6 +1610,9 @@ optional; `name` defaults to the item's name.
 ```
 
 Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
+For a studio template nothing is copied: the result is the recipe to run in
+Studio, `{"source": "studio_template", "result": {"recipe": {...}, "uses_input_images": false}}`
+(`name` is ignored).
 The source's own checks apply (a site template needs a plan with Sites), and
 `remix_count` goes up by one only when the copy succeeded, and not when the
 listing's owner uses their own listing. `404` for a missing
@@ -3371,6 +3665,18 @@ Every site response (`GET /sites`, `GET /sites/{site_id}`, the publish response,
 on) now carries `badge_hidden: bool`. It defaults to `true`, and a site written before the
 field existed reads `true`, which is how an entitled site behaved before the switch.
 
+**Partner-sold sites carry a co-brand mark instead.** A site a Paw Partner sold
+(`POST /partners/sell`, so `partner_client_id` is set) on an active partner-only plan
+(`site_year` / `staff_year`) publishes with "Made by <footer_name> · Paw Sites by
+PocketPaw", linking to `https://pocketpaw.xyz/partners`. `footer_name` comes from the
+partner's profile. It sits in the same place as the badge with the same lock, so the
+shop's own stylesheet cannot hide it, and `badge_hidden` does not remove it. A name over
+13 characters is shortened with "…" on screen so the mark fits a phone, and the full name
+stays in its accessible label. The sale's
+own redeploy already carries it. If the partner plan lapses, the next publish puts the
+standard badge back. A partner profile with no `footer_name` falls back to the rules
+above.
+
 ### `PATCH /sites/{site_id}/branding`
 
 Auth: `fabric.write`, tenant-scoped, same as `PATCH /sites/{site_id}/metadata`. A missing
@@ -5135,7 +5441,7 @@ the split is the security model:
   them runs the same fail-closed chain — unknown widget 404, rate limit 429,
   bad/revoked key 401, disallowed origin or a key that doesn't own the widget
   403 — and none of them expose owner-private data. Every public data route
-  (everything below except `widget.js` and the frame document) also sits behind
+  (everything below except `widget.js`, `actions.js` and the frame document) also sits behind
   a per-(client IP, widget) limit (429; 10/s sustained, 300 burst, the IP taken
   from the rightmost `X-Forwarded-For` hop, held in process memory so each
   replica counts separately). A `customer_ref` must be 8-128 characters of
@@ -5149,11 +5455,12 @@ the split is the security model:
 | Route | What it does |
 |---|---|
 | `GET /paw-bar/widget.js` | The embed loader a published page includes. `public, max-age=300` with a strong `ETag`; a matching `If-None-Match` gets a 304. |
+| `GET /paw-bar/actions.js` | The opt-in page-actions script an owner adds beside the loader so the concierge can scroll to or highlight something on the page. It acts only on `pawbar:act` messages from a `/paw-bar/frame` iframe on its own endpoint's origin. Same caching as `widget.js`; `PAW_BAR_ACTIONS_JS` overrides the vendored copy. |
 | `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. Every frame document, the shell included, also sends CSP `sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads`, so the browser sandboxes it whoever embeds it; no flag permits top navigation. A rendered frame is `private, max-age=60` (never `public`) and the key lookup behind it is memoised for 30 s, so a revoked key, a disabled concierge or an appearance edit reaches an open frame within about 90 s; the dead shell is `no-store`. Its `pawbar.js`/`pawbar.css` URLs carry `?v=<content hash>` and are served `immutable` for that exact version, `max-age=300` otherwise. |
 | `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. `public, max-age=60`, always with `Vary: Origin`. Its `catalog` is filled from the [catalog store](#catalog-store) (the first 200 products in the owner's order), so that client keeps working. |
 | `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
 | `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. A widget with a concierge agent requires `?signed_key=`. |
-| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. Takes an optional `page: {"url", "title"}`, the host page the widget sits on; omit it and the turn is answered as before. A v2 site uses it only when the url is http(s) on the site's allowed origins (query and fragment dropped): an indexed page adds its title, summary and article, any other page only its title, cut to 120 characters and marked unverified. A `page` that isn't an object with a string `url` is ignored, never a 422; legacy sites ignore the field. On v2 the one `sources` frame is `{"items": [{"id", "title", "url"}], "sources": <same list>}`: exactly the knowledge the model was given, in order, with a title and url only for pages the site sync indexed. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. |
+| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. Takes an optional `page: {"url", "title"}`, the host page the widget sits on; omit it and the turn is answered as before. A v2 site uses it only when the url is http(s) on the site's allowed origins (query and fragment dropped): an indexed page adds its title, summary and article, any other page only its title, cut to 120 characters and marked unverified. A `page` that isn't an object with a string `url` is ignored, never a 422; legacy sites ignore the field. On v2 the one `sources` frame is `{"items": [{"id", "title", "url"}], "sources": <same list>}`: exactly the knowledge the model was given, in order, with a title and url only for pages the site sync indexed. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. On v2, a turn the concierge cannot answer ends with one `unavailable` frame, `{"type": "unavailable", "reason": "temporary" | "limit"}`, then `stream_end`: `temporary` when the model provider failed (a timeout, 429, 5xx or connection error before any text is retried once first; text that already streamed stays and the frame follows it), `limit` when the site is at its daily spend cap or a new conversation finds the monthly allowance used up. It carries no text and raises no handoff; the widget renders the state, and only the visitor's own request-human raises one. The owner gets one `paw_bar_spend_cap` notification per site per UTC day when the cap is hit. |
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
 | `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |
@@ -5167,7 +5474,7 @@ the split is the security model:
 
 | Route | What it does |
 |---|---|
-| `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`legacy` unless the deployment asks for `v2` and the committed gate report passes) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
+| `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`v2` once a passing real-model gate report for the deployment's model is committed, `legacy` until then or when the deployment sets `POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME=legacy`) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |

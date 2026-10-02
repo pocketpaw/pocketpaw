@@ -11,11 +11,14 @@
 # Updated 2026-10-02 (feat/discover-moderation): staff-only
 # ``ListStaffListingsRequest`` / ``StaffListingResponse`` / ``StaffListingPage``
 # for the platform moderation routes. Never served on a public route.
+# Updated 2026-10-02 (feat/studio-templates): ``media_kind`` (image | video |
+# audio) and ``media_url`` (absolute) join ``UpsertListingRequest`` and the
+# public allow-list; ``None`` for site templates.
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -84,6 +87,8 @@ class UpsertListingRequest(BaseModel):
     audiences: list[str] = Field(default_factory=list, max_length=8)
     preview_image_url: str | None = None
     live_url: str | None = None
+    media_kind: Literal["image", "video", "audio"] | None = None
+    media_url: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +112,8 @@ class PublicListingResponse(BaseModel):
     live_url: str | None
     remix_count: int
     created_at: datetime | None
+    media_kind: str | None = None
+    media_url: str | None = None
 
 
 class PublicListingPage(BaseModel):

@@ -135,8 +135,9 @@ def test_book_slot_is_not_offered_yet():
 # --------------------------------------------------------------------------- #
 
 _RULE = (
-    "When the visitor shares contact details or asks to be contacted, offer a "
-    "send_to_team form prefilled with what they said. Never claim it was sent."
+    "When rule 1 calls for a way to reach the business, or the visitor shares their "
+    "own contact details, offer a send_to_team form prefilled with what they said "
+    "instead of writing out contact details. Never claim it was sent."
 )
 
 

@@ -51,8 +51,8 @@
       "category": "guided",
       "field": "escalation",
       "site": "shop",
-      "site_overrides": {"concierge_escalation": {"mode": "email", "contact": "hello@brewco.test"}},
-      "message": "Do you sell gift cards?",
+      "site_overrides": {"concierge_escalation": {"mode": "email", "contact": "hello@brewco.test"}, "concierge_lead_capture": false},
+      "message": "Who can I email about a wholesale order?",
       "expect": {"escalation": "email:hello@brewco.test"}
     },
     {
@@ -60,8 +60,8 @@
       "category": "guided",
       "field": "escalation",
       "site": "shop",
-      "site_overrides": {"concierge_escalation": {"mode": "handoff", "contact": ""}},
-      "message": "Do you sell gift cards?",
+      "site_overrides": {"concierge_escalation": {"mode": "handoff", "contact": ""}, "concierge_lead_capture": false},
+      "message": "Can I talk to someone on your team about a wholesale order?",
       "expect": {"escalation": "handoff"}
     },
     {

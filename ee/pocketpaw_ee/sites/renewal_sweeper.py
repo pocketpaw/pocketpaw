@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/sites/renewal_sweeper.py — the RENEWAL for site plans bought
 # from the workspace credit wallet.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): CLIENT-PAID partner
+# sites (``billing_rail == "client"``: the partner's client paid the year through
+# a one-time pay link) are never charged here — the debit query stays
+# ``== "credits"`` — and at their renewal date they LAPSE to the free floor (the
+# site stays up) through ``sites.service.lapse_due_client_paid_sites``, counted
+# under ``lapsed``. The client renews by paying a new link.
+#
 # Updated 2026-10-02 (feat/partners-sell, PH-2): a renewal buys ONE PERIOD of the
 # tier — ``tier.period_months`` (1 for every monthly rung, 12 for the partner-only
 # yearly rungs) — priced by ``billing.service.site_plan_price_usd`` (the partner's
@@ -117,6 +124,16 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
     from pocketpaw_ee.cloud.billing import site_plans
 
     at = now or datetime.now(UTC)
+    from pocketpaw_ee.sites import service as sites_service
+
+    # PH-13: a client-paid year that ran out lapses; nothing is debited for it.
+    client_lapsed = await sites_service.lapse_due_client_paid_sites(at)
+    if client_lapsed:
+        logger.info(
+            "sites.renewal_sweeper: %d client-paid partner site(s) reached the end of the "
+            "year their client paid for and lapsed to the free floor (not charged)",
+            client_lapsed,
+        )
     due = (
         await _SiteDoc.find(
             {
@@ -128,7 +145,7 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         .limit(_SWEEP_BATCH_LIMIT)
         .to_list()
     )
-    counts = {"renewed": 0, "lapsed": 0, "failed": 0, "not_live": 0, "closed": 0}
+    counts = {"renewed": 0, "lapsed": client_lapsed, "failed": 0, "not_live": 0, "closed": 0}
     if not due:
         return counts
 

@@ -1,0 +1,112 @@
+[
+  {
+    "name": "navigate_relative",
+    "about": "A site path the crawl knows.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/products/cairn-boot\",\"label\":\"Cairn boot\"}"
+  },
+  {
+    "name": "navigate_trailing_slash",
+    "about": "Trailing slash ignored when matching, dropped from the emitted url.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/products/cairn-boot/\",\"label\":\"Cairn boot\"}"
+  },
+  {
+    "name": "navigate_absolute_same_origin",
+    "about": "An absolute url on the site's origin.",
+    "body": "{\"do\":\"navigate\",\"to\":\"https://shop.example.com/returns\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "navigate_home",
+    "about": "The homepage.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/\",\"label\":\"Home\"}"
+  },
+  {
+    "name": "navigate_fragment_kept",
+    "about": "An #id fragment survives.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/faq#shipping\",\"label\":\"Shipping FAQ\"}"
+  },
+  {
+    "name": "navigate_query_dropped",
+    "about": "The query string never reaches the client.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/returns?ref=bar\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "navigate_extra_keys_dropped",
+    "about": "Keys outside the contract are not forwarded.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/returns\",\"label\":\"Returns\",\"why\":\"x\",\"target\":\"#a\"}"
+  },
+  {
+    "name": "navigate_foreign",
+    "about": "Another origin.",
+    "body": "{\"do\":\"navigate\",\"to\":\"https://evil.example/returns\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "navigate_unknown_page",
+    "about": "Same origin, but no crawled page or catalog url.",
+    "body": "{\"do\":\"navigate\",\"to\":\"/admin\",\"label\":\"Admin\"}"
+  },
+  {
+    "name": "navigate_javascript",
+    "about": "A javascript: url.",
+    "body": "{\"do\":\"navigate\",\"to\":\"javascript:alert(1)\",\"label\":\"Go\"}"
+  },
+  {
+    "name": "scroll_to_id",
+    "about": "An #id target.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#returns\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "highlight_heading",
+    "about": "Heading text, whitespace collapsed.",
+    "body": "{\"do\":\"highlight\",\"target\":\"  Free   returns \",\"label\":\"Free returns\"}"
+  },
+  {
+    "name": "label_whitespace_collapsed",
+    "about": "Label whitespace collapsed.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#returns\",\"label\":\" Our \\n returns \"}"
+  },
+  {
+    "name": "target_markup",
+    "about": "Markup in the target.",
+    "body": "{\"do\":\"highlight\",\"target\":\"<b>Returns</b>\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "target_bad_id",
+    "about": "An #id that does not start with a letter.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#1returns\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "target_too_long",
+    "about": "121 characters.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "target_at_limit",
+    "about": "120 characters.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"label\":\"Returns\"}"
+  },
+  {
+    "name": "label_too_long",
+    "about": "81 characters.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#returns\",\"label\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"}"
+  },
+  {
+    "name": "label_at_limit",
+    "about": "80 characters.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#returns\",\"label\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"}"
+  },
+  {
+    "name": "label_missing",
+    "about": "No label.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#returns\"}"
+  },
+  {
+    "name": "label_markup",
+    "about": "Markup in the label.",
+    "body": "{\"do\":\"scroll_to\",\"target\":\"#returns\",\"label\":\"<i>Returns</i>\"}"
+  },
+  {
+    "name": "unknown_verb",
+    "about": "A verb outside the allowlist.",
+    "body": "{\"do\":\"click\",\"target\":\"#buy\",\"label\":\"Buy\"}"
+  }
+]

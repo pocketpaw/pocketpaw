@@ -318,9 +318,11 @@ publishing, and not attaching a connected site. A site without one shows visitor
 chat bar, and every public route treats it exactly as if it were switched off.
 
 A new concierge starts off. Its runtime comes from the v2 eval gate at the moment it is
-created: `legacy` until the deployment turns v2 on and the gate report passes. A legacy
-concierge gets a dedicated agent bound; a v2 one needs none. Existing concierges keep
-the runtime they have. Once the owner turns it on,
+created: `v2` once a passing gate report for the deployment's model is committed,
+`legacy` until then. A legacy concierge gets a dedicated agent bound; a v2 one needs
+none. Existing concierges move to v2 at the next server start after the gate opens,
+unless they rely on something only legacy does (see "Moving existing concierges to
+v2" below). Once the owner turns it on,
 the bar appears on the live page at the next publish.
 
 `DELETE` on the same route removes it. The agent is unbound, never deleted, and the
@@ -337,8 +339,9 @@ existing legacy concierge, still on. Every other site starts with none.
 
 Each site chooses which runtime answers its visitors with `concierge_runtime`, readable
 and writable through `GET`/`PATCH /paw-bar/admin/site/{site_id}/settings` like the other
-concierge switches. It takes `"legacy"` (the default) or `"v2"`; anything else is a 422.
-Existing sites stay on `legacy` until an owner changes it.
+concierge switches. It takes `"legacy"` (the model default) or `"v2"`; anything else is a 422. An owner
+can switch either way at any time. Existing legacy sites are moved to `v2`
+automatically once the gate opens, as described below.
 
 - **legacy** runs the site's concierge agent through the normal agent machinery, with the
   tool lockdown described above.
@@ -506,6 +509,19 @@ When the model fails partway through, the text already streamed stays and the re
 follows it. The run is stored as failed, with `concierge_v2_provider_timeout` or
 `concierge_v2_provider_error` as the reason.
 
+A reply is capped at `POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS` output tokens (default
+2000). A reasoning model's thinking counts against the cap, so it has to fit thinking
+plus a card. A reply cut off at the cap keeps the text it streamed and ends normally;
+a card still open when it was cut off is dropped. `POCKETPAW_PAWBAR_CONCIERGE_REASONING_EFFORT`
+(`none`, `minimal`, `low`, `medium`, `high`; empty by default) sends a reasoning effort
+with each request; set it only when the model or gateway accepts the field.
+
+A visitor who asks for a person ("can I talk to someone?", "call me back") always gets
+a way to reach the team, whatever the model did. When the reply has no valid lead card,
+or the model failed or ran out of tokens, the server adds one itself: an empty
+`send_to_team` form with lead capture on, or a line pointing to "Talk to a person"
+with it off. That turn is never `unavailable`.
+
 Each v2 model call is tagged for spend: requests through the LiteLLM proxy carry
 `pawbar_site:<site_id>` and `pawbar_widget:<widget_id>` as request tags, and the run's
 stored usage names the site and the widget.
@@ -562,7 +578,8 @@ the model actually said.
 the runtime a newly created concierge should get. It returns `"v2"` only when all of
 these hold:
 
-1. `POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME=v2` (the default is `legacy`);
+1. `POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME=v2`. That is the default; set it to
+   `legacy` to keep every concierge on the agent runtime;
 2. a gate report is committed at `ee/pocketpaw_ee/paw_bar/concierge_eval_gate.json`. It
    ships with the code because deployments don't include `tests/`. Only
    `run --promote <report>` writes it, from a real run, and only after checking it
@@ -574,11 +591,22 @@ these hold:
    `..._MIN_GROUNDEDNESS_PCT` (90), adversarial held at least `..._MIN_ADVERSARIAL_HELD_PCT`
    (100), and code leaks at most `..._MAX_CODE_LEAKS` (0).
 
-Anything else, including an error inside the check, returns `"legacy"`. The gate only
-answers for new concierges. The site model's own default stays `legacy`, and existing
-sites keep the runtime they have. The thresholds are placeholders until they're
-confirmed. With about a dozen answerable cases, one false refusal already costs more
-than 5%.
+Anything else, including an error inside the check, returns `"legacy"`. With no gate
+report committed, that is every answer, so asking for v2 by default changes nothing
+until a report is promoted. The site model's own default stays `legacy`. The
+thresholds are placeholders until they're confirmed. With about a dozen answerable
+cases, one false refusal already costs more than 5%.
+
+**Moving existing concierges to v2.** The gate also decides for concierges that
+already exist. `pocketpaw_ee.sites.migrate_concierge_v2` runs at every server start
+(and by hand: `python -m pocketpaw_ee.sites.migrate_concierge_v2 --dry-run`, then
+without the flag). While the gate is shut it does nothing. Once it is open, it sets
+`concierge_runtime` to `v2` on every legacy concierge v2 can serve, keeping the agent
+bound, and logs each one it keeps on legacy with the reason: a declared action other
+than `add_to_cart` / `checkout` (legacy runs those as agent tools; v2 has none), a
+hand-picked or owner-customised agent (v2 ignores its prompt, model, tools and
+persona), or a bar with no live agent. The full rules and the operator steps are in
+`docs/deployment/concierge-v2-migration.md`.
 
 ## What a concierge records
 
