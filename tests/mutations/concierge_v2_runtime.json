@@ -620,7 +620,7 @@
   {
     "label": "contact route: a failed model on a contact request ends as unavailable again",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                    if not (contact or (full_text and _hit_output_cap(exc))):\n",
+    "find": "                    if not contact:\n",
     "replace": "                    if True:\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_contact.py::test_a_contact_request_the_provider_failed_gets_the_lead_card"
