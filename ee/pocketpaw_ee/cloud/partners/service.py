@@ -13,6 +13,10 @@
 # when the sale really happened. ``summary`` and ``earnings`` read the sold sites'
 # paid receipts (per currency, never FX-mixed) and their ``site_plan`` debits
 # (through ``credits.service.history``) for the partner earnings view.
+# Review fixes: the receipt is booked only against a debit the sale newly
+# recorded (``sell_site_plan`` returns its key), with an id derived from that key
+# so a double submit books one receipt; a failed receipt write leaves the sale
+# standing with ``invoice_id=None``; ``summary`` reads the sold sites once.
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -29,6 +33,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -64,6 +70,8 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerSiteOut,
     PartnerSummaryOut,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _default_store() -> FabricJournalStore:
@@ -308,7 +316,7 @@ async def sell(
     from pocketpaw_ee.sites import service as sites_service
     from pocketpaw_ee.sites.dto import SiteInvoiceCreate
 
-    doc, sold = await sites_service.sell_site_plan(
+    doc, debit_key = await sites_service.sell_site_plan(
         workspace_id=workspace_id,
         user_id=ctx.user_id,
         site_id=body.site_id,
@@ -316,21 +324,32 @@ async def sell(
         partner_client_id=body.client_id,
     )
     invoice_id: str | None = None
-    # Only a real sale gets a receipt: a refused one raised above, and the
-    # idempotent re-sell (``sold`` False) must not book the price twice.
-    if sold and body.price_minor is not None:
-        record = await sites_service.record_site_invoice(
-            workspace_id=workspace_id,
-            site_id=str(doc.id),
-            body=SiteInvoiceCreate(
-                amount_cents=body.price_minor,
-                currency=body.currency or ("INR" if profile.billing_country == "IN" else "USD"),
-                paid=True,
-                note=f"Paw Partners sale · {tier.display_name}",
-            ),
-            minor_units=True,
-        )
-        invoice_id = record.invoices[0].id  # newest first
+    # Only a debit THIS call recorded gets a receipt: a refused sale raised above,
+    # and a re-sell / zero-delta return / resume / replay moved no money. The id is
+    # derived from the debit key, so a double submit lands one receipt.
+    if debit_key is not None and body.price_minor is not None:
+        rid = f"inv_{hashlib.sha256(debit_key.encode()).hexdigest()[:16]}"
+        try:
+            await sites_service.record_site_invoice(
+                workspace_id=workspace_id,
+                site_id=str(doc.id),
+                body=SiteInvoiceCreate(
+                    amount_cents=body.price_minor,
+                    currency=body.currency or ("INR" if profile.billing_country == "IN" else "USD"),
+                    paid=True,
+                    note=f"Paw Partners sale · {tier.display_name}",
+                ),
+                minor_units=True,
+                invoice_id=rid,
+            )
+            invoice_id = rid
+        except Exception as exc:
+            # The sale (debit + deploy) already stands; the receipt is bookkeeping.
+            # The partner can add it through POST /sites/{site_id}/invoices.
+            # Ids only: the price is the partner's private figure.
+            logger.warning(
+                "partners.sell: receipt write failed site=%s err=%s", doc.id, type(exc).__name__
+            )
     # no-event: the sale runs the publish path, which emits SitePublished on deploy;
     # the receipt is the owner's own bookkeeping (see record_site_invoice).
     return PartnerSaleOut(
@@ -404,8 +423,11 @@ async def _site_plan_debits(workspace_id: str, site_ids: set[str]) -> list[Any]:
 
     out: list[Any] = []
     cursor: str | None = None
-    # ponytail: walks the whole site_plan history (a handful of rows per site a
-    # year); add a since-bounded credits read if a partner's history gets long.
+    # ponytail: ``history`` pages the workspace ledger by ``_id`` with a ``cause``
+    # filter, and there is no (workspace, cause) index, so every call scans the
+    # workspace's WHOLE ledger (compute spend included), not just site_plan rows.
+    # Add that index plus a since-bounded read when a busy partner's ledger makes
+    # this slow.
     while True:
         page, cursor = await credits_service.history(
             workspace_id, limit=200, cursor=cursor, cause=SITE_PLAN_DEBIT_CAUSE
@@ -427,15 +449,18 @@ async def summary(
     from pocketpaw_ee.sites import service as sites_service
 
     docs = await sites_service.list_partner_sites(workspace_id)
-    due = await sites_service.list_partner_sites(workspace_id, due_within_days=30)
     debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
     receipts = _paid_receipts(docs)
-    since = datetime.now(UTC) - timedelta(days=30)
+    now = datetime.now(UTC)
+    since, due_by = now - timedelta(days=30), now + timedelta(days=30)
     return PartnerSummaryOut(
         clients=len(await list_clients(ctx, store=store)),
         sites_sold=len(docs),
         active_sites=sum(1 for d in docs if d.subscription_status == "active"),
-        renewals_due_30d=len(due),
+        # Same rule as list_partner_sites(due_within_days=30): a null date is never due.
+        renewals_due_30d=sum(
+            1 for d in docs if d.renewal_date is not None and _aware(d.renewal_date) <= due_by
+        ),
         spent_credits_30d=sum(-e.amount_delta for e in debits if _aware(e.created_at) >= since),
         spent_credits_total=sum(-e.amount_delta for e in debits),
         revenue_30d=_money(r for r in receipts if _aware(r.issued_at) >= since),

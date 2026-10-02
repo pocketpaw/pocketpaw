@@ -41,6 +41,9 @@
 # is refused before the wallet moves); summary + monthly earnings over seeded
 # receipts and site_plan debits (per-currency, phantom / unsold / other-tenant
 # rows excluded); 403 for a non-partner; the HTTP routes and months bounds.
+# Review fixes: no receipt without a newly recorded debit (zero-delta return to a
+# paid tier, resume of a closing site); a double submit books one receipt and both
+# responses carry its id; a failed receipt write leaves the sale standing.
 
 from __future__ import annotations
 
@@ -1696,3 +1699,111 @@ async def test_summary_and_earnings_need_an_active_partner(mongo_db, store) -> N
             await service.summary(ctx, store=store)
         with pytest.raises(Forbidden):
             await service.earnings(ctx)
+
+
+async def _priced_sale(ctx, store, site_id: str, client_id: str, sku: str, price: int):
+    return await service.sell(
+        ctx,
+        body={"client_id": client_id, "site_id": site_id, "sku": sku, "price_minor": price},
+        store=store,
+    )
+
+
+async def _debit_count(wid: str) -> int:
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    page, _ = await credits_service.history(wid, limit=200, cause="site_plan")
+    return len(page)
+
+
+async def test_no_receipt_without_a_new_debit(mongo_db, store, monkeypatch) -> None:
+    """The reviewer's repro: site_year -> staff_year -> back to site_year -> resume
+    booked 4 receipts against 2 debits. Receipts may never outnumber debits."""
+    from pocketpaw_ee.cloud.models.site import Site
+
+    _sell_seams(monkeypatch)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 50_000)
+    site_id = await _free_site(wid)
+    cid = await _client(ctx, store)
+
+    first = await _priced_sale(ctx, store, site_id, cid, "site_year", 299900)
+    upgrade = await _priced_sale(ctx, store, site_id, cid, "staff_year", 599900)
+    assert first.invoice_id and upgrade.invoice_id and first.invoice_id != upgrade.invoice_id
+    assert await _debit_count(wid) == 2
+
+    back = await _priced_sale(ctx, store, site_id, cid, "site_year", 299900)  # zero delta
+    assert back.invoice_id is None
+
+    doc = await Site.get(site_id)
+    await doc.set({"plan_cancels_at_period_end": True})
+    resumed = await _priced_sale(ctx, store, site_id, cid, "site_year", 299900)  # no charge
+    assert resumed.invoice_id is None
+
+    assert await _debit_count(wid) == 2
+    receipts = (await Site.get(site_id)).client_invoices
+    assert [r.id for r in receipts] == [upgrade.invoice_id, first.invoice_id]
+
+
+async def test_a_double_submitted_sale_books_one_receipt(mongo_db, store, monkeypatch) -> None:
+    """Two sells race: both pass the ledger snapshot before either debits (a barrier
+    in the publish seam forces it). One debit, one receipt, one shared id."""
+    import asyncio
+
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+
+    _sell_seams(monkeypatch)
+    seam = sites_service.publish_pocket
+    arrived: list[int] = []
+    both_in = asyncio.Event()
+
+    async def _racing_publish(**kw):
+        arrived.append(1)
+        if len(arrived) == 2:
+            both_in.set()
+        await asyncio.wait_for(both_in.wait(), 5)
+        return await seam(**kw)
+
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+    cid = await _client(ctx, store)
+    monkeypatch.setattr(sites_service, "publish_pocket", _racing_publish)
+
+    a, b = await asyncio.gather(
+        _priced_sale(ctx, store, site_id, cid, "site_year", 299900),
+        _priced_sale(ctx, store, site_id, cid, "site_year", 299900),
+    )
+
+    assert len(arrived) == 2, "both calls reached the publish path"
+    assert a.invoice_id is not None and a.invoice_id == b.invoice_id
+    assert [r.id for r in (await Site.get(site_id)).client_invoices] == [a.invoice_id]
+    assert await _balance(wid) == 5000 - 1700
+
+
+async def test_a_failed_receipt_write_leaves_the_sale_standing(
+    mongo_db, store, monkeypatch
+) -> None:
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import service as sites_service
+
+    _sell_seams(monkeypatch)
+
+    async def _boom(**kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(sites_service, "record_site_invoice", _boom)
+    wid = await _partner_ws("in-shop")
+    ctx = _ctx(wid)
+    await _fund(wid, 5000)
+    site_id = await _free_site(wid)
+
+    sale = await _priced_sale(ctx, store, site_id, await _client(ctx, store), "site_year", 1)
+
+    assert sale.invoice_id is None
+    assert sale.plan_tier == "site_year"
+    assert await _balance(wid) == 5000 - 1700
+    assert (await Site.get(site_id)).client_invoices == []

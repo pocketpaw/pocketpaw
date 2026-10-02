@@ -2,8 +2,12 @@
 # owner of Site writes.
 #
 # Updated 2026-10-02 (feat/partners-earnings, PH-11): ``sell_site_plan`` returns
-# ``(doc, sold)`` — ``sold`` is False on the idempotent re-sell no-op — so the
-# partner sale records its client receipt only once.
+# ``(doc, debit_key)`` — the idempotency key of the ``site_plan`` debit THIS call
+# newly recorded (purchase or ``change`` key, this site + tier, today), else None —
+# so the partner sale books a client receipt only when money actually moved.
+# ``record_site_invoice`` takes an optional caller-derived ``invoice_id`` and then
+# appends with a conditional ``$push`` (no-op when that id is already there), so a
+# double-submitted sale books one receipt.
 #
 # Updated 2026-10-02 (feat/partners-cobrand, PH-5): ``_stamp_free_badge`` stamps
 # the partner CO-BRAND mark ("Made by <footer_name> · Paw Sites by PocketPaw" ->
@@ -7850,7 +7854,12 @@ async def update_site_client(
 
 
 async def record_site_invoice(
-    *, workspace_id: str, site_id: str, body: SiteInvoiceCreate, minor_units: bool = False
+    *,
+    workspace_id: str,
+    site_id: str,
+    body: SiteInvoiceCreate,
+    minor_units: bool = False,
+    invoice_id: str | None = None,
 ) -> SiteClientResponse:
     """Append one manual receipt to the site's client record and return the whole
     updated record (so the caller re-renders from one authoritative response rather
@@ -7867,6 +7876,11 @@ async def record_site_invoice(
     (``convert_legacy_minor``: ÷100 for yen, ×10 for dinar, unchanged for
     two-decimal currencies). Either way the row is stamped ``amount_unit=
     "iso4217"``, so the invoice migration never converts it again.
+
+    ``invoice_id`` (PH-11) is for a caller that derives the id from something
+    already idempotent (a partner sale uses its debit key). The append is then a
+    conditional ``$push`` that matches only while no receipt carries that id, so a
+    retried or double-submitted write lands once.
     """
     body = SiteInvoiceCreate.model_validate(body)
     site = await _load(workspace_id, site_id)
@@ -7877,7 +7891,7 @@ async def record_site_invoice(
     if amount > _INVOICE_MAX_MINOR:
         raise ValidationError("sites.invoice_amount_too_large", "amount_cents is implausibly large")
     entry = _SiteInvoiceDoc(
-        id=f"inv_{secrets.token_hex(8)}",
+        id=invoice_id or f"inv_{secrets.token_hex(8)}",
         issued_at=datetime.now(UTC),
         amount_cents=amount,
         currency=body.currency,
@@ -7885,6 +7899,22 @@ async def record_site_invoice(
         note=body.note.strip(),
         amount_unit=MONEY_UNITS_ISO4217,
     )
+    if invoice_id is not None:
+        await _SiteDoc.find_one(
+            {"_id": site.id, "workspace": workspace_id, "client_invoices.id": {"$ne": invoice_id}}
+        ).update(
+            {
+                "$push": {
+                    "client_invoices": {
+                        "$each": [entry.model_dump()],
+                        "$position": 0,
+                        "$slice": _INVOICE_KEEP,
+                    }
+                }
+            }
+        )
+        # no-event: as below.
+        return _client_response(await _load(workspace_id, site_id))
     kept = [entry, *site.client_invoices][:_INVOICE_KEEP]
     # Beanie's ``set()`` merges the updated document back onto ``site``, so the
     # response below is built from the list INCLUDING this receipt. That is
@@ -8628,7 +8658,7 @@ async def sell_site_plan(
     site_id: str,
     tier_key: str,
     partner_client_id: str,
-) -> tuple[_SiteDoc, bool]:
+) -> tuple[_SiteDoc, str | None]:
     """A Paw Partner sells one of its sites a partner-only plan (PH-2).
 
     NOT a second purchase path: it runs ``publish_pocket`` for the site's pocket
@@ -8638,8 +8668,13 @@ async def sell_site_plan(
     adds is the tenant check, two refusals, and the ``partner_client_id`` stamp.
 
     Re-selling the tier a site already holds and pays for is a no-op apart from
-    the stamp — no second debit, no redeploy. Returns ``(doc, sold)``; ``sold`` is
-    False on that no-op (PH-11: the caller records a receipt only for a real sale).
+    the stamp — no second debit, no redeploy.
+
+    Returns ``(doc, debit_key)``. ``debit_key`` is the idempotency key of the
+    ``site_plan`` debit this call newly recorded, or None when no money moved: the
+    no-op above, a return to a tier already paid for this period (zero delta), a
+    resume of a site scheduled to close, a same-day replay. PH-11 books the
+    partner's client receipt only against a non-None key.
     """
     doc = await _load(workspace_id, site_id)
     if getattr(doc, "foreign_origin", False):
@@ -8659,6 +8694,25 @@ async def sell_site_plan(
         and doc.plan_tier == tier_key
         and not getattr(doc, "plan_cancels_at_period_end", False)
     )
+    from pocketpaw_ee.cloud.billing import service as billing_service
+
+    now = datetime.now(UTC)
+    site_key = str(doc.id)
+
+    async def _recorded() -> set[str]:
+        """Today's purchase / change debit keys for this site + tier already in the ledger."""
+        return {
+            billing_service.site_plan_debit_key(site_key, tier_key, now, change=change)
+            for change in (False, True)
+            if await billing_service.site_plan_charged(
+                workspace_id=workspace_id,
+                site_id=site_key,
+                tier_key=tier_key,
+                period_start=now,
+                change=change,
+            )
+        }
+
     # Stamped BEFORE the redeploy: the badge stamper reads ``partner_client_id``
     # mid-deploy, and partner rungs remove the badge (``badge_hidden`` defaults
     # True), so stamping after would ship the sale with NO mark at all until the
@@ -8668,7 +8722,8 @@ async def sell_site_plan(
     prior_client_id = getattr(doc, "partner_client_id", None)
     await doc.set({"partner_client_id": partner_client_id})
     if already_sold:
-        return doc, False
+        return doc, None
+    before = await _recorded()
     completed = False
     try:
         doc = await publish_pocket(
@@ -8682,7 +8737,10 @@ async def sell_site_plan(
     finally:
         if not completed:
             await doc.set({"partner_client_id": prior_client_id})
-    return doc, True
+    # ponytail: the keys are dated by ``now`` taken before the publish; a sale that
+    # straddles UTC midnight debits under the next day's key and books no receipt
+    # (the partner adds it through POST /sites/{id}/invoices).
+    return doc, min(await _recorded() - before, default=None)
 
 
 async def list_partner_sites(
