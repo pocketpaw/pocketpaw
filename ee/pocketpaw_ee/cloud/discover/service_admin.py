@@ -34,6 +34,9 @@
 # functions (``increment_remix``, ``push_report``, ``count_reports``,
 # ``hide_listing``), so ``service`` touches no listing collection directly.
 # ``_audit`` is public as ``record_audit`` (``service`` calls it too).
+# ``upsert_from_source`` is one ``find_one_and_update(upsert=True)``; when a
+# concurrent sync wins the insert (``DuplicateKeyError`` on the unique
+# (source, source_id) index) it retries once as a plain update.
 
 from __future__ import annotations
 
@@ -44,6 +47,8 @@ from typing import Any
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -282,12 +287,23 @@ async def upsert_from_source(
         # Mongo refuses one path in both $set and $setOnInsert.
         del on_insert["hidden"]
         set_fields["hidden"] = True
-    await DiscoverListing.get_pymongo_collection().update_one(
-        key, {"$set": set_fields, "$setOnInsert": on_insert}, upsert=True
-    )
-    doc = await DiscoverListing.find_one(key)
-    await emit(DiscoverListingUpserted(data=_ref(doc)))
-    return str(doc.id)
+    collection = DiscoverListing.get_pymongo_collection()
+    try:
+        raw = await collection.find_one_and_update(
+            key,
+            {"$set": set_fields, "$setOnInsert": on_insert},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        # A concurrent sync inserted it between our match and our insert; it
+        # exists now, so update it.
+        raw = await collection.find_one_and_update(
+            key, {"$set": set_fields}, return_document=ReturnDocument.AFTER
+        )
+    listing_id = str(raw["_id"])
+    await emit(DiscoverListingUpserted(data={"listing_id": listing_id, **key}))
+    return listing_id
 
 
 async def remove_from_source(source: str, source_id: str) -> bool:

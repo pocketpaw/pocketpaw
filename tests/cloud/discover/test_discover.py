@@ -248,6 +248,38 @@ async def test_staff_hide_reaches_the_template(recording_bus) -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_that_loses_the_insert_race_updates_the_winner(monkeypatch) -> None:
+    from pymongo.errors import DuplicateKeyError
+
+    winner_id = await _upsert("race", title="Winner")
+    real = DiscoverListing.get_pymongo_collection
+    raised: list[bool] = []
+
+    class _Racing:
+        """The first upsert=True call raises as if a sibling inserted first."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        async def find_one_and_update(self, *args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("upsert") and not raised:
+                raised.append(True)
+                raise DuplicateKeyError("E11000 duplicate key")
+            return await self._inner.find_one_and_update(*args, **kwargs)
+
+    monkeypatch.setattr(
+        DiscoverListing, "get_pymongo_collection", classmethod(lambda cls: _Racing(real()))
+    )
+    assert await _upsert("race", title="Loser") == winner_id
+    assert raised == [True]
+    assert (await DiscoverListing.get(winner_id)).title == "Loser"
+    assert await DiscoverListing.find({"source_id": "race"}).count() == 1
+
+
+@pytest.mark.asyncio
 async def test_resync_keeps_discover_owned_state(recording_bus) -> None:
     meta = await _template(visibility="public")
     await _sync(recording_bus)
