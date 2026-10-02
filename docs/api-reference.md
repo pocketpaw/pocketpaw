@@ -5,6 +5,9 @@ that are not covered by the per-endpoint Mintlify pages under docs/api/.
 Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
   startup (and then every 30 minutes with the cloud scheduler on); the owner
   using their own listing doesn't raise `remix_count`.
+Updated: 2026-10-02 (feat/discover-moderation) — "Platform — Discover
+  Moderation": staff list (SUPPORT) and feature / unfeature / hide / unhide /
+  reindex (OPERATOR) under /api/v1/platform/discover, each audited.
 Updated: 2026-10-02 (feat/discover-index, hardening) — Discover reports are
   limited to 10 an hour per user (`429 discover.report_rate_limited`); a
   Discover hide also hides the source template (so re-publishing it doesn't
@@ -1216,8 +1219,8 @@ past that the route returns `429` with `discover.report_rate_limited`.
 Three different reporters hide the listing from both public reads, `use` and
 `report`, and hide the source item too: a hidden site template also leaves the
 /sites public list, and making it private and public again does not relist it.
-There is no unhide endpoint yet. When staff unhide a listing, the source item is
-unhidden with it, the reports are cleared, and the users who reported it are
+Staff unhide a listing with `POST /api/v1/platform/discover/{listing_id}/unhide`
+(see "Platform — Discover Moderation"). The source item is unhidden with it, the reports are cleared, and the users who reported it are
 recorded so their later reports on that listing are ignored. Hiding, unhiding,
 featuring and `use` each write an audit row. Errors: `404` for a missing or
 hidden listing; `403` (`discover.own_listing`) for the owner reporting their
@@ -6158,6 +6161,69 @@ not compiled.
   "scope": "workspace:w1"
 }
 ```
+
+## Platform — Discover Moderation
+
+Staff routes for the Discover index under `/api/v1/platform/discover`
+(`ee/pocketpaw_ee/cloud/platform/discover.py`). Like every `/platform` route they
+need a platform role and an interactive session cookie; a bearer token or API key
+is refused. The list is `platform.discover.read` (SUPPORT); every write is
+`platform.discover.moderate` (OPERATOR), so SUPPORT gets `403`
+(`platform.insufficient_role`) on them and a user with no platform role gets
+`403` (`platform.not_operator`) everywhere.
+
+Every write takes a body with a non-empty, free-text `reason` (`422`
+`platform.discover.invalid_reason` when blank) and is recorded as a
+`PlatformAuditEvent` (action `platform.discover.moderate`): written `attempted`
+before the change, then settled `applied` or `failed`. A listing write records
+`target_type: "discover_listing"`, the owner's workspace as `target_workspace`,
+and the listing id plus the verb and prior flags in `before`. The list read is
+recorded too, as `platform.discover.read`.
+
+```json
+{ "reason": "Spam reported by three users, confirmed" }
+```
+
+### `GET /api/v1/platform/discover` (SUPPORT)
+
+Every listing, hidden ones included, newest first. Query params, all optional:
+`source`, `hidden` (`true` / `false`), `featured` (`true` / `false`), `q` (as on the
+public list), `cursor`, `limit` (1-200, default 50). Response `200`:
+`{"items": [...], "next_cursor": ... | null}`, where each item is the staff view
+(never served on a public route):
+
+```json
+{
+  "id": "6660a1...", "source": "site_template", "source_id": "665f1c...",
+  "workspace_id": "w1", "owner": "u1", "kind": "site", "title": "Bakery",
+  "description": "", "live_url": "https://bakery.pawsites.workers.dev",
+  "featured": false, "hidden": true, "report_count": 3,
+  "dismissed_reporter_count": 0, "remix_count": 3,
+  "created_at": "2026-10-01T09:00:00Z"
+}
+```
+
+### `POST /api/v1/platform/discover/{listing_id}/feature` · `/unfeature` (OPERATOR)
+
+Sets `featured`; hidden listings can be featured too. Response `200`:
+`{"id", "featured", "hidden", "audit_event_id"}`. `404` for an unknown listing,
+with no audit row written.
+
+### `POST /api/v1/platform/discover/{listing_id}/hide` · `/unhide` (OPERATOR)
+
+Hide removes the listing from the public reads and hides the source item (a site
+template leaves the /sites public list); its reports are kept. Unhide brings both
+back, clears the reports and records their authors so their later reports on that
+listing are ignored. Same response and `404` as feature.
+
+### `POST /api/v1/platform/discover/reindex?source=site_template` (OPERATOR)
+
+Rebuilds one source's listings now: upserts every public item (a hidden one as a
+hidden listing) and removes listings whose item is gone or no longer public.
+Idempotent. `source` defaults to `site_template`, the only source that supports
+it; any other returns `422` (`discover.reindex_unsupported`). Response `200`:
+`{"source", "created", "updated", "unchanged", "removed", "audit_event_id"}`; a
+row is only written when something changed.
 
 ## Platform — Plan & Entitlement Overrides
 

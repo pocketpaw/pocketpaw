@@ -37,6 +37,10 @@
 # ``upsert_from_source`` is one ``find_one_and_update(upsert=True)``; when a
 # concurrent sync wins the insert (``DuplicateKeyError`` on the unique
 # (source, source_id) index) it retries once as a plain update.
+# Updated 2026-10-02 (feat/discover-moderation): staff reads for the platform
+# moderation routes. ``list_all`` / ``get_staff`` include hidden listings and
+# return ``StaffListingResponse`` (moderation fields, workspace, owner). The
+# cursor / ``q`` paging is shared with ``list_public`` (``_page``).
 
 from __future__ import annotations
 
@@ -60,8 +64,11 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 from pocketpaw_ee.cloud.discover.domain import DiscoverListingView
 from pocketpaw_ee.cloud.discover.dto import (
     ListPublicListingsRequest,
+    ListStaffListingsRequest,
     PublicListingPage,
     PublicListingResponse,
+    StaffListingPage,
+    StaffListingResponse,
     UpsertListingRequest,
 )
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
@@ -103,6 +110,43 @@ def _public(doc: DiscoverListing) -> dict:
     return PublicListingResponse.model_validate({key: view[key] for key in allowed}).model_dump(
         mode="json"
     )
+
+
+def _staff(doc: DiscoverListing) -> dict:
+    """The staff wire dict: the listing plus its moderation state."""
+    return StaffListingResponse(
+        id=str(doc.id),
+        source=doc.source,
+        source_id=doc.source_id,
+        workspace_id=doc.workspace,
+        owner=doc.owner,
+        kind=doc.kind,
+        title=doc.title,
+        description=doc.description,
+        live_url=doc.live_url,
+        featured=doc.featured,
+        hidden=doc.hidden,
+        report_count=len(doc.reports),
+        dismissed_reporter_count=len(doc.dismissed_reporters),
+        remix_count=doc.remix_count,
+        created_at=doc.createdAt,
+    ).model_dump(mode="json")
+
+
+async def _page(query: dict[str, Any], body: Any) -> tuple[list[DiscoverListing], str | None]:
+    """Newest-first page for ``query`` plus ``body``'s ``q`` / ``cursor`` /
+    ``limit``; returns the docs and the next cursor."""
+    if body.q:
+        pattern = {"$regex": re.escape(body.q), "$options": "i"}
+        query["$or"] = [{"title": pattern}, {"description": pattern}]
+    if body.cursor:
+        try:
+            query["_id"] = {"$lt": PydanticObjectId(body.cursor)}
+        except (InvalidId, TypeError, ValueError):
+            raise ValidationError("discover.bad_cursor", "Invalid cursor") from None
+    rows = await DiscoverListing.find(query).sort([("_id", -1)]).limit(body.limit + 1).to_list()
+    next_cursor = str(rows[body.limit - 1].id) if len(rows) > body.limit else None
+    return rows[: body.limit], next_cursor
 
 
 def _oid(listing_id: str) -> PydanticObjectId:
@@ -183,18 +227,8 @@ async def list_public(body: ListPublicListingsRequest | dict | None = None) -> d
         query["audiences"] = body.audience
     if body.featured is not None:
         query["featured"] = body.featured
-    if body.q:
-        pattern = {"$regex": re.escape(body.q), "$options": "i"}
-        query["$or"] = [{"title": pattern}, {"description": pattern}]
-    if body.cursor:
-        try:
-            query["_id"] = {"$lt": PydanticObjectId(body.cursor)}
-        except (InvalidId, TypeError, ValueError):
-            raise ValidationError("discover.bad_cursor", "Invalid cursor") from None
-
-    rows = await DiscoverListing.find(query).sort([("_id", -1)]).limit(body.limit + 1).to_list()
-    next_cursor = str(rows[body.limit - 1].id) if len(rows) > body.limit else None
-    items = [_public(row) for row in rows[: body.limit]]
+    rows, next_cursor = await _page(query, body)
+    items = [_public(row) for row in rows]
     return PublicListingPage(items=items, next_cursor=next_cursor).model_dump(mode="json")
 
 
@@ -251,6 +285,36 @@ async def hide_listing(listing_id: str) -> bool:
         {"_id": _oid(listing_id), "hidden": {"$ne": True}}, {"$set": {"hidden": True}}
     )
     return bool(hid.modified_count)
+
+
+# ---------------------------------------------------------------------------
+# Staff reads (platform routes)
+# ---------------------------------------------------------------------------
+
+
+async def list_all(body: ListStaffListingsRequest | dict | None = None) -> dict:
+    """A page of every listing, hidden ones included, newest first, with its
+    moderation state. Filters: ``source``, ``hidden``, ``featured``, ``q``."""
+    # admin-cross-tenant: platform moderation browses every workspace's listings.
+    body = ListStaffListingsRequest.model_validate(body or {})
+    query: dict[str, Any] = {}
+    if body.source:
+        query["source"] = body.source
+    if body.hidden is not None:
+        # ``$ne`` so a doc without the field counts as not hidden, as on the
+        # public list.
+        query["hidden"] = True if body.hidden else {"$ne": True}
+    if body.featured is not None:
+        query["featured"] = body.featured
+    rows, next_cursor = await _page(query, body)
+    page = StaffListingPage(items=[_staff(row) for row in rows], next_cursor=next_cursor)
+    return page.model_dump(mode="json")
+
+
+async def get_staff(listing_id: str) -> dict:
+    """One listing's staff view, hidden or not; NotFound when missing."""
+    # admin-cross-tenant: platform moderation reads any workspace's listing.
+    return _staff(await _any_doc(listing_id))
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +487,8 @@ __all__ = [
     "get_public",
     "hide_listing",
     "increment_remix",
+    "get_staff",
+    "list_all",
     "list_public",
     "public_doc",
     "push_report",
