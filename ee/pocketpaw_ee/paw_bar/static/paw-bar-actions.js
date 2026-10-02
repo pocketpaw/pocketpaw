@@ -6,7 +6,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:actions` in the
 // paw-bar repo (actions/dist/actions.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar actions/src/actions.ts @ ca96e45 (PR #38)
+// Source: qbtrix/paw-bar actions/src/actions.ts @ 947592a (PR #38)
 //
 // Vendored rather than fetched for the same reason as paw-bar.js: the URL
 // `GET /paw-bar/actions.js` is shown to site owners to paste into their pages,
@@ -25,6 +25,7 @@
   var ID_TARGET = /^#[A-Za-z][\w-]{0,63}$/;
   var TARGET_MAX = 120;
   var HIGHLIGHT_MS = 2e3;
+  var FADE_MS = 300;
   (function boot(win) {
     if (win[LOADED_FLAG]) return;
     const doc = win.document;
@@ -54,6 +55,7 @@
     }
     const norm = (p) => p.replace(/\/+$/, "") || "/";
     function navigate(to) {
+      clearOverlay();
       if (typeof to !== "string") return "unsupported";
       let url;
       try {
@@ -98,6 +100,12 @@
       overlay?.remove();
       overlay = null;
     }
+    function fadeOverlay() {
+      if (!overlay || reduced()) return clearOverlay();
+      overlay.addEventListener("transitionend", clearOverlay, { once: true });
+      overlayTimer = win.setTimeout(clearOverlay, FADE_MS + 100);
+      overlay.style.opacity = "0";
+    }
     function highlight(el) {
       clearOverlay();
       const r = el.getBoundingClientRect();
@@ -105,10 +113,10 @@
       box.setAttribute("data-pawbar-highlight", "");
       box.setAttribute("aria-hidden", "true");
       const pad = 6;
-      box.style.cssText = `position:absolute;pointer-events:none;z-index:2147483646;box-sizing:border-box;border:3px solid #3b82f6;border-radius:10px;box-shadow:0 0 0 6px rgba(59,130,246,.25);top:${r.top + win.scrollY - pad}px;left:${r.left + win.scrollX - pad}px;width:${r.width + pad * 2}px;height:${r.height + pad * 2}px;` + (reduced() ? "" : "transition:opacity .3s;");
+      box.style.cssText = `position:absolute;pointer-events:none;z-index:2147483646;box-sizing:border-box;border:3px solid #3b82f6;border-radius:10px;box-shadow:0 0 0 6px rgba(59,130,246,.25);top:${r.top + win.scrollY - pad}px;left:${r.left + win.scrollX - pad}px;width:${r.width + pad * 2}px;height:${r.height + pad * 2}px;` + (reduced() ? "" : `transition:opacity ${FADE_MS}ms;`);
       doc.documentElement.appendChild(box);
       overlay = box;
-      overlayTimer = win.setTimeout(clearOverlay, HIGHLIGHT_MS);
+      overlayTimer = win.setTimeout(fadeOverlay, HIGHLIGHT_MS);
     }
     function run(d) {
       if (d.do === "navigate") return navigate(d.to);
@@ -120,6 +128,7 @@
         if (d.do === "highlight") highlight(el);
       };
     }
+    win.addEventListener("popstate", clearOverlay);
     win.addEventListener("message", (ev) => {
       if (ev.origin !== frameOrigin) return;
       const d = ev.data;
