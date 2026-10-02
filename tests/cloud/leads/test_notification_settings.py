@@ -18,6 +18,9 @@
 #     change after queueing kills the row, a failed send-time lookup retries,
 #     MSG91 4xx is dead and 5xx retries (no PII in last_error), and visitor
 #     text is defanged (no formatting marks, no live links) and length-capped.
+# Updated 2026-10-02: ``partner_journal`` clears the shared
+# ``read_model.default_journal_store`` cache (partners ``_default_store`` now
+# delegates to it) and points the per-workspace stores at tmp_path.
 
 from __future__ import annotations
 
@@ -866,15 +869,18 @@ _MSG91_ENV = {
 @pytest.fixture
 def partner_journal(tmp_path, monkeypatch):
     """Partner clients live in the Fabric journal; never the developer's real one."""
-    from pocketpaw_ee.cloud.partners import service as partners_service
-
+    from pocketpaw import stores
+    from pocketpaw.fabric import read_model
     from pocketpaw.journal_dep import reset_journal_cache
 
     monkeypatch.setenv("SOUL_DATA_DIR", str(tmp_path / "soul"))
-    partners_service._default_store.cache_clear()
+    monkeypatch.setattr(stores, "_DATA_DIR", tmp_path / "pocketpaw")
+    stores.reset_store_caches()
+    read_model.default_journal_store.cache_clear()
     reset_journal_cache()
     yield
-    partners_service._default_store.cache_clear()
+    read_model.default_journal_store.cache_clear()
+    stores.reset_store_caches()
     reset_journal_cache()
 
 
