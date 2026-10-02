@@ -14,6 +14,16 @@
 # (claim paid -> reversed within the clawback window, then lapse the site) and
 # ``redeploy_site`` (best-effort republish after activation so the badge and
 # co-brand stamps match the new tier).
+# Review fixes (same branch): ``reserve_client_pay_link`` replaces the old target
+# check and reserves the link slot with a CONDITIONAL push, so a double submit
+# mints one Dodo payment and an open link for another plan is a 409
+# (``fill_`` / ``release_client_pay_link`` finish or drop the reservation);
+# activation's compare-and-set matches rows that predate ``billing_rail`` (a
+# default-valued field may be absent), flags a payment for a different plan than
+# the client-paid year running (``sku_mismatch``) and can stamp ``flag_reason``
+# on a record that still activates; ``void_pending_partner_payment`` marks a
+# record refunded before it was processed; a client-paid site's plan change is
+# refused as ``sites.client_paid_plan`` instead of the legacy-rail message.
 #
 # Updated 2026-10-02 (feat/partners-earnings, PH-11): ``sell_site_plan`` returns
 # ``(doc, debit_key)`` — the idempotency key of the ``site_plan`` debit THIS call
@@ -8377,6 +8387,17 @@ async def publish_pocket(
     # on the same rail is deliberate too: it looks hostile, but silently clearing
     # the subscription would strip the entitlements while Dodo kept charging, and
     # nothing left in the product would ever surface that again.
+    # PH-13: a year the partner's CLIENT paid through a pay link has no wallet
+    # period to re-price and no gateway subscription to adjust, so it cannot
+    # change plan here either — but it is not a legacy rail, and saying "old
+    # payment provider" sends the partner to support for nothing.
+    if tier_change_requested and existing_doc.billing_rail == _CLIENT_RAIL:
+        raise ConflictError(
+            "sites.client_paid_plan",
+            "Your client paid for this site's year through a pay link, so its plan "
+            "can't be changed here. Send your client a new pay link when the year "
+            "is up. Nothing has been charged.",
+        )
     if tier_change_requested and existing_doc.billing_rail not in (_CREDITS_RAIL, _PLAN_RAIL):
         raise ConflictError(
             "sites.legacy_billing_rail",
@@ -8788,6 +8809,10 @@ _CLIENT_RENEWAL_WINDOW = timedelta(days=30)
 # An open link for the same plan and price this recent is handed back instead of
 # minting another, so a double click is one link the shop can pay once.
 _CLIENT_LINK_REUSE = timedelta(days=7)
+# A reservation (``reserve_client_pay_link``) not filled within this long is a
+# crashed request, not an open link.
+_RESERVATION_TTL = timedelta(minutes=5)
+_RESERVING = "reserving:"
 
 
 def _aware_utc(value: datetime | None) -> datetime | None:
@@ -8806,24 +8831,33 @@ def _paying_tier(doc: _SiteDoc) -> Any:
     return tier if tier is not None and tier.monthly_price_usd > 0 else None
 
 
-async def client_pay_link_target(
+async def reserve_client_pay_link(
     *,
     workspace_id: str,
     site_id: str,
     sku: str,
     currency: str,
     amount_minor: int,
+    client_id: str,
     now: datetime | None = None,
-) -> tuple[_SiteDoc, Any]:
-    """Check a site may take a client pay link for ``sku``; return ``(doc, reusable)``.
+) -> tuple[_SiteDoc, Any, str | None]:
+    """Check a site may take a client pay link for ``sku`` and reserve the slot.
 
-    ``reusable`` is an open pending link for the same plan and price made within
-    ``_CLIENT_LINK_REUSE``, or None. Raises NotFound for another workspace's site
-    and ConflictError (409) when the site is not something a client can pay for
-    right now — above all when it is ALREADY PAID, by the wallet or by a client,
-    which is the double billing this exists to refuse. The one paid site that may
-    take a link is a client-paid one inside its renewal window, for the same plan.
+    Returns ``(doc, reusable, token)``. ``reusable`` is an open link for the same
+    plan and price (hand it back, mint nothing); otherwise ``token`` names a
+    placeholder record pushed ATOMICALLY — the push is conditional on no open link
+    existing — so a double submit mints one Dodo payment. Fill it with
+    ``fill_client_pay_link`` once the checkout exists, or drop it with
+    ``release_client_pay_link`` if the checkout failed.
+
+    Raises NotFound for another workspace's site and ConflictError (409) when the
+    site is not something a client can pay for right now — above all when it is
+    ALREADY PAID, by the wallet or by a client. The one paid site that may take a
+    link is a client-paid one inside its renewal window, for the same plan. An
+    open link for a DIFFERENT plan is a 409 too (``partners.link_open``).
     """
+    from pocketpaw_ee.cloud.models.site import PartnerClientPayment
+
     at = now or datetime.now(UTC)
     doc = await _load(workspace_id, site_id)
     if getattr(doc, "foreign_origin", False):
@@ -8854,28 +8888,93 @@ async def client_pay_link_target(
                 "This site's plan is already paid for. A client pay link opens 30 days "
                 "before the year runs out, for the same plan.",
             )
-    reusable = next(
-        (
-            p
-            for p in reversed(doc.partner_payments)
-            if p.status == "pending"
-            and p.sku == sku
-            and p.currency == currency
-            and p.amount_minor == amount_minor
-            and p.checkout_url
-            and at - _aware_utc(p.created_at) <= _CLIENT_LINK_REUSE
-        ),
-        None,
+
+    token = f"{_RESERVING}{secrets.token_hex(8)}"
+    open_link = {
+        "$elemMatch": {
+            "status": "pending",
+            "created_at": {"$gte": at - _CLIENT_LINK_REUSE},
+            # A reservation whose checkout never got filled in (a crash between
+            # Dodo and the fill) stops blocking after a few minutes.
+            "$or": [
+                {"checkout_url": {"$ne": ""}},
+                {"created_at": {"$gte": at - _RESERVATION_TTL}},
+            ],
+        }
+    }
+    placeholder = PartnerClientPayment(
+        payment_id=token,
+        sku=sku,
+        amount_minor=amount_minor,
+        currency=currency,
+        client_id=client_id,
+        created_at=at,
     )
-    return doc, reusable
+    res = await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": doc.id, "workspace": workspace_id, "$nor": [{"partner_payments": open_link}]},
+        {"$push": {"partner_payments": placeholder.model_dump()}},
+    )
+    if res.modified_count == 1:
+        return doc, None, token
+
+    doc = await _load(workspace_id, site_id)
+    for p in reversed(doc.partner_payments):
+        created = _aware_utc(p.created_at)
+        if p.status != "pending" or at - created > _CLIENT_LINK_REUSE:
+            continue
+        if not p.checkout_url:
+            if at - created > _RESERVATION_TTL:
+                continue
+            raise ConflictError(
+                "partners.link_in_progress", "A pay link for this site is being created; retry."
+            )
+        if (p.sku, p.currency, p.amount_minor) == (sku, currency, amount_minor):
+            return doc, p, None
+        raise ConflictError(
+            "partners.link_open",
+            "This site already has an open pay link for another plan. Wait for it to "
+            "be paid or to expire before sending a different one.",
+        )
+    raise ConflictError(
+        "partners.link_in_progress", "A pay link for this site is being created; retry."
+    )
 
 
-async def add_partner_payment(*, workspace_id: str, site_id: str, record: Any) -> None:
-    """Append a pending client pay-link record (a ``PartnerClientPayment``)."""
+async def fill_client_pay_link(
+    *, site_id: str, token: str, payment_id: str, checkout_url: str
+) -> None:
+    """Turn a reservation into the real pending record (Dodo's payment id + link)."""
     await _SiteDoc.get_pymongo_collection().update_one(
-        {"_id": ObjectId(site_id), "workspace": workspace_id},
-        {"$push": {"partner_payments": record.model_dump()}},
+        {"_id": ObjectId(site_id), "partner_payments.payment_id": token},
+        {
+            "$set": {
+                "partner_payments.$.payment_id": payment_id,
+                "partner_payments.$.checkout_url": checkout_url,
+            }
+        },
     )
+
+
+async def release_client_pay_link(*, site_id: str, token: str) -> None:
+    """Drop a reservation whose checkout could not be created."""
+    await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(site_id)}, {"$pull": {"partner_payments": {"payment_id": token}}}
+    )
+
+
+async def void_pending_partner_payment(*, site_id: str, payment_id: str) -> bool:
+    """A refund landed before the payment was processed: mark the PENDING record
+    reversed, so a late ``payment.succeeded`` activates nothing and pays nothing."""
+    res = await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(site_id), "partner_payments": _pending(payment_id)},
+        {
+            "$set": {
+                "partner_payments.$.status": "reversed",
+                "partner_payments.$.flag_reason": "refunded_before_processed",
+            }
+        },
+    )
+    return res.modified_count == 1
 
 
 async def find_partner_payment(payment_id: str) -> tuple[_SiteDoc, Any] | None:
@@ -8892,6 +8991,12 @@ async def find_partner_payment(payment_id: str) -> tuple[_SiteDoc, Any] | None:
         return None
     rec = next((p for p in doc.partner_payments if p.payment_id == payment_id), None)
     return (doc, rec) if rec is not None else None
+
+
+def _as_read(value: Any, default: Any) -> Any:
+    """A compare-and-set term for a field read back at ``value``. At its model
+    default the stored row may simply lack the key, so match either."""
+    return {"$in": [default, None]} if value == default else value
 
 
 def _pending(payment_id: str) -> dict:
@@ -8919,12 +9024,15 @@ async def activate_client_paid_site(
     paid_at: datetime,
     commission_credits: int,
     rate_bps: int,
+    flag_reason: str = "",
 ) -> str:
     """Claim a pending client payment and give the site its paid year — ONE write.
 
     Returns the outcome: ``"activated"``; ``"flagged"`` when the site is meanwhile
     paid on ANOTHER rail (the wallet bought it after the link went out — the
-    shop's money is for a period already paid, so a human refunds it); or the
+    shop's money is for a period already paid, so a human refunds it) or is
+    already on a client-paid year of a DIFFERENT plan (``sku_mismatch``: a second
+    link for another plan must not upgrade a year paid at the cheaper price); or the
     record's current status (``"paid"`` / ``"flagged"`` / ``"reversed"``) when it
     was not pending, and ``"missing"``.
 
@@ -8934,7 +9042,12 @@ async def activate_client_paid_site(
     renewal date: the loser re-reads and extends from the winner's date. A
     client-paid site still inside its year is EXTENDED from its renewal date.
     ``commission_credits`` / ``rate_bps`` are frozen onto the record here, so a
-    redelivery grants the stored figure and never recomputes it.
+    redelivery grants the stored figure and never recomputes it. ``flag_reason``
+    (e.g. ``partner_inactive``) is stamped on a record that still activates.
+
+    The compare-and-set treats a field still at its model default as "default OR
+    absent": rows written before ``billing_rail`` existed carry no such key, and
+    an equality filter on ``""`` never matches a missing field.
     """
     from pocketpaw_ee.cloud.billing import site_plans
 
@@ -8952,12 +9065,15 @@ async def activate_client_paid_site(
             return rec.status
         tier = site_plans.site_scoped_tier(rec.sku)
         paying = _paying_tier(doc) is not None
-        if tier is None or (paying and doc.billing_rail != _CLIENT_RAIL):
-            await flag_partner_payment(
-                site_id=site_id,
-                payment_id=payment_id,
-                reason="site_already_paid" if tier is not None else "unknown_sku",
-            )
+        reason = ""
+        if tier is None:
+            reason = "unknown_sku"
+        elif paying and doc.billing_rail != _CLIENT_RAIL:
+            reason = "site_already_paid"
+        elif paying and doc.plan_tier != tier.key:
+            reason = "sku_mismatch"
+        if reason:
+            await flag_partner_payment(site_id=site_id, payment_id=payment_id, reason=reason)
             return "flagged"
         start = paid_at
         renewal = _aware_utc(doc.renewal_date)
@@ -8967,8 +9083,8 @@ async def activate_client_paid_site(
             {
                 "_id": oid,
                 "partner_payments": _pending(payment_id),
-                "subscription_status": doc.subscription_status,
-                "billing_rail": doc.billing_rail,
+                "subscription_status": _as_read(doc.subscription_status, "none"),
+                "billing_rail": _as_read(doc.billing_rail, ""),
                 "renewal_date": doc.renewal_date,
             },
             {
@@ -8984,6 +9100,7 @@ async def activate_client_paid_site(
                     "partner_payments.$.paid_at": paid_at,
                     "partner_payments.$.commission_credits": int(commission_credits),
                     "partner_payments.$.rate_bps": int(rate_bps),
+                    "partner_payments.$.flag_reason": flag_reason,
                 }
             },
         )
