@@ -123,9 +123,9 @@
   },
   {
     "label": "a shell pin drifts off the vetted version — the download installs a package paw-sites never vetted",
-    "file": "ee/pocketpaw_ee/sites/vetted_pins.py",
-    "find": "    \"react\": \"^19.0.0\",",
-    "replace": "    \"react\": \"^20.0.0\",",
+    "file": "ee/pocketpaw_ee/sites/paw-sites-allowlist.json",
+    "find": "\"react\":\"^19.0.0\"",
+    "replace": "\"react\":\"^20.0.0\"",
     "tests": [
       "tests/ee/sites/test_project_zip.py::test_a_react_project_names_only_vetted_dependencies"
     ]
