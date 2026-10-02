@@ -1153,3 +1153,221 @@ async def test_a_refund_and_a_dispute_racing_claw_back_once(mongo_db, store, mon
     assert len(arrived) == 2
     assert await _lines(wid, "partner_commission_reversal") == [-5_700]
     assert await credits.balance(wid) == 0
+
+
+# ------------------------------------------------- re-check regressions (N1-N5)
+
+
+async def test_partials_that_reach_the_full_amount_lapse_the_year(mongo_db, store) -> None:
+    """N1: two half refunds are a full refund — the year lapses too."""
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    await _refund("pay_link_1", event_id="evt_r1", amount=11_400, partial=True)
+    assert (await Site.get(site_id)).subscription_status == "active"
+    await _refund("pay_link_1", event_id="evt_r2", amount=11_400, partial=True)
+    assert await _lines(wid, "partner_commission_reversal") == [-2_850, -2_850]
+    doc = await Site.get(site_id)
+    assert (doc.subscription_status, doc.partner_payments[-1].status) == ("none", "reversed")
+    row = await Payment.find_one(Payment.gateway_ref == "pay_link_1")
+    assert row.refunded_minor == 22_800
+
+
+async def test_an_inactive_partners_full_refund_still_lapses_the_year(mongo_db, store) -> None:
+    """No commission to claim, but the site side still reverses."""
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(wid)}, {"$set": {"partner.status": "suspended"}}
+    )
+    await _pay("pay_link_1", amount=22_800)
+    await _refund("pay_link_1", event_id="evt_r")
+    assert await _lines(wid, "partner_commission_reversal") == []
+    assert (await Site.get(site_id)).subscription_status == "none"
+
+
+async def test_a_dispute_that_loses_the_claim_race_retries_with_the_remainder(
+    mongo_db, store, monkeypatch, caplog
+) -> None:
+    """N2: a partial lands between the dispute's read and its claim; the dispute
+    retries with what is left instead of quietly taking nothing."""
+    import logging
+
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    real = credits.find_by_key
+    fired: list[bool] = []
+
+    async def interleave(workspace: str, key: str):
+        if not fired:
+            fired.append(True)
+            await _refund("pay_link_1", event_id="evt_partial", amount=11_400, partial=True)
+        return await real(workspace, key)
+
+    monkeypatch.setattr(credits, "find_by_key", interleave)
+    with caplog.at_level(logging.ERROR):
+        await _refund("pay_link_1", event_id="evt_dispute", event_type="dispute.lost")
+    assert sorted(await _lines(wid, "partner_commission_reversal")) == [-2_850, -2_850]
+    assert (await Site.get(site_id)).subscription_status == "none"
+    assert not [r for r in caplog.records if "commission" in r.getMessage()]
+
+
+async def test_a_reversal_refused_after_its_retry_alarms(mongo_db, store, caplog) -> None:
+    """N2: nothing left to claim after the re-read is an ERROR, not an INFO."""
+    import logging
+
+    wid = await _partner("us-shop")
+    await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    # Another reversal already took everything (written behind this one's read).
+    await Payment.get_pymongo_collection().update_many(
+        {"gateway_ref": "pay_link_1"}, {"$set": {"commission_reversed": 5_700}}
+    )
+    real = Payment.find
+
+    def stale(*args: Any, **kw: Any):
+        q = real(*args, **kw)
+        first = q.first_or_none
+
+        async def first_or_none():
+            row = await first()
+            if row is not None:
+                row.commission_reversed = 0
+            return row
+
+        q.first_or_none = first_or_none
+        return q
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Payment, "find", stale)
+        with caplog.at_level(logging.ERROR):
+            await _refund("pay_link_1", event_id="evt_late", event_type="dispute.lost")
+    assert await _lines(wid, "partner_commission_reversal") == []
+    assert any("REFUSED before debiting" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_cancelled_clawback_releases_its_claim(mongo_db, store, monkeypatch) -> None:
+    """N3: a CancelledError mid-debit releases the claim; the redelivery reverses."""
+    import asyncio
+
+    wid = await _partner("us-shop")
+    await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    real = credits.debit
+
+    async def cancelled(**kw: Any):
+        if kw.get("cause") == billing.PARTNER_COMMISSION_REVERSAL_CAUSE:
+            raise asyncio.CancelledError()
+        return await real(**kw)
+
+    monkeypatch.setattr(credits, "debit", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await _refund("pay_link_1", event_id="evt_ref")
+    row = await Payment.find_one(Payment.gateway_ref == "pay_link_1")
+    assert (row.commission_reversed, row.refunded_minor) == (0, 0)
+    monkeypatch.setattr(credits, "debit", real)
+    await _refund("pay_link_1", event_id="evt_ref")
+    assert await _lines(wid, "partner_commission_reversal") == [-5_700]
+
+
+async def test_a_claimed_but_undebited_clawback_alarms_on_redelivery(
+    mongo_db, store, caplog
+) -> None:
+    """N3: the row lists the event, the ledger has nothing (a hard kill) — ERROR."""
+    import logging
+
+    wid = await _partner("us-shop")
+    await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    await Payment.get_pymongo_collection().update_many(
+        {"gateway_ref": "pay_link_1"},
+        {"$set": {"commission_reversed": 5_700, "commission_reversal_event_ids": ["evt_ref"]}},
+    )
+    with caplog.at_level(logging.ERROR):
+        await _refund("pay_link_1", event_id="evt_ref")
+    assert await _lines(wid, "partner_commission_reversal") == []
+    assert any("NO LEDGER MOVEMENT" in r.getMessage() for r in caplog.records)
+
+
+async def test_an_early_partial_refund_leaves_the_record_to_activate(
+    mongo_db, store, caplog
+) -> None:
+    """N4: $1 back before the payment is processed does not void a $228 year."""
+    import logging
+
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    with caplog.at_level(logging.ERROR):
+        await _refund("pay_link_1", event_id="evt_r", amount=100, partial=True)
+    assert any("PARTIAL refund of 100" in r.getMessage() for r in caplog.records)
+    assert (await _record(site_id)).status == "pending"
+    await _pay("pay_link_1", amount=22_800)
+    assert (await _record(site_id)).status == "paid"
+    assert (await Site.get(site_id)).subscription_status == "active"
+
+
+async def test_a_stale_reservation_is_never_filled(mongo_db, store) -> None:
+    """N5: a reservation older than its TTL may already be read as crashed."""
+    wid = await _partner("us-shop")
+    site = await _site(wid)
+    cid = await _client(wid, store)
+    _, _, token = await sites_service.reserve_client_pay_link(
+        workspace_id=wid,
+        site_id=str(site.id),
+        sku="staff_year",
+        currency="USD",
+        amount_minor=22_800,
+        client_id=cid,
+        now=datetime.now(UTC) - timedelta(minutes=6),
+    )
+    filled = await sites_service.fill_client_pay_link(
+        site_id=str(site.id), token=token, payment_id="pay_slow", checkout_url="https://pay.test/a"
+    )
+    assert filled is False
+    assert await sites_service.find_partner_payment("pay_slow") is None
+
+
+async def test_a_pay_link_whose_reservation_went_stale_is_refused(mongo_db, store) -> None:
+    """N5: Dodo answered after the TTL — release the slot, hand out nothing."""
+    wid = await _partner("us-shop")
+    site = await _site(wid)
+    cid = await _client(wid, store)
+
+    class _Slow(FakeProvider):
+        async def create_one_time(self, **kw: Any) -> OneTimeCheckout:
+            await Site.get_pymongo_collection().update_one(
+                {"_id": site.id},
+                {
+                    "$set": {
+                        "partner_payments.0.created_at": datetime.now(UTC) - timedelta(minutes=6)
+                    }
+                },
+            )
+            return await super().create_one_time(**kw)
+
+    body = {"client_id": cid, "site_id": str(site.id), "sku": "staff_year"}
+    with pytest.raises(ConflictError):
+        await service.create_pay_link(_ctx(wid), body=body, store=store, provider=_Slow())
+    assert (await Site.get(site.id)).partner_payments == []
+
+
+async def test_a_flagged_payment_alarm_names_its_flag(mongo_db, store, caplog) -> None:
+    import logging
+
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store, sku="staff_year")
+    await Site.get_pymongo_collection().update_one(
+        {"_id": (await Site.get(site_id)).id},
+        {
+            "$set": {
+                "plan_tier": "site_year",
+                "subscription_status": "active",
+                "billing_rail": "client",
+                "renewal_date": datetime.now(UTC),
+            }
+        },
+    )
+    with caplog.at_level(logging.ERROR):
+        await _pay("pay_link_1", amount=22_800)
+    assert any("(sku_mismatch)" in r.getMessage() for r in caplog.records)
