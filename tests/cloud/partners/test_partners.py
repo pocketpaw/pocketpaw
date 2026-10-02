@@ -1033,6 +1033,40 @@ async def test_http_summary_and_earnings(partners_http) -> None:
     assert (await client.get("/api/v1/partners/summary")).status_code == 403
 
 
+async def test_http_pay_link_is_a_fabric_write(partners_http, monkeypatch) -> None:
+    """PH-13: a member opens a client pay link; a non-member cannot."""
+    from pocketpaw_ee.cloud.billing import service as billing_service
+    from pocketpaw_ee.cloud.billing.domain import OneTimeCheckout
+    from pocketpaw_ee.cloud.models.site import Site
+
+    class _Prov:
+        async def create_one_time(self, **kw):
+            return OneTimeCheckout(checkout_url="https://pay.test/x", gateway_ref="pay_http")
+
+    monkeypatch.setattr(billing_service, "_default_provider", lambda: _Prov())
+    client, holder, wid = partners_http
+    holder["user"] = _user(wid, "member")
+    cid = (
+        await client.post("/api/v1/partners/clients", json={"name": "R", "whatsapp": PHONE})
+    ).json()["id"]
+    site = Site(workspace=wid, pocket_id="pk_http", owner="u1", name="S", deployed=True)
+    await site.insert()
+    body = {"client_id": cid, "site_id": str(site.id), "sku": "staff_year"}
+    r = await client.post("/api/v1/partners/pay-link", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "checkout_url": "https://pay.test/x",
+        "site_id": str(site.id),
+        "sku": "staff_year",
+        "amount_minor": 1_198_800,
+        "currency": "INR",
+    }
+    bad = await client.post("/api/v1/partners/pay-link", json={**body, "sku": "staff"})
+    assert bad.status_code == 422
+    holder["user"] = _user(wid, None)
+    assert (await client.post("/api/v1/partners/pay-link", json=body)).status_code == 403
+
+
 # ------------------------------------------------- period changes (review B1)
 
 
