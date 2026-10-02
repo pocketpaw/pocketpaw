@@ -46,7 +46,7 @@
 # responses carry its id; a failed receipt write leaves the sale standing.
 # Updated 2026-10-02 (feat/partners-commissions, PH-13): summary / earnings shapes
 # carry the commission fields (zero here; commissions are covered in
-# test_partner_commissions.py).
+# test_partner_commissions.py). The pay-link route needs ``sites.buy_plan``.
 
 from __future__ import annotations
 
@@ -1033,8 +1033,9 @@ async def test_http_summary_and_earnings(partners_http) -> None:
     assert (await client.get("/api/v1/partners/summary")).status_code == 403
 
 
-async def test_http_pay_link_is_a_fabric_write(partners_http, monkeypatch) -> None:
-    """PH-13: a member opens a client pay link; a non-member cannot."""
+async def test_http_pay_link_needs_the_buy_plan_action(partners_http, monkeypatch) -> None:
+    """PH-13: a paid link changes the site's plan and rail, so like /sell it needs
+    ``sites.buy_plan`` (admin); a member and a non-member are refused."""
     from pocketpaw_ee.cloud.billing import service as billing_service
     from pocketpaw_ee.cloud.billing.domain import OneTimeCheckout
     from pocketpaw_ee.cloud.models.site import Site
@@ -1052,6 +1053,8 @@ async def test_http_pay_link_is_a_fabric_write(partners_http, monkeypatch) -> No
     site = Site(workspace=wid, pocket_id="pk_http", owner="u1", name="S", deployed=True)
     await site.insert()
     body = {"client_id": cid, "site_id": str(site.id), "sku": "staff_year"}
+    assert (await client.post("/api/v1/partners/pay-link", json=body)).status_code == 403
+    holder["user"] = _user(wid, "admin")
     r = await client.post("/api/v1/partners/pay-link", json=body)
     assert r.status_code == 200, r.text
     assert r.json() == {

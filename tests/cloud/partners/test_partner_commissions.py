@@ -30,6 +30,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from bson import ObjectId
 from dateutil.relativedelta import relativedelta
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
@@ -60,6 +61,16 @@ PHONE = "+919876543210"
 # ---------------------------------------------------------------- harness
 
 
+class _Settings(SimpleNamespace):
+    """Pinned money settings; anything else falls back to the code defaults (never
+    a developer's config.json)."""
+
+    def __getattr__(self, name: str) -> Any:
+        from pocketpaw.config import Settings
+
+        return getattr(Settings.model_construct(), name)
+
+
 @pytest.fixture(autouse=True)
 def settings(monkeypatch, tmp_path) -> SimpleNamespace:
     import pocketpaw.config as config_mod
@@ -67,7 +78,7 @@ def settings(monkeypatch, tmp_path) -> SimpleNamespace:
     from pocketpaw.fabric import read_model
     from pocketpaw.journal_dep import reset_journal_cache
 
-    stub = SimpleNamespace(
+    stub = _Settings(
         fx_inr_per_usd=89.0,
         dodo_credit_product_id=USD_PRODUCT,
         dodo_credit_product_id_inr=INR_PRODUCT,
@@ -141,11 +152,10 @@ async def _partner(
 async def _site(wid: str, **fields: Any) -> Site:
     doc = Site(
         workspace=wid,
-        pocket_id=f"pk_{uuid4().hex}",
         owner="u1",
         name="Ravi Stores",
         url="http://local/ravi/",
-        **{"plan_tier": "free", "deployed": True, **fields},
+        **{"plan_tier": "free", "deployed": True, "pocket_id": f"pk_{uuid4().hex}", **fields},
     )
     await doc.insert()
     return doc
@@ -219,19 +229,42 @@ async def _pay(
     return await _deliver("payment.succeeded", data, event_id or f"evt_{payment_id}")
 
 
-async def _refund(payment_id: str, *, event_id: str, event_type: str = "refund.succeeded"):
+async def _refund(
+    payment_id: str,
+    *,
+    event_id: str,
+    event_type: str = "refund.succeeded",
+    amount: int | None = None,
+    partial: bool = False,
+):
     data = {
         "refund_id": "ref_1",
         "payment_id": payment_id,
         "business_id": "biz_1",
         "status": "succeeded",
-        "is_partial": False,
+        "is_partial": partial,
         "currency": "USD",
         "metadata": {},
     }
+    if amount is not None:
+        data["amount"] = amount
     if event_type == "dispute.lost":
-        data = {"dispute_id": "dis_1", "payment_id": payment_id, "amount": "100", "currency": "USD"}
+        data = {
+            "dispute_id": "dis_1",
+            "payment_id": payment_id,
+            "amount": str(amount or 22_800),
+            "currency": "USD",
+        }
     return await _deliver(event_type, data, event_id)
+
+
+async def _age_commission(payment_id: str, at: datetime) -> None:
+    """Back-date the commission's ledger entry (the clawback window's anchor)."""
+    from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
+
+    await CreditLedgerEntry.get_pymongo_collection().update_many(
+        {"idempotency_key": f"{payment_id}:commission"}, {"$set": {"createdAt": at}}
+    )
 
 
 async def _lines(wid: str, cause: str) -> list[int]:
@@ -611,6 +644,7 @@ async def test_a_refund_after_60_days_claws_nothing_back(mongo_db, store) -> Non
         {"_id": (await Site.get(site_id)).id},
         {"$set": {"partner_payments.0.paid_at": old}},
     )
+    await _age_commission("pay_link_1", old)
     await _refund("pay_link_1", event_id="evt_late")
     assert await _lines(wid, "partner_commission_reversal") == []
     assert await credits.balance(wid) == 5_700
@@ -810,3 +844,282 @@ async def test_a_renewal_that_read_a_stale_year_retries_instead_of_losing_one(
     assert outcome == "activated"
     step = _aware((await Site.get(site.id)).renewal_date) - (due + relativedelta(months=24))
     assert abs(step.total_seconds()) < 1
+
+
+# ---------------------------------------------------------------- review regressions
+
+
+async def test_a_deleted_site_still_has_its_commission_clawed_back(mongo_db, store) -> None:
+    """C1: the clawback is anchored on the ledger, not on the Site record."""
+    wid = await _partner("founder", founding=True)
+    _, site_id = await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    assert await credits.balance(wid) == 9_120
+    await sites_service.delete_site_document(await Site.get(site_id))
+    await _refund("pay_link_1", event_id="evt_ref")
+    await _refund("pay_link_1", event_id="evt_dis", event_type="dispute.lost")
+    assert await _lines(wid, "partner_commission_reversal") == [-9_120]
+    assert await credits.balance(wid) == 0
+
+
+async def test_a_deleted_site_refunded_after_60_days_keeps_the_commission(mongo_db, store) -> None:
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    await _age_commission("pay_link_1", datetime.now(UTC) - timedelta(days=61))
+    await sites_service.delete_site_document(await Site.get(site_id))
+    await _refund("pay_link_1", event_id="evt_ref")
+    assert await credits.balance(wid) == 5_700
+
+
+async def test_a_row_without_a_billing_rail_key_still_activates(mongo_db, store) -> None:
+    """I1: pre-backfill rows lack ``billing_rail`` / ``subscription_status`` keys."""
+    wid = await _partner("us-shop")
+    site = await _site(wid)
+    await Site.get_pymongo_collection().update_one(
+        {"_id": site.id}, {"$unset": {"billing_rail": "", "subscription_status": ""}}
+    )
+    cid = await _client(wid, store)
+    await service.create_pay_link(
+        _ctx(wid),
+        body={"client_id": cid, "site_id": str(site.id), "sku": "staff_year"},
+        store=store,
+        provider=FakeProvider(),
+    )
+    await _pay("pay_link_1", amount=22_800)
+    fresh = await Site.get(site.id)
+    assert (fresh.billing_rail, fresh.subscription_status) == ("client", "active")
+    assert await credits.balance(wid) == 5_700
+
+
+async def test_a_second_plan_cannot_upgrade_a_client_paid_year(mongo_db, store) -> None:
+    """I3: a link for another plan is refused while one is open, and a payment
+    for another plan than the running client-paid year is flagged."""
+    wid = await _partner("us-shop")
+    site = await _site(wid)
+    cid = await _client(wid, store)
+    prov = FakeProvider()
+    body = {"client_id": cid, "site_id": str(site.id), "sku": "site_year"}
+    await service.create_pay_link(_ctx(wid), body=body, store=store, provider=prov)
+    with pytest.raises(ConflictError) as exc:
+        await service.create_pay_link(
+            _ctx(wid), body={**body, "sku": "staff_year"}, store=store, provider=prov
+        )
+    assert exc.value.code == "partners.link_open"
+    # Two links minted anyway (an older one, say): the second plan is flagged.
+    fresh = await Site.get(site.id)
+    fresh.partner_payments.append(
+        PartnerClientPayment(
+            payment_id="pay_other",
+            sku="staff_year",
+            amount_minor=22_800,
+            currency="USD",
+            client_id=cid,
+            checkout_url="https://pay.test/other",
+            created_at=datetime.now(UTC),
+        )
+    )
+    await fresh.save()
+    await _pay("pay_link_1", amount=8_400)
+    renewal = (await Site.get(site.id)).renewal_date
+    await _pay("pay_other", amount=22_800)
+    after = await Site.get(site.id)
+    assert (after.plan_tier, after.renewal_date) == ("site_year", renewal)
+    assert after.partner_payments[-1].flag_reason == "sku_mismatch"
+    assert await _lines(wid, "partner_commission") == [2_100]
+
+
+async def test_a_partial_refund_takes_its_share_and_keeps_the_year(mongo_db, store) -> None:
+    """I4: pro rata of the commission; only a full refund lapses the site."""
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    await _refund("pay_link_1", event_id="evt_part", amount=2_280, partial=True)
+    assert await _lines(wid, "partner_commission_reversal") == [-570]
+    site = await Site.get(site_id)
+    assert site.subscription_status == "active" and site.partner_payments[0].status == "paid"
+    # The rest refunded: the remainder goes and the year lapses.
+    await _refund("pay_link_1", event_id="evt_full")
+    assert sorted(await _lines(wid, "partner_commission_reversal")) == [-5_130, -570]
+    assert await credits.balance(wid) == 0
+    assert (await Site.get(site_id)).subscription_status == "none"
+
+
+async def test_a_partial_refund_with_no_amount_takes_nothing(mongo_db, store) -> None:
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _pay("pay_link_1", amount=22_800)
+    await _refund("pay_link_1", event_id="evt_part", partial=True)
+    assert await credits.balance(wid) == 5_700
+    assert (await Site.get(site_id)).subscription_status == "active"
+
+
+async def test_pay_links_pin_the_charge_currency(mongo_db, store) -> None:
+    """I2: a USD link is never charged in the buyer's local currency."""
+    wid = await _partner("us-shop")
+    prov = FakeProvider()
+    await _link(wid, store, provider=prov)
+    assert prov.calls[0]["pin_currency"] is True
+
+
+async def test_dodo_pins_usd_only_when_asked(monkeypatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    sent: list[dict] = []
+
+    async def create(**kw):
+        sent.append(kw)
+        return MagicMock(payment_link="https://pay", payment_id="pay_1")
+
+    client = MagicMock()
+    client.payments.create = AsyncMock(side_effect=create)
+    prov = _dodo()
+    monkeypatch.setattr(prov, "_client", lambda: client)
+    for pin in (False, True):
+        await prov.create_one_time(
+            amount_credits=100,
+            workspace_id="w",
+            customer_email=None,
+            metadata={},
+            pin_currency=pin,
+        )
+    assert "billing_currency" not in sent[0]  # top-ups keep adaptive pricing
+    assert sent[1]["billing_currency"] == "USD"
+
+
+async def test_a_discounted_or_local_currency_payment_is_flagged(mongo_db, store) -> None:
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _pay(
+        "pay_link_1",
+        amount=21_000,
+        currency="EUR",
+        settlement_amount=22_800,
+        settlement_currency="USD",
+    )
+    assert (await _record(site_id)).flag_reason == "currency"
+    _, site2 = await _link(wid, store, provider=_Renamed("pay_disc"))
+    await _pay("pay_disc", amount=22_800, discount_id="dsc_1")
+    assert (await _record(site2)).flag_reason == "discount"
+    assert await credits.balance(wid) == 0
+
+
+class _Renamed(FakeProvider):
+    def __init__(self, pid: str) -> None:
+        super().__init__()
+        self.pid = pid
+
+    async def create_one_time(self, **kw: Any) -> OneTimeCheckout:
+        self.calls.append(kw)
+        return OneTimeCheckout(checkout_url=f"https://pay.test/{self.pid}", gateway_ref=self.pid)
+
+
+async def test_a_refund_before_the_payment_voids_it(mongo_db, store, redeploys) -> None:
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await _refund("pay_link_1", event_id="evt_early")
+    await _pay("pay_link_1", amount=22_800)
+    rec = await _record(site_id)
+    assert (rec.status, rec.flag_reason) == ("reversed", "refunded_before_processed")
+    assert (await Site.get(site_id)).subscription_status == "none"
+    assert await credits.balance(wid) == 0 and redeploys == []
+
+
+async def test_an_inactive_partner_earns_nothing_but_the_shop_gets_its_year(
+    mongo_db, store
+) -> None:
+    wid = await _partner("us-shop")
+    _, site_id = await _link(wid, store)
+    await WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(wid)},
+        {"$set": {"partner.status": "suspended"}},
+    )
+    await _pay("pay_link_1", amount=22_800)
+    rec = await _record(site_id)
+    assert (rec.status, rec.flag_reason, rec.commission_credits) == ("paid", "partner_inactive", 0)
+    assert (await Site.get(site_id)).subscription_status == "active"
+    assert await credits.balance(wid) == 0
+
+
+async def test_a_double_submitted_link_is_one_payment(mongo_db, store) -> None:
+    import asyncio
+
+    wid = await _partner("us-shop")
+    site = await _site(wid)
+    cid = await _client(wid, store)
+
+    class _Slow(FakeProvider):
+        async def create_one_time(self, **kw: Any) -> OneTimeCheckout:
+            await asyncio.sleep(0.01)
+            return await super().create_one_time(**kw)
+
+    prov = _Slow()
+    body = {"client_id": cid, "site_id": str(site.id), "sku": "staff_year"}
+    results = await asyncio.gather(
+        service.create_pay_link(_ctx(wid), body=body, store=store, provider=prov),
+        service.create_pay_link(_ctx(wid), body=body, store=store, provider=prov),
+        return_exceptions=True,
+    )
+    assert len(prov.calls) == 1
+    ok = [r for r in results if not isinstance(r, Exception)]
+    assert len(ok) == 1
+    [err] = [r for r in results if isinstance(r, Exception)]
+    assert err.code == "partners.link_in_progress"
+    # Once filled, the same request hands the open link back.
+    again = await service.create_pay_link(_ctx(wid), body=body, store=store, provider=prov)
+    assert again.checkout_url == ok[0].checkout_url and len(prov.calls) == 1
+
+
+async def test_a_failed_checkout_releases_the_reservation(mongo_db, store) -> None:
+    wid = await _partner("us-shop")
+    site = await _site(wid)
+    cid = await _client(wid, store)
+
+    class _Down(FakeProvider):
+        async def create_one_time(self, **kw: Any) -> OneTimeCheckout:
+            raise RuntimeError("gateway down")
+
+    body = {"client_id": cid, "site_id": str(site.id), "sku": "staff_year"}
+    with pytest.raises(RuntimeError):
+        await service.create_pay_link(_ctx(wid), body=body, store=store, provider=_Down())
+    assert (await Site.get(site.id)).partner_payments == []
+    out = await service.create_pay_link(_ctx(wid), body=body, store=store, provider=FakeProvider())
+    assert out.checkout_url == "https://pay.test/1"
+
+
+async def test_a_subscription_charge_refund_alarms_for_a_human(mongo_db, caplog) -> None:
+    """I5: the subscription's Payment row is stamped, so its refund is an ERROR."""
+    import logging
+
+    await _pay("pay_sub_1", amount=4_900, meta={"workspace_id": "ws_sub"}, subscription_id="sub_1")
+    row = await Payment.find_one(Payment.gateway_ref == "pay_sub_1")
+    assert row.subscription_id == "sub_1"
+    with caplog.at_level(logging.ERROR):
+        await _refund("pay_sub_1", event_id="evt_sub_ref")
+    assert any("subscription=sub_1" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_client_paid_site_plan_change_names_the_client_rail(mongo_db) -> None:
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    wid = await _partner("us-shop")
+    pocket = Pocket(workspace=wid, name="R", owner="u1", type="site", pattern="landing")
+    await pocket.insert()
+    await _site(
+        wid,
+        id=sites_service._live_object_id(wid, str(pocket.id)),
+        pocket_id=str(pocket.id),
+        plan_tier="site_year",
+        subscription_status="active",
+        billing_rail="client",
+        renewal_date=datetime.now(UTC) + timedelta(days=100),
+    )
+    with pytest.raises(ConflictError) as exc:
+        await sites_service.publish_pocket(
+            workspace_id=wid,
+            user_id="u1",
+            pocket_id=str(pocket.id),
+            site_plan_key="staff_year",
+            purchase_authorized=True,
+        )
+    assert exc.value.code == "sites.client_paid_plan"
