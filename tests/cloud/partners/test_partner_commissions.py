@@ -17,7 +17,8 @@
 # the delete cascade treating the client rail as done.
 # Updated 2026-10-02 (feat/partners-tiers, PH-15): a paid client payment also
 # earns the 1st-site milestone reward (``FIRST_SALE_REWARD``), which a refund
-# does not claw back; the commission rule test covers the tier rates.
+# does not claw back; the commission rule test covers the tier rates. After the
+# PH-13 review rebase, the deleted-site, legacy-row and partial-refund cases add it too.
 #
 # Harness: the REAL ``standardwebhooks`` signer and ``DodoProvider`` for webhook
 # verification (as test_inr_topup.py), the shared ``mongo_db`` fixture, a fake
@@ -859,12 +860,12 @@ async def test_a_deleted_site_still_has_its_commission_clawed_back(mongo_db, sto
     wid = await _partner("founder", founding=True)
     _, site_id = await _link(wid, store)
     await _pay("pay_link_1", amount=22_800)
-    assert await credits.balance(wid) == 9_120
+    assert await credits.balance(wid) == 9_120 + FIRST_SALE_REWARD
     await sites_service.delete_site_document(await Site.get(site_id))
     await _refund("pay_link_1", event_id="evt_ref")
     await _refund("pay_link_1", event_id="evt_dis", event_type="dispute.lost")
     assert await _lines(wid, "partner_commission_reversal") == [-9_120]
-    assert await credits.balance(wid) == 0
+    assert await credits.balance(wid) == FIRST_SALE_REWARD  # a milestone is never clawed back
 
 
 async def test_a_deleted_site_refunded_after_60_days_keeps_the_commission(mongo_db, store) -> None:
@@ -874,7 +875,7 @@ async def test_a_deleted_site_refunded_after_60_days_keeps_the_commission(mongo_
     await _age_commission("pay_link_1", datetime.now(UTC) - timedelta(days=61))
     await sites_service.delete_site_document(await Site.get(site_id))
     await _refund("pay_link_1", event_id="evt_ref")
-    assert await credits.balance(wid) == 5_700
+    assert await credits.balance(wid) == 5_700 + FIRST_SALE_REWARD
 
 
 async def test_a_row_without_a_billing_rail_key_still_activates(mongo_db, store) -> None:
@@ -894,7 +895,7 @@ async def test_a_row_without_a_billing_rail_key_still_activates(mongo_db, store)
     await _pay("pay_link_1", amount=22_800)
     fresh = await Site.get(site.id)
     assert (fresh.billing_rail, fresh.subscription_status) == ("client", "active")
-    assert await credits.balance(wid) == 5_700
+    assert await credits.balance(wid) == 5_700 + FIRST_SALE_REWARD
 
 
 async def test_a_second_plan_cannot_upgrade_a_client_paid_year(mongo_db, store) -> None:
@@ -946,7 +947,7 @@ async def test_a_partial_refund_takes_its_share_and_keeps_the_year(mongo_db, sto
     # The rest refunded: the remainder goes and the year lapses.
     await _refund("pay_link_1", event_id="evt_full")
     assert sorted(await _lines(wid, "partner_commission_reversal")) == [-5_130, -570]
-    assert await credits.balance(wid) == 0
+    assert await credits.balance(wid) == FIRST_SALE_REWARD
     assert (await Site.get(site_id)).subscription_status == "none"
 
 
@@ -955,7 +956,7 @@ async def test_a_partial_refund_with_no_amount_takes_nothing(mongo_db, store) ->
     _, site_id = await _link(wid, store)
     await _pay("pay_link_1", amount=22_800)
     await _refund("pay_link_1", event_id="evt_part", partial=True)
-    assert await credits.balance(wid) == 5_700
+    assert await credits.balance(wid) == 5_700 + FIRST_SALE_REWARD
     assert (await Site.get(site_id)).subscription_status == "active"
 
 
@@ -1157,7 +1158,7 @@ async def test_a_refund_and_a_dispute_racing_claw_back_once(mongo_db, store, mon
     )
     assert len(arrived) == 2
     assert await _lines(wid, "partner_commission_reversal") == [-5_700]
-    assert await credits.balance(wid) == 0
+    assert await credits.balance(wid) == FIRST_SALE_REWARD
 
 
 # ------------------------------------------------- re-check regressions (N1-N5)
