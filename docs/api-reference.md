@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-tiers, PH-15) — Paw Partners volume tiers and
+  milestone rewards: GET /partners/me adds tier standing and benefits, offers and
+  sales are priced at the tier discount, commissions use the tier rate, summary /
+  earnings add reward credits and lifetime sites sold, new GET /partners/rewards.
 Updated: 2026-10-02 (feat/partners-commissions, PH-13 re-check) — partial refunds
   that add up to the full amount lapse the site; a partial refund before the
   payment is processed no longer cancels the link; a pay link whose reservation
@@ -1002,9 +1006,58 @@ All paths are under `/api/v1`. Errors use the standard CloudError JSON shape.
 
 ### `GET /partners/me`
 
-The caller's workspace partner profile: `status` (`applied` | `active` |
-`suspended`), `tier`, `footer_name`, `billing_country` (ISO-2), `founding`,
-`joined_at`. **404** when the workspace is not a partner.
+The caller's workspace partner profile and where it stands on the volume tiers:
+
+```json
+{
+  "status": "active", "tier": "silver", "footer_name": "Ravi Prints",
+  "billing_country": "IN", "founding": false, "joined_at": "2026-10-01T09:00:00Z",
+  "active_sites": 12, "lifetime_sites_sold": 15,
+  "next_tier": {"name": "gold", "at": 25, "remaining": 13},
+  "benefits": {"wholesale_discount_pct": 10.0, "commission_pct": 30.0}
+}
+```
+
+`status` is `applied` | `active` | `suspended`. `next_tier` is `null` at gold.
+`benefits.commission_pct` is the tier rate; a founding partner's site earns
+max(40%, that rate) for 24 months after the site's first client payment. Needs
+`fabric.read`. **404** when the workspace is not a partner (a suspended partner
+can still read it).
+
+### Volume tiers and milestone rewards
+
+The tier is worked out from **active sold sites**: sites with a client
+(`partner_client_id`) on an active paid plan, whoever paid (the wallet or the
+client). The same count is `active_sites` on `/me` and on the summary.
+
+| Tier | Active sold sites | Wholesale discount | Commission |
+|---|---|---|---|
+| bronze | 0–9 | 0% | 25% |
+| silver | 10–24 | 10% | 30% |
+| gold | 25+ | 20% | 35% |
+
+- **Up right away, down once a month.** After every sale and every paid client
+  payment the tier is recomputed and only raised. The sale or payment that
+  crosses a threshold is priced at the old tier; the next one gets the new
+  discount or rate. A monthly review (the first sweep tick of each UTC month)
+  recomputes with downgrade, so a lapse never costs a tier mid-month.
+- **Discount:** the partner pays floor(price × (1 − discount)) in whole USD. It
+  applies wherever the wallet pays for a partner plan: the sale, a plan change and
+  the renewal, and the offers show it. IN `site_year` is 1,700 / 1,500 / 1,300
+  credits; elsewhere 2,900 / 2,600 / 2,300. `staff_year` IN 5,600 / 5,000 / 4,400;
+  elsewhere 8,900 / 8,000 / 7,100.
+- **Who owns the tier:** the system. The operator PUT below can still set `tier`
+  (a manual promotion); it stands until the next recompute moves it, which is the
+  next upgrade or the next monthly review.
+
+**Milestone rewards** are one-time credit grants on **lifetime distinct sites
+sold**: 1st site +200, 10th +1,000, 25th +3,000, 50th +7,500 credits. A site
+counts once the wallet paid a partner plan for it or its client's payment earned a
+commission. Lifetime never goes down: a refund, a lapse or a deleted site does not
+lower it, does not re-trigger a milestone and does not take a reward back. Each
+milestone is granted once per workspace (ledger cause `partner_reward`, key
+`partner_reward:<workspace_id>:<sites>`), checked after every sale, paid client
+payment and monthly review.
 
 ### `GET /partners/clients` · `POST /partners/clients`
 
@@ -1030,7 +1083,8 @@ erasure path yet.
 Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
 session cookie; bearer tokens are refused). PUT requires a body: `status`,
 `footer_name`, `reason` (required, non-blank), optional `tier` (`bronze` |
-`silver` | `gold`, default `bronze`), `billing_country` (ISO-2, default `IN`,
+`silver` | `gold`, default `bronze`; system-owned, see the tier section above),
+`billing_country` (ISO-2, default `IN`,
 upper-cased), `founding`, `joined_at` (kept from the previous profile when
 omitted). A missing body is **422**. DELETE takes `{"reason": "..."}` and clears
 the profile. Both return `{workspace_id, partner}` and write a platform audit row.
@@ -1045,7 +1099,8 @@ The partner-only yearly plans at the caller's `billing_country` price:
 `[{sku, period_months, price_credits, conversation_allowance, label,
 client_price_minor, client_currency}]` (1 credit = $0.01). Today: `site_year`
 (1,700 credits in IN, 2,900 elsewhere) and `staff_year` (5,600 / 8,900; 1,200
-conversations a year). `client_price_minor` + `client_currency` are what the
+conversations a year), at bronze. `price_credits` already has the partner's tier
+discount applied. `client_price_minor` + `client_currency` are what the
 partner's client pays through a pay link: `site_year` ₹3,588 (`358800`, `INR`) in
 IN, $84 (`8400`, `USD`) elsewhere; `staff_year` ₹11,988 / $228. Needs `fabric.read`;
 **403** `partner.not_active` unless the profile is ACTIVE. These plans are not in
@@ -1096,9 +1151,10 @@ renewal_date, partner_client_id, subscription_status, invoice_id}`.
   sale: **403** `sites.partner_plan_only` if the partner is no longer active.
 - Renewals happen on their own: the site-renewal sweep debits the partner price
   when `renewal_date` passes and steps it 12 months, or lapses the site to the
-  free tier (still published) when the wallet is short. If the partner profile has
+  free tier (still published) when the wallet is short. The renewal is priced at
+  the partner's tier on the renewal day. If the partner profile has
   been removed, the renewal reuses the price last paid only when that is a real
-  price of the plan; otherwise the site lapses to the free tier (still published),
+  price of the plan (any country, any tier discount); otherwise the site lapses to the free tier (still published),
   never charged at a guessed price.
 - A plan change after `renewal_date` has passed (before the renewal sweep runs) is
   charged as one fresh period of the new plan, starting now.
@@ -1118,10 +1174,11 @@ currency (see `client_price_minor` on the offers). Returns:
 Nothing changes on the site until the payment lands. When Dodo confirms it, the
 site goes on the plan for 12 months (`billing_rail` `client`), its
 `partner_client_id` is set, and the partner's wallet gets a commission in credits:
-25% of the amount paid net of tax, in US cents (an INR payment converts through
-Dodo's USD settlement figure, or the configured FX rate when that is missing or
-implausible). Founding partners get 40% on payments made within 24 months of
-that site's first client payment. The partner's wallet is never charged for a
+the partner's tier rate (25% / 30% / 35%) of the amount paid net of tax, in US
+cents (an INR payment converts through Dodo's USD settlement figure, or the
+configured FX rate when that is missing or implausible). Founding partners get
+max(40%, the tier rate) on payments made within 24 months of that site's first
+client payment. The rate is fixed when the payment lands. The partner's wallet is never charged for a
 client-paid site, and the renewal sweep does not renew it: at `renewal_date` the
 site drops to the free tier and stays published, unless the client has paid a new
 link. A refund or lost dispute within 60 days of the payment takes that payment's
@@ -1185,7 +1242,9 @@ The partner's earnings at a glance:
   "revenue_30d": [{"currency": "INR", "amount_minor": 299900}],
   "revenue_total": [{"currency": "INR", "amount_minor": 1499500},
                     {"currency": "USD", "amount_minor": 5000}],
-  "commission_credits_30d": 3350, "commission_credits_total": 9120
+  "commission_credits_30d": 3350, "commission_credits_total": 9120,
+  "rewards_credits_30d": 200, "rewards_credits_total": 1200,
+  "lifetime_sites_sold": 10
 }
 ```
 
@@ -1202,16 +1261,32 @@ earlier paid publish of that site. Needs `fabric.read`; **403**
 `partner.not_active` without an ACTIVE profile.
 `commission_credits_30d` / `commission_credits_total` are the credits earned on
 client pay-link payments, minus any taken back after a refund or lost dispute.
+`rewards_credits_30d` / `rewards_credits_total` are milestone rewards credited,
+and `lifetime_sites_sold` is the milestone count (see the tier section).
 
 ### `GET /partners/earnings?months=12`
 
 One row per UTC calendar month, newest first, including months with no
 activity: `[{month: "YYYY-MM", sales, revenue: [{currency, amount_minor}],
-spent_credits, commission_credits}]`. `commission_credits` is that month's
-commissions minus that month's clawbacks. `sales` is the number of `site_plan` debits on currently-sold
+spent_credits, commission_credits, rewards_credits}]`. `commission_credits` is that month's
+commissions minus that month's clawbacks; `rewards_credits` is the milestone
+rewards credited that month. `sales` is the number of `site_plan` debits on currently-sold
 sites that month: purchases, renewals AND plan changes each count as one, so an
 upgrade is a sale. `revenue` and `spent_credits` follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
 Needs `fabric.read` and an ACTIVE profile.
+
+### `GET /partners/rewards`
+
+The milestone ladder with when each reward was credited:
+
+```json
+[{"sites": 1, "credits": 200, "reached_at": "2026-10-02T10:15:00Z"},
+ {"sites": 10, "credits": 1000, "reached_at": null},
+ {"sites": 25, "credits": 3000, "reached_at": null},
+ {"sites": 50, "credits": 7500, "reached_at": null}]
+```
+
+Needs `fabric.read` and an ACTIVE profile (**403** `partner.not_active`).
 
 ## Site templates
 

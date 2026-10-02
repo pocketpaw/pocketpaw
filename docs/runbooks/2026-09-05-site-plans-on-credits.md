@@ -23,6 +23,11 @@ subscriptions too. Re-check fixes on the same branch: partial refunds that add u
 to the full amount now lapse the site, early partial refunds no longer cancel the
 link, and a stale pay-link reservation is refused instead of filled.
 
+Updated 2026-10-02 (`feat/partners-tiers`, PH-15): **partner prices and
+commissions depend on a volume tier, and partners earn milestone rewards.** See
+"Partner volume tiers and milestone rewards" below. A partner's wallet charge
+for `site_year` / `staff_year` is no longer always the table price.
+
 ## What was broken
 
 Selecting a paid plan for a site produced a site that said **pending payment** and
@@ -364,8 +369,9 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
 | `staff_year` | same as `staff` + 1,200 concierge conversations per year | 12 months | $56 | $89 |
 
 - Prices live in one table in `billing/site_plans.py`, read by
-  `partner_price_usd(tier, country)`; the country is the partner profile's
-  `billing_country`. `billing.service.site_plan_price_usd` is what every charge
+  `partner_price_usd(tier, country, partner_tier)`; the country is the partner
+  profile's `billing_country`, and the volume tier's discount is applied there
+  (see the tiers section). `billing.service.site_plan_price_usd` is what every charge
   site calls, and for a monthly rung it is still `monthly_price_usd`.
 - The rungs are **not** in the public catalog (`list_site_plans`). A publish
   naming one outside an active partner workspace is refused with **403**
@@ -400,8 +406,9 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
   against `period_paid_usd`, keep the date. The rule is
   `billing.service.site_plan_change_terms` (pure; unit-tested).
 - If a partner's profile is removed, its yearly sites renew at `period_paid_usd`
-  **only when that is a real price of the tier** (17 or 29 for `site_year`, 56 or
-  89 for `staff_year`). `period_paid_usd` is a high-water mark, so after a
+  **only when that is a real price of the tier**, in any country at any volume-tier
+  discount (17, 15, 13, 29, 26 or 23 for `site_year`; 56, 50, 44, 89, 80 or 71 for
+  `staff_year`). `period_paid_usd` is a high-water mark, so after a
   mid-year `staff_year` → `site_year` downgrade it reads 89. With no real price
   to keep, the site **lapses at renewal** exactly like a short wallet: free floor,
   site stays up, logged by site id. **An operator removing a partner profile
@@ -452,10 +459,56 @@ wallet bought the site after the link went out, the record becomes `flagged`
 with a `flag_reason` and nothing moves. The client has paid for nothing at that
 point, so refund them in Dodo.
 
-Commission is 25% of the US cents paid, net of tax, floored. INR converts the way
-INR top-ups do. Founding partners (`Workspace.partner.founding`) get 40% on
-payments within 24 months of the site's first client payment. The rule lives in
-`partners/_calc.py::commission_rate_bps`, and that is the only place to change it.
+Commission is the partner's tier rate (25% / 30% / 35%) of the US cents paid, net
+of tax, floored. INR converts the way INR top-ups do. Founding partners
+(`Workspace.partner.founding`) get max(40%, tier rate) on payments within 24
+months of the site's first client payment. The rule lives in
+`partners/_calc.py::commission_rate_bps`, and the numbers in that file's `TIERS`
+table; that is the only place to change them.
+
+## Partner volume tiers and milestone rewards
+
+All numbers are in `partners/_calc.py` (`TIERS`, `MILESTONES`).
+
+| Tier | Active sold sites | Wallet discount | Commission |
+|------|-------------------|-----------------|------------|
+| bronze | 0–9 | 0% | 25% |
+| silver | 10–24 | 10% | 30% |
+| gold | 25+ | 20% | 35% |
+
+- **Active sold sites** = sites in the workspace with `partner_client_id` set and
+  `subscription_status: "active"`, on any rail.
+- **Who sets `Workspace.partner.tier`:** `partners.service.refresh_standing`,
+  through `workspace.service.set_partner_tier` (a compare-and-set on the tier as
+  read). It runs after every `POST /partners/sell` and every paid client payment
+  (including redeliveries), and only RAISES the tier there. It never raises an
+  exception: a failure is logged (`partners: refresh_standing failed`) and the
+  next sale, payment redelivery or monthly review repairs it.
+- **Monthly review:** `sweep_partner_tiers` on the 5-minute heartbeat, right after
+  the renewal sweep. It picks ACTIVE partners whose `partner.tier_reviewed_at` is
+  unset or before the current UTC month, recomputes with downgrade, grants any
+  missing milestone and stamps `tier_reviewed_at`. Kill switch:
+  `POCKETPAW_PARTNER_TIER_SWEEP_ENABLED=0` (default on). Suspended partners are
+  not reviewed; their tier freezes.
+- **Operator precedence:** the platform PUT can still write `tier`. It stands until
+  a recompute moves it: the next upgrade, or the next month's review. The PUT
+  keeps `tier_reviewed_at`, so a manual promotion lasts at least to the month
+  boundary.
+- **Discount** is floor(price × (1 − d)) in whole USD, applied in
+  `site_plans.partner_price_usd`, so the sale, a tier change, the renewal (priced
+  at the tier on the renewal day) and the offers agree. The debit keys are
+  unchanged (`site_plan:<site>:<tier>:<date>[:change]`).
+- The sale or payment that crosses a threshold is priced at the OLD tier; the
+  tier moves after it.
+- **Milestones** (`partner_reward`, key `partner_reward:<workspace_id>:<sites>`):
+  1st +200, 10th +1,000, 25th +3,000, 50th +7,500 credits, on LIFETIME distinct
+  sites sold, read from the ledger: distinct `ref.site_id` over applied
+  `site_plan` debits on a partner rung plus applied `partner_commission` grants.
+  Refunds, lapses and deleted sites never lower it, so a milestone is granted
+  once and never clawed back. Because it reads the ledger, partners who sold
+  before this shipped get their milestones at their next sale, payment or review.
+- Check a partner: `db.workspaces.find_one({_id: ObjectId("<id>")}, {partner: 1})`
+  and `db.credit_ledger.find({workspace: "<id>", cause: "partner_reward"})`.
 
 The renewal sweep never debits a `client` site. Once `renewal_date` passes, it
 drops the site to `free` / `none` and leaves it published. A new paid link in
