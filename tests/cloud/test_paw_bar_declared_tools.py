@@ -553,6 +553,37 @@ async def test_v2_with_page_actions_off_tools_are_ignored(concierge_client, mode
 
 
 @pytest.mark.parametrize(
+    "page",
+    [
+        {"url": "https://evil.example/products/cairn-45", "title": "Cairn 45"},
+        {"url": "javascript:alert(1)", "title": "Cairn 45"},
+        {"title": "no url"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_a_dropped_page_declares_no_tools(concierge_client, model, monkeypatch, page):
+    """resolve_page dropped the page (off-origin or malformed): its tools go with it."""
+    client, store = concierge_client
+    _seed_kb(monkeypatch, {})
+    await _site(concierge_page_actions=True)
+    widget = await store.create_widget(_widget())
+    model.reply = ["Sure.\n", _tool_fence(_TOOL_ACTION)]
+    res = await _chat(
+        client, widget.id, message="add it to my cart", page={**page, "tools": [_CART]}
+    )
+    assert res.status_code == 200, res.text
+    assert "action" not in [e for e, _ in _frames(res.text)]
+    assert "page-tools" not in model.user_prompt()
+
+
+def test_declared_tools_need_a_resolved_page():
+    from pocketpaw_ee.paw_bar.concierge_runtime import _declared_tools
+
+    site = SimpleNamespace(concierge_page_actions=True)
+    assert _declared_tools(site, [_CART], None) == []
+
+
+@pytest.mark.parametrize(
     "tools",
     [
         "add_to_cart",

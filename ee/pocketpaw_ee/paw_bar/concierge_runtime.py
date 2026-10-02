@@ -1342,10 +1342,12 @@ def _action_renderer(
     return partial(render_action, site_origin=origin, known_urls=known, tools=list(tools))
 
 
-def _declared_tools(site: Any, raw: Any) -> list[dict[str, Any]]:
+def _declared_tools(site: Any, raw: Any, page: PageContext | None) -> list[dict[str, Any]]:
     """This turn's declared tools: the request's ``page.tools`` that pass
-    ``action_spec.valid_tools``, and none at all with page actions off."""
-    if not page_actions_on(site):
+    ``action_spec.valid_tools``. None at all with page actions off, or when
+    ``resolve_page`` dropped the page (malformed or off the site's origins): the
+    tools belong to that page, so a page we don't trust declares nothing."""
+    if page is None or not page_actions_on(site):
         return []
     from pocketpaw_ee.paw_bar.action_spec import valid_tools
 
@@ -1657,7 +1659,7 @@ async def run_concierge_v2(
             catalog_for_turn(store, widget, query, page_ctx),
         )
         items = select_knowledge(retrieved, page_ctx)
-        declared = _declared_tools(site, tools)
+        declared = _declared_tools(site, tools, page_ctx)
         prompt = build_prompt(
             items,
             widget,
