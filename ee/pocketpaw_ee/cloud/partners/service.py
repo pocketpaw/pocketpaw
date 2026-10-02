@@ -3,6 +3,10 @@
 # Created 2026-10-01 (feat/partners-foundation, PH-1). Reads the caller's own
 # partner profile and does tenant-scoped CRUD on clients. Client routes require
 # an ACTIVE partner profile (``Forbidden`` otherwise).
+# Updated 2026-10-02: ``_default_store`` delegates to the shared
+# ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
+# instead of building its own ``FabricJournalStore``, so client writes are
+# also projected into the per-workspace FabricStore read model.
 # Updated 2026-10-02: PATCH re-reads via the scoped ``_load``; empty PATCH is a
 # no-op; the operator switch moved to ``cloud/platform/partners.py``.
 # Updated 2026-10-01: clients are Fabric ``Customer`` objects in the org
@@ -15,7 +19,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 from uuid import uuid4
 
@@ -42,14 +45,11 @@ from pocketpaw_ee.cloud.partners.dto import (
 )
 
 
-@lru_cache(maxsize=1)
 def _default_store() -> FabricJournalStore:
-    """Process-wide journal-backed store (same as ``people.service``). Tests pass ``store=``."""
-    from pocketpaw.journal_dep import get_journal
+    """The shared process-wide journal store (same as ``people.service``). Tests pass ``store=``."""
+    from pocketpaw.fabric import default_journal_store
 
-    store = FabricJournalStore(get_journal())
-    store.bootstrap()
-    return store
+    return default_journal_store()
 
 
 def _scope(workspace_id: str) -> list[str]:

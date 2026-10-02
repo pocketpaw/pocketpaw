@@ -12,6 +12,9 @@
 # Updated 2026-10-02 (quality review): HTTP-level tests for the operator switch
 # (now /platform/workspaces/{id}/partner) and the client-route action guards,
 # a seam that REFUSES (badge removal), empty-PATCH no-op and GSTIN validation.
+# Updated 2026-10-02: the autouse fixture clears the shared
+# ``read_model.default_journal_store`` cache (``service._default_store`` now
+# delegates to it) and points the per-workspace stores at tmp_path.
 
 from __future__ import annotations
 
@@ -59,15 +62,19 @@ async def _workspace(slug: str, status: str | None = None) -> WorkspaceDoc:
 
 @pytest.fixture(autouse=True)
 def _no_real_journal(tmp_path, monkeypatch):
-    """No test here may open the developer's real ~/.soul journal."""
+    """No test here may open the developer's real ~/.soul journal or ~/.pocketpaw stores."""
+    from pocketpaw import stores
+    from pocketpaw.fabric import read_model
     from pocketpaw.journal_dep import reset_journal_cache
 
     monkeypatch.setenv("SOUL_DATA_DIR", str(tmp_path / "soul"))
-    service._default_store.cache_clear()
+    monkeypatch.setattr(stores, "_DATA_DIR", tmp_path / "pocketpaw")
+    stores.reset_store_caches()
+    read_model.default_journal_store.cache_clear()
     reset_journal_cache()
     yield
-    # A test may have swapped _default_store for a stub (partners_http).
-    getattr(service._default_store, "cache_clear", lambda: None)()
+    read_model.default_journal_store.cache_clear()
+    stores.reset_store_caches()
     reset_journal_cache()
 
 

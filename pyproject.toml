@@ -806,6 +806,7 @@ source_modules = ["pocketpaw_ee"]
 forbidden_modules = ["pocketpaw.fabric.journal_store"]
 ignore_imports = [
     "pocketpaw_ee.cloud.people.service -> pocketpaw.fabric.journal_store",
+    "pocketpaw_ee.cloud.partners.service -> pocketpaw.fabric.journal_store",
 ]
 
 [[tool.importlinter.contracts]]
