@@ -1,5 +1,7 @@
 # Updated 2026-10-02 (feat/discover-moderation): reindex reports created / updated /
 # unchanged / removed (the index branch replaced `upserted`).
+# Updated 2026-10-02 (feat/discover-source-contract): reindex works for any
+# registered source with ``iter_public``; unknown ones still 422.
 """Staff moderation for the Discover index, on the platform axis.
 
 Created 2026-10-02 (feat/discover-moderation) — DS-5 of the /discover PRD.
@@ -145,7 +147,8 @@ async def reindex(
     source: Annotated[str, Query(max_length=64)] = service_admin.SITE_TEMPLATE,
 ) -> PlatformReindexOut:
     """Rebuild one source's listings now (idempotent). 422
-    ``discover.reindex_unsupported`` for a source that can't reindex."""
+    ``discover.reindex_unsupported`` for a source that is unknown or can't
+    reindex."""
     reason = _reason(body)
     event = await audit.begin(
         operator=operator,

@@ -12,6 +12,8 @@
 #     404s without one; a blank reason is 422.
 # Updated 2026-10-02 (feat/discover-moderation): reindex reports created / updated /
 # unchanged / removed (the index branch replaced `upserted`).
+# Updated 2026-10-02 (feat/discover-source-contract): seeds through
+# ``sync_source("site_template", id)`` (was ``sync_site_template``).
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -109,7 +111,7 @@ async def _template_listing() -> tuple[str, str]:
     meta = await templates.save_template(
         WS, OWNER, {"pocket_id": str(src.id), "name": "Bakery", "visibility": "public"}
     )
-    await service_admin.sync_site_template(meta["id"])
+    await service_admin.sync_source("site_template", meta["id"])
     listing = await DiscoverListing.find_one({"source_id": meta["id"]})
     return str(listing.id), meta["id"]
 

@@ -11,6 +11,9 @@
 #
 # Updated 2026-10-02 (feat/discover-index, hardening): POST /report is limited to
 # 10 an hour per user (the 11th is 429 ``discover.report_rate_limited``).
+#
+# Updated 2026-10-02 (feat/discover-source-contract): seeds through
+# ``sync_source("site_template", id)`` (was ``sync_site_template``).
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -107,7 +110,7 @@ async def _template_listing() -> str:
     meta = await templates.save_template(
         WS, OWNER, {"pocket_id": str(src.id), "name": "Bakery", "visibility": "public"}
     )
-    await service_admin.sync_site_template(meta["id"])
+    await service_admin.sync_source("site_template", meta["id"])
     return str((await DiscoverListing.find_one({"source_id": meta["id"]})).id)
 
 
