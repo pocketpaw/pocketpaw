@@ -8890,8 +8890,8 @@ async def find_partner_payment(payment_id: str) -> tuple[_SiteDoc, Any] | None:
     doc = await _SiteDoc.find_one({"partner_payments.payment_id": payment_id})
     if doc is None:
         return None
-    rec = next(p for p in doc.partner_payments if p.payment_id == payment_id)
-    return doc, rec
+    rec = next((p for p in doc.partner_payments if p.payment_id == payment_id), None)
+    return (doc, rec) if rec is not None else None
 
 
 def _pending(payment_id: str) -> dict:

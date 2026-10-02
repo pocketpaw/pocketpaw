@@ -675,7 +675,8 @@ async def test_a_subscription_payment_is_recorded_not_granted(mongo_db) -> None:
 async def test_summary_earnings_sites_and_offers_show_the_client_side(mongo_db, store) -> None:
     wid = await _partner("us-shop")
     ctx = _ctx(wid)
-    _, site_id = await _link(wid, store)
+    prov = FakeProvider()
+    _, site_id = await _link(wid, store, provider=prov)
     await _pay("pay_link_1", amount=22_800)
     s2 = await _site(wid)
     cid = (await Site.get(site_id)).partner_client_id
@@ -683,21 +684,24 @@ async def test_summary_earnings_sites_and_offers_show_the_client_side(mongo_db, 
         ctx,
         body={"client_id": cid, "site_id": str(s2.id), "sku": "site_year"},
         store=store,
-        provider=FakeProvider(),
+        provider=prov,
     )
-    # FakeProvider restarts its count, so this link's id collides; give it its own.
-    await Site.get_pymongo_collection().update_one(
-        {"_id": s2.id}, {"$set": {"partner_payments.0.payment_id": "pay_link_s2"}}
+    await _pay("pay_link_2", amount=8_400)
+    await _refund("pay_link_2", event_id="evt_ref_2")
+    wallet = await _site(
+        wid,
+        plan_tier="site_year",
+        subscription_status="active",
+        billing_rail="credits",
+        partner_client_id=cid,
     )
-    await _pay("pay_link_s2", amount=8_400)
-    await _refund("pay_link_s2", event_id="evt_ref_s2")
 
     got = await service.summary(ctx, store=store)
     assert got.commission_credits_30d == 5_700 and got.commission_credits_total == 5_700
     [row] = await service.earnings(ctx, months=1)
     assert row.commission_credits == 5_700
     modes = {s.site_id: s.billing_mode for s in await service.list_sites(ctx, store=store)}
-    assert modes == {site_id: "client", str(s2.id): "client"}
+    assert modes == {site_id: "client", str(s2.id): "client", str(wallet.id): "partner"}
     offers = {
         o.sku: (o.client_price_minor, o.client_currency) for o in await service.list_offers(ctx)
     }
