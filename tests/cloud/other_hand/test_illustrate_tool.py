@@ -3,6 +3,10 @@
 # Created 2026-08-28. The tool is agent-driven, so the tests that matter are
 # about what it does NOT do: it must not put a whole drawing through the model's
 # context, and it must not spend past the day's budget.
+# Updated 2026-10-01 (CN-3): the daily budget is the shared
+# ``metering.service`` primitive (``illustration_budget`` and
+# ``IllustrationUsage`` are gone). ``_claim`` makes the claim exactly as the
+# tool does; the fakes patch ``metering.service.try_spend`` and answer a bool.
 
 from __future__ import annotations
 
@@ -61,10 +65,10 @@ def signed_up_caller(monkeypatch):
 
 @pytest.fixture
 def budget_open(monkeypatch):
-    from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+    from pocketpaw_ee.cloud.metering import service as budget
 
     async def _spend(*_a, **_k):
-        return True, 1, 20
+        return True
 
     monkeypatch.setattr(budget, "try_spend", _spend)
 
@@ -118,10 +122,10 @@ class TestItRefusesRatherThanSpends:
     async def test_an_exhausted_budget_refuses_before_generating(
         self, captured, generator_ready, monkeypatch, signed_up_caller
     ):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+        from pocketpaw_ee.cloud.metering import service as budget
 
         async def _spent(*_a, **_k):
-            return False, 20, 20
+            return False
 
         monkeypatch.setattr(budget, "try_spend", _spent)
         res = await tool_mod._illustrate_handler({"subject": "a bee"})
@@ -133,26 +137,21 @@ class TestItRefusesRatherThanSpends:
 class TestTheBudgetItself:
     @pytest.mark.asyncio
     async def test_a_zero_cap_disables_the_feature(self, monkeypatch):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+        from pocketpaw_ee.cloud.metering import service as budget
 
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "0")
-        allowed, _spent, cap = await budget.try_spend("ws-1")
-        assert allowed is False
-        assert cap == 0
+        assert await _claim("ws-1") is False
+        assert budget.illustration_cap() == 0
 
     @pytest.mark.asyncio
     async def test_no_workspace_in_context_is_refused(self, monkeypatch):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
-
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
         # An uncharged generation is exactly the hole the budget closes.
-        allowed, _spent, _cap = await budget.try_spend("")
-        assert allowed is False
+        assert await _claim("") is False
 
     @pytest.mark.asyncio
     async def test_an_unreachable_database_fails_CLOSED(self, monkeypatch):
-        from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
 
@@ -166,12 +165,11 @@ class TestTheBudgetItself:
         def _unreachable():
             raise RuntimeError("database unreachable")
 
-        monkeypatch.setattr(IllustrationUsage, "get_pymongo_collection", staticmethod(_unreachable))
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", staticmethod(_unreachable))
         # A degraded database must never become an open tab at the illustrator,
         # so the answer is no — the cost of being wrong this way is a turn that
         # explains in words, and the other way is money.
-        allowed, _spent, _cap = await budget.try_spend("ws-1")
-        assert allowed is False
+        assert await _claim("ws-1") is False
 
     def test_the_collection_accessor_this_module_calls_actually_EXISTS(self):
         """The bug this test exists for shipped, and the suite stayed green.
@@ -185,9 +183,9 @@ class TestTheBudgetItself:
 
         So assert the API directly, where a mismatch is loud.
         """
-        from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
-        assert hasattr(IllustrationUsage, "get_pymongo_collection")
+        assert hasattr(DailyUsage, "get_pymongo_collection")
         import inspect
 
         src = inspect.getsource(budget_module_for_accessor_check())
@@ -195,15 +193,28 @@ class TestTheBudgetItself:
         assert "get_motor_collection()" not in src
 
     def test_a_nonsense_cap_falls_back_to_the_default(self, monkeypatch):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+        from pocketpaw_ee.cloud.metering import service as budget
 
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "twenty")
-        assert budget.daily_cap() == 20
+        assert budget.illustration_cap() == 20
+
+
+async def _claim(workspace_id):
+    """One illustration claim, exactly as the tool and the route make it."""
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.try_spend(
+        subject_type="workspace",
+        subject_id=workspace_id,
+        meter=DailyMeter.ILLUSTRATION,
+        cap=metering.illustration_cap(),
+    )
 
 
 def budget_module_for_accessor_check():
     """The budget module, imported lazily so the accessor test reads its real
     source rather than a name this file happens to have in scope."""
-    from pocketpaw_ee.cloud.other_hand import illustration_budget
+    from pocketpaw_ee.cloud.metering import service
 
-    return illustration_budget
+    return service

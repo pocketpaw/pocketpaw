@@ -1,6 +1,9 @@
 # CI — runs tests and lint on every PR targeting dev/main or an
 # RFC integration branch (pattern: feat/*-integration).
 # Created: 2026-02-26
+# Updated: 2026-10-02 (fix/canon-cross-repo-pins) — the EE test job runs
+# tests/cloud/test_paw_bar_widget_js.py (vendored loader hash pin), which otherwise
+# sits in the tests/cloud blind spot.
 # Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the EE test job runs the two
 # public concierge tool-lockdown files, which otherwise sit in the tests/cloud
 # blind spot.
@@ -42,6 +45,10 @@
 # runs `mutate.py --validate`, which counts substrings and exits: no mutation
 # applied, no tests run, no dependency install. A full sweep is deliberately
 # NOT here; see the job's own comment for why.
+# Updated: 2026-10-01 (CN-3) — the test job runs the daily cap and run-start
+# gate tests (metering primitive, per-meter characterization, abuse budgets,
+# comprehension, transcription, guest gates, illustration budget, the chat
+# route's billing leg) with the same addopts escape.
 # Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_faqs.py
 # (concierge pinned FAQs) with the same addopts escape as the v2 runner step.
 # Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_sources.py
@@ -261,6 +268,29 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run daily cap and run-start gate tests
+        # Same addopts escape. Every daily cap (chat turns, uploads, file
+        # comprehension, transcription, illustrations, guest turns) counts
+        # through one metering primitive, and these files are the only proof
+        # that each meter still allows and refuses at its boundaries, fails the
+        # way its caller needs, and that the chat route's billing leg is the
+        # shared credits guard. Mutations: tests/mutations/abuse_budgets.json,
+        # file_comprehension.json, transcription.json, byok_image_key.json.
+        run: >-
+          uv run pytest tests/cloud/metering/test_daily_usage.py
+          tests/cloud/test_daily_caps_characterization.py
+          tests/cloud/uploads/test_abuse_budgets.py
+          tests/cloud/uploads/test_comprehension.py
+          tests/cloud/uploads/test_transcription.py
+          tests/cloud/auth/test_guest_gates.py
+          tests/cloud/other_hand/test_illustrate_endpoint.py
+          tests/cloud/other_hand/test_illustrate_tool.py
+          tests/cloud/test_agent_router_run_start_gates.py
+          tests/cloud/credits/test_enforcement.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run v2 concierge runner tests
         # Same addopts escape. The v2 runner answers anonymous visitors on
         # customers' sites in one model call, and this file is the only proof
@@ -318,6 +348,15 @@ jobs:
         # case skips here (python-docx ships in ee[extraction], which this job does
         # not install). Mutations: tests/mutations/concierge_knowledge_sources.json.
         run: uv run pytest tests/cloud/test_paw_bar_concierge_sources.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Bar loader tests
+        # Same addopts escape. GET /paw-bar/widget.js serves a copy of paw-bar's
+        # built loader; this file pins that copy's sha256 to the paw-bar commit in
+        # paw-bar-loader.pin.json, so a hand edit or a stale copy fails here.
+        run: uv run pytest tests/cloud/test_paw_bar_widget_js.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

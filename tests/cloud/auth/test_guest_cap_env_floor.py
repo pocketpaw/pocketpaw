@@ -7,7 +7,7 @@
 # that matter are the ones where it must NOT fire: unset, garbage, zero and
 # negative all have to leave the stored cap standing, because every one of
 # those is a way an operator turns the gate off by accident. Zero has its own
-# test — ``try_spend_turn`` reads cap <= 0 as "refuse", so an operator writing
+# test — the guest turn counter reads cap <= 0 as "refuse", so an operator writing
 # 0 for "unlimited" would block every guest turn.
 #
 # Mutations that must break these: tests/mutations/guest_cap_env_floor.json.

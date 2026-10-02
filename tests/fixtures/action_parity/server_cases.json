@@ -1,0 +1,173 @@
+{
+  "about": "Server-only pawbar-action verdicts for pocketpaw's action_spec.render_action, beside the shared paw-bar parity set (cases.json + expected.json). `expected` is the `action` of the SSE frame, or null when the fence is dropped.",
+  "site_origin": "https://shop.example",
+  "known_urls": [
+    "/products/cairn-boot",
+    "/returns/",
+    "https://shop.example/faq",
+    "/"
+  ],
+  "cases": [
+    {
+      "name": "navigate_site_path",
+      "body": "{\"do\": \"navigate\", \"to\": \"/products/cairn-boot\", \"label\": \"Cairn boot\"}",
+      "expected": {
+        "do": "navigate",
+        "to": "https://shop.example/products/cairn-boot",
+        "label": "Cairn boot"
+      }
+    },
+    {
+      "name": "navigate_trailing_slash_ignored",
+      "body": "{\"do\": \"navigate\", \"to\": \"/returns\", \"label\": \"Returns\"}",
+      "expected": {
+        "do": "navigate",
+        "to": "https://shop.example/returns",
+        "label": "Returns"
+      }
+    },
+    {
+      "name": "navigate_absolute_same_origin_keeps_id_fragment",
+      "body": "{\"do\": \"navigate\", \"to\": \"https://shop.example/faq/#shipping\", \"label\": \"Shipping FAQ\"}",
+      "expected": {
+        "do": "navigate",
+        "to": "https://shop.example/faq#shipping",
+        "label": "Shipping FAQ"
+      }
+    },
+    {
+      "name": "navigate_drops_query",
+      "body": "{\"do\": \"navigate\", \"to\": \"/faq?utm=x\", \"label\": \"FAQ\"}",
+      "expected": {
+        "do": "navigate",
+        "to": "https://shop.example/faq",
+        "label": "FAQ"
+      }
+    },
+    {
+      "name": "navigate_home",
+      "body": "{\"do\": \"navigate\", \"to\": \"/\", \"label\": \"Home\"}",
+      "expected": {
+        "do": "navigate",
+        "to": "https://shop.example/",
+        "label": "Home"
+      }
+    },
+    {
+      "name": "navigate_unknown_page",
+      "body": "{\"do\": \"navigate\", \"to\": \"/admin\", \"label\": \"Admin\"}",
+      "expected": null
+    },
+    {
+      "name": "navigate_other_origin",
+      "body": "{\"do\": \"navigate\", \"to\": \"https://evil.example/products/cairn-boot\", \"label\": \"Boot\"}",
+      "expected": null
+    },
+    {
+      "name": "navigate_protocol_relative",
+      "body": "{\"do\": \"navigate\", \"to\": \"//evil.example/faq\", \"label\": \"FAQ\"}",
+      "expected": null
+    },
+    {
+      "name": "navigate_javascript_url",
+      "body": "{\"do\": \"navigate\", \"to\": \"javascript:alert(1)\", \"label\": \"Go\"}",
+      "expected": null
+    },
+    {
+      "name": "navigate_backslash",
+      "body": "{\"do\": \"navigate\", \"to\": \"/\\\\evil.example\", \"label\": \"Go\"}",
+      "expected": null
+    },
+    {
+      "name": "navigate_other_scheme_same_host",
+      "body": "{\"do\": \"navigate\", \"to\": \"http://shop.example/faq\", \"label\": \"FAQ\"}",
+      "expected": null
+    },
+    {
+      "name": "navigate_missing_to",
+      "body": "{\"do\": \"navigate\", \"target\": \"/faq\", \"label\": \"FAQ\"}",
+      "expected": null
+    },
+    {
+      "name": "scroll_to_id",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#sizing\", \"label\": \"Size guide\"}",
+      "expected": {
+        "do": "scroll_to",
+        "target": "#sizing",
+        "label": "Size guide"
+      }
+    },
+    {
+      "name": "highlight_heading_text",
+      "body": "{\"do\": \"highlight\", \"target\": \"Free returns within 30 days\", \"label\": \"Returns policy\"}",
+      "expected": {
+        "do": "highlight",
+        "target": "Free returns within 30 days",
+        "label": "Returns policy"
+      }
+    },
+    {
+      "name": "extra_keys_dropped",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#faq\", \"label\": \"FAQ\", \"to\": \"/admin\", \"why\": \"x\"}",
+      "expected": {
+        "do": "scroll_to",
+        "target": "#faq",
+        "label": "FAQ"
+      }
+    },
+    {
+      "name": "bad_id_target",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#1bad id\", \"label\": \"X\"}",
+      "expected": null
+    },
+    {
+      "name": "id_target_too_long",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"label\": \"X\"}",
+      "expected": null
+    },
+    {
+      "name": "heading_target_with_markup",
+      "body": "{\"do\": \"highlight\", \"target\": \"<img src=x>\", \"label\": \"X\"}",
+      "expected": null
+    },
+    {
+      "name": "heading_target_too_long",
+      "body": "{\"do\": \"highlight\", \"target\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"label\": \"X\"}",
+      "expected": null
+    },
+    {
+      "name": "label_missing",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#faq\"}",
+      "expected": null
+    },
+    {
+      "name": "label_too_long",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#faq\", \"label\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+      "expected": null
+    },
+    {
+      "name": "label_at_cap",
+      "body": "{\"do\": \"scroll_to\", \"target\": \"#faq\", \"label\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+      "expected": {
+        "do": "scroll_to",
+        "target": "#faq",
+        "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "name": "unknown_verb",
+      "body": "{\"do\": \"click\", \"target\": \"#buy\", \"label\": \"Buy\"}",
+      "expected": null
+    },
+    {
+      "name": "not_json",
+      "body": "navigate to /faq",
+      "expected": null
+    },
+    {
+      "name": "not_an_object",
+      "body": "[\"navigate\", \"/faq\"]",
+      "expected": null
+    }
+  ]
+}

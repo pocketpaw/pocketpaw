@@ -5,7 +5,8 @@
 #   ``allowed_origins`` plus the dashboard origin, CSP ``sandbox`` from
 #   ``PAWBAR_FRAME_SANDBOX``, no flag grants top navigation; 403 on an empty
 #   allowlist or a switched-off concierge), GET /paw-bar/widget.js (the
-#   tenant-blind loader), POST /paw-bar/chat (SSE), POST /paw-bar/action and
+#   tenant-blind loader) and GET /paw-bar/actions.js (the opt-in page-actions host
+#   script, same caching), POST /paw-bar/chat (SSE), POST /paw-bar/action and
 #   GET /paw-bar/cart, POST /paw-bar/request-human, POST /paw-bar/decision-contact,
 #   the decision and messages polls, articles, the visitor's own conversations,
 #   and the legacy spec + event ingest.
@@ -44,6 +45,10 @@
 # ``concierge_store_transcripts`` governs storing visitor text (and so the memory),
 # never the answer. Ledger beats and owner notifications are fail-soft and never
 # cost a visitor an answer.
+#
+# Changes (2026-10-01, CN-7): the legacy event ingest interpolates mappings with
+# sites_capture.ingest.interpolate; the private _interpolate/_lookup copy and
+# _PLACEHOLDER_RE are gone. The origin policy here is unchanged (fails open).
 from __future__ import annotations
 
 import asyncio
@@ -98,6 +103,7 @@ from pocketpaw.paw_bar.models import (
     spec_bytes,
 )
 from pocketpaw.security.rate_limiter import RateLimiter
+from pocketpaw.sites_capture.ingest import interpolate
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
 from pocketpaw_ee.cloud._core.rate_limit import _client_ip
 from pocketpaw_ee.paw_bar.admit import admit as admit_event
@@ -125,8 +131,6 @@ _require_paw_bar_read = require_action("paw_bar.read", workspace_dep=current_wor
 _require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
 
 router = APIRouter(tags=["PawBar"])
-
-_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 
 # The frozen public ``GET /paw-bar/spec/{id}`` still carries ``spec.catalog`` for
 # the key-less ``src/`` widget: the catalog store's first this-many items.
@@ -377,12 +381,15 @@ class PawBarAssets(StaticFiles):
 # control, so a long max-age would pin every embedder to whatever loader shipped on
 # the day their site was published. Five minutes keeps the edge useful and keeps a
 # fix at most one coffee away. Revalidation after that is cheap: the bytes are held
-# in memory (``_widget_js_memo``, re-read only when the file's path, mtime, ctime or size
-# changes) and carry a strong ETag, so a browser's If-None-Match gets a bodiless 304.
+# in memory (``_script_memo``, re-read only when the file's path, mtime, ctime or
+# size changes) and carry a strong ETag, so a browser's If-None-Match gets a
+# bodiless 304. The page-actions script (``/paw-bar/actions.js``) has the same
+# problem and the same policy.
 _WIDGET_JS_MAX_AGE = 300
-# (path, mtime_ns, ctime_ns, size, body, etag) of the last loader read. ctime is
-# there for the same reason as in ``_asset_version``'s signature.
-_widget_js_memo: tuple[str, int, int, int, bytes, str] | None = None
+# route -> (path, mtime_ns, ctime_ns, size, body, etag) of the last read of that
+# route's file. ctime is there for the same reason as in ``_asset_version``'s
+# signature.
+_script_memo: dict[str, tuple[str, int, int, int, bytes, str]] = {}
 
 
 def _etag_matches(if_none_match: str, etag: str) -> bool:
@@ -391,6 +398,13 @@ def _etag_matches(if_none_match: str, etag: str) -> bool:
         return True
     tags = (t.strip() for t in if_none_match.split(","))
     return any((t[2:] if t.startswith("W/") else t) == etag for t in tags)
+
+
+def _vendored_script(env_var: str, filename: str) -> Path:
+    override = os.environ.get(env_var, "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "static" / filename
 
 
 def paw_bar_widget_file() -> Path:
@@ -403,48 +417,50 @@ def paw_bar_widget_file() -> Path:
     now bakes this URL into customers' deployed HTML, so it has to resolve on every
     machine that runs the backend, not just a developer's.
     """
-    override = os.environ.get("PAW_BAR_WIDGET_JS", "").strip()
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parent / "static" / "paw-bar.js"
+    return _vendored_script("PAW_BAR_WIDGET_JS", "paw-bar.js")
 
 
-@router.get("/paw-bar/widget.js")
-async def widget_js(request: Request) -> Response:
-    """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
+def paw_bar_actions_file() -> Path:
+    """Path of the page-actions host script ``GET /paw-bar/actions.js`` serves.
 
-    No key, no Site read, no per-caller variation: this is a world-visible static
-    script, and the credential (the embed key) is presented later by the iframe it
-    mounts, at ``/paw-bar/frame``. Held in memory and invalidated by a ``stat`` per
-    request (path, mtime, ctime, size), not only at startup: replacing the file, or
-    pointing ``PAW_BAR_WIDGET_JS`` somewhere else, still takes effect without a
-    restart, and a stat is far cheaper than the read it saves. A matching
-    ``If-None-Match`` gets a 304.
+    Same resolution as the loader: ``PAW_BAR_ACTIONS_JS`` when set, else the copy
+    vendored beside this module (``static/paw-bar-actions.js``).
+    """
+    return _vendored_script("PAW_BAR_ACTIONS_JS", "paw-bar-actions.js")
 
-    A missing bundle is a clean 404 naming the env var that fixes it, not a
+
+def _serve_script(
+    request: Request, route: str, path: Path, env_var: str, what: str, filename: str
+) -> Response:
+    """Serve a vendored, tenant-blind script with the loader caching policy.
+
+    Held in memory and invalidated by a ``stat`` per request (path, mtime, ctime,
+    size), not only at startup: replacing the file, or pointing the env override
+    somewhere else, still takes effect without a restart, and a stat is far cheaper
+    than the read it saves. A matching ``If-None-Match`` gets a 304.
+
+    A missing file is a clean 404 naming the env var that fixes it, not a
     FileNotFoundError escaping as an opaque 500: the operator seeing this is
     debugging why a live site shows no bar, and the message is the answer.
     """
-    global _widget_js_memo
-    path = paw_bar_widget_file()
     try:
         st = path.stat()
-        memo = _widget_js_memo
+        memo = _script_memo.get(route)
         sig = (str(path), st.st_mtime_ns, st.st_ctime_ns, st.st_size)
         if memo is not None and memo[:4] == sig:
             body, etag = memo[4], memo[5]
         else:
             body = path.read_bytes()
             etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
-            _widget_js_memo = (*sig, body, etag)
+            _script_memo[route] = (*sig, body, etag)
     except OSError:
-        logger.warning("paw-bar: loader bundle unavailable at %s", path)
+        logger.warning("paw-bar: %s unavailable at %s", what, path)
         raise HTTPException(
             status_code=404,
             detail=(
-                "Paw Bar loader bundle not found. Set PAW_BAR_WIDGET_JS to the "
-                "path of a built widget bundle, or restore the copy shipped at "
-                "pocketpaw_ee/paw_bar/static/paw-bar.js."
+                f"Paw Bar {what} not found. Set {env_var} to the path of a built "
+                f"bundle, or restore the copy shipped at "
+                f"pocketpaw_ee/paw_bar/static/{filename}."
             ),
         ) from None
     headers = {"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}", "ETag": etag}
@@ -454,6 +470,45 @@ async def widget_js(request: Request) -> Response:
         content=body,
         media_type="application/javascript; charset=utf-8",
         headers=headers,
+    )
+
+
+@router.get("/paw-bar/widget.js")
+async def widget_js(request: Request) -> Response:
+    """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
+
+    No key, no Site read, no per-caller variation: this is a world-visible static
+    script, and the credential (the embed key) is presented later by the iframe it
+    mounts, at ``/paw-bar/frame``.
+    """
+    return _serve_script(
+        request,
+        "widget.js",
+        paw_bar_widget_file(),
+        "PAW_BAR_WIDGET_JS",
+        "loader bundle",
+        "paw-bar.js",
+    )
+
+
+@router.get("/paw-bar/actions.js")
+async def actions_js(request: Request) -> Response:
+    """Serve the opt-in page-actions host script — PUBLIC, unauthenticated,
+    tenant-blind, same caching as the loader.
+
+    A site owner who lets the concierge act on their page (scroll to, highlight,
+    open a link) adds this tag beside the loader. It carries no credential and
+    reads nothing per tenant: it only obeys ``pawbar:act`` messages posted by a
+    ``/paw-bar/frame`` iframe from its own endpoint's origin, so serving it to
+    anyone grants nothing.
+    """
+    return _serve_script(
+        request,
+        "actions.js",
+        paw_bar_actions_file(),
+        "PAW_BAR_ACTIONS_JS",
+        "page-actions script",
+        "paw-bar-actions.js",
     )
 
 
@@ -1560,6 +1615,9 @@ class ConciergeSettingsUpdate(BaseModel):
     # Leads from conversation: on, the v2 concierge may offer a send_to_team lead
     # card and the visitor's Send writes a Lead. Default on.
     concierge_lead_capture: bool | None = None
+    # "Guide visitors around your site": on, the v2 concierge may suggest one
+    # page action per reply (``paw_bar.action_spec``). Default off.
+    concierge_page_actions: bool | None = None
     # CR-4 (2026-09-28): the guided fields. Caps and shapes are in
     # ``pocketpaw.paw_bar.concierge_fields``; each value is normalized (one line,
     # no control characters) and refused with a 422 past its cap. Clear a text
@@ -1606,6 +1664,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_runtime: Literal["legacy", "v2"] = "legacy"
     concierge_allow_doc_code: bool = False
     concierge_lead_capture: bool = True
+    concierge_page_actions: bool = False
     # CR-4 guided fields. "", None and [] mean unset (nothing is rendered).
     concierge_name: str = ""
     concierge_tone: ConciergeTone | None = None
@@ -1732,6 +1791,8 @@ async def _concierge_settings_response(
         concierge_allow_doc_code=getattr(site, "concierge_allow_doc_code", False) is True,
         # Only an explicit False turns it off (a row older than the field reads on).
         concierge_lead_capture=getattr(site, "concierge_lead_capture", True) is not False,
+        # Only an explicit True turns it on (a row older than the field reads off).
+        concierge_page_actions=getattr(site, "concierge_page_actions", False) is True,
         # getattr again: rows older than the guided fields read as unset.
         concierge_name=getattr(site, "concierge_name", "") or "",
         concierge_tone=getattr(site, "concierge_tone", None),
@@ -5287,7 +5348,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
           allowance must not already be used up (403
           ``concierge_quota_exceeded``). Only new conversations are refused — a
           thread under way was counted when it began. A v2 site answers with the
-          leave-a-message degrade reply instead, after 7d (CR-5).
+          ``unavailable`` frame (reason "limit") instead, after 7d (CR-5).
       7d. Rate limit, overall + per-customer (429), checked and recorded as one
           step (``_admit_chat_turn``). Last of the refusals, so no refused turn
           (bad key, 409, quota) spends a slot.
@@ -5458,10 +5519,11 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # allowance been used up" fails to serve. Charging for a tier and then
     # withholding it because a count did not load is the worse outcome.
     #
-    # v2 (CR-5) does not refuse: it answers with the leave-a-message degrade reply
-    # and hands the visitor to the owner, so a site out of allowance still collects
-    # the lead. That reply is a served turn that writes a handoff, so it goes out
-    # only AFTER the rate limit below, never instead of it.
+    # v2 (CR-5) does not refuse: it answers with the ``unavailable`` frame
+    # (reason "limit"), which the widget renders next to its own "Talk to a
+    # person" button. No handoff is raised for the visitor. That reply is still a
+    # served turn, so it goes out only AFTER the rate limit below, never instead
+    # of it.
     quota_exhausted = False
     if is_new_conversation:
         from pocketpaw_ee.cloud.billing.enforcement import (
@@ -5486,24 +5548,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         raise HTTPException(429, "Rate limit exceeded")
 
     # (7c, v2) The used-up allowance, answered. Before the conversation upsert and
-    # the model: the handoff it raises is the only row this turn writes, and the
-    # visitor line on it follows the owner's transcript-retention switch.
+    # the model: this turn writes nothing at all.
     if quota_exhausted:
         from pocketpaw_ee.paw_bar import concierge_runtime
 
         return StreamingResponse(
-            concierge_runtime.degrade_reply(
-                widget,
-                "quota",
-                workspace_id=ctx.workspace_id,
-                customer_ref=body.customer_ref,
-                question=(
-                    body.message[:_STORED_USER_TEXT_CHARS]
-                    if site.concierge_store_transcripts
-                    else ""
-                ),
-                store=store,
-            ),
+            concierge_runtime.degrade_reply(widget, "quota"),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -6881,7 +6931,7 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
         return None
 
     context = {"payload": event.payload, "customer_ref": event.customer_ref}
-    properties = {k: _interpolate(v, context) for k, v in mapping.fields.items()}
+    properties = {k: interpolate(v, context) for k, v in mapping.fields.items()}
     try:
         obj = FabricObject(
             type_name=mapping.creates,
@@ -6894,31 +6944,3 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
     except Exception:
         logger.exception("Failed to create Fabric object from paw-bar event")
         return None
-
-
-def _interpolate(template: str, context: dict[str, Any]) -> Any:
-    """Resolve `{{ a.b }}` placeholders against the context dict.
-
-    If the entire template is a single placeholder (`{{ payload.item }}`), the
-    raw value is returned (preserving non-string types). Mixed strings fall back
-    to stringified substitution.
-    """
-    full_match = re.fullmatch(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}", template)
-    if full_match:
-        return _lookup(full_match.group(1), context)
-
-    def _replace(m: re.Match[str]) -> str:
-        val = _lookup(m.group(1), context)
-        return "" if val is None else str(val)
-
-    return _PLACEHOLDER_RE.sub(_replace, template)
-
-
-def _lookup(path: str, context: dict[str, Any]) -> Any:
-    cur: Any = context
-    for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return None
-    return cur

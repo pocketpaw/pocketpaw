@@ -1,4 +1,8 @@
-"""Comment document — threaded comments on pockets."""
+"""Comment document — threaded comments on pockets.
+
+Changes (2026-10-01, CN-7): the sort index names ``createdAt`` (the real
+TimestampedDocument field); ``created_at`` indexed a field that never exists.
+"""
 
 from __future__ import annotations
 
@@ -35,5 +39,5 @@ class Comment(TimestampedDocument):
     class Settings:
         name = "comments"
         indexes = [
-            [("target.pocket_id", 1), ("created_at", -1)],
+            [("target.pocket_id", 1), ("createdAt", -1)],
         ]

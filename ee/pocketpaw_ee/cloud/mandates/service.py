@@ -33,6 +33,10 @@
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
 # find; emit an event on every write (or ``# no-event: <reason>``); errors via
 # ``_core.errors`` CloudError subclasses (never HTTPException).
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
+#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -985,33 +989,19 @@ def _emit_stood_down_close(
 async def _persist_plan_chain_ids(*, store: Any, action_id: str, proposed_event_id: str) -> None:
     """Back-write ``proposed_event_id`` onto the persisted ``_belt_plan`` blob
     (the correlation_id was minted before the blob was built, so it's already
-    correct). Direct SQL update — the same pattern the belt MCP propose uses.
+    correct). Store-API write — the same pattern the belt MCP propose uses.
     Best-effort."""
-    import json as _json
 
-    import aiosqlite
-
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
     try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(BELT_PLAN_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["proposed_event_id"] = proposed_event_id
-        params[BELT_PLAN_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key=BELT_PLAN_PARAM_KEY,
+            updates={"proposed_event_id": proposed_event_id},
+        )
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "mandate: failed to persist chain ids onto action %s — human.corrected "

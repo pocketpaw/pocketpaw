@@ -21,8 +21,15 @@
 # source site's screenshot), never an auth-gated ``/api/v1/uploads/...`` URL:
 # public templates are shown to every workspace.
 #
-# Only ``ee.cloud.site_templates.service`` imports this doc (import-linter
-# "SiteTemplates" contract).
+# ``kind`` and ``audiences`` are source-owned Discover fields the owner sets;
+# ``live_url`` is the source site's deployed URL, stamped by the service on save
+# and update (``None`` when the site is not deployed). Defaults keep old rows valid.
+#
+# Only ``ee.cloud.site_templates.service`` and ``service_admin`` import this doc
+# (import-linter "SiteTemplates" contract).
+#
+# Updated 2026-10-01 (feat/discover-index): added ``kind``, ``audiences`` and
+# ``live_url`` for the Discover index.
 
 from __future__ import annotations
 
@@ -50,6 +57,9 @@ class SiteTemplate(TimestampedDocument):
     pattern: str | None = None
     snapshot: dict[str, Any] = Field(default_factory=dict)
     preview_image_url: str | None = None
+    kind: Literal["site", "tool", "game"] = "site"
+    audiences: list[Literal["shop", "design", "everyone", "fun"]] = Field(default_factory=list)
+    live_url: str | None = None
 
     class Settings(TimestampedDocument.Settings):
         name = "site_templates"

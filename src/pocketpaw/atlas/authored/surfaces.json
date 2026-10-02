@@ -102,6 +102,32 @@
       "agent_openable": false
     },
     {
+      "id": "surface:discover",
+      "kind": "surface",
+      "name": "Discover",
+      "summary": "Discover: free tools, games and site templates that people publish from Paw, open to browse without signing in; remix one into your own workspace.",
+      "narrative": "Discover is the public index of things people chose to share from Paw: small free tools, games and site templates, filterable by kind and audience and searchable by title. Anyone can browse it and open a live demo without signing in; a signed-in user remixes a listing into a private copy in their own workspace, or reports it. Point a user here when they want a ready-made free tool, game or template someone else published, or to see what the community has shared.",
+      "how": "",
+      "surface": "/discover",
+      "requires": [],
+      "keywords": [
+        "discover",
+        "free tools",
+        "free tool",
+        "games",
+        "community",
+        "published by others",
+        "browse templates",
+        "remix",
+        "explore",
+        "showcase",
+        "gallery"
+      ],
+      "slash": "discover",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
       "id": "surface:belt",
       "kind": "surface",
       "name": "Belt",

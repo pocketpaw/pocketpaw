@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Tests that the chat router emits realtime events for transient signals.
 
 Covers ``typing.start`` / ``typing.stop`` / ``message.read`` — transient
@@ -11,8 +13,8 @@ import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pocketpaw_ee.cloud._core.realtime.events import MessageRead, TypingStart, TypingStop
 from pocketpaw_ee.cloud.chat.schemas import WsInbound
-from pocketpaw_ee.cloud.realtime.events import MessageRead, TypingStart, TypingStop
 
 
 @pytest.mark.asyncio

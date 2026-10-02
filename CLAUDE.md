@@ -1,4 +1,7 @@
+<!-- Updated 2026-10-01 (CN-1): added "Canonical primitives — use X, never Y" section; hmac rule scoped to outbound signing. -->
 # CLAUDE.md
+
+<!-- Updated 2026-10-02 (feat/discover-index, review): cloud rules 2 and 7 name <entity>/service_admin.py for cross-tenant reads/writes. -->
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -287,10 +290,10 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   because they all happen inside a run: the reply, plus image generation,
   speech, OCR, translate, research and web search when a run calls them.
   `POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY` (default `2000`) and
-  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — both
-  ceilings on the same daily row, because a file count alone is beaten by fifty
-  25 MiB files and a byte total alone is beaten by a hundred thousand one-byte
-  ones.
+  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — two
+  ceilings checked together on every upload, because a file count alone is
+  beaten by fifty 25 MiB files and a byte total alone is beaten by a hundred
+  thousand one-byte ones.
   `POCKETPAW_MAX_OWNED_WORKSPACES` (default `10`) — the one that makes the other
   three mean anything. Every ceiling above is keyed on the workspace, so an
   account that can mint workspaces in a loop gets a fresh empty counter each
@@ -310,6 +313,12 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   `runs.daily_limit`, `uploads.daily_limit` and `workspace.owned_limit` —
   deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
   for sale here and the answer is to wait, not to upgrade.
+  Every daily cap (turns, uploads, the comprehension, transcription and illustration
+  caps, and the guest turn cap) counts through ONE primitive:
+  `metering.service.try_spend` on the `daily_usage` collection, one row per
+  (subject, meter, UTC day). Inside it a cap is `None` = uncapped, `0` =
+  disabled, `n` = cap; each meter's resolver maps its env var onto that, so the
+  `0` meanings above are unchanged.
   Crude flood protection belongs at the proxy (Traefik on Coolify), not here.
 - **Social sign-in needs two URLs set, and returns to the face it started on**:
   `POCKETPAW_PUBLIC_BASE_URL` (no default beyond `http://localhost:8888`) builds
@@ -537,6 +546,28 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Entry point**: `pocketpaw.__main__:main`
 - **Lazy imports**: Agent backends are imported inside `AgentRouter._initialize_agent()` to avoid loading unused dependencies
 
+## Canonical primitives — use X, never Y
+
+These already exist. Don't build a parallel copy; `scripts/dup-ratchet` and the
+import-linter contracts fail CI on new ones (they pin today's count and only shrink).
+Why: parallel copies drift (different caps, floors, SSRF checks), so one canonical copy wins.
+
+- **Approvals:** propose through `InstinctStore` (`update_parameters` / `_update_status`).
+  Never open `store._db_path` or raw-`UPDATE instinct_actions`; no new `InstinctApproval` writers.
+- **Audit:** through `ee/pocketpaw_ee/agent/mcp_servers/_audit`. Never hand-roll
+  `get_audit_logger()` + `audit_service.record`; cloud code never writes the SQLite `AuditStore`.
+- **Caps and meters:** caps from `entitlements.resolve_entitlements`, meters from `cloud/metering`
+  (0 = disabled, None = uncapped). No new `*_DAILY` env cap, `try_spend` copy or inline `check_quota`.
+- **Outbound HTTP to user-supplied URLs:** `pocketpaw.security` pinned fetch
+  (`safe_fetch` / `url_validators`). No new `_ip_is_unsafe`.
+- **Webhooks and system email:** the notifications outbox (`cloud/notifications/outbox.py`).
+  Outbound signatures use `webhook_signing.py`, never a hand-rolled `hmac.new`; inbound
+  verifiers for a provider's own scheme (growth, Recall webhooks) are fine. No `smtplib`.
+- **Fabric / people:** no new Fabric type (Customer/Partner/Client) and no Beanie doc for an
+  external person until the object-store decision lands. `Project` = work scope only, never a
+  client container.
+- **Realtime:** import from `pocketpaw_ee.cloud._core.realtime`, never the `cloud.realtime` shim.
+
 ## pocketpaw_ee/cloud Code Rules
 
 Applies to code under `ee/pocketpaw_ee/cloud/`. Local-runtime code (`src/pocketpaw/`)
@@ -544,7 +575,7 @@ uses different patterns; these rules don't apply there.
 
 1. **Each entity has a 4-file shape.** `<entity>/{domain.py, dto.py, service.py, router.py}`. No `repositories.py`. The service IS the repository — Beanie writes are inline.
 
-2. **Writes go through `<entity>/service.py`.** Never import Beanie document classes (`pocketpaw_ee.cloud.models.*`) from routers, DTOs, domains, channels, tools, or agents. Only `<entity>/service.py` may import its own `models.<entity>`.
+2. **Writes go through `<entity>/service.py`.** Never import Beanie document classes (`pocketpaw_ee.cloud.models.*`) from routers, DTOs, domains, channels, tools, or agents. Only `<entity>/service.py` may import its own `models.<entity>`. `<entity>/service_admin.py` may too, for cross-tenant reads/writes only, each function marked `# admin-cross-tenant: <reason>` (first example: `discover/service_admin.py`).
 
 3. **Domain enforces multi-tenancy at construction.** `domain.py` value objects are frozen with required tenancy fields (`workspace_id`, `scope`, etc.) — no defaults. Constructing a domain object without tenancy info is a type error.
 
@@ -560,7 +591,7 @@ uses different patterns; these rules don't apply there.
 
 6. **Validate at entry.** First line of every service function: `body = <RequestSchema>.model_validate(body)`. FastAPI parses HTTP bodies; services re-parse for internal callers (bus handlers, MCP tools, CLI, jobs).
 
-7. **Tenant filter on every read.** Every `_FooDoc.find(...)` / `find_one(...)` call includes `workspace=ctx.workspace_id` (or has an explicit `# global-read: <reason>` comment). Domain-level required fields catch construction-time leaks; this rule catches read-path leaks.
+7. **Tenant filter on every read.** Every `_FooDoc.find(...)` / `find_one(...)` call includes `workspace=ctx.workspace_id` (or has an explicit `# global-read: <reason>` comment, or lives in a `service_admin.py` function marked `# admin-cross-tenant: <reason>`). Domain-level required fields catch construction-time leaks; this rule catches read-path leaks.
 
 8. **Mapping via Pydantic, not hand-rolled helpers.** Use `Domain.model_validate(doc, from_attributes=True)` and `Response.model_validate(domain, from_attributes=True)` where field names align. When the wire format renames or transforms fields (e.g., camelCase ↔ snake_case, nested → flat), keep mapping as a private helper *in the same `service.py`* rather than a separate file.
 

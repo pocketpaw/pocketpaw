@@ -1,8 +1,11 @@
+# 2026-10-01 (CN-2): docstring no longer claims ``require_scope`` checks
+#   ``ctx.scopes`` — the ee dependency that did was deleted.
 """API-key scope registry.
 
 Scopes are coarse permissions attached to API keys. JWT-authenticated
-requests carry ``ctx.scopes is None`` (full access); API-key requests
-carry a concrete list and pass through ``require_scope`` checks.
+requests carry ``ctx.scopes is None``; API-key requests carry the key's
+concrete list on ``RequestContext.scopes``. Nothing enforces that list on
+routes today (see ``_core/context.py``).
 """
 
 from __future__ import annotations

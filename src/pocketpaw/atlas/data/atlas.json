@@ -390,6 +390,29 @@
     },
     {
       "gist": "",
+      "how": "HTTP only, no agent tool: GET /api/v1/discover?source&kind&audience&q&featured&limit&cursor (no sign-in); GET /api/v1/discover/{id}; POST /api/v1/discover/{id}/use {name?} returns {source, result}; POST /api/v1/discover/{id}/report {reason}",
+      "id": "capability:discover.remix",
+      "keywords": [
+        "discover",
+        "remix",
+        "use a template",
+        "free tool",
+        "community templates",
+        "browse published",
+        "report a listing",
+        "publish to discover"
+      ],
+      "kind": "capability",
+      "name": "Browse, remix and publish on Discover",
+      "narrative": "Discover lists every public site template (and, later, other shareable items) across all workspaces, without the owner's name. Browsing needs no sign-in. Remixing (use) makes a brand-new private copy in the caller's own workspace through the item's source, with the source's own plan and cap checks; the owner's use of their own listing is not counted as a remix. A signed-in user can report a listing once; three reports from different users hide it. Publishing to Discover is making a site template public (see capability:sites.save_as_template); making it private or deleting it takes the listing down.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Browse the free tools, games and site templates people publish to Discover, remix one into your workspace, or publish your own.",
+      "surface": "/discover"
+    },
+    {
+      "gist": "",
       "how": "propose via the Instinct gate; approve/reject at /decisions",
       "id": "capability:fabric.conflict_steward",
       "keywords": [
@@ -455,6 +478,27 @@
       ],
       "summary": "Save a site as a template, share it with your workspace or every user, and start new sites from it.",
       "surface": "/sites"
+    },
+    {
+      "gist": "",
+      "how": "HTTP only, no agent tool: POST /api/v1/studio-templates {generation_id, asset_id?, title, description?, audiences?, visibility?}; GET /api/v1/studio-templates?limit&cursor (your own); PATCH {title?, description?, audiences?, visibility?} or DELETE /api/v1/studio-templates/{id}; POST /api/v1/discover/{id}/use on a studio listing returns {source, result: {recipe, uses_input_images}}",
+      "id": "capability:studio.publish_template",
+      "keywords": [
+        "studio template",
+        "publish a generation",
+        "share a generation",
+        "publish to discover",
+        "reuse a prompt",
+        "remix a generation"
+      ],
+      "kind": "capability",
+      "name": "Publish a Studio generation as a template",
+      "narrative": "Publishes one asset of a finished Studio generation as a template: the asset becomes the cover and the prompt, model and settings become the recipe. A template is private (owner only), workspace or public; a public one is listed on Discover with its media, without the owner's name. Input images used by the original run are never published: the recipe drops them and only notes that the run had some, so whoever reuses it adds their own. Using a Studio template from Discover returns the recipe to run in Studio and copies nothing. Making it private or deleting it takes the listing down; three reports from different users hide it. Only a generation that succeeded can be published, and only from your own workspace.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Publish a finished Studio generation as a template, and share it on Discover when public.",
+      "surface": "/studio"
     },
     {
       "gist": "",
@@ -2676,6 +2720,33 @@
       ],
       "summary": "Visual query layer over the historical Decision projection: trace a decision's graph by id, depth, and mode.",
       "surface": "/decisions-graph"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:discover",
+      "keywords": [
+        "discover",
+        "free tools",
+        "free tool",
+        "games",
+        "community",
+        "published by others",
+        "browse templates",
+        "remix",
+        "explore",
+        "showcase",
+        "gallery"
+      ],
+      "kind": "surface",
+      "name": "Discover",
+      "narrative": "Discover is the public index of things people chose to share from Paw: small free tools, games and site templates, filterable by kind and audience and searchable by title. Anyone can browse it and open a live demo without signing in; a signed-in user remixes a listing into a private copy in their own workspace, or reports it. Point a user here when they want a ready-made free tool, game or template someone else published, or to see what the community has shared.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "discover",
+      "summary": "Discover: free tools, games and site templates that people publish from Paw, open to browse without signing in; remix one into your own workspace.",
+      "surface": "/discover"
     },
     {
       "agent_openable": false,

@@ -1,0 +1,164 @@
+{
+  "_about": [
+    "Shared verdicts for pawbar-action fences. The same files belong in pocketpaw (tests/fixtures/action_parity/) and paw-bar (app/tests/fixtures/action_parity/); change them in both.",
+    "server: what action_spec.render_action does with the fence body, given context.site_origin and context.known_urls: accept (emits `frame`) | drop.",
+    "frame: the exact `action` object the server streams in the SSE `action` frame. paw-bar's sanitizeAction must return it unchanged.",
+    "client_rejects_body: the fence body is invalid on grounds the client can check too (verb, label, target, url scheme), so sanitizeAction on the raw body must return null. Same-origin and known-page checks are the server's alone.",
+    "Never edit a verdict to make one side pass."
+  ],
+  "context": {
+    "site_origin": "https://shop.example.com",
+    "known_urls": [
+      "https://shop.example.com/",
+      "https://shop.example.com/products/cairn-boot",
+      "https://shop.example.com/returns",
+      "https://shop.example.com/faq"
+    ]
+  },
+  "bounds": {
+    "verbs": [
+      "navigate",
+      "scroll_to",
+      "highlight"
+    ],
+    "label_max": 80,
+    "target_max": 120,
+    "target_id_re": "#[A-Za-z][A-Za-z0-9_-]{0,63}"
+  },
+  "verdicts": {
+    "navigate_relative": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/products/cairn-boot",
+        "label": "Cairn boot"
+      }
+    },
+    "navigate_trailing_slash": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/products/cairn-boot",
+        "label": "Cairn boot"
+      }
+    },
+    "navigate_absolute_same_origin": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/returns",
+        "label": "Returns"
+      }
+    },
+    "navigate_home": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/",
+        "label": "Home"
+      }
+    },
+    "navigate_fragment_kept": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/faq#shipping",
+        "label": "Shipping FAQ"
+      }
+    },
+    "navigate_query_dropped": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/returns",
+        "label": "Returns"
+      }
+    },
+    "navigate_extra_keys_dropped": {
+      "server": "accept",
+      "frame": {
+        "do": "navigate",
+        "to": "https://shop.example.com/returns",
+        "label": "Returns"
+      }
+    },
+    "navigate_foreign": {
+      "server": "drop"
+    },
+    "navigate_unknown_page": {
+      "server": "drop"
+    },
+    "navigate_javascript": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "scroll_to_id": {
+      "server": "accept",
+      "frame": {
+        "do": "scroll_to",
+        "target": "#returns",
+        "label": "Returns"
+      }
+    },
+    "highlight_heading": {
+      "server": "accept",
+      "frame": {
+        "do": "highlight",
+        "target": "Free returns",
+        "label": "Free returns"
+      }
+    },
+    "label_whitespace_collapsed": {
+      "server": "accept",
+      "frame": {
+        "do": "scroll_to",
+        "target": "#returns",
+        "label": "Our returns"
+      }
+    },
+    "target_markup": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "target_bad_id": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "target_too_long": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "target_at_limit": {
+      "server": "accept",
+      "frame": {
+        "do": "scroll_to",
+        "target": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "label": "Returns"
+      }
+    },
+    "label_too_long": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "label_at_limit": {
+      "server": "accept",
+      "frame": {
+        "do": "scroll_to",
+        "target": "#returns",
+        "label": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      }
+    },
+    "label_missing": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "label_markup": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "unknown_verb": {
+      "server": "drop",
+      "client_rejects_body": true
+    }
+  }
+}

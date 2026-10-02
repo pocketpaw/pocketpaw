@@ -1,4 +1,6 @@
 # tests/atlas/test_store.py — AtlasStore loader / search / describe (AT-1).
+# Updated 2026-10-02 (feat/discover-index, review): surface:discover (/discover)
+# joins the expected surfaces.
 # Created: 2026-07-02 (feat/atlas-core). Proves the packaged seed validates
 # against paw.atlas/v1 with all 10 primitive entries, intent search ranks
 # the right primitive into the top results ("approve agent actions" →
@@ -77,6 +79,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:chat",
     "surface:pockets",
     "surface:sites",
+    "surface:discover",
     "surface:belt",
     "surface:decisions",
     "surface:decisions-graph",

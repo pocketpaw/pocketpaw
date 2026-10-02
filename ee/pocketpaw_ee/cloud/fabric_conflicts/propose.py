@@ -1,5 +1,7 @@
 # ee/cloud/fabric_conflicts/propose.py — stage an un-rankable Fabric conflict for a steward.
 # Created: 2026-07-10 (FST-6 — the conflict lifecycle: _fabric_conflict proposal type).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 #
 # What this module does (the propose half of the conflict-stewardship gate): the
 # source-truth chain's resolver (FST-2) auto-resolves every conflict it can RANK;
@@ -99,6 +101,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator for a conflict-stewardship proposal.
@@ -131,119 +135,6 @@ def _source_truth_mode() -> str:
     from pocketpaw.fabric import store as fabric_store_mod
 
     return fabric_store_mod._source_truth_mode()
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    workspace_id: str,
-    user_id: str,
-    object_type: str,
-    property: str,
-    choice_count: int,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a conflict proposal.
-
-    Mirrors ``instinct_rule_proposals.propose._emit_agent_proposed``: the
-    proposing caller is the actor (``kind="agent"``); a conflict isn't bound
-    to a pocket — its tenancy is the workspace — so ``pocket_id`` on the chain
-    carries the workspace id (matching the Action's ``pocket_id``).
-
-    Returns the emitted event id (back-written onto the blob for the
-    ``human.corrected`` causation chain) or ``None`` when the emit raised —
-    best-effort per RFC 09; the Slice 4 reconciler picks up orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    intent = f"arbitrate {choice_count} competing values for {object_type or 'object'}.{property}"
-    payload: dict[str, Any] = {
-        # Fields the projection's ``_fold_proposed`` consumes.
-        "intent": intent,
-        "action": "fabric_conflict",
-        "pocket_id": workspace_id,
-        "inputs": [],
-        # Richer fields for the explain narrator.
-        "proposal_kind": "fabric_conflict",
-        "proposal": {
-            "object_type": object_type,
-            "property": property,
-            "choice_count": choice_count,
-        },
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "fabric_conflict agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — Slice 4 reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Back-write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._fabric_conflict`` blob after ``agent.proposed`` fired.
-
-    Direct SQL update — the same pattern the instinct-rule gate's
-    ``_persist_chain_ids`` uses. Best-effort: a write failure leaves
-    ``proposed_event_id`` None and the eventual ``human.corrected`` emits
-    without a causation_id (the chain still folds).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(FABRIC_CONFLICT_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[FABRIC_CONFLICT_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "fabric_conflict: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 def _short(value: Any, limit: int = 60) -> str:
@@ -395,21 +286,30 @@ async def propose_fabric_conflict(
 
     # Open the Decision-Graph chain now that the Action is stored. Best-effort:
     # a Decision-Graph wiring failure must NOT fail the propose.
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
+        kind="fabric_conflict",
+        intent=(
+            f"arbitrate {len(choices)} competing values for "
+            f"{conflict.object_type or 'object'}.{conflict.property}"
+        ),
+        proposal={
+            "object_type": conflict.object_type or "",
+            "property": conflict.property,
+            "choice_count": len(choices),
+        },
         workspace_id=workspace_id,
         user_id=requested_by,
-        object_type=conflict.object_type or "",
-        property=conflict.property,
-        choice_count=len(choices),
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=FABRIC_CONFLICT_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="fabric_conflict",
         )
 
     return action_obj.id

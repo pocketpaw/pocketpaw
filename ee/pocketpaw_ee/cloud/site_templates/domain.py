@@ -5,6 +5,9 @@
 # deliberately NOT a field: nothing outside the service may hold a template's
 # source, so the domain object carries the metadata only. It holds the real
 # ``owner`` and ``workspace_id``; the service redacts them per viewer.
+#
+# Updated 2026-10-01 (feat/discover-index): added ``kind``, ``audiences`` and
+# ``live_url`` (the Discover source fields).
 
 from __future__ import annotations
 
@@ -27,6 +30,9 @@ class SiteTemplateMeta:
     pattern: str | None
     hidden: bool = False
     preview_image_url: str | None = None
+    kind: str = "site"
+    audiences: tuple[str, ...] = ()
+    live_url: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

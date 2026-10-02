@@ -1,5 +1,10 @@
 """Process-wide Redis clients. URL from ``POCKETPAW_REDIS_URL``.
 
+Changes (2026-10-01, CN-4): added ``get_arq_pool()`` / ``close_arq_pool()``, the
+one process-wide arq enqueue pool. It replaces four copied lazy getters (chat
+runs, workspace jobs, site build, site delete), three of which were never closed
+on shutdown. ``CloudLifecycleHook.on_shutdown`` now closes it.
+
 Two clients, two pools, on purpose:
 
 - ``get_redis()`` is the shared client for short commands: ws tickets, cancel
@@ -21,15 +26,20 @@ Redis user in the process.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
+from arq import create_pool
+from arq.connections import ArqRedis, RedisSettings
 from redis.asyncio import BlockingConnectionPool, Redis
 
 logger = logging.getLogger(__name__)
 
 _client: Redis | None = None
 _blocking_client: Redis | None = None
+_arq_pool: ArqRedis | None = None
+_arq_pool_lock = asyncio.Lock()
 
 # Ceiling on the shared pool. Blocking stream reads live on their own pool, so
 # this only has to cover short request-scoped commands. Exhaustion raises
@@ -133,7 +143,41 @@ async def close_redis() -> None:
         _blocking_client = None
 
 
+async def get_arq_pool() -> ArqRedis:
+    """The process's arq pool, for ``enqueue_job`` only (every queue shares it;
+    ``_queue_name`` picks the queue). Double-checked lock so concurrent first
+    enqueues don't leak a second pool."""
+    global _arq_pool
+    if _arq_pool is None:
+        async with _arq_pool_lock:
+            if _arq_pool is None:
+                url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
+                if not url:
+                    raise RuntimeError(
+                        "POCKETPAW_REDIS_URL is not set — arq job queues need Redis."
+                    )
+                _arq_pool = await create_pool(RedisSettings.from_dsn(url))
+    return _arq_pool
+
+
+async def close_arq_pool() -> None:
+    """Close the arq pool on web-process shutdown. No-op if never built; a
+    failing aclose is swallowed because shutdown paths can't afford to raise."""
+    global _arq_pool
+    pool = _arq_pool
+    _arq_pool = None
+    if pool is None:
+        return
+    try:
+        await pool.aclose()
+    except Exception:
+        logger.debug("arq pool aclose failed during shutdown", exc_info=True)
+
+
 def _reset_for_tests() -> None:
-    global _client, _blocking_client
+    global _client, _blocking_client, _arq_pool, _arq_pool_lock
     _client = None
     _blocking_client = None
+    _arq_pool = None
+    # A contended lock binds to that test's loop; a fresh one per reset.
+    _arq_pool_lock = asyncio.Lock()

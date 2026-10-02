@@ -2,9 +2,9 @@
   "case_id": "on-escalation",
   "mode": "recorded",
   "authored_by": "hand",
-  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved don't-know with the email route. Replace with `run --real --record`.",
+  "note": "HAND-AUTHORED, not captured from a model. well-behaved don't-know with the email route the visitor asked for. Replace with `run --real --record`.",
   "model_spec": null,
   "captured_at": null,
   "prompt_fingerprint": "7ea8def5eec829e3",
-  "raw_model_output": "I don't have information about wholesale pricing. Please write to hello@brewco.test and the team can help."
+  "raw_model_output": "I don't have information about wholesale pricing. You can write to hello@brewco.test for a quote."
 }

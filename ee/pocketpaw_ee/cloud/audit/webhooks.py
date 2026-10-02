@@ -1,3 +1,11 @@
+# 2026-10-01 (CN-2): deliveries go out through the pinned
+#   ``sites.safe_fetch.SafeFetcher.post`` instead of a plain httpx client, so the
+#   socket connects to the IP the SSRF check validated (closes the DNS-rebind
+#   window between check and connect). Headers, failure counting and
+#   auto-disable are unchanged; a target the pinned fetcher refuses disables the
+#   webhook like the pre-check does. The create/pre-check now also refuses
+#   URLs carrying credentials or longer than the fetcher's cap, which the
+#   pinned path would otherwise refuse (and auto-disable) on the first event.
 """SIEM webhook delivery for workspace audit events (Wave 3 Task 15).
 
 External HTTPS endpoint registry. Each enabled webhook receives a signed
@@ -22,8 +30,11 @@ Receiver guidance — what your SIEM endpoint must do to be safe:
      or shell contexts.
 
 Auto-disable after 10 consecutive failures. Secrets are encrypted at
-rest with the shared SSO Fernet key; URLs are revalidated per delivery
-to catch DNS rebinding mid-flight. The SSRF check resolves hostnames through
+rest with the shared SSO Fernet key; URLs are revalidated per delivery, and
+the POST goes through ``sites.safe_fetch.SafeFetcher`` which resolves once,
+checks every address, and pins the connection to the validated IP (Host header
+and TLS SNI keep the hostname), so DNS rebinding between check and connect
+cannot reach a private address. The SSRF check resolves hostnames through
 the loop's async resolver (never a sync ``getaddrinfo`` on the event loop), and
 fire-and-forget deliveries run at most ``_MAX_CONCURRENT_DELIVERIES`` at once.
 """
@@ -43,7 +54,6 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
@@ -55,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 _FAILURE_DISABLE_THRESHOLD = 10
 _DELIVERY_TIMEOUT_SECONDS = 5.0
+# A receiver's reply is read only for its status; anything past this is cut off.
+_RESPONSE_CAP_BYTES = 64 * 1024
+_USER_AGENT = "PocketPaw-Audit-Webhooks/1.0 (+https://pocketpaw.dev)"
 
 # Why: asyncio.create_task only keeps a weakref; if the event loop GCs the
 # task before it runs we silently lose deliveries (and Python logs a
@@ -145,15 +158,28 @@ async def _validate_url_safety(url: str) -> None:
 
     Defense against SSRF: a workspace admin should not be able to point
     a webhook at ``https://169.254.169.254/...`` and have us POST signed
-    audit events into the cloud metadata service. Runs at create time
-    AND per-delivery (the second call catches DNS rebinding).
+    audit events into the cloud metadata service. Runs at create time and
+    again per delivery as defence in depth; the rebinding guard proper is the
+    delivery itself, which ``SafeFetcher`` pins to the IP it validated.
+    Also refuses what that pinned path refuses (credentials in the URL, an
+    over-long URL), so such a hook fails at create instead of being
+    auto-disabled on its first event.
     """
+    from pocketpaw_ee.sites.safe_fetch import MAX_URL_LENGTH
+
     if not url.startswith("https://"):
         raise Forbidden("webhooks.https_required", "Webhook URL must be https://")
+    if len(url) > MAX_URL_LENGTH:
+        raise Forbidden("webhooks.invalid_url", "Webhook URL is too long")
     try:
         parsed = urlparse(url)
     except ValueError as exc:
         raise Forbidden("webhooks.invalid_url", "Webhook URL is malformed") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise Forbidden(
+            "webhooks.invalid_url",
+            "Webhook URL must not embed credentials; authenticate with the signature",
+        )
     hostname = (parsed.hostname or "").lower()
     if not hostname:
         raise Forbidden("webhooks.invalid_url", "Webhook URL missing hostname")
@@ -282,28 +308,55 @@ def _sign(secret: str, timestamp: str, body: str) -> str:
     return f"sha256={mac.hexdigest()}"
 
 
+async def _pin_resolve(host: str) -> list[str]:
+    """Resolver for the pinned fetcher. Looks ``_resolve_addresses`` up at call
+    time so the pre-check and the pin share one resolver (and one test seam).
+    No answer comes back empty, which the fetcher fails closed on."""
+    return await _resolve_addresses(host) or []
+
+
+def _new_fetcher():
+    from pocketpaw_ee.sites.safe_fetch import SafeFetcher
+
+    return SafeFetcher(
+        total_byte_cap=1 << 62,
+        per_fetch_cap=_RESPONSE_CAP_BYTES,
+        timeout_sec=_DELIVERY_TIMEOUT_SECONDS,
+        user_agent=_USER_AGENT,
+        resolver=_pin_resolve,
+    )
+
+
+async def _mark_unsafe(webhook: AuditWebhook, message: str) -> None:
+    webhook.failure_count += 1
+    webhook.last_status = None
+    webhook.last_error = f"unsafe url: {message}"[:500]
+    webhook.last_delivery_at = datetime.now(UTC)
+    webhook.enabled = False  # never retry — the URL itself is the problem
+    await webhook.save()
+
+
 async def _deliver_one(
     webhook: AuditWebhook,
     body: str,
     timestamp: str,
-    client: httpx.AsyncClient,
+    fetcher: Any,
 ) -> None:
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
     # Re-check at delivery time so a hostname that flipped to a private
     # IP after create (DNS rebinding, takeover) can't leak signed events.
     try:
         await _validate_url_safety(webhook.url)
     except Forbidden as exc:
-        webhook.failure_count += 1
-        webhook.last_status = None
-        webhook.last_error = f"unsafe url: {exc.message}"[:500]
-        webhook.last_delivery_at = datetime.now(UTC)
-        webhook.enabled = False  # never retry — the URL itself is the problem
-        await webhook.save()
+        await _mark_unsafe(webhook, exc.message)
         return
 
     signature = _sign(_decrypt_secret(webhook.secret), timestamp, body)
     try:
-        resp = await client.post(
+        # Pinned POST: the fetcher resolves again, rejects the target if ANY
+        # address is non-public, and connects to the address it checked.
+        resp = await fetcher.post(
             webhook.url,
             content=body,
             headers={
@@ -311,8 +364,10 @@ async def _deliver_one(
                 "X-Paw-Audit-Timestamp": timestamp,
                 "X-Paw-Audit-Signature": signature,
             },
-            timeout=_DELIVERY_TIMEOUT_SECONDS,
         )
+    except ValidationError as exc:
+        await _mark_unsafe(webhook, exc.message)
+        return
     except Exception as exc:
         webhook.failure_count += 1
         webhook.last_status = None
@@ -324,13 +379,13 @@ async def _deliver_one(
         return
 
     webhook.last_delivery_at = datetime.now(UTC)
-    webhook.last_status = resp.status_code
-    if 200 <= resp.status_code < 300:
+    webhook.last_status = resp.status
+    if 200 <= resp.status < 300:
         webhook.failure_count = 0
         webhook.last_error = None
     else:
         webhook.failure_count += 1
-        webhook.last_error = f"http {resp.status_code}"
+        webhook.last_error = f"http {resp.status}"
         if webhook.failure_count >= _FAILURE_DISABLE_THRESHOLD:
             webhook.enabled = False
     await webhook.save()
@@ -352,16 +407,19 @@ async def deliver(event: AuditEvent) -> None:
         payload = _event_payload(event)
         body = json.dumps(payload, default=str)
         timestamp = str(int(time.time()))
-        # Explicit timeout. httpx's 5s default already bounded this, but the
-        # URL here is SUPPLIED BY THE WORKSPACE, and the loop below delivers
-        # to each hook in turn — so a deliberately slow endpoint delays every
-        # later hook's delivery. Stating the deadline keeps that visible.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        # The URL here is SUPPLIED BY THE WORKSPACE and the loop below
+        # delivers to each hook in turn, so a deliberately slow endpoint
+        # delays every later hook: the fetcher's per-request deadline is
+        # ``_DELIVERY_TIMEOUT_SECONDS``.
+        fetcher = _new_fetcher()
+        try:
             for hook in hooks:
                 try:
-                    await _deliver_one(hook, body, timestamp, client)
+                    await _deliver_one(hook, body, timestamp, fetcher)
                 except Exception:
                     logger.warning("audit.webhook delivery crashed for %s", hook.id, exc_info=True)
+        finally:
+            await fetcher.aclose()
     except Exception:
         logger.warning("audit.webhook deliver fan-out crashed", exc_info=True)
 

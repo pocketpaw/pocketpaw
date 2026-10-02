@@ -1,4 +1,5 @@
 # tests/atlas/test_compile.py — atlas compiler + drift check (AT-4).
+# Updated 2026-10-02 (feat/discover-index, review): 30 authored surfaces (surface:discover).
 # Created: 2026-07-02 (feat/atlas-compiler). Proves:
 #   * byte-determinism: compile twice → identical bytes;
 #   * the authored files validate and their entries survive the compile
@@ -101,7 +102,7 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 12
-        assert len(surfs.entries) == 29
+        assert len(surfs.entries) == 30
         verbs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[3].read_text(encoding="utf-8")))
         assert {e.kind for e in verbs.entries} == {"verb"}
 

@@ -204,11 +204,12 @@
   },
   {
     "label": "an unset POCKETPAW_REDIS_URL silently falls back to localhost, so a typoed production config enqueues every build into a Redis no worker is reading — the exact split-brain the worker's own RedisSettings review finding #4 was about",
-    "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "                if not url:\n                    raise RuntimeError(\n                        \"POCKETPAW_REDIS_URL is not set — the site-build lane needs Redis.\"\n                    )",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "                if not url:\n                    raise RuntimeError(\n                        \"POCKETPAW_REDIS_URL is not set — arq job queues need Redis.\"\n                    )",
     "replace": "                if not url:\n                    url = \"redis://localhost:6379\"",
     "tests": [
-      "tests/ee/sites/test_build_job.py::TestTheEnqueueNeedsRedisConfigured"
+      "tests/ee/sites/test_build_job.py::TestTheEnqueueNeedsRedisConfigured",
+      "tests/cloud/runs/test_redis_client.py::test_get_arq_pool_without_url_raises"
     ]
   },
   {

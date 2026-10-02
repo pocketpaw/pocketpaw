@@ -2,6 +2,10 @@
 # refuse to do.
 #
 # Created 2026-08-28.
+# Updated 2026-10-01 (CN-3): the daily cap is the shared ``metering.service``
+# primitive (meter ``file_comprehension``); ``_claim`` makes the claim exactly
+# the way the listener does. Assertions unchanged, except that the primitive
+# answers a bool, so the old ``(spent, cap)`` tuple checks became counter reads.
 #
 # The happy path here is cheap to get right and cheap to test: a model returns
 # JSON, a summary lands on a row. Everything worth writing a test for is a
@@ -40,11 +44,23 @@ import httpx
 import pytest
 from pocketpaw_ee.cloud._core.realtime.events import FileReady
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
-from pocketpaw_ee.cloud.uploads import comprehension, comprehension_budget
+from pocketpaw_ee.cloud.metering import service as metering
+from pocketpaw_ee.cloud.metering.domain import DailyMeter
+from pocketpaw_ee.cloud.uploads import comprehension
 
 from pocketpaw.uploads.file_store import FileRecord
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _claim(workspace_id):
+    """One comprehension claim, exactly as ``listeners`` makes it."""
+    return await metering.try_spend(
+        subject_type="workspace",
+        subject_id=workspace_id,
+        meter=DailyMeter.FILE_COMPREHENSION,
+        cap=metering.file_comprehension_cap(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -56,15 +72,15 @@ pytestmark = pytest.mark.asyncio
 async def beanie_with_budget():
     """Beanie bound to the upload docs AND the comprehension counter.
 
-    The package conftest deliberately does not register
-    ``FileComprehensionUsage`` — which means every OTHER listener test runs
+    The package conftest deliberately does not register the shared
+    ``DailyUsage`` counter — which means every OTHER listener test runs
     with an unreadable counter and therefore a fail-CLOSED budget, so no
     unrelated test ever reaches the network. Tests that need comprehension to
     actually run ask for this fixture instead.
     """
     from beanie import init_beanie
     from mongomock_motor import AsyncMongoMockClient
-    from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
+    from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
     from pocketpaw_ee.cloud.uploads.models import FileFolder, FileUpload
     from pocketpaw_ee.cloud.uploads.share_models import ShareLink
 
@@ -77,7 +93,7 @@ async def beanie_with_budget():
 
     db.list_collection_names = _safe  # type: ignore[method-assign]
 
-    models = [FileUpload, FileFolder, ShareLink, FileComprehensionUsage]
+    models = [FileUpload, FileFolder, ShareLink, DailyUsage]
     await init_beanie(database=db, document_models=models)
     try:
         yield db
@@ -289,40 +305,37 @@ class TestTheDailyCap:
     async def test_the_cap_refuses_the_next_claim(self, beanie_with_budget, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "2")
 
-        first = await comprehension_budget.try_spend("w1")
-        second = await comprehension_budget.try_spend("w1")
-        third = await comprehension_budget.try_spend("w1")
+        first = await _claim("w1")
+        second = await _claim("w1")
+        third = await _claim("w1")
 
-        assert first[0] is True
-        assert second[0] is True
-        assert third[0] is False, "the third claim on a cap of 2 must be refused"
-        assert third[1:] == (2, 2)
+        assert first is True
+        assert second is True
+        assert third is False, "the third claim on a cap of 2 must be refused"
 
     async def test_a_refused_claim_does_not_consume_a_slot(self, beanie_with_budget, monkeypatch):
         """An over-cap claim is rolled back, so the counter cannot run away to
         thousands and leave the workspace refused long after midnight."""
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "1")
 
-        await comprehension_budget.try_spend("w1")
+        await _claim("w1")
         for _ in range(5):
-            await comprehension_budget.try_spend("w1")
+            await _claim("w1")
 
-        from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
-
-        day = datetime.now(UTC).strftime("%Y-%m-%d")
-        row = await FileComprehensionUsage.find_one(FileComprehensionUsage.key == f"w1:{day}")
-        assert row is not None
-        assert row.used == 1
+        used = await metering.used(
+            subject_type="workspace", subject_id="w1", meter=DailyMeter.FILE_COMPREHENSION
+        )
+        assert used == 1
 
     async def test_one_workspace_cannot_spend_anothers_budget(
         self, beanie_with_budget, monkeypatch
     ):
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "1")
 
-        await comprehension_budget.try_spend("w1")
-        other = await comprehension_budget.try_spend("w2")
+        await _claim("w1")
+        other = await _claim("w2")
 
-        assert other[0] is True
+        assert other is True
 
     async def test_an_unreadable_counter_fails_CLOSED(self, monkeypatch):
         """No Beanie binding in this test, so the collection genuinely cannot
@@ -331,26 +344,23 @@ class TestTheDailyCap:
         summary costs a summary, an ungated ingest costs money."""
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "5")
 
-        allowed, _spent, _cap = await comprehension_budget.try_spend("w1")
-
-        assert allowed is False
+        assert await _claim("w1") is False
 
     async def test_no_workspace_is_refused(self, beanie_with_budget, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "5")
-        assert (await comprehension_budget.try_spend(""))[0] is False
-        assert (await comprehension_budget.try_spend(None))[0] is False
+        assert await _claim("") is False
+        assert await _claim(None) is False
 
     async def test_a_zero_cap_disables_the_feature(self, beanie_with_budget, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "0")
-        allowed, _spent, cap = await comprehension_budget.try_spend("w1")
-        assert allowed is False
-        assert cap == 0
+        assert await _claim("w1") is False
+        assert metering.file_comprehension_cap() == 0
 
     async def test_a_nonsense_cap_falls_back_to_the_default(self, monkeypatch):
         """ "five hundred" must not read as zero and switch comprehension off
         for a whole deployment."""
         monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "five hundred")
-        assert comprehension_budget.daily_cap() == 500
+        assert metering.file_comprehension_cap() == 500
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +619,35 @@ class TestTheListener:
         assert doc is not None
         assert doc.summary is None
         assert doc.tags
+        ingest.assert_awaited_once()
+
+    async def test_an_unreadable_counter_stops_the_listener_calling_the_model(
+        self, budget_store, monkeypatch, proxy, tmp_path
+    ):
+        """The listener's own claim fails CLOSED: the counter raises, so no
+        model call, and the file is still indexed. Drives the real call path
+        rather than re-encoding its arguments."""
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+        from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+        monkeypatch.setenv("POCKETPAW_FILE_COMPREHENSION_DAILY", "10")
+        cap = proxy(_model_reply("Never sent.", ["deck"]))
+        await budget_store.save_scoped(_record(), workspace="w1")
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("counter unavailable")
+
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+
+        path = tmp_path / "deck.pdf"
+        path.write_bytes(b"unused")
+        chain = _FakeChain(ExtractionResult(title="Deck", text="revenue", backend="local"))
+        ingest = AsyncMock(return_value={"article": "a1"})
+        _wire(monkeypatch, chain=chain, adapter=_FakeAdapter(path), ingest=ingest)
+
+        await index_uploaded_file(_event())
+
+        assert cap.requests == [], "an unreadable counter let the model call through"
         ingest.assert_awaited_once()
 
     async def test_an_existing_shelf_is_not_removed_by_comprehension(
