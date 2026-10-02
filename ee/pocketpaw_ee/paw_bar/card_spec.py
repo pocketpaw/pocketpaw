@@ -20,7 +20,8 @@
 #     become ``items`` (name, price, currency, image, page url, description),
 #     unknown ids are dropped, an empty product-card is dropped. A legacy
 #     ``{"kind": "product"}`` card is repriced the same way; other legacy cards
-#     pass through untouched. ``card_ids`` says which catalog items to fetch.
+#     pass through untouched. ``card_ids`` says which catalog items to fetch;
+#     ``has_lead_form`` says whether a card is the lead card.
 #
 # pawbar-manifest.json is vendored byte-for-byte from paw-bar's
 # app/pawbar-manifest.json. The drift test in
@@ -321,6 +322,31 @@ def render_card(
     return f"{_FENCE}pawbar-card\n{body}{_FENCE}"
 
 
+def has_lead_form(body: str) -> bool:
+    """Whether a card body holds a send_to_team form, as a Ripple spec node or a
+    legacy ``{"kind": "form"}`` card. Says nothing about whether it is valid:
+    ask it of a body ``render_card`` passed."""
+    raw = _parse(body)
+    if isinstance(raw, dict) and raw.get("kind") == "form":
+        return raw.get("verb") == LEAD_VERB
+    if not _is_spec(raw):
+        return False
+    stack = [raw["ui"]]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        props = node.get("props")
+        if node.get("type") == "form" and isinstance(props, dict):
+            if props.get("verb") == LEAD_VERB:
+                return True
+        for key in ("children", "else_children"):
+            kids = node.get(key)
+            if isinstance(kids, list):
+                stack.extend(kids)
+    return False
+
+
 def _ids_in(node: Any, out: dict[str, None], budget: list[int]) -> None:
     if not isinstance(node, dict) or budget[0] <= 0:
         return
@@ -404,6 +430,7 @@ __all__ = [
     "card_ids",
     "card_verdict",
     "compact_manifest",
+    "has_lead_form",
     "render_card",
     "validate_and_hydrate",
 ]

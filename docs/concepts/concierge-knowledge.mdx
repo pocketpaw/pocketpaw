@@ -509,6 +509,19 @@ When the model fails partway through, the text already streamed stays and the re
 follows it. The run is stored as failed, with `concierge_v2_provider_timeout` or
 `concierge_v2_provider_error` as the reason.
 
+A reply is capped at `POCKETPAW_PAWBAR_CONCIERGE_MAX_TOKENS` output tokens (default
+2000). A reasoning model's thinking counts against the cap, so it has to fit thinking
+plus a card. A reply cut off at the cap keeps the text it streamed and ends normally;
+a card still open when it was cut off is dropped. `POCKETPAW_PAWBAR_CONCIERGE_REASONING_EFFORT`
+(`none`, `minimal`, `low`, `medium`, `high`; empty by default) sends a reasoning effort
+with each request; set it only when the model or gateway accepts the field.
+
+A visitor who asks for a person ("can I talk to someone?", "call me back") always gets
+a way to reach the team, whatever the model did. When the reply has no valid lead card,
+or the model failed or ran out of tokens, the server adds one itself: an empty
+`send_to_team` form with lead capture on, or a line pointing to "Talk to a person"
+with it off. That turn is never `unavailable`.
+
 Each v2 model call is tagged for spend: requests through the LiteLLM proxy carry
 `pawbar_site:<site_id>` and `pawbar_widget:<widget_id>` as request tags, and the run's
 stored usage names the site and the widget.
