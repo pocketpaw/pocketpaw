@@ -1313,8 +1313,9 @@ class Settings(BaseSettings):
         ge=0,
         description=(
             "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
-            "day, in USD at provider cost. Past it, visitors get the leave-a-message "
-            "reply and no model call is made. 0 turns the cap off."
+            "day, in USD at provider cost. Past it, visitors get the `unavailable` "
+            "frame with reason limit, no model call is made, and the owner is "
+            "notified once that day. 0 turns the cap off."
         ),
     )
     # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan

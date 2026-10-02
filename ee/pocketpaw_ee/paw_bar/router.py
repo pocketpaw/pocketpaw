@@ -5348,7 +5348,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
           allowance must not already be used up (403
           ``concierge_quota_exceeded``). Only new conversations are refused — a
           thread under way was counted when it began. A v2 site answers with the
-          leave-a-message degrade reply instead, after 7d (CR-5).
+          ``unavailable`` frame (reason "limit") instead, after 7d (CR-5).
       7d. Rate limit, overall + per-customer (429), checked and recorded as one
           step (``_admit_chat_turn``). Last of the refusals, so no refused turn
           (bad key, 409, quota) spends a slot.
@@ -5519,10 +5519,11 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # allowance been used up" fails to serve. Charging for a tier and then
     # withholding it because a count did not load is the worse outcome.
     #
-    # v2 (CR-5) does not refuse: it answers with the leave-a-message degrade reply
-    # and hands the visitor to the owner, so a site out of allowance still collects
-    # the lead. That reply is a served turn that writes a handoff, so it goes out
-    # only AFTER the rate limit below, never instead of it.
+    # v2 (CR-5) does not refuse: it answers with the ``unavailable`` frame
+    # (reason "limit"), which the widget renders next to its own "Talk to a
+    # person" button. No handoff is raised for the visitor. That reply is still a
+    # served turn, so it goes out only AFTER the rate limit below, never instead
+    # of it.
     quota_exhausted = False
     if is_new_conversation:
         from pocketpaw_ee.cloud.billing.enforcement import (
@@ -5547,24 +5548,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         raise HTTPException(429, "Rate limit exceeded")
 
     # (7c, v2) The used-up allowance, answered. Before the conversation upsert and
-    # the model: the handoff it raises is the only row this turn writes, and the
-    # visitor line on it follows the owner's transcript-retention switch.
+    # the model: this turn writes nothing at all.
     if quota_exhausted:
         from pocketpaw_ee.paw_bar import concierge_runtime
 
         return StreamingResponse(
-            concierge_runtime.degrade_reply(
-                widget,
-                "quota",
-                workspace_id=ctx.workspace_id,
-                customer_ref=body.customer_ref,
-                question=(
-                    body.message[:_STORED_USER_TEXT_CHARS]
-                    if site.concierge_store_transcripts
-                    else ""
-                ),
-                store=store,
-            ),
+            concierge_runtime.degrade_reply(widget, "quota"),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

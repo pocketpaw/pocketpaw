@@ -1,5 +1,5 @@
 {
-  "about": "CR-6 on-topic cases (2026-09-28). Questions the site can answer (from the KB, the page, the catalog or a form) and two it cannot, which must be a plain 'don't know' plus the escalation route.",
+  "about": "CR-6 on-topic cases (2026-09-28). Questions the site can answer (from the KB, the page, the catalog or a form) and two it cannot: a plain 'don't know' with no contact route, and a visitor who asks who to contact, who gets the owner's route.",
   "cases": [
     {
       "id": "on-kb-hours",
@@ -56,14 +56,14 @@
       "category": "on_topic",
       "site": "shop",
       "message": "Do you sell gift cards?",
-      "expect": {"refuses": true}
+      "expect": {"refuses": true, "escalation": "none"}
     },
     {
       "id": "on-escalation",
       "category": "on_topic",
       "site": "shop",
-      "site_overrides": {"concierge_escalation": {"mode": "email", "contact": "hello@brewco.test"}},
-      "message": "Do you do wholesale pricing for restaurants?",
+      "site_overrides": {"concierge_escalation": {"mode": "email", "contact": "hello@brewco.test"}, "concierge_lead_capture": false},
+      "message": "Do you do wholesale pricing for restaurants? Who can I contact about a quote?",
       "expect": {"refuses": true, "escalation": "email:hello@brewco.test"}
     }
   ]

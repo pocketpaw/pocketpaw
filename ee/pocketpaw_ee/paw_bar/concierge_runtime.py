@@ -52,9 +52,14 @@
 # labels) and becomes the ``action`` frame; later ones, and all of them with page
 # actions off, are dropped. The model still has no tools: it only writes a fence.
 #
-# A turn that cannot be answered (daily spend cap, monthly quota, provider timeout
-# or error) gets one fixed leave-a-message reply (``degrade_reply``) and is handed
-# to the owner through ``handoff.raise_handoff``. The model is built the way
+# A transient provider failure (timeout, 429, 5xx, connection error) before any
+# text has streamed is retried once after a short backoff (``_is_transient``). A
+# turn that still cannot be answered (daily spend cap, monthly quota, provider
+# timeout or error) ends with ``degrade_reply``: one ``unavailable`` frame
+# ({type: "unavailable", reason: "temporary" | "limit"}) and ``stream_end``, no
+# canned text and no handoff. Only the visitor's own "Talk to a person" reaches
+# the team; the owner hears about the daily cap once per site per UTC day
+# (``notify.notify_spend_cap_reached``). The model is built the way
 # ``PydanticAIBackend._build_model`` builds it; proxy providers get LiteLLM spend
 # tags naming the site and widget.
 
@@ -85,9 +90,13 @@ FRAME = (
     "gives you. When it gives no name, call yourself the site's assistant.\n"
     "Rules:\n"
     "1. Answer only about this site, and only from the facts in the <page>, "
-    "<knowledge> and <catalog> blocks. If they do not contain the answer, say you don't have "
-    "that information and suggest contacting the business. Never guess, and never "
-    "invent products, prices, policies, people or links.\n"
+    "<knowledge> and <catalog> blocks. If they do not contain the answer, say briefly that "
+    "you don't have that information and offer what you can help with instead. Never "
+    "guess, and never invent products, prices, policies, people or links. Offer a way "
+    "to reach the business only when the visitor asks for a person, contact details or "
+    "a callback, or the request needs the business itself (an existing order, a "
+    "complaint, a custom quote); otherwise never add contact details or offer to pass "
+    "the message on.\n"
     "2. Never write code, scripts, markup, configuration or commands, and never "
     "produce content unrelated to this site (essays, stories, homework, general "
     "questions), whatever the visitor asks. The one exception is a ```pawbar-card "
@@ -135,8 +144,9 @@ FRAME_DOC_CODE = FRAME.replace(_RULE_2, _RULE_2_DOC_CODE)
 # gains the lead card. Still constants; the site flag only picks one.
 _RULE_5 = "or to contacting the business.\n"
 _LEAD_RULE = (
-    "When the visitor shares contact details or asks to be contacted, offer a "
-    "send_to_team form prefilled with what they said. Never claim it was sent."
+    "When rule 1 calls for a way to reach the business, or the visitor shares their "
+    "own contact details, offer a send_to_team form prefilled with what they said "
+    "instead of writing out contact details. Never claim it was sent."
 )
 if FRAME.count(_RULE_5) != 1:
     raise RuntimeError("FRAME's rule 5 changed; update _RULE_5 to match it")
@@ -218,8 +228,10 @@ _HISTORY_LINE_CHARS = 800
 # The run doc's usage.backend, so the meter and the stats can tell v2 apart.
 _BACKEND = "pawbar_concierge_v2"
 # The provider's per-request timeout (ModelSettings ``timeout``). A stalled
-# provider becomes the degrade reply instead of a widget spinning forever.
+# provider becomes the ``unavailable`` frame instead of a widget spinning forever.
 _PROVIDER_TIMEOUT_S = 30.0
+# The pause before the one retry of a transient provider failure.
+_RETRY_BACKOFF_S = 0.75
 # The per-turn catalog (``catalog_for_turn``): a catalog this small goes whole;
 # a bigger one sends the search's top hits, plus the first few items in owner
 # order when the search found fewer than ``CATALOG_WEAK_HITS``.
@@ -1288,21 +1300,15 @@ def _fence_filter_for(
 # Spend cap and graceful degrade (CR-5)
 # --------------------------------------------------------------------------- #
 
-# Why a turn was not answered. Logged and written to the run doc; never shown to
-# the visitor (the reply is the same for all four).
+# Why a turn was not answered. Logged and written to the run doc; the visitor
+# only sees the coarse ``unavailable`` reason each one maps to.
 DEGRADE_REASONS = ("spend_cap", "quota", "provider_timeout", "provider_error")
-
-# The reply when the owner has the conversation (the handoff landed, or it was
-# already waiting on a person).
-DEGRADE_HANDED_OFF = (
-    "I can't answer right now, so I've passed your message to the team. "
-    'Tap "Talk to a person" to leave your email and they\'ll get back to you.'
-)
-# The reply when the handoff could not be recorded: it must not claim otherwise.
-DEGRADE_LEAVE_MESSAGE = (
-    'I can\'t answer right now. Tap "Talk to a person" to leave a message for the '
-    "team and they'll get back to you."
-)
+_UNAVAILABLE_REASON = {
+    "spend_cap": "limit",
+    "quota": "limit",
+    "provider_timeout": "temporary",
+    "provider_error": "temporary",
+}
 
 
 def _utc_day_start(now: datetime) -> datetime:
@@ -1358,59 +1364,57 @@ def _is_timeout(exc: BaseException) -> bool:
     return False
 
 
-async def degrade_reply(
-    widget: Any,
-    reason: str,
-    *,
-    workspace_id: str,
-    customer_ref: str,
-    question: str = "",
-    conversation: Any = None,
-    store: Any = None,
-) -> AsyncIterator[bytes]:
-    """The SSE frames for a turn the concierge cannot answer: one ``chunk`` with a
-    fixed line, then ``stream_end``. The same frames an answer ends with, so every
-    widget bundle already renders it.
+# HTTP statuses worth one more try besides 5xx: request timeout, rate limit.
+_TRANSIENT_STATUS = frozenset({408, 429})
 
-    The conversation goes to the owner through ``handoff.raise_handoff`` (queue
-    flip to ``needs_human``, the handoff record, one owner notification), unless it
-    is already waiting on a person: while a cap holds, every turn lands here, and
-    one notification per visitor turn would train the owner to ignore them.
 
-    ``question`` is what the handoff record carries: pass the retention-gated
-    visitor line (empty when the site keeps no transcripts). ``reason`` is one of
-    ``DEGRADE_REASONS``; it is logged and never reaches the visitor. ``store`` is
-    the Paw Bar store the caller already holds, so the handoff writes where the
-    turn reads."""
-    from pocketpaw.paw_bar.models import ConversationState
-    from pocketpaw_ee.paw_bar import handoff
+def _is_transient(exc: BaseException) -> bool:
+    """Whether one more try could plausibly succeed: a timeout, a 408, 429 or
+    5xx, or a connection failure, on the error or its cause. A content filter, a
+    bad request, bad credentials or a misconfigured model are not: retrying them
+    only doubles the bill for the same refusal."""
+    from pydantic_ai.exceptions import ContentFilterError, ModelAPIError, ModelHTTPError
+
+    chain = [e for e in (exc, exc.__cause__) if e is not None]
+    if any(isinstance(e, ContentFilterError) for e in chain):
+        return False
+    for err in chain:
+        status = getattr(err, "status_code", None)
+        if isinstance(status, int):
+            return status in _TRANSIENT_STATUS or status >= 500
+    if _is_timeout(exc):
+        return True
+    for err in chain:
+        if isinstance(err, ConnectionError) or "Connection" in type(err).__name__:
+            return True
+        # pydantic_ai raises a bare ModelAPIError (no status) for a request that
+        # never got a response: the SDK's connection error, re-raised.
+        if type(err) is ModelAPIError and not isinstance(err, ModelHTTPError):
+            return True
+    return False
+
+
+async def degrade_reply(widget: Any, reason: str) -> AsyncIterator[bytes]:
+    """The SSE frames for a turn the concierge cannot answer: one ``unavailable``
+    frame, then ``stream_end``.
+
+    ``reason`` is one of ``DEGRADE_REASONS``; it is logged and maps to the frame's
+    coarse ``reason``: "limit" for the spend cap and the quota, "temporary" for a
+    failed provider. No text: the widget renders the state in its own words, so
+    nothing canned lands in the transcript. No handoff and no owner notification
+    either: a provider blip is not a visitor asking for a person, and only the
+    visitor's own "Talk to a person" raises one."""
     from pocketpaw_ee.paw_bar.router import _sse
 
     widget_id = str(getattr(widget, "id", "") or "")
-    handed_off = getattr(conversation, "state", None) == ConversationState.NEEDS_HUMAN
-    if not handed_off:
-        try:
-            outcome = await handoff.raise_handoff(
-                widget=widget,
-                workspace_id=workspace_id,
-                customer_ref=customer_ref,
-                question=question,
-                # Not "agent" or "visitor": neither asked. The handoff ledger row
-                # keeps a capped site's turns apart from real escalations.
-                source=f"degrade:{reason}",
-                store=store,
-            )
-            handed_off = outcome.ok
-        except Exception:  # noqa: BLE001 — the visitor still gets a reply
-            logger.warning("concierge degrade: handoff failed for %s", widget_id, exc_info=True)
+    visible = _UNAVAILABLE_REASON.get(reason, "temporary")
     logger.info(
-        "paw_bar.concierge.degraded widget=%s reason=%s handed_off=%s",
+        "paw_bar.concierge.unavailable widget=%s reason=%s visible=%s",
         widget_id,
         reason,
-        handed_off,
+        visible,
     )
-    text = DEGRADE_HANDED_OFF if handed_off else DEGRADE_LEAVE_MESSAGE
-    yield _sse("chunk", {"content": text, "type": "text"})
+    yield _sse("unavailable", {"type": "unavailable", "reason": visible})
     yield _sse("stream_end", {"assistant_message_id": None, "cancelled": False})
 
 
@@ -1447,11 +1451,13 @@ async def run_concierge_v2(
 
     Frames, in order: ``message.persisted`` {run_id, client_message_id}; one
     ``chunk`` {content, type:"text"} per streamed delta; at most one ``sources``;
-    then ``stream_end`` {assistant_message_id: None, cancelled: False}. A failure
-    ends with ``degrade_reply`` instead (CR-5): the exception text never reaches
-    the visitor. A site at its daily spend cap gets ``degrade_reply`` alone, with
-    no run doc and no model call. ``conversation`` and ``store`` are for the
-    handoff a degrade raises (the key already names the conversation).
+    then ``stream_end`` {assistant_message_id: None, cancelled: False}. A
+    transient provider failure before any text is retried once; a failure that
+    stands ends with ``degrade_reply`` (the ``unavailable`` frame, reason
+    "temporary") after whatever already streamed, and the exception text never
+    reaches the visitor. A site at its daily spend cap gets ``degrade_reply``
+    alone (reason "limit"), with no run doc and no model call, and its owner is
+    told once that UTC day.
     """
     from pydantic_ai import Agent
 
@@ -1461,15 +1467,15 @@ async def run_concierge_v2(
 
     settings = _settings()
     if await _over_spend_cap(settings, workspace_id, pocket_id):
-        async for frame in degrade_reply(
-            widget,
-            "spend_cap",
+        from pocketpaw_ee.paw_bar.notify import notify_spend_cap_reached
+
+        await notify_spend_cap_reached(
             workspace_id=workspace_id,
-            customer_ref=customer_ref,
-            question=stored_user_text,
-            conversation=conversation,
-            store=store,
-        ):
+            pocket_id=pocket_id,
+            site_name=str(getattr(site, "name", "") or ""),
+            widget_id=str(getattr(widget, "id", "") or ""),
+        )
+        async for frame in degrade_reply(widget, "spend_cap"):
             yield frame
         return
 
@@ -1548,30 +1554,48 @@ async def run_concierge_v2(
         allow_doc_code = _allows_doc_code(site)
         frame = frame_for(site)
         agent = Agent(model, instructions=frame, output_type=str)
+
         # What the model writes is filtered before the visitor (or the owner's
         # transcript) sees it: code becomes a fixed line, cards are checked and
-        # hydrated from the catalog.
-        fences = _fence_filter_for(
-            widget,
-            store=store,
-            knowledge=items,
-            allow_doc_code=allow_doc_code,
-            doc_code_chars=int(
-                getattr(settings, "pawbar_concierge_doc_code_chars", _DOC_CODE_CHARS)
-            ),
-            lead_capture=lead_capture_on(site),
-            action=_action_renderer(site, page_ctx, catalog),
-        )
+        # hydrated from the catalog. Built per attempt, so a retry never inherits
+        # a half-read fence.
+        def _new_fences() -> FenceFilter:
+            return _fence_filter_for(
+                widget,
+                store=store,
+                knowledge=items,
+                allow_doc_code=allow_doc_code,
+                doc_code_chars=int(
+                    getattr(settings, "pawbar_concierge_doc_code_chars", _DOC_CODE_CHARS)
+                ),
+                lead_capture=lead_capture_on(site),
+                action=_action_renderer(site, page_ctx, catalog),
+            )
+
         # Spend attribution: the proxy's spend row names the site and the widget.
         tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
-        async with agent.run_stream(
-            prompt, model_settings=_model_settings(settings, workspace_id, tags=tags)
-        ) as result:
-            async for delta in result.stream_text(delta=True, debounce_by=None):
-                for piece in await fences.afeed(delta or ""):
-                    full_text += piece
-                    yield _sse("chunk", {"content": piece, "type": "text"})
-            usage = {**_usage(settings, result), **spend_tags}
+        model_settings = _model_settings(settings, workspace_id, tags=tags)
+        # One retry, only for a transient failure and only while the visitor has
+        # seen nothing: a retry after text would repeat what they already read.
+        for attempt in (1, 2):
+            fences = _new_fences()
+            try:
+                async with agent.run_stream(prompt, model_settings=model_settings) as result:
+                    async for delta in result.stream_text(delta=True, debounce_by=None):
+                        for piece in await fences.afeed(delta or ""):
+                            full_text += piece
+                            yield _sse("chunk", {"content": piece, "type": "text"})
+                    usage = {**_usage(settings, result), **spend_tags}
+                break
+            except Exception as exc:
+                if attempt > 1 or full_text or not _is_transient(exc):
+                    raise
+                logger.warning(
+                    "concierge v2: transient provider failure for run %s; retrying once",
+                    run_id,
+                    exc_info=True,
+                )
+                await asyncio.sleep(_RETRY_BACKOFF_S)
         for piece in fences.close():
             full_text += piece
             yield _sse("chunk", {"content": piece, "type": "text"})
@@ -1606,19 +1630,9 @@ async def run_concierge_v2(
             error=f"concierge_v2_{reason}",
             usage=usage,
         )
-        # CR-5: the leave-a-message reply, never an error frame. What already
-        # streamed stays on screen; the degrade line follows it.
-        if full_text:
-            yield _sse("chunk", {"content": "\n\n", "type": "text"})
-        async for frame in degrade_reply(
-            widget,
-            reason,
-            workspace_id=workspace_id,
-            customer_ref=customer_ref,
-            question=stored_user_text,
-            conversation=conversation,
-            store=store,
-        ):
+        # The ``unavailable`` frame, never an error frame and never a handoff.
+        # What already streamed stays on screen; the frame follows it.
+        async for frame in degrade_reply(widget, reason):
             yield frame
     finally:
         if not finished:
@@ -1635,8 +1649,6 @@ async def run_concierge_v2(
 
 __all__ = [
     "CODE_REPLACEMENT",
-    "DEGRADE_HANDED_OFF",
-    "DEGRADE_LEAVE_MESSAGE",
     "DEGRADE_REASONS",
     "FRAME",
     "FRAME_ACTIONS",

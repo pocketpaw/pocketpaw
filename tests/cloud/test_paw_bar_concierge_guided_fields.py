@@ -357,6 +357,8 @@ def test_owner_text_never_lands_outside_a_quoted_value():
         concierge_about=_ATTACK,
         concierge_avoid_topics=[_ATTACK, "fine"],
         concierge_escalation={"mode": "email", "contact": _ATTACK},
+        # Off, so the owner's address (the attack) is rendered at all.
+        concierge_lead_capture=False,
         concierge_tone="friendly",
     )
     _assert_contained(block)
@@ -365,8 +367,9 @@ def test_owner_text_never_lands_outside_a_quoted_value():
     assert "<knowledge>" not in block and "</knowledge>" not in block
     # Control and bidi characters never reach the model.
     assert "‮" not in block and "\u0000" not in block
-    # Every owner value is one line: the block is the fixed sentences, nothing more.
-    assert len(block.splitlines()) == 2 + 1 + 1 + 1 + 1 + 1 + 1
+    # Every owner value is one line: the block is the fixed sentences, nothing more
+    # (escalation is two: the don't-know line and the contact route).
+    assert len(block.splitlines()) == 2 + 1 + 1 + 1 + 1 + 2 + 1
 
 
 def test_quote_is_one_line_with_no_quote_or_tag_characters_of_its_own():
