@@ -4,7 +4,10 @@
     "server: what action_spec.render_action does with the fence body, given context.site_origin and context.known_urls: accept (emits `frame`) | drop.",
     "frame: the exact `action` object the server streams in the SSE `action` frame. paw-bar's sanitizeAction must return it unchanged.",
     "client_rejects_body: the fence body is invalid on grounds the client can check too (verb, label, target, url scheme), so sanitizeAction on the raw body must return null. Same-origin and known-page checks are the server's alone.",
-    "Never edit a verdict to make one side pass."
+    "Never edit a verdict to make one side pass.",
+    "Tool cases (tool_*): context.tools is this turn's page.tools as the server receives it ([{name, description, input_schema}]); the frame holds the same tools in its registry, so it can check every tool rule and client_rejects_body is true for every dropped tool case.",
+    "Tool args: absent or null args read as {}; no extra keys, every required key present, types string | number | integer | boolean (an integer is a number with no fractional part, so 2.0 is accepted and emitted as 2, and a boolean is never a number), strings <= bounds.arg_string_max and their own maxLength, enum membership, inclusive minimum/maximum.",
+    "Tool schemas (the limits on what a site may declare) are in tool_schemas.json."
   ],
   "context": {
     "site_origin": "https://shop.example.com",
@@ -13,17 +16,87 @@
       "https://shop.example.com/products/cairn-boot",
       "https://shop.example.com/returns",
       "https://shop.example.com/faq"
+    ],
+    "tools": [
+      {
+        "name": "add_to_cart",
+        "description": "Add a product to the cart",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Product page path or SKU"
+            },
+            "quantity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [
+            "product"
+          ]
+        }
+      },
+      {
+        "name": "pick_size",
+        "description": "Choose a size for the product on this page",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string",
+              "enum": [
+                "S",
+                "M",
+                "L"
+              ]
+            },
+            "gift": {
+              "type": "boolean"
+            },
+            "weight": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 10
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 10
+            }
+          },
+          "required": [
+            "size"
+          ]
+        }
+      }
     ]
   },
   "bounds": {
     "verbs": [
       "navigate",
       "scroll_to",
-      "highlight"
+      "highlight",
+      "tool"
     ],
     "label_max": 80,
     "target_max": 120,
-    "target_id_re": "#[A-Za-z][A-Za-z0-9_-]{0,63}"
+    "target_id_re": "#[A-Za-z][A-Za-z0-9_-]{0,63}",
+    "tools_max": 12,
+    "tool_name_re": "[a-z][a-z0-9_]{0,39}",
+    "tool_description_max": 200,
+    "tool_schema_max": 2048,
+    "arg_string_max": 200,
+    "arg_name_re": "[A-Za-z][A-Za-z0-9_]{0,39}",
+    "enum_max": 50,
+    "enum_string_max": 80,
+    "arg_types": [
+      "string",
+      "number",
+      "integer",
+      "boolean"
+    ]
   },
   "verdicts": {
     "navigate_relative": {
@@ -157,6 +230,184 @@
       "client_rejects_body": true
     },
     "unknown_verb": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_valid": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "/products/cairn-45-trekking-pack/",
+          "quantity": 1
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_optional_omitted": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "CAIRN-45"
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_extra_keys_dropped": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "/products/cairn-45-trekking-pack/"
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_integer_written_as_float": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "CAIRN-45",
+          "quantity": 2
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_at_maximum": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "CAIRN-45",
+          "quantity": 20
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_at_minimum": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "CAIRN-45",
+          "quantity": 1
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_enum_boolean_number": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "pick_size",
+        "args": {
+          "size": "M",
+          "gift": true,
+          "weight": 0.5
+        },
+        "label": "Pick a size"
+      }
+    },
+    "tool_string_at_limit": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "add_to_cart",
+        "args": {
+          "product": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+        },
+        "label": "Add Cairn 45 Trekking Pack to your cart"
+      }
+    },
+    "tool_max_length_at_limit": {
+      "server": "accept",
+      "frame": {
+        "do": "tool",
+        "name": "pick_size",
+        "args": {
+          "size": "S",
+          "note": "nnnnnnnnnn"
+        },
+        "label": "Pick a size"
+      }
+    },
+    "tool_unknown_name": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_bad_name": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_args_missing": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_args_not_object": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_required_missing": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_extra_arg": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_wrong_type_string_for_integer": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_wrong_type_fraction": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_wrong_type_boolean_for_integer": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_wrong_type_string_for_boolean": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_null_arg": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_enum_miss": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_below_minimum": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_above_maximum": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_number_below_minimum": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_string_too_long": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_over_max_length": {
+      "server": "drop",
+      "client_rejects_body": true
+    },
+    "tool_label_missing": {
       "server": "drop",
       "client_rejects_body": true
     }

@@ -307,9 +307,13 @@ jobs:
         # a person always gets a route to the team and that the output cap
         # never fails a turn. The _evals and _eval_gate files pin the eval scorers
         # and the rollout gate that decides whether new concierges get v2.
+        # The _page_actions and _declared_tools files are the only proof that
+        # a pawbar-action fence is validated (known pages, declared tools with
+        # schema-checked args) before it becomes the action frame.
         # Mutations: tests/mutations/concierge_v2_runtime.json,
-        # tests/mutations/concierge_guided_fields.json and
-        # tests/mutations/concierge_eval_gate.json.
+        # tests/mutations/concierge_guided_fields.json,
+        # tests/mutations/concierge_eval_gate.json and
+        # tests/mutations/concierge_declared_tools.json.
         run: >-
           uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
           tests/cloud/test_paw_bar_concierge_v2_output.py
@@ -318,7 +322,9 @@ jobs:
           tests/cloud/test_paw_bar_concierge_guided_fields.py
           tests/cloud/test_paw_bar_concierge_page.py
           tests/cloud/test_paw_bar_concierge_evals.py
-          tests/cloud/test_paw_bar_concierge_eval_gate.py -o addopts="" -q --tb=short
+          tests/cloud/test_paw_bar_concierge_eval_gate.py
+          tests/cloud/test_paw_bar_page_actions.py
+          tests/cloud/test_paw_bar_declared_tools.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

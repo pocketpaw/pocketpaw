@@ -6,7 +6,10 @@
 #     (tests/fixtures/action_parity/cases.json + expected.json, copied from
 #     paw-bar's app/tests/fixtures/action_parity; change both sides together)
 #     and the server-only ones in server_cases.json (same origin, known page,
-#     bounded targets and labels, unknown verbs and bad JSON dropped);
+#     bounded targets and labels, unknown verbs and bad JSON dropped); shared
+#     tool_* cases run against the fixture's ``context.tools``, and every
+#     ``bounds`` entry equals its server constant (tool_schemas.json runs in
+#     tests/cloud/test_paw_bar_declared_tools.py);
 #   * ``FenceFilter`` routes the fence to ``.action``, never into the text; only
 #     the first fence in a reply counts; with page actions off every one is
 #     dropped; split at every chunk boundary the result is the same;
@@ -82,8 +85,14 @@ def test_every_shared_case_has_a_verdict():
 
 @pytest.mark.parametrize("case", _SHARED_CASES, ids=[c["name"] for c in _SHARED_CASES])
 def test_render_action_matches_the_paw_bar_parity_verdicts(case):
+    from pocketpaw_ee.paw_bar.action_spec import valid_tools
+
     verdict = _SHARED["verdicts"][case["name"]]
-    got = _render(case["body"], **_SHARED["context"])
+    context = dict(_SHARED["context"])
+    # context.tools is the page's declared tools; the server validates them first.
+    context["tools"] = valid_tools(context.pop("tools"))
+    assert [t["name"] for t in context["tools"]] == ["add_to_cart", "pick_size"]
+    got = _render(case["body"], **context)
     if verdict["server"] == "accept":
         assert got == verdict["frame"]
     else:
@@ -95,10 +104,40 @@ def test_the_shared_bounds_are_the_servers():
     from pocketpaw_ee.paw_bar import action_spec
 
     bounds = _SHARED["bounds"]
-    assert tuple(bounds["verbs"]) == action_spec.VERBS
+    verbs = tuple(v for v in bounds["verbs"] if v != action_spec.TOOL_VERB)
+    assert verbs == action_spec.VERBS
     assert bounds["label_max"] == action_spec.LABEL_MAX
     assert bounds["target_max"] == action_spec.TARGET_MAX
     assert bounds["target_id_re"] == action_spec.TARGET_ID_RE.pattern
+    assert action_spec.TOOL_VERB in bounds["verbs"]
+    assert bounds["tools_max"] == action_spec.TOOLS_MAX
+    assert bounds["tool_name_re"] == action_spec.TOOL_NAME_RE.pattern
+    assert bounds["tool_description_max"] == action_spec.TOOL_DESCRIPTION_MAX
+    assert bounds["tool_schema_max"] == action_spec.TOOL_SCHEMA_MAX
+    assert bounds["arg_string_max"] == action_spec.ARG_STRING_MAX
+    assert bounds["arg_name_re"] == action_spec.ARG_NAME_RE.pattern
+    assert bounds["enum_max"] == action_spec.ENUM_MAX
+    assert bounds["enum_string_max"] == action_spec.ENUM_STRING_MAX
+    assert tuple(bounds["arg_types"]) == action_spec.ARG_TYPES
+
+
+def test_every_shared_bound_is_checked():
+    # A bound paw-bar adds needs a server constant and a line in the test above.
+    assert set(_SHARED["bounds"]) == {
+        "verbs",
+        "label_max",
+        "target_max",
+        "target_id_re",
+        "tools_max",
+        "tool_name_re",
+        "tool_description_max",
+        "tool_schema_max",
+        "arg_string_max",
+        "arg_name_re",
+        "enum_max",
+        "enum_string_max",
+        "arg_types",
+    }
 
 
 def test_navigate_needs_a_site_origin():
