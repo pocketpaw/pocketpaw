@@ -8,6 +8,10 @@ Updated 2026-10-02 (feat/discover-index, hardening): behind
 ``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` a leased loop reindexes Discover from site
 templates every 30 minutes.
 
+Updated 2026-10-02 (feat/discover-index, review): that loop's first pass runs at
+startup; with the scheduler flag off, one background Discover reindex pass runs
+at startup instead (fire-and-forget), so templates public before a deploy list.
+
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
 ``pocketpaw.routes`` entry-point). It mounts every domain router under
 ``/api/v1`` (each domain keeps a thin router over a service that owns its
@@ -1318,6 +1322,24 @@ def mount_cloud(app: FastAPI) -> None:
         @on_shutdown
         async def _stop_discover_reindex() -> None:
             await _discover_reindex.stop()
+
+    else:
+        # No scheduler: one fire-and-forget backfill pass at startup, so
+        # templates that were public before this deploy still get listed. Not
+        # leased: the pass is idempotent, so several processes running it is
+        # harmless. The hook returns at once (off the startup critical path).
+        from pocketpaw_ee.cloud.discover.listeners import (
+            start_discover_backfill,
+            stop_discover_backfill,
+        )
+
+        @on_startup
+        async def _start_discover_backfill() -> None:
+            await start_discover_backfill(app)
+
+        @on_shutdown
+        async def _stop_discover_backfill() -> None:
+            await stop_discover_backfill(app)
 
     # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
     # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a

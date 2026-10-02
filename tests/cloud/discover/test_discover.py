@@ -21,6 +21,11 @@
 # reporters are ignored; reindex keeps hidden listings and refreshes live_url;
 # the periodic reindex loop; audit rows for use / feature / hide; the
 # (hidden, _id) index.
+#
+# Updated 2026-10-02 (feat/discover-index, review): the reindex loop's first pass
+# runs at once; the no-scheduler startup backfill runs one pass and logs a
+# failure; an upsert that loses the insert race retries as an update; a no-op
+# reindex writes and emits nothing; using your own listing doesn't count a remix.
 from __future__ import annotations
 
 from typing import Any
@@ -302,6 +307,58 @@ async def test_periodic_reindex_starts_once_runs_and_stops(monkeypatch) -> None:
     await asyncio.wait_for(ran.wait(), 1)
     await listeners.stop_discover_reindex(app)
     assert app.state.discover_reindex_task is None and task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_reindex_loop_runs_its_first_pass_at_once(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    ran = asyncio.Event()
+
+    async def _reindex(source: str) -> dict:
+        ran.set()
+        return {}
+
+    monkeypatch.setattr(listeners, "REINDEX_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(service_admin, "reindex", _reindex)
+    app = SimpleNamespace(state=SimpleNamespace())
+    await listeners.start_discover_reindex(app)
+    try:
+        await asyncio.wait_for(ran.wait(), 1)  # no 30-minute wait first
+    finally:
+        await listeners.stop_discover_reindex(app)
+
+
+@pytest.mark.asyncio
+async def test_startup_backfill_runs_one_pass_and_logs_a_failure(monkeypatch, caplog) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    calls: list[str] = []
+
+    async def _reindex(source: str) -> dict:
+        calls.append(source)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(service_admin, "reindex", _reindex)
+    app = SimpleNamespace(state=SimpleNamespace())
+    await listeners.start_discover_backfill(app)  # returns before the pass runs
+    await asyncio.wait_for(app.state.discover_backfill_task, 1)
+    assert calls == ["site_template"]
+    assert "discover: reindex failed" in caplog.text
+    await listeners.stop_discover_backfill(app)  # already done: a no-op
+
+
+def test_mount_cloud_backfills_when_the_scheduler_is_off() -> None:
+    import inspect
+
+    from pocketpaw_ee import cloud
+
+    source = inspect.getsource(cloud.mount_cloud)
+    scheduled = source.index("async def _stop_discover_reindex")
+    backfill = source.index("async def _start_discover_backfill")
+    assert scheduled < source.index("else:", scheduled) < backfill
 
 
 # ---------------------------------------------------------------------------
