@@ -12,7 +12,9 @@
 #     fields; ``featured``, ``hidden``, ``reports`` and ``remix_count`` are
 #     ``$setOnInsert``, so a template re-save never unhides a listing that
 #     Discover reports hid, and never resets its counters.
-#   * Site templates are read through ``site_templates.service_admin`` only.
+#   * Source items are read through their registered ``DiscoverSource``
+#     (``get_public`` / ``iter_public``) only; this module knows no source's
+#     field names.
 #
 # Updated 2026-10-01 (feat/discover-index): unhiding a listing clears its
 # reports, so one new report can't instantly re-hide it. Hiding keeps them.
@@ -41,6 +43,13 @@
 # moderation routes. ``list_all`` / ``get_staff`` include hidden listings and
 # return ``StaffListingResponse`` (moderation fields, workspace, owner). The
 # cursor / ``q`` paging is shared with ``list_public`` (``_page``).
+#
+# Updated 2026-10-02 (feat/discover-source-contract): source-generic sync.
+# ``sync_source(name, source_id)`` replaces ``sync_site_template`` and reads the
+# item through the source's ``get_public``; ``reindex(name)`` walks the source's
+# ``iter_public`` and works for any registered source that has one (unknown or
+# unsupported -> ``discover.reindex_unsupported``, as before). The site-template
+# mapping and ``live_url`` refresh moved to ``sources``.
 
 from __future__ import annotations
 
@@ -73,7 +82,6 @@ from pocketpaw_ee.cloud.discover.dto import (
 )
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
-from pocketpaw_ee.cloud.site_templates import service_admin as site_templates_admin
 
 SITE_TEMPLATE = "site_template"
 
@@ -182,18 +190,12 @@ def _ref(doc: DiscoverListing) -> dict[str, Any]:
     return {"listing_id": str(doc.id), "source": doc.source, "source_id": doc.source_id}
 
 
-def _site_template_fields(row: dict[str, Any]) -> dict[str, Any]:
-    """A site template's Discover row as listing fields (``name`` -> ``title``)."""
-    return {
-        "workspace": row["workspace"],
-        "owner": row["owner"],
-        "kind": row["kind"],
-        "title": row["name"],
-        "description": row["description"],
-        "audiences": row["audiences"],
-        "preview_image_url": row["preview_image_url"],
-        "live_url": row["live_url"],
-    }
+_ROW_FLAGS = ("id", "public", "hidden")
+
+
+def _row_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """A source row's listing fields: the row minus ``id`` / ``public`` / ``hidden``."""
+    return {k: v for k, v in row.items() if k not in _ROW_FLAGS}
 
 
 # ---------------------------------------------------------------------------
@@ -383,41 +385,44 @@ async def remove_from_source(source: str, source_id: str) -> bool:
     return True
 
 
-async def sync_site_template(template_id: str) -> None:
-    """List the template when it is public (a hidden one as a hidden listing,
-    so staff can unhide it); otherwise (private, workspace, deleted) remove its
+async def sync_source(name: str, source_id: str) -> None:
+    """List the source item when it is public (a hidden one as a hidden
+    listing, so staff can unhide it); otherwise (private, deleted) remove its
     listing."""
-    # admin-cross-tenant: reacts to template events from every workspace.
-    row = await site_templates_admin.get_for_discover(template_id)
+    # admin-cross-tenant: reacts to source events from every workspace.
+    get_public = get_source(name).get_public
+    if get_public is None:
+        raise ValidationError("discover.sync_unsupported", f"Cannot sync {name!r}")
+    row = await get_public(source_id)
     if row is not None and row["public"]:
-        await upsert_from_source(
-            SITE_TEMPLATE, template_id, _site_template_fields(row), hide=row["hidden"]
-        )
+        await upsert_from_source(name, source_id, _row_fields(row), hide=row["hidden"])
     else:
-        await remove_from_source(SITE_TEMPLATE, template_id)
+        await remove_from_source(name, source_id)
 
 
 async def reindex(source: str) -> dict:
     """Idempotent backfill: upsert every public item of ``source`` whose listing
-    is missing or differs (a hidden one as a hidden listing, ``live_url``
-    re-read from the source site) and remove listings whose item is gone or no
-    longer public. Returns created / updated / unchanged / removed counts. Only
-    ``site_template`` is supported."""
+    is missing or differs (a hidden one as a hidden listing) and remove listings
+    whose item is gone or no longer public. Returns created / updated /
+    unchanged / removed counts. A source that is unknown or has no
+    ``iter_public`` can't be reindexed."""
     # admin-cross-tenant: rebuilds the public index across every workspace.
-    if source != SITE_TEMPLATE:
+    try:
+        iter_public = get_source(source).iter_public
+    except NotFound:
+        iter_public = None
+    if iter_public is None:
         raise ValidationError("discover.reindex_unsupported", f"Cannot reindex {source!r}")
-    rows = await site_templates_admin.iter_public_for_discover()
-    keep = {row["id"] for row in rows}
     existing = {
-        doc.source_id: doc
-        for doc in await DiscoverListing.find({"source": SITE_TEMPLATE}).to_list()
+        doc.source_id: doc for doc in await DiscoverListing.find({"source": source}).to_list()
     }
+    keep: set[str] = set()
     counts = {"created": 0, "updated": 0, "unchanged": 0}
-    for row in rows:
-        # ponytail: one site lookup per public template; batch by pocket id if
-        # public templates reach the thousands.
-        row["live_url"] = await site_templates_admin.refresh_live_url(row["id"])
-        fields = UpsertListingRequest.model_validate(_site_template_fields(row)).model_dump()
+    async for row in iter_public():
+        if not row["public"]:
+            continue
+        keep.add(row["id"])
+        fields = UpsertListingRequest.model_validate(_row_fields(row)).model_dump()
         doc = existing.get(row["id"])
         if doc is None:
             counts["created"] += 1
@@ -429,10 +434,10 @@ async def reindex(source: str) -> dict:
             # no-event: the listing already matches its source.
             counts["unchanged"] += 1
             continue
-        await upsert_from_source(SITE_TEMPLATE, row["id"], fields, hide=row["hidden"])
+        await upsert_from_source(source, row["id"], fields, hide=row["hidden"])
     stale = [doc for source_id, doc in existing.items() if source_id not in keep]
     for doc in stale:
-        await remove_from_source(SITE_TEMPLATE, doc.source_id)
+        await remove_from_source(source, doc.source_id)
     return {"source": source, **counts, "removed": len(stale)}
 
 
@@ -497,6 +502,6 @@ __all__ = [
     "remove_from_source",
     "set_featured",
     "set_hidden",
-    "sync_site_template",
+    "sync_source",
     "upsert_from_source",
 ]

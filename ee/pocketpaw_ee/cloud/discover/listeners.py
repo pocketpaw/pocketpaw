@@ -19,6 +19,11 @@
 # listed on boot. With the scheduler flag off, ``start_discover_backfill`` runs
 # ONE background pass at startup (fire-and-forget, logged on failure);
 # ``stop_discover_backfill`` cancels it if it is still running at shutdown.
+#
+# Updated 2026-10-02 (feat/discover-source-contract): site-template events call
+# ``service_admin.sync_source("site_template", id)``. The periodic loop and the
+# startup backfill reindex EVERY registered source; a failing source is logged
+# and the others still run.
 
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     SiteTemplateUpdated,
 )
 from pocketpaw_ee.cloud.discover import service_admin
+from pocketpaw_ee.cloud.discover.sources import registered_sources
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +56,7 @@ async def on_site_template_changed(event: Event) -> None:
     if not template_id:
         return
     try:
-        await service_admin.sync_site_template(str(template_id))
+        await service_admin.sync_source(service_admin.SITE_TEMPLATE, str(template_id))
     except Exception:
         logger.exception("discover: sync of site template %s failed", template_id)
 
@@ -63,13 +69,17 @@ def register_discover_listeners() -> None:
 
 
 async def _reindex_once() -> None:
-    """One reindex pass. A failure is logged, never raised; ``CancelledError``
-    propagates for a clean shutdown."""
-    try:
-        result = await service_admin.reindex(service_admin.SITE_TEMPLATE)
-        logger.info("discover: reindex %s", result)
-    except Exception:
-        logger.exception("discover: reindex failed")
+    """One reindex pass over every registered source that can reindex. A
+    failing source is logged, never raised, and the rest still run;
+    ``CancelledError`` propagates for a clean shutdown."""
+    for src in registered_sources():
+        if src.iter_public is None:
+            continue
+        try:
+            result = await service_admin.reindex(src.name)
+            logger.info("discover: reindex %s", result)
+        except Exception:
+            logger.exception("discover: reindex failed for %s", src.name)
 
 
 async def _run_reindex_loop() -> None:

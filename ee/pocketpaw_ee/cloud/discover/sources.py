@@ -11,11 +11,18 @@
 # ``set_hidden(source_id, hidden)`` so a Discover hide / unhide reaches the
 # source item (site templates: ``service_admin.set_hidden_from_discover``);
 # ``hide_at_source`` calls it when the source has one.
+#
+# Updated 2026-10-02 (feat/discover-source-contract): optional ``get_public`` /
+# ``iter_public`` make the index source-generic. Both return rows already
+# mapped to listing fields plus ``id`` / ``public`` / ``hidden`` (see
+# ``DiscoverSource``); the site-template mapping (``name`` -> ``title``) and its
+# reindex-time ``live_url`` refresh moved here from ``service_admin``.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.site_templates import service as site_templates_service
@@ -24,10 +31,22 @@ from pocketpaw_ee.cloud.site_templates import service_admin as site_templates_ad
 
 @dataclass(frozen=True)
 class DiscoverSource:
+    """A product that publishes into Discover.
+
+    ``get_public(source_id)`` / ``iter_public()`` return Discover rows: the
+    ``UpsertListingRequest`` fields (workspace, owner, kind, title, description,
+    audiences, preview_image_url, live_url) plus ``id`` (the source id),
+    ``public`` (belongs in the index) and ``hidden`` (its listing must stay
+    hidden). ``get_public`` returns ``None`` for a missing item; ``iter_public``
+    yields every public item, hidden ones included. A source without them can't
+    be synced or reindexed."""
+
     name: str
     kinds: frozenset[str]
     use: Callable[[str, str, str, str | None], Awaitable[dict]]
     set_hidden: Callable[[str, bool], Awaitable[None]] | None = None
+    get_public: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
+    iter_public: Callable[[], AsyncIterator[dict[str, Any]]] | None = None
 
 
 _SOURCES: dict[str, DiscoverSource] = {}
@@ -65,6 +84,42 @@ async def _use_site_template(
     return await site_templates_service.use_template(workspace_id, user_id, source_id, body)
 
 
+def _site_template_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A site template's Discover row as a source row (``name`` -> ``title``)."""
+    return {
+        "id": row["id"],
+        "public": row["public"],
+        "hidden": row["hidden"],
+        "workspace": row["workspace"],
+        "owner": row["owner"],
+        "kind": row["kind"],
+        "title": row["name"],
+        "description": row["description"],
+        "audiences": row["audiences"],
+        "preview_image_url": row["preview_image_url"],
+        "live_url": row["live_url"],
+    }
+
+
+async def _get_site_template(template_id: str) -> dict[str, Any] | None:
+    # admin-cross-tenant: the Discover sync reacts to template events from every
+    # workspace; the caller only lists rows whose ``public`` is True.
+    row = await site_templates_admin.get_for_discover(template_id)
+    return _site_template_row(row) if row is not None else None
+
+
+async def _iter_site_templates() -> AsyncIterator[dict[str, Any]]:
+    """Every public template, its ``live_url`` re-read from the source site
+    (sites emit no rename / unpublish / delete events)."""
+    # admin-cross-tenant: the Discover reindex spans every workspace's public
+    # templates.
+    for row in await site_templates_admin.iter_public_for_discover():
+        # ponytail: one site lookup per public template; batch by pocket id if
+        # public templates reach the thousands.
+        row["live_url"] = await site_templates_admin.refresh_live_url(row["id"])
+        yield _site_template_row(row)
+
+
 def register_builtin_sources() -> None:
     register_source(
         DiscoverSource(
@@ -72,6 +127,8 @@ def register_builtin_sources() -> None:
             kinds=frozenset({"site", "tool", "game"}),
             use=_use_site_template,
             set_hidden=site_templates_admin.set_hidden_from_discover,
+            get_public=_get_site_template,
+            iter_public=_iter_site_templates,
         )
     )
 

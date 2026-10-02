@@ -26,6 +26,9 @@
 # runs at once; the no-scheduler startup backfill runs one pass and logs a
 # failure; an upsert that loses the insert race retries as an update; a no-op
 # reindex writes and emits nothing; using your own listing doesn't count a remix.
+#
+# Updated 2026-10-02 (feat/discover-source-contract): ``sync_site_template`` is
+# now ``sync_source("site_template", id)``.
 from __future__ import annotations
 
 from typing import Any
@@ -297,10 +300,10 @@ async def test_resync_keeps_discover_owned_state(recording_bus) -> None:
 
 @pytest.mark.asyncio
 async def test_a_failing_sync_is_swallowed(monkeypatch) -> None:
-    async def _boom(_template_id: str) -> None:
+    async def _boom(_source: str, _template_id: str) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(service_admin, "sync_site_template", _boom)
+    monkeypatch.setattr(service_admin, "sync_source", _boom)
     event = type("E", (), {"type": "site_template.saved", "data": {"id": "x"}})()
     await listeners.on_site_template_changed(event)  # no raise
 
@@ -470,7 +473,7 @@ async def test_use_listing_returns_the_pocket_and_counts_once(recording_bus) -> 
 @pytest.mark.asyncio
 async def test_using_your_own_listing_does_not_count_a_remix() -> None:
     meta = await _template(visibility="public")
-    await service_admin.sync_site_template(meta["id"])
+    await service_admin.sync_source("site_template", meta["id"])
     listing_id = str((await _listing(meta["id"])).id)
 
     used = await service.use_listing(WS, OWNER, listing_id)
