@@ -2414,6 +2414,25 @@ class Settings(BaseSettings):
             "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
         ),
     )
+    dodo_credit_product_id_inr: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the INR-priced credits SKU (Paw Partners). An INR "
+            "top-up puts this product in the cart with a pay-what-you-want amount in "
+            "PAISE (a pay-what-you-want amount is denominated in the product's own "
+            "currency, so the USD product cannot carry it). Unset disables INR "
+            "top-ups. Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID_INR."
+        ),
+    )
+    fx_inr_per_usd: float = Field(
+        default=89.0,
+        gt=0,
+        description=(
+            "Rupees per US dollar, used ONLY as the fallback when a verified INR "
+            "payment.succeeded carries no USD settlement figure from Dodo: credits "
+            "= floor(paise / rate). Set via POCKETPAW_FX_INR_PER_USD."
+        ),
+    )
     dodo_plan_products: Annotated[dict[str, str], NoDecode] = Field(
         default_factory=dict,
         description=(

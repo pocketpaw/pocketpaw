@@ -34,6 +34,11 @@
 #   2026-09-15-paw-admin-prd-corrections.md caught the master PRD asking for
 #   the wrong index — a workspace-prefixed one on Subscription — and missed
 #   this doc entirely).
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): optional audit fields for an
+#   INR top-up — ``settlement_amount`` / ``settlement_currency`` (Dodo's figure)
+#   and ``conversion`` + ``fx_inr_per_usd`` (the source and rate the base credits
+#   were granted at, from the ledger entry). Defaulted,
+#   so every existing row and writer is unchanged.
 
 from __future__ import annotations
 
@@ -85,6 +90,18 @@ class Payment(TimestampedDocument):
     reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
     # ISO currency the buyer was charged in (e.g. ``USD``), informational.
     currency: str | None = None
+    # AUDIT for a converted top-up. ``settlement_*`` is Dodo's own settlement
+    # figure as the verified body stated it (None when it sent none).
+    # ``conversion`` is which figure the base grant came from (``settlement`` /
+    # ``fx`` / ``fx_settlement_distrusted``; None for a plain USD charge) and
+    # ``fx_inr_per_usd`` the configured rate in force at
+    # that grant — both copied off the base LEDGER entry's ref, so a redelivery
+    # at a different rate cannot rewrite them. Informational — the cap is
+    # ``credits_granted``.
+    settlement_amount: int | None = None
+    settlement_currency: str | None = None
+    conversion: str | None = None
+    fx_inr_per_usd: float | None = None
     # The GATEWAY's outcome, not ours: a non-USD charge is genuinely
     # ``succeeded`` with ``credits_granted == 0``.
     # ``succeeded`` | ``failed`` | ``pending``.
