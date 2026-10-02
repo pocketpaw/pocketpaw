@@ -9,7 +9,8 @@
 # and the visitor got ``unavailable`` (temporary) on 4 of 4 contact requests.
 # Pinned here:
 #
-#   * ``is_contact_request``: a small, conservative intent check, with negatives;
+#   * ``is_contact_request``: a small, conservative check for a first-person
+#     request to reach a person, with ordinary questions as negatives;
 #   * a reply cut off at the cap keeps the text that streamed and ends normally;
 #     a card fence left open is dropped, as before;
 #   * a contact request whose model output is empty, truncated or failed still
@@ -199,6 +200,12 @@ def test_a_request_for_a_person_is_a_contact_request(message):
         "What does a property manager plan cost?",
         "Can someone use this on two laptops?",
         "How human-like is the voice?",
+        "Are your reviews from real people?",
+        "Can you email me the receipt?",
+        "How do I reach you from the station?",
+        "Do I need a person to sign for delivery?",
+        "does it support a live agent / talk to a human handoff?",
+        "Does the API support a callback URL?",
         "",
     ],
 )
@@ -256,6 +263,24 @@ async def test_a_normal_question_with_an_empty_capped_reply_is_still_unavailable
 
     assert frames[-2:] == [_TEMPORARY, _END]
     assert _text(frames) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_question_that_only_mentions_a_person_still_fails_as_unavailable(
+    concierge_client, model, monkeypatch
+):
+    """The provider failed and the visitor didn't ask for a person: no server card,
+    the turn ends as unavailable(temporary)."""
+    client, store = concierge_client
+
+    frames = await _turn(
+        monkeypatch, client, store, _BrokenModel(), "Can you email me the receipt?"
+    )
+
+    assert frames[-2:] == [_TEMPORARY, _END]
+    assert "pawbar-card" not in _text(frames)
+    (run,) = await _runs()
+    assert run.status == "failed"
 
 
 # --------------------------------------------------------------------------- #
