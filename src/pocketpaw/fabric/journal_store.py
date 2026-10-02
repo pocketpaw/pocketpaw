@@ -42,6 +42,10 @@
 # ``pocketpaw.fabric.default_journal_store()``; never construct a second
 # ``FabricJournalStore(get_journal())`` (two projections, two backfills).
 # Without ``read_model`` nothing changes.
+# Updated: 2026-10-02 (CN-6 race fix) — every upsert is guarded by an
+# "is this snapshot still the live row?" check (row object identity + archived
+# flag) before AND after the write; a stale write that slipped through an
+# interleaved archive is undone. Closes the backfill-vs-live-archive race.
 
 from __future__ import annotations
 
@@ -353,8 +357,16 @@ class FabricJournalStore:
                 target = self._read_model(ws)
                 if archived:
                     await unproject_object(target, obj.id, workspace_id=ws)
-                else:
-                    await project_object(target, obj, workspace_id=ws)
+                    continue
+                await project_object(
+                    target, obj, workspace_id=ws, is_current=lambda: self._is_live(obj)
+                )
+                # The upsert itself awaits; an archive can still land between
+                # the check and the INSERT. Re-check and undo if so.
+                if not self._is_live(obj):
+                    row = self._projection.row(obj.id)
+                    if row is None or row.archived:
+                        await unproject_object(target, obj.id, workspace_id=ws)
             except Exception:
                 logger.warning(
                     "fabric read model: projecting %s into workspace %s failed —"
@@ -363,6 +375,14 @@ class FabricJournalStore:
                     ws,
                     exc_info=True,
                 )
+
+    def _is_live(self, obj: FabricObject) -> bool:
+        """True while ``obj`` is still the projection's live state for its id.
+        Updates rebind ``row.obj`` and re-creates replace the row, so identity
+        is exact; archive flips the flag."""
+
+        row = self._projection.row(obj.id)
+        return row is not None and row.obj is obj and not row.archived
 
     # -- Internals ----------------------------------------------------------
 

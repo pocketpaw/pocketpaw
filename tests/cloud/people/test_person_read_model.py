@@ -12,6 +12,9 @@
 # unprojects, and a missed removal heals on sync; (7) a re-scope moves the row;
 # (8) a stale upsert never rolls a newer row back, while a journal write after
 # a direct store edit still lands.
+# Updated 2026-10-02 (race fix): (9) an archive landing while the backfill is
+# parked in its type awaits keeps the row absent; (10) the ordering guard
+# breaks same-second ties (microsecond timestamps).
 
 from __future__ import annotations
 
@@ -243,3 +246,48 @@ async def test_journal_update_lands_after_a_direct_store_edit(journal):
     await fs.update_object("person-ws1-u1", {"name": "Agent edit"}, workspace_id="ws1")
     await _materialize("ws1", name="Mira K")
     assert (await _people("ws1"))[0].properties["name"] == "Mira K"
+
+
+@pytest.mark.asyncio
+async def test_archive_during_backfill_await_keeps_row_absent(journal, monkeypatch):
+    import asyncio
+
+    await _materialize("ws1")
+    store = read_model.default_journal_store()
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_ensure = read_model._ensure_type
+
+    async def _blocking_ensure(fs, obj, ws):
+        entered.set()
+        await release.wait()
+        return await real_ensure(fs, obj, ws)
+
+    monkeypatch.setattr(read_model, "_ensure_type", _blocking_ensure)
+    backfill = asyncio.create_task(store.sync_read_model())
+    await entered.wait()
+
+    # Member removed while the backfill holds its pre-archive snapshot.
+    assert await store.archive("person-ws1-u1", scope=["workspace:ws1"])
+    assert await _people("ws1") == []
+
+    release.set()
+    await backfill
+    assert await _people("ws1") == []
+
+
+@pytest.mark.asyncio
+async def test_ordering_guard_breaks_same_second_ties(journal):
+    await _materialize("ws1", name="New")
+    fs = stores.get_fabric_store(workspace_id="ws1")
+    current = (await _people("ws1"))[0]
+    stale = current.model_copy(
+        update={
+            "properties": {**current.properties, "name": "Old"},
+            "updated_at": current.updated_at.replace(microsecond=0),
+        }
+    )
+    if stale.updated_at == current.updated_at:
+        pytest.skip("write landed exactly on a whole second")
+    assert await fs.upsert_object(stale, workspace_id="ws1") is False
+    assert (await _people("ws1"))[0].properties["name"] == "New"

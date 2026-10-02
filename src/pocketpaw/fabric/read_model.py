@@ -23,6 +23,10 @@
 # with the object's name, the projected row is stamped with THAT type's id
 # (no dangling ``type_id``); the backfill is no longer triggered lazily — EE
 # runs ``sync_read_model()`` as a startup background task.
+#
+# Updated: 2026-10-02 (CN-6 race fix) — ``project_object`` takes an optional
+# ``is_current`` check, re-read right before the upsert, so a projection whose
+# snapshot went stale during its awaits (e.g. a live archive) never writes it.
 
 from __future__ import annotations
 
@@ -90,11 +94,24 @@ async def _ensure_type(store: FabricStore, obj: FabricObject, workspace_id: str)
     return obj.type_id
 
 
-async def project_object(store: FabricStore, obj: FabricObject, *, workspace_id: str) -> None:
-    """Upsert ``obj`` (its full current state) into one workspace's store."""
+async def project_object(
+    store: FabricStore,
+    obj: FabricObject,
+    *,
+    workspace_id: str,
+    is_current: Callable[[], bool] | None = None,
+) -> None:
+    """Upsert ``obj`` (its full current state) into one workspace's store.
+
+    ``is_current`` is re-checked after the type awaits, right before the
+    upsert: if the snapshot is no longer the object's live state (archived or
+    rewritten meanwhile), nothing is written — the newer write projects itself.
+    """
     type_id = await _ensure_type(store, obj, workspace_id)
     if type_id != obj.type_id:
         obj = obj.model_copy(update={"type_id": type_id})
+    if is_current is not None and not is_current():
+        return
     if not await store.upsert_object(obj, workspace_id=workspace_id):
         logger.info(
             "fabric read model: %s not projected into %s — row is owned by another"

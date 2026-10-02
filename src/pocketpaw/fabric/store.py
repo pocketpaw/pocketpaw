@@ -6,6 +6,7 @@
 #   tenancy- and updated_at-guarded). Both exist for ``pocketpaw.fabric.read_model``, which
 #   projects journal-written objects (FabricJournalStore) into the
 #   per-workspace store so the Fabric API / MCP / Ripple readers see them.
+#   Timestamps keep microseconds (2026-10-02) so the ordering guard can't tie.
 #   The upsert writes the flat cache directly (no statement pass): the journal
 #   is the system of record for these objects.
 # Updated: 2026-08-17 (AST-5a — review fixes on the atlas source-truth stack) —
@@ -669,10 +670,12 @@ def _is_number(value: Any) -> bool:
 
 def _sqlite_ts(ts: datetime) -> str:
     """Render ``ts`` in SQLite's ``datetime('now')`` shape (naive UTC
-    ``YYYY-MM-DD HH:MM:SS``) so upserted rows sort and parse like the rest."""
+    ``YYYY-MM-DD HH:MM:SS``) plus microseconds, so upserted rows sort and parse
+    like the rest while the upsert ordering guard can't tie within a second
+    (``"... 12:00:00.5" > "... 12:00:00"`` as strings)."""
     if ts.tzinfo is not None:
         ts = ts.astimezone(UTC).replace(tzinfo=None)
-    return ts.strftime("%Y-%m-%d %H:%M:%S")
+    return ts.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _workspace_scope(
