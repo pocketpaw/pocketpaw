@@ -10,6 +10,8 @@
 #   * reindex returns counts and is idempotent.
 #   * every mutation leaves an ``applied`` PlatformAuditEvent; a missing listing
 #     404s without one; a blank reason is 422.
+# Updated 2026-10-02 (feat/discover-moderation): reindex reports created / updated /
+# unchanged / removed (the index branch replaced `upserted`).
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -223,9 +225,15 @@ async def test_reindex_returns_counts_and_is_idempotent(client) -> None:
     await _upsert("gone")  # no template behind it: reindex removes it
 
     first = (await client.post(f"{PLATFORM}/reindex", json=REASON)).json()
-    assert (first["source"], first["upserted"], first["removed"]) == ("site_template", 1, 1)
+    assert (first["source"], first["removed"]) == ("site_template", 1)
+    assert first["created"] + first["updated"] + first["unchanged"] == 1
     second = (await client.post(f"{PLATFORM}/reindex", json=REASON)).json()
-    assert (second["upserted"], second["removed"]) == (1, 0)
+    assert (second["created"], second["updated"], second["unchanged"], second["removed"]) == (
+        0,
+        0,
+        1,
+        0,
+    )
     assert await _public_ids(client) == [listing_id]
 
     bad = await client.post(f"{PLATFORM}/reindex", params={"source": "nope"}, json=REASON)

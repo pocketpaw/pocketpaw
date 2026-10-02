@@ -6222,7 +6222,8 @@ Rebuilds one source's listings now: upserts every public item (a hidden one as a
 hidden listing) and removes listings whose item is gone or no longer public.
 Idempotent. `source` defaults to `site_template`, the only source that supports
 it; any other returns `422` (`discover.reindex_unsupported`). Response `200`:
-`{"source", "upserted", "removed", "audit_event_id"}`.
+`{"source", "created", "updated", "unchanged", "removed", "audit_event_id"}`; a
+row is only written when something changed.
 
 ## Platform — Plan & Entitlement Overrides
 

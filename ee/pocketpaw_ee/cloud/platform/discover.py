@@ -1,3 +1,5 @@
+# Updated 2026-10-02 (feat/discover-moderation): reindex reports created / updated /
+# unchanged / removed (the index branch replaced `upserted`).
 """Staff moderation for the Discover index, on the platform axis.
 
 Created 2026-10-02 (feat/discover-moderation) — DS-5 of the /discover PRD.
@@ -53,7 +55,9 @@ class PlatformModerateOut(BaseModel):
 
 class PlatformReindexOut(BaseModel):
     source: str
-    upserted: int
+    created: int
+    updated: int
+    unchanged: int
     removed: int
     audit_event_id: str
 
