@@ -26,6 +26,13 @@
 # runs at once; the no-scheduler startup backfill runs one pass and logs a
 # failure; an upsert that loses the insert race retries as an update; a no-op
 # reindex writes and emits nothing; using your own listing doesn't count a remix.
+#
+# Updated 2026-10-02 (feat/discover-source-contract): ``sync_site_template`` is
+# now ``sync_source("site_template", id)``.
+#
+# Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
+# ``media_kind`` / ``media_url``; the listeners and the backfill pass also cover
+# the ``studio_template`` source.
 from __future__ import annotations
 
 from typing import Any
@@ -60,6 +67,8 @@ PUBLIC_KEYS = {
     "live_url",
     "remix_count",
     "created_at",
+    "media_kind",
+    "media_url",
 }
 SYNCED = {"site_template.saved", "site_template.updated", "site_template.deleted"}
 
@@ -297,10 +306,10 @@ async def test_resync_keeps_discover_owned_state(recording_bus) -> None:
 
 @pytest.mark.asyncio
 async def test_a_failing_sync_is_swallowed(monkeypatch) -> None:
-    async def _boom(_template_id: str) -> None:
+    async def _boom(_source: str, _template_id: str) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(service_admin, "sync_site_template", _boom)
+    monkeypatch.setattr(service_admin, "sync_source", _boom)
     event = type("E", (), {"type": "site_template.saved", "data": {"id": "x"}})()
     await listeners.on_site_template_changed(event)  # no raise
 
@@ -314,7 +323,8 @@ def test_register_discover_listeners_subscribes_the_three_events(monkeypatch) ->
 
     monkeypatch.setattr(listeners, "get_bus", lambda: _Bus())
     listeners.register_discover_listeners()
-    assert set(subscribed) == SYNCED
+    studio = {e.replace("site_", "studio_") for e in SYNCED}
+    assert set(subscribed) == SYNCED | studio
 
 
 @pytest.mark.asyncio
@@ -377,7 +387,7 @@ async def test_startup_backfill_runs_one_pass_and_logs_a_failure(monkeypatch, ca
     app = SimpleNamespace(state=SimpleNamespace())
     await listeners.start_discover_backfill(app)  # returns before the pass runs
     await asyncio.wait_for(app.state.discover_backfill_task, 1)
-    assert calls == ["site_template"]
+    assert calls == ["site_template", "studio_template"]
     assert "discover: reindex failed" in caplog.text
     await listeners.stop_discover_backfill(app)  # already done: a no-op
 
@@ -470,7 +480,7 @@ async def test_use_listing_returns_the_pocket_and_counts_once(recording_bus) -> 
 @pytest.mark.asyncio
 async def test_using_your_own_listing_does_not_count_a_remix() -> None:
     meta = await _template(visibility="public")
-    await service_admin.sync_site_template(meta["id"])
+    await service_admin.sync_source("site_template", meta["id"])
     listing_id = str((await _listing(meta["id"])).id)
 
     used = await service.use_listing(WS, OWNER, listing_id)

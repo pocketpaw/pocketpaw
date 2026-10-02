@@ -18,12 +18,16 @@
 # Deliberately allowed: external URLs, and the public Sites asset rail
 # (``sites-assets/{workspace}/{pocket}/...`` on the public bucket), which is the
 # only durable public address a site image has.
+#
+# Updated 2026-10-02 (feat/studio-templates): the deployment host comes from
+# ``_core.public_url.public_base_url`` instead of a direct env read.
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
+
+from pocketpaw_ee.cloud._core.public_url import public_base_url
 
 # A URL body: stops at whitespace, quotes, brackets and markup delimiters.
 _TAIL = r"[^\s\"'<>()\[\]{}`\\]*"
@@ -79,8 +83,7 @@ def _strings(value: Any):
 
 def _own_host_shapes() -> list[re.Pattern[str]]:
     """``/uploads/...`` on the deployment's own host (``POCKETPAW_PUBLIC_BASE_URL``)."""
-    # Same default as the OAuth callback builder (auth/social/service.py).
-    base = os.environ.get("POCKETPAW_PUBLIC_BASE_URL", "http://localhost:8888").strip().rstrip("/")
+    base = public_base_url()
     if not base:
         return []
     host = re.escape(base.split("://", 1)[-1])

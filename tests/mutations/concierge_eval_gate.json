@@ -5,7 +5,7 @@
     "find": "        if getattr(settings, \"pawbar_concierge_default_runtime\", \"legacy\") != \"v2\":",
     "replace": "        if getattr(settings, \"pawbar_concierge_default_runtime\", \"legacy\") == \"never\":",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_the_shipped_default_is_legacy_even_with_a_passing_report"
+      "tests/cloud/test_paw_bar_concierge_eval_gate.py::test_a_deployment_that_asks_for_legacy_stays_legacy_with_a_passing_report"
     ]
   },
   {

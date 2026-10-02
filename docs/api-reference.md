@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
+  Studio generation as a template: POST / GET /studio-templates, PATCH / DELETE
+  /studio-templates/{id}). Discover gains a second source, `studio_template`,
+  and two public listing fields, `media_kind` and `media_url`.
 Updated: 2026-10-02 (feat/partners-tiers, PH-15) — Paw Partners volume tiers and
   milestone rewards: GET /partners/me adds tier standing and benefits, offers and
   sales are priced at the tier discount, commissions use the tier rate, summary /
@@ -1473,11 +1477,73 @@ return `404` for everyone but the owner, who still sees it with
 Errors: `404` for a template you can't see or that is not public; `403`
 (`site_templates.own_template`) for the owner reporting their own.
 
+## Studio templates
+
+Publish one asset of a finished Studio generation as a template. The template
+is a frozen copy: the asset becomes `cover` and the generation's prompt, model
+and settings become `recipe`. Editing or deleting the generation later doesn't
+change it. Input images are never published: `recipe.params` drops
+`inputImageCount` and any other input-image, reference or upload field, and
+`uses_input_images` only says the original run had some. `visibility` is
+`private` (default), `workspace` or `public`; a public template is listed on
+Discover (`source: "studio_template"`), private or deleted takes the listing
+down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
+`music`). Cover URLs stay backend-relative (`/api/v1/media/...`) here.
+
+```json
+{
+  "id": "6661b2...",
+  "owner": "u1",
+  "template_type": "generation",
+  "source_generation_id": "gen_abc",
+  "kind": "image",
+  "title": "Red fox",
+  "description": "",
+  "audiences": ["design"],
+  "visibility": "public",
+  "cover": {"url": "/api/v1/media/fox.png", "mime": "image/png", "width": 1024, "height": 1024, "poster_url": null},
+  "recipe": {"kind": "image", "model": "flux", "prompt": "a red fox", "params": {"aspectRatio": "1:1", "count": 1}},
+  "uses_input_images": false,
+  "hidden": false,
+  "created_at": "2026-10-02T09:00:00Z",
+  "updated_at": "2026-10-02T09:00:00Z"
+}
+```
+
+### `POST /studio-templates`
+
+```json
+{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public" }
+```
+
+`asset_id` is optional (default: the generation's first asset). Response `200`:
+the template. Errors: `404` for a generation that isn't in your workspace or an
+unknown `asset_id`; `409` (`studio_templates.not_ready`) unless the generation
+succeeded.
+
+### `GET /studio-templates`
+
+Your own templates in this workspace, newest first. Query: `limit` (1-50,
+default 50), `cursor`. Response `200`:
+`{"templates": [<template>, ...], "next_cursor": "..." | null}`.
+
+### `PATCH /studio-templates/{template_id}`
+
+Any of `title`, `description`, `audiences`, `visibility`. Owner only; anyone
+else gets `404`. The cover and recipe never change. A template hidden by
+Discover reports stays hidden after a private and public round trip.
+
+### `DELETE /studio-templates/{template_id}`
+
+Owner only. Response `200`: `{"id": "...", "deleted": true}`. The generation is
+untouched.
+
 ## Discover — Public Index
 
-One index of shareable items from every workspace, newest first. Today the only
-source is public site templates (`source: "site_template"`); a public template
-has one listing, hidden when the template is hidden. The two reads need no sign-in and
+One index of shareable items from every workspace, newest first. Sources are
+public site templates (`source: "site_template"`) and public studio templates
+(`source: "studio_template"`); a public template has one listing, hidden when
+the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
 return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
 user and act in the caller's active workspace.
@@ -1497,13 +1563,22 @@ reports or the source item's id):
   "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
   "live_url": "https://bakery.pawsites.workers.dev",
   "remix_count": 3,
-  "created_at": "2026-10-01T09:00:00Z"
+  "created_at": "2026-10-01T09:00:00Z",
+  "media_kind": null,
+  "media_url": null
 }
 ```
 
+`media_kind` (`image`, `video`, `audio`) and `media_url` are set on studio
+template listings and `null` on site templates. Studio listings carry absolute
+URLs built from `POCKETPAW_PUBLIC_BASE_URL`: `media_url` is the asset,
+`preview_image_url` the image itself or a video's poster (`null` for music),
+and `live_url` is always `null`.
+
 ### `GET /discover` (public)
 
-Query params, all optional: `source`, `kind` (`site`, `tool`, `game`),
+Query params, all optional: `source`, `kind` (`site`, `tool`, `game`, `image`,
+`video`, `music`),
 `audience` (matches one of a listing's `audiences`), `q` (case-insensitive
 substring of title or description, up to 100 chars), `featured` (`true` /
 `false`), `cursor`, `limit` (1-50, default 24).
@@ -1527,6 +1602,9 @@ optional; `name` defaults to the item's name.
 ```
 
 Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
+For a studio template nothing is copied: the result is the recipe to run in
+Studio, `{"source": "studio_template", "result": {"recipe": {...}, "uses_input_images": false}}`
+(`name` is ignored).
 The source's own checks apply (a site template needs a plan with Sites), and
 `remix_count` goes up by one only when the copy succeeded, and not when the
 listing's owner uses their own listing. `404` for a missing
@@ -5298,7 +5376,7 @@ the split is the security model:
   them runs the same fail-closed chain — unknown widget 404, rate limit 429,
   bad/revoked key 401, disallowed origin or a key that doesn't own the widget
   403 — and none of them expose owner-private data. Every public data route
-  (everything below except `widget.js` and the frame document) also sits behind
+  (everything below except `widget.js`, `actions.js` and the frame document) also sits behind
   a per-(client IP, widget) limit (429; 10/s sustained, 300 burst, the IP taken
   from the rightmost `X-Forwarded-For` hop, held in process memory so each
   replica counts separately). A `customer_ref` must be 8-128 characters of
@@ -5312,11 +5390,12 @@ the split is the security model:
 | Route | What it does |
 |---|---|
 | `GET /paw-bar/widget.js` | The embed loader a published page includes. `public, max-age=300` with a strong `ETag`; a matching `If-None-Match` gets a 304. |
+| `GET /paw-bar/actions.js` | The opt-in page-actions script an owner adds beside the loader so the concierge can scroll to or highlight something on the page. It acts only on `pawbar:act` messages from a `/paw-bar/frame` iframe on its own endpoint's origin. Same caching as `widget.js`; `PAW_BAR_ACTIONS_JS` overrides the vendored copy. |
 | `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. Every frame document, the shell included, also sends CSP `sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads`, so the browser sandboxes it whoever embeds it; no flag permits top navigation. A rendered frame is `private, max-age=60` (never `public`) and the key lookup behind it is memoised for 30 s, so a revoked key, a disabled concierge or an appearance edit reaches an open frame within about 90 s; the dead shell is `no-store`. Its `pawbar.js`/`pawbar.css` URLs carry `?v=<content hash>` and are served `immutable` for that exact version, `max-age=300` otherwise. |
 | `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. `public, max-age=60`, always with `Vary: Origin`. Its `catalog` is filled from the [catalog store](#catalog-store) (the first 200 products in the owner's order), so that client keeps working. |
 | `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
 | `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. A widget with a concierge agent requires `?signed_key=`. |
-| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. Takes an optional `page: {"url", "title"}`, the host page the widget sits on; omit it and the turn is answered as before. A v2 site uses it only when the url is http(s) on the site's allowed origins (query and fragment dropped): an indexed page adds its title, summary and article, any other page only its title, cut to 120 characters and marked unverified. A `page` that isn't an object with a string `url` is ignored, never a 422; legacy sites ignore the field. On v2 the one `sources` frame is `{"items": [{"id", "title", "url"}], "sources": <same list>}`: exactly the knowledge the model was given, in order, with a title and url only for pages the site sync indexed. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. |
+| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. Takes an optional `page: {"url", "title"}`, the host page the widget sits on; omit it and the turn is answered as before. A v2 site uses it only when the url is http(s) on the site's allowed origins (query and fragment dropped): an indexed page adds its title, summary and article, any other page only its title, cut to 120 characters and marked unverified. A `page` that isn't an object with a string `url` is ignored, never a 422; legacy sites ignore the field. On v2 the one `sources` frame is `{"items": [{"id", "title", "url"}], "sources": <same list>}`: exactly the knowledge the model was given, in order, with a title and url only for pages the site sync indexed. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. On v2, a turn the concierge cannot answer ends with one `unavailable` frame, `{"type": "unavailable", "reason": "temporary" | "limit"}`, then `stream_end`: `temporary` when the model provider failed (a timeout, 429, 5xx or connection error before any text is retried once first; text that already streamed stays and the frame follows it), `limit` when the site is at its daily spend cap or a new conversation finds the monthly allowance used up. It carries no text and raises no handoff; the widget renders the state, and only the visitor's own request-human raises one. The owner gets one `paw_bar_spend_cap` notification per site per UTC day when the cap is hit. |
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
 | `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |
@@ -5330,7 +5409,7 @@ the split is the security model:
 
 | Route | What it does |
 |---|---|
-| `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`legacy` unless the deployment asks for `v2` and the committed gate report passes) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
+| `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`v2` once a passing real-model gate report for the deployment's model is committed, `legacy` until then or when the deployment sets `POCKETPAW_PAWBAR_CONCIERGE_DEFAULT_RUNTIME=legacy`) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |

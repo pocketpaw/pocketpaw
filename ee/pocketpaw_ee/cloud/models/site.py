@@ -721,6 +721,13 @@ class Site(TimestampedDocument):
     # visitor's tap on Send writes a Lead (``paw_bar.actions``). Off: no lead card
     # is offered or accepted.
     concierge_lead_capture: bool = True
+    # "Guide visitors around your site". On: the v2 concierge may suggest one
+    # page action per reply (navigate to a known page of this site, scroll to or
+    # highlight a section), validated by ``paw_bar.action_spec`` and run by the
+    # owner's paw-bar actions script. Off (the default, and for rows older than
+    # the field): the model is never told about actions and any it writes is
+    # dropped.
+    concierge_page_actions: bool = False
     # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
     # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
     # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted

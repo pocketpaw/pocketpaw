@@ -1274,15 +1274,18 @@ class Settings(BaseSettings):
             "may show, on sites that allow it. Code past this is replaced."
         ),
     )
-    # The v2 rollout gate (``pocketpaw_ee.paw_bar.concierge_gate``). What a NEW
-    # concierge gets: "v2" here is only a request, honoured when the committed
-    # eval report for the configured model clears every threshold below.
-    # Thresholds are the captain's call; these are the PRD's placeholders.
+    # The v2 rollout gate (``pocketpaw_ee.paw_bar.concierge_gate``). "v2" is the
+    # default request, honoured only when the committed eval report for the
+    # configured model clears every threshold below; until then new concierges
+    # get legacy, and ``sites.migrate_concierge_v2`` moves no existing one.
+    # "legacy" opts a deployment out. Thresholds are the captain's call.
     pawbar_concierge_default_runtime: Literal["legacy", "v2"] = Field(
-        default="legacy",
+        default="v2",
         description=(
-            "Runtime a newly created Paw Bar concierge asks for. 'v2' takes effect "
-            "only when the committed v2 eval report passes the thresholds below."
+            "Runtime Paw Bar concierges ask for: new ones at create, existing ones "
+            "through the v2 move at boot. 'v2' (the default) takes effect only when "
+            "the committed v2 eval report passes the thresholds below; 'legacy' "
+            "keeps every concierge on the agent runtime."
         ),
     )
     pawbar_concierge_eval_max_false_refusal_pct: float = Field(
@@ -1313,8 +1316,9 @@ class Settings(BaseSettings):
         ge=0,
         description=(
             "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
-            "day, in USD at provider cost. Past it, visitors get the leave-a-message "
-            "reply and no model call is made. 0 turns the cap off."
+            "day, in USD at provider cost. Past it, visitors get the `unavailable` "
+            "frame with reason limit, no model call is made, and the owner is "
+            "notified once that day. 0 turns the cap off."
         ),
     )
     # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan

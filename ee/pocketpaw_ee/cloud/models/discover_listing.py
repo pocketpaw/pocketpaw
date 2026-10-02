@@ -18,6 +18,10 @@
 # the user ids whose reports staff dismissed on an unhide; their later reports
 # on this listing are ignored. Discover-owned, like ``reports``. Index
 # ``(hidden, _id desc)`` serves the public list's filter + newest-first sort.
+#
+# Updated 2026-10-02 (feat/studio-templates): source-owned ``media_kind``
+# (image | video | audio) and ``media_url`` (absolute) for media listings such
+# as studio templates; ``None`` for site templates.
 
 from __future__ import annotations
 
@@ -42,6 +46,8 @@ class DiscoverListing(TimestampedDocument):
     audiences: list[str] = Field(default_factory=list)
     preview_image_url: str | None = None
     live_url: str | None = None
+    media_kind: str | None = None
+    media_url: str | None = None
     featured: bool = False
     hidden: bool = False
     reports: list[dict[str, Any]] = Field(default_factory=list)

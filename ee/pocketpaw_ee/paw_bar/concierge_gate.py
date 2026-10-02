@@ -1,11 +1,12 @@
 # ee/pocketpaw_ee/paw_bar/concierge_gate.py — the rollout gate for the v2 concierge.
 #
-# Created: 2026-09-28 (feat/concierge-eval-gate, CR-6). One question, one answer:
-# which runtime should a NEWLY created concierge get? ``default_concierge_runtime()``
-# returns "v2" only when ALL of these hold, and "legacy" otherwise:
+# One question, one answer: should a concierge run on v2? ``default_concierge_runtime()``
+# answers for a NEWLY created concierge (the create route) and for the boot-time move
+# of existing ones (``sites.migrate_concierge_v2``). It returns "v2" only when ALL of
+# these hold, and "legacy" otherwise:
 #
 #   1. the deployment asks for it: ``pawbar_concierge_default_runtime == "v2"``
-#      (default "legacy");
+#      (the default; "legacy" opts a deployment out);
 #   2. a gate report is committed beside this module (``GATE_REPORT_PATH``,
 #      ``concierge_eval_gate.json``). It is packaged with the code on purpose: the
 #      image ships ``src/`` and ``ee/`` only, so a report under ``tests/`` could never
@@ -22,10 +23,10 @@
 #      (0). A metric that is missing or None fails. Thresholds are the captain's
 #      call; these are the PRD's placeholders.
 #
-# It never raises: anything unexpected reads as "legacy". It flips nothing by
-# itself: the Site model's own default stays "legacy", and only a caller that
-# creates a concierge (CR-12's explicit create) asks this function which runtime to
-# write. Existing sites keep whatever ``concierge_runtime`` they have.
+# So the default request is v2, but with no passing report committed every answer
+# is still "legacy": the report is the switch. It never raises: anything unexpected
+# reads as "legacy". It writes nothing itself; the Site model's own default stays
+# "legacy", and only its two callers write a runtime.
 
 from __future__ import annotations
 
@@ -111,9 +112,10 @@ def load_gate_report(path: Path | None = None) -> dict[str, Any] | None:
 
 
 def default_concierge_runtime(settings: Any = None) -> Literal["legacy", "v2"]:
-    """The runtime a newly created concierge should get: "v2" only when the
-    deployment asks for it AND the committed real-model report for its configured
-    model passes every threshold. Never raises; any doubt is "legacy"."""
+    """The runtime a concierge should run on (asked at create, and by the boot-time
+    move of existing ones): "v2" only when the deployment asks for it AND the
+    committed real-model report for its configured model passes every threshold.
+    Never raises; any doubt is "legacy"."""
     try:
         settings = settings if settings is not None else _settings()
         if getattr(settings, "pawbar_concierge_default_runtime", "legacy") != "v2":

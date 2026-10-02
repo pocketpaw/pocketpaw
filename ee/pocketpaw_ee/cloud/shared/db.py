@@ -7,6 +7,8 @@ requirement for serving a concierge and flips ``concierge_enabled`` to default
 False, so the rows written before it must be classified before the first request
 or every live bar goes dark. Running it at boot ties it to the model by
 construction, whatever the deploy config does. Best-effort like its neighbours.
+After it, ``sites.migrate_concierge_v2.migrate_on_boot`` moves legacy concierges
+to the v2 runtime, a no-op unless the v2 eval gate is open.
 
 2026-09-04 (fix/pool-and-body-ceilings, backend-perf H6): the client is built
 with explicit timeouts. It had none, so it ran on PyMongo's defaults, and two of
@@ -357,6 +359,14 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     )
 
     await migrate_concierge_marker_on_boot()
+
+    # Move legacy concierges v2 can serve to v2, only while the eval gate is open.
+    # Runs after the marker backfill (it selects on the marker). Never raises.
+    from pocketpaw_ee.sites.migrate_concierge_v2 import (
+        migrate_on_boot as migrate_concierge_v2_on_boot,
+    )
+
+    await migrate_concierge_v2_on_boot()
 
     # Flip the memory backend AFTER Beanie is initialized so the
     # MongoMemoryStore's first .insert()/.find() call can never race a
