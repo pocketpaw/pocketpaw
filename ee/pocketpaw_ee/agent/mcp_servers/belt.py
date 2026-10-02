@@ -25,6 +25,11 @@
 #   console open sees the new Tray run too), plus an in-turn per-session SSE push.
 #   Best-effort — an emit failure never breaks the propose response.
 #
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL). The
+#   ``record_decision`` audit row still fires only after a successful emit. The
+#   helper is imported lazily inside the handler to keep this server's import light.
+#
 # What this file does: clones the media.py shape — a single
 # ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /
 # ``*_TOOL_ID`` allowlist constants, ContextVar-sourced identity (the same
@@ -72,7 +77,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from ._audit import record_decision, record_tool_call
 
@@ -244,152 +249,6 @@ def _resolve_repo(repo: str) -> tuple[Path | None, str | None]:
     return candidate, None
 
 
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    repo_name: str,
-    base_branch: str,
-    summary: str,
-    task: str,
-    changed_lines: int,
-    workspace_id: str,
-    user_id: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a Belt code change.
-
-    Mirrors ``action_executor``'s ``agent.proposed`` emit for pocket writes:
-    the develop station is the actor that PROPOSED the change, so the chain
-    actor is ``kind="agent"`` with the requesting user on its id and the
-    workspace on its scope_context. The Belt action isn't bound to a pocket —
-    its tenancy is the workspace — so ``pocket_id`` on the chain carries the
-    workspace id (matching how the Action's ``pocket_id`` field carries the
-    workspace, see ``_propose_change_handler``). The projection's
-    ``_fold_proposed`` reads ``intent`` / ``action`` / ``pocket_id`` /
-    ``inputs`` off the payload.
-
-    Returns the emitted event id (``UUID``) so the caller can persist it on the
-    blob's ``proposed_event_id`` field for the ``human.corrected`` causation
-    chain, or ``None`` when the emit raised — best-effort per RFC 09; the Slice
-    4 reconciler / abandon-sweeper picks up any orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    intent = f"code change to {repo_name} ({base_branch}) — {changed_lines} changed lines"
-    payload: dict[str, Any] = {
-        # Fields the projection's ``_fold_proposed`` consumes.
-        "intent": intent,
-        "action": "code_change",
-        "pocket_id": workspace_id,
-        "inputs": [],
-        # Richer fields for the explain narrator / a future swap to
-        # soul-protocol's ``build_proposal_event(AgentProposal(...))``.
-        "proposal_kind": "code_change",
-        "summary": summary,
-        "proposal": {
-            "repo": repo_name,
-            "base_branch": base_branch,
-            "task": task,
-            "changed_lines": changed_lines,
-        },
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        # Fire a workspace audit event for this decision (best-effort).
-        try:
-            record_decision(
-                workspace_id=workspace_id,
-                actor_id=user_id or "agent",
-                pocket_id=workspace_id,
-                decision_action="agent.proposed",
-                outcome="proposed",
-                metadata={
-                    "proposal_kind": "code_change",
-                    "repo": repo_name,
-                    "summary": summary[:100] if summary else "",
-                    "correlation_id": str(correlation_id),
-                },
-            )
-        except Exception:  # noqa: BLE001 — must not break the caller
-            logger.warning("belt record_decision failed", exc_info=True)
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "belt agent.proposed emit failed for correlation_id=%s (action_id=%s) "
-            "— Slice 4 reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._code_change`` blob after ``agent.proposed`` fired.
-
-    The blob is built with these fields already set from the in-memory values,
-    so this re-write only matters when the proposed event id was unknown at
-    propose-build time. We mint the correlation_id BEFORE building the blob, so
-    that field is already correct on the stored row; ``proposed_event_id`` is
-    the one this back-write fills in. Direct SQL update — same pattern as the
-    pocket-write bridge's ``_persist_parked_policy_event_id``. Best-effort:
-    failure leaves ``proposed_event_id`` None and the eventual
-    ``human.corrected`` emits without a causation_id (the chain still folds;
-    causation_id is optional on EventEntry).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(CODE_CHANGE_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[CODE_CHANGE_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "belt: failed to persist chain ids onto action %s — the chain's "
-            "human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
-
-
 async def _propose_change_handler(args: dict) -> dict:
     """MCP handler for ``belt__belt_propose_change``.
 
@@ -398,6 +257,10 @@ async def _propose_change_handler(args: dict) -> dict:
     or an ``is_error`` response with the reason. NO phantom successes: ok is
     returned only after ``store.propose`` confirms the Action is stored.
     """
+    # Lazy: keeps this server's import light and an import failure in the cloud
+    # package from silently disabling the belt surface at load time.
+    from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
     workspace_id, user_id, session_mongo_id = _identity()
     if not workspace_id or not user_id:
         return _error_response(
@@ -466,7 +329,7 @@ async def _propose_change_handler(args: dict) -> dict:
     #
     # Schema 2 (BS-4, RFC 09) — carries the chain ``correlation_id`` and
     # ``proposed_event_id`` (the latter back-written after ``agent.proposed``
-    # fires; None here, filled by ``_persist_chain_ids`` below).
+    # fires; None here, filled by ``persist_chain_ids`` below).
     blob: dict[str, Any] = {
         "kind": CODE_CHANGE_KIND,
         "schema": CODE_CHANGE_SCHEMA,
@@ -541,23 +404,48 @@ async def _propose_change_handler(args: dict) -> dict:
     # Best-effort: a Decision-Graph wiring failure must NOT fail the propose
     # response — the Action is already stored; the Slice 4 reconciler closes
     # any chain that never opened.
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=correlation_id,
         action_id=action.id,
-        repo_name=repo_name,
-        base_branch=base_branch.strip(),
-        summary=summary.strip(),
-        task=task.strip(),
-        changed_lines=changed_lines,
+        kind="code_change",
+        intent=(
+            f"code change to {repo_name} ({base_branch.strip()}) — {changed_lines} changed lines"
+        ),
+        proposal={
+            "repo": repo_name,
+            "base_branch": base_branch.strip(),
+            "task": task.strip(),
+            "changed_lines": changed_lines,
+        },
         workspace_id=workspace_id,
         user_id=user_id,
+        extra={"summary": summary.strip()},
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        # Fire a workspace audit event for this decision (best-effort).
+        try:
+            record_decision(
+                workspace_id=workspace_id,
+                actor_id=user_id or "agent",
+                pocket_id=workspace_id,
+                decision_action="agent.proposed",
+                outcome="proposed",
+                metadata={
+                    "proposal_kind": "code_change",
+                    "repo": repo_name,
+                    "summary": summary.strip()[:100] if summary.strip() else "",
+                    "correlation_id": str(correlation_id),
+                },
+            )
+        except Exception:  # noqa: BLE001 — must not break the caller
+            logger.warning("belt record_decision failed", exc_info=True)
+        await persist_chain_ids(
             store=store,
             action_id=action.id,
+            param_key=CODE_CHANGE_PARAM_KEY,
             correlation_id=str(correlation_id),
             proposed_event_id=str(proposed_event_id),
+            label="belt",
         )
 
     # SC-2 — publish ``belt_run_updated`` (status=proposed, stage=gate) so the

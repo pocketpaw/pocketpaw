@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Cluster presence across web processes, with two "processes" in one test.
 
 Each simulated process is its own ``ConnectionManager`` with its own presence
@@ -142,7 +144,7 @@ async def test_grace_timer_skips_offline_when_user_is_on_another_process(
 ):
     import importlib
 
-    from pocketpaw_ee.cloud.realtime.events import PresenceOffline
+    from pocketpaw_ee.cloud._core.realtime.events import PresenceOffline
 
     chat_router = importlib.import_module("pocketpaw_ee.cloud.chat.router")
 
@@ -348,7 +350,7 @@ async def test_endpoint_snapshot_includes_peers_on_other_processes(redis, prefix
 
 
 async def test_endpoint_announces_only_a_cluster_wide_first_and_last(redis, prefix, monkeypatch):
-    from pocketpaw_ee.cloud.realtime.events import PresenceOnline
+    from pocketpaw_ee.cloud._core.realtime.events import PresenceOnline
 
     a, b = _proc(redis, prefix), _proc(redis, prefix)
     other = AsyncMock()

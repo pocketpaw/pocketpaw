@@ -1,29 +1,25 @@
 # tests/cloud/test_paw_bar_concierge_v2.py — the v2 concierge runtime (CR-1).
 #
-# Updated: 2026-09-28 (feat/concierge-spend-cap, CR-5) — two v2 outcomes changed on
-# purpose: a used-up monthly allowance and a failed model call no longer end in a
-# 403 / generic ``error`` frame but in the leave-a-message degrade reply
-# (``chunk`` + ``stream_end``). The two tests below say so; the rest of CR-5 lives
-# in test_paw_bar_concierge_v2_degrade.py.
-# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
-# defaults to a concierge its owner has CREATED and switched on
-# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
-# marker a requirement at every public seam and flips the switch's default to
-# False, so a bare Site is now "no concierge"; overrides still win.
-#
-# Created: 2026-09-27 (feat/concierge-v2-runner) — a site switched to
-# ``concierge_runtime="v2"`` answers through ONE streamed pydantic_ai call with no
-# tools, grounded in the site KB, instead of dispatching a full agent run. These
-# tests pin the four things that make that safe to ship behind a per-site switch:
+# A site switched to ``concierge_runtime="v2"`` answers through ONE streamed
+# pydantic_ai call with no tools, grounded in the site KB, instead of dispatching a
+# full agent run. These tests pin what makes that safe to ship behind a per-site
+# switch:
 #
 #   * it answers from the knowledge it retrieved, and the model sees that fact;
 #   * the model is offered ZERO tools (guarded by tests/mutations/concierge_v2_runtime.json);
 #   * every public gate still fires BEFORE the runner, and only the bound-agent 409
 #     and the connector 409 are skipped;
+#   * a used-up monthly allowance and a failed model call end in the structured
+#     ``unavailable`` frame + ``stream_end``, not a 403 or an ``error`` frame (the
+#     rest of that lives in test_paw_bar_concierge_v2_degrade.py);
 #   * a legacy site is untouched, and the SSE frames the widget reads have the same
-#     names and fields on both paths.
-#   * a visitor turn never provisions a concierge (captain rule, 2026-09-27): no
-#     agent, no widget, no provisioning call, even for an unbound v2 widget.
+#     names and fields on both paths;
+#   * a visitor turn never provisions a concierge: no agent, no widget, no
+#     provisioning call, even for an unbound v2 widget.
+#
+# The Site builder defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``); a bare Site is
+# "no concierge", and overrides still win.
 #
 # The model seam is ``concierge_runtime._build_model``: tests hand it a pydantic_ai
 # ``FunctionModel`` whose stream function records the request (messages + AgentInfo)
@@ -609,9 +605,8 @@ async def test_v2_sibling_pocket_binding_is_403_before_the_runner(concierge_clie
 
 @pytest.mark.asyncio
 async def test_v2_quota_degrades_before_the_runner(concierge_client, model, monkeypatch):
-    """CR-5: a used-up allowance on v2 is the degrade reply, still with no model call."""
-    from pocketpaw_ee.paw_bar.concierge_runtime import DEGRADE_HANDED_OFF
-
+    """CR-5: a used-up allowance on v2 is the ``unavailable`` frame (reason
+    "limit"), still with no model call."""
     client, store = concierge_client
     await _site()
     widget = await store.create_widget(_widget())
@@ -625,8 +620,8 @@ async def test_v2_quota_degrades_before_the_runner(concierge_client, model, monk
     )
     res = await _chat(client, widget.id)
     assert res.status_code == 200
-    assert [e for e, _d in _frames(res.text)] == ["chunk", "stream_end"]
-    assert _frames(res.text)[0][1]["content"] == DEGRADE_HANDED_OFF
+    assert [e for e, _d in _frames(res.text)] == ["unavailable", "stream_end"]
+    assert _frames(res.text)[0][1] == {"type": "unavailable", "reason": "limit"}
     assert model.calls == []
 
 
@@ -790,7 +785,8 @@ async def test_v2_sse_shape_matches_legacy_for_text_and_done(concierge_client, m
 
 @pytest.mark.asyncio
 async def test_v2_model_failure_is_the_degrade_reply(concierge_client, monkeypatch):
-    """CR-5: a provider failure is the leave-a-message reply, never an error frame."""
+    """CR-5: a provider failure is the ``unavailable`` frame, never an error frame
+    and never canned text."""
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
     from pocketpaw_ee.paw_bar import concierge_runtime
 
@@ -806,8 +802,9 @@ async def test_v2_model_failure_is_the_degrade_reply(concierge_client, monkeypat
     frames = _frames(res.text)
     assert frames[-1][0] == "stream_end"
     assert "error" not in [e for e, _d in frames]
-    text = "".join(d["content"] for e, d in frames if e == "chunk")
-    assert text == concierge_runtime.DEGRADE_HANDED_OFF
+    assert [e for e, _d in frames][-2:] == ["unavailable", "stream_end"]
+    assert frames[-2][1] == {"type": "unavailable", "reason": "temporary"}
+    assert not [d for e, d in frames if e == "chunk"]
     assert "sk-secret" not in res.text
     run = (await ChatRunDoc.find(ChatRunDoc.context_type == "concierge").to_list())[0]
     assert run.status == "failed"

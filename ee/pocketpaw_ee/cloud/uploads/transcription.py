@@ -3,6 +3,8 @@
 # document like everything else in the Files box.
 #
 # Created 2026-08-29 (T2 "Audio/video transcription at ingest").
+# Updated 2026-10-01 (CN-3): the daily budget claims through the shared
+# ``metering.service.try_spend`` primitive; ``transcription_budget`` is gone.
 #
 # THE POINT IS THE PLUMBING, NOT THE MODEL. The transcript is handed back as an
 # ordinary ``ExtractionResult`` and dropped into the ONE place the upload
@@ -346,14 +348,19 @@ async def transcribe_media(
         )
 
     # ── Gate 4: today's budget. Fails CLOSED. ──────────────────────────────
-    from pocketpaw_ee.cloud.uploads.transcription_budget import try_spend
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
-    allowed, spent, cap = await try_spend(workspace_id)
-    if not allowed:
+    cap = metering.file_transcription_cap()
+    if not await metering.try_spend(
+        subject_type="workspace",
+        subject_id=workspace_id,
+        meter=DailyMeter.FILE_TRANSCRIPTION,
+        cap=cap,
+    ):
         logger.warning(
-            "transcription: refused by the daily budget (%d/%d) for workspace=%s "
+            "transcription: refused by the daily budget (cap %s) for workspace=%s "
             "file_id=%s; a re-ingest will retry",
-            spent,
             cap,
             workspace_id,
             file_id,
@@ -408,13 +415,12 @@ async def transcribe_media(
         )
 
     logger.info(
-        "transcription: %d chars from file_id=%s (%s, %s) via %s — budget %d/%d",
+        "transcription: %d chars from file_id=%s (%s, %s) via %s — daily cap %s",
         len(text),
         file_id,
         mime,
         f"{duration / 60:.1f} min" if duration is not None else "unknown length",
         model,
-        spent,
         cap,
     )
     return ExtractionResult(

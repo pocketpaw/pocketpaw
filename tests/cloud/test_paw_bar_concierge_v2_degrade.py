@@ -1,19 +1,23 @@
-# tests/cloud/test_paw_bar_concierge_v2_degrade.py — spend cap and graceful degrade (CR-5).
+# tests/cloud/test_paw_bar_concierge_v2_degrade.py — when the v2 concierge can't answer.
 #
-# Created: 2026-09-28 (feat/concierge-spend-cap) — a v2 concierge that cannot answer
-# (the site is over its daily spend cap, the site's monthly conversation allowance
-# is used up, or the model provider timed out or failed) sends the visitor ONE
-# fixed leave-a-message reply as ordinary ``chunk`` + ``stream_end`` frames and
-# hands the conversation to the owner through ``handoff.raise_handoff``, instead of
-# an error. These tests pin:
+# A v2 concierge that cannot answer a turn (the site is over its daily spend cap,
+# the site's monthly conversation allowance is used up, or the model provider kept
+# failing) sends the widget ONE structured ``unavailable`` frame,
+# {"type": "unavailable", "reason": "temporary" | "limit"}, then ``stream_end``.
+# No canned chunk text, no handoff, no owner notification per turn: the widget
+# renders the state, and the visitor's own "Talk to a person" button stays the
+# only way a conversation reaches the team. These tests pin:
 #
-#   * each trigger produces the degrade reply, and the cap and quota arms make no
-#     model call (tests/mutations/concierge_v2_runtime.json guards each arm);
+#   * each trigger produces the frame with the right reason, and the cap and quota
+#     arms make no model call (tests/mutations/concierge_v2_runtime.json guards
+#     each arm);
+#   * a transient provider failure (timeout, 429, 5xx, connection error) is retried
+#     once when nothing has streamed yet; content-filter and config errors are not;
+#   * no arm raises a handoff or flips the conversation to needs_human;
+#   * the owner hears about the daily spend cap at most once per site per UTC day;
 #   * the cap is per site per UTC day, compared with ``>=``, and 0 turns it off;
 #   * the metered call carries the site and widget as LiteLLM request tags;
-#   * a legacy site is untouched by the cap;
-#   * a conversation already waiting on a person is not handed off again, and the
-#     handoff respects the site's transcript-retention switch.
+#   * a legacy site is untouched by the cap.
 #
 # Fixtures come from CR-1's test module, as test_paw_bar_concierge_v2_output does;
 # naming one as a test parameter is how pytest injects it, hence the F811 waiver.
@@ -40,6 +44,52 @@ from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
     concierge_client,
     model,
 )
+
+_END = ("stream_end", {"assistant_message_id": None, "cancelled": False})
+_LIMIT = ("unavailable", {"type": "unavailable", "reason": "limit"})
+_TEMPORARY = ("unavailable", {"type": "unavailable", "reason": "temporary"})
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """The retry's backoff is real time; the tests don't wait for it."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    monkeypatch.setattr(concierge_runtime, "_RETRY_BACKOFF_S", 0.0, raising=False)
+
+
+def _spy_handoffs(monkeypatch) -> list[dict[str, Any]]:
+    from pocketpaw_ee.paw_bar import handoff
+
+    seen: list[dict[str, Any]] = []
+    real = handoff.raise_handoff
+
+    async def _spy(**kw: Any) -> Any:
+        seen.append(kw)
+        return await real(**kw)
+
+    monkeypatch.setattr(handoff, "raise_handoff", _spy)
+    return seen
+
+
+def _spy_owner_notes(monkeypatch) -> list[dict[str, Any]]:
+    """Every owner notification the turn asks for."""
+    from pocketpaw_ee.paw_bar import notify
+
+    seen: list[dict[str, Any]] = []
+
+    async def _spy(**kw: Any) -> bool:
+        seen.append(kw)
+        return True
+
+    monkeypatch.setattr(notify, "notify_workspace_owner", _spy)
+    return seen
+
+
+def _no_needs_human_note(notes: list[dict[str, Any]]) -> bool:
+    from pocketpaw_ee.paw_bar.notify import NOTIFY_NEEDS_HUMAN
+
+    return all(n.get("kind") != NOTIFY_NEEDS_HUMAN for n in notes)
 
 
 def _pin_cap(monkeypatch, cap: float) -> None:
@@ -104,32 +154,65 @@ async def _state(store, widget_id: str) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_a_site_at_its_daily_cap_gets_the_degrade_reply_and_no_model_call(
+async def test_a_site_at_its_daily_cap_is_unavailable_with_no_model_call(
     concierge_client, model, monkeypatch
 ):
-    """Spend EXACTLY at the cap degrades: the cap is the most a site may spend."""
-    from pocketpaw_ee.paw_bar.concierge_runtime import DEGRADE_HANDED_OFF
-
+    """Spend EXACTLY at the cap stops the concierge: the cap is the most a site may
+    spend. The visitor gets the ``limit`` frame; nobody is handed the conversation."""
     client, store = concierge_client
     _seed_kb(monkeypatch, _HOURS_KB)
     _pin_cap(monkeypatch, 0.5)
     await _seed_spend(0.25)
     await _seed_spend(0.25)
+    handoffs = _spy_handoffs(monkeypatch)
+    notes = _spy_owner_notes(monkeypatch)
     await _site()
     widget = await store.create_widget(_widget())
 
     res = await _chat(client, widget.id)
 
     assert res.status_code == 200, res.text
-    frames = _frames(res.text)
-    assert [e for e, _d in frames] == ["chunk", "stream_end"]
-    assert _text(frames) == DEGRADE_HANDED_OFF
-    assert frames[-1][1] == {"assistant_message_id": None, "cancelled": False}
+    assert _frames(res.text) == [_LIMIT, _END]
     assert model.calls == []
     # No run doc for a turn nobody answered; the two seeded runs are all there is.
     assert len(await _runs()) == 2
-    # The owner has it: the conversation waits on a person.
-    assert await _state(store, widget.id) == ConversationState.NEEDS_HUMAN
+    assert handoffs == []
+    assert _no_needs_human_note(notes)
+    assert await _state(store, widget.id) != ConversationState.NEEDS_HUMAN
+
+
+@pytest.mark.asyncio
+async def test_the_owner_hears_about_the_cap_once_per_site_per_day(
+    concierge_client, model, monkeypatch
+):
+    """Every capped turn lands on the cap; the owner is told once a UTC day, not
+    once a turn. The record outlives the process cache: a worker that finds
+    today's notification already written does not send another."""
+    from pocketpaw_ee.cloud.models.notification import Notification
+    from pocketpaw_ee.paw_bar import notify
+
+    async def _owner(_ws: str) -> str:
+        return "owner-1"
+
+    monkeypatch.setattr(notify, "resolve_workspace_owner", _owner)
+    client, store = concierge_client
+    _pin_cap(monkeypatch, 0.5)
+    await _seed_spend(1.0)
+    await _site()
+    widget = await store.create_widget(_widget())
+
+    for _ in range(3):
+        res = await _chat(client, widget.id)
+        assert _frames(res.text) == [_LIMIT, _END]
+    getattr(notify, "_spend_cap_noted", set()).clear()
+    await _chat(client, widget.id)
+
+    notes = await Notification.find(
+        Notification.type == getattr(notify, "NOTIFY_SPEND_CAP", "paw_bar_spend_cap")
+    ).to_list()
+    assert len(notes) == 1
+    assert notes[0].recipient == "owner-1"
+    assert notes[0].workspace == "ws-1"
 
 
 @pytest.mark.asyncio
@@ -234,32 +317,32 @@ def _quota_used_up(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v2_quota_hit_is_the_degrade_reply_with_no_model_call(
+async def test_v2_quota_hit_is_unavailable_limit_with_no_model_call(
     concierge_client, model, monkeypatch
 ):
-    from pocketpaw_ee.paw_bar.concierge_runtime import DEGRADE_HANDED_OFF
-
     client, store = concierge_client
     _quota_used_up(monkeypatch)
+    handoffs = _spy_handoffs(monkeypatch)
+    notes = _spy_owner_notes(monkeypatch)
     await _site()
     widget = await store.create_widget(_widget())
 
     res = await _chat(client, widget.id)
 
     assert res.status_code == 200, res.text
-    frames = _frames(res.text)
-    assert [e for e, _d in frames] == ["chunk", "stream_end"]
-    assert _text(frames) == DEGRADE_HANDED_OFF
+    assert _frames(res.text) == [_LIMIT, _END]
     assert model.calls == []
     assert await _runs() == []
-    assert await _state(store, widget.id) == ConversationState.NEEDS_HUMAN
+    assert handoffs == []
+    assert _no_needs_human_note(notes)
+    assert await _state(store, widget.id) != ConversationState.NEEDS_HUMAN
 
 
 @pytest.mark.asyncio
 async def test_v2_quota_degrade_still_spends_a_rate_limit_slot(
     concierge_client, model, monkeypatch
 ):
-    """A degrade is a served turn that writes a handoff: it must be rate-limited."""
+    """An unavailable turn is still a served turn: it must be rate-limited."""
     from pocketpaw.paw_bar.models import PawBarEvent
 
     client, store = concierge_client
@@ -297,6 +380,8 @@ async def test_legacy_quota_hit_is_still_403(concierge_client, model, monkeypatc
 
 
 class _FailingModel(_RecordingModel):
+    """Streams ``reply`` then raises ``exc``, on every call."""
+
     def __init__(self, exc: BaseException, reply: list[str] | None = None) -> None:
         super().__init__(reply=reply or [])
         self.exc = exc
@@ -313,34 +398,146 @@ class _FailingModel(_RecordingModel):
         return FunctionModel(stream_function=_stream, model_name="fake-concierge")
 
 
-async def _degraded_by(monkeypatch, client, store, exc: BaseException, reply=None):
+class _FlakyModel(_RecordingModel):
+    """Raises ``exc`` before streaming anything on the first ``failures`` calls,
+    then answers with ``_MODEL_REPLY``."""
+
+    def __init__(self, exc: BaseException, failures: int = 1) -> None:
+        super().__init__()
+        self.exc = exc
+        self.failures = failures
+
+    def build(self, _settings: Any) -> Any:
+        from pydantic_ai.models.function import FunctionModel
+
+        async def _stream(messages, info):
+            self.calls.append({"messages": messages, "info": info})
+            if len(self.calls) <= self.failures:
+                raise self.exc
+            for piece in self.reply:
+                yield piece
+
+        return FunctionModel(stream_function=_stream, model_name="fake-concierge")
+
+
+async def _turn_with(monkeypatch, client, store, rec: _RecordingModel, **site_kw: Any):
     from pocketpaw_ee.paw_bar import concierge_runtime
 
-    rec = _FailingModel(exc, reply=reply)
     monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
     _seed_kb(monkeypatch, _HOURS_KB)
-    await _site()
+    await _site(**site_kw)
     widget = await store.create_widget(_widget())
     res = await _chat(client, widget.id)
     assert res.status_code == 200, res.text
     return res, widget
 
 
-@pytest.mark.asyncio
-async def test_a_provider_timeout_is_the_degrade_reply(concierge_client, model, monkeypatch):
-    from pocketpaw_ee.paw_bar.concierge_runtime import DEGRADE_HANDED_OFF
+def _caused_by(cause: BaseException) -> BaseException:
+    err = RuntimeError("model request failed")
+    err.__cause__ = cause
+    return err
 
+
+class APIConnectionError(Exception):
+    """Named like the openai SDK's, which subclasses nothing builtin."""
+
+
+def _transient_errors() -> list[BaseException]:
+    from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
+
+    return [
+        TimeoutError("read timed out"),
+        ModelHTTPError(429, "fake-concierge", body="rate limited"),
+        ModelHTTPError(503, "fake-concierge", body="overloaded"),
+        ModelAPIError("fake-concierge", "Connection error."),
+        ConnectionResetError("connection reset by peer"),
+        _caused_by(APIConnectionError("Connection error.")),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    _transient_errors(),
+    ids=["timeout", "http429", "http503", "model_api", "conn_reset", "sdk_conn_cause"],
+)
+async def test_a_transient_failure_is_retried_once_and_answered(
+    concierge_client, model, monkeypatch, exc
+):
+    """A provider blip before any text is the same question asked again, not a
+    handoff: the retry answers it and the visitor never sees the failure."""
     client, store = concierge_client
-    res, widget = await _degraded_by(monkeypatch, client, store, TimeoutError("read timed out"))
+    handoffs = _spy_handoffs(monkeypatch)
+    notes = _spy_owner_notes(monkeypatch)
+    rec = _FlakyModel(exc)
+
+    res, widget = await _turn_with(monkeypatch, client, store, rec)
+
+    frames = _frames(res.text)
+    assert _text(frames) == "".join(_MODEL_REPLY)
+    assert "unavailable" not in [e for e, _d in frames]
+    assert frames[-1] == _END
+    assert len(rec.calls) == 2
+    assert handoffs == []
+    assert _no_needs_human_note(notes)
+    (run,) = await _runs()
+    assert run.status == "completed"
+    assert await _state(store, widget.id) != ConversationState.NEEDS_HUMAN
+
+
+def _permanent_errors() -> list[BaseException]:
+    from pydantic_ai.exceptions import ContentFilterError, ModelHTTPError, UserError
+
+    return [
+        ContentFilterError("content filter triggered"),
+        ModelHTTPError(400, "fake-concierge", body="bad request"),
+        ModelHTTPError(401, "fake-concierge", body="bad key"),
+        UserError("unknown model"),
+        RuntimeError("upstream model exploded"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    _permanent_errors(),
+    ids=["content_filter", "http400", "http401", "user_error", "runtime"],
+)
+async def test_a_permanent_failure_is_not_retried(concierge_client, model, monkeypatch, exc):
+    client, store = concierge_client
+    rec = _FlakyModel(exc)
+
+    res, _w = await _turn_with(monkeypatch, client, store, rec)
+
+    assert len(rec.calls) == 1
+    assert _frames(res.text)[-2:] == [_TEMPORARY, _END]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_keeps_failing_is_unavailable_with_no_handoff(
+    concierge_client, model, monkeypatch
+):
+    """Retried once, failed twice: the ``temporary`` frame, no canned text, no
+    handoff, no owner notification, and the conversation stays with the bot."""
+    client, store = concierge_client
+    handoffs = _spy_handoffs(monkeypatch)
+    notes = _spy_owner_notes(monkeypatch)
+    rec = _FlakyModel(TimeoutError("read timed out"), failures=99)
+
+    res, widget = await _turn_with(monkeypatch, client, store, rec)
 
     frames = _frames(res.text)
     assert frames[0][0] == "message.persisted"
-    assert [e for e, _d in frames[1:]] == ["chunk", "stream_end"]
-    assert _text(frames) == DEGRADE_HANDED_OFF
+    assert frames[1:] == [_TEMPORARY, _END]
+    assert _text(frames) == ""
+    assert "can't answer" not in res.text
+    assert len(rec.calls) == 2
+    assert handoffs == []
+    assert _no_needs_human_note(notes)
     (run,) = await _runs()
     assert run.status == "failed"
     assert run.error == "concierge_v2_provider_timeout"
-    assert await _state(store, widget.id) == ConversationState.NEEDS_HUMAN
+    assert await _state(store, widget.id) != ConversationState.NEEDS_HUMAN
 
 
 @pytest.mark.asyncio
@@ -351,37 +548,55 @@ async def test_a_timeout_named_by_the_sdk_is_a_timeout(concierge_client, model, 
         pass
 
     client, store = concierge_client
-    await _degraded_by(monkeypatch, client, store, APITimeoutError("Request timed out."))
+    await _turn_with(
+        monkeypatch, client, store, _FailingModel(APITimeoutError("Request timed out."))
+    )
 
     (run,) = await _runs()
     assert run.error == "concierge_v2_provider_timeout"
 
 
 @pytest.mark.asyncio
-async def test_a_provider_error_is_the_degrade_reply(concierge_client, model, monkeypatch):
-    from pocketpaw_ee.paw_bar.concierge_runtime import DEGRADE_HANDED_OFF
-
+async def test_a_failure_after_text_streamed_keeps_the_text_and_is_not_retried(
+    concierge_client, model, monkeypatch
+):
+    """A retry would repeat what the visitor already read: what streamed stays,
+    the ``temporary`` frame follows it, and nothing canned is added."""
     client, store = concierge_client
-    res, widget = await _degraded_by(
-        monkeypatch,
-        client,
-        store,
+    handoffs = _spy_handoffs(monkeypatch)
+    rec = _FailingModel(
         RuntimeError("upstream model exploded: sk-secret-internal-detail"),
         reply=["We open at "],
     )
 
+    res, widget = await _turn_with(monkeypatch, client, store, rec)
+
     frames = _frames(res.text)
-    assert frames[-1] == ("stream_end", {"assistant_message_id": None, "cancelled": False})
+    assert frames[-2:] == [_TEMPORARY, _END]
     assert "error" not in [e for e, _d in frames]
-    # What streamed before the failure stays; the degrade line follows it.
-    assert _text(frames).startswith("We open at ")
-    assert _text(frames).endswith(DEGRADE_HANDED_OFF)
+    assert _text(frames) == "We open at "
     assert "sk-secret" not in res.text
+    assert len(rec.calls) == 1
+    assert handoffs == []
     (run,) = await _runs()
     assert run.status == "failed"
     assert run.error == "concierge_v2_provider_error"
+    # The transcript keeps what the model said, never a canned line.
     assert run.partial_text == "We open at "
-    assert await _state(store, widget.id) == ConversationState.NEEDS_HUMAN
+    assert await _state(store, widget.id) != ConversationState.NEEDS_HUMAN
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_mid_stream_is_not_retried(concierge_client, model, monkeypatch):
+    client, store = concierge_client
+    rec = _FailingModel(TimeoutError("read timed out"), reply=["We open at "])
+
+    res, _w = await _turn_with(monkeypatch, client, store, rec)
+
+    assert len(rec.calls) == 1
+    frames = _frames(res.text)
+    assert _text(frames) == "We open at "
+    assert frames[-2:] == [_TEMPORARY, _END]
 
 
 # --------------------------------------------------------------------------- #
@@ -433,175 +648,33 @@ async def test_tags_are_not_sent_to_a_provider_that_is_not_our_proxy(monkeypatch
 # --------------------------------------------------------------------------- #
 
 
-class _Conv:
-    def __init__(self, state: Any) -> None:
-        self.state = state
-
-
 async def _collect(gen) -> list[tuple[str, dict[str, Any]]]:
     body = b"".join([frame async for frame in gen]).decode()
     return _frames(body)
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_already_waiting_on_a_person_is_not_handed_off_again(
-    monkeypatch,
-):
-    """No second owner notification per visitor turn while the cap holds."""
-    from pocketpaw_ee.paw_bar import concierge_runtime, handoff
-
-    raised: list[dict[str, Any]] = []
-
-    async def _raise(**kw: Any) -> Any:
-        raised.append(kw)
-        return handoff.HandoffOutcome(ok=True)
-
-    monkeypatch.setattr(handoff, "raise_handoff", _raise)
-    frames = await _collect(
-        concierge_runtime.degrade_reply(
-            object(),
-            "spend_cap",
-            workspace_id="ws-1",
-            customer_ref="cust-0001",
-            question="hello",
-            conversation=_Conv(ConversationState.NEEDS_HUMAN),
-        )
-    )
-    assert raised == []
-    assert _text(frames) == concierge_runtime.DEGRADE_HANDED_OFF
-
-
-@pytest.mark.asyncio
-async def test_a_handoff_that_did_not_land_says_leave_a_message(monkeypatch):
-    """The reply never claims the team has the message when nothing recorded it."""
-    from pocketpaw_ee.paw_bar import concierge_runtime, handoff
-
-    async def _raise(**_kw: Any) -> Any:
-        return handoff.HandoffOutcome(ok=False, error="handoff_unavailable", http_status=503)
-
-    monkeypatch.setattr(handoff, "raise_handoff", _raise)
-    frames = await _collect(
-        concierge_runtime.degrade_reply(
-            object(), "provider_error", workspace_id="ws-1", customer_ref="cust-0001"
-        )
-    )
-    assert _text(frames) == concierge_runtime.DEGRADE_LEAVE_MESSAGE
-    assert [e for e, _d in frames] == ["chunk", "stream_end"]
-
-
-@pytest.mark.asyncio
-async def test_the_degrade_reply_never_names_its_reason(monkeypatch):
-    """Cap, quota and provider state are the owner's business, not the visitor's."""
-    from pocketpaw_ee.paw_bar import concierge_runtime, handoff
-
-    async def _raise(**_kw: Any) -> Any:
-        return handoff.HandoffOutcome(ok=True)
-
-    monkeypatch.setattr(handoff, "raise_handoff", _raise)
-    texts = set()
-    for reason in concierge_runtime.DEGRADE_REASONS:
-        frames = await _collect(
-            concierge_runtime.degrade_reply(
-                object(), reason, workspace_id="ws-1", customer_ref="cust-0001"
-            )
-        )
-        texts.add(_text(frames))
-    assert texts == {concierge_runtime.DEGRADE_HANDED_OFF}
-
-
-@pytest.mark.asyncio
-def _spy_handoffs(monkeypatch) -> list[dict[str, Any]]:
-    from pocketpaw_ee.paw_bar import handoff
-
-    seen: list[dict[str, Any]] = []
-    real = handoff.raise_handoff
-
-    async def _spy(**kw: Any) -> Any:
-        seen.append(kw)
-        return await real(**kw)
-
-    monkeypatch.setattr(handoff, "raise_handoff", _spy)
-    return seen
-
-
-# One test per arm that hands the visitor line on: each passes it separately, so
-# each can leak it separately.
-
-
-@pytest.mark.asyncio
-async def test_retention_off_keeps_the_visitor_line_off_the_handoff(
-    concierge_client, model, monkeypatch
-):
-    """The cap arm."""
-    client, store = concierge_client
-    _pin_cap(monkeypatch, 0.5)
-    await _seed_spend(1.0)
-    seen = _spy_handoffs(monkeypatch)
-    await _site(concierge_store_transcripts=False)
-    widget = await store.create_widget(_widget())
-
-    await _chat(client, widget.id)
-
-    assert len(seen) == 1
-    assert seen[0]["question"] == ""
-    assert seen[0]["store"] is store
-    # Told apart from the visitor's own button and the agent's escalation.
-    assert seen[0]["source"] == "degrade:spend_cap"
-
-
-@pytest.mark.asyncio
-async def test_retention_off_keeps_the_visitor_line_off_a_provider_error_handoff(
-    concierge_client, model, monkeypatch
-):
-    """The failed-model arm."""
+async def test_degrade_reply_is_the_unavailable_frame_and_never_a_handoff(monkeypatch):
+    """Cap and quota read as ``limit``, a failed provider as ``temporary``; the
+    internal reason itself never reaches the visitor."""
     from pocketpaw_ee.paw_bar import concierge_runtime
 
-    client, store = concierge_client
-    rec = _FailingModel(RuntimeError("boom"))
-    monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
-    _seed_kb(monkeypatch, _HOURS_KB)
-    seen = _spy_handoffs(monkeypatch)
-    await _site(concierge_store_transcripts=False)
-    widget = await store.create_widget(_widget())
-
-    await _chat(client, widget.id)
-
-    assert len(seen) == 1
-    assert seen[0]["question"] == ""
-    assert seen[0]["store"] is store
-    assert seen[0]["source"] == "degrade:provider_error"
+    handoffs = _spy_handoffs(monkeypatch)
+    expected = {
+        "spend_cap": _LIMIT,
+        "quota": _LIMIT,
+        "provider_timeout": _TEMPORARY,
+        "provider_error": _TEMPORARY,
+    }
+    assert set(expected) == set(concierge_runtime.DEGRADE_REASONS)
+    for reason, frame in expected.items():
+        frames = await _collect(concierge_runtime.degrade_reply(object(), reason))
+        assert frames == [frame, _END]
+    assert handoffs == []
 
 
-@pytest.mark.asyncio
-async def test_retention_off_keeps_the_visitor_line_off_a_quota_handoff(
-    concierge_client, model, monkeypatch
-):
-    """The quota arm, which the router builds on its own."""
-    client, store = concierge_client
-    _quota_used_up(monkeypatch)
-    seen = _spy_handoffs(monkeypatch)
-    await _site(concierge_store_transcripts=False)
-    widget = await store.create_widget(_widget())
+def test_the_canned_degrade_lines_are_gone():
+    from pocketpaw_ee.paw_bar import concierge_runtime
 
-    await _chat(client, widget.id)
-
-    assert len(seen) == 1
-    assert seen[0]["question"] == ""
-    assert seen[0]["store"] is store
-    assert seen[0]["source"] == "degrade:quota"
-
-
-@pytest.mark.asyncio
-async def test_retention_on_puts_the_visitor_line_on_the_handoff(
-    concierge_client, model, monkeypatch
-):
-    """The owner who keeps transcripts gets the question on the handoff record."""
-    client, store = concierge_client
-    _quota_used_up(monkeypatch)
-    seen = _spy_handoffs(monkeypatch)
-    await _site()
-    widget = await store.create_widget(_widget())
-
-    await _chat(client, widget.id)
-
-    assert seen[0]["question"] == "When do you open on Sunday?"
+    assert not hasattr(concierge_runtime, "DEGRADE_HANDED_OFF")
+    assert not hasattr(concierge_runtime, "DEGRADE_LEAVE_MESSAGE")

@@ -1,4 +1,6 @@
 # audience.py — resolves an Event into the user_ids that should receive it.
+# Updated 2026-10-02 (feat/studio-templates): studio_template.saved / updated /
+# deleted go to the one ``user_id`` recipient, like site templates.
 # Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — meeting.knock and
 # meeting.knock_resolved fan out to the meeting room's members, like meeting.*.
 # Updated: 2026-09-04 — the member cache is now an LRU with single-flight.
@@ -453,6 +455,9 @@ class AudienceResolver:
             "site_template.deleted",
             "site_template.used",
             "site_template.updated",
+            "studio_template.saved",
+            "studio_template.updated",
+            "studio_template.deleted",
         }:
             if recipient := d.get("user_id"):
                 return [recipient]

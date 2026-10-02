@@ -2,8 +2,8 @@
   {
     "label": "a self-funded workspace is charged our quota too \u2014 pictures stop at 20 a day for someone paying their own bill",
     "file": "ee/pocketpaw_ee/cloud/other_hand/router.py",
-    "find": "    if not grant.byok:\n        allowed, spent, cap = await illustration_budget.try_spend(workspace_id)",
-    "replace": "    if True:\n        allowed, spent, cap = await illustration_budget.try_spend(workspace_id)",
+    "find": "    if not grant.byok:\n        cap = metering.illustration_cap()",
+    "replace": "    if True:\n        cap = metering.illustration_cap()",
     "tests": [
       "tests/cloud/other_hand/test_illustrate_endpoint.py::TestAWorkspaceOnItsOwnKey::test_the_route_does_not_claim_our_budget"
     ]

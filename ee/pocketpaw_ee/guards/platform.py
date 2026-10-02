@@ -1,5 +1,7 @@
 # Platform authority axis — cross-tenant operator roles, parallel to workspace RBAC.
 # Created: 2026-09-14 (feat/platform-authority-axis) — chunk 1 of the Paw Admin PRD.
+# Updated 2026-10-02 (feat/discover-moderation): platform.discover.read (SUPPORT)
+# and platform.discover.moderate (OPERATOR) for the Discover moderation routes.
 #
 # This is a SECOND authority axis, not an extension of the first. A WorkspaceRole
 # answers "what may this user do inside one tenant"; a PlatformRole answers "may
@@ -115,6 +117,11 @@ PLATFORM_ACTIONS: dict[str, PlatformActionRule] = {
     "platform.settings.read": PlatformActionRule(PlatformRole.OPERATOR),
     "platform.settings.write": PlatformActionRule(PlatformRole.OPERATOR),
     "platform.health.read": PlatformActionRule(PlatformRole.SUPPORT),
+    # Discover moderation (DS-5). Browsing every listing, hidden ones included,
+    # is support work; feature / hide / unhide / reindex change what the public
+    # index shows, so they are not.
+    "platform.discover.read": PlatformActionRule(PlatformRole.SUPPORT),
+    "platform.discover.moderate": PlatformActionRule(PlatformRole.OPERATOR),
     # The operator audit trail itself (chunk 1).
     "platform.audit.read": PlatformActionRule(PlatformRole.SUPPORT),
     # Granting platform access. OPERATOR, and deliberately the same rung as any

@@ -8,6 +8,9 @@ The cases that matter most here are the ones that are NOT about ranking:
 ``None`` (what every user in the database holds today), a workspace role handed
 in by mistake, and an unrecognised string. All three must deny. A bug in any of
 them is silent and grants cross-tenant access.
+
+Updated 2026-10-02 (feat/discover-moderation): ``moderate`` joins the mutating
+suffixes, so ``platform.discover.moderate`` must sit at OPERATOR.
 """
 
 from __future__ import annotations
@@ -124,7 +127,7 @@ def test_write_actions_require_operator() -> None:
     mutating = [
         action
         for action in PLATFORM_ACTIONS
-        if action.rsplit(".", 1)[-1] in {"write", "adjust", "grant", "revoke"}
+        if action.rsplit(".", 1)[-1] in {"write", "adjust", "grant", "revoke", "moderate"}
     ]
     assert mutating, "sanity: the registry should contain mutating actions"
 

@@ -32,8 +32,8 @@
   {
     "label": "the owner tag is not neutralized in data — a visitor can forge an owner block",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "visitor-message|owner-settings|page)",
-    "replace": "visitor-message|page)",
+    "find": "visitor-message|owner-settings|site-pages|page)",
+    "replace": "visitor-message|site-pages|page)",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_a_visitor_cannot_forge_the_owner_block"
     ]
@@ -53,7 +53,7 @@
     "find": "    if mode == \"email\" and contact:",
     "replace": "    if contact:",
     "tests": [
-      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_the_escalation_mode_drives_the_dont_know_line"
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_the_escalation_mode_picks_the_route_not_whether_to_offer_one"
     ]
   },
   {
@@ -99,6 +99,33 @@
     "replace": "        if False:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_settings_patch_rejects_out_of_bounds_guided_fields"
+    ]
+  },
+  {
+    "label": "lead capture no longer picks the form card — the bar writes the owner's address in prose",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_prompt.py",
+    "find": "    if getattr(site, \"concierge_lead_capture\", True) is not False:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_the_escalation_mode_picks_the_route_not_whether_to_offer_one"
+    ]
+  },
+  {
+    "label": "the don't-know line is dropped — the model falls back to appending a contact route",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_prompt.py",
+    "find": "        return [_DONT_KNOW, _ROUTE_FORM]\n",
+    "replace": "        return [_ROUTE_FORM]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_the_escalation_mode_picks_the_route_not_whether_to_offer_one"
+    ]
+  },
+  {
+    "label": "FRAME rule 1 loses the ask-only contact rule — contact details on every turn",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    \"to reach the business only when the visitor asks for a person, contact details or \"\n",
+    "replace": "    \"to reach the business whenever helpful, for a person, contact details or \"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_guided_fields.py::test_every_frame_carries_the_ask_only_contact_rule"
     ]
   }
 ]

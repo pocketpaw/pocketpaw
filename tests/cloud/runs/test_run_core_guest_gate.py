@@ -10,6 +10,10 @@
 # The refusal fixtures EXCEED the cap inside the test (cap 2 -> two real
 # spends land first): a gate test that never crosses the line is how a
 # switched-off gate ships green.
+# Updated 2026-10-01 (CN-3): guest turns are counted by the shared
+# ``metering.service`` daily primitive; ``_spend_turn`` / ``_turns_used_today``
+# below stand in for the removed ``guest_budget.try_spend_turn`` /
+# ``turns_used_today`` with the same claim the gate makes.
 
 from __future__ import annotations
 
@@ -17,7 +21,6 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
-from pocketpaw_ee.cloud.auth import guest_budget
 from pocketpaw_ee.cloud.chat.runs import run_core
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport
@@ -25,6 +28,25 @@ from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 from pocketpaw_ee.cloud.models.user import GuestLimits, User
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _spend_turn(user_id: str, cap: int) -> bool:
+    """One guest turn claim, exactly as ``guest_gates`` makes it."""
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.try_spend(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS, cap=cap
+    )
+
+
+async def _turns_used_today(user_id: str) -> int:
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.used(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS
+    )
 
 
 async def _mk_guest(*, turns: int) -> User:
@@ -137,8 +159,8 @@ async def test_a_guest_over_the_cap_is_rejected_and_the_model_never_runs(monkeyp
     await _store_key()
     uid = str(guest.id)
     # EXCEED the cap: two real spends first.
-    assert (await guest_budget.try_spend_turn(uid, 2))[0] is True
-    assert (await guest_budget.try_spend_turn(uid, 2))[0] is True
+    assert (await _spend_turn(uid, 2)) is True
+    assert (await _spend_turn(uid, 2)) is True
 
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     transport = RedisStreamTransport(redis)
@@ -153,7 +175,7 @@ async def test_a_guest_over_the_cap_is_rejected_and_the_model_never_runs(monkeyp
     assert events[0].data["kind"] == "turns"
     assert called["terminal"] == [{"run_id": "r1", "status": "failed"}]
     # The refused claim was rolled back — the counter did not run away.
-    assert await guest_budget.turns_used_today(uid) == 2
+    assert await _turns_used_today(uid) == 2
 
 
 async def test_a_guest_under_the_cap_runs_and_spends_exactly_one(monkeypatch, mongo_db):
@@ -168,7 +190,7 @@ async def test_a_guest_under_the_cap_runs_and_spends_exactly_one(monkeypatch, mo
     await run_core.execute_run(_spec(uid))
 
     assert called["agent_loop"] is True
-    assert await guest_budget.turns_used_today(uid) == 1, (
+    assert await _turns_used_today(uid) == 1, (
         "the executor is the single spend site — exactly one per turn"
     )
 
@@ -189,7 +211,7 @@ async def test_a_keyless_guest_is_rejected_without_spending(monkeypatch, mongo_d
     events = await _events(transport)
     assert [e.event for e in events] == ["error"]
     assert events[0].data["code"] == "guest_key_required"
-    assert await guest_budget.turns_used_today(uid) == 0
+    assert await _turns_used_today(uid) == 0
 
 
 async def test_a_non_guest_runs_with_no_counter_row(monkeypatch, mongo_db):
@@ -204,4 +226,4 @@ async def test_a_non_guest_runs_with_no_counter_row(monkeypatch, mongo_db):
     await run_core.execute_run(_spec(uid))
 
     assert called["agent_loop"] is True
-    assert await guest_budget.turns_used_today(uid) == 0
+    assert await _turns_used_today(uid) == 0

@@ -3,7 +3,6 @@
   "title": "Components -- Knowledge \u0026 Memory Management",
   "description": "Component-level view of Knowledge \u0026 Memory Management",
   "elements": [
-    "knowledge",
     "memory",
     "vectordb"
   ],

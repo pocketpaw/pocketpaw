@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Verify agent_bridge routes broadcasts through emit()."""
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_agent_bridge_emits_stream_start_through_bus():
     """Confirm agent_bridge uses emit() not ws_manager.broadcast_to_group."""
-    from pocketpaw_ee.cloud.realtime.events import AgentStreamStart
+    from pocketpaw_ee.cloud._core.realtime.events import AgentStreamStart
 
     # Smoke-test: if `emit` is the only path used by agent_bridge for agent events,
     # patching it should capture every broadcast.

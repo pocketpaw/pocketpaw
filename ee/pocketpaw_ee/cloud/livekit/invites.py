@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Meeting invite service — shareable links for guest access to LiveKit calls.
 
 Guests receive a temporary LiveKit access token with ``guest-`` prefixed
@@ -291,8 +293,8 @@ async def accept_meeting_invite(
 
     # Emit a participant-joined event so group members see the guest.
     try:
-        from pocketpaw_ee.cloud.realtime.emit import emit
-        from pocketpaw_ee.cloud.realtime.events import CallParticipantJoined
+        from pocketpaw_ee.cloud._core.realtime.emit import emit
+        from pocketpaw_ee.cloud._core.realtime.events import CallParticipantJoined
 
         await emit(
             CallParticipantJoined(

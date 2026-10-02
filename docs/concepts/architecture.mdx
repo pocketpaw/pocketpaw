@@ -14,6 +14,9 @@ tags: ["architecture", "design"]
   enforce mode ladder, the divergence report as the enforce gate, PIN/IGNORE
   + the stewardship queue, and freshness decay. The section documents the
   FST-1..8 chain in src/pocketpaw/fabric/ for devs who haven't read it.
+  Updated 2026-10-01 (CN-6) — added "Write path and read model": the journal
+  is the Fabric object write path, the per-workspace FabricStore the read model;
+  lists default_journal_store, sync_read_model, upsert_object, define_type(type_id=).
 */}
 
 # PocketPaw Architecture: Event-Driven Message Bus
@@ -89,6 +92,16 @@ The AgentLoop is the central coordinator:
 ## Fabric Source Truth
 
 Fabric is PocketPaw's typed workspace ontology — objects like `Customer` or `Deal` with a flat `properties` dict that connectors, agents, and humans all write to. By default those writes are **last-writer-wins (LWW)**: whoever writes last owns the value, regardless of how trustworthy they are. The source-truth chain (`src/pocketpaw/fabric/`) fixes that without changing the read path.
+
+### Write path and read model
+
+Fabric objects have one write path and one read model. `FabricJournalStore` (`journal_store.py`) appends `fabric.object.*` events to the org journal; that is how domain code such as the people service writes. The per-workspace SQLite `FabricStore` (`get_fabric_store(workspace_id=...)`, one file per workspace) is the read model: the Fabric API router, the agents' Fabric MCP and Ripple sources read from it. The journal's own in-memory projection still serves the writing domain (the people service's `get_person` reads it), but no general reader goes to the journal. Projected rows go straight to the flat cache, so the statement layer below does not see them.
+
+- `pocketpaw.fabric.default_journal_store()` returns the process-wide journal store wired to the read model. Reuse it; a second `FabricJournalStore(get_journal())` means a second projection and a second backfill.
+- Each create or update upserts the object's full current state into the store of every `workspace:<id>` in the event scope (`read_model.py`). A re-scope removes the row from workspaces it left, and archive removes it. If that workspace already has its own type with the same name, the row takes that type's id.
+- `FabricJournalStore.sync_read_model()` mirrors every journal object into the read model again: live rows are upserted and archived rows removed. It is idempotent. EE runs it once as a background task at startup, never on a read path.
+- `FabricStore.upsert_object(obj, workspace_id=...)` writes an object under its own id. It will not touch a row owned by another workspace, or a row whose `updated_at` is newer.
+- `FabricStore.define_type(..., type_id=...)` pins a stable type id, for example `person`.
 
 ### The statement model
 

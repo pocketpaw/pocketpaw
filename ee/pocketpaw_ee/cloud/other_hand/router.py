@@ -1,5 +1,9 @@
 # router.py — Otherhand page-snapshot REST surface.
 #
+# Updated: 2026-10-01 (CN-3) — the illustration route claims its daily budget
+# through the shared ``metering.service.try_spend`` primitive
+# (``illustration_budget`` is gone); same cap, same 429 code and message.
+#
 # Created: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — one endpoint,
 # pinned by section 2 of the frozen frontend/backend contract
 # (``docs/design/drafts/2026-08-25-otherhand-contract.md``):
@@ -151,8 +155,9 @@ async def illustrate(
     generator.
     """
     from pocketpaw_ee.cloud.auth import guest_budget
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
     from pocketpaw_ee.cloud.other_hand import illustrate as illustrator
-    from pocketpaw_ee.cloud.other_hand import illustration_budget
     from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
     from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
 
@@ -183,12 +188,17 @@ async def illustrate(
     # the platform's key, because a workspace spending its own money has no
     # reason to be inside our quota.
     if not grant.byok:
-        allowed, spent, cap = await illustration_budget.try_spend(workspace_id)
-        if not allowed:
+        cap = metering.illustration_cap()
+        if not await metering.try_spend(
+            subject_type="workspace",
+            subject_id=workspace_id,
+            meter=DailyMeter.ILLUSTRATION,
+            cap=cap,
+        ):
             raise CloudError(
                 429,
                 "other_hand.illustration_limit",
-                f"Today's illustration limit is used up ({spent}/{cap}).",
+                f"Today's illustration limit is used up ({cap}/{cap}).",
             )
 
     try:

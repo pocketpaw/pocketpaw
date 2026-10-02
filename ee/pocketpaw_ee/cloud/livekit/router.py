@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """FastAPI REST router for LiveKit call management.
 
 Endpoints:
@@ -54,19 +56,19 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    CallEnded,
+    CallParticipantJoined,
+    CallParticipantLeft,
+    CallStarted,
+)
 from pocketpaw_ee.cloud.chat.group_service import (
     _get_group_domain_or_404,
     _require_domain_group_member,
 )
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.livekit import service as livekit_service
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
-    CallEnded,
-    CallParticipantJoined,
-    CallParticipantLeft,
-    CallStarted,
-)
 from pocketpaw_ee.cloud.shared.deps import current_user, current_workspace_id
 
 logger = logging.getLogger(__name__)

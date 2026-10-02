@@ -21,11 +21,16 @@
 #   hoping. The float stays because it is what gets serialised onto the ledger
 #   ref and ``BillResult``; the Decimal is what the conversion reads. Also a new
 #   ``CostSource`` member, ``unpriced`` — see below.
+# Updated 2026-10-01 (fix/canon-daily-caps, CN-3): added ``DailyMeter`` and
+#   ``SubjectType``, the names of the daily usage counters that
+#   ``service.try_spend`` claims against (one ``DailyUsage`` row per subject,
+#   meter and UTC day).
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
+from enum import StrEnum
 from typing import Literal
 
 from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT
@@ -39,6 +44,23 @@ from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT
 # ``unpriced`` is something to bill that we could not put a number on, and it is
 # the one an operator has to see.
 CostSource = Literal["reported", "estimated", "unpriced", "none"]
+
+# Who a daily counter is charged to. Every meter is per workspace except the
+# guest turn meter, which follows the guest USER across workspaces.
+SubjectType = Literal["workspace", "user"]
+
+
+class DailyMeter(StrEnum):
+    """The daily usage counters. The value is stored on the ``DailyUsage`` row,
+    so renaming one resets that meter's counters — add, don't rename."""
+
+    WORKSPACE_TURNS = "workspace_turns"
+    GUEST_TURNS = "guest_turns"
+    UPLOAD_FILES = "upload_files"
+    UPLOAD_BYTES = "upload_bytes"
+    FILE_COMPREHENSION = "file_comprehension"
+    FILE_TRANSCRIPTION = "file_transcription"
+    ILLUSTRATION = "illustration"
 
 
 @dataclass(frozen=True)

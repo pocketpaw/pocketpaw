@@ -58,12 +58,36 @@ def test_a_passing_real_report_for_the_configured_model_opens_the_gate(gate_file
     assert default_concierge_runtime(_settings()) == "v2"
 
 
-def test_the_shipped_default_is_legacy_even_with_a_passing_report(gate_file):
+def test_a_deployment_that_asks_for_legacy_stays_legacy_with_a_passing_report(gate_file):
     gate_file(_report())
-    assert get_settings().pawbar_concierge_default_runtime == "legacy"
     assert (
         default_concierge_runtime(_settings(pawbar_concierge_default_runtime="legacy")) == "legacy"
     )
+
+
+def _shipped_settings():
+    """Settings with the shipped runtime request, whatever the environment says."""
+    from pocketpaw.config import Settings
+
+    shipped = Settings.model_fields["pawbar_concierge_default_runtime"].default
+    return get_settings().model_copy(
+        update={"pawbar_concierge_default_runtime": shipped, "pawbar_concierge_model": _MODEL}
+    )
+
+
+def test_the_shipped_default_asks_for_v2():
+    from pocketpaw.config import Settings
+
+    assert Settings.model_fields["pawbar_concierge_default_runtime"].default == "v2"
+
+
+def test_the_shipped_default_with_a_passing_report_is_v2(gate_file):
+    gate_file(_report())
+    assert default_concierge_runtime(_shipped_settings()) == "v2"
+
+
+def test_the_shipped_default_without_a_report_is_legacy(gate_file):
+    assert default_concierge_runtime(_shipped_settings()) == "legacy"
 
 
 def test_no_report_is_legacy(gate_file):

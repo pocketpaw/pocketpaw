@@ -20,6 +20,8 @@
 # the steps that already succeeded in place. Tag and comprehension writes emit
 # `file.updated` so /files refetches the row. A re-index that lands under a new
 # article id removes the old article first: one file, one article.
+# Updated 2026-10-01 (CN-3): the comprehension cap claims through the shared
+# `metering.service.try_spend` daily primitive (comprehension_budget is gone).
 """Upload bus subscribers.
 
 The upload pipeline emits :class:`FileReady` on every successful upload.
@@ -664,7 +666,7 @@ async def _write_comprehension(
        merging cannot destroy anything.
     2. **The daily cap is claimed before the call, and refuses fail-CLOSED.**
        This is the one gate in the whole path that fails closed; see
-       ``comprehension_budget``'s module note for why the asymmetry is
+       the DAILY CAPS note in ``metering.service`` for why the asymmetry is
        deliberate.
     3. **Everything after that fails OPEN.** A dead proxy, a 404 model id, a
        model that answers in prose — ``comprehend`` returns None and this
@@ -681,17 +683,24 @@ async def _write_comprehension(
             logger.debug("file_id=%s already has a summary; leaving it alone", file_id)
             return
 
-        from pocketpaw_ee.cloud.uploads import comprehension_budget
+        from pocketpaw_ee.cloud.metering import service as metering
+        from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
-        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)
-        if not allowed:
+        cap = metering.file_comprehension_cap()
+        # Fails CLOSED (the default): a degraded database must not become an
+        # open tab at the model for unrequested, platform-paid calls.
+        if not await metering.try_spend(
+            subject_type="workspace",
+            subject_id=workspace_id,
+            meter=DailyMeter.FILE_COMPREHENSION,
+            cap=cap,
+        ):
             logger.info(
                 "file comprehension skipped for file_id=%s: workspace %s is at "
-                "%d/%d for today (or the counter was unreadable). The file is "
-                "still indexed and tagged.",
+                "its daily cap of %s (or the counter was unreadable). The file "
+                "is still indexed and tagged.",
                 file_id,
                 workspace_id,
-                spent,
                 cap,
             )
             return

@@ -1,8 +1,9 @@
 """Tier 2 executor — enqueues the run as an arq job for a separate worker
 process to execute. Selected when ``POCKETPAW_CLOUD_RUN_EXECUTOR=arq``.
 
-The arq pool is lazily constructed on first ``submit`` and cached for the
-lifetime of the process.
+The arq pool is the process-wide one from ``_core.redis_client.get_arq_pool``
+(built on first ``submit``, closed by ``CloudLifecycleHook.on_shutdown``).
+Changes (2026-10-01, CN-4): the local getter and ``close_pool`` moved there.
 
 Before enqueueing, ``submit`` writes a ``queued`` frame to the run's stream (only
 when the stream does not exist yet, so an idempotent re-submit never puts it
@@ -14,53 +15,19 @@ refreshes it. Best-effort: a failed frame never blocks the enqueue.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 
-from arq import create_pool
-from arq.connections import ArqRedis, RedisSettings
-
+from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec, queued_stream_ttl_seconds
 
 logger = logging.getLogger(__name__)
 
 QUEUED_MESSAGE = "Waiting for a free slot. Your reply will start shortly."
 
-_pool: ArqRedis | None = None
-_pool_lock = asyncio.Lock()
-
-
-async def _get_pool() -> ArqRedis:
-    global _pool
-    # Double-checked lock so concurrent first-submits don't leak pools.
-    if _pool is None:
-        async with _pool_lock:
-            if _pool is None:
-                url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
-                if not url:
-                    raise RuntimeError(
-                        "POCKETPAW_REDIS_URL is not set — the arq executor needs Redis."
-                    )
-                _pool = await create_pool(RedisSettings.from_dsn(url))
-    return _pool
-
-
-async def close_pool() -> None:
-    """Close the cached arq Redis pool on web-process shutdown.
-
-    No-op when the pool was never built (Tier 0 / Tier 1 deployments).
-    A failing aclose is swallowed — shutdown paths can't afford to raise.
-    """
-    global _pool
-    pool = _pool
-    _pool = None
-    if pool is None:
-        return
-    try:
-        await pool.aclose()
-    except Exception:
-        logger.debug("arq pool aclose failed during shutdown", exc_info=True)
+# The process-wide arq pool (one pool, closed on shutdown) lives in
+# _core.redis_client. ``_get_pool`` is this module's name for it: callers and
+# tests monkeypatch it here.
+_get_pool = get_arq_pool
 
 
 class ArqExecutor:
@@ -88,8 +55,3 @@ async def _announce_queued(run_id: str) -> None:
         await transport.set_ttl(run_id, queued_stream_ttl_seconds())
     except Exception:
         logger.warning("queued frame write failed for run %s", run_id, exc_info=True)
-
-
-def _reset_for_tests() -> None:
-    global _pool
-    _pool = None
