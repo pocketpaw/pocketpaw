@@ -385,8 +385,8 @@
   {
     "label": "CR-3: knowledge can open or close the <page> block (page left the neutralized tags)",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "|visitor-message|owner-settings|page)\\b\",",
-    "replace": "|visitor-message|owner-settings)\\b\",",
+    "find": "|visitor-message|owner-settings|site-pages|page)\\b\",",
+    "replace": "|visitor-message|owner-settings|site-pages)\\b\",",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_page.py::test_knowledge_cannot_close_the_page_block"
     ]
