@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-commissions, PH-13 re-check) — partial refunds
+  that add up to the full amount lapse the site; a partial refund before the
+  payment is processed no longer cancels the link; a pay link whose reservation
+  went stale while the checkout was created is a 409 partners.link_in_progress.
 Updated: 2026-10-02 (feat/partners-commissions, PH-13 review) — pay-link needs
   sites.buy_plan; one open link per site (409 partners.link_open /
   partners.link_in_progress); partial refunds take a pro-rata share of the
@@ -1122,11 +1126,14 @@ client-paid site, and the renewal sweep does not renew it: at `renewal_date` the
 site drops to the free tier and stays published, unless the client has paid a new
 link. A refund or lost dispute within 60 days of the payment takes that payment's
 commission back (the wallet can go negative); a partial refund takes the same
-share of the commission and leaves the site on its plan, while a full refund or
-a lost dispute also drops the site to the free tier. This still happens if the
-site has been deleted since. After 60 days nothing is taken back. A refund that
-arrives before the payment was processed cancels the link: the late payment
-activates nothing and earns nothing. If the partner is no longer active when the
+share of the commission and leaves the site on its plan, while a full refund, a
+lost dispute, or partial refunds that add up to the full amount also drop the
+site to the free tier. This still happens if the site has been deleted since.
+After 60 days nothing is taken back. A full refund that arrives before the
+payment was processed cancels the link: the late payment activates nothing and
+earns nothing. A partial refund that arrives that early leaves the link alone (the
+payment still activates and pays the full commission) and is logged as an error
+for someone to settle by hand. If the partner is no longer active when the
 payment lands, the site still gets its year but no commission is paid (the
 payment is flagged `partner_inactive` for review).
 

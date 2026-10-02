@@ -19,7 +19,9 @@ Updated 2026-10-02 (`feat/partners-commissions`, PH-13): **a third rail,
 pay link, and the partner earns a commission. See "Client-paid partner sites"
 below. Also: a Dodo `payment.succeeded` that carries a `subscription_id` is now
 recorded and never granted as a top-up, which applies to workspace-plan
-subscriptions too.
+subscriptions too. Re-check fixes on the same branch: partial refunds that add up
+to the full amount now lapse the site, early partial refunds no longer cancel the
+link, and a stale pay-link reservation is refused instead of filled.
 
 ## What was broken
 
@@ -468,11 +470,25 @@ with no usable amount takes nothing and logs ERROR. The running total is claimed
 on the Payment row (`commission_reversed`, `commission_reversal_event_ids`)
 before the debit (cause `partner_commission_reversal`, key
 `<payment_id>:commission:reversal:<event_id>`, may go negative), so a refund and
-a dispute, or several partials, never take more than was granted. Only a full
-refund or a lost dispute (within 60 days of `paid_at`) flips the record to
-`reversed` and drops the site to free. A refund that lands while the record is
-still `pending` marks it `reversed` (`refunded_before_processed`), so the late
-payment does nothing.
+a dispute, or several partials, never take more than was granted. A claim that
+loses that race re-reads the row and retries once with what is left, then logs
+ERROR. The same claim sums the refunds into `refunded_minor`, so a full refund, a
+lost dispute, or partials that add up to the amount paid (within 60 days of
+`paid_at`) flip the record to `reversed` and drop the site to free. The site
+lapses after the claim and before the debit. Known gap: `refunded_minor` only
+moves when there is commission to claim, so an inactive partner's site keeps its
+year after partials that add up to the full amount (a single full refund still
+lapses it). A debit that raises, including a cancellation, releases the claim so
+the redelivery re-drives it; a redelivery that finds its event id on the row with
+no ledger entry behind it logs ERROR (the process died between claim and debit;
+check the ledger, then settle by hand). A full refund that lands while the record
+is still `pending` marks it `reversed` (`refunded_before_processed`), so the late
+payment does nothing; a partial one logs ERROR and leaves the record to activate.
+
+A pay link's reservation is filled only while it is younger than five minutes.
+After that another request may have treated it as crashed and opened its own
+link, so the slow request releases its slot and returns 409
+`partners.link_in_progress`. The Dodo payment it created is never handed out.
 
 Other flags on a record: `discount` (a discount code was used; payment links
 cannot switch codes off), `sku_mismatch` (a payment for another plan than the
