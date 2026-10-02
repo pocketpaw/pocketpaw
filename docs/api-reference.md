@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
+  Studio generation as a template: POST / GET /studio-templates, PATCH / DELETE
+  /studio-templates/{id}). Discover gains a second source, `studio_template`,
+  and two public listing fields, `media_kind` and `media_url`.
 Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
   startup (and then every 30 minutes with the cloud scheduler on); the owner
   using their own listing doesn't raise `remix_count`.
@@ -1152,11 +1156,73 @@ return `404` for everyone but the owner, who still sees it with
 Errors: `404` for a template you can't see or that is not public; `403`
 (`site_templates.own_template`) for the owner reporting their own.
 
+## Studio templates
+
+Publish one asset of a finished Studio generation as a template. The template
+is a frozen copy: the asset becomes `cover` and the generation's prompt, model
+and settings become `recipe`. Editing or deleting the generation later doesn't
+change it. Input images are never published: `recipe.params` drops
+`inputImageCount` and any other input-image, reference or upload field, and
+`uses_input_images` only says the original run had some. `visibility` is
+`private` (default), `workspace` or `public`; a public template is listed on
+Discover (`source: "studio_template"`), private or deleted takes the listing
+down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
+`music`). Cover URLs stay backend-relative (`/api/v1/media/...`) here.
+
+```json
+{
+  "id": "6661b2...",
+  "owner": "u1",
+  "template_type": "generation",
+  "source_generation_id": "gen_abc",
+  "kind": "image",
+  "title": "Red fox",
+  "description": "",
+  "audiences": ["design"],
+  "visibility": "public",
+  "cover": {"url": "/api/v1/media/fox.png", "mime": "image/png", "width": 1024, "height": 1024, "poster_url": null},
+  "recipe": {"kind": "image", "model": "flux", "prompt": "a red fox", "params": {"aspectRatio": "1:1", "count": 1}},
+  "uses_input_images": false,
+  "hidden": false,
+  "created_at": "2026-10-02T09:00:00Z",
+  "updated_at": "2026-10-02T09:00:00Z"
+}
+```
+
+### `POST /studio-templates`
+
+```json
+{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public" }
+```
+
+`asset_id` is optional (default: the generation's first asset). Response `200`:
+the template. Errors: `404` for a generation that isn't in your workspace or an
+unknown `asset_id`; `409` (`studio_templates.not_ready`) unless the generation
+succeeded.
+
+### `GET /studio-templates`
+
+Your own templates in this workspace, newest first. Query: `limit` (1-50,
+default 50), `cursor`. Response `200`:
+`{"templates": [<template>, ...], "next_cursor": "..." | null}`.
+
+### `PATCH /studio-templates/{template_id}`
+
+Any of `title`, `description`, `audiences`, `visibility`. Owner only; anyone
+else gets `404`. The cover and recipe never change. A template hidden by
+Discover reports stays hidden after a private and public round trip.
+
+### `DELETE /studio-templates/{template_id}`
+
+Owner only. Response `200`: `{"id": "...", "deleted": true}`. The generation is
+untouched.
+
 ## Discover — Public Index
 
-One index of shareable items from every workspace, newest first. Today the only
-source is public site templates (`source: "site_template"`); a public template
-has one listing, hidden when the template is hidden. The two reads need no sign-in and
+One index of shareable items from every workspace, newest first. Sources are
+public site templates (`source: "site_template"`) and public studio templates
+(`source: "studio_template"`); a public template has one listing, hidden when
+the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
 return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
 user and act in the caller's active workspace.
@@ -1176,13 +1242,22 @@ reports or the source item's id):
   "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
   "live_url": "https://bakery.pawsites.workers.dev",
   "remix_count": 3,
-  "created_at": "2026-10-01T09:00:00Z"
+  "created_at": "2026-10-01T09:00:00Z",
+  "media_kind": null,
+  "media_url": null
 }
 ```
 
+`media_kind` (`image`, `video`, `audio`) and `media_url` are set on studio
+template listings and `null` on site templates. Studio listings carry absolute
+URLs built from `POCKETPAW_PUBLIC_BASE_URL`: `media_url` is the asset,
+`preview_image_url` the image itself or a video's poster (`null` for music),
+and `live_url` is always `null`.
+
 ### `GET /discover` (public)
 
-Query params, all optional: `source`, `kind` (`site`, `tool`, `game`),
+Query params, all optional: `source`, `kind` (`site`, `tool`, `game`, `image`,
+`video`, `music`),
 `audience` (matches one of a listing's `audiences`), `q` (case-insensitive
 substring of title or description, up to 100 chars), `featured` (`true` /
 `false`), `cursor`, `limit` (1-50, default 24).
@@ -1206,6 +1281,9 @@ optional; `name` defaults to the item's name.
 ```
 
 Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
+For a studio template nothing is copied: the result is the recipe to run in
+Studio, `{"source": "studio_template", "result": {"recipe": {...}, "uses_input_images": false}}`
+(`name` is ignored).
 The source's own checks apply (a site template needs a plan with Sites), and
 `remix_count` goes up by one only when the copy succeeded, and not when the
 listing's owner uses their own listing. `404` for a missing
