@@ -1,4 +1,6 @@
 # tests/cloud/test_paw_bar_ingest.py — PR-B: HTTP surface + event ingest.
+# Updated 2026-10-01 (CN-7): TestInterpolate imports the shared
+#   sites_capture.ingest.interpolate and pins that paw-bar uses the same one.
 # Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
 #   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
 #   route (fix/pawbar-public-route-gates, 2026-09-26).
@@ -521,18 +523,18 @@ class TestInjectionScreening:
 
 
 # ---------------------------------------------------------------------------
-# _interpolate helper behavior
+# interpolate helper behavior (shared with sites_capture since CN-7)
 # ---------------------------------------------------------------------------
 
 
 class TestInterpolate:
     def test_full_placeholder_returns_raw_value(self) -> None:
-        from pocketpaw_ee.paw_bar.router import _interpolate
+        from pocketpaw.sites_capture.ingest import interpolate as _interpolate
 
         assert _interpolate("{{ payload.count }}", {"payload": {"count": 42}}) == 42
 
     def test_mixed_string_stringifies(self) -> None:
-        from pocketpaw_ee.paw_bar.router import _interpolate
+        from pocketpaw.sites_capture.ingest import interpolate as _interpolate
 
         out = _interpolate(
             "Order {{ payload.item }} for {{ customer_ref }}",
@@ -541,10 +543,29 @@ class TestInterpolate:
         assert out == "Order latte for cust_a"
 
     def test_missing_path_resolves_to_empty_string_in_mixed_mode(self) -> None:
-        from pocketpaw_ee.paw_bar.router import _interpolate
+        from pocketpaw.sites_capture.ingest import interpolate as _interpolate
 
         out = _interpolate("Hi {{ payload.name }}!", {"payload": {}})
         assert out == "Hi !"
+
+    def test_paw_bar_and_capture_share_one_interpolate(self) -> None:
+        """paw-bar used to carry a private copy. Both ingest paths now resolve
+        templates through the same function, so they cannot drift apart."""
+        from pocketpaw_ee.paw_bar import router
+
+        from pocketpaw.sites_capture import ingest
+        from pocketpaw.sites_capture.models import SiteEventMapping
+
+        assert router.interpolate is ingest.interpolate
+        assert not hasattr(router, "_interpolate")
+        ctx = {"payload": {"item": "latte", "count": 2}, "customer_ref": "cust_abcd"}
+        fields = {"item": "{{ payload.item }}", "line": "{{ payload.count }}x {{ payload.item }}"}
+        mapping = SiteEventMapping(creates="Order", fields=fields)
+        assert (
+            ingest.interpolate_mapping(mapping, ctx)
+            == {k: router.interpolate(v, ctx) for k, v in fields.items()}
+            == {"item": "latte", "line": "2x latte"}
+        )
 
 
 # ---------------------------------------------------------------------------

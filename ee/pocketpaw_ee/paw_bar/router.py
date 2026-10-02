@@ -44,6 +44,10 @@
 # ``concierge_store_transcripts`` governs storing visitor text (and so the memory),
 # never the answer. Ledger beats and owner notifications are fail-soft and never
 # cost a visitor an answer.
+#
+# Changes (2026-10-01, CN-7): the legacy event ingest interpolates mappings with
+# sites_capture.ingest.interpolate; the private _interpolate/_lookup copy and
+# _PLACEHOLDER_RE are gone. The origin policy here is unchanged (fails open).
 from __future__ import annotations
 
 import asyncio
@@ -98,6 +102,7 @@ from pocketpaw.paw_bar.models import (
     spec_bytes,
 )
 from pocketpaw.security.rate_limiter import RateLimiter
+from pocketpaw.sites_capture.ingest import interpolate
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
 from pocketpaw_ee.cloud._core.rate_limit import _client_ip
 from pocketpaw_ee.paw_bar.admit import admit as admit_event
@@ -125,8 +130,6 @@ _require_paw_bar_read = require_action("paw_bar.read", workspace_dep=current_wor
 _require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
 
 router = APIRouter(tags=["PawBar"])
-
-_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 
 # The frozen public ``GET /paw-bar/spec/{id}`` still carries ``spec.catalog`` for
 # the key-less ``src/`` widget: the catalog store's first this-many items.
@@ -6881,7 +6884,7 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
         return None
 
     context = {"payload": event.payload, "customer_ref": event.customer_ref}
-    properties = {k: _interpolate(v, context) for k, v in mapping.fields.items()}
+    properties = {k: interpolate(v, context) for k, v in mapping.fields.items()}
     try:
         obj = FabricObject(
             type_name=mapping.creates,
@@ -6894,31 +6897,3 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
     except Exception:
         logger.exception("Failed to create Fabric object from paw-bar event")
         return None
-
-
-def _interpolate(template: str, context: dict[str, Any]) -> Any:
-    """Resolve `{{ a.b }}` placeholders against the context dict.
-
-    If the entire template is a single placeholder (`{{ payload.item }}`), the
-    raw value is returned (preserving non-string types). Mixed strings fall back
-    to stringified substitution.
-    """
-    full_match = re.fullmatch(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}", template)
-    if full_match:
-        return _lookup(full_match.group(1), context)
-
-    def _replace(m: re.Match[str]) -> str:
-        val = _lookup(m.group(1), context)
-        return "" if val is None else str(val)
-
-    return _PLACEHOLDER_RE.sub(_replace, template)
-
-
-def _lookup(path: str, context: dict[str, Any]) -> Any:
-    cur: Any = context
-    for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return None
-    return cur

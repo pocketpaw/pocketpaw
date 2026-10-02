@@ -37,8 +37,8 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 >    `ogl` or `gsap` go through `set_site_dependencies` (or the create's
 >    `dependencies`) and are imported inside `onMount` / a `useEffect` dynamic
 >    `import()`; a top-level import breaks the prerender. `get_effect` returns an
->    effect's `needs` as `dependencies` to declare; on **html** it ships them
->    vendored. A dynamic svelte site takes no packages: use `needs_js=false`
+>    effect's `needs` as `dependencies` to declare on **react**; on **html**
+>    and **svelte** it ships them vendored. A dynamic svelte site takes no packages: use `needs_js=false`
 >    effects or hand-written GLSL there. See `pocketpaw-design-taste` §2.C, which
 >    owns the canvas guardrail and stays authoritative on Paw Sites; this skill
 >    supplies the mechanics behind it.
