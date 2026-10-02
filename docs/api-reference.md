@@ -2,6 +2,10 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-earnings, PH-11) — Paw Partners: POST /partners/sell
+  takes an optional price_minor + currency (booked as a paid receipt on the site's
+  client record) and returns invoice_id; new GET /partners/summary and
+  GET /partners/earnings.
 Updated: 2026-10-02 (feat/partners-cobrand, PH-5) — "Hide the PocketPaw badge":
   partner-sold sites carry the partner co-brand mark instead of the badge.
 Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
@@ -1032,13 +1036,24 @@ the public plan catalog.
 
 ### `POST /partners/sell`
 
-Body `{client_id, site_id, sku}`. Sells one of the workspace's sites a partner
+Body `{client_id, site_id, sku, price_minor?, currency?}`. Sells one of the workspace's sites a partner
 plan, paid from the workspace credit wallet. The client must be this partner's
 (**404** otherwise), the site must belong to this workspace (**404**), and `sku`
 must be a partner plan (**422** `partners.unknown_sku`). It runs the ordinary
 paid-publish path for the site's pocket — wallet debit, then redeploy — and
 stamps the site's `partner_client_id`. Returns `{site_id, name, url, plan_tier,
-renewal_date, partner_client_id, subscription_status}`.
+renewal_date, partner_client_id, subscription_status, invoice_id}`.
+
+- `price_minor` (optional, integer ≥ 0, ISO-4217 minor units, same ceiling as a
+  site receipt) is what the partner charged its client. `currency` is a 3-letter
+  code, upper-cased; it defaults to `INR` when the profile's `billing_country` is
+  `IN`, else `USD`. Both are validated before the wallet is touched (**422**).
+  When the sale goes through, the price is booked as a PAID receipt on the site's
+  client record (the same list `GET /sites/{site_id}/client` returns, note
+  `Paw Partners sale · <plan label>`) and its id comes back as `invoice_id`. It is
+  the partner's private bookkeeping: nothing bills from it and the client never
+  sees it. A refused sale and the no-op re-sell below book nothing
+  (`invoice_id: null`), and so does a sale without `price_minor`.
 
 - Needs `sites.buy_plan` (workspace admin): a sale spends the wallet. **403**
   for a member, and **403** `partner.not_active` without an ACTIVE profile.
@@ -1073,6 +1088,39 @@ partner_client_id, client_name}]`, ordered by `renewal_date` (sites with none co
 many days (a site with no renewal date is never due); without it, every sold
 site is returned, including lapsed ones with a null date. Needs `fabric.read` and
 an ACTIVE profile.
+
+### `GET /partners/summary`
+
+The partner's earnings at a glance:
+
+```json
+{
+  "clients": 4, "sites_sold": 6, "active_sites": 5, "renewals_due_30d": 1,
+  "spent_credits_30d": 1700, "spent_credits_total": 10200,
+  "revenue_30d": [{"currency": "INR", "amount_minor": 299900}],
+  "revenue_total": [{"currency": "INR", "amount_minor": 1499500},
+                    {"currency": "USD", "amount_minor": 5000}]
+}
+```
+
+`clients` counts the partner's client records; `sites_sold`, `active_sites`
+(`subscription_status` active) and `renewals_due_30d` (same rule as
+`GET /partners/sites?due_within_days=30`) count the sold sites. Revenue is the sum
+of PAID receipts on the sold sites' client records (sale prices and any receipt
+added through `/sites/{site_id}/client/invoices`), one row per currency, never
+converted or mixed; `revenue_30d` keeps receipts issued in the last 30 days.
+Spend is the `site_plan` wallet debits (purchases, renewals, plan changes) for
+the sold sites, in credits (1 credit = $0.01). Needs `fabric.read`; **403**
+`partner.not_active` without an ACTIVE profile.
+
+### `GET /partners/earnings?months=12`
+
+One row per UTC calendar month, newest first, including months with no
+activity: `[{month: "YYYY-MM", sales, revenue: [{currency, amount_minor}],
+spent_credits}]`. `sales` is the number of `site_plan` debits on sold sites that
+month (purchases, renewals and plan changes); `revenue` and `spent_credits`
+follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
+Needs `fabric.read` and an ACTIVE profile.
 
 ## Site templates
 
