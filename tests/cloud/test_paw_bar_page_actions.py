@@ -6,7 +6,9 @@
 #     (tests/fixtures/action_parity/cases.json + expected.json, copied from
 #     paw-bar's app/tests/fixtures/action_parity; change both sides together)
 #     and the server-only ones in server_cases.json (same origin, known page,
-#     bounded targets and labels, unknown verbs and bad JSON dropped);
+#     bounded targets and labels, unknown verbs and bad JSON dropped); a shared
+#     case whose context carries ``tools`` is checked against them (declared
+#     tools, tests/cloud/test_paw_bar_declared_tools.py);
 #   * ``FenceFilter`` routes the fence to ``.action``, never into the text; only
 #     the first fence in a reply counts; with page actions off every one is
 #     dropped; split at every chunk boundary the result is the same;
@@ -82,8 +84,13 @@ def test_every_shared_case_has_a_verdict():
 
 @pytest.mark.parametrize("case", _SHARED_CASES, ids=[c["name"] for c in _SHARED_CASES])
 def test_render_action_matches_the_paw_bar_parity_verdicts(case):
+    from pocketpaw_ee.paw_bar.action_spec import valid_tools
+
     verdict = _SHARED["verdicts"][case["name"]]
-    got = _render(case["body"], **_SHARED["context"])
+    context = dict(_SHARED["context"])
+    # Tool cases carry the page's declared tools; the server validates them first.
+    context["tools"] = valid_tools(context.pop("tools", None))
+    got = _render(case["body"], **context)
     if verdict["server"] == "accept":
         assert got == verdict["frame"]
     else:
@@ -95,10 +102,21 @@ def test_the_shared_bounds_are_the_servers():
     from pocketpaw_ee.paw_bar import action_spec
 
     bounds = _SHARED["bounds"]
-    assert tuple(bounds["verbs"]) == action_spec.VERBS
+    verbs = tuple(v for v in bounds["verbs"] if v != action_spec.TOOL_VERB)
+    assert verbs == action_spec.VERBS
     assert bounds["label_max"] == action_spec.LABEL_MAX
     assert bounds["target_max"] == action_spec.TARGET_MAX
     assert bounds["target_id_re"] == action_spec.TARGET_ID_RE.pattern
+    # Declared-tool bounds, once paw-bar's fixture carries them.
+    for key, value in (
+        ("tools_max", action_spec.TOOLS_MAX),
+        ("tool_name_re", action_spec.TOOL_NAME_RE.pattern),
+        ("tool_description_max", action_spec.TOOL_DESCRIPTION_MAX),
+        ("tool_schema_max", action_spec.TOOL_SCHEMA_MAX),
+        ("arg_string_max", action_spec.ARG_STRING_MAX),
+    ):
+        if key in bounds:
+            assert bounds[key] == value, key
 
 
 def test_navigate_needs_a_site_origin():
