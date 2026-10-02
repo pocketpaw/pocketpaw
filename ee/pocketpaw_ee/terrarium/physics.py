@@ -1,0 +1,350 @@
+# ee/pocketpaw_ee/terrarium/physics.py
+#
+# The PHYSICS FILE — a universe's genome. YAML in, a validated ``PhysicsFile``
+# out. Everything the world costs, allows, and can unlock lives here; nothing
+# else in terrarium invents a number.
+#
+# Validation is LOUD by design: a bad physics file is a universe that would run
+# wrong forever, so ``load_physics`` raises ``PhysicsError`` with a message that
+# names the offending key. The hard rules:
+#   * every cost (and every tech-node cost) is a positive integer
+#   * ``verbs`` is a subset of ``KNOWN_VERBS``
+#   * every tech-tree ``needs`` entry names an existing node, and the graph
+#     is acyclic (a cycle can never unlock, so it is a broken world)
+#   * ``founders >= 1`` — a universe with nobody in it has no first tick
+#   * ``founder_cards`` (optional) — when a creator names the founders, the
+#     list length must equal ``founders``, at most 12, each with a non-empty
+#     name and role, a bounded charter and at most four values
+#   * resources (optional layer) — every ``TechNode.produces`` and every bundle
+#     key (``TechNode.stock_cost``, ``stock_costs[verb]``, ``FounderCard.stock``)
+#     names a declared resource, bundle amounts are positive, ``resources`` is
+#     unique, ``stock_costs`` keys are known verbs, ``stock_cap`` is positive
+#
+# Every resource field defaults empty, so a physics file without the layer
+# validates and behaves exactly as before. Bundles live on the node and at the
+# top level, never inside ``Costs`` — ``_check_costs`` reads every Costs value
+# as one positive integer. ``costs.trade`` is the one optional cost: the fee an
+# offer, an accept or a spring swap charges, and it rides the speak price when
+# a file leaves it unset (a ``trade`` row must cost; ``None`` never reaches a
+# prompt or a check).
+#
+# Wire shape matches the frozen v0 contract exactly (YAML in, JSON out).
+
+"""The physics file: a universe's genome, and its validation."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+# The fixed verb set. A physics file may narrow it, never widen it.
+KNOWN_VERBS: tuple[str, ...] = (
+    "speak",
+    "write",
+    "trade",
+    "craft",
+    "build",
+    "explore",
+    "spawn",
+    "vote",
+    "design",
+)
+
+Rung = Literal["camp", "town", "nation", "planet", "multiverse"]
+
+# Founder-card limits (the contract's "Founder cards" amendment).
+MAX_FOUNDER_CARDS = 12
+MAX_CHARTER_LEN = 400
+MAX_CARD_VALUES = 4
+
+
+class PhysicsError(ValueError):
+    """A physics file that would produce a broken universe."""
+
+
+class Endowment(BaseModel):
+    daily: int = 120
+    decay_weekly: float = 0.02
+
+
+class Costs(BaseModel):
+    """Per-verb credit costs. ``think`` is charged once per citizen per tick."""
+
+    think: int = 2
+    speak: int = 1
+    write: int = 4
+    craft: int = 8
+    build: int = 20
+    explore: int = 6
+    spawn: int = 150
+    # ``design`` (a citizen drawing its own building) rides the craft price when
+    # a physics file predates the verb, so old files keep working unchanged.
+    design: int | None = None
+    # The fee on an offer, an accept and a spring swap. Unset = the speak price
+    # (``world.trade_fee``); a credit gift still costs its ``amount``.
+    trade: int | None = None
+
+    @model_validator(mode="after")
+    def _design_defaults_to_craft(self) -> Costs:
+        if self.design is None:
+            self.design = self.craft
+        return self
+
+
+class ChatRules(BaseModel):
+    open: bool = True
+    token_per_message: int = 1
+    superchat: bool = True
+
+
+class TimeRules(BaseModel):
+    world_day_seconds: int = 3600
+    ticks_per_day: int = 12
+    dormant_ticks_per_day: int = 1
+
+
+class TechNode(BaseModel):
+    cost: int
+    needs: list[str] = Field(default_factory=list)
+    grants: list[str] = Field(default_factory=list)
+    # Resource layer: what a holder harvests each world day, and the bundle
+    # charged at build on top of ``cost``.
+    produces: str | None = None
+    stock_cost: dict[str, int] = Field(default_factory=dict)
+
+
+class ModelTiers(BaseModel):
+    founders: str = "premium"
+    descendants: str = "mid"
+    crowd: str = "tail"
+
+
+class FounderCard(BaseModel):
+    """A founder a creator named in the create flow (contract: FounderCard).
+
+    Optional widening of the physics file. When ``PhysicsFile.founder_cards`` is
+    present, the runtime seeds each founder from a card — its name, role, day-one
+    charter and core values — instead of generating one generically. A card
+    carries no OCEAN; the deterministic spread still supplies personality.
+    """
+
+    name: str
+    role: str
+    charter: str = ""
+    values: list[str] = Field(default_factory=list)
+    stock: dict[str, int] = Field(default_factory=dict)
+
+
+class PhysicsFile(BaseModel):
+    """The universe genome. Field-for-field the contract's PhysicsFile."""
+
+    universe: str
+    seed: int = 0
+    endowment: Endowment = Field(default_factory=Endowment)
+    costs: Costs = Field(default_factory=Costs)
+    verbs: list[str] = Field(default_factory=lambda: list(KNOWN_VERBS))
+    raids: bool = False
+    chat: ChatRules = Field(default_factory=ChatRules)
+    time: TimeRules = Field(default_factory=TimeRules)
+    constitution: list[str] = Field(default_factory=list)
+    tech_tree: dict[str, TechNode] = Field(default_factory=dict)
+    models: ModelTiers = Field(default_factory=ModelTiers)
+    founders: int = 5
+    founder_cards: list[FounderCard] | None = None
+    world_brief: str = ""
+    # Resource layer. ``[]`` means this world has no resources; then no node
+    # produces, every bundle is empty, and the robber never fires.
+    resources: list[str] = Field(default_factory=list)
+    stock_costs: dict[str, dict[str, int]] = Field(default_factory=dict)  # verb -> bundle
+    stock_cap: int | None = None
+
+
+def _check_costs(physics: PhysicsFile) -> None:
+    for verb, value in physics.costs.model_dump(exclude_none=True).items():
+        if value <= 0:
+            raise PhysicsError(f"costs.{verb} must be a positive integer, got {value!r}")
+    if physics.endowment.daily <= 0:
+        raise PhysicsError(f"endowment.daily must be positive, got {physics.endowment.daily!r}")
+
+
+def _check_verbs(physics: PhysicsFile) -> None:
+    unknown = [v for v in physics.verbs if v not in KNOWN_VERBS]
+    if unknown:
+        raise PhysicsError(
+            f"verbs contains unknown verb(s) {unknown!r}; known verbs are {list(KNOWN_VERBS)}"
+        )
+    if not physics.verbs:
+        raise PhysicsError("verbs must not be empty — a citizen with no verbs cannot act")
+
+
+def _check_tech_tree(physics: PhysicsFile) -> None:
+    """Costs positive, ``needs`` resolvable, and the graph acyclic.
+
+    Iterative DFS with an on-stack set so the error names the actual cycle
+    instead of blowing the Python recursion limit on a deep tree.
+    """
+    tree = physics.tech_tree
+    for name, node in tree.items():
+        if node.cost <= 0:
+            raise PhysicsError(f"tech_tree.{name}.cost must be positive, got {node.cost!r}")
+        for need in node.needs:
+            if need not in tree:
+                raise PhysicsError(
+                    f"tech_tree.{name}.needs references unknown node {need!r}; "
+                    f"known nodes are {sorted(tree)}"
+                )
+
+    visited: set[str] = set()
+    for root in tree:
+        if root in visited:
+            continue
+        # (node, iterator over its needs); ``stack_names`` is the on-stack set.
+        stack: list[tuple[str, list[str]]] = [(root, list(tree[root].needs))]
+        stack_names = {root}
+        while stack:
+            name, pending = stack[-1]
+            if not pending:
+                stack.pop()
+                stack_names.discard(name)
+                visited.add(name)
+                continue
+            nxt = pending.pop()
+            if nxt in stack_names:
+                cycle = [n for n, _ in stack] + [nxt]
+                raise PhysicsError(
+                    f"tech_tree has a cycle that can never unlock: {' -> '.join(cycle)}"
+                )
+            if nxt not in visited:
+                stack.append((nxt, list(tree[nxt].needs)))
+                stack_names.add(nxt)
+
+
+def _check_founder_cards(physics: PhysicsFile) -> None:
+    """A creator-named founder list must match ``founders`` and be well-formed.
+
+    Absent cards leave the generic seeding path untouched; present cards must
+    number ``founders``, cap at 12, and each carry a non-empty name and role, a
+    bounded charter and at most four values.
+    """
+    cards = physics.founder_cards
+    if cards is None:
+        return
+    if len(cards) > MAX_FOUNDER_CARDS:
+        raise PhysicsError(
+            f"founder_cards has {len(cards)} cards; at most {MAX_FOUNDER_CARDS} are allowed"
+        )
+    if len(cards) != physics.founders:
+        raise PhysicsError(
+            f"founders is {physics.founders} but founder_cards has {len(cards)}; they must match"
+        )
+    for i, card in enumerate(cards):
+        if not card.name.strip():
+            raise PhysicsError(f"founder_cards[{i}].name must be a non-empty name")
+        if not card.role.strip():
+            raise PhysicsError(f"founder_cards[{i}].role must be a non-empty role")
+        if len(card.charter) > MAX_CHARTER_LEN:
+            raise PhysicsError(
+                f"founder_cards[{i}].charter is {len(card.charter)} chars; "
+                f"at most {MAX_CHARTER_LEN} are allowed"
+            )
+        if len(card.values) > MAX_CARD_VALUES:
+            raise PhysicsError(
+                f"founder_cards[{i}].values has {len(card.values)} entries; "
+                f"at most {MAX_CARD_VALUES} are allowed"
+            )
+
+
+def _check_bundle(physics: PhysicsFile, where: str, bundle: dict[str, int]) -> None:
+    for name, amount in bundle.items():
+        if name not in physics.resources:
+            raise PhysicsError(
+                f"{where}.{name} names an undeclared resource; resources are {physics.resources}"
+            )
+        if amount <= 0:
+            raise PhysicsError(f"{where}.{name} must be positive, got {amount!r}")
+
+
+def _check_resources(physics: PhysicsFile) -> None:
+    """The resource layer: every name declared once, every bundle positive."""
+    if len(set(physics.resources)) != len(physics.resources):
+        raise PhysicsError(f"resources must be unique, got {physics.resources}")
+    for name, node in physics.tech_tree.items():
+        if node.produces is not None and node.produces not in physics.resources:
+            raise PhysicsError(
+                f"tech_tree.{name}.produces names undeclared resource {node.produces!r}"
+            )
+        _check_bundle(physics, f"tech_tree.{name}.stock_cost", node.stock_cost)
+    for verb, bundle in physics.stock_costs.items():
+        if verb not in KNOWN_VERBS:
+            raise PhysicsError(f"stock_costs.{verb} is not a known verb")
+        _check_bundle(physics, f"stock_costs.{verb}", bundle)
+    for i, card in enumerate(physics.founder_cards or []):
+        _check_bundle(physics, f"founder_cards[{i}].stock", card.stock)
+    if physics.stock_cap is not None and physics.stock_cap <= 0:
+        raise PhysicsError(f"stock_cap must be positive when set, got {physics.stock_cap!r}")
+
+
+def validate_physics(physics: PhysicsFile) -> PhysicsFile:
+    """Run every hard rule. Raises ``PhysicsError`` on the first violation."""
+    if physics.founders < 1:
+        raise PhysicsError(f"founders must be >= 1, got {physics.founders!r}")
+    if not physics.universe.strip():
+        raise PhysicsError("universe must be a non-empty name")
+    if physics.time.ticks_per_day < 1:
+        raise PhysicsError(f"time.ticks_per_day must be >= 1, got {physics.time.ticks_per_day!r}")
+    _check_costs(physics)
+    _check_verbs(physics)
+    _check_tech_tree(physics)
+    _check_founder_cards(physics)
+    _check_resources(physics)
+    return physics
+
+
+def parse_physics(raw: dict[str, Any]) -> PhysicsFile:
+    """Validate a physics dict (the wire shape) into a ``PhysicsFile``."""
+    try:
+        physics = PhysicsFile.model_validate(raw)
+    except ValidationError as exc:
+        raise PhysicsError(f"physics file is malformed: {exc}") from exc
+    return validate_physics(physics)
+
+
+def load_physics(path: str | Path) -> PhysicsFile:
+    """Load + validate a physics YAML file."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise PhysicsError(f"physics file not found: {p}")
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise PhysicsError(f"physics file {p} is not valid YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise PhysicsError(f"physics file {p} must be a YAML mapping, got {type(raw).__name__}")
+    return parse_physics(raw)
+
+
+def seed_physics_path(name: str = "dust") -> Path:
+    """Path to a bundled seed physics file (``seeds/<name>.yaml``)."""
+    return Path(__file__).parent / "seeds" / f"{name}.yaml"
+
+
+__all__ = [
+    "KNOWN_VERBS",
+    "ChatRules",
+    "Costs",
+    "Endowment",
+    "FounderCard",
+    "ModelTiers",
+    "PhysicsError",
+    "PhysicsFile",
+    "Rung",
+    "TechNode",
+    "TimeRules",
+    "load_physics",
+    "parse_physics",
+    "seed_physics_path",
+    "validate_physics",
+]
