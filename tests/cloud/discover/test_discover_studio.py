@@ -83,8 +83,13 @@ async def _publish(client, **body) -> dict:
         status="succeeded",
         kind="image",
         model="flux",
-        params={"kind": "image", "model": "flux", "aspectRatio": "1:1", "count": 1,
-                "inputImageCount": 1},
+        params={
+            "kind": "image",
+            "model": "flux",
+            "aspectRatio": "1:1",
+            "count": 1,
+            "inputImageCount": 1,
+        },
         assets=[{"id": "a1", "url": "/api/v1/media/fox.png", "mime": "image/png"}],
         created_at_ms=1,
     ).insert()

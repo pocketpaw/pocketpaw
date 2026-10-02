@@ -185,9 +185,7 @@ async def publish_template(
     )
     await doc.insert()
     await emit(StudioTemplateSaved(data=_event_data(doc)))
-    await _audit(
-        workspace_id, user_id, "studio_template.saved", str(doc.id), generation_id=gen.id
-    )
+    await _audit(workspace_id, user_id, "studio_template.saved", str(doc.id), generation_id=gen.id)
     return _meta(doc)
 
 
