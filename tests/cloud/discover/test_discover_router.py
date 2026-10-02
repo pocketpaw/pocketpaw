@@ -14,6 +14,9 @@
 #
 # Updated 2026-10-02 (feat/discover-source-contract): seeds through
 # ``sync_source("site_template", id)`` (was ``sync_site_template``).
+#
+# Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
+# ``media_kind`` / ``media_url``.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -44,6 +47,8 @@ PUBLIC_KEYS = {
     "live_url",
     "remix_count",
     "created_at",
+    "media_kind",
+    "media_url",
 }
 
 

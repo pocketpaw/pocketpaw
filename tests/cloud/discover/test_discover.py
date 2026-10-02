@@ -29,6 +29,9 @@
 #
 # Updated 2026-10-02 (feat/discover-source-contract): ``sync_site_template`` is
 # now ``sync_source("site_template", id)``.
+#
+# Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
+# ``media_kind`` / ``media_url``.
 from __future__ import annotations
 
 from typing import Any
@@ -63,6 +66,8 @@ PUBLIC_KEYS = {
     "live_url",
     "remix_count",
     "created_at",
+    "media_kind",
+    "media_url",
 }
 SYNCED = {"site_template.saved", "site_template.updated", "site_template.deleted"}
 
