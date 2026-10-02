@@ -94,8 +94,8 @@
   {
     "label": "PP-1 resolver: the 20-package cap is effectively removed",
     "file": "ee/pocketpaw_ee/sites/dependency_manifest.py",
-    "find": "MAX_DECLARED_PACKAGES = 20",
-    "replace": "MAX_DECLARED_PACKAGES = 2000",
+    "find": "MAX_DECLARED_PACKAGES: int = int(VENDORED_ALLOWLIST[\"maxAuthorPackages\"])",
+    "replace": "MAX_DECLARED_PACKAGES: int = 2000",
     "tests": [
       "tests/ee/sites/test_dependency_resolver.py::test_more_than_twenty_is_refused_past_the_cap"
     ]

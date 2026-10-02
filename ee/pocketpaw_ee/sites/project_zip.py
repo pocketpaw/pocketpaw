@@ -1,6 +1,8 @@
 # ee/pocketpaw_ee/sites/project_zip.py — assemble a source-engine Paw Site's
 # downloadable project as in-memory zip bytes.
 #
+# Updated 2026-10-02 (CN-8, fix/canon-cross-repo-pins): the _VETTED_PINS comment now
+# names the committed paw-sites-allowlist.json fallback; no code change.
 # Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): a site's author-declared
 # npm packages (``paw.dependencies.json``) are merged into the downloaded svelte /
 # react ``package.json`` at their exact resolved versions, and the manifest file
@@ -97,11 +99,12 @@ MAX_TOTAL_BYTES = 16 * 1024 * 1024
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
 # The toolchain pins, from paw-sites/src/allowlist.ts ``VETTED_DEPENDENCIES`` via
-# ``vetted_pins`` — the vendored ``paw-sites-gen allowlist`` JSON when there is one,
-# the fallback constants otherwise. Only the entries a downloadable shell names are
-# looked up; the rest of that map is hosting toolchain the generator picks from what
-# it emitted (adapter-cloudflare, valibot, @noble/hashes, @ripple-ui/svelte), and a
-# project someone takes away does not deploy to our edge.
+# ``vetted_pins`` — the deployed ``paw-sites-gen allowlist`` JSON when there is one,
+# otherwise the copy committed in this package (paw-sites-allowlist.json). Only
+# the entries a downloadable shell names are looked up; the rest of that map is
+# hosting toolchain the generator picks from what it emitted (adapter-cloudflare,
+# valibot, @noble/hashes, @ripple-ui/svelte), and a project someone takes away does
+# not deploy to our edge.
 #
 # Every shell builder looks its names up in this map, so adding a dependency without
 # a vetted pin raises instead of shipping an unvetted package.
