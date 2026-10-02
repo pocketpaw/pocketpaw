@@ -22,6 +22,9 @@
 # ``TOOLS_MAX`` entries that pass the contract (name regex, short description, a
 # flat object schema of string / number / integer / boolean properties, at most
 # ``TOOL_SCHEMA_MAX`` chars of JSON), each bad one dropped alone, never raising.
+# The frame (paw-bar ``page-tools.ts``) applies the same rules, so tool text is
+# measured as JavaScript does it: UTF-16 units, ``\s`` whitespace, the schema's
+# size as ``JSON.stringify`` writes it (``_js_len``, ``_js_json_len``).
 #
 # The host script (paw-bar ``actions/``) checks again on the page; the server is
 # the authority on which pages exist. ``site_pages`` lists the pages the prompt
@@ -38,6 +41,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Sequence
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
@@ -64,11 +68,16 @@ TOOL_SCHEMA_MAX = 2_048
 ARG_STRING_MAX = 200
 ARG_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,39}")
 ENUM_MAX = 50
-_ARG_TYPES = ("string", "number", "integer", "boolean")
+ARG_TYPES: tuple[str, ...] = ("string", "number", "integer", "boolean")
 _PROPERTY_KEYS = frozenset({"type", "description", "enum", "minimum", "maximum", "maxLength"})
 _SCHEMA_KEYS = frozenset({"type", "properties", "required"})
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# JavaScript's ``\s``, what the frame collapses and trims. ``str.split`` differs:
+# it also splits on \x1c-\x1f and \x85, and not on \ufeff.
+_JS_SPACE_RE = re.compile(
+    r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+"
+)
 _PATH_SAFE = "/-._~!$&'()*+,;=:@"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -172,12 +181,43 @@ def _number(value: Any) -> bool:
     )
 
 
+def _js_len(text: str) -> int:
+    """``text.length`` in JavaScript: UTF-16 code units, so an emoji counts 2."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _js_number(value: int | float) -> str:
+    """A finite number as ``JSON.stringify`` writes it: 1.0 is "1", 1e-05 is
+    "0.00001", 1e-08 is "1e-8", 1e+21 is "1e+21"."""
+    if abs(value) < 1e21 and float(value).is_integer():
+        return str(int(value))
+    value = float(value)
+    text = repr(value)
+    if 1e-7 <= abs(value) < 1e21:
+        return format(Decimal(text), "f")
+    mantissa, _, exponent = text.partition("e")
+    power = int(exponent)
+    return f"{mantissa}e{'+' if power > 0 else '-'}{abs(power)}"
+
+
+def _js_json_len(value: Any) -> int:
+    """``JSON.stringify(value).length`` for a parsed JSON value."""
+    if isinstance(value, dict):
+        sizes = [_js_json_len(str(k)) + 1 + _js_json_len(v) for k, v in value.items()]
+        return 2 + sum(sizes) + max(len(sizes) - 1, 0)
+    if isinstance(value, list):
+        return 2 + sum(_js_json_len(v) for v in value) + max(len(value) - 1, 0)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return len(_js_number(value))
+    return _js_len(json.dumps(value, ensure_ascii=False))
+
+
 def _plain(value: Any, cap: int) -> str | None:
     """``value`` as non-empty one-line text of at most ``cap`` chars, or None."""
     if not isinstance(value, str):
         return None
-    text = " ".join(value.split())
-    if not text or len(text) > cap or _CONTROL_RE.search(text):
+    text = _JS_SPACE_RE.sub(" ", value).strip(" ")
+    if not text or _js_len(text) > cap or _CONTROL_RE.search(text):
         return None
     return text
 
@@ -197,7 +237,7 @@ def _valid_property(prop: Any) -> bool:
     if not isinstance(prop, dict) or not set(prop) <= _PROPERTY_KEYS:
         return False
     kind = prop.get("type")
-    if kind not in _ARG_TYPES:
+    if kind not in ARG_TYPES:
         return False
     if "description" in prop and _plain(prop["description"], TOOL_DESCRIPTION_MAX) is None:
         return False
@@ -207,7 +247,7 @@ def _valid_property(prop: Any) -> bool:
             return False
         if not all(_fits(kind, v) for v in enum):
             return False
-        if kind == "string" and any(len(v) > ARG_STRING_MAX for v in enum):
+        if kind == "string" and any(_js_len(v) > ARG_STRING_MAX for v in enum):
             return False
     bounds = [b for b in ("minimum", "maximum") if b in prop]
     if bounds and (kind not in ("number", "integer") or not all(_number(prop[b]) for b in bounds)):
@@ -227,22 +267,24 @@ def _valid_schema(schema: Any) -> bool:
         return False
     if schema.get("type") != "object":
         return False
-    props = schema.get("properties", {})
+    # Absent or null properties / required are empty, as on the frame.
+    props = schema.get("properties")
+    props = {} if props is None else props
     if not isinstance(props, dict):
         return False
     if not all(isinstance(k, str) and ARG_NAME_RE.fullmatch(k) for k in props):
         return False
     if not all(_valid_property(p) for p in props.values()):
         return False
-    required = schema.get("required", [])
+    required = schema.get("required")
+    required = [] if required is None else required
     if not isinstance(required, list):
         return False
     if not all(isinstance(r, str) and r in props for r in required):
         return False
     if len(set(required)) != len(required):
         return False
-    size = len(json.dumps(schema, separators=(",", ":"), ensure_ascii=False))
-    return size <= TOOL_SCHEMA_MAX
+    return _js_json_len(schema) <= TOOL_SCHEMA_MAX
 
 
 def _valid_tool(raw: Any) -> dict[str, Any] | None:
@@ -306,7 +348,7 @@ def _check_args(args: Any, schema: dict[str, Any]) -> dict[str, Any] | None:
         if kind == "integer":
             value = int(value)
         cap = min(ARG_STRING_MAX, prop.get("maxLength", ARG_STRING_MAX))
-        if kind == "string" and len(value) > cap:
+        if kind == "string" and _js_len(value) > cap:
             return None
         if "enum" in prop and value not in prop["enum"]:
             return None

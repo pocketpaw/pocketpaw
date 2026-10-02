@@ -6,7 +6,8 @@
 # ```pawbar-action fence ``{"do": "tool", "name", "args", "label"}``. Pinned here:
 #   * ``action_spec.valid_tools``: the contract's limits (at most ``TOOLS_MAX``,
 #     the name regex, a short description, a small flat object schema), each bad
-#     tool dropped on its own;
+#     tool dropped on its own, with text and schema size measured as the
+#     frame measures them in JavaScript;
 #   * ``render_action`` for ``do: "tool"``: the name is one of this turn's tools
 #     and the args match its schema (types, required, no extra keys, string
 #     length, enum, minimum / maximum);
@@ -191,6 +192,37 @@ def test_at_most_twelve_tools_are_read():
 def test_a_repeated_name_keeps_the_first():
     second = _tool(description="Something else")
     assert _valid([_CART, second]) == [_CART]
+
+
+# Lengths and whitespace are measured as the frame measures them in JavaScript.
+
+
+def test_text_is_measured_in_utf16_units():
+    emoji = "\U0001f600"
+    assert _valid([_tool(description=emoji * 100)])
+    assert _valid([_tool(description=emoji * 101)]) == []
+    enum = _schema({"e": {"type": "string", "enum": [emoji * 101]}})
+    assert _valid([_tool(input_schema=enum)]) == []
+
+
+def test_whitespace_is_javascripts():
+    # \x1f is a control char to JavaScript, not whitespace; \ufeff is whitespace.
+    assert _valid([_tool(description="Add\x1fit")]) == []
+    assert _valid([_tool(description="\ufeffAdd it\u00a0 now ")])[0]["description"] == "Add it now"
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(1.0, "1"), (0.5, "0.5"), (1e-05, "0.00001"), (1e-08, "1e-8"), (1e21, "1e+21"), (-0.0, "0")],
+)
+def test_schema_numbers_are_sized_as_json_stringify_writes_them(value, text):
+    from pocketpaw_ee.paw_bar.action_spec import _js_json_len
+
+    assert _js_json_len({"m": value}) == len('{"m":' + text + "}")
+
+
+def test_null_properties_and_required_read_as_empty():
+    assert _valid([_tool(input_schema={"type": "object", "properties": None, "required": None})])
 
 
 # --------------------------------------------------------------------------- #
