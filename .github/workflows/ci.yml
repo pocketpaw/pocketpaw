@@ -359,7 +359,11 @@ jobs:
         # Same addopts escape. GET /paw-bar/widget.js serves a copy of paw-bar's
         # built loader; this file pins that copy's sha256 to the paw-bar commit in
         # paw-bar-loader.pin.json, so a hand edit or a stale copy fails here.
-        run: uv run pytest tests/cloud/test_paw_bar_widget_js.py -o addopts="" -q --tb=short
+        # test_paw_bar_actions_js.py does the same for the vendored page-actions
+        # host script: protocol strings, IIFE, and its only two page globals.
+        run: >-
+          uv run pytest tests/cloud/test_paw_bar_widget_js.py
+          tests/cloud/test_paw_bar_actions_js.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

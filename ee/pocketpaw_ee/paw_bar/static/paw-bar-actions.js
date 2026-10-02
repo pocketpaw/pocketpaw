@@ -1,12 +1,15 @@
 // ee/pocketpaw_ee/paw_bar/static/paw-bar-actions.js — the Paw Bar PAGE-ACTIONS
 // host script, the opt-in IIFE a site includes beside the loader so the
 // concierge can act on the host page (scroll to and highlight an element, open a
-// link). It obeys only `pawbar:act` messages posted by a /paw-bar/frame iframe
-// whose origin matches its own endpoint, and replies with `pawbar:act-result`.
+// link) and call tools the site declares on window.pawbarTools. It reads that
+// array, replaces its push so later declarations register too, and offers the
+// tools to the frame. It obeys only `pawbar:act` messages posted by a
+// /paw-bar/frame iframe whose origin matches its own endpoint, and replies with
+// `pawbar:act-result`.
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:actions` in the
 // paw-bar repo (actions/dist/actions.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar actions/src/actions.ts @ 947592a (PR #38)
+// Source: qbtrix/paw-bar actions/src/actions.ts @ 663feef (PR #40)
 //
 // Vendored rather than fetched for the same reason as paw-bar.js: the URL
 // `GET /paw-bar/actions.js` is shown to site owners to paste into their pages,
@@ -26,6 +29,10 @@
   var TARGET_MAX = 120;
   var HIGHLIGHT_MS = 2e3;
   var FADE_MS = 300;
+  var TOOL_NAME = /^[a-z][a-z0-9_]{0,39}$/;
+  var TOOLS_MAX = 12;
+  var SCHEMA_MAX = 2048;
+  var TOOL_MS = 1e4;
   (function boot(win) {
     if (win[LOADED_FLAG]) return;
     const doc = win.document;
@@ -41,18 +48,61 @@
     win[LOADED_FLAG] = true;
     let overlay = null;
     let overlayTimer = 0;
-    function frameFor(source) {
-      if (!source) return null;
+    let sendTimer = 0;
+    const tools = /* @__PURE__ */ new Map();
+    function frameWin(source) {
       for (const f of Array.from(doc.querySelectorAll("iframe"))) {
-        if (f.contentWindow !== source) continue;
+        const w = f.contentWindow;
+        if (!w || source !== void 0 && w !== source) continue;
         try {
           const u = new URL(f.src);
-          if (u.origin === frameOrigin && FRAME_PATH.test(u.pathname)) return f;
+          if (u.origin === frameOrigin && FRAME_PATH.test(u.pathname)) return w;
         } catch {
         }
       }
       return null;
     }
+    function addTool(t) {
+      try {
+        const j = JSON.stringify(t.inputSchema);
+        if (TOOL_NAME.test(t.name) && typeof t.description == "string" && typeof t.execute == "function" && j.length <= SCHEMA_MAX && (tools.size < TOOLS_MAX || tools.has(t.name))) {
+          const w = { name: t.name, description: t.description, inputSchema: JSON.parse(j), confirm: t.confirm !== false };
+          tools.set(t.name, [w, t.execute]);
+          return;
+        }
+      } catch {
+      }
+      console.warn("paw-bar: bad tool", t);
+    }
+    function sendTools(w = frameWin()) {
+      w?.postMessage({ type: "pawbar:tools", tools: Array.from(tools.values(), (t) => t[0]) }, frameOrigin);
+    }
+    function sendSoon() {
+      clearTimeout(sendTimer);
+      sendTimer = setTimeout(sendTools, 50);
+    }
+    function runTool(d, reply) {
+      const t = tools.get(d.name);
+      if (!t) return reply({ ok: false, error: "not_found" });
+      let done = 0;
+      const fin = (r) => done++ || reply(r);
+      setTimeout(() => fin({ ok: false, error: "timeout" }), TOOL_MS);
+      new Promise((res) => res(t[1](d.args ?? {}))).then(
+        (r) => {
+          const ok = r?.ok !== false;
+          const m = r?.message;
+          fin({ ok, error: ok ? void 0 : "failed", message: typeof m == "string" && m ? m.slice(0, 160) : void 0 });
+        },
+        () => fin({ ok: false, error: "failed" })
+      );
+    }
+    const queue = Array.isArray(win.pawbarTools) ? win.pawbarTools : win.pawbarTools = [];
+    queue.splice(0).forEach(addTool);
+    queue.push = (...ts) => {
+      ts.forEach(addTool);
+      sendSoon();
+    };
+    if (tools.size) sendSoon();
     const norm = (p) => p.replace(/\/+$/, "") || "/";
     function navigate(to) {
       clearOverlay();
@@ -132,10 +182,13 @@
     win.addEventListener("message", (ev) => {
       if (ev.origin !== frameOrigin) return;
       const d = ev.data;
-      if (!d || typeof d !== "object" || d.type !== "pawbar:act" || typeof d.id !== "string") return;
-      const frame = frameFor(ev.source);
-      const target = frame?.contentWindow;
+      if (!d || typeof d !== "object") return;
+      if (d.type === "pawbar:tools-request") return sendTools(frameWin(ev.source));
+      if (d.type !== "pawbar:act" || typeof d.id !== "string") return;
+      const target = frameWin(ev.source);
       if (!target) return;
+      const reply = (r) => target.postMessage({ type: "pawbar:act-result", id: d.id, ...r }, frameOrigin);
+      if (d.do === "tool") return runTool(d, reply);
       let out;
       try {
         out = run(d);
@@ -143,10 +196,7 @@
         out = "unsupported";
       }
       const ok = typeof out === "function";
-      target.postMessage(
-        { type: "pawbar:act-result", id: d.id, ok, ...ok ? {} : { error: out } },
-        frameOrigin
-      );
+      reply({ ok, ...ok ? {} : { error: out } });
       if (ok) {
         try {
           out();
