@@ -1,5 +1,14 @@
 # Fabric store — async SQLite operations for the ontology layer.
 # Created: 2026-03-28 — CRUD for object types, objects, and links.
+# Updated: 2026-10-01 (CN-6 — journal write path, FabricStore read model) —
+#   ``define_type`` takes an optional stable ``type_id`` and a new
+#   ``upsert_object`` writes an object under ITS OWN id (insert-or-replace,
+#   tenancy- and updated_at-guarded). Both exist for ``pocketpaw.fabric.read_model``, which
+#   projects journal-written objects (FabricJournalStore) into the
+#   per-workspace store so the Fabric API / MCP / Ripple readers see them.
+#   Timestamps keep microseconds (2026-10-02) so the ordering guard can't tie.
+#   The upsert writes the flat cache directly (no statement pass): the journal
+#   is the system of record for these objects.
 # Updated: 2026-08-17 (AST-5a — review fixes on the atlas source-truth stack) —
 #   two additive type-level statement reads for the atlas aggregate:
 #   ``get_statements_for_type(type_id, workspace_id=, key_cap=)`` — ONE query
@@ -659,6 +668,16 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _sqlite_ts(ts: datetime) -> str:
+    """Render ``ts`` in SQLite's ``datetime('now')`` shape (naive UTC
+    ``YYYY-MM-DD HH:MM:SS``) plus microseconds, so upserted rows sort and parse
+    like the rest while the upsert ordering guard can't tie within a second
+    (``"... 12:00:00.5" > "... 12:00:00"`` as strings)."""
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(UTC).replace(tzinfo=None)
+    return ts.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
 def _workspace_scope(
     workspace_id: str | None, *, column: str = "workspace_id"
 ) -> tuple[str | None, list[Any]]:
@@ -1248,8 +1267,13 @@ class FabricStore:
         icon: str = "box",
         color: str = "#0A84FF",
         workspace_id: str | None = None,
+        type_id: str | None = None,
     ) -> ObjectType:
         """Define a new object type, optionally scoped to a tenant (SZD-2).
+
+        ``type_id`` pins a stable id (CN-6: journal-projected types such as
+        ``person`` must match the ``type_id`` their objects already carry);
+        ``None`` mints one as before.
 
         ``workspace_id`` stamps the owning workspace on the type row so the
         discovered-type catalog stays private per tenant: a type defined here
@@ -1264,6 +1288,7 @@ class FabricStore:
             color=color,
             properties=properties,
             workspace_id=workspace_id,
+            **({"id": type_id} if type_id else {}),
         )
         await self._ensure_schema()
         async with self._conn() as db:
@@ -1536,6 +1561,52 @@ class FabricStore:
             )
             await db.commit()
         return obj
+
+    async def upsert_object(self, obj: FabricObject, *, workspace_id: str | None) -> bool:
+        """Insert ``obj`` under its OWN id, or replace that row's fields (CN-6).
+
+        The read-model write for journal-projected objects: unlike
+        :meth:`create_object` the id is the caller's (a journal object id), and
+        a repeat call overwrites ``properties`` wholesale — the caller passes
+        the full current object, not a patch. Tenancy guard: an existing row
+        owned by ANOTHER workspace is left untouched (returns ``False``); a
+        legacy NULL-workspace row is adopted. Ordering guard: a row whose
+        ``updated_at`` is newer than ``obj.updated_at`` is kept (a late replay
+        never rolls a row back). Writes the flat cache only — no
+        statement pass, no write-time validation (the journal already accepted
+        the write).
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                "INSERT INTO fabric_objects"
+                " (id, type_id, type_name, properties, source_connector,"
+                " source_id, workspace_id, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                " type_id = excluded.type_id, type_name = excluded.type_name,"
+                " properties = excluded.properties,"
+                " source_connector = excluded.source_connector,"
+                " source_id = excluded.source_id,"
+                " workspace_id = excluded.workspace_id,"
+                " updated_at = excluded.updated_at"
+                " WHERE (fabric_objects.workspace_id IS excluded.workspace_id"
+                " OR fabric_objects.workspace_id IS NULL)"
+                " AND excluded.updated_at >= IFNULL(fabric_objects.updated_at, '')",
+                (
+                    obj.id,
+                    obj.type_id,
+                    obj.type_name,
+                    json.dumps(obj.properties),
+                    obj.source_connector,
+                    obj.source_id,
+                    workspace_id,
+                    _sqlite_ts(obj.created_at),
+                    _sqlite_ts(obj.updated_at),
+                ),
+            )
+            await db.commit()
+            return cur.rowcount > 0
 
     async def get_object(self, obj_id: str, workspace_id: str | None = None) -> FabricObject | None:
         """Fetch one object by id, optionally scoped to ``workspace_id`` (W4a).
