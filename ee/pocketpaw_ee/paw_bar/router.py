@@ -5,7 +5,8 @@
 #   ``allowed_origins`` plus the dashboard origin, CSP ``sandbox`` from
 #   ``PAWBAR_FRAME_SANDBOX``, no flag grants top navigation; 403 on an empty
 #   allowlist or a switched-off concierge), GET /paw-bar/widget.js (the
-#   tenant-blind loader), POST /paw-bar/chat (SSE), POST /paw-bar/action and
+#   tenant-blind loader) and GET /paw-bar/actions.js (the opt-in page-actions host
+#   script, same caching), POST /paw-bar/chat (SSE), POST /paw-bar/action and
 #   GET /paw-bar/cart, POST /paw-bar/request-human, POST /paw-bar/decision-contact,
 #   the decision and messages polls, articles, the visitor's own conversations,
 #   and the legacy spec + event ingest.
@@ -380,12 +381,15 @@ class PawBarAssets(StaticFiles):
 # control, so a long max-age would pin every embedder to whatever loader shipped on
 # the day their site was published. Five minutes keeps the edge useful and keeps a
 # fix at most one coffee away. Revalidation after that is cheap: the bytes are held
-# in memory (``_widget_js_memo``, re-read only when the file's path, mtime, ctime or size
-# changes) and carry a strong ETag, so a browser's If-None-Match gets a bodiless 304.
+# in memory (``_script_memo``, re-read only when the file's path, mtime, ctime or
+# size changes) and carry a strong ETag, so a browser's If-None-Match gets a
+# bodiless 304. The page-actions script (``/paw-bar/actions.js``) has the same
+# problem and the same policy.
 _WIDGET_JS_MAX_AGE = 300
-# (path, mtime_ns, ctime_ns, size, body, etag) of the last loader read. ctime is
-# there for the same reason as in ``_asset_version``'s signature.
-_widget_js_memo: tuple[str, int, int, int, bytes, str] | None = None
+# route -> (path, mtime_ns, ctime_ns, size, body, etag) of the last read of that
+# route's file. ctime is there for the same reason as in ``_asset_version``'s
+# signature.
+_script_memo: dict[str, tuple[str, int, int, int, bytes, str]] = {}
 
 
 def _etag_matches(if_none_match: str, etag: str) -> bool:
@@ -394,6 +398,13 @@ def _etag_matches(if_none_match: str, etag: str) -> bool:
         return True
     tags = (t.strip() for t in if_none_match.split(","))
     return any((t[2:] if t.startswith("W/") else t) == etag for t in tags)
+
+
+def _vendored_script(env_var: str, filename: str) -> Path:
+    override = os.environ.get(env_var, "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "static" / filename
 
 
 def paw_bar_widget_file() -> Path:
@@ -406,48 +417,50 @@ def paw_bar_widget_file() -> Path:
     now bakes this URL into customers' deployed HTML, so it has to resolve on every
     machine that runs the backend, not just a developer's.
     """
-    override = os.environ.get("PAW_BAR_WIDGET_JS", "").strip()
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parent / "static" / "paw-bar.js"
+    return _vendored_script("PAW_BAR_WIDGET_JS", "paw-bar.js")
 
 
-@router.get("/paw-bar/widget.js")
-async def widget_js(request: Request) -> Response:
-    """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
+def paw_bar_actions_file() -> Path:
+    """Path of the page-actions host script ``GET /paw-bar/actions.js`` serves.
 
-    No key, no Site read, no per-caller variation: this is a world-visible static
-    script, and the credential (the embed key) is presented later by the iframe it
-    mounts, at ``/paw-bar/frame``. Held in memory and invalidated by a ``stat`` per
-    request (path, mtime, ctime, size), not only at startup: replacing the file, or
-    pointing ``PAW_BAR_WIDGET_JS`` somewhere else, still takes effect without a
-    restart, and a stat is far cheaper than the read it saves. A matching
-    ``If-None-Match`` gets a 304.
+    Same resolution as the loader: ``PAW_BAR_ACTIONS_JS`` when set, else the copy
+    vendored beside this module (``static/paw-bar-actions.js``).
+    """
+    return _vendored_script("PAW_BAR_ACTIONS_JS", "paw-bar-actions.js")
 
-    A missing bundle is a clean 404 naming the env var that fixes it, not a
+
+def _serve_script(
+    request: Request, route: str, path: Path, env_var: str, what: str, filename: str
+) -> Response:
+    """Serve a vendored, tenant-blind script with the loader caching policy.
+
+    Held in memory and invalidated by a ``stat`` per request (path, mtime, ctime,
+    size), not only at startup: replacing the file, or pointing the env override
+    somewhere else, still takes effect without a restart, and a stat is far cheaper
+    than the read it saves. A matching ``If-None-Match`` gets a 304.
+
+    A missing file is a clean 404 naming the env var that fixes it, not a
     FileNotFoundError escaping as an opaque 500: the operator seeing this is
     debugging why a live site shows no bar, and the message is the answer.
     """
-    global _widget_js_memo
-    path = paw_bar_widget_file()
     try:
         st = path.stat()
-        memo = _widget_js_memo
+        memo = _script_memo.get(route)
         sig = (str(path), st.st_mtime_ns, st.st_ctime_ns, st.st_size)
         if memo is not None and memo[:4] == sig:
             body, etag = memo[4], memo[5]
         else:
             body = path.read_bytes()
             etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
-            _widget_js_memo = (*sig, body, etag)
+            _script_memo[route] = (*sig, body, etag)
     except OSError:
-        logger.warning("paw-bar: loader bundle unavailable at %s", path)
+        logger.warning("paw-bar: %s unavailable at %s", what, path)
         raise HTTPException(
             status_code=404,
             detail=(
-                "Paw Bar loader bundle not found. Set PAW_BAR_WIDGET_JS to the "
-                "path of a built widget bundle, or restore the copy shipped at "
-                "pocketpaw_ee/paw_bar/static/paw-bar.js."
+                f"Paw Bar {what} not found. Set {env_var} to the path of a built "
+                f"bundle, or restore the copy shipped at "
+                f"pocketpaw_ee/paw_bar/static/{filename}."
             ),
         ) from None
     headers = {"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}", "ETag": etag}
@@ -457,6 +470,45 @@ async def widget_js(request: Request) -> Response:
         content=body,
         media_type="application/javascript; charset=utf-8",
         headers=headers,
+    )
+
+
+@router.get("/paw-bar/widget.js")
+async def widget_js(request: Request) -> Response:
+    """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
+
+    No key, no Site read, no per-caller variation: this is a world-visible static
+    script, and the credential (the embed key) is presented later by the iframe it
+    mounts, at ``/paw-bar/frame``.
+    """
+    return _serve_script(
+        request,
+        "widget.js",
+        paw_bar_widget_file(),
+        "PAW_BAR_WIDGET_JS",
+        "loader bundle",
+        "paw-bar.js",
+    )
+
+
+@router.get("/paw-bar/actions.js")
+async def actions_js(request: Request) -> Response:
+    """Serve the opt-in page-actions host script — PUBLIC, unauthenticated,
+    tenant-blind, same caching as the loader.
+
+    A site owner who lets the concierge act on their page (scroll to, highlight,
+    open a link) adds this tag beside the loader. It carries no credential and
+    reads nothing per tenant: it only obeys ``pawbar:act`` messages posted by a
+    ``/paw-bar/frame`` iframe from its own endpoint's origin, so serving it to
+    anyone grants nothing.
+    """
+    return _serve_script(
+        request,
+        "actions.js",
+        paw_bar_actions_file(),
+        "PAW_BAR_ACTIONS_JS",
+        "page-actions script",
+        "paw-bar-actions.js",
     )
 
 
