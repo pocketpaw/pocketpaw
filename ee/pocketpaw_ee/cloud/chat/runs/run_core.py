@@ -46,6 +46,10 @@ never trains the agent's soul. Invariants worth keeping:
   prewarm task is created, so both are inherited by it;
 - the host-cancel cleanup is shielded and tracked, and the worker drains it
   (``drain_pending_cleanups``) before closing the database.
+
+Changes: 2026-10-01 (CN-3, fix/canon-daily-caps) — the daily turn cap claims
+through ``metering.service.try_spend`` (the one daily usage primitive) instead
+of ``turn_budget``, which is gone. Same cap, same env, same fail-open.
 """
 
 from __future__ import annotations
@@ -2604,12 +2608,19 @@ async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transpor
 
     Returns ``True`` when the run was rejected.
     """
-    from pocketpaw_ee.cloud.chat.runs import turn_budget
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
-    allowed, spent, cap = await turn_budget.try_spend(ctx.workspace_id)
-    if allowed:
-        if cap:
-            logger.debug("workspace turn %d/%d for %s", spent, cap, ctx.workspace_id)
+    cap = metering.workspace_turns_cap()
+    if await metering.try_spend(
+        subject_type="workspace",
+        subject_id=ctx.workspace_id,
+        meter=DailyMeter.WORKSPACE_TURNS,
+        cap=cap,
+        # Fails OPEN: the run persists to the same Mongo, so a database that
+        # cannot serve this counter cannot serve the run either.
+        fail_open=True,
+    ):
         return False
 
     from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError

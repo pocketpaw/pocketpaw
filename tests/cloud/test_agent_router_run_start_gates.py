@@ -4,6 +4,13 @@
 turn gate and daily turn ceiling together, then raises the earliest failure in
 that declared order, the order they ran in as sequential awaits. A turn that
 fails several checks must get the same error it always did.
+
+Updated 2026-10-01 (CN-3): the balance + quota pair is now ONE coroutine,
+``credits.guards.assert_within_billing`` (the gate run_core already uses), so
+those two run in sequence inside it and concurrently with the guest and turn
+checks. ``billing_enforced`` is read by the guard, the turn ceiling reads the
+shared ``metering`` counter, and two new tests pin the delegation and the
+guard's empty-workspace behaviour.
 """
 
 from __future__ import annotations
@@ -35,7 +42,9 @@ def _install(monkeypatch, *, billing: bool, fail: set[str], barrier: asyncio.Bar
 
     async def _step(name: str) -> None:
         started.append(name)
-        if barrier is not None:
+        # Quota runs after balance inside the one billing coroutine, so it is
+        # not a separate party to the overlap barrier.
+        if barrier is not None and name != "quota":
             await barrier.wait()
 
     async def _balance(_ws):
@@ -53,15 +62,18 @@ def _install(monkeypatch, *, billing: bool, fail: set[str], barrier: asyncio.Bar
         if "guest" in fail:
             raise _Guest
 
-    async def _over_cap(_ws):
+    async def _used(**_k):
         await _step("turns")
-        return "turns" in fail
+        return 10**9 if "turns" in fail else 0
 
-    monkeypatch.setattr(mod, "get_settings", lambda: SimpleNamespace(billing_enforced=billing))
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.credits.guards.get_settings",
+        lambda: SimpleNamespace(billing_enforced=billing),
+    )
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_balance", _balance)
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_quota", _quota)
     monkeypatch.setattr("pocketpaw_ee.cloud.auth.guest_gates.assert_guest_turn_allowed", _guest)
-    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.turn_budget.is_over_cap", _over_cap)
+    monkeypatch.setattr("pocketpaw_ee.cloud.metering.service.used", _used)
     return started
 
 
@@ -104,11 +116,46 @@ async def test_all_pass_is_a_no_op(monkeypatch):
 
 
 async def test_the_checks_overlap_instead_of_running_in_sequence(monkeypatch):
-    """Every check waits on a four-party barrier, which only opens once all four
-    are in flight. Sequential awaits would never get there.
+    """The billing, guest and turn checks wait on a three-party barrier, which
+    only opens once all three are in flight. Sequential awaits would never get
+    there.
 
     Mutation: replace the gather with a loop of ``await c`` per check.
     """
-    _install(monkeypatch, billing=True, fail=set(), barrier=asyncio.Barrier(4))
+    _install(monkeypatch, billing=True, fail=set(), barrier=asyncio.Barrier(3))
 
     await asyncio.wait_for(mod._run_start_gates("w1", "u1", "w1"), timeout=2)
+
+
+async def test_the_billing_leg_is_the_shared_guard(monkeypatch):
+    """The route asks ``credits.guards`` — the same gate run_core uses — so a
+    change to the guard cannot miss the HTTP leg. Its 402 reaches the caller
+    unchanged.
+
+    Mutation: inline ``check_balance`` / ``check_quota`` again.
+    """
+    from pocketpaw_ee.cloud._core.errors import InsufficientCredits
+
+    _install(monkeypatch, billing=True, fail=set())
+    asked: list[str] = []
+
+    async def _over(ws):
+        asked.append(ws)
+        return InsufficientCredits(requested=1, available=0)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.credits.guards.over_billing_limit", _over)
+
+    with pytest.raises(InsufficientCredits) as caught:
+        await mod._run_start_gates("w1", "u1", "w1")
+    assert asked == ["w1"]
+    assert caught.value.code == "credits.insufficient"
+
+
+async def test_an_empty_workspace_skips_billing_like_the_guard(monkeypatch):
+    """The guard returns None for an empty workspace (no wallet to attribute);
+    the old inline copy called the credit service with ``""``. The route keeps
+    the guard's behaviour. Unreachable live: the route rejects an empty
+    workspace before it gets here."""
+    started = _install(monkeypatch, billing=True, fail={"balance", "quota"})
+    await mod._run_start_gates("", "u1", "")
+    assert "balance" not in started and "quota" not in started

@@ -2,6 +2,15 @@
 
 Updated: 2026-10-01 (DS-1, feat/discover-index) — added ``DiscoverListing`` (one
 public Discover card per source item; see discover/service_admin.py).
+Updated: 2026-10-01 (CN-3, fix/canon-daily-caps) — the six per-meter daily
+counters (``FileComprehensionUsage``, ``FileTranscriptionUsage``,
+``GuestTurnUsage``, ``IllustrationUsage``, ``WorkspaceTurnUsage``,
+``WorkspaceUploadUsage``) are gone, replaced by ONE ``DailyUsage`` doc keyed
+``(subject_type, subject_id, meter, day)`` in the ``daily_usage`` collection.
+Kept out of ``__all__``: only ``ee.cloud.metering.service`` imports it.
+Registering it is load-bearing — an unregistered doc makes
+``get_pymongo_collection()`` raise inside the fail-closed meters, so every
+comprehension / transcription / illustration / guest turn would be refused.
 
 Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added ``MeetingKnock`` (a guest
 asking to join a meeting; see meetings/lobby_service.py).
@@ -222,6 +231,7 @@ from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
+from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.draft import Draft
@@ -230,8 +240,6 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestState,
 )
 from pocketpaw_ee.cloud.models.file import FileObj
-from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
-from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
@@ -248,7 +256,6 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
-from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
 from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
@@ -273,7 +280,6 @@ from pocketpaw_ee.cloud.models.notification_outbox import (
     NotificationOutboxItem,
     NotificationRateMarker,
 )
-from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
@@ -309,8 +315,6 @@ from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
-from pocketpaw_ee.cloud.models.workspace_turn_usage import WorkspaceTurnUsage
-from pocketpaw_ee.cloud.models.workspace_upload_usage import WorkspaceUploadUsage
 from pocketpaw_ee.cloud.models.workspace_vm import WorkspaceVm
 
 # Lazy import to avoid circular imports
@@ -445,7 +449,6 @@ __all__ = [
     "Lead",
     "LeadSource",
     "ByokProviderKey",
-    "IllustrationUsage",
     "LiteLLMTenantKey",
     "ShipApp",
     "ShipBox",
@@ -553,20 +556,11 @@ def get_all_documents():
         # collection from FileUpload on purpose — a session is not a file and
         # must never appear in a library listing; see the model docstring.
         MultipartUpload,
-        # Per-workspace/day file-comprehension spend counter (FC-3). Only
-        # ``ee.cloud.uploads.comprehension_budget`` reads/writes this.
-        FileComprehensionUsage,
-        # Per-guest-user/day turn counter (BYOK-first onboarding). Only
-        # ``ee.cloud.auth.guest_budget`` reads/writes this.
-        GuestTurnUsage,
-        # Per-workspace/day media-transcription spend counter (T2). Only
-        # ``ee.cloud.uploads.transcription_budget`` reads/writes this. Separate
-        # from the comprehension counter on purpose: the two meter different
-        # bills, and one shared row would let a bulk photo import exhaust the
-        # ceiling that exists to stop a podcast library.
-        FileTranscriptionUsage,
-        WorkspaceTurnUsage,
-        WorkspaceUploadUsage,
+        # Every daily cap's counter: one row per (subject, meter, UTC day).
+        # Only ``ee.cloud.metering.service`` reads/writes this. Meters stay
+        # separate rows, so a bulk photo import cannot exhaust the ceiling
+        # that exists to stop a podcast library.
+        DailyUsage,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,
@@ -587,7 +581,6 @@ def get_all_documents():
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
         ByokProviderKey,
-        IllustrationUsage,
         LiteLLMTenantKey,
         # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
         # Only ``ee.cloud.ship.store`` reads/writes these.

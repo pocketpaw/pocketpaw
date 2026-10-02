@@ -19,6 +19,10 @@ Updated: 2026-10-01 (feat/discover-index) — Site templates gain `kind`,
   the Discover index. Added "Discover — Public Index" (GET /discover,
   GET /discover/{id} public and rate-limited; POST /discover/{id}/use and
   /report signed in).
+Updated: 2026-10-01 (CN-3, fix/canon-daily-caps) — the guest-cap note names the
+shared daily counter (`metering.service.try_spend`) instead of the removed
+`guest_budget.try_spend_turn`.
+
 Updated: 2026-10-01 (feat/atlas-canonical) — added "Atlas — Surfaces, Verbs and
   Search" (GET /api/v1/atlas/{surfaces,verbs,search}), and `open_surface`'s
   route list now comes from atlas (`agent_openable` surfaces). Review pass: the
@@ -4614,8 +4618,8 @@ and the guest's own `guest_limits` wins, so a single guest can still be lifted
 by their row. Both are unset in production and both ignore a non-integer, zero
 or negative value rather than applying it — there is deliberately no "disable
 guest limits" switch, because zero is what an operator types when they mean
-unlimited and `try_spend_turn` reads a cap of zero as *refuse every turn*. A dev
-box turns the caps off by setting them past anything it will reach:
+unlimited and the guest turn counter (`metering.service.try_spend`) reads a
+cap of zero as *refuse every turn*. A dev box turns the caps off by setting them past anything it will reach:
 
 ```bash
 export POCKETPAW_GUEST_SESSIONS=1000

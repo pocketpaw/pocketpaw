@@ -27,7 +27,7 @@
 # defaults sit far above any real day's use.
 #
 # ``0`` means NO CAP for that dimension. This DIVERGES from
-# ``comprehension_budget``, where ``0`` disables the feature and so blocks
+# the file-comprehension meter, where ``0`` disables the feature and so blocks
 # everything, and the divergence is deliberate: comprehension is an extra a
 # workspace can live without for a day, whereas uploading IS the product. An
 # env typo that reads as ``0`` must not take file upload off the air.
@@ -35,10 +35,16 @@
 # It fails OPEN on a database error, logged at WARNING. The upload path writes
 # its metadata row to the same Mongo on the next statement, so a database that
 # cannot serve this counter cannot complete the upload either — refusing here
-# would protect nothing (see ``turn_budget`` for the harness that proved it).
+# would protect nothing (see the chat-turn meter for the harness that proved it).
 #
-# Structure copied from ``uploads/comprehension_budget.py``, including the
-# increment-then-compare ordering and the rollback of an over-cap claim.
+# Updated 2026-10-01 (CN-3): the counters are the shared ``metering.service``
+# daily primitive — two meters, ``upload_files`` and ``upload_bytes`` — and the
+# caps come from its resolvers (same env vars; ``0`` still means uncapped for a
+# dimension, mapped to the primitive's ``None``). This module only composes the
+# two: claim files, then bytes; a bytes refusal refunds the files claim, so a
+# refused batch holds nothing. Two drifts from the one-row ``$inc`` this
+# replaced, both harmless: the two increments are separate operations, and an
+# uncapped dimension is no longer counted at all.
 #
 # 2026-09-14 (feat/uploads-multipart-endpoints): added ``release`` and
 # ``today()``. A multipart upload claims its budget at INIT — before any bytes
@@ -60,56 +66,8 @@
 
 from __future__ import annotations
 
-import logging
-import os
-from datetime import UTC, datetime
-
-from pymongo import ReturnDocument
-
-from pocketpaw_ee.cloud.models.workspace_upload_usage import WorkspaceUploadUsage
-
-logger = logging.getLogger(__name__)
-
-_ENV_FILES = "POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY"
-_ENV_BYTES = "POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY"
-
-#: Files per workspace per UTC day. 2000 is roughly forty full 50-file batches
-#: — far past any real day of work, and far short of a script left running.
-_DEFAULT_FILES = 2000
-
-#: Bytes per workspace per UTC day. 20 GB: four times the Free plan's entire
-#: 5 GB storage cap, so it never fires before a plan cap would, and it still
-#: bounds an unbilled deployment's exposure to one workspace-day.
-_DEFAULT_BYTES = 20_000_000_000
-
-
-def _cap(name: str, default: int) -> int:
-    """Read an env ceiling. ``0`` means uncapped; a bad value means the default.
-
-    A non-integer is a misconfiguration, not an instruction — warn and use the
-    default rather than reading ``"twenty gigs"`` as ``0`` and quietly removing
-    the ceiling for the whole deployment.
-    """
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        logger.warning("%s is not an integer (%r) — using the default", name, raw)
-        return default
-
-
-def daily_file_cap() -> int:
-    return _cap(_ENV_FILES, _DEFAULT_FILES)
-
-
-def daily_byte_cap() -> int:
-    return _cap(_ENV_BYTES, _DEFAULT_BYTES)
-
-
-def _today() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d")
+from pocketpaw_ee.cloud.metering import service as metering
+from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
 
 def today() -> str:
@@ -117,58 +75,17 @@ def today() -> str:
 
     Public because a caller that holds a claim across requests (multipart
     sessions) must persist which day it spent on in order to refund it there.
-    Same value ``try_spend`` uses, from one place, so the two cannot drift.
     """
-    return _today()
+    return metering.today()
 
 
 async def release(workspace_id: str | None, day: str, files: int, size_bytes: int) -> None:
-    """Give back a claim made by ``try_spend`` on ``day``.
-
-    Best-effort and silent on failure: the claim expires at the next UTC
-    midnight regardless, so a failed refund costs at most the rest of that day,
-    and raising here would turn a successful abort into a 500 the user cannot
-    act on.
-
-    Clamped at zero with a ``$max``-style follow-up read rather than a bare
-    ``$inc``: a negative counter would grant free quota, which is worse than
-    failing to refund. See the module header for why the day travels with the
-    claim instead of being read as "now".
-    """
-    if not workspace_id or not day:
-        return
-    if files <= 0 and size_bytes <= 0:
-        return
-
-    key = f"{workspace_id}:{day}"
-    try:
-        coll = WorkspaceUploadUsage.get_pymongo_collection()
-        doc = await coll.find_one_and_update(
-            {"key": key},
-            {
-                "$inc": {"used": -int(files), "bytes_used": -int(size_bytes)},
-                "$set": {"updatedAt": datetime.now(UTC)},
-            },
-            return_document=ReturnDocument.AFTER,
-        )
-        if doc is None:
-            # Nothing to refund — the row was reaped, or the claim never
-            # landed (``try_spend`` fails open, so a claim can be "held"
-            # without a row behind it). Either way there is no counter to fix.
-            return
-        floor: dict[str, int] = {}
-        if int(doc.get("used", 0)) < 0:
-            floor["used"] = 0
-        if int(doc.get("bytes_used", 0)) < 0:
-            floor["bytes_used"] = 0
-        if floor:
-            await coll.update_one({"key": key}, {"$set": floor})
-    except Exception:
-        logger.warning(
-            "could not release an upload budget claim for workspace=%s day=%s",
-            workspace_id,
-            day,
-            exc_info=True,
+    """Give back a claim made by ``try_spend`` on ``day``. Best-effort, clamped
+    at zero, never raises — see the module header for why the day travels with
+    the claim instead of being read as "now"."""
+    for meter, amount in ((DailyMeter.UPLOAD_FILES, files), (DailyMeter.UPLOAD_BYTES, size_bytes)):
+        await metering.refund(
+            subject_type="workspace", subject_id=workspace_id, meter=meter, amount=amount, day=day
         )
 
 
@@ -176,83 +93,43 @@ async def try_spend(workspace_id: str | None, files: int, size_bytes: int) -> tu
     """Claim ``files`` files and ``size_bytes`` bytes against today's budget.
 
     Returns ``(allowed, reason)``; ``reason`` is empty when allowed and names
-    the dimension that tripped otherwise, so the caller can say which ceiling
-    the user hit.
-
-    Increments FIRST and compares after. The increment is the atomic part: a
-    check-then-increment lets two concurrent batches both read "just under" and
-    both spend. An over-cap claim is rolled back in full, so a refused batch
-    does not hold a slot a later one could have used.
+    the dimension that tripped otherwise (``"files"``, ``"bytes"`` or
+    ``"workspace"``), so the caller can say which ceiling the user hit.
+    Fails OPEN on a storage error, like the chat-turn meter: the metadata row
+    is written to the same Mongo on the next statement.
     """
-    file_cap = daily_file_cap()
-    byte_cap = daily_byte_cap()
-    if file_cap <= 0 and byte_cap <= 0:
+    file_cap = metering.upload_files_cap()
+    byte_cap = metering.upload_bytes_cap()
+    if file_cap is None and byte_cap is None:
         return True, ""
     if files <= 0 and size_bytes <= 0:
         return True, ""
-
     if not workspace_id:
         # No tenant means no counter to charge, and an uncharged upload is
-        # exactly what this file exists to prevent.
-        logger.warning("upload refused — no workspace to charge")
+        # exactly what this ceiling exists to prevent.
         return False, "workspace"
 
-    day = _today()
-    key = f"{workspace_id}:{day}"
-    try:
-        # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter
-        # is beanie 1.x and this repo is on 2.1.0. Getting it wrong is invisible
-        # in the worst way: the AttributeError lands in the fail-closed
-        # ``except`` below and every upload is refused, which reads as "uploads
-        # are broken" rather than as a bug in the ceiling.
-        coll = WorkspaceUploadUsage.get_pymongo_collection()
-        doc = await coll.find_one_and_update(
-            {"key": key},
-            {
-                "$inc": {"used": int(files), "bytes_used": int(size_bytes)},
-                "$setOnInsert": {
-                    "workspace": workspace_id,
-                    "day": day,
-                    "createdAt": datetime.now(UTC),
-                },
-                "$set": {"updatedAt": datetime.now(UTC)},
-            },
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-        if doc is None:
-            # A successful update with no returned document should not happen,
-            # but reading it as "0 spent" would be a permanently open gate.
-            raise RuntimeError("upload budget upsert returned no document")
-        spent_files = int(doc.get("used", 0))
-        spent_bytes = int(doc.get("bytes_used", 0))
-    except Exception:
-        # Fails OPEN — same reasoning and same reversal as ``turn_budget``:
-        # the metadata row is written to this Mongo on the very next
-        # statement, so an unreadable counter never lets an upload through
-        # that the database itself would not have accepted.
-        logger.warning(
-            "upload budget unavailable for workspace=%s; allowing this batch",
-            workspace_id,
-            exc_info=True,
-        )
-        return True, ""
-
-    over = ""
-    if file_cap > 0 and spent_files > file_cap:
-        over = "files"
-    elif byte_cap > 0 and spent_bytes > byte_cap:
-        over = "bytes"
-    if not over:
-        return True, ""
-
-    try:
-        await coll.update_one(
-            {"key": key}, {"$inc": {"used": -int(files), "bytes_used": -int(size_bytes)}}
-        )
-    except Exception:
-        logger.debug("could not roll back an over-cap upload claim", exc_info=True)
-    return False, over
+    day = today()
+    if not await metering.try_spend(
+        subject_type="workspace",
+        subject_id=workspace_id,
+        meter=DailyMeter.UPLOAD_FILES,
+        amount=files,
+        cap=file_cap,
+        fail_open=True,
+    ):
+        return False, "files"
+    if not await metering.try_spend(
+        subject_type="workspace",
+        subject_id=workspace_id,
+        meter=DailyMeter.UPLOAD_BYTES,
+        amount=size_bytes,
+        cap=byte_cap,
+        fail_open=True,
+    ):
+        await release(workspace_id, day, files, 0)
+        return False, "bytes"
+    return True, ""
 
 
-__all__ = ["daily_byte_cap", "daily_file_cap", "release", "today", "try_spend"]
+__all__ = ["release", "today", "try_spend"]
