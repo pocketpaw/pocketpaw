@@ -3,6 +3,7 @@
 # function-level duplicates that import-linter can't see. Each row pins today's
 # count; the check fails only when a count GROWS. Consolidating copies is
 # welcome: lower max_count in the same PR. Stdlib only.
+# 2026-10-02: counts lowered to the post-consolidation totals after the canonicalization PRs landed.
 # Updated 2026-10-01: added the FabricJournalStore( construction row, which
 # closes the `from pocketpaw.fabric import FabricJournalStore` re-export gap
 # the Fabric import-linter contract can't see. Review pass: comment lines are
@@ -33,7 +34,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"UPDATE instinct_actions",
         ("*",),
         ("src/pocketpaw/instinct/store.py",),
-        27,
+        2,
         "InstinctStore.update_parameters / _update_status (src/pocketpaw/instinct/store.py)",
     ),
     (
@@ -41,7 +42,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"def try_spend",
         ("*",),
         (),
-        6,
+        2,
         "one try_spend(meter) in cloud/metering, caps via resolve_entitlements",
     ),
     (
@@ -57,7 +58,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"(?<!def )check_quota\(",
         ("*",),
         ("ee/pocketpaw_ee/cloud/credits/guards.py",),
-        2,
+        1,
         "credits/guards.over_billing_limit",
     ),
     (
@@ -73,7 +74,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"httpx\.AsyncClient\(",
         ("ee/pocketpaw_ee/cloud/audit/webhooks.py",),
         (),
-        1,
+        0,
         "the notifications outbox delivery path",
     ),
     (
@@ -112,7 +113,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"create_pool\(",
         ("*",),
         (),
-        4,
+        1,
         "a shared get_arq_pool() in cloud/_core/redis_client.py",
     ),
     (
@@ -129,7 +130,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"(FRONTEND_BASE_URL|PUBLIC_BASE_URL|REDIS_URL)",
         ("*",),
         (),
-        24,
+        21,
         "cloud/_core/redis_client for Redis; one settings accessor for base URLs",
     ),
     (
@@ -137,7 +138,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"def require_scope",
         ("ee/pocketpaw_ee/*",),
         (),
-        1,
+        0,
         "pocketpaw.api.deps.require_scope (fail-closed)",
     ),
     (
@@ -161,7 +162,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"FabricJournalStore\(",
         ("*",),
         ("src/pocketpaw/fabric/*",),
-        1,
+        0,
         "the shared journal_store helper (canonicalization plan A1)",
     ),
     (
