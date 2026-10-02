@@ -10,9 +10,12 @@
 #     404 naming that variable;
 #   * the default is the copy vendored in the package, served byte for byte,
 #     wrapped in one IIFE, generated (not hand-edited), and still speaking the
-#     pawbar:act / pawbar:act-result protocol the glass app posts.
+#     pawbar:act / pawbar:act-result protocol the glass app posts, and writing
+#     no page globals beyond its load flag and window.pawbarTools.
 
 from __future__ import annotations
+
+import re
 
 import pytest
 import pytest_asyncio
@@ -136,6 +139,19 @@ def test_vendored_script_keeps_its_globals_to_itself():
         ln for ln in body[1:] if ln.startswith(("const ", "let ", "var ", "function ", "class "))
     ]
     assert stray == []
+
+
+def test_vendored_script_writes_only_its_two_page_globals():
+    """Inside the wrapper it may write exactly two page properties: its own
+    double-load flag and window.pawbarTools, the array a site declares tools on
+    (created if absent, its push replaced so later declarations register)."""
+    code = _code()
+    writes = set(re.findall(r"\bwin(\.[A-Za-z_$][\w$]*|\[[^\]]+\])\s*=(?!=)", code))
+    assert writes == {"[LOADED_FLAG]", ".pawbarTools"}
+    assert 'LOADED_FLAG = "__pawBarActionsLoaded"' in code
+    assert "window." not in code and "globalThis" not in code
+    assert re.findall(r"(\w+)\.push\s*=(?!=)", code) == ["queue"]
+    assert "const queue = Array.isArray(win.pawbarTools)" in code
 
 
 def test_vendored_script_carries_nothing_tenant_specific():
