@@ -18,6 +18,8 @@ _CROSS_TENANT_HELPERS = (
     # no membership check, workspace_id is a caller-supplied path parameter,
     # same shape as the four above.
     "platform_set_workspace_overrides",
+    # Added 2026-10-02 (Paw Partners PH-1): the partner-profile writer — same shape.
+    "platform_set_partner_profile",
 )
 
 

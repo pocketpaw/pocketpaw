@@ -34,6 +34,21 @@
 #   2026-09-15-paw-admin-prd-corrections.md caught the master PRD asking for
 #   the wrong index — a workspace-prefixed one on Subscription — and missed
 #   this doc entirely).
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): optional audit fields for an
+#   INR top-up — ``settlement_amount`` / ``settlement_currency`` (Dodo's figure)
+#   and ``conversion`` + ``fx_inr_per_usd`` (the source and rate the base credits
+#   were granted at, from the ledger entry). Defaulted,
+#   so every existing row and writer is unchanged.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``subscription_id``
+#   stamps a subscription's own charge (recorded, never granted) so a refund of
+#   it can be told from a top-up with nothing left to reverse.
+#   ``commission_reversed`` + ``commission_reversal_event_ids`` are the running
+#   clawback of a partner client payment's commission — the claim a reversal
+#   wins before it debits, so a refund and a lost dispute (or several partial
+#   refunds) can never take back more than was granted. Defaulted; no migration.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 re-check): ``refunded_minor``
+#   sums the refunds those claims counted, so cumulative partials reaching the
+#   amount paid lapse the client-paid year. Defaulted; no migration.
 
 from __future__ import annotations
 
@@ -85,10 +100,31 @@ class Payment(TimestampedDocument):
     reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
     # ISO currency the buyer was charged in (e.g. ``USD``), informational.
     currency: str | None = None
+    # AUDIT for a converted top-up. ``settlement_*`` is Dodo's own settlement
+    # figure as the verified body stated it (None when it sent none).
+    # ``conversion`` is which figure the base grant came from (``settlement`` /
+    # ``fx`` / ``fx_settlement_distrusted``; None for a plain USD charge) and
+    # ``fx_inr_per_usd`` the configured rate in force at
+    # that grant — both copied off the base LEDGER entry's ref, so a redelivery
+    # at a different rate cannot rewrite them. Informational — the cap is
+    # ``credits_granted``.
+    settlement_amount: int | None = None
+    settlement_currency: str | None = None
+    conversion: str | None = None
+    fx_inr_per_usd: float | None = None
     # The GATEWAY's outcome, not ours: a non-USD charge is genuinely
     # ``succeeded`` with ``credits_granted == 0``.
     # ``succeeded`` | ``failed`` | ``pending``.
     status: str = "succeeded"
+    # PH-13: set when the payment was a SUBSCRIPTION's charge (never a top-up).
+    subscription_id: str | None = None
+    # PH-13: partner commission clawed back from this client payment so far, and
+    # the reversal deliveries that took it (the claim, as for ``credits_reversed``).
+    commission_reversed: int = 0
+    commission_reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
+    # PH-13: the client's refunds counted by those claims, summed, so partial
+    # refunds that reach ``amount_credits`` lapse the site like a full one.
+    refunded_minor: int = 0
 
     class Settings:
         name = "billing_payments"

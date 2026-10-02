@@ -84,6 +84,16 @@
 #   locked property still reported it visible. The colours (and stroke-width /
 #   caps / joins, which a stroked glyph needs and a filled one does not) moved
 #   into ``_MARK_LOCK``.
+# Updated 2026-10-02 (feat/partners-cobrand, PH-5): the builders and
+#   ``inject_into_tree`` take optional ``text`` / ``href`` / ``label`` so a
+#   partner-sold site can carry the co-brand mark ("Made by <shop> · Paw Sites by
+#   PocketPaw" -> ``PARTNERS_HREF``) through the SAME injector, lock, marker and
+#   sentinels — which is what lets a republish swap badge <-> co-brand when a site
+#   changes state. Defaults are byte-identical to the old badge. Every input is
+#   escaped AND forced to ASCII (character references), because the latin-1
+#   fallback below re-encodes the page and the co-brand carries a middle dot and a
+#   shop name in any script. The latin-1 comment in ``inject_into_tree`` now
+#   points at both ASCII tests.
 
 from __future__ import annotations
 
@@ -153,6 +163,9 @@ BADGE_HREF = "https://pocketpaw.dev"
 BADGE_TEXT = "Built with PocketPaw"
 
 _HTML_SUFFIXES = (".html", ".htm")
+
+# PH-5: where a partner-sold site's co-brand mark points — the Paw Partners page.
+PARTNERS_HREF = "https://pocketpaw.xyz/partners"
 
 # THE LOCK. The properties an author stylesheet would reach for to hide the badge,
 # inline and ``!important``. A style-attribute ``!important`` is the strongest
@@ -363,7 +376,21 @@ def badge_required(*, badge_removal: bool) -> bool:
     return not badge_removal
 
 
-def build_badge_anchor() -> str:
+def _ascii_escape(value: str) -> str:
+    """HTML-escape ``value`` and spell any non-ASCII as a character reference.
+
+    ASCII is load-bearing, not tidy: ``inject_into_tree`` writes a non-UTF-8 page
+    back as latin-1, and a co-brand name in Devanagari (or the middle dot in the
+    co-brand text) would not encode — the publish would abort. ``&#183;`` renders
+    exactly like ``·``. ASCII input comes back unchanged, so the default badge is
+    byte-identical.
+    """
+    return html.escape(value).encode("ascii", "xmlcharrefreplace").decode("ascii")
+
+
+def build_badge_anchor(
+    *, text: str = BADGE_TEXT, href: str = BADGE_HREF, label: str | None = None
+) -> str:
     """Just the anchor — the element that carries the lock.
 
     Split out from ``build_badge_html`` so the lock can be asserted against the
@@ -375,18 +402,24 @@ def build_badge_anchor() -> str:
     EVERY element here carries a lock — anchor, mark and text. The children are
     not decoration inside a locked box: they are the badge, and an unlocked child
     is a two-line bypass (see ``_CHILD_LOCK``).
+
+    ``text`` / ``href`` / ``label`` (label defaults to the text) are how the
+    partner co-brand mark reuses this element; the defaults are the free badge.
     """
-    text = html.escape(BADGE_TEXT)
+    text = _ascii_escape(text)
+    label = text if label is None else _ascii_escape(label)
     return (
-        f'<a {BADGE_MARKER}="1" href="{BADGE_HREF}" target="_blank" '
+        f'<a {BADGE_MARKER}="1" href="{_ascii_escape(href)}" target="_blank" '
         f'rel="noopener noreferrer nofollow" '
-        f'aria-label="{text}" '
+        f'aria-label="{label}" '
         f'style="{_LOCKED_STYLE}">{_MARK_SVG}'
         f'<span style="{_SPAN_LOCK}">{text}</span></a>'
     )
 
 
-def build_badge_html() -> str:
+def build_badge_html(
+    *, text: str = BADGE_TEXT, href: str = BADGE_HREF, label: str | None = None
+) -> str:
     """The full badge snippet: the scoped look, then the locked anchor.
 
     No script, and nothing fetched — the mark is an inline SVG, so the badge is
@@ -394,7 +427,8 @@ def build_badge_html() -> str:
     and a reader with JavaScript off. Those are the same conditions under which a
     script-injected badge quietly disappears, which is why this one is markup.
     """
-    return f"{BADGE_OPEN}<style>{_LOOK_CSS}{_GUARD_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}"
+    anchor = build_badge_anchor(text=text, href=href, label=label)
+    return f"{BADGE_OPEN}<style>{_LOOK_CSS}{_GUARD_CSS}</style>{anchor}{BADGE_CLOSE}"
 
 
 def strip_badge(page: str) -> str:
@@ -453,8 +487,14 @@ def inject_into_html(page: str, badge: str) -> str | None:
     return None if updated == page else updated
 
 
-def inject_into_tree(root: Path) -> list[Path]:
+def inject_into_tree(
+    root: Path, *, text: str = BADGE_TEXT, href: str = BADGE_HREF, label: str | None = None
+) -> list[Path]:
     """Badge every HTML page under ``root``; return the pages rewritten.
+
+    ``text`` / ``href`` / ``label`` go straight to ``build_badge_html`` (the
+    partner co-brand mark); because every variant shares the marker and the
+    sentinels, injecting one replaces whichever the page carried before.
 
     FAILURE-CLOSED ON EVERY PAGE THAT WILL SHIP, which is what separates this from
     ``paw_bar.embed.inject_into_tree`` (that one logs and skips, because a bar is
@@ -493,7 +533,7 @@ def inject_into_tree(root: Path) -> list[Path]:
         )
         return []
 
-    badge = build_badge_html()
+    badge = build_badge_html(text=text, href=href, label=label)
     changed: list[Path] = []
     seen_pages = 0
 
@@ -520,9 +560,13 @@ def inject_into_tree(root: Path) -> list[Path]:
         # same codec reproduces the original bytes with ASCII spliced in. That is
         # safe for every ASCII-compatible encoding — utf-8, latin-1, windows-1252,
         # the whole ISO-8859 family. ``test_the_badge_is_pure_ascii`` pins the
-        # assumption the fallback rests on; if the badge ever gains a non-ASCII
-        # character, this silently corrupts a latin-1 page and that test is what
-        # stops it.
+        # assumption the fallback rests on for the default badge, and
+        # ``_ascii_escape`` keeps it true for caller-supplied text (a partner's
+        # co-brand name in any script, the middle dot) —
+        # ``test_a_hostile_cobrand_name_is_escaped_and_ascii`` pins that half. A raw
+        # non-ASCII character would either abort the publish here
+        # (``UnicodeEncodeError``) or be written as a latin-1 byte into a page whose
+        # real codec may not be latin-1.
         try:
             page, codec = raw.decode("utf-8"), "utf-8"
         except UnicodeDecodeError:
@@ -555,6 +599,7 @@ __all__ = [
     "BADGE_HREF",
     "BADGE_MARKER",
     "BADGE_TEXT",
+    "PARTNERS_HREF",
     "BadgeInjectionError",
     "badge_required",
     "build_badge_anchor",

@@ -1,6 +1,23 @@
 # ee/pocketpaw_ee/sites/renewal_sweeper.py — the RENEWAL for site plans bought
 # from the workspace credit wallet.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): CLIENT-PAID partner
+# sites (``billing_rail == "client"``: the partner's client paid the year through
+# a one-time pay link) are never charged here — the debit query stays
+# ``== "credits"`` — and at their renewal date they LAPSE to the free floor (the
+# site stays up) through ``sites.service.lapse_due_client_paid_sites``, counted
+# under ``lapsed``. The client renews by paying a new link.
+#
+# Updated 2026-10-02 (feat/partners-sell, PH-2): a renewal buys ONE PERIOD of the
+# tier — ``tier.period_months`` (1 for every monthly rung, 12 for the partner-only
+# yearly rungs) — priced by ``billing.service.site_plan_price_usd`` (the partner's
+# country price for partner rungs, ``monthly_price_usd`` otherwise).
+# ``period_paid_usd`` records the amount actually charged; for a partner whose
+# profile has since been removed it is the renewal price only if it is a real
+# price of the tier. Otherwise there is no price, and the site LAPSES to the free
+# floor like a short wallet (it stays up) rather than keeping paid features unpaid.
+# Monthly behaviour is unchanged; partner sites ride this same sweep.
+#
 # Created 2026-09-05 (fix/sites-plan-credits). A paid site now bills against the
 # workspace's own credit balance rather than a Dodo subscription, and a Dodo
 # subscription is the thing that used to make a MONTHLY plan actually recur. With
@@ -41,7 +58,7 @@ from datetime import UTC, datetime
 
 from dateutil.relativedelta import relativedelta
 
-from pocketpaw_ee.cloud._core.errors import InsufficientCredits
+from pocketpaw_ee.cloud._core.errors import ConflictError, InsufficientCredits
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
 logger = logging.getLogger(__name__)
@@ -107,6 +124,16 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
     from pocketpaw_ee.cloud.billing import site_plans
 
     at = now or datetime.now(UTC)
+    from pocketpaw_ee.sites import service as sites_service
+
+    # PH-13: a client-paid year that ran out lapses; nothing is debited for it.
+    client_lapsed = await sites_service.lapse_due_client_paid_sites(at)
+    if client_lapsed:
+        logger.info(
+            "sites.renewal_sweeper: %d client-paid partner site(s) reached the end of the "
+            "year their client paid for and lapsed to the free floor (not charged)",
+            client_lapsed,
+        )
     due = (
         await _SiteDoc.find(
             {
@@ -118,7 +145,7 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         .limit(_SWEEP_BATCH_LIMIT)
         .to_list()
     )
-    counts = {"renewed": 0, "lapsed": 0, "failed": 0, "not_live": 0, "closed": 0}
+    counts = {"renewed": 0, "lapsed": client_lapsed, "failed": 0, "not_live": 0, "closed": 0}
     if not due:
         return counts
 
@@ -216,14 +243,28 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # before the save re-reads the same due date next tick, computes the same
         # idempotency key, and no-ops instead of charging a second time.
         period = doc.renewal_date or at
+        # ONE PERIOD of the tier, priced for this workspace. For a monthly rung
+        # this IS ``monthly_price_usd``; a partner-only rung is a year at the
+        # partner's country price.
+        price_usd = 0
         try:
+            # ``period_paid_usd`` is a per-period HIGH-WATER mark, not this tier's
+            # price (a mid-period downgrade leaves the dearer tier's number). It is
+            # offered only as a fallback for a partner whose profile is gone, and
+            # ``site_plan_price_usd`` keeps it only if it is a real price of this
+            # tier; otherwise there is no price and the site LAPSES (below), never
+            # charged at a guess.
+            price_usd = await billing_service.site_plan_price_usd(
+                tier, doc.workspace, last_paid_usd=getattr(doc, "period_paid_usd", 0) or 0
+            )
             await billing_service.charge_site_plan_credits(
                 workspace_id=doc.workspace,
                 site_id=site_id,
                 tier_key=tier.key,
-                # A RENEWAL BUYS THE WHOLE MONTH. The publish path is the one that
-                # charges a difference, and only when a tier changes mid-period.
-                amount_usd=tier.monthly_price_usd,
+                # A RENEWAL BUYS ONE WHOLE PERIOD of the tier (a month, or a year
+                # for a partner rung). The publish path is the one that charges a
+                # difference, and only when a tier changes mid-period.
+                amount_usd=price_usd,
                 period_start=period,
                 member_id=None,
             )
@@ -243,7 +284,34 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
                 site_id,
                 doc.workspace,
                 tier.key,
-                tier.monthly_price_usd,
+                price_usd,
+            )
+            continue
+        except ConflictError as exc:
+            if exc.code != billing_service.PARTNER_PRICE_UNKNOWN:
+                counts["failed"] += 1
+                logger.warning(
+                    "sites.renewal_sweeper: site %s (workspace=%s) refused to renew (%s); "
+                    "left due and will be retried on the next tick",
+                    site_id,
+                    doc.workspace,
+                    exc.code,
+                )
+                continue
+            # NO PRICE TO RENEW AT (a partner rung whose partner profile is gone).
+            # Retrying forever would leave every paid capability on, unpaid. Lapse
+            # exactly as a short wallet does: free floor, site stays up.
+            doc.subscription_status = "cancelled"
+            doc.renewal_date = None
+            doc.period_paid_usd = 0
+            await doc.save()
+            counts["lapsed"] += 1
+            logger.warning(
+                "sites.renewal_sweeper: site %s (workspace=%s tier=%s) has no partner "
+                "price to renew at — lapsed to the free floor; the site STAYS LIVE.",
+                site_id,
+                doc.workspace,
+                tier.key,
             )
             continue
         except Exception:
@@ -260,12 +328,12 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
         # Step from the DUE date, not from now. Stepping from now would let each
         # sweep's few seconds of lateness accumulate, walking every customer's
         # billing day slowly forward through the calendar.
-        doc.renewal_date = period + relativedelta(months=1)
+        doc.renewal_date = period + relativedelta(months=tier.period_months)
         # A NEW PERIOD RESETS WHAT IT HAS BEEN PAID FOR. The high-water mark is
         # per-period by definition, so carrying last month's across would let a
         # customer who upgraded in March take the April upgrade for free forever.
         # Set to the tier just charged, which is exactly what this month bought.
-        doc.period_paid_usd = int(tier.monthly_price_usd)
+        doc.period_paid_usd = int(price_usd)
         await doc.save()
         counts["renewed"] += 1
 

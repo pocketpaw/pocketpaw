@@ -3,6 +3,11 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): the site-plan request door
+# refuses partner-only rungs (sold only through /partners/sell).
+# Updated 2026-10-02 (feat/partners-foundation, PH-1): the foreign-concierge
+# response passes the workspace partner profile to the concierge gates.
+#
 # ORIGIN OWNERSHIP: POST ``/sites/origins/claims`` issues a token bound to
 # (workspace, host) and POST ``/sites/origins/verify`` reads it back off the
 # claimed domain. They are the gate the foreign-concierge routes ask before
@@ -468,7 +473,8 @@ async def request_site_plan(
     # quotes a price, and a client showing "$0/month" for a tier we could not
     # resolve would be worse than the refusal it replaced.
     tier = site_plans.site_scoped_tier(site_plans.canonical_site_tier_key(body.site_plan_key))
-    if tier is None:
+    # Partner-only rungs are sold through /partners/sell, never requested here.
+    if tier is None or tier.partner_only:
         raise ValidationError(
             "sites.unknown_plan_tier",
             f"'{body.site_plan_key}' is not a plan a single site can be put on",
@@ -1845,8 +1851,11 @@ async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
     workspace_id = str(getattr(site, "workspace", "") or "")
     pocket_id = str(getattr(site, "pocket_id", "") or "")
     site_key = str(getattr(site, "signed_key", "") or "")
-    available = bool(concierge_available(site))
-    entitled = bool(concierge_plan_entitled(site))
+    from pocketpaw_ee.cloud.billing.enforcement import load_partner
+
+    partner = await load_partner(workspace_id)
+    available = bool(concierge_available(site, partner=partner))
+    entitled = bool(concierge_plan_entitled(site, partner=partner))
     enabled = bool(getattr(site, "concierge_enabled", False))
     exists = concierge_exists(site)
 

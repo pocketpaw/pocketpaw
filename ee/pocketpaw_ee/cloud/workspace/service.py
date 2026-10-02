@@ -1,5 +1,11 @@
 """Workspace domain — business logic service.
 
+Updated 2026-10-02 (feat/partners-foundation, PH-1): added the platform-only
+partner-profile writer beside ``platform_set_workspace_overrides``.
+Updated 2026-10-02 (feat/partners-tiers, PH-15): ``set_partner_tier`` — the
+system's compare-and-set write of a partner's volume tier (and the monthly
+review stamp), called only by ``partners.service``.
+
 Sole owner of writes to the ``Workspace`` and ``Invite`` Beanie documents.
 Module-level ``async def`` API. Members are embedded ``WorkspaceMembership``
 rows on User, so workspace-scoped User queries live here too.
@@ -80,8 +86,12 @@ from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
 from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
+from pocketpaw_ee.cloud.models.workspace import (
+    PartnerProfile,
+    WorkspaceOverrides,
+    WorkspaceSettings,
+)
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
-from pocketpaw_ee.cloud.models.workspace import WorkspaceOverrides, WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
@@ -2507,6 +2517,56 @@ async def platform_set_workspace_overrides(
     doc.overrides = overrides
     await doc.save()
     return doc
+
+
+async def platform_set_partner_profile(
+    workspace_id: str, profile: PartnerProfile | None
+) -> _WorkspaceDoc:
+    """Set (or clear, with ``profile=None``) a workspace's Paw Partners profile.
+
+    Platform-only mutator (Paw Partners PH-1), same shape as
+    ``platform_set_workspace_overrides`` above: no membership check, a
+    caller-supplied ``workspace_id``, listed in ``_CROSS_TENANT_HELPERS``
+    (test_platform_boundary.py). An ``active`` profile switches the per-site
+    billing seams on for this workspace (``billing.enforcement``).
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception as exc:
+        raise NotFound("workspace", workspace_id) from exc
+    # global-read: platform operator write; workspace_id is the path target.
+    doc = await _WorkspaceDoc.find_one({"_id": oid, "deleted_at": None})
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    doc.partner = profile
+    await doc.save()
+    # no-event: platform write, recorded by the platform audit row at the route.
+    return doc
+
+
+async def set_partner_tier(
+    workspace_id: str, *, expected: str, tier: str, reviewed_at: datetime | None = None
+) -> bool:
+    """Set ``partner.tier`` (and ``partner.tier_reviewed_at`` when given) — PH-15.
+
+    Compare-and-set on the tier as read (``expected``), so a concurrent operator
+    PUT or another recompute is never stomped; False when nothing matched (the
+    caller's next recompute re-reads). A targeted ``$set``, never a doc save, so
+    the rest of the profile is untouched. Called by ``partners.service`` with the
+    workspace of a sale / payment it is handling, or by the tier sweep.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    fields: dict = {"partner.tier": tier}
+    if reviewed_at is not None:
+        fields["partner.tier_reviewed_at"] = reviewed_at
+    res = await _WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": oid, "deleted_at": None, "partner.tier": expected}, {"$set": fields}
+    )
+    # no-event: the tier is read on demand (/partners/me); nothing subscribes to it.
+    return res.matched_count == 1
 
 
 async def platform_list_members(workspace_id: str) -> list[WorkspaceMember]:

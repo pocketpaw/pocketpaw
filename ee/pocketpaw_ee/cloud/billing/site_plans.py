@@ -20,6 +20,25 @@
 # never drift.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-9): new module.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): ``SitePlanTier`` gains
+#   ``period_months`` (default 1) and ``partner_only`` (default False). Two
+#   partner-only YEARLY rungs, ``site_year`` and ``staff_year``, priced per billing
+#   country in ONE table read by ``partner_price_usd``. They resolve everywhere a
+#   tier key does (entitlements, sweeper) but are NOT in ``_SITE_TIER_ORDER``, so
+#   the public storefront is unchanged; ``list_partner_plans`` lists them. Their
+#   ``monthly_price_usd`` is derived and display-only. Existing rungs unchanged.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): ``partner_client_price``
+#   — the LIST yearly price a partner's client (the shop) pays us through a
+#   one-time pay link, per billing country, in that country's currency and minor
+#   units (IN: Rs.3,588 / Rs.11,988; default: $84 / $228). One table beside the
+#   wholesale one; the pay link charges it and the webhook checks the payment
+#   against the figure stored when the link was made.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``partner_price_usd`` takes the
+#   partner's volume ``tier`` and charges floor(price x (1 - discount)) through
+#   ``partners._calc.discounted_usd`` (the one table of tier numbers), so the
+#   sale, a tier change, the renewal and the offers all read the discounted
+#   figure. ``partner_prices_usd`` now lists every country x tier price, so a
+#   removed partner's site still renews at the discounted figure it last paid.
 # Updated 2026-08-19 (feat/site-plan-catalog-inclusions): added the
 #   ``sells_concierge`` property — the catalog-level "does this tier sell the
 #   concierge", lifted out of ``resolve_site_entitlements`` where it lived as an
@@ -141,10 +160,40 @@ from dataclasses import dataclass, field
 # What remains here is per-SITE overflow: the rungs a workspace buys for site
 # N+1 once its plan's included sites are used up.
 # ---------------------------------------------------------------------------
+# PAW PARTNERS (PH-2): the yearly partner-only rungs, priced per billing country
+# in ONE table. Whole USD for the WHOLE period (site billing stores int USD).
+# ``partner_price_usd`` is the only reader that charges; the "default" row is the
+# fallback for any country without its own price.
+_PARTNER_PRICE_USD: dict[str, dict[str, int]] = {
+    "site_year": {"default": 29, "IN": 17},
+    "staff_year": {"default": 89, "IN": 56},
+}
+
+# PH-13: what the partner's CLIENT pays us for one period of a partner rung, as
+# (ISO currency, amount in minor units). List price, not the partner's wholesale
+# price above. Read only by ``partner_client_price``.
+_PARTNER_CLIENT_PRICE: dict[str, dict[str, tuple[str, int]]] = {
+    "site_year": {"default": ("USD", 8_400), "IN": ("INR", 358_800)},
+    "staff_year": {"default": ("USD", 22_800), "IN": ("INR", 1_198_800)},
+}
+
+# Months one paid period buys. Absent = 1 (every monthly rung).
+_SITE_PLAN_PERIOD_MONTHS: dict[str, int] = {
+    "site_year": 12,
+    "staff_year": 12,
+}
+
 _SITE_PLAN_MONTHLY_PRICE_USD: dict[str, int] = {
     "free": 0,
     "site": 7,
     "staff": 19,
+    # DISPLAY ONLY for the partner rungs, derived (default period price / months,
+    # rounded down): it must be > 0 because ``is_paid`` / the sweeper's skip gate
+    # on it, but nothing charges it — the charge is ``partner_price_usd``.
+    **{
+        key: prices["default"] // _SITE_PLAN_PERIOD_MONTHS[key]
+        for key, prices in _PARTNER_PRICE_USD.items()
+    },
 }
 
 # What a subscription on this tier BUYS: one site, or the whole workspace.
@@ -160,6 +209,8 @@ _SITE_PLAN_SCOPE: dict[str, str] = {
     "free": SITE_SCOPE,
     "site": SITE_SCOPE,
     "staff": SITE_SCOPE,
+    "site_year": SITE_SCOPE,
+    "staff_year": SITE_SCOPE,
 }
 
 # The ``cloudflare_features`` member that gates VISITOR ANALYTICS: the pageview
@@ -184,6 +235,8 @@ _SITE_PLAN_CF_FEATURES: dict[str, frozenset[str]] = {
     "free": frozenset(),
     "site": frozenset({"custom_domain", "analytics"}),
     "staff": frozenset({"custom_domain", "analytics", "waf", "edge_cache"}),
+    "site_year": frozenset({"custom_domain", "analytics"}),
+    "staff_year": frozenset({"custom_domain", "analytics", "waf", "edge_cache"}),
 }
 
 # Does this tier sell the visitor concierge at all?
@@ -200,6 +253,8 @@ _SITE_PLAN_SELLS_CONCIERGE: dict[str, bool] = {
     "free": False,
     "site": False,
     "staff": True,
+    "site_year": False,
+    "staff_year": True,
 }
 
 # Whether a tier may ship a site WITHOUT the attribution badge. ``free`` is the
@@ -210,6 +265,8 @@ _SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {
     "free": False,
     "site": True,
     "staff": True,
+    "site_year": True,
+    "staff_year": True,
 }
 
 # WHITE-LABEL AND INCLUDED-SITES ARE GONE FROM THIS CATALOG (2026-09-06).
@@ -240,6 +297,9 @@ _SITE_PLAN_CONVERSATION_ALLOWANCE: dict[str, int] = {
     "free": 0,
     "site": 0,
     "staff": 200,
+    "site_year": 0,
+    # Per PERIOD (a year), not per month — the quota window follows the period.
+    "staff_year": 1200,
 }
 
 # The list rate is 10 cents, and after the 2026-09-06 retirement of the ``studio``
@@ -257,6 +317,8 @@ _SITE_PLAN_CONVERSATION_RATE_CENTS: dict[str, int] = {
     "free": _LIST_CONVERSATION_RATE_CENTS,
     "site": _LIST_CONVERSATION_RATE_CENTS,
     "staff": _LIST_CONVERSATION_RATE_CENTS,
+    "site_year": _LIST_CONVERSATION_RATE_CENTS,
+    "staff_year": _LIST_CONVERSATION_RATE_CENTS,
 }
 
 # Buyer-facing name + the one line a plan card leads with. The catalog owns these
@@ -274,6 +336,8 @@ _SITE_PLAN_DISPLAY: dict[str, tuple[str, str]] = {
     # remove it. The mark here is ``sites.badge``'s attribution anchor.
     "site": ("Site", "Point your own domain at it and the Paw watermark comes off."),
     "staff": ("Staff", "Adds the visitor concierge — 200 conversations a month, then metered."),
+    "site_year": ("Site · 1 year", "A year of Site, sold by a Paw Partner."),
+    "staff_year": ("Staff · 1 year", "A year of Staff with 1,200 concierge conversations."),
 }
 
 # Extra selling points that are NOT capability flags, and the distinction matters
@@ -305,6 +369,8 @@ _SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {
     "free": 1,
     "site": None,
     "staff": None,
+    "site_year": None,
+    "staff_year": None,
 }
 
 # How many HOSTNAMES one FLOOR-tier site may carry: the free site's one custom
@@ -321,6 +387,11 @@ _FREE_MAX_HOSTNAMES_PER_SITE = 2
 
 # Order the catalog is listed in — the price ladder, cheapest first.
 _SITE_TIER_ORDER: tuple[str, ...] = ("free", "site", "staff")
+
+# The partner-only rungs. Deliberately NOT in ``_SITE_TIER_ORDER``: that order is
+# the public storefront (``list_site_plans``), and these are sold only through
+# ``/partners/sell`` by an active partner workspace.
+_PARTNER_TIER_ORDER: tuple[str, ...] = ("site_year", "staff_year")
 
 # The base/floor site tier — a publish with no explicit tier resolves here.
 BASE_SITE_PLAN_KEY = "free"
@@ -386,6 +457,8 @@ class SitePlanTier:
     display_name: str = ""
     tagline: str = ""
     highlights: tuple[str, ...] = field(default_factory=tuple)
+    period_months: int = 1
+    partner_only: bool = False
 
     @property
     def is_org_scoped(self) -> bool:
@@ -502,6 +575,8 @@ def _build(key: str) -> SitePlanTier:
         display_name=display_name,
         tagline=tagline,
         highlights=_SITE_PLAN_HIGHLIGHTS.get(key, ()),
+        period_months=_SITE_PLAN_PERIOD_MONTHS.get(key, 1),
+        partner_only=key in _PARTNER_PRICE_USD,
     )
 
 
@@ -529,6 +604,45 @@ def list_site_plans() -> list[SitePlanTier]:
     the catalog always reflects the current configuration.
     """
     return [_build(key) for key in _SITE_TIER_ORDER]
+
+
+def list_partner_plans() -> list[SitePlanTier]:
+    """The partner-only yearly rungs (``/partners/offers``). Never in the storefront."""
+    return [_build(key) for key in _PARTNER_TIER_ORDER]
+
+
+def partner_price_usd(tier_key: str, country: str, tier: str = "bronze") -> int:
+    """Whole USD for ONE PERIOD of a partner-only tier in ``country``, after the
+    partner's volume ``tier`` discount (PH-15; bronze = no discount).
+
+    Falls back to the "default" row for a country without its own price. Raises
+    KeyError for a tier that is not partner-only — a monthly rung has no partner
+    price, and guessing one would charge the wrong amount.
+    """
+    from pocketpaw_ee.cloud.partners import _calc
+
+    row = _PARTNER_PRICE_USD[tier_key]
+    return _calc.discounted_usd(row.get((country or "").upper(), row["default"]), tier)
+
+
+def partner_client_price(tier_key: str, country: str) -> tuple[str, int]:
+    """``(currency, amount_minor)`` the partner's client pays for ONE PERIOD of a
+    partner-only tier in ``country`` (PH-13 pay link). Falls back to "default";
+    KeyError for a tier that is not partner-only, like ``partner_price_usd``."""
+    row = _PARTNER_CLIENT_PRICE[tier_key]
+    return row.get((country or "").upper(), row["default"])
+
+
+def partner_prices_usd(tier_key: str) -> frozenset[int]:
+    """Every price ``tier_key`` is sold at, across countries and volume tiers
+    (empty if not partner-only)."""
+    from pocketpaw_ee.cloud.partners import _calc
+
+    return frozenset(
+        _calc.discounted_usd(price, t.name)
+        for price in _PARTNER_PRICE_USD.get(tier_key, {}).values()
+        for t in _calc.TIERS
+    )
 
 
 def list_site_scoped_plans() -> list[SitePlanTier]:
@@ -612,6 +726,10 @@ __all__ = [
     "canonical_site_tier_key",
     "free_max_hostnames_per_site",
     "get_site_plan",
+    "partner_client_price",
+    "partner_price_usd",
+    "partner_prices_usd",
+    "list_partner_plans",
     "list_site_plans",
     "list_site_scoped_plans",
     "site_scoped_tier",

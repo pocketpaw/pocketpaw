@@ -25,13 +25,27 @@
 # SECURITY: the provider verifies the signature before this module trusts any
 # field. The webhook secret / API key are never logged.
 #
-# CURRENCY: the 1-credit==1-cent mapping is USD-only, so ``handle_webhook`` gates
-# the GRANT on ``currency == "USD"`` — a verified non-USD success event is acked
-# but never granted (it would otherwise credit 1:1 against the wrong denomination).
+# CURRENCY: the 1-credit==1-cent mapping is USD's, and INR converts through
+# ``_inr_base_credits`` (PH-4), so ``handle_webhook`` gates the GRANT on USD or
+# INR — a verified success in ANY OTHER currency is acked but never granted (it
+# would otherwise credit 1:1 against the wrong denomination).
 # It is still RECORDED, with ``credits_granted=0``: the gate stops us handing over
 # credits, not from keeping the receipt a later reversal has to join through.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): ``site_plan_price_usd`` — what one
+#   period of a site tier costs THIS workspace. Monthly rungs return
+#   ``monthly_price_usd`` unchanged; partner-only rungs return
+#   ``site_plans.partner_price_usd`` for the partner's billing country. The wallet
+#   charge sites for site plans (``sites.service`` purchase and tier change, the
+#   renewal sweeper) read it; the foreign-concierge mint stays on its fixed
+#   monthly rung. With no partner profile a renewal keeps the price last paid only
+#   when that is a real price of the tier; otherwise it refuses.
+#   ``site_plan_change_terms`` is the pure tier-change rule (same period: pay the
+#   gap, keep the date; different period: full price, new period; a running
+#   longer period cannot move to a shorter one). Tier-change debits use their own
+#   key namespace (``site_plan_debit_key(..., change=True)``) so a change on a
+#   renewal's due date can never replay that renewal's debit.
 # Updated 2026-06-24 (security): enforce USD before granting; correct the
 #   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
 # Updated 2026-06-24 (BC-7, the Subscription primitive): added ``subscribe`` (open
@@ -191,16 +205,121 @@
 #   cancel-then-create, and open a SECOND parallel Dodo subscription — the
 #   double-billing defect fixed on 2026-07-08, reintroduced by a status string.
 #   See ``_BILLABLE_STATUSES`` for which question each set answers.
+#
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): INR TOP-UPS GRANT. Paw
+#   Partners (Indian print shops / designers) prepay the wallet in rupees, and a
+#   verified INR ``payment.succeeded`` used to be acked and grant nothing. The
+#   currency gate now admits USD and INR ONLY; every other currency keeps the old
+#   ack-record-grant-nothing behaviour.
+#
+#   THE INR RATE is Dodo's own: a USD ``settlement_amount`` on the verified body
+#   is the auditable USD value of the charge, and credits = those cents. Only
+#   when no USD settlement figure is present does the grant fall back to the
+#   configured ``fx_inr_per_usd`` (credits = floor(paise / rate)), or when the
+#   settlement figure sits outside 0.5x-2x of that estimate. Neither figure is
+#   logged: Dodo's settlement figure is stored on the Payment row
+#   (``settlement_amount`` / ``settlement_currency``) and the source that won plus
+#   the rate ride on the base ledger entry's ``ref`` (``conversion``,
+#   ``fx_inr_per_usd``) and are copied onto the row, so a fee netted into the
+#   settlement, or a unit mismatch, is auditable after the fact.
+#
+#   DODO'S PRODUCT ID, NOT METADATA AND NOT THE CHARGE CURRENCY, picks the INR
+#   path: conversion + bulk bonus run only when the verified body's
+#   ``product_cart`` is exactly the INR credits product AND the charge is INR.
+#   Metadata NEVER gates or sizes a grant — Dodo static payment links accept
+#   ``metadata_*`` query params, so a buyer can write any metadata they like
+#   and the webhook signature only proves Dodo sent it, not that we wrote it.
+#   Every INR grant is derived from money actually paid. A USD-product checkout
+#   that Dodo charges in another currency grants nothing (origin/dev behaviour).
+#
+#   BULK BONUS rides a SEPARATE ledger line, ``cause="bulk_bonus"``, keyed on
+#   ``<event_id>:bulk_bonus`` so it is exactly-once on its own — see
+#   ``_INR_BULK_BONUS``. ``credits_granted`` on the Payment row is base + bonus,
+#   which is the reversal cap.
+#
+#   REVERSALS ARE NOW PROPORTIONAL. ``_handle_reversal_event`` used to take a
+#   same-currency refund's stated amount AS credits, which is exact for USD (one
+#   cent, one credit) and a gross over-reversal for INR (a Rs.100 refund is 10,000
+#   paise, not 10,000 credits). It now takes ``floor(granted * refunded / paid)``,
+#   which reduces to the old figure for USD (granted == paid) and reverses base
+#   and bonus pro rata for INR — exactly base + bonus on a full refund, never
+#   more than was granted, rounding down on every partial.
+#
+#   REVIEW FIX (same branch): the reversal cap is stamped from the LEDGER, not
+#   from this delivery's arithmetic. A redelivery recomputes the INR base at the
+#   rate configured NOW and its grant no-ops, so stamping that figure let a rate
+#   change between deliveries inflate ``credits_granted`` past what moved — and a
+#   full refund then drove the wallet negative. The bonus is sized off the base
+#   the ledger holds, the conversion rate rides on the base entry's ``ref``, the
+#   capture emit / log report only what moved on THIS delivery, and a USD
+#   settlement figure outside 0.5x-2x of the FX estimate is distrusted.
+#
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): CLIENT-PAID PARTNER
+#   SITES. A partner sends its client (the shop) a one-time pay link for a
+#   yearly partner plan at list price (``create_partner_client_checkout``, the
+#   same ``create_one_time`` path a top-up takes, on the USD or INR credits
+#   product). The site keeps the server-side record, keyed by the Dodo payment
+#   id returned at creation. On a verified ``payment.succeeded`` that payment id
+#   is looked up FIRST (``_handle_partner_client_payment``): a match never
+#   grants a top-up; it checks amount / currency / product against the record,
+#   gives the site its year on ``CLIENT_BILLING_RAIL`` and grants the partner a
+#   commission (``partner_commission``, key ``<payment_id>:commission``) of
+#   floor(rate x paid US cents, net of tax) — the rate from
+#   ``partners._calc.commission_rate_bps``. INR converts through the PH-4
+#   settlement-in-band-else-FX helper. A refund or lost dispute within 60 days
+#   reverses that commission once and lapses the site (``partner_commission_reversal``).
+#   Metadata never qualifies a payment; a payment whose metadata CLAIMS to be a
+#   partner client payment and matches no record is recorded and NOT granted
+#   (fail closed: if Dodo ever re-keyed a payment, the shop's money would
+#   otherwise land in the partner's wallet as a top-up).
+#
+#   Review fixes (same branch): the CLAWBACK IS ANCHORED ON THE LEDGER, not the
+#   Site record (a deleted site took its records with it and kept the
+#   commission): the reversal finds the partner's workspace through the Payment
+#   row, the 60-day window runs from the commission's ledger entry, and the
+#   running clawback is claimed on the Payment row (``commission_reversed``)
+#   before the debit, so refund + dispute or several partial refunds never take
+#   more than was granted. A PARTIAL refund takes a pro-rata share and leaves the
+#   site's year; only a full refund or a lost dispute lapses it. A refund before
+#   the payment is processed voids the pending record. Pay links pin their charge
+#   currency; a discounted payment is a mismatch; no commission is granted while
+#   the partner is not ACTIVE (the record is flagged ``partner_inactive``, the
+#   shop's year still activates).
+#
+#   SUBSCRIPTION PAYMENTS NO LONGER GRANT AS TOP-UPS. A ``payment.succeeded``
+#   carrying a ``subscription_id`` is a subscription's charge (the subscription
+#   events grant its allotment); it is recorded and acked, never granted as
+#   credits. Before this, nothing stopped the generic top-up grant from also
+#   crediting a subscription payment whose metadata named a workspace. The row is
+#   stamped ``subscription_id``, so a refund of it alarms "needs a human" instead
+#   of reading as a top-up with nothing left to reverse.
+#
+#   Re-check fixes (same branch): partial refunds are SUMMED on the Payment row
+#   (``refunded_minor``, bumped inside the commission claim), so partials that
+#   reach the full amount lapse the year like a full refund; the site lapses
+#   AFTER the claim and before the debit. A claim that loses the cap race re-reads
+#   the row and retries once with the fresh remainder, then alarms (ERROR). The
+#   claim is released on ANY exception (CancelledError too), and a redelivery of
+#   a listed event with no ledger movement alarms. A PARTIAL refund before the
+#   payment is processed no longer voids the record (alarms, left pending). The
+#   flagged-payment alarm names the actual flag.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``site_plan_price_usd`` prices
+#   a partner rung at the partner's volume-tier discount; a client payment's
+#   commission rate reads the partner's volume tier (it was passed the SKU); a
+#   paid client payment then runs ``partners.service.refresh_standing`` (tier
+#   upgrade + milestone rewards; never raises).
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from beanie.operators import In
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from pocketpaw_ee.cloud._core.errors import NoActiveSubscription, ValidationError
+from pocketpaw_ee.cloud._core.errors import ConflictError, NoActiveSubscription, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     BillingSubscriptionGranted,
@@ -247,9 +366,21 @@ SUBSCRIPTION_BILLING_RAIL = "subscription"
 # make it indistinguishable from the pre-cutover Dodo rows, which is precisely
 # the population the sweep must NOT touch.
 PLAN_BILLING_RAIL = "plan"
+# PH-13: the year was paid by the partner's CLIENT through a one-time pay link.
+# Nothing recurs and nothing is debited: the renewal sweep lapses it at its date.
+CLIENT_BILLING_RAIL = "client"
 SITE_PLAN_DEBIT_CAUSE = "site_plan"
-# 1 credit == 1 cent. The same mapping the top-up grant enforces (and gates on
-# USD for), written once here so the site price never gets converted by hand.
+# PH-13 ledger causes for the partner's commission on a client payment, and its
+# clawback. Neither is a spend cause or a top-up.
+PARTNER_COMMISSION_CAUSE = "partner_commission"
+PARTNER_COMMISSION_REVERSAL_CAUSE = "partner_commission_reversal"
+# Informational metadata tag on a client pay link. It never qualifies a payment
+# (the server-side record does); it only makes an UNMATCHED claim fail closed.
+PARTNER_CLIENT_PAYMENT_KIND = "partner_client_payment"
+# A refund or lost dispute this long after the payment no longer claws back.
+_PARTNER_CLAWBACK = timedelta(days=60)
+# 1 credit == 1 cent. The same mapping a USD top-up grant uses (INR converts to
+# US cents first), written once here so the site price never gets converted by hand.
 _CENTS_PER_USD = 100
 # Only this event type grants credits. The other one-time families
 # (payment.failed / payment.processing / …) are acknowledged but never grant.
@@ -323,6 +454,62 @@ _REVERSAL_EVENTS = frozenset({_REFUND_SUCCEEDED, _DISPUTE_LOST})
 # workspace's monthly quota.
 _REVERSAL_CAUSE = "payment_reversal"
 
+# --- INR top-ups (PH-4) ---------------------------------------------------
+# The credits products a top-up checkout can SELL (``create_topup``'s currency).
+# The webhook routes on Dodo's own product id, never on metadata — see
+# ``_topup_base_credits``.
+_GRANT_CURRENCIES = frozenset({"USD", "INR"})
+_TOPUP_CAUSE = "top_up"
+# The separate ledger line a bulk INR prepay earns. NOT ``top_up``: it is not
+# money the partner paid, so it must not count as purchased revenue or raise the
+# monthly ceiling the way a bought top-up does.
+_BULK_BONUS_CAUSE = "bulk_bonus"
+# (minimum INR charge in PAISE, bonus percent), highest tier first. Measured on
+# the gross ``total_amount`` the partner paid. Rs.25,000 -> +10%, Rs.1,00,000 -> +20%.
+_INR_BULK_BONUS: tuple[tuple[int, int], ...] = (
+    (10_000_000, 20),
+    (2_500_000, 10),
+)
+
+
+def _inr_bulk_bonus(paid_paise: int, base_credits: int) -> int:
+    """The bonus credits a ``paid_paise`` INR top-up earns on ``base_credits`` (floor)."""
+    for threshold, pct in _INR_BULK_BONUS:
+        if paid_paise >= threshold:
+            return base_credits * pct // 100
+    return 0
+
+
+# How far Dodo's USD settlement figure may sit from our own FX estimate before
+# we stop trusting it. Outside this band it is far more likely a unit or field
+# mismatch than a real exchange rate, so the FX path grants instead.
+_SETTLEMENT_SANITY_BAND = (0.5, 2.0)
+_FX_SETTLEMENT_DISTRUSTED = "fx_settlement_distrusted"
+
+
+def _inr_base_credits(event: GatewayEvent) -> tuple[int, str, float]:
+    """Credits an INR charge is worth, which figure produced them, and the rate.
+
+    Dodo's USD ``settlement_amount`` wins when present — it is the gateway's own
+    conversion, auditable against the payout, and needs no rate. Otherwise the
+    configured ``fx_inr_per_usd`` converts the paise: credits are US cents, so
+    ``floor(paise / 100 / rate * 100) == paise // rate``.
+
+    A settlement figure outside ``_SETTLEMENT_SANITY_BAND`` of the FX estimate is
+    NOT trusted: the FX path grants, under source ``fx_settlement_distrusted`` so
+    the caller can warn (once, on the delivery that actually grants).
+    """
+    from pocketpaw.config import get_settings
+
+    rate = float(get_settings().fx_inr_per_usd)
+    fx_credits = int(event.amount_credits // rate)
+    if event.settlement_currency.upper() == "USD" and event.settlement_amount > 0:
+        low, high = _SETTLEMENT_SANITY_BAND
+        if low * fx_credits <= event.settlement_amount <= high * fx_credits:
+            return event.settlement_amount, "settlement", rate
+        return fx_credits, _FX_SETTLEMENT_DISTRUSTED, rate
+    return fx_credits, "fx", rate
+
 
 def _default_provider() -> IPaymentsProvider:
     """Build the v1 provider (Dodo) from runtime settings.
@@ -348,12 +535,15 @@ async def create_topup(
     *,
     customer_email: str | None = None,
     provider: IPaymentsProvider | None = None,
+    currency: str = "USD",
 ) -> dict:
     """Create a one-time top-up and return ``{"checkout_url": ...}``.
 
-    ``amount_credits`` is integer credits (1 credit == $0.01) and must be a
-    positive integer. ``workspace_id`` is stamped onto the gateway metadata so
-    the success webhook can route the grant back to the right wallet.
+    ``amount_credits`` is the charge in ``currency``'s lowest denomination and
+    must be a positive integer: integer credits for USD (1 credit == $0.01), and
+    PAISE for INR (the credits an INR charge buys are settled by the webhook —
+    see ``_inr_base_credits``). ``workspace_id`` is stamped onto the gateway
+    metadata so the success webhook can route the grant back to the right wallet.
     """
     # Rule 6 — validate at entry.
     if (
@@ -364,6 +554,9 @@ async def create_topup(
         raise ValidationError("billing.invalid_amount", "amount_credits must be a positive integer")
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+    currency = (currency or "USD").upper()
+    if currency not in _GRANT_CURRENCIES:
+        raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
 
     prov = provider or _default_provider()
     checkout = await prov.create_one_time(
@@ -371,8 +564,51 @@ async def create_topup(
         workspace_id=workspace_id,
         customer_email=customer_email,
         metadata={"workspace_id": workspace_id, "user_id": user_id or ""},
+        currency=currency,
     )
     return {"checkout_url": checkout.checkout_url}
+
+
+async def create_partner_client_checkout(
+    *,
+    workspace_id: str,
+    user_id: str,
+    site_id: str,
+    amount_minor: int,
+    currency: str,
+    provider: IPaymentsProvider | None = None,
+) -> Any:
+    """Open a one-time pay link a partner's client pays for a site's year (PH-13).
+
+    The SAME ``create_one_time`` path a top-up takes (USD or INR credits product,
+    ``amount_minor`` in the currency's lowest unit). Returns the provider's
+    ``OneTimeCheckout``; its ``gateway_ref`` (Dodo's payment id) is what the
+    webhook matches the payment on, so a checkout without one is refused.
+    """
+    currency = (currency or "").upper()
+    if currency not in _GRANT_CURRENCIES:
+        raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
+    prov = provider or _default_provider()
+    checkout = await prov.create_one_time(
+        amount_credits=int(amount_minor),
+        workspace_id=workspace_id,
+        customer_email=None,
+        metadata={
+            "workspace_id": workspace_id,
+            "site_id": site_id,
+            "kind": PARTNER_CLIENT_PAYMENT_KIND,
+            "user_id": user_id or "",
+        },
+        currency=currency,
+        # The payment must be charged exactly as the link was made: no adaptive
+        # local-currency pricing, which would turn a $228 link into a EUR charge.
+        pin_currency=True,
+    )
+    if not checkout.gateway_ref:
+        raise ValidationError(
+            "billing.no_payment_id", "The payment provider returned no payment id for the link."
+        )
+    return checkout
 
 
 # ---------------------------------------------------------------------------
@@ -495,25 +731,35 @@ def _dunning_grace_days() -> int:
     return max(int(get_settings().billing_dunning_grace_days), 0)
 
 
-def site_plan_debit_key(site_id: str, tier_key: str, period_start: datetime) -> str:
-    """The idempotency key for one site-month bought from the credit wallet.
+def site_plan_debit_key(
+    site_id: str, tier_key: str, period_start: datetime, *, change: bool = False
+) -> str:
+    """The idempotency key for one site-plan debit from the credit wallet.
 
-    ANCHORED ON A DATE, not a timestamp, and that is the whole design. The key is
-    what stops the same month being charged twice, so it has to be identical
-    across every call that means "this month" and different across calls that
-    mean different months. A timestamp is unique per call, which makes a
-    double-submitted purchase two charges; a bare ``site_id`` is identical
-    forever, which makes the second month free.
+    ANCHORED ON A DATE, not a timestamp. The key is what stops the same period
+    being charged twice, so it has to be identical across every call that means
+    "this period" and different across calls that mean different ones. A
+    timestamp is unique per call, which makes a double-submitted purchase two
+    charges; a bare ``site_id`` is identical forever, which makes the second
+    period free.
 
     The date is UTC and comes from the caller: a PURCHASE passes now, a RENEWAL
-    passes the ``renewal_date`` it is consuming. Since renewals step a month at a
-    time the two can never collide.
+    passes the ``renewal_date`` it is consuming. Those two meet only if a site is
+    bought on the very day an earlier period of the same tier renews, which the
+    purchase path cannot reach (a paying site takes the tier-change branch).
+
+    A TIER CHANGE IS ITS OWN NAMESPACE (``change=True`` appends ``:change``). A
+    change made on a renewal's due date would otherwise share that renewal's key,
+    and whichever ran second would replay as a no-op — an upgrade on renewal day
+    made the whole next period free. Purchases and renewals keep the unsuffixed
+    key so nothing already in the ledger changes meaning.
 
     The tier is in the key because an upgrade is a genuinely new charge on the
     same day. The consequence — buying back down to a tier already bought today
     is free — is the correct reading of a same-day flip-flop rather than a gap.
     """
-    return f"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}"
+    key = f"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}"
+    return f"{key}:change" if change else key
 
 
 async def charge_site_plan_credits(
@@ -524,8 +770,11 @@ async def charge_site_plan_credits(
     amount_usd: int,
     period_start: datetime,
     member_id: str | None = None,
+    change: bool = False,
 ) -> int:
     """Debit the workspace credit wallet for a paid site tier.
+
+    ``change=True`` for a TIER CHANGE debit — see ``site_plan_debit_key``.
 
     ``amount_usd`` IS NOT ALWAYS THE TIER'S STICKER PRICE, which is why the
     parameter is not called ``monthly_price_usd`` any more. It is a full month on
@@ -566,13 +815,124 @@ async def charge_site_plan_credits(
         workspace=workspace_id,
         amount=amount,
         cause=SITE_PLAN_DEBIT_CAUSE,
-        idempotency_key=site_plan_debit_key(site_id, tier_key, period_start),
+        idempotency_key=site_plan_debit_key(site_id, tier_key, period_start, change=change),
         member_id=member_id,
         ref={"site_id": site_id, "plan_tier": tier_key, "kind": "site_plan"},
         # A purchase, so the wallet must actually cover it. ``allow_negative`` is
         # for spend that already happened and can only be recorded.
         allow_negative=False,
     )
+
+
+async def site_plan_charged(
+    *, workspace_id: str, site_id: str, tier_key: str, period_start: datetime, change: bool = False
+) -> bool:
+    """Has this (site, tier, day) debit already been recorded? A replayed debit is
+    a silent no-op, so a caller that grants a NEW period on the charge asks first.
+    ``change`` picks the namespace, exactly as ``charge_site_plan_credits`` does."""
+    return await credits_service.is_recorded(
+        workspace_id, site_plan_debit_key(site_id, tier_key, period_start, change=change)
+    )
+
+
+def site_plan_change_terms(
+    *,
+    held_tier: Any,
+    new_tier: Any,
+    new_price_usd: int,
+    already_paid_usd: int,
+    paid_through: datetime | None,
+    now: datetime,
+    already_bought_today: bool = False,
+) -> tuple[int, datetime | None]:
+    """What moving a PAYING site from ``held_tier`` to ``new_tier`` costs. PURE.
+
+    Returns ``(amount_usd, new_renewal)``: charge ``amount_usd`` (0 = charge
+    nothing) and, when ``new_renewal`` is not None, start a new period ending
+    then. ``period_paid_usd`` becomes ``new_price_usd`` exactly when
+    ``amount_usd > 0``.
+
+      * SAME period length: pay the gap against ``already_paid_usd`` (a
+        high-water mark for this period), keep the date. A downgrade pays nothing.
+      * A SHORTER period while the longer one is still running (``paid_through``
+        in the future, or unknown): ``sites.period_downgrade_refused``.
+      * Any other period change — and ANY change once ``paid_through`` has
+        passed (the period ended, the sweep has not run yet) — is a FRESH
+        PURCHASE: the full new price and a new period from ``now``. No proration
+        of what is left of the old period.
+        Refused with ``sites.plan_already_bought_today`` when that debit already
+        exists today — the charge would replay as a no-op and the period would
+        restart for nothing.
+
+    The period restarts only together with a charge, never on its own.
+    """
+    held_months = getattr(held_tier, "period_months", 1) if held_tier is not None else 1
+    new_months = new_tier.period_months
+    through = None if paid_through is None else _as_utc(paid_through)
+    # The paid period has already ENDED (the sweep has not got to it yet). There is
+    # nothing left to re-price: any change is a fresh purchase from now, and the
+    # sweep then finds the renewal date moved forward and skips the site. Pricing
+    # the gap here would bill the ended period and then the sweep a whole new one.
+    ended = through is not None and through <= now
+    if new_months == held_months and not ended:
+        return max(new_price_usd - already_paid_usd, 0), None
+    if new_months < held_months and not ended:
+        when = through.date().isoformat() if through is not None else "the end of its period"
+        raise ConflictError(
+            "sites.period_downgrade_refused",
+            f"This site is paid through {when}. Switch plans when it renews. "
+            "Nothing has been charged.",
+        )
+    if already_bought_today:
+        raise ConflictError(
+            "sites.plan_already_bought_today",
+            "This site already bought this plan today. Try again tomorrow. "
+            "Nothing has been charged.",
+        )
+    if new_price_usd <= 0:
+        return 0, None
+    from dateutil.relativedelta import relativedelta
+
+    return new_price_usd, now + relativedelta(months=new_months)
+
+
+# Raised by ``site_plan_price_usd`` when a partner rung has no price it can charge.
+# The renewal sweep LAPSES on it, like a short wallet.
+PARTNER_PRICE_UNKNOWN = "billing.partner_price_unknown"
+
+
+async def site_plan_price_usd(
+    tier: Any, workspace_id: str | None, *, last_paid_usd: int | None = None
+) -> int:
+    """Whole USD for one PERIOD of ``tier``, as charged to ``workspace_id``.
+
+    A monthly rung costs its ``monthly_price_usd`` — byte-identical to before. A
+    partner-only rung is priced per the partner's ``billing_country``. Read the
+    profile directly, not via ``enforcement.load_partner``: that one returns None
+    whenever the global flags enforce.
+
+    NO PROFILE (the partner was removed) never guesses a country. A renewal passes
+    ``last_paid_usd`` (the site's ``period_paid_usd``), and it is kept ONLY when it
+    is one of this tier's real prices. ``period_paid_usd`` is a per-period
+    HIGH-WATER mark, so after a mid-period downgrade it holds the dearer tier's
+    price; renewing at that would overcharge. Anything else raises
+    ``PARTNER_PRICE_UNKNOWN`` and the renewal sweep lapses the site.
+    """
+    if not getattr(tier, "partner_only", False):
+        return int(tier.monthly_price_usd)
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    profile = await partners_service.partner_profile_for_workspace(workspace_id)
+    if profile is None:
+        if last_paid_usd and int(last_paid_usd) in site_plans.partner_prices_usd(tier.key):
+            return int(last_paid_usd)
+        raise ConflictError(
+            PARTNER_PRICE_UNKNOWN,
+            f"Site tier '{tier.key}' is sold by Paw Partners and this workspace has no "
+            "partner profile to price it.",
+        )
+    return site_plans.partner_price_usd(tier.key, profile.billing_country, profile.tier)
 
 
 async def subscribe(
@@ -752,6 +1112,63 @@ async def cancel(
 # ---------------------------------------------------------------------------
 
 
+def _is_inr_credit_product(event: GatewayEvent) -> bool:
+    """Whether Dodo says this payment bought exactly the INR credits product.
+
+    ``product_ids`` comes off the verified body's ``product_cart``, which Dodo
+    fills from what was actually bought — unlike metadata, the buyer cannot
+    write it. Exactly ONE line of that product, as ``create_one_time`` builds
+    it: a mixed cart would convert the whole total as credits.
+    """
+    from pocketpaw.config import get_settings
+
+    inr_product = str(getattr(get_settings(), "dodo_credit_product_id_inr", None) or "")
+    return bool(inr_product) and event.product_ids == (inr_product,)
+
+
+def _topup_base_credits(event: GatewayEvent) -> tuple[int, dict, bool]:
+    """Decide a verified top-up's BASE grant: ``(credits, conversion_ref, inr_product)``.
+
+    0 credits means "grant nothing" (acked, recorded, logged by event id +
+    currency only — never the amount). NOTHING here reads metadata:
+
+      * the INR credits product (Dodo's ``product_cart``), charged in INR —
+        converted via ``_inr_base_credits`` from the money actually paid, and
+        eligible for the bulk bonus. Charged in anything else: nothing.
+      * any other USD charge — ``total_amount`` cents, exactly as before.
+      * anything else (a USD-product checkout Dodo priced in rupees, a foreign
+        charge) — nothing. The 1-credit==1-cent mapping would credit it against
+        the wrong denomination (a ¥750 charge granting 750 credits == $7.50).
+    """
+    charged = event.currency.upper()
+    if _is_inr_credit_product(event):
+        if charged != "INR":
+            logger.warning(
+                "billing.webhook: INR credits product charged in currency=%s (event_id=%s) — "
+                "not granting",
+                event.currency,
+                event.event_id,
+            )
+            return 0, {}, False
+        base, source, rate = _inr_base_credits(event)
+        if base <= 0:
+            logger.warning(
+                "billing.webhook: INR payment.succeeded converted to 0 credits "
+                "(event_id=%s) — not granting",
+                event.event_id,
+            )
+        return max(base, 0), {"conversion": source, "fx_inr_per_usd": rate}, True
+    if charged == "USD":
+        return event.amount_credits, {}, False
+    logger.warning(
+        "billing.webhook: payment.succeeded in unsupported currency=%s (event_id=%s) — "
+        "not granting",
+        event.currency,
+        event.event_id,
+    )
+    return 0, {}, False
+
+
 async def handle_webhook(
     *,
     payload: bytes,
@@ -797,6 +1214,41 @@ async def handle_webhook(
         logger.info("billing.webhook: ignoring non-success event type=%s", event.type)
         return {"ok": True, "granted": False}
 
+    # PH-13: a client pay link is matched on Dodo's payment id against the
+    # server-side record — before anything else, and never on metadata.
+    from pocketpaw_ee.sites import service as sites_service
+
+    data = event.raw.get("data") or {}
+    match = await sites_service.find_partner_payment(str(data.get("payment_id") or ""))
+    if match is not None:
+        return await _handle_partner_client_payment(event, *match)
+
+    # A SUBSCRIPTION's charge is not a top-up: the subscription events grant its
+    # allotment. Record it (a refund still joins through it), never grant it.
+    # Affects workspace-plan subscriptions too, which is the point.
+    if data.get("subscription_id"):
+        if event.workspace_id:
+            await _record_payment(event)
+        logger.info(
+            "billing.webhook: payment.succeeded for a subscription (event_id=%s) — recorded, "
+            "not granted as a top-up",
+            event.event_id,
+        )
+        return {"ok": True, "granted": False}
+
+    if (data.get("metadata") or {}).get("kind") == PARTNER_CLIENT_PAYMENT_KIND:
+        # Claims to be a client pay link and matches no record: either forged
+        # metadata or a payment Dodo keyed differently. Fail closed — the money
+        # is the CLIENT's, so it must not land in a wallet as a top-up.
+        if event.workspace_id:
+            await _record_payment(event)
+        logger.error(
+            "billing.webhook: payment.succeeded tagged as a partner client payment matches no "
+            "pay link (event_id=%s) — recorded, NOT granted; needs a human",
+            event.event_id,
+        )
+        return {"ok": True, "granted": False}
+
     if not event.workspace_id:
         # A success event with no workspace_id in metadata can't be routed. Ack
         # it (200) so the gateway stops retrying, but record nothing.
@@ -836,64 +1288,115 @@ async def handle_webhook(
             event.event_id,
         )
         return {"ok": True, "granted": False}
-    # USD-ONLY: the 1-credit==1-cent mapping holds only for USD. A verified
-    # non-USD charge would be credited 1:1 against the wrong denomination (a
-    # ¥750 charge wrongly granting 750 credits == $7.50). Until the gateway
-    # carries an FX-normalized amount, gate the grant on currency == USD; any
-    # other currency is acked (200) so Dodo stops retrying, but grants nothing.
-    if event.currency.upper() != "USD":
-        # Log the event id + currency only — never the amount (PII / money).
-        logger.warning(
-            "billing.webhook: payment.succeeded in non-USD currency=%s (event_id=%s) — "
-            "not granting (USD-only)",
-            event.currency,
-            event.event_id,
-        )
-        return {"ok": True, "granted": False}
+    # Dodo's own product id decides the INR path — never metadata, which a buyer
+    # can forge through a static payment link's ``metadata_*`` params.
+    base, conversion, inr_product = _topup_base_credits(event)
 
     # Grant EXACTLY ONCE — idempotency is keyed on the webhook event id. A replay
     # collides on BC-1's unique (workspace, idempotency_key) index and no-ops.
-    result = await credits_service.grant(
-        workspace=event.workspace_id,
-        amount=event.amount_credits,
-        cause="top_up",
-        idempotency_key=event.event_id,
-        ref={"gateway": _GATEWAY, "event_id": event.event_id},
-    )
-    new_balance = result.balance
-    # A genuine first grant reports ``created=True``; a replay reports False. We
-    # gate the capture emit on this authoritative flag, NOT a balance delta — a
-    # delta heuristic mis-fires under concurrency (a racing grant could mask a
-    # genuine grant as a replay or vice versa).
-    applied = result.created
+    moved = 0
+    new_balance = None
+    base_created = False
+    if base > 0:
+        result = await credits_service.grant(
+            workspace=event.workspace_id,
+            amount=base,
+            cause=_TOPUP_CAUSE,
+            idempotency_key=event.event_id,
+            # The conversion rides on the ledger entry itself, so what ACTUALLY
+            # moved the credits is recorded atomically with them — a redelivery
+            # at a different rate can never rewrite it.
+            ref={"gateway": _GATEWAY, "event_id": event.event_id, **conversion},
+        )
+        new_balance = result.balance
+        # ``created`` is the authoritative "this grant applied" flag — never a
+        # balance delta, which mis-fires under concurrency.
+        base_created = result.created
+        if base_created:
+            moved = base
 
-    # Stamp what the grant ACTUALLY moved onto the row written above. Done on
-    # every delivery, not only a first one: if a prior delivery crashed in the
-    # window between recording and granting, its row still reads 0 while the
-    # credits exist, and a redelivery is the only thing that can heal it.
-    await _mark_payment_granted(event.event_id, event.amount_credits)
+    # EVERYTHING BELOW READS THE LEDGER, NOT THIS DELIVERY'S ARITHMETIC — and it
+    # runs on every delivery, granting or not. A redelivery recomputes ``base``
+    # at whatever FX rate is configured NOW and its grant no-ops, so trusting
+    # that figure would size the bonus, and stamp the reversal cap, off credits
+    # that never moved (a rate halved between deliveries doubled the cap, and a
+    # full refund then drove the wallet negative by the difference). Only
+    # APPLIED entries count: a half-applied grant must not raise the cap.
+    base_entry = await credits_service.find_by_key(event.workspace_id, event.event_id)
+    base_applied = base_entry.amount_delta if base_entry is not None and base_entry.applied else 0
+    bonus_key = f"{event.event_id}:{_BULK_BONUS_CAUSE}"
+    if inr_product and base_applied > 0:
+        bonus = _inr_bulk_bonus(event.amount_credits, base_applied)
+        if bonus > 0:
+            # Its OWN line and its OWN key, derived from the event id, so it is
+            # exactly-once independently of the base grant: a crash between the
+            # two is healed by the redelivery granting just the missing bonus.
+            bonus_result = await credits_service.grant(
+                workspace=event.workspace_id,
+                amount=bonus,
+                cause=_BULK_BONUS_CAUSE,
+                idempotency_key=bonus_key,
+                ref={"gateway": _GATEWAY, "event_id": event.event_id},
+            )
+            new_balance = bonus_result.balance
+            if bonus_result.created:
+                moved += bonus
+    bonus_entry = await credits_service.find_by_key(event.workspace_id, bonus_key)
+    bonus_applied = (
+        bonus_entry.amount_delta if bonus_entry is not None and bonus_entry.applied else 0
+    )
+    applied = moved > 0
+
+    if base > 0 and base_entry is None:
+        # The grant returned and yet the ledger holds no entry under its key.
+        # Never stamp a cap from this delivery's arithmetic — leave the row as is.
+        logger.error(
+            "billing.webhook: top-up event_id=%s granted but no ledger entry is readable "
+            "under its key — NOT stamping the reversal cap; needs a human",
+            event.event_id,
+        )
+    else:
+        # Stamp what the ledger ACTUALLY holds for this payment — the cap a
+        # reversal claws back against. On every delivery, so a row left at 0 by a
+        # delivery that crashed between recording and granting is healed; the
+        # same figure every time, because it is read rather than computed.
+        ref = (base_entry.ref or {}) if base_entry is not None else {}
+        await _mark_payment_granted(
+            event.event_id,
+            base_applied + bonus_applied,
+            conversion=ref.get("conversion"),
+            fx_inr_per_usd=ref.get("fx_inr_per_usd"),
+        )
 
     if applied:
-        # Rule 9 — emit only on a grant that actually applied (not a replay).
+        if base_created and conversion.get("conversion") == _FX_SETTLEMENT_DISTRUSTED:
+            logger.warning(
+                "billing.webhook: INR top-up event_id=%s carried a USD settlement figure "
+                "outside the sanity band of the FX estimate — granted from the FX rate",
+                event.event_id,
+            )
+        # Rule 9 — emit only on a grant that actually applied (not a replay), and
+        # report only what moved on THIS delivery.
         await emit(
             BillingTopupCaptured(
                 data={
                     "workspace_id": event.workspace_id,
                     "gateway": _GATEWAY,
                     "event_id": event.event_id,
-                    "amount_credits": event.amount_credits,
+                    "amount_credits": moved,
                     "currency": event.currency,
                     "balance_after": new_balance,
                 }
             )
         )
         logger.info(
-            "billing.webhook: granted %d credits to workspace=%s (event_id=%s)",
-            event.amount_credits,
+            "billing.webhook: granted %d credits to workspace=%s (event_id=%s, via %s)",
+            moved,
             event.workspace_id,
             event.event_id,
+            conversion.get("conversion", "usd"),
         )
-    else:
+    elif base > 0:
         logger.info(
             "billing.webhook: replay of event_id=%s — grant was a no-op, balance unchanged",
             event.event_id,
@@ -930,6 +1433,10 @@ async def _record_payment(event: GatewayEvent) -> None:
         credits_granted=0,
         currency=event.currency or None,
         status="succeeded",
+        # Audit: Dodo's own settlement figure, as the verified body stated it.
+        settlement_amount=event.settlement_amount or None,
+        settlement_currency=event.settlement_currency or None,
+        subscription_id=str((event.raw.get("data") or {}).get("subscription_id") or "") or None,
     )
     try:
         await doc.insert()
@@ -938,7 +1445,13 @@ async def _record_payment(event: GatewayEvent) -> None:
         return
 
 
-async def _mark_payment_granted(event_id: str, credits_granted: int) -> None:
+async def _mark_payment_granted(
+    event_id: str,
+    credits_granted: int,
+    *,
+    conversion: str | None = None,
+    fx_inr_per_usd: float | None = None,
+) -> None:
     """Stamp what a payment actually granted onto its recorded row.
 
     Separate from ``_record_payment`` because the row is written BEFORE the
@@ -947,9 +1460,16 @@ async def _mark_payment_granted(event_id: str, credits_granted: int) -> None:
     incrementing one, so a redelivery writes the same number and a delivery that
     crashed before reaching here is healed by the next one.
     """
+    fields: dict = {"credits_granted": int(credits_granted)}
+    if conversion is not None:
+        fields["conversion"] = str(conversion)
+    if fx_inr_per_usd is not None:
+        # Read off the base ledger entry, so it is the rate the credits were
+        # actually granted at — the same value on every delivery.
+        fields["fx_inr_per_usd"] = float(fx_inr_per_usd)
     await Payment.get_pymongo_collection().update_one(
         {"gateway": _GATEWAY, "gateway_event_id": event_id},
-        {"$set": {"credits_granted": int(credits_granted)}, "$currentDate": {"updatedAt": True}},
+        {"$set": fields, "$currentDate": {"updatedAt": True}},
     )
 
 
@@ -1033,16 +1553,19 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     already took. It is doing three jobs at once, which is why this path needs no
     currency gate and no partial-refund special case of its own:
 
-      * a non-USD charge granted nothing, so its cap is 0 and refunding it takes
-        no credits — correct, because we never gave any;
+      * a charge in an unsupported currency (anything but USD / INR) granted
+        nothing, so its cap is 0 and refunding it takes no credits — correct,
+        because we never gave any;
       * a payment carrying BOTH a refund and a lost dispute (routine, because
         Verifi RDR resolves disputes by refunding) cannot be clawed twice;
       * we can never take more credits than we handed out, whatever the gateway
         says the money was.
 
-    THE AMOUNT is the reversal's own stated figure when the gateway named one in
-    the payment's currency — a partial refund returns part of the charge, and
-    taking the whole grant for it would seize credits the buyer still paid for.
+    THE AMOUNT is the grant's share of the reversal's own stated figure when the
+    gateway named one in the payment's currency (``granted * refunded // paid``:
+    the stated cents for USD, base + bulk bonus pro rata for INR) — a partial
+    refund returns part of the charge, and taking the whole grant for it would
+    seize credits the buyer still paid for.
     Otherwise it is the full remaining grant, which is what a completed refund
     and a lost chargeback both mean.
 
@@ -1096,13 +1619,14 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     rejects at <= 0) until it is settled. Writing the shortfall off instead would
     make disputing profitable.
 
-    KNOWN GAP — a subscription RENEWAL cannot be reversed here, and the reason is
-    structural rather than unfinished. A renewal writes no ``Payment`` row
-    because ``subscription.active`` / ``.renewed`` carry no ``payment_id``
-    anywhere in their body, so nothing links a refunded renewal charge back to
-    the grant it paid for; and that grant is the tier's monthly ALLOTMENT, not
-    the cash, so the money on the refund is not the figure to claw back either.
-    Such a delivery is logged at ERROR with the payment id and left for a human.
+    KNOWN GAP — a subscription charge cannot be reversed here, and the reason is
+    structural rather than unfinished. The charge's own ``payment.succeeded``
+    writes a ``Payment`` row stamped ``subscription_id`` (never granted), but
+    nothing links it to the grant it paid for — ``subscription.active`` /
+    ``.renewed`` carry no ``payment_id`` — and that grant is the tier's monthly
+    ALLOTMENT, not the cash, so the money on the refund is not the figure to
+    claw back either. Such a delivery is logged at ERROR with the payment id and
+    the subscription and left for a human (so is one that matches no row).
     Reversing a number nobody can derive would be worse than alarming.
     """
     if event.type not in _REVERSAL_EVENTS:
@@ -1124,6 +1648,10 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
         )
         return _reversal_ack()
 
+    # PH-13: a client pay link's commission and year. Independent of the Payment
+    # row below, which for these payments granted nothing and reverses nothing.
+    await _reverse_partner_commission(event)
+
     doc = await Payment.find_one(
         Payment.gateway == _GATEWAY,
         Payment.gateway_ref == event.payment_id,
@@ -1131,11 +1659,22 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     if doc is None:
         logger.error(
             "billing.webhook: %s for payment=%s (event_id=%s) matches no recorded payment — "
-            "NOT clawing back. A subscription renewal writes no Payment row (its webhook "
-            "carries no payment_id), so a renewal reversal lands here and needs a human",
+            "NOT clawing back; needs a human",
             event.type,
             event.payment_id,
             event.event_id,
+        )
+        return _reversal_ack()
+    if doc.subscription_id:
+        # A SUBSCRIPTION's charge: it granted no credits here (the subscription
+        # events grant the tier's allotment), so there is no figure to derive.
+        logger.error(
+            "billing.webhook: %s for payment=%s (event_id=%s) is a charge of subscription=%s "
+            "— NOT clawing back; the allotment it paid for needs a human",
+            event.type,
+            event.payment_id,
+            event.event_id,
+            doc.subscription_id,
         )
         return _reversal_ack()
 
@@ -1219,8 +1758,15 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
         return _reversal_ack()
 
     same_currency = bool(event.currency) and event.currency.upper() == (doc.currency or "").upper()
-    if event.amount_credits > 0 and same_currency:
-        amount = min(event.amount_credits, remaining)
+    paid = int(doc.amount_credits or 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        # PRO RATA of what the payment granted, never the refund's money AS
+        # credits. For USD granted == paid, so this is exactly the stated cents.
+        # For INR the refund is in paise and the grant is base + bulk bonus, so a
+        # full refund takes exactly base + bonus and a partial takes its share of
+        # both. Floor: repeated partials can leave a credit un-reversed, which is
+        # the recoverable direction.
+        amount = min(int(granted) * min(event.amount_credits, paid) // paid, remaining)
     elif event.is_partial:
         # A PARTIAL reversal whose amount we could not read. Falling through to
         # the full remaining grant here would seize credits the buyer still paid
@@ -1240,6 +1786,17 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
         return _reversal_ack()
     else:
         amount = remaining
+
+    if amount <= 0:
+        # A refund so small its pro-rata share floors to zero credits.
+        logger.info(
+            "billing.webhook: %s for payment=%s (event_id=%s) is worth 0 credits pro rata — "
+            "nothing to reverse",
+            event.type,
+            event.payment_id,
+            event.event_id,
+        )
+        return _reversal_ack()
 
     # CLAIM the reversal on the payment row BEFORE any money moves. The filter
     # carries two independent guards:
@@ -1345,6 +1902,433 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
         balance,
     )
     return _reversal_ack(amount)
+
+
+# ---------------------------------------------------------------------------
+# Client-paid partner sites (PH-13)
+# ---------------------------------------------------------------------------
+
+
+def _int_field(data: dict, key: str) -> int:
+    value = data.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _credit_product_for(currency: str) -> str:
+    """The credits product a pay link in ``currency`` sells (what Dodo must report)."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    name = "dodo_credit_product_id_inr" if currency.upper() == "INR" else "dodo_credit_product_id"
+    return str(getattr(settings, name, None) or "")
+
+
+def _partner_paid_usd_cents(event: GatewayEvent) -> int | None:
+    """US cents the client paid, NET OF TAX, or None for an unsupported currency.
+
+    USD: ``total_amount - tax``. INR: the same paise net of tax, converted by the
+    PH-4 helper (Dodo's USD settlement net of ``settlement_tax`` when it sits in
+    the sanity band, else the configured FX rate).
+    """
+    data = event.raw.get("data") or {}
+    net = event.amount_credits - _int_field(data, "tax")
+    charged = event.currency.upper()
+    if charged == "USD":
+        return max(net, 0)
+    if charged == "INR":
+        settled = max(event.settlement_amount - _int_field(data, "settlement_tax"), 0)
+        cents, _, _ = _inr_base_credits(
+            replace(event, amount_credits=max(net, 0), settlement_amount=settled)
+        )
+        return max(cents, 0)
+    return None
+
+
+def _partner_payment_mismatch(event: GatewayEvent, rec: Any) -> str:
+    """Why a matched payment is NOT the one the link was made for, or ""."""
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    if event.currency.upper() != rec.currency.upper():
+        return "currency"
+    data = event.raw.get("data") or {}
+    # A payment link cannot switch discount codes off at Dodo; a discounted
+    # payment is not the list price the link was made for.
+    if data.get("discount_id") or data.get("discounts"):
+        return "discount"
+    tax = _int_field(data, "tax")
+    # Tax-inclusive: the total IS the list price. Tax-exclusive: Dodo adds tax on top.
+    if rec.amount_minor not in (event.amount_credits, event.amount_credits - tax):
+        return "amount"
+    expected = _credit_product_for(rec.currency)
+    if not expected or event.product_ids != (expected,):
+        return "product"
+    tier = site_plans.site_scoped_tier(rec.sku)
+    if tier is None or not tier.partner_only:
+        return "sku"
+    return ""
+
+
+async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any) -> dict:
+    """A verified payment for a client pay link we created (matched by payment id).
+
+    Never a top-up. Records the payment against the PARTNER's workspace (the
+    site's), then, for a pending record that matches what was sold, claims it and
+    activates the year in one write (``sites.activate_client_paid_site``) with the
+    commission figure frozen on the record; then grants that stored figure
+    (idempotent per payment). A redelivery of a paid record re-drives only the
+    grant. A mismatch flags the record and moves nothing.
+    """
+    from pocketpaw_ee.cloud.partners import _calc
+    from pocketpaw_ee.cloud.partners import service as partners_service
+    from pocketpaw_ee.sites import service as sites_service
+
+    site_id, payment_id = str(doc.id), rec.payment_id
+    await _record_payment(replace(event, workspace_id=doc.workspace))
+
+    if rec.status == "pending":
+        reason = _partner_payment_mismatch(event, rec)
+        paid_cents = _partner_paid_usd_cents(event) if not reason else None
+        if not reason and paid_cents is None:
+            reason = "currency"
+        if reason:
+            await sites_service.flag_partner_payment(
+                site_id=site_id, payment_id=payment_id, reason=reason
+            )
+            # Ids only: the amounts are the client's payment.
+            logger.error(
+                "billing.webhook: partner client payment=%s (site=%s, event_id=%s) does not "
+                "match its pay link (%s) — flagged; nothing activated, no commission",
+                payment_id,
+                site_id,
+                event.event_id,
+                reason,
+            )
+            return {"ok": True, "granted": False}
+        now = datetime.now(UTC)
+        profile = await partners_service.partner_profile_for_workspace(doc.workspace)
+        first = min(
+            (_as_utc(p.paid_at) for p in doc.partner_payments if p.status == "paid" and p.paid_at),
+            default=now,
+        )
+        rate = _calc.commission_rate_bps(
+            founding=bool(profile is not None and profile.founding),
+            first_client_payment_at=first,
+            paid_at=now,
+            tier=profile.tier if profile is not None else "bronze",
+        )
+        # The shop paid, so its year activates whatever the partner's state; a
+        # partner that is not ACTIVE earns nothing automatically (manual review).
+        active = profile is not None and profile.status == "active"
+        outcome = await sites_service.activate_client_paid_site(
+            site_id=site_id,
+            payment_id=payment_id,
+            paid_at=now,
+            commission_credits=_calc.commission_credits(paid_cents, rate) if active else 0,
+            rate_bps=rate if active else 0,
+            flag_reason="" if active else "partner_inactive",
+        )
+        if outcome == "flagged":
+            again = await sites_service.find_partner_payment(payment_id)
+            logger.error(
+                "billing.webhook: partner client payment=%s (site=%s, event_id=%s) cannot "
+                "activate the site (%s) — flagged; nothing activated, no commission. The "
+                "client's payment needs a refund",
+                payment_id,
+                site_id,
+                event.event_id,
+                again[1].flag_reason if again is not None else "unknown",
+            )
+    else:
+        outcome = rec.status
+
+    found = await sites_service.find_partner_payment(payment_id)
+    rec = found[1] if found is not None else rec
+    moved = 0
+    if rec.status == "paid" and rec.commission_credits > 0:
+        result = await credits_service.grant(
+            workspace=doc.workspace,
+            amount=rec.commission_credits,
+            cause=PARTNER_COMMISSION_CAUSE,
+            idempotency_key=f"{payment_id}:commission",
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": payment_id,
+                "site_id": site_id,
+                "sku": rec.sku,
+                "rate_bps": rec.rate_bps,
+            },
+        )
+        moved = rec.commission_credits if result.created else 0
+    if rec.status == "paid":
+        # PH-15: tier upgrade + milestone rewards. Every paid delivery re-drives
+        # it (both idempotent), so a redelivery heals a crash right here.
+        await partners_service.refresh_standing(doc.workspace)
+    if outcome == "activated":
+        logger.info(
+            "billing.webhook: partner client payment=%s activated site=%s on %s; commission "
+            "%d credits at %d bps (event_id=%s)",
+            payment_id,
+            site_id,
+            rec.sku,
+            rec.commission_credits,
+            rec.rate_bps,
+            event.event_id,
+        )
+        try:
+            await sites_service.redeploy_site(site_id)
+        except Exception:
+            # The money state already stands; a republish refreshes the stamps.
+            logger.exception(
+                "billing.webhook: redeploy after partner client payment=%s failed (site=%s)",
+                payment_id,
+                site_id,
+            )
+    return {"ok": True, "granted": False, "commission_credits": moved}
+
+
+async def _reverse_partner_commission(event: ReversalEvent) -> None:
+    """Claw back a client payment's commission for a refund / lost dispute.
+
+    ANCHORED ON THE LEDGER. The site's record says which partner was paid, but a
+    deleted site takes its records with it, so the partner's workspace comes
+    from the ``Payment`` row (written against the partner) and the 60-day window
+    runs from the commission's own ledger entry. The site side — voiding a
+    pending record, lapsing the year — is best-effort and only when the record
+    still exists.
+
+    THE AMOUNT mirrors ``_handle_reversal_event``: a stated amount in the
+    payment's currency takes ``commission * refunded // paid`` (a partial refund
+    takes its share and the site keeps its year); a partial with no usable
+    amount takes nothing and alarms; otherwise the whole remainder goes. A full
+    refund, a lost dispute, or partials whose running total (``refunded_minor``)
+    reaches the amount paid lapse the site.
+
+    THE CLAIM runs first on the Payment row (``commission_reversed`` capped at
+    what the ledger shows was granted, ``refunded_minor``, plus the event id),
+    then the site lapses, then the debit keyed
+    ``<payment_id>:commission:reversal:<event_id>``; a debit that raises (or is
+    cancelled) releases the claim so the redelivery re-drives. Allowed to go
+    negative, like M1 reversals.
+    """
+    if event.type not in _REVERSAL_EVENTS:
+        return
+    from pocketpaw_ee.sites import service as sites_service
+
+    pid = event.payment_id
+    now = datetime.now(UTC)
+    # The OLDEST row: a redelivery under a new webhook id records a second row
+    # for the same payment, and every reversal must claim against the same one.
+    payment = (
+        await Payment.find(Payment.gateway == _GATEWAY, Payment.gateway_ref == pid)
+        .sort("+_id")
+        .first_or_none()
+    )
+    paid = int(payment.amount_credits or 0) if payment is not None else 0
+    same_currency = (
+        payment is not None
+        and bool(event.currency)
+        and event.currency.upper() == (payment.currency or "").upper()
+    )
+    full = event.type == _DISPUTE_LOST or not (
+        event.is_partial or (same_currency and 0 < event.amount_credits < paid)
+    )
+
+    found = await sites_service.find_partner_payment(pid)
+    workspace = payment.workspace if payment is not None else None
+    if found is not None:
+        doc, rec = found
+        workspace = workspace or doc.workspace
+        if rec.status == "pending":
+            # Refunded before we processed it. A FULL refund voids the record so
+            # the late payment.succeeded activates and pays nothing; a partial one
+            # leaves a mostly-paid year to activate, and a human to settle.
+            if full:
+                await sites_service.void_pending_partner_payment(
+                    site_id=str(doc.id), payment_id=pid
+                )
+            else:
+                logger.error(
+                    "billing.webhook: %s for partner client payment=%s (event_id=%s) is a "
+                    "PARTIAL refund of %d landing before the payment was processed — record "
+                    "left pending (the year will still activate, full commission); needs a human",
+                    event.type,
+                    pid,
+                    event.event_id,
+                    event.amount_credits,
+                )
+            return
+
+    claim = None
+    if workspace and payment is not None:
+        refunded = (paid if full else min(event.amount_credits, paid)) if same_currency else 0
+        claim = await _claim_commission_reversal(
+            event, payment, workspace, paid=paid, same_currency=same_currency, refunded=refunded
+        )
+    # ponytail: ``refunded_minor`` moves only on a commission claim, so partials
+    # summing to full on a site with NO commission to claw (inactive partner)
+    # keep the year; widen with a separate refund claim if that ever matters.
+    if claim is not None and paid > 0 and int(claim[0].get("refunded_minor") or 0) >= paid:
+        full = True
+    if found is not None and full:
+        await sites_service.reverse_client_paid_site(
+            site_id=str(found[0].id), payment_id=pid, paid_since=now - _PARTNER_CLAWBACK
+        )
+    if claim is None:
+        return
+
+    amount = claim[1]
+    key = f"{pid}:commission:reversal:{event.event_id}"
+    try:
+        await credits_service.debit(
+            workspace=workspace,
+            amount=amount,
+            cause=PARTNER_COMMISSION_REVERSAL_CAUSE,
+            idempotency_key=key,
+            allow_negative=True,
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": pid,
+                "reason": event.type,
+            },
+        )
+    except BaseException:
+        # BaseException: a CancelledError mid-debit must release too, or the
+        # redelivery finds its id listed and stops (the alarm below catches only
+        # what no release could).
+        if not await credits_service.is_recorded(workspace, key):
+            await Payment.get_pymongo_collection().update_one(
+                {"_id": payment.id, "commission_reversal_event_ids": event.event_id},
+                {
+                    "$inc": {"commission_reversed": -amount, "refunded_minor": -claim[2]},
+                    "$pull": {"commission_reversal_event_ids": event.event_id},
+                },
+            )
+        raise
+    logger.warning(
+        "billing.webhook: %s clawed back %d commission credits from workspace=%s "
+        "(payment=%s, event_id=%s)",
+        event.type,
+        amount,
+        workspace,
+        pid,
+        event.event_id,
+    )
+
+
+async def _claim_commission_reversal(
+    event: ReversalEvent,
+    payment: Payment,
+    workspace: str,
+    *,
+    paid: int,
+    same_currency: bool,
+    refunded: int,
+) -> tuple[dict, int, int] | None:
+    """Claim this reversal's commission share on the Payment row.
+
+    Returns ``(row after the claim, amount claimed, refunded counted)``, or None
+    when there is nothing to claw back (no grant, outside 60 days, already
+    claimed, nothing left) — the caller then debits nothing.
+    """
+    pid = event.payment_id
+    key = f"{pid}:commission:reversal:{event.event_id}"
+    entry = await credits_service.find_by_key(workspace, f"{pid}:commission")
+    granted = entry.amount_delta if entry is not None and entry.applied else 0
+    if granted <= 0:
+        return None
+    if _as_utc(entry.created_at) < datetime.now(UTC) - _PARTNER_CLAWBACK:
+        logger.info(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+            "paid over 60 days ago, not clawed back",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return None
+    if event.event_id in (payment.commission_reversal_event_ids or []):
+        # Every listed id is a claim that had something to debit, so a listed id
+        # with no ledger movement is a reversal that died between claim and
+        # debit (mirrors the general path's alarm, with its in-flight caveat).
+        if not await credits_service.is_recorded(workspace, key):
+            logger.error(
+                "billing.webhook: %s for partner client payment=%s (event_id=%s) is RECORDED "
+                "ON THE PAYMENT ROW WITH NO LEDGER MOVEMENT BEHIND IT — the commission "
+                "clawback died between claim and debit, workspace=%s still holds it, and "
+                "nothing retries it. CHECK THE LEDGER BEFORE SETTLING BY HAND: a duplicate "
+                "delivery still in flight reads identically for about one round-trip",
+                event.type,
+                pid,
+                event.event_id,
+                workspace,
+            )
+        return None
+    already = int(payment.commission_reversed or 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        share = granted * min(event.amount_credits, paid) // paid
+    elif event.is_partial:
+        logger.error(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) is PARTIAL with "
+            "no usable amount — commission NOT clawed back; needs a human",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return None
+    else:
+        share = granted
+    amount = min(share, max(granted - already, 0))
+    if amount <= 0:
+        return None
+
+    col = Payment.get_pymongo_collection()
+    for _attempt in range(2):
+        claimed = await col.find_one_and_update(
+            {
+                "_id": payment.id,
+                "commission_reversal_event_ids": {"$ne": event.event_id},
+                "$or": [
+                    {"commission_reversed": {"$lte": granted - amount}},
+                    {"commission_reversed": {"$exists": False}},
+                ],
+            },
+            {
+                "$inc": {"commission_reversed": amount, "refunded_minor": refunded},
+                "$push": {"commission_reversal_event_ids": event.event_id},
+                "$currentDate": {"updatedAt": True},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if claimed is not None:
+            return claimed, amount, refunded
+        # Refused: a redelivery of this event (routine), or a concurrent reversal
+        # took part of the remainder first — retry ONCE with what is left.
+        current = await col.find_one({"_id": payment.id}) or {}
+        if event.event_id in (current.get("commission_reversal_event_ids") or []):
+            logger.info(
+                "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+                "already clawed back by this event",
+                event.type,
+                pid,
+                event.event_id,
+            )
+            return None
+        already = int(current.get("commission_reversed") or 0)
+        amount = min(share, max(granted - already, 0))
+        if amount <= 0:
+            break
+    logger.error(
+        "billing.webhook: %s for partner client payment=%s (event_id=%s) could not claim its "
+        "commission share — REFUSED before debiting. granted=%d, already reversed=%d: a "
+        "concurrent reversal on the same payment claimed the remainder first",
+        event.type,
+        pid,
+        event.event_id,
+        int(granted),
+        already,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1846,6 +2830,7 @@ async def _upsert_subscription(
 __all__ = [
     "cancel",
     "charge_site_plan_credits",
+    "create_partner_client_checkout",
     "create_topup",
     "handle_webhook",
     "site_plan_debit_key",

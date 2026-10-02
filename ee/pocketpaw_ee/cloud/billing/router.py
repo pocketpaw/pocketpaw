@@ -101,6 +101,8 @@
 #   "where". The PUBLIC Dodo webhook router (``billing.webhooks``) is NOT touched:
 #   it is mounted separately with no auth ON PURPOSE — Dodo is the caller and the
 #   Standard-Webhooks signature is its trust boundary.
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): POST /topup forwards the
+#   request's ``currency`` ("USD" | "INR") to ``create_topup``; same owner guard.
 
 from __future__ import annotations
 
@@ -232,12 +234,14 @@ async def create_topup(
 
     Returns the hosted-checkout url the buyer is redirected to. Credits are NOT
     granted here — they land when Dodo posts a verified ``payment.succeeded`` to
-    the public webhook. ``amount_credits`` is integer credits (1 credit == $0.01).
+    the public webhook. ``amount_credits`` is integer credits (1 credit == $0.01)
+    for USD, or the charge in paise when ``currency`` is INR (Paw Partners).
     """
     result = await billing_service.create_topup(
         workspace_id=workspace_id,
         user_id=user_id,
         amount_credits=body.amount_credits,
+        currency=body.currency,
     )
     return CreateTopupResponse(checkout_url=result["checkout_url"])
 

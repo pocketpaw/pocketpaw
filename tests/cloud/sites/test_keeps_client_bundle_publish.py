@@ -1,6 +1,8 @@
 # tests/cloud/sites/test_keeps_client_bundle_publish.py — MT-1: the pocket's
 # "my client JavaScript is load-bearing" declaration survives every publish path.
 # Created 2026-08-07 (feat/sites-keep-client-bundle).
+# Updated 2026-10-02 (feat/partners-sell, PH-2): ``_publish_pending_site`` returns
+# ``(doc, prior)``; the pending-site helper unpacks it.
 #
 # Edited 2026-08-08 (feat/sites-js-by-default): the declaration is now TRI-STATE,
 # and ``publish_pocket`` is the one place it collapses to a bool. ``None`` — the
@@ -358,7 +360,8 @@ async def _pending_on_the_legacy_rail(*, workspace_id, pocket_id, keeps_client_b
     pocket, because that is exactly what the publish path does — resolving the
     declaration and handing it down is the step under test.
     """
-    return await sites_service._publish_pending_site(
+    # ``(doc, prior)`` since PH-2; ``prior`` is the refused-charge restore state.
+    doc, _prior = await sites_service._publish_pending_site(
         workspace_id=workspace_id,
         user_id="u1",
         pocket_id=pocket_id,
@@ -372,6 +375,7 @@ async def _pending_on_the_legacy_rail(*, workspace_id, pocket_id, keeps_client_b
         keeps_client_bundle=keeps_client_bundle,
         tier=site_plans.get_site_plan("site"),
     )
+    return doc
 
 
 async def test_a_deferred_deploy_replays_the_flag(mongo_db, monkeypatch):  # noqa: ARG001

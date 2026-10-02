@@ -103,6 +103,9 @@ PLATFORM_ACTIONS: dict[str, PlatformActionRule] = {
     # Plans and entitlement overrides (chunk 7).
     "platform.entitlements.read": PlatformActionRule(PlatformRole.SUPPORT),
     "platform.entitlements.write": PlatformActionRule(PlatformRole.OPERATOR),
+    # Paw Partners (PH-1): turning a workspace into a partner switches its site
+    # billing on, so it is an operator write, not support.
+    "platform.partners.write": PlatformActionRule(PlatformRole.OPERATOR),
     # Stats, rollups, revenue (chunks 8-9).
     "platform.stats.read": PlatformActionRule(PlatformRole.SUPPORT),
     "platform.revenue.read": PlatformActionRule(PlatformRole.SUPPORT),

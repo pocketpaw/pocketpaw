@@ -6,6 +6,37 @@ Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
   Studio generation as a template: POST / GET /studio-templates, PATCH / DELETE
   /studio-templates/{id}). Discover gains a second source, `studio_template`,
   and two public listing fields, `media_kind` and `media_url`.
+Updated: 2026-10-02 (feat/partners-tiers, PH-15) — Paw Partners volume tiers and
+  milestone rewards: GET /partners/me adds tier standing and benefits, offers and
+  sales are priced at the tier discount, commissions use the tier rate, summary /
+  earnings add reward credits and lifetime sites sold, new GET /partners/rewards.
+Updated: 2026-10-02 (feat/partners-commissions, PH-13 re-check) — partial refunds
+  that add up to the full amount lapse the site; a partial refund before the
+  payment is processed no longer cancels the link; a pay link whose reservation
+  went stale while the checkout was created is a 409 partners.link_in_progress.
+Updated: 2026-10-02 (feat/partners-commissions, PH-13 review) — pay-link needs
+  sites.buy_plan; one open link per site (409 partners.link_open /
+  partners.link_in_progress); partial refunds take a pro-rata share of the
+  commission; clawback survives a deleted site.
+Updated: 2026-10-02 (feat/partners-commissions, PH-13) — Paw Partners: new
+  POST /partners/pay-link (the partner's client pays a site's year through a
+  one-time link; the partner earns a commission in credits). Offers carry the
+  client's list price, sold sites carry billing_mode, summary and earnings carry
+  commission credits.
+Updated: 2026-10-02 (feat/partners-earnings, PH-11) — Paw Partners: POST /partners/sell
+  takes an optional price_minor + currency (booked as a paid receipt on the site's
+  client record) and returns invoice_id; new GET /partners/summary and
+  GET /partners/earnings. Review fixes: a receipt only when the sale recorded a new
+  debit, idempotent under a double submit, spend/sales semantics spelled out.
+Updated: 2026-10-02 (feat/partners-cobrand, PH-5) — "Hide the PocketPaw badge":
+  partner-sold sites carry the partner co-brand mark instead of the badge.
+Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
+  POST /partners/sell, GET /partners/sites (yearly partner plans paid from the
+  partner's credit wallet).
+Updated: 2026-10-02 (feat/partners-foundation, PH-1) — added "Paw Partners —
+  profile and clients": GET /partners/me, client CRUD under /partners/clients,
+  and the operator PUT/DELETE /platform/workspaces/{workspace_id}/partner. An active
+  partner profile turns site billing on for that workspace.
 Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
   startup (and then every 30 minutes with the cloud scheduler on); the owner
   using their own listing doesn't raise `remix_count`.
@@ -970,6 +1001,296 @@ Returns `404` for a missing or cross-tenant pocket, `403` when the caller can't
 read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site,
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
+
+## Paw Partners — profile and clients
+
+A partner is a workspace that resells sites to local shops. A **client** is a
+shop-owner record inside the partner's workspace (not a workspace, not a user).
+All paths are under `/api/v1`. Errors use the standard CloudError JSON shape.
+
+### `GET /partners/me`
+
+The caller's workspace partner profile and where it stands on the volume tiers:
+
+```json
+{
+  "status": "active", "tier": "silver", "footer_name": "Ravi Prints",
+  "billing_country": "IN", "founding": false, "joined_at": "2026-10-01T09:00:00Z",
+  "active_sites": 12, "lifetime_sites_sold": 15,
+  "next_tier": {"name": "gold", "at": 25, "remaining": 13},
+  "benefits": {"wholesale_discount_pct": 10.0, "commission_pct": 30.0}
+}
+```
+
+`status` is `applied` | `active` | `suspended`. `next_tier` is `null` at gold.
+`benefits.commission_pct` is the tier rate; a founding partner's site earns
+max(40%, that rate) for 24 months after the site's first client payment. Needs
+`fabric.read`. **404** when the workspace is not a partner (a suspended partner
+can still read it).
+
+### Volume tiers and milestone rewards
+
+The tier is worked out from **active sold sites**: sites with a client
+(`partner_client_id`) on an active paid plan, whoever paid (the wallet or the
+client). The same count is `active_sites` on `/me` and on the summary.
+
+| Tier | Active sold sites | Wholesale discount | Commission |
+|---|---|---|---|
+| bronze | 0–9 | 0% | 25% |
+| silver | 10–24 | 10% | 30% |
+| gold | 25+ | 20% | 35% |
+
+- **Up right away, down once a month.** After every sale and every paid client
+  payment the tier is recomputed and only raised. The sale or payment that
+  crosses a threshold is priced at the old tier; the next one gets the new
+  discount or rate. A monthly review (the first sweep tick of each UTC month)
+  recomputes with downgrade, so a lapse never costs a tier mid-month.
+- **Discount:** the partner pays floor(price × (1 − discount)) in whole USD. It
+  applies wherever the wallet pays for a partner plan: the sale, a plan change and
+  the renewal, and the offers show it. IN `site_year` is 1,700 / 1,500 / 1,300
+  credits; elsewhere 2,900 / 2,600 / 2,300. `staff_year` IN 5,600 / 5,000 / 4,400;
+  elsewhere 8,900 / 8,000 / 7,100.
+- **Who owns the tier:** the system. The operator PUT below can still set `tier`
+  (a manual promotion); it stands until the next recompute moves it, which is the
+  next upgrade or the next monthly review.
+
+**Milestone rewards** are one-time credit grants on **lifetime distinct sites
+sold**: 1st site +200, 10th +1,000, 25th +3,000, 50th +7,500 credits. A site
+counts once the wallet paid a partner plan for it or its client's payment earned a
+commission. Lifetime never goes down: a refund, a lapse or a deleted site does not
+lower it, does not re-trigger a milestone and does not take a reward back. Each
+milestone is granted once per workspace (ledger cause `partner_reward`, key
+`partner_reward:<workspace_id>:<sites>`), checked after every sale, paid client
+payment and monthly review.
+
+### `GET /partners/clients` · `POST /partners/clients`
+
+List (newest first) or create clients. Create body: `name`, `whatsapp` (E.164,
+`^\+[1-9]\d{7,14}$`), optional `whatsapp_opt_in_at`, `gstin` (upper-cased, then the 15-char GSTIN
+pattern), `notes`. Returns
+the client (`id`, `workspace_id`, fields, `created_at`, `updated_at`); create is
+**201**. **403** `partner.not_active` unless the workspace has an ACTIVE profile. Reads
+need the `fabric.read` workspace action and writes `fabric.write` (member+); a
+non-member is **403**.
+
+### `PATCH /partners/clients/{client_id}` · `DELETE /partners/clients/{client_id}`
+
+Partial update (only sent fields change; an empty body writes nothing) or delete
+(**204**). Same 403 rule; a client from another workspace is **404**.
+
+**Delete archives.** The client disappears from every read, but the org journal
+keeps its full history, including the WhatsApp number and GSTIN. There is no
+erasure path yet.
+
+### `PUT /platform/workspaces/{workspace_id}/partner` · `DELETE /platform/workspaces/{workspace_id}/partner`
+
+Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
+session cookie; bearer tokens are refused). PUT requires a body: `status`,
+`footer_name`, `reason` (required, non-blank), optional `tier` (`bronze` |
+`silver` | `gold`, default `bronze`; system-owned, see the tier section above),
+`billing_country` (ISO-2, default `IN`,
+upper-cased), `founding`, `joined_at` (kept from the previous profile when
+omitted). A missing body is **422**. DELETE takes `{"reason": "..."}` and clears
+the profile. Both return `{workspace_id, partner}` and write a platform audit row.
+
+**Billing effect:** while the profile is `active`, the per-site billing seams
+(`billing.enforcement.sites_enforced`) enforce for that workspace even with
+`billing_enforced` and `sites_billing_enforced` off.
+
+### `GET /partners/offers`
+
+The partner-only yearly plans at the caller's `billing_country` price:
+`[{sku, period_months, price_credits, conversation_allowance, label,
+client_price_minor, client_currency}]` (1 credit = $0.01). Today: `site_year`
+(1,700 credits in IN, 2,900 elsewhere) and `staff_year` (5,600 / 8,900; 1,200
+conversations a year), at bronze. `price_credits` already has the partner's tier
+discount applied. `client_price_minor` + `client_currency` are what the
+partner's client pays through a pay link: `site_year` ₹3,588 (`358800`, `INR`) in
+IN, $84 (`8400`, `USD`) elsewhere; `staff_year` ₹11,988 / $228. Needs `fabric.read`;
+**403** `partner.not_active` unless the profile is ACTIVE. These plans are not in
+the public plan catalog.
+
+### `POST /partners/sell`
+
+Body `{client_id, site_id, sku, price_minor?, currency?}`. Sells one of the workspace's sites a partner
+plan, paid from the workspace credit wallet. The client must be this partner's
+(**404** otherwise), the site must belong to this workspace (**404**), and `sku`
+must be a partner plan (**422** `partners.unknown_sku`). It runs the ordinary
+paid-publish path for the site's pocket — wallet debit, then redeploy — and
+stamps the site's `partner_client_id`. Returns `{site_id, name, url, plan_tier,
+renewal_date, partner_client_id, subscription_status, invoice_id}`.
+
+- `price_minor` (optional, integer ≥ 0, ISO-4217 minor units, same ceiling as a
+  site receipt) is what the partner charged its client. `currency` is a 3-letter
+  code, upper-cased; it defaults to `INR` when the profile's `billing_country` is
+  `IN`, else `USD`. Both are validated before the wallet is touched (**422**).
+  When the sale records a NEW wallet debit, the price is booked as a PAID receipt
+  on the site's client record (the same list `GET /sites/{site_id}/client`
+  returns, note `Paw Partners sale · <plan label>`) and its id comes back as
+  `invoice_id`. It is the partner's private bookkeeping: nothing bills from it and
+  the client never sees it. No new debit means no receipt (`invoice_id: null`): a
+  refused sale, the no-op re-sell below, moving back to a plan already paid for
+  this period, resuming a site that was set to close, and a sale without
+  `price_minor`. The receipt id is derived from the debit, so a double-submitted
+  sale books one receipt and both responses carry the same `invoice_id`.
+- If the receipt cannot be written after the sale went through, the sale still
+  stands and `invoice_id` is `null`. Add the receipt yourself with
+  `POST /sites/{site_id}/invoices`.
+
+- Needs `sites.buy_plan` (workspace admin): a sale spends the wallet. **403**
+  for a member, and **403** `partner.not_active` without an ACTIVE profile.
+- Short wallet: **402** `credits.insufficient`, nothing charged, the site keeps
+  its plan.
+- Selling the sku a site already holds and pays for is a no-op apart from the
+  client stamp: no second debit, no redeploy.
+- **409** `partners.site_on_plan` when the site is carried by the workspace
+  plan; **409** `partners.foreign_site` when it is a concierge-only (foreign)
+  site.
+- A site already on a monthly paid plan pays the full year price (no credit for
+  the rest of the month) and its year starts today. **409**
+  `sites.plan_already_bought_today` if that same change was already charged today.
+- The same rules apply to `POST /sites/publish`: moving a site whose year is still
+  running to a monthly plan is **409** `sites.period_downgrade_refused`.
+- Re-buying a partner plan on a lapsed site goes through the same checks as a new
+  sale: **403** `sites.partner_plan_only` if the partner is no longer active.
+- Renewals happen on their own: the site-renewal sweep debits the partner price
+  when `renewal_date` passes and steps it 12 months, or lapses the site to the
+  free tier (still published) when the wallet is short. The renewal is priced at
+  the partner's tier on the renewal day. If the partner profile has
+  been removed, the renewal reuses the price last paid only when that is a real
+  price of the plan (any country, any tier discount); otherwise the site lapses to the free tier (still published),
+  never charged at a guessed price.
+- A plan change after `renewal_date` has passed (before the renewal sweep runs) is
+  charged as one fresh period of the new plan, starting now.
+
+### `POST /partners/pay-link`
+
+Body `{client_id, site_id, sku}`, `sku` one of `site_year` | `staff_year`
+(**422** otherwise). Opens a one-time payment link the partner sends its client.
+The client pays the plan's list price for one year in the partner's billing
+currency (see `client_price_minor` on the offers). Returns:
+
+```json
+{"checkout_url": "https://...", "site_id": "...", "sku": "staff_year",
+ "amount_minor": 1198800, "currency": "INR"}
+```
+
+Nothing changes on the site until the payment lands. When Dodo confirms it, the
+site goes on the plan for 12 months (`billing_rail` `client`), its
+`partner_client_id` is set, and the partner's wallet gets a commission in credits:
+the partner's tier rate (25% / 30% / 35%) of the amount paid net of tax, in US
+cents (an INR payment converts through Dodo's USD settlement figure, or the
+configured FX rate when that is missing or implausible). Founding partners get
+max(40%, the tier rate) on payments made within 24 months of that site's first
+client payment. The rate is fixed when the payment lands. The partner's wallet is never charged for a
+client-paid site, and the renewal sweep does not renew it: at `renewal_date` the
+site drops to the free tier and stays published, unless the client has paid a new
+link. A refund or lost dispute within 60 days of the payment takes that payment's
+commission back (the wallet can go negative); a partial refund takes the same
+share of the commission and leaves the site on its plan, while a full refund, a
+lost dispute, or partial refunds that add up to the full amount also drop the
+site to the free tier. This still happens if the site has been deleted since.
+After 60 days nothing is taken back. A full refund that arrives before the
+payment was processed cancels the link: the late payment activates nothing and
+earns nothing. A partial refund that arrives that early leaves the link alone (the
+payment still activates and pays the full commission) and is logged as an error
+for someone to settle by hand. If the partner is no longer active when the
+payment lands, the site still gets its year but no commission is paid (the
+payment is flagged `partner_inactive` for review).
+
+- Needs `sites.buy_plan` (workspace admin, like `/partners/sell`: a paid link
+  changes the site's plan) and an ACTIVE profile (**403** `partner.not_active`).
+  Another workspace's client or site is **404**.
+- **409** `partners.site_already_paid` when the site is already on a paid plan,
+  paid by the wallet or by a client. The one exception is the renewal: a
+  client-paid site in the last 30 days of its year can take a link for the same
+  plan, and that payment adds a year from the current `renewal_date`.
+- **409** `partners.site_on_plan` (carried by the workspace plan),
+  `partners.foreign_site` (concierge-only site), `partners.site_not_live` (not
+  published yet).
+- One open link per site. Asking again for the same plan and price within 7
+  days returns the open link instead of making a second one (a double submit
+  opens one payment). A link for a different plan while one is open is **409**
+  `partners.link_open`; a request racing another one still being created is
+  **409** `partners.link_in_progress` (retry).
+- The link is charged in exactly its currency (no local-currency conversion at
+  checkout).
+- Only a payment for a link created here counts, matched on Dodo's payment id.
+  If the amount, currency or product Dodo reports differs from the link, a
+  discount was applied, the site was bought with the wallet in the meantime, or
+  the site is already on a client-paid year of a different plan, the payment is
+  flagged: nothing is activated and no commission is paid. Those need a refund
+  by hand.
+- Changing the plan of a client-paid site through `POST /sites/publish` is
+  **409** `sites.client_paid_plan`.
+
+### `GET /partners/sites`
+
+The workspace's sold sites: `[{site_id, name, url, plan_tier, renewal_date,
+partner_client_id, client_name, billing_mode}]`, where `billing_mode` is `client`
+when the client paid the year through a pay link and `partner` when the wallet
+bought it, ordered by `renewal_date` (sites with none come first). Optional
+`due_within_days` (0–3660) keeps only sites whose `renewal_date` is within that
+many days (a site with no renewal date is never due); without it, every sold
+site is returned, including lapsed ones with a null date. Needs `fabric.read` and
+an ACTIVE profile.
+
+### `GET /partners/summary`
+
+The partner's earnings at a glance:
+
+```json
+{
+  "clients": 4, "sites_sold": 6, "active_sites": 5, "renewals_due_30d": 1,
+  "spent_credits_30d": 1700, "spent_credits_total": 10200,
+  "revenue_30d": [{"currency": "INR", "amount_minor": 299900}],
+  "revenue_total": [{"currency": "INR", "amount_minor": 1499500},
+                    {"currency": "USD", "amount_minor": 5000}],
+  "commission_credits_30d": 3350, "commission_credits_total": 9120,
+  "rewards_credits_30d": 200, "rewards_credits_total": 1200,
+  "lifetime_sites_sold": 10
+}
+```
+
+`clients` counts the partner's client records; `sites_sold`, `active_sites`
+(`subscription_status` active) and `renewals_due_30d` (same rule as
+`GET /partners/sites?due_within_days=30`) count the sold sites. Revenue is the sum
+of PAID receipts on the sold sites' client records (sale prices and any receipt
+added through `POST /sites/{site_id}/invoices`), one row per currency, never
+converted or mixed; `revenue_30d` keeps receipts issued in the last 30 days.
+Spend is every `site_plan` wallet debit (purchases, renewals, plan changes) on
+the sites that are sold to a client NOW, in credits (1 credit = $0.01). That
+includes debits made before the site was sold, for example the partner's own
+earlier paid publish of that site. Needs `fabric.read`; **403**
+`partner.not_active` without an ACTIVE profile.
+`commission_credits_30d` / `commission_credits_total` are the credits earned on
+client pay-link payments, minus any taken back after a refund or lost dispute.
+`rewards_credits_30d` / `rewards_credits_total` are milestone rewards credited,
+and `lifetime_sites_sold` is the milestone count (see the tier section).
+
+### `GET /partners/earnings?months=12`
+
+One row per UTC calendar month, newest first, including months with no
+activity: `[{month: "YYYY-MM", sales, revenue: [{currency, amount_minor}],
+spent_credits, commission_credits, rewards_credits}]`. `commission_credits` is that month's
+commissions minus that month's clawbacks; `rewards_credits` is the milestone
+rewards credited that month. `sales` is the number of `site_plan` debits on currently-sold
+sites that month: purchases, renewals AND plan changes each count as one, so an
+upgrade is a sale. `revenue` and `spent_credits` follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
+Needs `fabric.read` and an ACTIVE profile.
+
+### `GET /partners/rewards`
+
+The milestone ladder with when each reward was credited:
+
+```json
+[{"sites": 1, "credits": 200, "reached_at": "2026-10-02T10:15:00Z"},
+ {"sites": 10, "credits": 1000, "reached_at": null},
+ {"sites": 25, "credits": 3000, "reached_at": null},
+ {"sites": 50, "credits": 7500, "reached_at": null}]
+```
+
+Needs `fabric.read` and an ACTIVE profile (**403** `partner.not_active`).
 
 ## Site templates
 
@@ -3335,6 +3656,18 @@ pay for. A lapsed paid site gets its badge back on its next publish whatever the
 Every site response (`GET /sites`, `GET /sites/{site_id}`, the publish response, and so
 on) now carries `badge_hidden: bool`. It defaults to `true`, and a site written before the
 field existed reads `true`, which is how an entitled site behaved before the switch.
+
+**Partner-sold sites carry a co-brand mark instead.** A site a Paw Partner sold
+(`POST /partners/sell`, so `partner_client_id` is set) on an active partner-only plan
+(`site_year` / `staff_year`) publishes with "Made by <footer_name> · Paw Sites by
+PocketPaw", linking to `https://pocketpaw.xyz/partners`. `footer_name` comes from the
+partner's profile. It sits in the same place as the badge with the same lock, so the
+shop's own stylesheet cannot hide it, and `badge_hidden` does not remove it. A name over
+13 characters is shortened with "…" on screen so the mark fits a phone, and the full name
+stays in its accessible label. The sale's
+own redeploy already carries it. If the partner plan lapses, the next publish puts the
+standard badge back. A partner profile with no `footer_name` falls back to the rules
+above.
 
 ### `PATCH /sites/{site_id}/branding`
 

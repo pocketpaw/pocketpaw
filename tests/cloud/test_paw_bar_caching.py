@@ -238,7 +238,7 @@ def lookups(monkeypatch):
         return state["site"]
 
     monkeypatch.setattr(site_keys, "lookup_site_by_key", _lookup)
-    monkeypatch.setattr(site_keys, "concierge_available", lambda site: True)
+    monkeypatch.setattr(site_keys, "concierge_available", lambda site, **_: True)
     monkeypatch.delenv("PAWBAR_DASHBOARD_ORIGIN", raising=False)
     monkeypatch.delenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", raising=False)
     return state
@@ -275,7 +275,7 @@ async def test_frame_html_has_no_per_request_nonce(client, lookups):
 async def test_dead_frame_stays_no_store(client, lookups, monkeypatch):
     from pocketpaw_ee.cloud.auth import site_keys
 
-    monkeypatch.setattr(site_keys, "concierge_available", lambda site: False)
+    monkeypatch.setattr(site_keys, "concierge_available", lambda site, **_: False)
     res = await client.get("/paw-bar/frame", params={"key": _KEY})
     assert res.status_code == 403
     assert res.headers["cache-control"] == "no-store"

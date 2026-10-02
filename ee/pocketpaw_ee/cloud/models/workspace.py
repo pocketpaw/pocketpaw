@@ -1,5 +1,17 @@
 """Workspace document — one per deployment/org, and the sub-models embedded in it.
 
+Updated 2026-10-01 (feat/partners-foundation, PH-1): added ``PartnerProfile`` and
+``Workspace.partner``. Set only by the platform route in
+``cloud/platform/partners.py`` (via the workspace service's platform partner writer);
+an ``active`` profile turns the per-site billing seams on for THIS workspace
+(``billing.enforcement.sites_enforced``). Updated 2026-10-02: ``IsoCountry`` is the
+one billing-country validator; ``tier`` is a Literal of the known tiers.
+Updated 2026-10-02 (feat/partners-tiers, PH-15): ``tier`` is now SYSTEM-owned —
+recomputed from active sold sites (``partners.service.refresh_standing``), raised
+right after a sale / client payment, lowered only by the monthly sweep, which
+stamps ``tier_reviewed_at``. An operator-set tier stands until the next
+recompute that moves it.
+
 ``Workspace`` carries the tenant's plan, its members' roles, and the embedded
 config below. The sub-models are separated by WHAT THEY ARE, not by who edits
 them, and the split is load-bearing:
@@ -30,10 +42,10 @@ reads the resolved values and threads them through ``run_action`` →
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from beanie import Indexed
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -188,6 +200,40 @@ class VerifiedDomain(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+def normalize_iso2(v: str) -> str:
+    """Upper-case ISO-3166 alpha-2 country code, or ValueError."""
+    v = v.strip().upper()
+    if len(v) != 2 or not v.isalpha():
+        raise ValueError("billing_country must be an ISO-3166 alpha-2 code")
+    return v
+
+
+# The ONE billing-country validator; the platform write body reuses this type.
+IsoCountry = Annotated[str, AfterValidator(normalize_iso2)]
+PartnerStatus = Literal["applied", "active", "suspended"]
+PartnerTier = Literal["bronze", "silver", "gold"]
+
+
+class PartnerProfile(BaseModel):
+    """Paw Partners (PH-1): this workspace resells sites to its own clients.
+
+    ``None`` on the workspace = not a partner. Only ``status == "active"`` turns
+    on site billing for the workspace; ``applied`` and ``suspended`` do not.
+    Written only by the workspace service's platform partner writer.
+    """
+
+    status: PartnerStatus
+    # System-owned since PH-15 (see the module docstring); the operator PUT can
+    # still set it, and the next recompute that moves it overwrites that value.
+    tier: PartnerTier = "bronze"
+    footer_name: str = Field(min_length=1, max_length=120)
+    billing_country: IsoCountry = "IN"
+    founding: bool = False
+    joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # When the monthly tier sweep last reviewed (and maybe lowered) ``tier``.
+    tier_reviewed_at: datetime | None = None
+
+
 class Workspace(TimestampedDocument):
     """Organization workspace — one per enterprise deployment."""
 
@@ -208,6 +254,8 @@ class Workspace(TimestampedDocument):
     # ``WorkspaceOverrides`` for the field list and why two ``Entitlements``
     # fields are deliberately absent from it.
     overrides: WorkspaceOverrides | None = None
+    # Paw Partners (PH-1). Platform-admin set only; see ``PartnerProfile``.
+    partner: PartnerProfile | None = None
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None

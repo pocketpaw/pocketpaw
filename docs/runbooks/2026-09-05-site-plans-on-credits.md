@@ -10,6 +10,24 @@ site is paid for, and it is not the wallet.** The workspace plan carries sites
 read first if a paid-looking site shows no debit. The same change retired the
 `studio` and `agency` org flats; "What was removed" records that.
 
+Updated 2026-10-02 (`feat/partners-sell`, PH-2): **Paw Partners sell yearly
+plans.** See "Partner yearly plans" below. A renewal now buys one *period* of the
+tier, which is still one month for every public rung.
+
+Updated 2026-10-02 (`feat/partners-commissions`, PH-13): **a third rail,
+`client`.** A partner's client can pay a site's year directly through a one-time
+pay link, and the partner earns a commission. See "Client-paid partner sites"
+below. Also: a Dodo `payment.succeeded` that carries a `subscription_id` is now
+recorded and never granted as a top-up, which applies to workspace-plan
+subscriptions too. Re-check fixes on the same branch: partial refunds that add up
+to the full amount now lapse the site, early partial refunds no longer cancel the
+link, and a stale pay-link reservation is refused instead of filled.
+
+Updated 2026-10-02 (`feat/partners-tiers`, PH-15): **partner prices and
+commissions depend on a volume tier, and partners earn milestone rewards.** See
+"Partner volume tiers and milestone rewards" below. A partner's wallet charge
+for `site_year` / `staff_year` is no longer always the table price.
+
 ## What was broken
 
 Selecting a paid plan for a site produced a site that said **pending payment** and
@@ -336,6 +354,233 @@ top-up buys the tier again through the ordinary purchase path.
 never also debited. Once its gateway subscription is cancelled, flip it over by
 setting `billing_rail` to `credits` and `renewal_date` to when its paid period
 ends — after that the sweep picks it up like any other.
+
+## Partner yearly plans (`site_year`, `staff_year`)
+
+An ACTIVE Paw Partners workspace can sell a client site a yearly plan from its
+own wallet (`POST /api/v1/partners/sell`). There is no separate purchase code:
+the sale calls `publish_pocket` with the partner tier, so the debit, the redeploy,
+the badge/concierge stamping and the renewal date are what any paid publish does.
+The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
+
+| Tier | Features | Period | IN | Everywhere else |
+|------|----------|--------|----|-----------------|
+| `site_year` | same as `site` (badge off, custom domain) | 12 months | $17 | $29 |
+| `staff_year` | same as `staff` + 1,200 concierge conversations per year | 12 months | $56 | $89 |
+
+- Prices live in one table in `billing/site_plans.py`, read by
+  `partner_price_usd(tier, country, partner_tier)`; the country is the partner
+  profile's `billing_country`, and the volume tier's discount is applied there
+  (see the tiers section). `billing.service.site_plan_price_usd` is what every charge
+  site calls, and for a monthly rung it is still `monthly_price_usd`.
+- The rungs are **not** in the public catalog (`list_site_plans`). A publish
+  naming one outside an active partner workspace is refused with **403**
+  `sites.partner_plan_only` — and so is re-buying one on a lapsed site once the
+  partner is suspended. The member plan-request door never takes them: `POST
+  /sites/plan-requests` answers **422** `sites.unknown_plan_tier`, and the propose
+  step refuses them too. They are never carried by the workspace plan.
+- Re-buying the tier a LAPSED (or pending) site still names is a purchase, so it
+  needs `sites.buy_plan` like any other (`sites.plan_purchase_forbidden` for a
+  member). This applies to every workspace, not only partners.
+- `monthly_price_usd` on these rows is display-only (year price / 12, rounded
+  down). Nothing charges it.
+- **Renewals ride the same sweep.** A due `site_year` site is debited the partner
+  price again and its `renewal_date` steps 12 months from the due date; a short
+  wallet lapses it to the free floor and the site stays up, like any other.
+- **Changing to a different period length is a fresh purchase**, not a re-price.
+  Monthly to yearly charges the FULL year price, sets `period_paid_usd` to it and
+  starts the year today. The unused part of the month is not credited; nothing on
+  this rail prorates.
+- **A running year cannot move to a monthly plan.** Yearly to any monthly rung
+  before `renewal_date` is refused with `sites.period_downgrade_refused` ("This
+  site is paid through <date>. Switch plans when it renews."), with no charge and
+  no change. After the date it is a fresh monthly purchase.
+- **Tier-change debits have their own key** (`site_plan:<site>:<tier>:<date>:change`).
+  Purchases and renewals keep `site_plan:<site>:<tier>:<date>`. Before this, an
+  upgrade made on a renewal's due date shared that renewal's key, the renewal
+  replayed as a no-op, and the whole next period was free (monthly too).
+- A period change that would replay a `:change` debit already made today is
+  refused (`sites.plan_already_bought_today`) rather than restarting the period
+  for nothing.
+- Changes within the same period length keep the old rule: pay the difference
+  against `period_paid_usd`, keep the date. The rule is
+  `billing.service.site_plan_change_terms` (pure; unit-tested).
+- If a partner's profile is removed, its yearly sites renew at `period_paid_usd`
+  **only when that is a real price of the tier**, in any country at any volume-tier
+  discount (17, 15, 13, 29, 26 or 23 for `site_year`; 56, 50, 44, 89, 80 or 71 for
+  `staff_year`). `period_paid_usd` is a high-water mark, so after a
+  mid-year `staff_year` → `site_year` downgrade it reads 89. With no real price
+  to keep, the site **lapses at renewal** exactly like a short wallet: free floor,
+  site stays up, logged by site id. **An operator removing a partner profile
+  therefore lapses that partner's yearly sites at their next renewal unless the
+  profile is restored first.**
+- **A change after the paid period has ENDED** (renewal date passed, sweep not yet
+  run) is a fresh purchase of the new tier with a new period from now, whatever
+  the period lengths. The sweep then finds the date moved forward and skips the
+  site. Before this, an upgrade billed the gap on the ended period and the sweep
+  billed a whole new one ($60 + $89 instead of $89).
+- **Save race at a renewal.** Both the renewal sweep and a publish tier change
+  write the whole Site document with `save()`. If an admin changes a site's plan
+  in the same few seconds the sweep is renewing it, the later save wins. A
+  change debit can then be in the ledger with nothing delivered (the sweep's save
+  put the old tier back), or a renewal debit can be recorded against a row the
+  change rewrote. The same key is never charged twice, but money **can be taken
+  without the change being delivered**. If a site's tier and its latest
+  `site_plan` ledger rows disagree around a renewal, trust the ledger: fix the row
+  to what was paid, or refund the change debit.
+- **Deploy-day edge for the `:change` keys.** Tier-change debits written BEFORE
+  this deploy used the plain key. On the deploy day D only, a change made before
+  the deploy and a renewal of the same site and tier falling due later on D share
+  that plain key, so the renewal replays as a no-op (the old R1 bug, once). To
+  avoid it, deploy right after a sweep tick. To check afterwards: a site renewed
+  on D with no new `site_plan` ledger debit for that renewal was the replay.
+- The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
+  not from the 1st of the month.
+
+## Client-paid partner sites (`billing_rail: "client"`)
+
+A partner calls `POST /partners/pay-link`. That opens a one-time Dodo payment on
+the credits product (USD, or the INR credits product for an IN partner) at the
+plan's list yearly price, and appends a record to the site's `partner_payments`:
+`{payment_id, sku, amount_minor, currency, client_id, checkout_url, created_at,
+status: "pending"}`. `payment_id` is the id Dodo returned when the link was made.
+
+When `payment.succeeded` arrives, the webhook looks that payment id up in
+`partner_payments` before doing anything else. A match is never granted as a
+top-up. If the currency, the amount (the total, or the total minus `tax` when tax
+was added on top) and the product all match the record, one write flips the
+record to `paid` and puts the site on the plan for 12 months: `billing_rail:
+"client"`, `subscription_status: "active"`, `partner_client_id` set. The same
+write freezes `commission_credits` and `rate_bps` on the record. The commission
+is then granted to the partner's workspace (ledger cause `partner_commission`,
+key `<payment_id>:commission`), and the site is republished as a content edit so
+the badge and co-brand mark follow the plan. If anything doesn't match, or the
+wallet bought the site after the link went out, the record becomes `flagged`
+with a `flag_reason` and nothing moves. The client has paid for nothing at that
+point, so refund them in Dodo.
+
+Commission is the partner's tier rate (25% / 30% / 35%) of the US cents paid, net
+of tax, floored. INR converts the way INR top-ups do. Founding partners
+(`Workspace.partner.founding`) get max(40%, tier rate) on payments within 24
+months of the site's first client payment. The rule lives in
+`partners/_calc.py::commission_rate_bps`, and the numbers in that file's `TIERS`
+table; that is the only place to change them.
+
+## Partner volume tiers and milestone rewards
+
+All numbers are in `partners/_calc.py` (`TIERS`, `MILESTONES`).
+
+| Tier | Active sold sites | Wallet discount | Commission |
+|------|-------------------|-----------------|------------|
+| bronze | 0–9 | 0% | 25% |
+| silver | 10–24 | 10% | 30% |
+| gold | 25+ | 20% | 35% |
+
+- **Active sold sites** = sites in the workspace with `partner_client_id` set and
+  `subscription_status: "active"`, on any rail.
+- **Who sets `Workspace.partner.tier`:** `partners.service.refresh_standing`,
+  through `workspace.service.set_partner_tier` (a compare-and-set on the tier as
+  read). It runs after every `POST /partners/sell` and every paid client payment
+  (including redeliveries), and only RAISES the tier there. It never raises an
+  exception: a failure is logged (`partners: refresh_standing failed`) and the
+  next sale, payment redelivery or monthly review repairs it.
+- **Monthly review:** `sweep_partner_tiers` on the 5-minute heartbeat, right after
+  the renewal sweep. It picks ACTIVE partners whose `partner.tier_reviewed_at` is
+  unset or before the current UTC month, recomputes with downgrade, grants any
+  missing milestone and stamps `tier_reviewed_at`. Kill switch:
+  `POCKETPAW_PARTNER_TIER_SWEEP_ENABLED=0` (default on). Suspended partners are
+  not reviewed; their tier freezes.
+- **Operator precedence:** the platform PUT can still write `tier`. It stands until
+  a recompute moves it: the next upgrade, or the next month's review. The PUT
+  keeps `tier_reviewed_at`, so a manual promotion lasts at least to the month
+  boundary.
+- **Discount** is floor(price × (1 − d)) in whole USD, applied in
+  `site_plans.partner_price_usd`, so the sale, a tier change, the renewal (priced
+  at the tier on the renewal day) and the offers agree. The debit keys are
+  unchanged (`site_plan:<site>:<tier>:<date>[:change]`).
+- The sale or payment that crosses a threshold is priced at the OLD tier; the
+  tier moves after it.
+- **Milestones** (`partner_reward`, key `partner_reward:<workspace_id>:<sites>`):
+  1st +200, 10th +1,000, 25th +3,000, 50th +7,500 credits, on LIFETIME distinct
+  sites sold, read from the ledger: distinct `ref.site_id` over applied
+  `site_plan` debits on a partner rung plus applied `partner_commission` grants.
+  Refunds, lapses and deleted sites never lower it, so a milestone is granted
+  once and never clawed back. Because it reads the ledger, partners who sold
+  before this shipped get their milestones at their next sale, payment or review.
+- Check a partner: `db.workspaces.find_one({_id: ObjectId("<id>")}, {partner: 1})`
+  and `db.credit_ledger.find({workspace: "<id>", cause: "partner_reward"})`.
+
+The renewal sweep never debits a `client` site. Once `renewal_date` passes, it
+drops the site to `free` / `none` and leaves it published. A new paid link in
+the last 30 days of the year adds a year from `renewal_date`.
+
+A `refund.succeeded` or `dispute.lost` takes the commission back when the
+commission's ledger entry is less than 60 days old. The clawback is anchored on
+the ledger, not the Site: the partner's workspace comes from the `Payment` row,
+so it works after the site is deleted. A stated refund amount takes
+`commission * refunded // paid` (a partial refund takes its share); a partial
+with no usable amount takes nothing and logs ERROR. The running total is claimed
+on the Payment row (`commission_reversed`, `commission_reversal_event_ids`)
+before the debit (cause `partner_commission_reversal`, key
+`<payment_id>:commission:reversal:<event_id>`, may go negative), so a refund and
+a dispute, or several partials, never take more than was granted. A claim that
+loses that race re-reads the row and retries once with what is left, then logs
+ERROR. The same claim sums the refunds into `refunded_minor`, so a full refund, a
+lost dispute, or partials that add up to the amount paid (within 60 days of
+`paid_at`) flip the record to `reversed` and drop the site to free. The site
+lapses after the claim and before the debit. Known gap: `refunded_minor` only
+moves when there is commission to claim, so an inactive partner's site keeps its
+year after partials that add up to the full amount (a single full refund still
+lapses it). A debit that raises, including a cancellation, releases the claim so
+the redelivery re-drives it; a redelivery that finds its event id on the row with
+no ledger entry behind it logs ERROR (the process died between claim and debit;
+check the ledger, then settle by hand). A full refund that lands while the record
+is still `pending` marks it `reversed` (`refunded_before_processed`), so the late
+payment does nothing; a partial one logs ERROR and leaves the record to activate.
+
+A pay link's reservation is filled only while it is younger than five minutes.
+After that another request may have treated it as crashed and opened its own
+link, so the slow request releases its slot and returns 409
+`partners.link_in_progress`. The Dodo payment it created is never handed out.
+
+Other flags on a record: `discount` (a discount code was used; payment links
+cannot switch codes off), `sku_mismatch` (a payment for another plan than the
+client-paid year running), `partner_inactive` (the year activated, no commission
+paid; review by hand). Pay links pin `billing_currency`, so a USD link is never
+charged in EUR.
+
+Things to know:
+
+- A metadata tag `kind: partner_client_payment` on a payment that matches no
+  record is logged at ERROR and NOT granted. If Dodo ever reported a different
+  payment id at completion than at creation, real client payments would land
+  here instead of becoming top-ups in the partner's wallet. Check the log, find
+  the site by `metadata.site_id`, and settle by hand.
+- Changing the plan of a `client` site through publish is refused with
+  `sites.client_paid_plan` (a plan change would need a second client payment).
+- A pay link is reserved on the Site before Dodo is called (a record whose
+  `payment_id` starts `reserving:` and has no `checkout_url`). One left behind by
+  a crash stops blocking new links after 5 minutes.
+- Subscription charges: their `payment.succeeded` writes a Payment row stamped
+  `subscription_id` and grants nothing. A refund of one logs ERROR with the
+  subscription id; settle the allotment by hand.
+- Not fixed, by design: a refund racing the commission grant can leave the
+  grant standing (the refund reads no ledger entry yet); the founding 24-month
+  window is per site, from that site's first client payment.
+- A refund of an earlier payment inside 60 days of a later renewal payment still
+  drops the site to free, although the later year was paid. Restore the row by
+  hand if that happens.
+- Find client-paid payments: `db.sites.find({"partner_payments.payment_id": "<id>"})`.
+
+### Behaviour change for EVERY workspace: a refused upgrade no longer strands a live site
+
+Upgrading a live free site to a paid tier first rewrites the row to "pending" on
+the new tier, then debits the wallet. When the wallet was short, the row used to
+stay that way: still deployed, but `pending` on a tier nobody paid for. Since
+2026-10-02 the purchase puts back the site's previous `plan_tier`,
+`subscription_status`, `billing_rail`, `pending_deploy_inputs`, `owner` and `name`
+when the charge fails. A brand-new site that was never live still stays pending
+and undeployed, as before.
 
 ## A site that was charged and never went live
 

@@ -62,8 +62,8 @@
   {
     "label": "the $7 rung is given the concierge — the $19 rung's only differentiator",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"site\": False,\n    \"staff\": True,\n}",
-    "replace": "    \"site\": True,\n    \"staff\": True,\n}",
+    "find": "    \"site\": False,\n    \"staff\": True,\n    \"site_year\": False,",
+    "replace": "    \"site\": True,\n    \"staff\": True,\n    \"site_year\": False,",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_only_the_top_per_site_rung_sells_the_concierge",
       "tests/cloud/billing/test_site_plan_inclusions.py::test_only_the_top_per_site_rung_sells_the_concierge"
@@ -91,8 +91,8 @@
   {
     "label": "a tier that sells no concierge is given a 0 rate — the card offers free conversations",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"site\": _LIST_CONVERSATION_RATE_CENTS,\n    \"staff\": _LIST_CONVERSATION_RATE_CENTS,\n}",
-    "replace": "    \"site\": 0,\n    \"staff\": _LIST_CONVERSATION_RATE_CENTS,\n}",
+    "find": "    \"site\": _LIST_CONVERSATION_RATE_CENTS,\n    \"staff\": _LIST_CONVERSATION_RATE_CENTS,\n    \"site_year\"",
+    "replace": "    \"site\": 0,\n    \"staff\": _LIST_CONVERSATION_RATE_CENTS,\n    \"site_year\"",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_a_tier_that_sells_no_concierge_still_carries_the_list_rate",
       "tests/cloud/billing/test_site_pricing_ladder.py::test_the_conversation_rate_is_cents_and_stays_an_int"
@@ -101,8 +101,8 @@
   {
     "label": "staff loses its 200 included conversations — the tier bills from the first one",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"site\": 0,\n    \"staff\": 200,\n}",
-    "replace": "    \"site\": 0,\n    \"staff\": 0,\n}",
+    "find": "    \"site\": 0,\n    \"staff\": 200,\n",
+    "replace": "    \"site\": 0,\n    \"staff\": 0,\n",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_the_conversation_allowance_belongs_to_the_tier_that_sells_the_concierge"
     ]
@@ -165,7 +165,7 @@
   {
     "label": "activation stamps an annual renewal again on a monthly plan",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)",
+    "find": "        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=months)",
     "replace": "        doc.renewal_date = (at or datetime.now(UTC)) + timedelta(days=365)",
     "tests": [
       "tests/cloud/sites/test_foreign_site_mint.py::test_the_shared_renewal_stamp_steps_one_calendar_month"
@@ -174,7 +174,7 @@
   {
     "label": "activation steps 30 days instead of a month — the date walks back through the year",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=1)",
+    "find": "        doc.renewal_date = (at or datetime.now(UTC)) + relativedelta(months=months)",
     "replace": "        doc.renewal_date = (at or datetime.now(UTC)) + timedelta(days=90)",
     "tests": [
       "tests/cloud/sites/test_foreign_site_mint.py::test_the_shared_renewal_stamp_steps_one_calendar_month"

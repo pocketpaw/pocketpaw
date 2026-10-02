@@ -24,6 +24,9 @@
 #     ``subscription_status``, so a missed revert is permanent.
 #
 # Created 2026-09-05 (fix/sites-plan-credits): new test module.
+# Updated 2026-10-02 (feat/partners-sell, PH-2): a refused upgrade of a LIVE free
+# site leaves it exactly as it was (it used to be left "pending" on the tier it
+# never paid for).
 
 from __future__ import annotations
 
@@ -455,3 +458,50 @@ async def test_an_upgrade_lands_the_site_on_the_new_tier(mongo_db, monkeypatch):
     assert doc.deployed is True
     # One month of staff in total: $7 for the purchase, $12 for the gap.
     assert await credits_service.balance(ws) == 9000 - _price_credits("staff")
+
+
+async def test_a_refused_upgrade_of_a_live_free_site_leaves_it_exactly_as_it_was(
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+):
+    """Behaviour change (PH-2), for every workspace, not only partners. The purchase
+    rewrites the live row to "pending" on the paid tier BEFORE the debit; a short
+    wallet used to leave it there. Now the prior billing fields come back."""
+    _local_deploy(monkeypatch)
+    ws = await _make_workspace()
+    await _fund(ws, 100)
+    pocket_id = await _make_pocket(workspace_id=ws)
+    await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="free",
+        _bundle_reader=lambda d: b"x",
+    )
+    before = await _site_under_test(ws)
+    fields = (
+        "plan_tier",
+        "subscription_status",
+        "billing_rail",
+        "pending_deploy_inputs",
+        "owner",
+        "name",
+    )
+    snapshot = {f: getattr(before, f) for f in fields}
+
+    with pytest.raises(InsufficientCredits):
+        await sites_service.publish_pocket(
+            workspace_id=ws,
+            user_id="u1",
+            pocket_id=pocket_id,
+            site_plan_key="site",
+            purchase_authorized=True,
+            _bundle_reader=lambda d: b"x",
+        )
+
+    after = await _site_under_test(ws)
+    assert {f: getattr(after, f) for f in fields} == snapshot
+    assert after.plan_tier == "free"
+    assert after.deployed is True, "the live site stays live"
+    assert after.url == before.url
+    assert await credits_service.balance(ws) == 100

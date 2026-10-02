@@ -9,6 +9,13 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-10-02 (feat/partners-tiers, PH-15) — added the
+  POCKETPAW_PARTNER_TIER_SWEEP_ENABLED kill switch (monthly partner tier review).
+  Updated 2026-10-02 (feat/partners-inr-topup, PH-4) — Billing & Credits: added
+  `dodo_credit_product_id_inr` + `fx_inr_per_usd` and an "INR top-ups" note
+  (settlement-first conversion with a 0.5x-2x sanity band, bulk bonus tiers,
+  pro-rata reversals, Rs.100 minimum; INR routes on Dodo's product id, and
+  metadata never sets an amount).
   Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2/SA-3 section
   below rather than adding a second one, with the one operator fact the variables
   alone do not carry: the READ needs an Account Analytics Read token scope that the
@@ -95,8 +102,24 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 | _(removed)_ | `POCKETPAW_DODO_SITE_PRODUCTS` | — | — | **Deleted 2026-09-05.** Mapped a per-site plan tier to a Dodo recurring product id. Paw Sites left the gateway: a paid site is charged to the **workspace credit balance**, so nothing reads this and the setting no longer exists. Setting the env var is inert. `dodo_plan_products` is untouched — workspace plans still bill through Dodo. |
 | _(removed)_ | `POCKETPAW_DODO_SITE_ADDONS` | — | — | **Deleted 2026-09-05.** Mapped a per-site plan tier to a Dodo add-on id, billing a paid site as a line on the workspace subscription. Removed with the rest of that rail; see the [site plans on credits runbook](/runbooks/2026-09-05-site-plans-on-credits). |
 | _(no setting)_ | `POCKETPAW_SITE_RENEWALS_ENABLED` | bool | `true` (unset) | Kill switch for the credits site-plan **renewal** sweep, which runs on the five-minute heartbeat and debits the next month for every wallet-paid site whose `renewal_date` has passed. This sweep is what makes a monthly site plan recur at all now that a paid site has no gateway subscription — without it a customer pays once and keeps every paid capability for good — so it defaults **on** and is off only when this is set to `0`/`false`/`no`/`off`. Read per sweep rather than at boot, so an operator can stop the charging on a running process. A site whose wallet cannot cover the renewal is marked `cancelled` and drops to the free floor; **the site itself is never taken down**. |
+| _(no setting)_ | `POCKETPAW_PARTNER_TIER_SWEEP_ENABLED` | bool | `true` (unset) | Kill switch for the monthly Paw Partners tier review (`partners.service.sweep_partner_tiers`, on the five-minute heartbeat). It lowers a partner's volume tier when its active sold sites no longer earn it and re-grants any missing milestone reward, once per partner per UTC month. Off only when set to `0`/`false`/`no`/`off`; read per sweep. Off, tiers still go up after sales and client payments but never come down. |
 | `credit_usd` | `POCKETPAW_CREDIT_USD` | float | `0.01` | USD value of one credit (1 credit == $0.01). Divides the marked-up compute cost to yield integer credits. |
 | `billing_dunning_grace_days` | `POCKETPAW_BILLING_DUNNING_GRACE_DAYS` | int | `7` | Days a workspace keeps its paid plan after a renewal payment fails. A verified `subscription.on_hold` webhook stamps the deadline onto the subscription and leaves entitlements alone; a sweep on the five-minute heartbeat reverts `Workspace.plan` to `free` once it passes, and a successful retry (`subscription.renewed` / `.active`) clears it. `subscription.expired` / `.failed` are terminal at the gateway and suspend immediately regardless of this value. Credits are never clawed back on any dunning path — only an actual `refund.succeeded` or `dispute.lost` reverses credits. Set it longer than the gateway's own retry schedule: cutting a customer off while Dodo is still recovering the charge is worse than a few extra days of service. `0` suspends on the first failed charge. |
+| `dodo_credit_product_id_inr` | `POCKETPAW_DODO_CREDIT_PRODUCT_ID_INR` | string | -- | Dodo product id of the **INR-priced** pay-what-you-want credits product. `POST /billing/topup` with `"currency": "INR"` puts it in the cart with the amount in **paise** (a pay-what-you-want amount is in the product's own currency, so the USD credits product cannot carry a rupee figure) and pins `billing_currency=INR`. Unset refuses INR top-ups with `billing.product_unconfigured`. |
+| `fx_inr_per_usd` | `POCKETPAW_FX_INR_PER_USD` | float | `89` | Rupees per US dollar. Used **only** when a verified INR `payment.succeeded` carries no USD `settlement_amount`: credits = `floor(paise / rate)`. When Dodo does report a USD settlement, that figure is granted instead (1 credit per settled cent). |
+
+### INR top-ups (Paw Partners)
+
+Indian partners prepay the wallet in rupees. The verified webhook decides what to grant from **Dodo's own `product_cart`** (the product actually bought) and the money actually paid. Checkout metadata never gates or sizes a grant: a Dodo static payment link accepts `metadata_*` query parameters, so a buyer can write any metadata they like, and the webhook signature only proves Dodo sent the body. (`topup_currency` is still stamped on the checkout metadata, as an informational tag.)
+
+- **INR credits product (`dodo_credit_product_id_inr`, the only line in the cart), charged in INR** → converted from the money paid (below) and eligible for the bulk bonus.
+- **Any other USD charge** → `total_amount` cents, exactly as before.
+- **Anything else** (a USD-product checkout Dodo priced in rupees, a mixed or missing cart, a foreign charge) → acknowledged, recorded on the `Payment` row with `credits_granted = 0`, and granted nothing. The log names the event id and currency, never the amount.
+
+- **Conversion.** Dodo's own USD `settlement_amount` wins when present and sits within 0.5x–2x of the `fx_inr_per_usd` estimate; outside that band it is treated as a unit or field mismatch and the FX rate grants instead (a warning names the event id). The `Payment` row keeps the settlement figure, which source won (`conversion`) and the rate the base credits were granted at — the last two copied off the base ledger entry, so a redelivery after a rate change cannot rewrite them. The reversal cap (`credits_granted`) is likewise read from the applied ledger lines, never recomputed.
+- **Bulk bonus.** A separate ledger line with `cause = "bulk_bonus"`, keyed on `<event_id>:bulk_bonus`, so it is exactly-once on its own: **+10%** of the base credits from ₹25,000, **+20%** from ₹1,00,000 (floored, measured on the gross amount paid). A bonus is not `top_up`, so it does not count as purchased revenue and does not raise the monthly ceiling.
+- **Reversals.** `refund.succeeded` / `dispute.lost` against an INR top-up reverse `floor(granted × refunded / paid)`, where `granted` is base + bonus: a full refund takes exactly base + bonus, a partial refund takes its share of both, and the running total can never pass what was granted. For USD `granted == paid`, so this is the same cent-for-credit reversal as before.
+- **Limits.** One INR top-up is ₹100 to ₹10,00,000 (10,000 to 100,000,000 paise); the USD cap stays 1,000,000 credits ($10,000).
 
 ## Tool Policy
 

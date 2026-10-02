@@ -2,7 +2,7 @@
   {
     "label": "the capability gate is deleted outright",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
+    "find": "    await _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
     "replace": "\n    # Then the COUNT, per site",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses",
@@ -61,8 +61,8 @@
   {
     "label": "a workspace census comes back \u2014 a sibling's domain refuses this site's own",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    host_exceeded, _hosts, host_limit = _hostname_cap_exceeded(site)",
-    "replace": "    if await _SiteDoc.find(\n        {\"workspace\": workspace_id, \"_id\": {\"$ne\": site.id}, \"domains.0\": {\"$exists\": True}}\n    ).count():\n        raise CustomDomainLimitError(limit=1)\n    host_exceeded, _hosts, host_limit = _hostname_cap_exceeded(site)",
+    "find": "    host_exceeded, _hosts, host_limit = await _hostname_cap_exceeded(site)",
+    "replace": "    if await _SiteDoc.find(\n        {\"workspace\": workspace_id, \"_id\": {\"$ne\": site.id}, \"domains.0\": {\"$exists\": True}}\n    ).count():\n        raise CustomDomainLimitError(limit=1)\n    host_exceeded, _hosts, host_limit = await _hostname_cap_exceeded(site)",
     "tests": [
       "tests/cloud/sites/test_free_domain_per_site.py::test_a_second_free_site_gets_its_own_domain",
       "tests/cloud/sites/test_custom_domain_cap.py::test_every_free_site_gets_its_own_domain",
@@ -100,8 +100,8 @@
   {
     "label": "the count gate runs AFTER Cloudflare has already created the hostname",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
-    "replace": "    await cf.create_custom_hostname(hostname, features=set())\n    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
+    "find": "    await _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
+    "replace": "    await cf.create_custom_hostname(hostname, features=set())\n    await _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_the_refusal_precedes_every_cloudflare_call",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_refused_attach_never_reaches_cloudflare"
@@ -110,8 +110,8 @@
   {
     "label": "a refused attach still writes the hostname onto allowed_origins",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
-    "replace": "    site.allowed_origins.append(hostname)\n    await site.set({\"allowed_origins\": list(site.allowed_origins)})\n    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
+    "find": "    await _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
+    "replace": "    site.allowed_origins.append(hostname)\n    await site.set({\"allowed_origins\": list(site.allowed_origins)})\n    await _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT, per site",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_a_refused_attach_keeps_a_clean_document",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_refused_attach_writes_nothing_to_the_site"
@@ -121,7 +121,7 @@
     "label": "the count gate becomes retroactive \u2014 it runs before the already-connected repair",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    hostname = _normalize_hostname(hostname)\n    existing = next(",
-    "replace": "    if _hostname_cap_exceeded(site)[0]:\n        raise CustomDomainLimitError(limit=2)\n    hostname = _normalize_hostname(hostname)\n    existing = next(",
+    "replace": "    if (await _hostname_cap_exceeded(site))[0]:\n        raise CustomDomainLimitError(limit=2)\n    hostname = _normalize_hostname(hostname)\n    existing = next(",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_re_adding_a_connected_hostname_is_never_refused_for_quota"
     ]
@@ -129,7 +129,7 @@
   {
     "label": "the billing_enforced guard is dropped from the count \u2014 OSS/self-host inherits the cap",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not sites_enforced():\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.billing import site_plans as _site_plans",
+    "find": "    if not await sites_enforced_for(getattr(site, \"workspace\", None), partner=partner):\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.billing import site_plans as _site_plans",
     "replace": "    from pocketpaw_ee.cloud.billing import site_plans as _site_plans",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_free_site_is_not_capped",
@@ -139,7 +139,7 @@
   {
     "label": "the billing_enforced guard is dropped from the capability gate",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
+    "find": "    if not await sites_enforced_for(getattr(site, \"workspace\", None)):\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
     "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_even_a_zero_floor_attaches"
@@ -148,8 +148,8 @@
   {
     "label": "the capability guard inverts \u2014 the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
-    "replace": "    if sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
+    "find": "    if not await sites_enforced_for(getattr(site, \"workspace\", None)):\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
+    "replace": "    if await sites_enforced_for(getattr(site, \"workspace\", None)):\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(\n        site_id=str(site.id),\n        workspace_id=site.workspace,\n        plan_tier=site.plan_tier,\n        subscription_status=site.subscription_status,\n        concierge_enabled=bool(getattr(site, \"concierge_enabled\", True)),\n    )\n    if ent.custom_domain:",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"

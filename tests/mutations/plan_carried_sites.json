@@ -20,8 +20,8 @@
   {
     "label": "the charge is not skipped for a carried site (the plan and the wallet both pay)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not covered_by_plan:\n        await billing_service.charge_site_plan_credits(",
-    "replace": "    if True:\n        await billing_service.charge_site_plan_credits(",
+    "find": "    if not covered_by_plan:\n        try:\n",
+    "replace": "    if True:\n        try:\n",
     "tests": [
       "tests/cloud/sites/test_plan_carried_sites.py::test_the_first_site_on_go_is_carried_not_bought"
     ]

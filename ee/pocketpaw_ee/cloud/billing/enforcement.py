@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/cloud/billing/enforcement.py — one function answering "do the
 # PER-SITE billing seams enforce right now".
 #
+# Updated 2026-10-02 (feat/partners-sell, PH-2): the concierge quota counts over
+# the site's PAID PERIOD when the tier's period is longer than a month (the
+# partner ``staff_year`` rung: 1,200 a year, counted from ``renewal_date`` minus
+# 12 months). Monthly tiers still count from the 1st of the month, unchanged.
+# Updated 2026-10-01 (feat/partners-foundation, PH-1): the answer is now also
+# PER WORKSPACE. ``sites_enforced(partner)`` is True when the site's workspace
+# holds an ACTIVE Paw Partners profile, even with both global flags off; async
+# seams call ``sites_enforced_for(workspace_id)``, which loads that profile only
+# when the global flags are off. Non-partner workspaces behave exactly as before.
+# Updated 2026-10-02: ``load_partner`` skips the read when the flags already
+# enforce, and ``partner=`` lets a caller that already holds the profile pass it
+# (``...`` = not loaded yet), so one request never reads the Workspace twice.
+#
 # Created 2026-08-21 (feat/sites-billing-flag, PW-2). Until now every sites seam
 # read ``billing_enforced`` directly, which is the workspace-wide switch: turning
 # it on to start charging for custom domains also starts 402ing chat runs, seat
@@ -41,11 +54,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+from dateutil.relativedelta import relativedelta
 
-def sites_enforced() -> bool:
+
+def sites_enforced(partner: Any | None = None) -> bool:
     """Are the per-site billing seams live?
 
     True when EITHER the workspace-wide ``billing_enforced`` or the sites-only
@@ -64,7 +79,40 @@ def sites_enforced() -> bool:
     return bool(
         getattr(settings, "billing_enforced", False)
         or getattr(settings, "sites_billing_enforced", False)
+        or _partner_active(partner)
     )
+
+
+def _partner_active(partner: Any | None) -> bool:
+    """An ``active`` Paw Partners profile (PH-1). ``applied`` / ``suspended`` are not."""
+    return getattr(partner, "status", None) == "active"
+
+
+async def load_partner(workspace_id: str | None) -> Any | None:
+    """The workspace partner profile the billing gates need, or None.
+
+    Skips the read entirely when the global flags already enforce — the profile
+    cannot change the answer then.
+    """
+    if sites_enforced():
+        return None
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    return await partners_service.partner_profile_for_workspace(workspace_id)
+
+
+async def sites_enforced_for(workspace_id: str | None, *, partner: Any = ...) -> bool:
+    """``sites_enforced`` for one workspace, loading its partner profile.
+
+    Global flags first, so a deployment with them on never reads anything. With
+    them off (OSS, self-host, prod today) this is one ``_id`` lookup on the
+    workspace — a positive per-workspace check, never a cached marker.
+    """
+    if sites_enforced():
+        return True
+    if partner is ...:
+        partner = await load_partner(workspace_id)
+    return _partner_active(partner)
 
 
 def _month_start() -> datetime:
@@ -80,12 +128,27 @@ def _month_start() -> datetime:
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def _period_start(site: Any, months: int) -> datetime | None:
+    """Start of the site's current paid period, on the store's naive-local clock.
+
+    ``renewal_date - months``; None when the site has no renewal date (it is not
+    paying, and the entitlement gate upstream already refuses it).
+    """
+    renewal = getattr(site, "renewal_date", None)
+    if renewal is None:
+        return None
+    if renewal.tzinfo is None:
+        renewal = renewal.replace(tzinfo=UTC)
+    return (renewal - relativedelta(months=months)).astimezone().replace(tzinfo=None)
+
+
 async def concierge_conversation_quota_exceeded(
     site: Any,
     *,
     widget_id: str,
     workspace_id: str,
     store: Any | None = None,
+    partner: Any = ...,
 ) -> bool:
     """Would STARTING another concierge conversation exceed this site's month?
 
@@ -119,7 +182,7 @@ async def concierge_conversation_quota_exceeded(
     the safe error is allow — the alternative charges a customer for a tier and
     then withholds it because a count did not load.
     """
-    if not sites_enforced():
+    if not await sites_enforced_for(workspace_id, partner=partner):
         return False
 
     from pocketpaw_ee.cloud.billing import site_plans
@@ -136,9 +199,11 @@ async def concierge_conversation_quota_exceeded(
 
         store = get_paw_bar_store()
     try:
-        used = await store.count_conversations_started_since(
-            widget_id, _month_start(), workspace_id
+        # A yearly rung's allowance is per YEAR: count from its period start.
+        since = (_period_start(site, tier.period_months) if tier.period_months > 1 else None) or (
+            _month_start()
         )
+        used = await store.count_conversations_started_since(widget_id, since, workspace_id)
     except Exception:
         import logging
 
@@ -152,4 +217,9 @@ async def concierge_conversation_quota_exceeded(
     return used >= allowance
 
 
-__all__ = ["concierge_conversation_quota_exceeded", "sites_enforced"]
+__all__ = [
+    "concierge_conversation_quota_exceeded",
+    "load_partner",
+    "sites_enforced",
+    "sites_enforced_for",
+]

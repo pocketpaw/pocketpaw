@@ -1,6 +1,11 @@
 # ee/pocketpaw_ee/cloud/auth/site_keys.py — resolve a public Paw Bar embed key
 # (Site.signed_key) into a scoped RequestContext.
 #
+# Updated 2026-10-02 (feat/partners-foundation, PH-1): ``concierge_available`` /
+# ``concierge_plan_entitled`` take ``partner=`` (an active profile = enforced);
+# ``resolve_site_key_with_partner`` also returns the profile so a chat turn's
+# quota check reuses it.
+#
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): a site with no
 # concierge (``Site.concierge_created_at`` unset) is OFF at every public seam.
 # ``concierge_exists`` is the new predicate; ``concierge_available`` is now
@@ -80,6 +85,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -176,7 +182,7 @@ def concierge_exists(site: _SiteDoc) -> bool:
     return getattr(site, "concierge_created_at", None) is not None
 
 
-def concierge_available(site: _SiteDoc) -> bool:
+def concierge_available(site: _SiteDoc, *, partner: Any | None = None) -> bool:
     """May this site serve its concierge right now — created, switched on, and sold?
 
     The ONE question every public paw-bar seam asks, so the rule lives here instead
@@ -209,10 +215,10 @@ def concierge_available(site: _SiteDoc) -> bool:
     """
     if not concierge_exists(site) or not site.concierge_enabled:
         return False
-    return concierge_plan_entitled(site)
+    return concierge_plan_entitled(site, partner=partner)
 
 
-def concierge_plan_entitled(site: _SiteDoc) -> bool:
+def concierge_plan_entitled(site: _SiteDoc, *, partner: Any | None = None) -> bool:
     """Does this site's PLAN sell a concierge? The plan half of
     ``concierge_available`` and nothing else: not created, not switched on.
 
@@ -223,10 +229,15 @@ def concierge_plan_entitled(site: _SiteDoc) -> bool:
 
     With ``sites_enforced()`` off (OSS, self-host) every site is entitled, the
     same fail-open direction ``concierge_available`` takes.
+
+    ``partner`` (PH-1) is the site's workspace Paw Partners profile; an ACTIVE one
+    turns enforcement on for this site. Callers that own a request load it with
+    ``billing.enforcement.load_partner`` and pass it in, so this
+    stays synchronous and DB-free. Omitted = not a partner (the old behaviour).
     """
     from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not sites_enforced():
+    if not sites_enforced(partner):
         return True
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -338,6 +349,20 @@ async def resolve_site_key_with_site(
     *,
     frame_origin: str | None = None,
 ) -> tuple[RequestContext, _SiteDoc]:
+    """``resolve_site_key_with_partner`` without the partner profile."""
+    ctx, site, _partner = await resolve_site_key_with_partner(
+        key, origin, customer_ref, frame_origin=frame_origin
+    )
+    return ctx, site
+
+
+async def resolve_site_key_with_partner(
+    key: str,
+    origin: str | None,
+    customer_ref: str,
+    *,
+    frame_origin: str | None = None,
+) -> tuple[RequestContext, _SiteDoc, Any]:
     """``resolve_site_key`` plus the resolved Site doc — the SAME gate chain.
 
     This holds the actual implementation; ``resolve_site_key`` is a thin wrapper
@@ -367,7 +392,12 @@ async def resolve_site_key_with_site(
     # silence to a visitor — only the detail differs, because an owner who switched
     # it off and an owner whose subscription lapsed need different remedies. A
     # no-op unless ``billing_enforced`` or ``sites_billing_enforced``.
-    if not concierge_available(site):
+    from pocketpaw_ee.cloud.billing.enforcement import load_partner
+
+    # PH-1: the Paw Partners profile, returned too so the chat turn's quota check
+    # reuses it instead of reading the Workspace again.
+    partner = await load_partner(site.workspace)
+    if not concierge_available(site, partner=partner):
         raise HTTPException(status_code=403, detail="concierge_not_entitled")
 
     # Dual-mode origin gate. Frame mode (request Origin == our frame origin) means
@@ -379,11 +409,12 @@ async def resolve_site_key_with_site(
     elif not origin_allowed(site.allowed_origins, origin):
         raise HTTPException(status_code=403, detail="origin_not_allowed")
 
-    return _context_from_site(site, customer_ref), site
+    return _context_from_site(site, customer_ref), site, partner
 
 
 __all__ = [
     "concierge_available",
+    "resolve_site_key_with_partner",
     "concierge_exists",
     "lookup_site_by_key",
     "resolve_site_key",

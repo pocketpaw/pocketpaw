@@ -2,8 +2,8 @@
   {
     "label": "the purchase debit becomes overdraftable (an empty wallet buys a paid site)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "        allow_negative=False,\n    )\n\n\nasync def subscribe(",
-    "replace": "        allow_negative=True,\n    )\n\n\nasync def subscribe(",
+    "find": "        allow_negative=False,\n    )\n\n\nasync def site_plan_charged(",
+    "replace": "        allow_negative=True,\n    )\n\n\nasync def site_plan_charged(",
     "tests": [
       "tests/cloud/sites/test_credits_publish.py::test_an_empty_wallet_leaves_the_site_unpaid_and_undeployed"
     ]
@@ -11,8 +11,8 @@
   {
     "label": "the debit key drops the period (every month charges as month one)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "    return f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
-    "replace": "    return f\"site_plan:{site_id}:{tier_key}\"",
+    "find": "    key = f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
+    "replace": "    key = f\"site_plan:{site_id}:{tier_key}\"",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_month_two_is_a_separate_charge_from_month_one"
     ]
@@ -20,8 +20,8 @@
   {
     "label": "the debit key uses now instead of the period (a replay charges twice)",
     "file": "ee/pocketpaw_ee/cloud/billing/service.py",
-    "find": "    return f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
-    "replace": "    import uuid as _uuid\n\n    return f\"site_plan:{site_id}:{tier_key}:{_uuid.uuid4().hex}\"",
+    "find": "    key = f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
+    "replace": "    import uuid as _uuid\n\n    key = f\"site_plan:{site_id}:{tier_key}:{_uuid.uuid4().hex}\"",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_replayed_sweep_does_not_charge_the_month_twice"
     ]
@@ -47,8 +47,8 @@
   {
     "label": "a lapsed renewal takes the site down instead of dropping it to the floor",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "            doc.subscription_status = \"cancelled\"\n            doc.renewal_date = None\n",
-    "replace": "            doc.subscription_status = \"cancelled\"\n            doc.deployed = False\n            doc.renewal_date = None\n",
+    "find": "            # LAPSED. Drop to the free floor and stop trying; the site stays up.\n            doc.subscription_status = \"cancelled\"\n            doc.renewal_date = None\n",
+    "replace": "            # LAPSED. Drop to the free floor and stop trying; the site stays up.\n            doc.subscription_status = \"cancelled\"\n            doc.deployed = False\n            doc.renewal_date = None\n",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_short_wallet_lapses_the_plan_but_leaves_the_site_up"
     ]
@@ -56,8 +56,8 @@
   {
     "label": "the renewal steps from now, walking the billing day forward",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "        doc.renewal_date = period + relativedelta(months=1)",
-    "replace": "        doc.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
+    "find": "        doc.renewal_date = period + relativedelta(months=tier.period_months)",
+    "replace": "        doc.renewal_date = datetime.now(UTC) + relativedelta(months=tier.period_months)",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_renewals_do_not_walk_the_billing_day_forward"
     ]
@@ -109,9 +109,9 @@
   },
   {
     "label": "a tier change is priced at the new tier's full month again",
-    "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        delta_usd = int(tier.monthly_price_usd) - already_paid_usd",
-    "replace": "        delta_usd = int(tier.monthly_price_usd)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        return max(new_price_usd - already_paid_usd, 0), None",
+    "replace": "        return new_price_usd, None",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing",
       "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
@@ -138,8 +138,8 @@
   {
     "label": "a purchase records nothing as paid for the period",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.period_paid_usd = int(tier.monthly_price_usd)",
-    "replace": "    doc.period_paid_usd = 0",
+    "find": "        doc.period_paid_usd = int(price_usd)\n    # A FRESH PURCHASE",
+    "replace": "        doc.period_paid_usd = 0\n    # A FRESH PURCHASE",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
     ]
@@ -147,8 +147,8 @@
   {
     "label": "the paid high-water mark falls on a downgrade",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            existing_doc.period_paid_usd = int(tier.monthly_price_usd)\n        _previous_tier = existing_doc.plan_tier",
-    "replace": "        existing_doc.period_paid_usd = int(tier.monthly_price_usd)\n        _previous_tier = existing_doc.plan_tier",
+    "find": "                existing_doc.renewal_date = _new_renewal\n        _previous_tier = existing_doc.plan_tier\n",
+    "replace": "                existing_doc.renewal_date = _new_renewal\n        existing_doc.period_paid_usd = price_usd\n        _previous_tier = existing_doc.plan_tier\n",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_returning_to_a_tier_already_bought_this_period_is_free",
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing"
@@ -175,7 +175,7 @@
   {
     "label": "a renewal does not record the month it just bought",
     "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
-    "find": "        doc.period_paid_usd = int(tier.monthly_price_usd)",
+    "find": "        doc.period_paid_usd = int(price_usd)",
     "replace": "        doc.period_paid_usd = 0",
     "tests": [
       "tests/cloud/sites/test_credits_renewal.py::test_a_renewed_month_is_recorded_as_paid_for"

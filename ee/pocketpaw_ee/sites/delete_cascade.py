@@ -3,6 +3,10 @@
 #
 # Created 2026-09-09 (sites lifecycle wave 1 chunk 3, feat/sites-delete-cascade).
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): the client-paid partner
+# rail (``"client"``, a one-time payment) stops cleanly like credits and plan,
+# instead of being reported as a legacy gateway rail an operator must close.
+#
 # Updated 2026-09-23 (VS-1, feat/sites-worker-name-decouple): the ``workers``-target
 # script delete now names the Worker through ``workers_deploy.site_worker_name``. It
 # used to pass ``script_name``, which is the site id, while the Worker a ``workers``
@@ -107,6 +111,9 @@ class CascadeStepFailed(Exception):
 # which is the exact row the flag exists for.
 _CREDITS_RAIL = "credits"
 _PLAN_RAIL = "plan"
+# PH-13: a client-paid year was a one-time payment; nothing recurs at a gateway,
+# so stopping the local renewal is the whole stop.
+_CLIENT_RAIL = "client"
 
 
 async def run_cascade(
@@ -206,7 +213,7 @@ async def _stop_billing(*, site: Any, deps: Any) -> str:
     site.renewal_date = None
 
     rail = (getattr(site, "billing_rail", "") or "").strip()
-    if rail not in (_CREDITS_RAIL, _PLAN_RAIL):
+    if rail not in (_CREDITS_RAIL, _PLAN_RAIL, _CLIENT_RAIL):
         logger.warning(
             "sites.delete: site %s bills on the legacy %r rail; its local renewal is "
             "stopped but any charge on the old rail must be closed by an operator",

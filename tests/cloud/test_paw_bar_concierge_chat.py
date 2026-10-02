@@ -1110,7 +1110,10 @@ def _enforce_sites_billing(monkeypatch) -> None:
     from this module, and a stubbed settings namespace would also be read by
     unrelated machinery in the chat path.
     """
-    monkeypatch.setattr("pocketpaw_ee.cloud.billing.enforcement.sites_enforced", lambda: True)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.billing.enforcement.sites_enforced",
+        lambda *a, **k: True,
+    )
 
 
 def _mock_run_machinery(monkeypatch):
@@ -1188,7 +1191,10 @@ async def test_a_conversation_already_under_way_is_not_cut_off(concierge_client,
 async def test_an_unenforced_deployment_serves_past_the_allowance(concierge_client, monkeypatch):
     """OSS / self-host has no paywall, so the ceiling must not appear there."""
     client, store = concierge_client
-    monkeypatch.setattr("pocketpaw_ee.cloud.billing.enforcement.sites_enforced", lambda: False)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.billing.enforcement.sites_enforced",
+        lambda *a, **k: False,
+    )
     _mock_run_machinery(monkeypatch)
     await _site(plan_tier="staff", subscription_status="active")
     widget = await store.create_widget(_widget(agent_id="agent-xyz"))

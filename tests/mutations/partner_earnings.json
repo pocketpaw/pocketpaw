@@ -1,0 +1,137 @@
+[
+  {
+    "label": "a sale that recorded no new debit still books a receipt (zero-delta return, resume)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return doc, min(await _recorded() - before, default=None)",
+    "replace": "    return doc, min(await _recorded(), default=None)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_no_receipt_without_a_new_debit"
+    ]
+  },
+  {
+    "label": "the sale price goes through the legacy major-x-100 conversion",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "            minor_units=True,",
+    "replace": "            minor_units=False,",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_bad_currency_is_refused_before_the_wallet_moves"
+    ]
+  },
+  {
+    "label": "an IN partner's receipt defaults to USD",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "(\"INR\" if profile.billing_country == \"IN\" else \"USD\")",
+    "replace": "\"USD\"",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_priced_sale_books_one_paid_receipt"
+    ]
+  },
+  {
+    "label": "phantom (unapplied) debits count as spend",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "            out += [e for e in page if e.applied]",
+    "replace": "            out += list(page)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "debits on sites the partner never sold count as spend",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": " and e.ref.get(\"site_id\") in site_ids",
+    "replace": "",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "unpaid receipts count as revenue",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "for inv in d.client_invoices if inv.paid]",
+    "replace": "for inv in d.client_invoices]",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "the 30-day window covers everything",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    since, due_by = now - timedelta(days=30), now + timedelta(days=30)",
+    "replace": "    since, due_by = now - timedelta(days=3650), now + timedelta(days=30)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "lapsed sold sites count as active",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "if d.subscription_status == \"active\")",
+    "replace": "if True)",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "earnings months come oldest first",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "for i in range(months))",
+    "replace": "for i in reversed(range(months)))",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "earnings accept an unbounded months value",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    if not 1 <= months <= 24:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "earnings lose the active-partner guard",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "\"months must be between 1 and 24\")\n    workspace_id = await _require_active(ctx)",
+    "replace": "\"months must be between 1 and 24\")\n    workspace_id = ctx.workspace_id",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_need_an_active_partner"
+    ]
+  },
+  {
+    "label": "renewals due counts every dated sold site",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "if d.renewal_date is not None and _aware(d.renewal_date) <= due_by",
+    "replace": "if d.renewal_date is not None",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_summary_and_earnings_over_a_seeded_book"
+    ]
+  },
+  {
+    "label": "the receipt id is random again, so a double submit books two",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "                invoice_id=rid,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_double_submitted_sale_books_one_receipt"
+    ]
+  },
+  {
+    "label": "the receipt append is unconditional",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "\"client_invoices.id\": {\"$ne\": invoice_id}",
+    "replace": "\"client_invoices.id\": {\"$ne\": \"\"}",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_double_submitted_sale_books_one_receipt"
+    ]
+  },
+  {
+    "label": "a failed receipt write fails the sale response",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "        except Exception as exc:\n            # The sale (debit + deploy) already stands",
+    "replace": "        except ZeroDivisionError as exc:\n            # The sale (debit + deploy) already stands",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_failed_receipt_write_leaves_the_sale_standing"
+    ]
+  }
+]
