@@ -27,6 +27,12 @@
 #   tier key does (entitlements, sweeper) but are NOT in ``_SITE_TIER_ORDER``, so
 #   the public storefront is unchanged; ``list_partner_plans`` lists them. Their
 #   ``monthly_price_usd`` is derived and display-only. Existing rungs unchanged.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): ``partner_client_price``
+#   — the LIST yearly price a partner's client (the shop) pays us through a
+#   one-time pay link, per billing country, in that country's currency and minor
+#   units (IN: Rs.3,588 / Rs.11,988; default: $84 / $228). One table beside the
+#   wholesale one; the pay link charges it and the webhook checks the payment
+#   against the figure stored when the link was made.
 # Updated 2026-08-19 (feat/site-plan-catalog-inclusions): added the
 #   ``sells_concierge`` property — the catalog-level "does this tier sell the
 #   concierge", lifted out of ``resolve_site_entitlements`` where it lived as an
@@ -155,6 +161,14 @@ from dataclasses import dataclass, field
 _PARTNER_PRICE_USD: dict[str, dict[str, int]] = {
     "site_year": {"default": 29, "IN": 17},
     "staff_year": {"default": 89, "IN": 56},
+}
+
+# PH-13: what the partner's CLIENT pays us for one period of a partner rung, as
+# (ISO currency, amount in minor units). List price, not the partner's wholesale
+# price above. Read only by ``partner_client_price``.
+_PARTNER_CLIENT_PRICE: dict[str, dict[str, tuple[str, int]]] = {
+    "site_year": {"default": ("USD", 8_400), "IN": ("INR", 358_800)},
+    "staff_year": {"default": ("USD", 22_800), "IN": ("INR", 1_198_800)},
 }
 
 # Months one paid period buys. Absent = 1 (every monthly rung).
@@ -602,6 +616,14 @@ def partner_price_usd(tier_key: str, country: str) -> int:
     return row.get((country or "").upper(), row["default"])
 
 
+def partner_client_price(tier_key: str, country: str) -> tuple[str, int]:
+    """``(currency, amount_minor)`` the partner's client pays for ONE PERIOD of a
+    partner-only tier in ``country`` (PH-13 pay link). Falls back to "default";
+    KeyError for a tier that is not partner-only, like ``partner_price_usd``."""
+    row = _PARTNER_CLIENT_PRICE[tier_key]
+    return row.get((country or "").upper(), row["default"])
+
+
 def partner_prices_usd(tier_key: str) -> frozenset[int]:
     """Every price ``tier_key`` is sold at, across countries (empty if not partner-only)."""
     return frozenset(_PARTNER_PRICE_USD.get(tier_key, {}).values())
@@ -688,6 +710,7 @@ __all__ = [
     "canonical_site_tier_key",
     "free_max_hostnames_per_site",
     "get_site_plan",
+    "partner_client_price",
     "partner_price_usd",
     "partner_prices_usd",
     "list_partner_plans",
