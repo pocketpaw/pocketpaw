@@ -1,6 +1,20 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): client-paid partner
+# sites. ``_CLIENT_RAIL`` ("client") is the rail of a site whose YEAR the
+# partner's client paid us through a one-time pay link — no wallet debit, no
+# gateway subscription, nothing for the renewal sweep to charge (it lapses the
+# site to free at its renewal date instead). The Site-doc writes live here:
+# ``client_pay_link_target`` (the 404/409 rules a pay link is refused on, and an
+# open link to reuse), ``add_partner_payment`` (the pending record),
+# ``find_partner_payment`` (the webhook's global lookup by Dodo payment id),
+# ``activate_client_paid_site`` (claim pending -> paid AND stamp the year in ONE
+# compare-and-set write), ``flag_partner_payment``, ``reverse_client_paid_site``
+# (claim paid -> reversed within the clawback window, then lapse the site) and
+# ``redeploy_site`` (best-effort republish after activation so the badge and
+# co-brand stamps match the new tier).
+#
 # Updated 2026-10-02 (feat/partners-earnings, PH-11): ``sell_site_plan`` returns
 # ``(doc, debit_key)`` — the idempotency key of the ``site_plan`` debit THIS call
 # newly recorded (purchase or ``change`` key, this site + tier, today), else None —
@@ -1413,6 +1427,10 @@ _CREDITS_RAIL = "credits"
 # — which is why its tier changes take their own branch below rather than the
 # credits arithmetic.
 _PLAN_RAIL = "plan"
+# PH-13: the year was paid by the partner's CLIENT through a one-time pay link.
+# Mirrored from ``billing.service.CLIENT_BILLING_RAIL``. Never swept for a debit;
+# lapses to free at ``renewal_date`` unless a new paid link extends it.
+_CLIENT_RAIL = "client"
 # The per-site rung a plan-carried site is granted. The workspace ladder's promise
 # is "N sites, no badge, with the concierge", which is precisely what ``staff``
 # is — so the number lives in one place (the plan catalog) and the CAPABILITIES
@@ -8759,6 +8777,301 @@ async def list_partner_sites(
         }
     # ponytail: unpaginated; a partner with thousands of sold sites needs a cursor.
     return await _SiteDoc.find(query).sort("+renewal_date").to_list()
+
+
+# ------------------------------------------- client-paid partner sites (PH-13)
+
+# A client-paid site may take a NEW pay link this close to its renewal date: the
+# renewal. Earlier than this, a second link would be a second payment for a year
+# already bought.
+_CLIENT_RENEWAL_WINDOW = timedelta(days=30)
+# An open link for the same plan and price this recent is handed back instead of
+# minting another, so a double click is one link the shop can pay once.
+_CLIENT_LINK_REUSE = timedelta(days=7)
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _paying_tier(doc: _SiteDoc) -> Any:
+    """The priced tier an ACTIVE site is paying for, else None."""
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    if doc.subscription_status != "active":
+        return None
+    tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
+    return tier if tier is not None and tier.monthly_price_usd > 0 else None
+
+
+async def client_pay_link_target(
+    *,
+    workspace_id: str,
+    site_id: str,
+    sku: str,
+    currency: str,
+    amount_minor: int,
+    now: datetime | None = None,
+) -> tuple[_SiteDoc, Any]:
+    """Check a site may take a client pay link for ``sku``; return ``(doc, reusable)``.
+
+    ``reusable`` is an open pending link for the same plan and price made within
+    ``_CLIENT_LINK_REUSE``, or None. Raises NotFound for another workspace's site
+    and ConflictError (409) when the site is not something a client can pay for
+    right now — above all when it is ALREADY PAID, by the wallet or by a client,
+    which is the double billing this exists to refuse. The one paid site that may
+    take a link is a client-paid one inside its renewal window, for the same plan.
+    """
+    at = now or datetime.now(UTC)
+    doc = await _load(workspace_id, site_id)
+    if getattr(doc, "foreign_origin", False):
+        raise ConflictError(
+            "partners.foreign_site", "A concierge-only site can't be sold a site plan."
+        )
+    if getattr(doc, "billing_rail", "") == _PLAN_RAIL:
+        raise ConflictError(
+            "partners.site_on_plan",
+            "This site is carried by your workspace plan. Move it off the plan "
+            "before selling it to a client.",
+        )
+    if not getattr(doc, "deployed", False):
+        raise ConflictError(
+            "partners.site_not_live", "Publish this site before sending your client a pay link."
+        )
+    if _paying_tier(doc) is not None:
+        renewal = _aware_utc(doc.renewal_date)
+        renewing = (
+            doc.billing_rail == _CLIENT_RAIL
+            and doc.plan_tier == sku
+            and renewal is not None
+            and renewal - at <= _CLIENT_RENEWAL_WINDOW
+        )
+        if not renewing:
+            raise ConflictError(
+                "partners.site_already_paid",
+                "This site's plan is already paid for. A client pay link opens 30 days "
+                "before the year runs out, for the same plan.",
+            )
+    reusable = next(
+        (
+            p
+            for p in reversed(doc.partner_payments)
+            if p.status == "pending"
+            and p.sku == sku
+            and p.currency == currency
+            and p.amount_minor == amount_minor
+            and p.checkout_url
+            and at - _aware_utc(p.created_at) <= _CLIENT_LINK_REUSE
+        ),
+        None,
+    )
+    return doc, reusable
+
+
+async def add_partner_payment(*, workspace_id: str, site_id: str, record: Any) -> None:
+    """Append a pending client pay-link record (a ``PartnerClientPayment``)."""
+    await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(site_id), "workspace": workspace_id},
+        {"$push": {"partner_payments": record.model_dump()}},
+    )
+
+
+async def find_partner_payment(payment_id: str) -> tuple[_SiteDoc, Any] | None:
+    """The site holding a client pay link for Dodo ``payment_id``, and that record.
+
+    global-read: the payment webhook carries no trustworthy workspace; the key is a
+    payment id Dodo minted for a link WE created, so it cannot be forged into a
+    match. A buyer-written ``metadata`` never reaches this lookup.
+    """
+    if not payment_id:
+        return None
+    doc = await _SiteDoc.find_one({"partner_payments.payment_id": payment_id})
+    if doc is None:
+        return None
+    rec = next(p for p in doc.partner_payments if p.payment_id == payment_id)
+    return doc, rec
+
+
+def _pending(payment_id: str) -> dict:
+    return {"$elemMatch": {"payment_id": payment_id, "status": "pending"}}
+
+
+async def flag_partner_payment(*, site_id: str, payment_id: str, reason: str) -> bool:
+    """Move a PENDING record to ``flagged`` (nothing activated, no commission)."""
+    res = await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(site_id), "partner_payments": _pending(payment_id)},
+        {
+            "$set": {
+                "partner_payments.$.status": "flagged",
+                "partner_payments.$.flag_reason": reason,
+            }
+        },
+    )
+    return res.modified_count == 1
+
+
+async def activate_client_paid_site(
+    *,
+    site_id: str,
+    payment_id: str,
+    paid_at: datetime,
+    commission_credits: int,
+    rate_bps: int,
+) -> str:
+    """Claim a pending client payment and give the site its paid year — ONE write.
+
+    Returns the outcome: ``"activated"``; ``"flagged"`` when the site is meanwhile
+    paid on ANOTHER rail (the wallet bought it after the link went out — the
+    shop's money is for a period already paid, so a human refunds it); or the
+    record's current status (``"paid"`` / ``"flagged"`` / ``"reversed"``) when it
+    was not pending, and ``"missing"``.
+
+    The record flip and the site fields land in the same ``update_one``, filtered
+    on the record still being pending AND on the billing fields as read. Two
+    payments for one site therefore cannot both start their year from the same
+    renewal date: the loser re-reads and extends from the winner's date. A
+    client-paid site still inside its year is EXTENDED from its renewal date.
+    ``commission_credits`` / ``rate_bps`` are frozen onto the record here, so a
+    redelivery grants the stored figure and never recomputes it.
+    """
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    oid = ObjectId(site_id)
+    for _ in range(3):
+        doc = await _SiteDoc.find_one({"_id": oid})
+        rec = (
+            next((p for p in doc.partner_payments if p.payment_id == payment_id), None)
+            if doc is not None
+            else None
+        )
+        if rec is None:
+            return "missing"
+        if rec.status != "pending":
+            return rec.status
+        tier = site_plans.site_scoped_tier(rec.sku)
+        paying = _paying_tier(doc) is not None
+        if tier is None or (paying and doc.billing_rail != _CLIENT_RAIL):
+            await flag_partner_payment(
+                site_id=site_id,
+                payment_id=payment_id,
+                reason="site_already_paid" if tier is not None else "unknown_sku",
+            )
+            return "flagged"
+        start = paid_at
+        renewal = _aware_utc(doc.renewal_date)
+        if paying and renewal is not None and renewal > paid_at:
+            start = renewal
+        res = await _SiteDoc.get_pymongo_collection().update_one(
+            {
+                "_id": oid,
+                "partner_payments": _pending(payment_id),
+                "subscription_status": doc.subscription_status,
+                "billing_rail": doc.billing_rail,
+                "renewal_date": doc.renewal_date,
+            },
+            {
+                "$set": {
+                    "plan_tier": tier.key,
+                    "billing_rail": _CLIENT_RAIL,
+                    "subscription_status": "active",
+                    "renewal_date": start + relativedelta(months=tier.period_months),
+                    "period_paid_usd": 0,
+                    "plan_cancels_at_period_end": False,
+                    "partner_client_id": rec.client_id,
+                    "partner_payments.$.status": "paid",
+                    "partner_payments.$.paid_at": paid_at,
+                    "partner_payments.$.commission_credits": int(commission_credits),
+                    "partner_payments.$.rate_bps": int(rate_bps),
+                }
+            },
+        )
+        if res.modified_count == 1:
+            return "activated"
+    raise ConflictError(
+        "partners.payment_contended",
+        "The site changed while this payment was being applied; retry the delivery.",
+    )
+
+
+def _lapse_fields() -> dict:
+    """The free-floor shape the renewal sweep's close leaves (site stays up)."""
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    return {
+        "plan_tier": site_plans.BASE_SITE_PLAN_KEY,
+        "subscription_status": "none",
+        "renewal_date": None,
+        "period_paid_usd": 0,
+        "plan_cancels_at_period_end": False,
+    }
+
+
+async def reverse_client_paid_site(*, site_id: str, payment_id: str, paid_since: datetime) -> str:
+    """Claim a PAID client payment as reversed and lapse its site; return the status.
+
+    Only a payment made at or after ``paid_since`` (the clawback window) is
+    claimed. Returns ``"reversed"`` when the record is reversed (by this call or
+    an earlier delivery — the caller re-drives its idempotent debit either way),
+    ``"expired"`` for a paid record outside the window, else the record's status.
+    The site lapses to the free floor only on the claim, and only while it is
+    still on the client rail (a site the wallet has since bought keeps its plan).
+    ponytail: lapses even when a LATER client payment extended the year; a refund
+    of an earlier payment inside 60 days of a second one needs a human.
+    """
+    oid = ObjectId(site_id)
+    col = _SiteDoc.get_pymongo_collection()
+    res = await col.update_one(
+        {
+            "_id": oid,
+            "partner_payments": {
+                "$elemMatch": {
+                    "payment_id": payment_id,
+                    "status": "paid",
+                    "paid_at": {"$gte": paid_since},
+                }
+            },
+        },
+        {"$set": {"partner_payments.$.status": "reversed"}},
+    )
+    if res.modified_count == 1:
+        await col.update_one(
+            {"_id": oid, "billing_rail": _CLIENT_RAIL, "subscription_status": "active"},
+            {"$set": _lapse_fields()},
+        )
+        return "reversed"
+    found = await find_partner_payment(payment_id)
+    if found is None:
+        return "missing"
+    rec = found[1]
+    return "expired" if rec.status == "paid" else rec.status
+
+
+async def lapse_due_client_paid_sites(at: datetime) -> int:
+    """Drop every client-paid site past its renewal date to the free floor.
+
+    Called by the renewal sweep. Nothing is charged: the partner's wallet never
+    paid for these, and the client renews by paying a new link.
+    """
+    res = await _SiteDoc.get_pymongo_collection().update_many(
+        {
+            "billing_rail": _CLIENT_RAIL,
+            "subscription_status": "active",
+            "renewal_date": {"$ne": None, "$lte": at},
+        },
+        {"$set": _lapse_fields()},
+    )
+    return int(res.modified_count)
+
+
+async def redeploy_site(site_id: str) -> None:
+    """Republish a live site as its owner, as a content edit (no tier, no charge),
+    so the badge / co-brand stamps follow the tier a payment just set."""
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id)})
+    if doc is None or not doc.pocket_id:
+        return
+    await publish_pocket(workspace_id=doc.workspace, user_id=doc.owner, pocket_id=doc.pocket_id)
 
 
 async def _apply_site_plan(
