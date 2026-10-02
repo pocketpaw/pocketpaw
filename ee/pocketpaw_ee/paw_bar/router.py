@@ -5155,22 +5155,30 @@ class ConciergeChatRequest(BaseModel):
     # erroring: the value is client-supplied, so it is a hint, never an authority.
     conversation_id: str = ""
     # The host page the visitor is on (CR-3), as paw-bar's loader reports it:
-    # ``{"url": "https://site/path", "title": "..."}``. OPTIONAL for the same reason
-    # as ``conversation_id``, and absent means today's turn. It is visitor-controlled
-    # data, never an authority: only the v2 runner reads it, through
-    # ``concierge_runtime.resolve_page``, which drops it unless the url is on the
-    # site's allowed origins. Kept as a plain dict so no shape of it can 422 a turn.
-    page: dict[str, str] | None = None
+    # ``{"url": "https://site/path", "title": "...", "tools"?: [...]}``. OPTIONAL for
+    # the same reason as ``conversation_id``, and absent means today's turn. It is
+    # visitor-controlled data, never an authority: only the v2 runner reads it,
+    # through ``concierge_runtime.resolve_page``, which drops it unless the url is
+    # on the site's allowed origins. ``tools`` are the page's declared tools
+    # (``[{name, description, input_schema}]``): a list is kept, cut to
+    # ``action_spec.TOOLS_MAX`` entries, anything else is no tools; the runner
+    # validates each one (``action_spec.valid_tools``). Kept as a plain dict so no
+    # shape of it can 422 a turn.
+    page: dict[str, Any] | None = None
 
     @field_validator("page", mode="before")
     @classmethod
-    def _page_or_nothing(cls, value: Any) -> dict[str, str] | None:
+    def _page_or_nothing(cls, value: Any) -> dict[str, Any] | None:
         if not isinstance(value, dict) or not isinstance(value.get("url"), str):
             return None
+        from pocketpaw_ee.paw_bar.action_spec import TOOLS_MAX
+
         title = value.get("title")
+        tools = value.get("tools")
         return {
             "url": value["url"][:_PAGE_URL_MAX],
             "title": title[:_PAGE_TITLE_MAX] if isinstance(title, str) else "",
+            "tools": tools[:TOOLS_MAX] if isinstance(tools, list) else [],
         }
 
 
@@ -5724,6 +5732,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
                 history=prior_history,
                 stored_user_text=stored_user_text,
                 store=store,
+                tools=(body.page or {}).get("tools"),
             ),
             media_type="text/event-stream",
             headers={
