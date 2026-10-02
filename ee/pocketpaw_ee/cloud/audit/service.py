@@ -7,6 +7,9 @@
 #   for a single workspace (age- + tenant-scoped). Kept here because this
 #   module is the sole writer of the AuditEvent collection; the retention
 #   orchestrator in workspace.service calls it.
+# 2026-10-01 (CN-2, interim until the one-audit-sink work): the purge also
+#   deletes the workspace's old rows from the SQLite ``AuditStore`` — the sink
+#   ``agent_list_audit`` reads — so retention no longer leaves them behind.
 from __future__ import annotations
 
 import json
@@ -214,7 +217,12 @@ async def record(
     _webhooks.schedule_delivery(doc)
 
 
-async def purge_workspace_audit(workspace_id: str, older_than: datetime) -> int:
+async def purge_workspace_audit(
+    workspace_id: str,
+    older_than: datetime,
+    *,
+    store: AuditStore | None = None,  # DI seam for tests
+) -> int:
     """Delete audit rows older than ``older_than`` for ONE workspace.
 
     The retention-enforcement seam (compliance-starter). Tenant-scoped by
@@ -223,14 +231,21 @@ async def purge_workspace_audit(workspace_id: str, older_than: datetime) -> int:
     touched. Lives here because ``audit.service`` is the sole writer of the
     ``AuditEvent`` collection (import-linter contract); the retention
     orchestrator (``workspace.service.enforce_retention``) calls this rather
-    than reaching into the collection itself. Returns the deleted count.
+    than reaching into the collection itself.
+
+    Interim: audit lives in two sinks — Mongo ``AuditEvent`` and the SQLite
+    ``AuditStore`` that ``agent_list_audit`` reads — so both are purged with
+    the same tenant + age scope. Returns the total deleted across both.
+    # no-event: retention bookkeeping
     """
     result = await _AuditEventDoc.find(
         {"workspace": workspace_id, "at": {"$lt": older_than}}
     ).delete()
     # motor/beanie DeleteResult exposes ``deleted_count``; guard for the
     # mongomock shim which may return None on an empty match.
-    return int(getattr(result, "deleted_count", 0) or 0)
+    mongo_deleted = int(getattr(result, "deleted_count", 0) or 0)
+    store = store or get_audit_store()
+    return mongo_deleted + await store.purge_entries(workspace_id, older_than)
 
 
 async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> AuditPage:

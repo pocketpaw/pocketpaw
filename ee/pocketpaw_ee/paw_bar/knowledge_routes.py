@@ -1,51 +1,38 @@
 # ee/pocketpaw_ee/paw_bar/knowledge_routes.py — owner routes for a site
-# concierge's knowledge sources.
+# concierge's knowledge: pinned FAQs and knowledge sources.
 #
-# Created: 2026-09-28 (feat/concierge-pinned-faqs, CR-8) — pinned FAQs:
-#   GET    /paw-bar/admin/site/{site_id}/knowledge/faqs            list + the caps
-#   POST   /paw-bar/admin/site/{site_id}/knowledge/faqs            add one (201)
-#   PATCH  /paw-bar/admin/site/{site_id}/knowledge/faqs/{faq_id}   edit question/answer
-#   DELETE /paw-bar/admin/site/{site_id}/knowledge/faqs/{faq_id}   remove one (204)
-# stored on ``Site.concierge_faqs``, which the v2 runner's ``retrieve`` puts ahead
-# of every KB hit. Gated like the router's other owner routes: ``paw_bar.read`` on
-# the GET and ``paw_bar.manage`` on the writes (both ADMIN), bound to the session's
-# active workspace, and the site is loaded workspace-scoped, so a foreign or
-# malformed id is one 404 and nothing is written. Caps come from config
-# (``pawbar_concierge_faq_max_count`` / ``pawbar_concierge_faq_max_chars``): 409
-# ``faq_limit_reached`` past the count, 422 ``faq_too_long`` past the length.
+#   GET/POST          …/site/{site_id}/knowledge/faqs                  list + caps / add (201)
+#   PATCH/DELETE      …/site/{site_id}/knowledge/faqs/{faq_id}         edit / remove (204)
+#   GET/POST          …/site/{site_id}/knowledge/sources               list + caps / add (202)
+#   POST              …/site/{site_id}/knowledge/sources/{id}/refetch  re-read a link (202)
+#   DELETE            …/site/{site_id}/knowledge/sources/{id}          remove (204)
 #
-# ``delete_faqs(site)`` is the clear-all hook the concierge delete (CR-12) calls.
-# Writes ``$set`` only ``concierge_faqs``, so a concurrent settings PATCH is not
-# clobbered. Two concurrent adds can still land one past the count cap; the
-# runner's knowledge budget bounds what that costs.
+# All under /paw-bar/admin, gated like the router's other owner routes
+# (``paw_bar.read`` on GETs, ``paw_bar.manage`` on writes), bound to the session's
+# workspace; a foreign or malformed site id is one 404 and nothing is written.
 #
-# A separate module so CR-9 (uploads and links, ``…/knowledge/sources``) extends
-# this one instead of growing router.py. Mounted beside ``paw_bar.router`` in
-# ``pocketpaw_ee.cloud``.
+# FAQs live on ``Site.concierge_faqs`` (``retrieve`` puts them ahead of every KB
+# hit), capped by config: 409 ``faq_limit_reached``, 422 ``faq_too_long``. Writes
+# ``$set`` only that field; two racing adds can land one past the count cap.
 #
-# Updated: 2026-09-28 (feat/concierge-knowledge-sources, CR-9) — knowledge sources:
-#   GET    /paw-bar/admin/site/{site_id}/knowledge/sources                     list + caps
-#   POST   /paw-bar/admin/site/{site_id}/knowledge/sources                     add (202)
-#   POST   /paw-bar/admin/site/{site_id}/knowledge/sources/{source_id}/refetch (202)
-#   DELETE /paw-bar/admin/site/{site_id}/knowledge/sources/{source_id}         (204)
-# The POST is multipart: a ``file`` (PDF, DOCX, Markdown, text) or a ``url`` field,
-# exactly one. Refusals write nothing and use the row's status codes as the detail:
-# 409 ``over_limit``, 413 ``too_large``, 415 ``unsupported``, 422 ``blocked``. An
-# accepted source is stored as a ``processing`` row on ``Site.concierge_sources``
-# and read into ``pocket:<pocket_id>`` in the background (``knowledge_sources``),
-# then flips to ``ready`` or a refusal. The file's bytes are never stored: an
-# upload is extracted and dropped, so there is no storage key to leak through the
-# unauthenticated /uploads mount and nothing for the concierge delete to purge but
-# the kb articles. A row still ``processing`` after ``_STALE_AFTER`` is reported
-# as ``failed``/``interrupted`` (its task died with the process).
+# A source is a file (PDF, DOCX, Markdown, text) or one ``url``, exactly one per
+# multipart POST. Refusals write nothing: 409 ``over_limit``, 413 ``too_large``,
+# 415 ``unsupported``, 422 ``blocked``. An accepted source is a ``processing`` row
+# on ``Site.concierge_sources``, read into ``pocket:<pocket_id>`` in the background
+# through ``KnowledgeService.ingest_document_to_scope``: a long document lands as
+# one article per section, the row records ALL their ids plus ``sections_total``,
+# ``sections_failed`` and ``sections_truncated`` (past the plan's char cap), and it
+# is ``ready`` once one section landed (``ingest_failed`` when none did). File
+# bytes are never stored. A row still ``processing`` after ``_STALE_AFTER`` reads as
+# ``failed``/``interrupted``; the sectioned ingest's own deadline ends well inside it.
 #
-# Rows are written with $push, $pull and positional $set, never a whole-list save,
-# so a background ingest finishing cannot clobber a concurrent add or delete. The
-# count cap is part of the $push filter, so two concurrent adds cannot pass it. If
-# the row was removed while its ingest ran, the article just written is deleted.
-# Removing a source deletes its articles unless another row or the page sync
-# (``kb_article_ids``) holds the same id: kb-go keys an article by its compiled
-# title, so two sources can share one. ``delete_sources(site)`` is CR-12's hook.
+# Rows change only by $push, $pull and positional $set, so a finishing ingest cannot
+# clobber a concurrent add or delete, and the count cap sits in the $push filter. A
+# row removed mid-ingest has its new articles deleted; a refetch deletes the old
+# ids the new set does not keep. Removal deletes a source's articles unless another
+# row or the page sync (``kb_article_ids``) holds the same id (kb-go keys an article
+# by its title). ``delete_faqs`` / ``delete_sources`` are the concierge delete's
+# hooks. Mounted beside ``paw_bar.router`` in ``pocketpaw_ee.cloud``.
 
 from __future__ import annotations
 
@@ -67,6 +54,7 @@ from pocketpaw_ee.paw_bar.knowledge_sources import (
     check_link,
     extract_file_text,
     fetch_link_text,
+    missing_parser,
     sniff_upload,
 )
 from pocketpaw_ee.paw_bar.router import (
@@ -390,6 +378,30 @@ async def _read_source(
     return await extract_file_text(data or b"", ext, mime), mime
 
 
+def _log_unreadable(refused: SourceRefused, *, kind: str, source_id: str, mime: str) -> None:
+    """A missing parser is the deployment's fault and every upload of that type
+    fails, so it logs at error; a file the parser cannot read logs at warning."""
+    cause = refused.__cause__
+    if missing_parser(cause):
+        logger.error(
+            "paw_bar.sources: no parser for %s source %s (%s): %s",
+            kind,
+            source_id,
+            mime,
+            cause,
+            exc_info=refused,
+        )
+    else:
+        logger.warning(
+            "paw_bar.sources: %s source %s (%s) is unreadable: %s",
+            kind,
+            source_id,
+            mime,
+            cause,
+            exc_info=refused,
+        )
+
+
 async def _ingest_source(
     site_id: Any,
     scope: str,
@@ -413,7 +425,8 @@ async def _ingest_source(
     from pocketpaw_ee.cloud.agents.knowledge import (
         KnowledgeEngineUnavailable,
         KnowledgeService,
-        extract_ingest_article_id,
+        count_document_sections,
+        extract_ingest_article_ids,
     )
 
     try:
@@ -424,17 +437,44 @@ async def _ingest_source(
         if not text:
             raise SourceRefused("failed", "no_content")
         truncated = len(text) > max_chars
+        # Sections the plan's char cap leaves unread, so the owner can be told
+        # how much of a long document the concierge did not get.
+        sections_truncated = count_document_sections(text[max_chars:]) if truncated else 0
         text = text[:max_chars]
         try:
-            result = await KnowledgeService.ingest_text_to_scope(scope, text, label)
+            result = await KnowledgeService.ingest_document_to_scope(
+                scope, text, label, doc_key=f"concierge-source:{source_id}"
+            )
         except KnowledgeEngineUnavailable as exc:
+            logger.warning(
+                "paw_bar.sources: kb engine unavailable for %s source %s: %s",
+                kind,
+                source_id,
+                exc,
+                exc_info=True,
+            )
             raise SourceRefused("failed", "kb_unavailable") from exc
         except Exception as exc:  # noqa: BLE001 — a compile failure is this source's
+            logger.warning(
+                "paw_bar.sources: ingest of %s source %s failed: %s",
+                kind,
+                source_id,
+                exc,
+                exc_info=True,
+            )
             raise SourceRefused("failed", "ingest_failed") from exc
-        article_id = extract_ingest_article_id(result)
-        if not article_id:
+        article_ids = extract_ingest_article_ids(result)
+        if not article_ids:
+            logger.warning(
+                "paw_bar.sources: ingest of %s source %s returned no article id: %r",
+                kind,
+                source_id,
+                result,
+            )
             raise SourceRefused("failed", "ingest_failed")
     except SourceRefused as refused:
+        if refused.reason == "unreadable":
+            _log_unreadable(refused, kind=kind, source_id=source_id, mime=mime)
         fields = {"status": refused.status, "reason": refused.reason}
         await _set_source(site_id, source_id, {**fields, "updated_at": datetime.now(UTC)})
         return
@@ -444,6 +484,20 @@ async def _ingest_source(
         await _set_source(site_id, source_id, {**fields, "updated_at": datetime.now(UTC)})
         return
 
+    receipt = result if isinstance(result, dict) else {}
+    sections_total = int(receipt.get("sections_total") or len(article_ids))
+    sections_failed = int(receipt.get("sections_failed") or 0)
+    if sections_failed or sections_truncated:
+        logger.warning(
+            "paw_bar.sources: %s source %s is ready with %d of %d sections "
+            "(%d failed, %d past the char cap)",
+            kind,
+            source_id,
+            len(article_ids),
+            sections_total,
+            sections_failed,
+            sections_truncated,
+        )
     now = datetime.now(UTC)
     kept = await _set_source(
         site_id,
@@ -454,16 +508,19 @@ async def _ingest_source(
             "mime": mime,
             "chars": len(text),
             "truncated": truncated,
-            "article_ids": [article_id],
+            "article_ids": article_ids,
+            "sections_total": sections_total,
+            "sections_failed": sections_failed,
+            "sections_truncated": sections_truncated,
             "updated_at": now,
             "indexed_at": now,
         },
     )
     if not kept:
-        # Removed while it was being read: the article just written is an orphan.
-        await _unindex(scope, [article_id], site_id)
+        # Removed while it was being read: the articles just written are orphans.
+        await _unindex(scope, article_ids, site_id)
         return
-    stale = [a for a in previous if a != article_id]
+    stale = [a for a in previous if a not in article_ids]
     if stale:
         await _unindex(scope, stale, site_id)
 

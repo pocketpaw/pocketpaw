@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Agent-facing pocket helpers — back the in-process MCP write tools the
 cloud SSE chat agent uses to read/write the pocket it lives inside.
 
@@ -562,8 +564,8 @@ async def create_pocket_for_agent(
         )
         if linked_session_oid:
             try:
-                from pocketpaw_ee.cloud.realtime.emit import emit
-                from pocketpaw_ee.cloud.realtime.events import SessionUpdated
+                from pocketpaw_ee.cloud._core.realtime.emit import emit
+                from pocketpaw_ee.cloud._core.realtime.events import SessionUpdated
 
                 await emit(
                     SessionUpdated(

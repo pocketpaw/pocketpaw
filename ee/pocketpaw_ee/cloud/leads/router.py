@@ -1,75 +1,28 @@
-# ee/pocketpaw_ee/cloud/leads/router.py — capture ingest (public, signed-key-gated,
-# origin-ATTRIBUTED; the edge Queue drains here) + authed tenant-scoped reads.
-# The public capture endpoint deliberately has NO auth dependency: it is called
-# by the deployed site's own pages / Queue consumer, authenticated by the per-site
-# signed key, not a user session.
+# ee/pocketpaw_ee/cloud/leads/router.py — the leads routes.
 #
-# Updated 2026-08-13 (fix/sites-capture-origin-posture): the origin pin STOPPED
-# BEING A GATE by default and became a recorded signal plus a per-site opt-in
-# (``Site.enforce_origin``, default False) — the Formspree/Basin posture. Reported
-# from a live run: a site published to ``*.workers.dev`` submitted its contact form
-# and the VISITOR was shown ``{"detail":"Origin not allowed for this site"}``.
+# Public ingest (no auth dependency; the per-site signed key is the credential):
+#   * POST /sites/{site_id}/capture — JSON capture (the edge Queue drains here).
+#   * POST /capture/form — native-form capture for IMPORTED sites (urlencoded,
+#     hidden paw_site_id / paw_key / paw_page / paw_redirect / paw_form_type),
+#     answered with a 303 back to the site. Final URL {captureApiBase}/capture/form.
+#   Both: site exists -> origin gate (only when ``Site.enforce_origin``) ->
+#   constant-time key compare -> payload size cap -> ``leads_service.capture``.
+#   The origin is otherwise RECORDED on the lead (``origin_unrecognized`` judged
+#   against ``_effective_origins``: the allowlist plus the site's own url host and
+#   custom domains). The pin guarded a key that is public in page source and only
+#   bound browsers, so as a default gate it mostly 403'd real visitors.
 #
-# The pin was never buying what it looked like it was buying. It guards a
-# credential that is ALREADY PUBLIC on three of the four engines — html, react and
-# static svelte all ship ``paw_key`` as a hidden input in the page source — and
-# ``Origin`` binds browsers only, so any script forges it in one flag. What it did
-# reliably was 403 legitimate submissions whenever the stored allowlist and the
-# serving host disagreed, which has several routine causes (a draft/preview publish
-# that returns before the deploy stamp, an async react build inserted with
-# ``url=""``, apex vs ``www.``, a preview URL, a ``file://`` open sending no Origin
-# at all). Every one fails CLOSED, and on the native-form path the person who sees
-# the failure is the customer's prospect, not the owner — who sees only an absence
-# of leads.
+# Owner routes ("sites" plan feature; reads need ``fabric.read``, writes
+# ``fabric.write`` like the sites router's mutations; workspace-scoped, another
+# workspace's lead is a 404). ``site_id`` is the site's script_name, as on the Lead:
+#   * GET   /sites/{site_id}/leads
+#   * PATCH /sites/{site_id}/leads/{lead_id}  {status?, read?}
+#   * POST  /sites/{site_id}/leads/read-all   -> {updated}
 #
-# Three pieces make the new posture safe, and they ship together:
-#   * ``_effective_origins`` derives the known-host set from the site's own ``url``
-#     and attached ``domains`` instead of trusting the stamped field alone, so a
-#     site's own traffic is never foreign to it — for the flag AND for the opt-in
-#     gate, which would otherwise 403 its own pages.
-#   * ``_redirect_base`` no longer echoes the request Origin unconditionally. That
-#     was safe ONLY because the origin had just been pinned; without the pin it
-#     would be an open redirect. It now prefers an allowlisted origin, falls back to
-#     the site's own url, and never emits a host the caller chose.
-#   * every lead records ``origin`` + ``origin_unrecognized`` (evaluated at capture,
-#     against the derived set) so an owner can judge an unexpected submission
-#     instead of us silently refusing it.
-# The controls that actually work on a public endpoint with a public key are
-# untouched: honeypot, atomic per-(scope, minute) rate limit, injection screen at
-# HIGH, payload cap, constant-time key compare, open-redirect guard.
-#
-# Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.4): the Sites
-# capture surface. Public POST /sites/{site_id}/capture (site-exists → origin
-# pin → signed key → service hardening) and authed GET /sites/{site_id}/leads
-# (plan-gated + RBAC + workspace-scoped read).
-#
-# Updated 2026-05-30 (security hardening): the public capture path now (C1)
-# enforces MAX_PAYLOAD_BYTES on the JSON-encoded payload immediately after the
-# signed-key check — an unauthenticated caller can no longer POST an unbounded
-# body for a Mongo-write amplification DoS — and (H1) compares the signed key
-# with secrets.compare_digest (constant time) instead of ``!=`` so the check is
-# not vulnerable to a timing side channel.
-#
-# Updated 2026-05-30 (follow-up item 1): the per-IP rate-limit identity is now
-# derived SERVER-SIDE from the connection — a sha256 hash of
-# ``request.client.host`` (see ``_rate_key``) — and passed to the service as
-# ``rate_key``. The caller-controlled ``body.submitter_ref`` is no longer the
-# limiter key (it was randomizable to dodge the cap); it rides through only as an
-# opaque, non-PII label on the stored Lead.
-#
-# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added the NATIVE-FORM
-# capture sibling, POST /capture/form (final URL: {captureApiBase}/capture/form,
-# i.e. /api/v1/capture/form — captureApiBase already carries /api/v1, so the
-# spec's "/v1/capture/form" would have doubled the segment; this is the
-# router-consistent resolution and the cross-repo contract paw-sites' import
-# rewiring must target). IMPORTED sites rewire their <form>s to a plain
-# application/x-www-form-urlencoded POST here, with hidden fields ``paw_site_id``,
-# ``paw_key`` (the per-site signed key), ``paw_page``, ``paw_redirect`` and
-# optionally ``paw_form_type``. The endpoint runs the SAME hardening ladder as the
-# JSON capture (site exists → origin pin → constant-time signed key → payload size
-# cap → leads_service.capture), then 303-redirects to ``paw_redirect`` — which MUST
-# be a relative path (open-redirect guard: absolute / protocol-relative /
-# backslash / CR-LF all 400), resolved against the validated request Origin.
+# Invariants: the per-IP limiter key is derived from the connection
+# (``_rate_key``), never the body; ``_redirect_base`` never emits a host the caller
+# chose, and on a site with no url ``_safe_relative_redirect`` is the ONLY lock on
+# the 303 Location, so its ``//`` and ``://`` rejections must stay.
 
 from __future__ import annotations
 
@@ -84,7 +37,14 @@ from pocketpaw.sites_capture.models import MAX_PAYLOAD_BYTES
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud.leads import service as leads_service
-from pocketpaw_ee.cloud.leads.dto import CaptureRequest, CaptureResponse, LeadOut, lead_to_dto
+from pocketpaw_ee.cloud.leads.dto import (
+    CaptureRequest,
+    CaptureResponse,
+    LeadOut,
+    LeadUpdate,
+    ReadAllResponse,
+    lead_to_dto,
+)
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
 router = APIRouter(tags=["Sites"])
@@ -333,3 +293,43 @@ async def list_leads(
 ) -> list[LeadOut]:
     leads = await leads_service.list_for_site(ctx.workspace_id, site_id, limit=limit)
     return [lead_to_dto(lead) for lead in leads]
+
+
+_OWNER_WRITE_DEPS = [
+    Depends(require_plan_feature("sites")),
+    Depends(require_action_any_workspace("fabric.write")),
+]
+
+
+@router.patch(
+    "/sites/{site_id}/leads/{lead_id}",
+    response_model=LeadOut,
+    dependencies=_OWNER_WRITE_DEPS,
+)
+async def update_lead(
+    site_id: str,
+    lead_id: str,
+    body: LeadUpdate,
+    ctx: RequestContext = Depends(request_context),
+) -> LeadOut:
+    """Set a lead's status and/or read state. ``lead.updated`` fires on a status
+    change. Another workspace's (or site's) lead is a 404."""
+    lead = await leads_service.update_lead(
+        ctx.workspace_id, site_id, lead_id, status=body.status, read=body.read
+    )
+    if lead is None:
+        raise HTTPException(404, "Lead not found")
+    return lead_to_dto(lead)
+
+
+@router.post(
+    "/sites/{site_id}/leads/read-all",
+    response_model=ReadAllResponse,
+    dependencies=_OWNER_WRITE_DEPS,
+)
+async def read_all_leads(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ReadAllResponse:
+    """Mark every unread lead on this site read."""
+    return ReadAllResponse(updated=await leads_service.mark_all_read(ctx.workspace_id, site_id))

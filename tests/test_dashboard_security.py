@@ -278,6 +278,101 @@ class TestIsGenuineLocalhost:
         req = self._make_request("127.0.0.1", headers={"cf-connecting-ip": "8.8.8.8"})
         assert _is_genuine_localhost(req) is False
 
+    @patch("pocketpaw.dashboard_auth.Settings")
+    def test_remote_host_does_not_load_settings(self, mock_settings_cls):
+        """Hot path: remote traffic must not pay for Settings.load() (~5 ms)."""
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+
+        assert _is_genuine_localhost(self._make_request("203.0.113.7")) is False
+        mock_settings_cls.load.assert_not_called()
+
+    @patch("pocketpaw.dashboard_auth.Settings")
+    def test_proxied_loopback_does_not_load_settings(self, mock_settings_cls):
+        """A same-host reverse proxy gives 127.0.0.1 + X-Forwarded-For on every request."""
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+
+        req = self._make_request("127.0.0.1", headers={"x-forwarded-for": "8.8.8.8"})
+        assert _is_genuine_localhost(req) is False
+        mock_settings_cls.load.assert_not_called()
+
+
+class TestAccessTokenCache:
+    """get_access_token caches the file but honours a rotation on the next call."""
+
+    def test_rotation_is_seen_on_next_call(self, tmp_path):
+        from pocketpaw.config import get_access_token, regenerate_token
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            old = get_access_token()
+            assert get_access_token() == old
+            new = regenerate_token()
+            assert new != old
+            assert get_access_token() == new
+
+    def test_rotation_swaps_in_a_new_file(self, tmp_path):
+        """A rotation must change the inode, so a same-tick, same-size rewrite by
+        another process still changes the cache key (and leaves no temp file)."""
+        from pocketpaw.config import get_access_token, regenerate_token
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            get_access_token()
+            before = (tmp_path / "access_token").stat().st_ino
+            regenerate_token()
+            assert (tmp_path / "access_token").stat().st_ino != before
+        assert [p.name for p in tmp_path.iterdir()] == ["access_token"]
+
+    def test_external_rewrite_is_seen_on_next_call(self, tmp_path):
+        import os
+
+        from pocketpaw.config import get_access_token
+
+        path = tmp_path / "access_token"
+        path.write_text("token-one")
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            assert get_access_token() == "token-one"
+            st = path.stat()
+            path.write_text("token-two")
+            # Force a distinct mtime: Windows ticks are coarse enough that two
+            # writes in one test can share one.
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+            assert get_access_token() == "token-two"
+
+    def test_cached_read_skips_the_file_read(self, tmp_path):
+        from pathlib import Path
+
+        from pocketpaw.config import get_access_token
+
+        (tmp_path / "access_token").write_text("cached-token")
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            assert get_access_token() == "cached-token"
+            with patch.object(Path, "read_text", side_effect=AssertionError("re-read")):
+                assert get_access_token() == "cached-token"
+
+    async def test_rotated_token_accepted_old_rejected_by_middleware(self, tmp_path):
+        from types import SimpleNamespace
+
+        from pocketpaw.config import get_access_token, regenerate_token
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        def req(token):
+            r = MagicMock()
+            r.method = "GET"
+            r.url.path = "/api/identity"
+            r.client.host = "203.0.113.7"
+            r.query_params = {}
+            r.headers = {"Authorization": f"Bearer {token}"}
+            r.cookies = {}
+            r.state = SimpleNamespace()
+            return r
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            old = get_access_token()
+            assert await _auth_dispatch(req(old)) is None
+            new = regenerate_token()
+            assert await _auth_dispatch(req(new)) is None
+            rejected = await _auth_dispatch(req(old))
+            assert rejected is not None and rejected.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # Dashboard integration tests (auth middleware, headers, CORS, session exchange)

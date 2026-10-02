@@ -8,6 +8,13 @@ handles *what the agent sees*:
   pocket-scoped tool specs where applicable.
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
+* The per-stream resolvers (``current_user_id``, ``current_pocket_id``,
+  ``current_pawbar_run``, ``current_timeline``, ``push_sse_event``,
+  ``record_delivered_artifact``, ...) read the active TURN SLOT's binding first
+  (``bind_turn``) and their ContextVar second, so the in-process MCP tools of a
+  warm Claude SDK client see the turn now running rather than the one that
+  connected it. ``warm_session_key_for`` is the per-member key that slot and the
+  warm process live under.
 
 Changes: 2026-09-27 (fix/chat-run-heartbeat) — a run that does not complete
 now persists its partial reply as a real ``Message`` carrying ``run_status``, and
@@ -302,6 +309,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import weakref
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -447,19 +455,23 @@ def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> N
 
 
 def current_workspace_id() -> str | None:
-    return _active_workspace_id.get()
+    binding = _current_turn_binding()
+    return binding.workspace_id if binding is not None else _active_workspace_id.get()
 
 
 def current_user_id() -> str | None:
-    return _active_user_id.get()
+    binding = _current_turn_binding()
+    return binding.user_id if binding is not None else _active_user_id.get()
 
 
 def current_session_mongo_id() -> str | None:
-    return _active_session_mongo_id.get()
+    binding = _current_turn_binding()
+    return binding.session_mongo_id if binding is not None else _active_session_mongo_id.get()
 
 
 def current_pocket_id() -> str | None:
-    return _active_pocket_id.get()
+    binding = _current_turn_binding()
+    return binding.pocket_id if binding is not None else _active_pocket_id.get()
 
 
 # Per-stream Paw Bar action context (C1). Set by ``run_core`` for a CONCIERGE run
@@ -482,7 +494,8 @@ def unbind_pawbar_run(token: Token) -> None:
 
 
 def current_pawbar_run() -> dict[str, Any] | None:
-    return _active_pawbar_run.get()
+    binding = _current_turn_binding()
+    return binding.pawbar_run if binding is not None else _active_pawbar_run.get()
 
 
 # Per-stream /studio/editor timeline context. Set by ``run_core`` from
@@ -504,7 +517,8 @@ def unbind_timeline(token: Token) -> None:
 
 
 def current_timeline() -> dict[str, Any] | None:
-    return _active_timeline.get()
+    binding = _current_turn_binding()
+    return binding.timeline if binding is not None else _active_timeline.get()
 
 
 def current_cloud_chat_run() -> bool:
@@ -577,9 +591,10 @@ def push_sse_event(name: str, data: dict[str, Any]) -> None:
     run that isn't part of an SSE stream). An observability frame nobody is obliged
     to see must never become an exception inside a tool handler.
     """
-    sink = _sse_event_sink.get()
+    binding = _current_turn_binding()
+    sink = binding.sse_sink if binding is not None else _sse_event_sink.get()
     if sink is None:
-        sink = stream_sink_for_session(_active_session_mongo_id.get(), _active_workspace_id.get())
+        sink = stream_sink_for_session(current_session_mongo_id(), current_workspace_id())
     if sink is None:
         return
     try:
@@ -600,6 +615,9 @@ def has_sse_event_sink() -> bool:
     say which problem it hit — "no browser attached" rather than "the browser
     was slow".
     """
+    binding = _current_turn_binding()
+    if binding is not None:
+        return binding.sse_sink is not None
     return _sse_event_sink.get() is not None
 
 
@@ -798,10 +816,123 @@ def record_delivered_artifact(meta: dict[str, Any]) -> None:
     active run's collector. No-op when unbound (a deliver call outside a chat
     run). Never raises — a collector hiccup must not fail an otherwise-successful
     delivery."""
-    collector = _delivered_artifacts.get()
+    binding = _current_turn_binding()
+    collector = binding.artifacts if binding is not None else _delivered_artifacts.get()
     if collector is None:
         return
     collector.append(meta)
+
+
+def current_delivered_artifacts() -> list[dict[str, Any]] | None:
+    """The collector bound in THIS context (read by ``run_core`` to put it on
+    the turn binding). Tools go through ``record_delivered_artifact``."""
+    return _delivered_artifacts.get()
+
+
+# ---------------------------------------------------------------------------
+# Per-session turn binding
+#
+# The ContextVars above are right for code that runs in the turn's own task and
+# wrong for the in-process MCP tools of a WARM Claude SDK client. The SDK starts
+# those tools' handler tasks at ``connect()``, and a task copies the context as
+# it stood then, so every later turn on that client ran its tools under the
+# connecting task's values: the prewarm's (or turn 1's) user, pocket, Paw Bar
+# run, timeline, SSE sink and artifact collector. From turn 2 ``deliver_artifact``
+# appended to a list nobody drained, and in a shared scope a member's turn could
+# run tools as whoever connected the client.
+#
+# So the connecting task carries a SLOT (``_active_turn_slot``), one per warm
+# session key, and each run fills it with THIS turn's ``TurnBinding`` right
+# before it queries the client (``bind_turn``) and empties it in its finally.
+# The resolvers above read the slot's binding first and fall back to their own
+# ContextVar when there is none, so every non-SDK path is unchanged.
+#
+# Concurrency: nothing serializes runs per session. A run that finds the shared
+# slot already bound gets a PRIVATE slot instead of overwriting it. The warm
+# client is leased to the first run, so the second is served by a separate
+# client (stateless fallback or a fresh build) that captures ITS context, and
+# with it the private slot. Slots are held weakly: one lives exactly as long as
+# some context (a warm client's, a running turn's) still refers to it.
+#
+# ``warm_session_key_for`` folds the user into the key for every scope, so two
+# members of one pocket, group or session never share a warm CLI process at all.
+# Isolation is structural; the slot only has to keep one user's turns apart.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TurnBinding:
+    """What the in-process tools of the turn now running should resolve to."""
+
+    workspace_id: str | None = None
+    user_id: str | None = None
+    session_mongo_id: str | None = None
+    pocket_id: str | None = None
+    pawbar_run: dict[str, Any] | None = None
+    timeline: dict[str, Any] | None = None
+    sse_sink: asyncio.Queue[tuple[str, dict[str, Any]]] | None = None
+    artifacts: list[dict[str, Any]] | None = None
+
+
+class _TurnSlot:
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.binding: TurnBinding | None = None
+
+
+@dataclass(frozen=True)
+class TurnHandle:
+    slot: _TurnSlot
+    binding: TurnBinding
+    token: Token
+
+
+_turn_slots: weakref.WeakValueDictionary[str, _TurnSlot] = weakref.WeakValueDictionary()
+_active_turn_slot: ContextVar[_TurnSlot | None] = ContextVar("agent_turn_slot", default=None)
+
+
+def _shared_turn_slot(key: str) -> _TurnSlot:
+    slot = _turn_slots.get(key)
+    if slot is None:
+        slot = _TurnSlot(key)
+        _turn_slots[key] = slot
+    return slot
+
+
+def _current_turn_binding() -> TurnBinding | None:
+    slot = _active_turn_slot.get()
+    return slot.binding if slot is not None else None
+
+
+def enter_turn_slot(key: str) -> Token:
+    """Carry ``key``'s shared slot in this context, unbound. Called by the
+    prewarm before it connects, so the warm client's tools read the slot."""
+    return _active_turn_slot.set(_shared_turn_slot(key))
+
+
+def exit_turn_slot(token: Token) -> None:
+    _active_turn_slot.reset(token)
+
+
+def bind_turn(key: str, binding: TurnBinding) -> TurnHandle:
+    """Make ``binding`` what ``key``'s tools resolve to for this turn, and carry
+    the slot in this context so a client connected by this turn captures it."""
+    slot = _shared_turn_slot(key)
+    if slot.binding is not None:
+        slot = _TurnSlot(key)  # a concurrent run holds the shared slot
+    slot.binding = binding
+    return TurnHandle(slot=slot, binding=binding, token=_active_turn_slot.set(slot))
+
+
+def unbind_turn(handle: TurnHandle) -> None:
+    """Undo ``bind_turn``. Identity-checked, so it never clears a later run's
+    binding, and safe to call from a finally."""
+    if handle.slot.binding is handle.binding:
+        handle.slot.binding = None
+    try:
+        _active_turn_slot.reset(handle.token)
+    except ValueError:  # reset from another context; the slot is cleared anyway
+        pass
 
 
 class ScopeKind(StrEnum):
@@ -904,6 +1035,14 @@ class ScopeContext:
     # array as "this pocket is an empty shell"). ``None`` when the chat
     # isn't anchored to a pocket — no block, behavior unchanged.
     pocket_summary: dict[str, Any] | None = None
+    # A public concierge run's <owner-settings> block: the site owner's guided
+    # fields (the concierge's name, tone, languages, topics to avoid, escalation),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` with every owner
+    # value quoted. ``_resolve_concierge`` fills it from the site;
+    # ``build_behavior_instructions`` appends it, so the legacy runtime hears the
+    # same settings as v2, including a name set after the agent's soul was born.
+    # ``None`` (every other scope, or a site with no guided field set) adds nothing.
+    concierge_owner_block: str | None = None
     # CS-13 — the per-send model override the client's composer picker chose for
     # THIS turn. ``execute_run`` copies it off ``RunSpec.model_override`` onto the
     # ctx it rebuilds; ``_drive_agent_loop`` forwards it into ``AgentPool.run`` only
@@ -1568,7 +1707,29 @@ async def _resolve_concierge(
         pocket_id=scope_id,
         pocket_type=getattr(pocket, "type", None),
         pocket_summary=pocket_summary,
+        concierge_owner_block=await _concierge_owner_block(scope_id, workspace_id),
     )
+
+
+async def _concierge_owner_block(pocket_id: str, workspace_id: str) -> str | None:
+    """The <owner-settings> block for the site whose pocket is ``pocket_id``.
+
+    The site is looked up in ``workspace_id`` only (the workspace the resolver
+    just reconciled), so another tenant's settings can never reach this run.
+    ``None`` when there is no such site, it sets no guided field, or the read
+    fails: the run then goes ahead exactly as before.
+    """
+    try:
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
+
+        site = await Site.find_one({"pocket_id": pocket_id, "workspace": workspace_id})
+        if site is None:
+            return None
+        return render_owner_block(site) or None
+    except Exception:  # noqa: BLE001 — the owner's settings never block a reply
+        logger.warning("concierge owner settings read failed for %s", pocket_id, exc_info=True)
+        return None
 
 
 async def _agent_in_workspace(agent_id: str, workspace_id: str) -> bool:
@@ -2084,6 +2245,10 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # it is elsewhere.
     if ctx.pocket_summary and ctx.intent != "pocket_create" and override is None:
         parts.append(_render_pocket_summary_block(ctx.pocket_summary))
+    # A public concierge's owner settings (its name first). Only ever set by the
+    # concierge resolver; owner values arrive quoted, never as instructions.
+    if ctx.kind is ScopeKind.CONCIERGE and ctx.concierge_owner_block:
+        parts.append(ctx.concierge_owner_block)
     # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
     # "about this member" block LAST so the agent greets the caller by name and
     # tailors to their role/focus from turn one. It is pre-resolved on the
@@ -3369,6 +3534,21 @@ def session_key_for(ctx: ScopeContext) -> str:
     if ctx.kind is ScopeKind.CONCIERGE:
         return f"cloud:concierge:{ctx.scope_id}:{ctx.user_id}:{ctx.target_agent_id}"
     return f"cloud:{ctx.kind.value}:{ctx.scope_id}:{ctx.target_agent_id}"
+
+
+def warm_session_key_for(ctx: ScopeContext) -> str:
+    """The key an agent run's WARM CLI process is cached under.
+
+    ``session_key_for`` names the conversation and is shared by every member of
+    a pocket, group or session; that is right for history and wrong for a warm
+    process, whose tools act as the user who is asking. So the user is folded in
+    and each member gets their own process (concierge keys already carry the
+    visitor). Also the key of the per-session turn slot (``bind_turn``).
+    """
+    base = session_key_for(ctx)
+    if ctx.kind is ScopeKind.CONCIERGE:
+        return base
+    return f"{base}:u:{ctx.user_id}"
 
 
 async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[dict[str, str]]:

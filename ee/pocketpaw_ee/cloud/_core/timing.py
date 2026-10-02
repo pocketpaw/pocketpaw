@@ -1,34 +1,23 @@
-"""Lightweight request-timing middleware for ee/cloud.
+"""In-memory request-timing buffers behind ``GET /api/v1/_admin/perf``.
 
-Records `(method, path) -> duration_ms` samples in an in-memory ring
-buffer. A `report()` function dumps p50/p95/p99 on demand. Deliberately
-not a metrics system - no Prometheus, no histograms, no exporters -
-because the goal is just to have *some* data when the perf phase
-begins. Phase 11 may swap in a real metrics stack; until then this
-keeps the slice small.
+``record()`` keeps ``(method, path) -> duration_ms`` samples in a ring buffer
+per key; ``snapshot()`` / ``percentiles()`` / ``report()`` read them back.
+Deliberately not a metrics system: no Prometheus, no histograms, no exporters.
+There is no middleware here: ``_core.request_log.RequestLogMiddleware`` already
+times every HTTP request and calls ``record()`` with the time to the response
+headers, for skipped (health/static) paths too.
 
-Capacity defaults to 10k samples per endpoint. With the default
-capacity the buffer uses ~80 KB per distinct endpoint at steady state
-(two `float` per sample is conservative).
-
-That "per distinct endpoint" sizing only holds if the key space is bounded,
-which it was not until 2026-09-04. A MATCHED request keys on the route
-template, and the route table is fixed at startup — bounded. An UNMATCHED
-request has no ``route`` in its ASGI scope, so the key fell back to the raw
-URL path and every distinct 404 minted a permanent buffer. This middleware
-wraps everything and runs before authentication, so one scanner walking a
-million URLs was a million retained entries in a 6 GB container whose only
-recovery is a restart. Unmatched requests now share a single bucket.
+Capacity is 10k samples per key (~80 KB each at steady state). That bound only
+holds if the key space is bounded: a MATCHED request keys on its route
+template, fixed at startup; every UNMATCHED request shares ``UNMATCHED_PATH``,
+because a 404's raw path is attacker-chosen and would otherwise mint one
+permanent buffer per distinct URL.
 """
 
 from __future__ import annotations
 
-import time
 from collections import deque
-from typing import Final
-
-from fastapi import FastAPI, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from typing import Any, Final
 
 _DEFAULT_CAPACITY: Final = 10_000
 
@@ -39,36 +28,15 @@ UNMATCHED_PATH: Final = "<unmatched>"
 _buffers: dict[tuple[str, str], deque[float]] = {}
 
 
-class TimingMiddleware(BaseHTTPMiddleware):
-    """Records request duration per `(method, path)`."""
-
-    def __init__(self, app: FastAPI, capacity: int = _DEFAULT_CAPACITY) -> None:
-        super().__init__(app)
-        self.capacity = capacity
-
-    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        start = time.perf_counter()
-        response: Response = await call_next(request)
-        duration_ms = (time.perf_counter() - start) * 1000.0
-        # Use the matched route template (e.g. /workspaces/{id}) so we don't
-        # get one buffer per id. When nothing matched there is no template to
-        # use, and the raw path is caller-controlled, so those all share one
-        # bucket rather than minting an entry each. The aggregate is still
-        # useful — it says how much time is going into 404s — and it cannot
-        # grow.
-        scope_route = request.scope.get("route")
-        path = (
-            scope_route.path
-            if scope_route is not None and hasattr(scope_route, "path")
-            else UNMATCHED_PATH
-        )
-        key = (request.method, path)
-        buf = _buffers.get(key)
-        if buf is None:
-            buf = deque(maxlen=self.capacity)
-            _buffers[key] = buf
-        buf.append(duration_ms)
-        return response
+def record(method: str, route: Any, duration_ms: float, capacity: int = _DEFAULT_CAPACITY) -> None:
+    """Append one sample, keyed on the matched route template (``scope["route"]``)."""
+    path = route.path if route is not None and hasattr(route, "path") else UNMATCHED_PATH
+    key = (method, path)
+    buf = _buffers.get(key)
+    if buf is None:
+        buf = deque(maxlen=capacity)
+        _buffers[key] = buf
+    buf.append(duration_ms)
 
 
 def reset_buffers() -> None:
@@ -117,8 +85,9 @@ def report() -> str:
 
 
 __all__ = [
-    "TimingMiddleware",
+    "UNMATCHED_PATH",
     "percentiles",
+    "record",
     "report",
     "reset_buffers",
     "snapshot",

@@ -21,6 +21,10 @@
 # is right for what they assert and blinding for this one — the guard lives
 # inside that call, and this route never touches the DTO that would otherwise
 # back it up. The new test leaves ``validate_key`` alone and stubs DNS instead.
+# Updated 2026-10-01 (CN-3): guest turns are counted by the shared
+# ``metering.service`` daily primitive; ``_spend_turn`` / ``_turns_used_today``
+# below stand in for the removed ``guest_budget.try_spend_turn`` /
+# ``turns_used_today`` with the same claim the gate makes.
 
 from __future__ import annotations
 
@@ -40,6 +44,26 @@ from pocketpaw_ee.cloud.models.user import GuestLimits, User
 
 pytestmark = pytest.mark.asyncio
 
+
+async def _spend_turn(user_id: str, cap: int) -> bool:
+    """One guest turn claim, exactly as ``guest_gates`` makes it."""
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.try_spend(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS, cap=cap
+    )
+
+
+async def _turns_used_today(user_id: str) -> int:
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    return await metering.used(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS
+    )
+
+
 _KEY = "sk-ant-api03-" + "sekrit" * 8
 
 
@@ -48,6 +72,8 @@ def _encryption_key(monkeypatch):
     from cryptography.fernet import Fernet
 
     monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    # upgrade_guest runs the register password policy; keep HIBP off the network.
+    monkeypatch.setenv("POCKETPAW_HIBP_ENABLED", "false")
 
 
 async def _mk_guest(**over) -> User:
@@ -130,38 +156,37 @@ class TestTurnBudget:
     async def test_the_cap_refuses_the_claim_that_EXCEEDS_it(self, mongo_db):
         """Cap 2, three claims: the fixture crosses the cap, so this test
         exercises the refusal branch — not just the happy path."""
-        first = await guest_budget.try_spend_turn("u_g1", 2)
-        second = await guest_budget.try_spend_turn("u_g1", 2)
-        third = await guest_budget.try_spend_turn("u_g1", 2)
-        assert first[0] is True and second[0] is True
-        assert third[0] is False, "the third claim on a cap of 2 must be refused"
-        assert third[1:] == (2, 2)
+        first = await _spend_turn("u_g1", 2)
+        second = await _spend_turn("u_g1", 2)
+        third = await _spend_turn("u_g1", 2)
+        assert first is True and second is True
+        assert third is False, "the third claim on a cap of 2 must be refused"
+        assert await _turns_used_today("u_g1") == 2
 
     async def test_a_refused_claim_is_rolled_back(self, mongo_db):
-        await guest_budget.try_spend_turn("u_g2", 1)
+        await _spend_turn("u_g2", 1)
         for _ in range(4):
-            await guest_budget.try_spend_turn("u_g2", 1)
-        assert await guest_budget.turns_used_today("u_g2") == 1
+            await _spend_turn("u_g2", 1)
+        assert await _turns_used_today("u_g2") == 1
 
     async def test_one_guest_cannot_spend_anothers_budget(self, mongo_db):
-        await guest_budget.try_spend_turn("u_g3", 1)
-        assert (await guest_budget.try_spend_turn("u_g4", 1))[0] is True
+        await _spend_turn("u_g3", 1)
+        assert (await _spend_turn("u_g4", 1)) is True
 
     async def test_an_unreadable_counter_fails_CLOSED(self, monkeypatch):
         """A degraded database must not become an unmetered free tier: break
         the collection accessor (as a driver outage or the beanie-1.x accessor
         bug would) and the claim must be refused."""
-        from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
         def _broken(*a, **k):
             raise RuntimeError("collection unavailable")
 
-        monkeypatch.setattr(GuestTurnUsage, "get_pymongo_collection", _broken)
-        allowed, _spent, _cap = await guest_budget.try_spend_turn("u_g5", 5)
-        assert allowed is False
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _broken)
+        assert await _spend_turn("u_g5", 5) is False
 
     async def test_a_zero_cap_refuses(self, mongo_db):
-        assert (await guest_budget.try_spend_turn("u_g6", 0))[0] is False
+        assert (await _spend_turn("u_g6", 0)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +414,9 @@ class TestUpgradeGuest:
         doc = await _mk_guest(active_workspace="w_keep")
         before_id = doc.id
 
-        got = await guest_service.upgrade_guest(doc, email="Real@Example.com", password="hunter22")
+        got = await guest_service.upgrade_guest(
+            doc, email="Real@Example.com", password="Hunter22!x"
+        )
 
         assert got.id == before_id
         assert got.is_guest is False
@@ -403,7 +430,7 @@ class TestUpgradeGuest:
         await User(email="taken@x.co", hashed_password="x", is_active=True).insert()
         doc = await _mk_guest()
         with pytest.raises(CloudError) as exc:
-            await guest_service.upgrade_guest(doc, email="taken@x.co", password="hunter22")
+            await guest_service.upgrade_guest(doc, email="taken@x.co", password="Hunter22!x")
         assert exc.value.code == "auth.email_taken"
         assert exc.value.status_code == 409
 
@@ -411,7 +438,7 @@ class TestUpgradeGuest:
         doc = User(email="real2@x.co", hashed_password="x", is_active=True)
         await doc.insert()
         with pytest.raises(CloudError) as exc:
-            await guest_service.upgrade_guest(doc, email="new@x.co", password="hunter22")
+            await guest_service.upgrade_guest(doc, email="new@x.co", password="Hunter22!x")
         assert exc.value.code == "auth.not_a_guest"
 
     async def test_a_short_password_is_rejected(self, mongo_db):

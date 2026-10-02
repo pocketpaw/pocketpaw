@@ -8,6 +8,9 @@
 #   * enforce_retention() purges ONLY audit rows older than the cutoff for
 #     the RIGHT workspace, and is a no-op when retention is unset.
 #   * purge_workspace_audit() is age- + tenant-scoped.
+# 2026-10-01 (CN-2): the purge also clears the SQLite AuditStore rows the
+#   audit list endpoint reads; every test runs against a tmp AuditStore so the
+#   developer's ~/.pocketpaw/audit.db is never touched.
 
 from __future__ import annotations
 
@@ -29,6 +32,13 @@ from pocketpaw_ee.cloud.workspace.dto import (
 )
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
+
+
+@pytest.fixture(autouse=True)
+def _tmp_audit_store(audit_store_tmp, monkeypatch: pytest.MonkeyPatch):
+    """Point the purge at a tmp SQLite AuditStore, never the home-dir singleton."""
+    monkeypatch.setattr(audit_service, "get_audit_store", lambda: audit_store_tmp)
+    return audit_store_tmp
 
 
 @pytest.fixture(autouse=True)
@@ -199,6 +209,34 @@ async def test_purge_workspace_audit_deletes_only_old_and_right_tenant() -> None
     # Other tenant's old row untouched despite the same age.
     remaining_b = await _AuditEventDoc.find({"workspace": "ws-B"}).to_list()
     assert len(remaining_b) == 1
+
+
+async def test_purge_workspace_audit_also_purges_the_audit_store(
+    _tmp_audit_store, make_audit_entry
+) -> None:
+    """The audit list endpoint reads the SQLite AuditStore, so retention must
+    delete there too, with the same tenant + age scoping as the Mongo purge."""
+    now = datetime.now(UTC)
+    old_a = await make_audit_entry("ws-A", action="old.a")
+    await make_audit_entry("ws-A", action="recent.a")
+    old_b = await make_audit_entry("ws-B", action="old.b")
+    stamp = (now - timedelta(days=100)).isoformat()
+    with _tmp_audit_store._get_conn() as conn:
+        conn.executemany(
+            "UPDATE audit_log SET timestamp = ? WHERE id = ?", [(stamp, old_a), (stamp, old_b)]
+        )
+        conn.commit()
+    await _seed_audit("ws-A", at=now - timedelta(days=100), action="old.row")
+
+    deleted = await audit_service.purge_workspace_audit("ws-A", now - timedelta(days=30))
+
+    assert deleted == 2  # one Mongo AuditEvent + one AuditStore row
+    assert [e.action for e in await _tmp_audit_store.search_entries(workspace_id="ws-A")] == [
+        "recent.a"
+    ]
+    assert [e.action for e in await _tmp_audit_store.search_entries(workspace_id="ws-B")] == [
+        "old.b"
+    ]
 
 
 async def test_enforce_retention_purges_old_audit() -> None:

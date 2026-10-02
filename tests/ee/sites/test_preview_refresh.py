@@ -500,3 +500,148 @@ async def test_a_failed_manual_refresh_leaves_the_existing_card_alone(
         await sites_service.refresh_site_preview(workspace_id="ws1", site_id=str(site.id))
 
     assert await _card_image_url() == good
+
+
+# --------------------------------------------------------------------------- #
+# Connected (foreign-origin) sites: photographed from their verified origin
+# --------------------------------------------------------------------------- #
+
+_FOREIGN_HOST = "brew.example"
+
+
+async def _foreign_site(*, origins: list[str], preview: str = ""):
+    """A connected site exactly as ``mint_foreign_site`` leaves it: no Worker, no
+    url, never deployed, and the customer's hosts in ``allowed_origins``."""
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    oid = ObjectId()
+    doc = _SiteDoc(
+        id=oid,
+        workspace="ws1",
+        pocket_id="pocket-foreign",
+        owner="u1",
+        name="Brew on Squarespace",
+        script_name="",
+        deployed=False,
+        url="",
+        signed_key="k",
+        foreign_origin=True,
+        allowed_origins=origins,
+        preview_image_url=preview,
+    )
+    await doc.insert()
+    return doc
+
+
+async def _verify(host: str, *, days_ago: int = 0) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
+
+    now = datetime.now(UTC)
+    await SiteOriginClaim(
+        workspace="ws1",
+        host=host,
+        token="pawverify-token",
+        status="verified",
+        issued_at=now,
+        expires_at=now + timedelta(days=7),
+        issued_by="u1",
+        method="well-known",
+        verified_at=now - timedelta(days=days_ago),
+    ).insert()
+
+
+def _record_probes(monkeypatch) -> list[tuple[str, bool]]:
+    """Open the readiness gate (as the conftest does) while recording what it was
+    asked about, and whether it was told the address is a customer's."""
+    probes: list[tuple[str, bool]] = []
+
+    async def _serving(url: str, **kw) -> bool:
+        probes.append((url, bool(kw.get("foreign"))))
+        return True
+
+    monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
+    return probes
+
+
+@pytest.mark.asyncio
+async def test_a_manual_refresh_photographs_a_connected_site_at_its_verified_origin(
+    beanie_test_db, monkeypatch, uploads_in_tmp
+):
+    """A connected site has no url and never deploys, so the refresh used to fall
+    through to the draft path and answer ``preview_unavailable`` — the Appearance
+    editor could never get a picture of the page the concierge actually sits on.
+    The verified origin IS that page."""
+    await _verify(_FOREIGN_HOST)
+    site = await _foreign_site(origins=[_FOREIGN_HOST])
+    cf = _ShotSequence(_AFTER)
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+    probes = _record_probes(monkeypatch)
+
+    out = await sites_service.refresh_site_preview(workspace_id="ws1", site_id=str(site.id))
+
+    assert out.preview_image_url.startswith("/api/v1/uploads/")
+    assert await _stored_bytes(out.preview_image_url, uploads_in_tmp) == _AFTER
+    assert len(cf.calls) == 1
+    assert cf.calls[0]["html"] is None
+    assert cf.calls[0]["url"].startswith(f"https://{_FOREIGN_HOST}/?{screenshot_mod._SHOT_PARAM}=")
+    # Same readiness gate as a hosted site, told the address is the customer's so
+    # it probes through the SSRF-hardened fetch.
+    assert probes and all(url.startswith(f"https://{_FOREIGN_HOST}/") for url, _ in probes)
+    assert all(foreign for _, foreign in probes)
+    # Recorded on the card, and ``url`` is left alone: other code reads a url as
+    # "hosted and deployed".
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    fresh = await _SiteDoc.get(site.id)
+    assert fresh.preview_image_url == out.preview_image_url
+    assert fresh.url == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("verified_days_ago", "code"),
+    [(None, "sites.origin_unverified"), (45, "sites.origin_verification_stale")],
+)
+async def test_a_manual_refresh_of_a_connected_site_without_a_fresh_proof_says_verify_first(
+    beanie_test_db, monkeypatch, uploads_in_tmp, verified_days_ago, code
+):
+    """No verified, fresh origin means no address we may point a browser at. The
+    owner gets told to verify the domain — not the hosted-site advice to publish —
+    and nothing is rendered."""
+    if verified_days_ago is not None:
+        await _verify(_FOREIGN_HOST, days_ago=verified_days_ago)
+    site = await _foreign_site(origins=[_FOREIGN_HOST], preview="/api/v1/uploads/old")
+    cf = _ShotSequence(_AFTER)
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+    probes = _record_probes(monkeypatch)
+
+    with pytest.raises(ValidationError) as exc:
+        await sites_service.refresh_site_preview(workspace_id="ws1", site_id=str(site.id))
+
+    assert exc.value.code == code
+    assert "verif" in str(exc.value).lower()
+    assert cf.calls == []
+    assert probes == []
+
+
+@pytest.mark.asyncio
+async def test_a_connected_site_is_only_ever_photographed_at_its_verified_host(
+    beanie_test_db, monkeypatch, uploads_in_tmp
+):
+    """``allowed_origins`` lists where the EMBED may run, which can include hosts
+    nobody proved. Only the verified one may be probed or rendered."""
+    await _verify(_FOREIGN_HOST)
+    site = await _foreign_site(origins=["staging.unproved.example", _FOREIGN_HOST])
+    cf = _ShotSequence(_AFTER)
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+    probes = _record_probes(monkeypatch)
+
+    await sites_service.refresh_site_preview(workspace_id="ws1", site_id=str(site.id))
+
+    touched = [c["url"] for c in cf.calls] + [url for url, _ in probes]
+    assert touched
+    assert all(url.startswith(f"https://{_FOREIGN_HOST}/") for url in touched)
+    assert not any("unproved" in url for url in touched)

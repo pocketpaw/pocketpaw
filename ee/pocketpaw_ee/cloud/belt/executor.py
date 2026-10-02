@@ -105,6 +105,9 @@
 # Why a separate module (not in pockets/): the Belt code-change path is its own
 # subsystem — it doesn't touch backend credentials or the pockets service. It
 # mirrors instinct_bridge's propose/execute SHAPE without sharing its plumbing.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -401,8 +404,8 @@ async def _persist_run_result(
 
     The runs read model reads ``pr_url`` / ``branch`` / ``commit_sha`` /
     ``files_changed`` off the blob STRUCTURALLY rather than parsing the free-text
-    ``mark_executed`` outcome. Direct SQL update — the same pattern belt.py's
-    ``_persist_chain_ids`` uses for the propose-time chain ids. Best-effort: a
+    ``mark_executed`` outcome. Store-API write — the same pattern belt.py's
+    ``persist_chain_ids`` uses for the propose-time chain ids. Best-effort: a
     write failure leaves the run without the structured fields (the read model
     falls back to None) but never breaks the approve response.
 
@@ -412,9 +415,6 @@ async def _persist_run_result(
         stays absent so the read model emits ``pr_url=None`` and the page renders
         a branch chip instead of a PR link.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -436,13 +436,7 @@ async def _persist_run_result(
             blob["commit_sha"] = commit_sha
         params[_CODE_CHANGE_PARAM_KEY] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — back-write is best-effort
         logger.warning(
             "belt: failed to persist PR result onto action %s — runs read model "

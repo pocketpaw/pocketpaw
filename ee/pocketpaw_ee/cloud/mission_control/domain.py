@@ -26,7 +26,7 @@ Tenancy:
   - ``workspace_id`` is the active workspace. The façade service refuses
     to construct a WorkItem without it. The pocket service already
     enforces workspace scoping on its reads, so the façade can rely on
-    ``pockets_service.list_pockets(workspace_id, user_id)`` to gate which
+    ``pockets_service.visible_pocket_refs(workspace_id, user_id)`` to gate which
     Instinct actions are visible.
   - ``assignee_kind`` / ``assignee_id`` mirror the polymorphic
     assignment Tasks (PR 2) will carry. For PR 1 every Nudge surfaces as

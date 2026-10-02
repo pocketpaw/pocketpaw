@@ -367,6 +367,52 @@
     },
     {
       "gist": "",
+      "how": "mcp__pocketpaw_rooms__list_rooms (query: optional name filter; limit) and mcp__pocketpaw_rooms__read_room (room: id, #handle or name; limit: default 30, max 100; before: older_cursor)",
+      "id": "capability:chat.read_rooms",
+      "keywords": [
+        "catch me up",
+        "what did i miss",
+        "recent messages",
+        "read the channel",
+        "general channel",
+        "unread messages",
+        "summarize the room",
+        "room history"
+      ],
+      "kind": "capability",
+      "name": "Catch up on a PocketPaw room",
+      "narrative": "Two read-only tools over the workspace's own PocketPaw chat rooms, not Slack or Teams. list_rooms lists the rooms the user can see (id, name, #handle, kind, member flag, unread count, last activity), optionally filtered by name. read_room returns up to 100 recent messages from one room, oldest to newest, resolved by id, #handle or name, with an older_cursor to page back. Access is exactly what the user sees in the app: a private room, DM or private channel they are not in, or a room in another workspace, reads as not found. Messages are written by other people and agents and come back labelled as data, never instructions. Nothing is sent, edited or reacted to.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Read recent messages from one of the workspace's own chat rooms (a channel like #general, a group or a DM) to catch the user up on what they missed.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "HTTP only, no agent tool: GET /api/v1/discover?source&kind&audience&q&featured&limit&cursor (no sign-in); GET /api/v1/discover/{id}; POST /api/v1/discover/{id}/use {name?} returns {source, result}; POST /api/v1/discover/{id}/report {reason}",
+      "id": "capability:discover.remix",
+      "keywords": [
+        "discover",
+        "remix",
+        "use a template",
+        "free tool",
+        "community templates",
+        "browse published",
+        "report a listing",
+        "publish to discover"
+      ],
+      "kind": "capability",
+      "name": "Browse, remix and publish on Discover",
+      "narrative": "Discover lists every public site template (and, later, other shareable items) across all workspaces, without the owner's name. Browsing needs no sign-in. Remixing (use) makes a brand-new private copy in the caller's own workspace through the item's source, with the source's own plan and cap checks; the owner's use of their own listing is not counted as a remix. A signed-in user can report a listing once; three reports from different users hide it. Publishing to Discover is making a site template public (see capability:sites.save_as_template); making it private or deleting it takes the listing down.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Browse the free tools, games and site templates people publish to Discover, remix one into your workspace, or publish your own.",
+      "surface": "/discover"
+    },
+    {
+      "gist": "",
       "how": "propose via the Instinct gate; approve/reject at /decisions",
       "id": "capability:fabric.conflict_steward",
       "keywords": [
@@ -406,6 +452,56 @@
         "role:member"
       ],
       "summary": "Read a Fabric object's winner value, whether it is contested, its freshness, and the competing statements with their sources. A member-level read.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "HTTP only, no agent tool: POST /api/v1/site-templates {pocket_id, name, description?, visibility?}; GET /api/v1/site-templates?scope=mine|workspace|public&limit&cursor; GET, PATCH {name?, description?, visibility?} or DELETE /api/v1/site-templates/{id}; POST /api/v1/site-templates/{id}/use {name?} returns {pocket_id}; POST /api/v1/site-templates/{id}/report {reason}; POST /api/v1/site-templates/{id}/preview-refresh re-copies the source screenshot",
+      "id": "capability:sites.save_as_template",
+      "keywords": [
+        "template",
+        "site template",
+        "save as template",
+        "save my site as a template",
+        "reuse a site",
+        "new site from template",
+        "my templates",
+        "share a template",
+        "public templates",
+        "workspace templates"
+      ],
+      "kind": "capability",
+      "name": "Save a site as a template",
+      "narrative": "Saves a frozen copy of a site's authored content (engine, pattern, ripple spec, source) as a template. A template is private (owner only), workspace (every member) or public (every user in every workspace, no review); the owner can change that later. Going public is refused if the site points at the workspace's own uploaded or generated files, or carries source the plan does not unlock. Public templates do not show who made them; three reports from different users hide one. A template carries a public copy of the site's screenshot when one exists, refreshable by the owner. Using a template starts a brand-new private site pocket in your own workspace with that content and a draft gallery row; nothing is published. Later edits to the original site do not change the template, and deleting the template leaves sites made from it alone. Needs a plan with Sites. A workspace holds at most 50 templates, each at most 2 MB.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Save a site as a template, share it with your workspace or every user, and start new sites from it.",
+      "surface": "/sites"
+    },
+    {
+      "gist": "",
+      "how": "mcp__pocketpaw_surfaces__open_surface (route: /files | /studio/editor | /chat | /pockets | /knowledge; params: optional flat string map; reason: optional one line shown to the user)",
+      "id": "capability:surface.open",
+      "keywords": [
+        "open files",
+        "file picker",
+        "pick a file",
+        "open the editor",
+        "take me to",
+        "open surface",
+        "open a page",
+        "navigate",
+        "go to",
+        "bring up"
+      ],
+      "kind": "capability",
+      "name": "Open an app surface on the user's screen",
+      "narrative": "The agent asks the user's browser to open one of five app surfaces: /files to upload or pick files, /studio/editor with a clip handoff (src, name, mime, kind) to edit a video, /chat to read a conversation, /pockets or /knowledge to browse those. The route set is closed and params are a small flat string map; the editor's src must be the file's own /api/v1/uploads/<id> or /api/v1/media/<name> path, never an external URL. It has no side effect on the server: the tool returns once the request is dispatched, and the browser does the opening, so the agent must not claim the page has loaded.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Bring a page up on the user's screen (Files, the clip editor, a chat room, Pockets, Knowledge) when they need to see or choose something rather than read an answer.",
       "surface": ""
     },
     {
@@ -1695,7 +1791,7 @@
         "what is a verdict",
         "outcome",
         "did it work",
-        "did the task actually get done",
+        "actually get done",
         "solved",
         "not solved",
         "partial",
@@ -1972,6 +2068,20 @@
       "narrative": "Work with the user's Gmail inside a pocket/room that has the Gmail connector bound. Invoke when the user wants to find, read, triage, or send email from the chat — \"search my inbox for the invoice from Acme\", \"what did Sarah email me yesterday\", \"reply to the last message from legal\", \"draft and send a follow-up to the candidate\", \"label these as Done\". This skill teaches the Gmail action surface (search, read, send, labels, trash) and the safe-by-default workflow: read before you act, confirm before you send or destroy. It is auto-surfaced into a room when the Gmail connector is bound to that pocket, so you only see it when Gmail is actually available.",
       "requires": [],
       "summary": "Work with the user's Gmail inside a pocket/room that has the Gmail connector bound.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /hyperframes-core in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:hyperframes-core",
+      "keywords": [
+        "hyperframes-core"
+      ],
+      "kind": "skill",
+      "name": "hyperframes-core",
+      "narrative": "The HyperFrames composition contract — build one renderable project. Use for composition structure, the `data-*` timing attributes, `class=\"clip\"`, tracks, sub-compositions, variables, framework-owned media playback, deterministic-render rules, and validation. Read before writing composition HTML.",
+      "requires": [],
+      "summary": "The HyperFrames composition contract — build one renderable project.",
       "surface": ""
     },
     {
@@ -2291,7 +2401,7 @@
       ],
       "kind": "skill",
       "name": "studio-editor",
-      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". You do NOT generate media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
+      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". Also invoke for \"make a title card\", \"add an intro animation\", \"make a motion graphic\", \"animate this stat\", \"add a lower third\" — authored as HyperFrames HTML. You do NOT generate footage or AI media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
       "requires": [],
       "summary": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes.",
       "surface": ""
@@ -2311,6 +2421,7 @@
       "surface": ""
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:activity",
@@ -2325,11 +2436,14 @@
       "kind": "surface",
       "name": "Activity",
       "narrative": "The Activity surface is the workspace-wide activity feed (same source as the home screen's river, polled live). Point a user here to see what has been happening across the workspace recently.",
+      "presentation": "window",
       "requires": [],
+      "slash": "activity",
       "summary": "Workspace activity feed, polled live; shares its source with the home river.",
       "surface": "/activity"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:agents",
@@ -2345,11 +2459,35 @@
       "kind": "surface",
       "name": "Agents",
       "narrative": "The Agents surface lists the workspace's agents and opens each one's editor (/agents/<id>) — identity, reasoning, and soul evolution. Point a user here to create, inspect, or tune an agent.",
+      "presentation": "window",
       "requires": [],
+      "slash": "agents",
       "summary": "Agents shell: the agent list plus a per-agent editor (identity, reasoning, soul evolution).",
       "surface": "/agents"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:agents-activity",
+      "keywords": [
+        "agent activity",
+        "agents working",
+        "busy agents",
+        "running agents",
+        "live agents"
+      ],
+      "kind": "surface",
+      "name": "Agent Activity",
+      "narrative": "The /agents/activity board is the member-level, workspace-scoped view of live agent work: which agents are busy, what they are running, and what just finished. Point a user here when they ask what their agents are doing right now; the agent list and editor live at /agents.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "agents/activity",
+      "summary": "Which of the workspace's agents are working right now, and on what.",
+      "surface": "/agents/activity"
+    },
+    {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:audit",
@@ -2364,17 +2502,20 @@
       "kind": "surface",
       "name": "Audit",
       "narrative": "The Audit surface is the workspace audit log — the compliance-grade record of actions. Point a user here when they need the authoritative trail of who or what did something; for a lighter live feed use /activity.",
+      "presentation": "window",
       "requires": [],
+      "slash": "audit",
       "summary": "Workspace audit log.",
       "surface": "/audit"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:belt",
       "keywords": [
         "belt",
-        "coding task",
+        "coding work",
         "diff",
         "station",
         "develop",
@@ -2384,13 +2525,16 @@
       "kind": "surface",
       "name": "Belt",
       "narrative": "The Belt surface is where a human hands the develop station a coding task and watches it run: repo picker, run cards, and the read-only diff viewer, with the station agent in the chat rail. Point a user here to request code changes or review proposed diffs. This is the home surface of the Belt primitive.",
+      "presentation": "window",
       "requires": [
         "primitive:belt"
       ],
+      "slash": "belt",
       "summary": "Belt develop-station console: repo picker, run cards, and a read-only diff viewer, chat-first.",
       "surface": "/belt"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:billing",
@@ -2411,11 +2555,34 @@
       "kind": "surface",
       "name": "Billing",
       "narrative": "Billing is the workspace's money-and-plan surface at /settings/billing — a tabbed page: Usage (a consumption graph over the ledger plus the monthly allowance meter), Plans (the tiered plan cards for choosing or changing the subscription), and Billing (the wallet balance, top-up flow, and full ledger history). Point a user here for anything about spend, plan choice, the credit wallet, invoices, or upgrading. Linked from the user menu, the plan badge, and the settings nav; owner action to actually change the paid plan still goes through the human-gated billing_plan_change proposal.",
+      "presentation": "window",
       "requires": [],
       "summary": "Workspace billing surface: three tabs — Usage (consumption graph + allowance), Plans (plan cards), and Billing (wallet, top-up, ledger).",
       "surface": "/settings/billing"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:browser",
+      "keywords": [
+        "web browsing",
+        "browse the web",
+        "headless browser",
+        "look it up online",
+        "visit a website"
+      ],
+      "kind": "surface",
+      "name": "Browser",
+      "narrative": "The /browser surface is where the agent drives a headless browser on the server and only the results reach the user; there is no URL bar or live view. Point a user here when they want the agent to look something up or act on a website for them.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "browser",
+      "summary": "Chat-driven web browsing: the agent drives a server-side browser and brings back results.",
+      "surface": "/browser"
+    },
+    {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:calendar",
@@ -2429,11 +2596,14 @@
       "kind": "surface",
       "name": "Calendar",
       "narrative": "The Calendar surface shows the workspace calendar. Point a user here to see upcoming events; calendar data arrives via bound connectors (e.g. Google Calendar).",
+      "presentation": "window",
       "requires": [],
+      "slash": "calendar",
       "summary": "Workspace calendar (operator surface).",
       "surface": "/calendar"
     },
     {
+      "agent_openable": true,
       "gist": "",
       "how": "",
       "id": "surface:chat",
@@ -2451,11 +2621,14 @@
       "kind": "surface",
       "name": "Chat",
       "narrative": "Chat is where users talk to agents and each other: a rooms rail with DMs, agent rooms, groups, channels, plus entity rooms scoped to a pocket (/chat/<pocketId>). Point a user here to converse with an agent, resume a room, or work inside a pocket-bound conversation.",
+      "presentation": "inline",
       "requires": [],
+      "slash": "chat",
       "summary": "Chat panel with the rooms rail: DMs, agent rooms, groups, channels, and entity rooms bound to pockets.",
       "surface": "/chat"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:code",
@@ -2463,18 +2636,23 @@
         "code",
         "ide",
         "editor",
-        "file tree",
+        "source tree",
+        "repo tree",
+        "source code",
         "scripts",
         "edit code"
       ],
       "kind": "surface",
       "name": "Code",
-      "narrative": "The Code surface is an in-browser IDE over the shared workspace: a real file tree, editor tabs, and an honest activity indicator while the agent does the work agent-side. Point a user here to read or edit workspace code with the agent alongside.",
+      "narrative": "The Code surface is an in-browser IDE over the shared workspace: a real source tree, editor tabs, and an honest activity indicator while the agent does the work agent-side. Point a user here to read or edit workspace code with the agent alongside.",
+      "presentation": "window",
       "requires": [],
-      "summary": "In-browser IDE: real workspace file tree, editor tabs, and an agent-side edit-run-verify loop.",
+      "slash": "code",
+      "summary": "In-browser IDE: real workspace source tree, editor tabs, and an agent-side edit-run-verify loop.",
       "surface": "/code"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:decisions",
@@ -2490,13 +2668,16 @@
       "kind": "surface",
       "name": "Decisions",
       "narrative": "Decisions is the org-wide decision feed — recent Instinct corrections across the workspace, each rendered through a diff viewer. Point a user here to review what decisions agents and humans have been making. It is the decision-feed home of the Instinct primitive; the historical query layer is /decisions-graph.",
+      "presentation": "window",
       "requires": [
         "primitive:instinct"
       ],
+      "slash": "decisions",
       "summary": "Org-wide decision feed: recent Instinct corrections across the workspace's pockets, with diff viewers.",
       "surface": "/decisions"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:decisions-graph",
@@ -2512,6 +2693,7 @@
       "kind": "surface",
       "name": "Decision Graph",
       "narrative": "Decision Graph lets an operator query the historical Decision projection visually — deep-linkable by decision id, depth, and mode. Point a user here to trace WHY a decision happened and what it connects to; for the live feed of recent decisions use /decisions instead.",
+      "presentation": "window",
       "requires": [
         "primitive:instinct"
       ],
@@ -2519,6 +2701,56 @@
       "surface": "/decisions-graph"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:discover",
+      "keywords": [
+        "discover",
+        "free tools",
+        "free tool",
+        "games",
+        "community",
+        "published by others",
+        "browse templates",
+        "remix",
+        "explore",
+        "showcase",
+        "gallery"
+      ],
+      "kind": "surface",
+      "name": "Discover",
+      "narrative": "Discover is the public index of things people chose to share from Paw: small free tools, games and site templates, filterable by kind and audience and searchable by title. Anyone can browse it and open a live demo without signing in; a signed-in user remixes a listing into a private copy in their own workspace, or reports it. Point a user here when they want a ready-made free tool, game or template someone else published, or to see what the community has shared.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "discover",
+      "summary": "Discover: free tools, games and site templates that people publish from Paw, open to browse without signing in; remix one into your own workspace.",
+      "surface": "/discover"
+    },
+    {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:fabric",
+      "keywords": [
+        "fabric browser",
+        "entity browser",
+        "ontology view",
+        "object types"
+      ],
+      "kind": "surface",
+      "name": "Fabric",
+      "narrative": "The /fabric page is the human view of Fabric, the workspace's typed knowledge graph of entities and the links between them. Point a user here to browse or inspect the entities Fabric holds; to explain Fabric itself or use it from an agent, see primitive:fabric.",
+      "presentation": "window",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "slash": "fabric",
+      "summary": "Browse the workspace's Fabric: its typed entities, their properties and links.",
+      "surface": "/fabric"
+    },
+    {
+      "agent_openable": true,
       "gist": "",
       "how": "",
       "id": "surface:files",
@@ -2543,11 +2775,14 @@
       "kind": "surface",
       "name": "Files",
       "narrative": "The Files surface is the workspace file browser and the place to write notes. Point a user here to browse, inspect, or manage the files the workspace holds (including files that feed the knowledge base), to make a markdown note or today's daily note, to link notes with [[wikilinks]] and see which notes link back, to tag files with #tags, or to view the whole library as a link graph. Behind it: GET /api/v1/files/{file_id}/links (outgoing links + backlinks) and GET /api/v1/files/graph (nodes, edges, ghost names for links with no file yet).",
+      "presentation": "inline",
       "requires": [],
+      "slash": "files",
       "summary": "Workspace file browser and notes library: files, folders, markdown notes with [[wikilinks]], backlinks, tags, and a link graph.",
       "surface": "/files"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:foresight",
@@ -2563,12 +2798,37 @@
       ],
       "kind": "surface",
       "name": "Foresight",
-      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
+      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, the Fabric view, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
+      "presentation": "window",
       "requires": [],
-      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, fabric, aggregate views).",
+      "slash": "foresight",
+      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, aggregate views).",
       "surface": "/foresight"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:growth",
+      "keywords": [
+        "outbound",
+        "prospects",
+        "outreach",
+        "leads",
+        "cold email",
+        "linkedin queue"
+      ],
+      "kind": "surface",
+      "name": "Growth",
+      "narrative": "The /growth surface is where a human runs the outbound engine: the prospect list and detail pages, outreach drafts waiting for approval, and the manual LinkedIn queue. Point a user here for prospecting and outreach work.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "growth",
+      "summary": "The outbound engine's workspace: prospects, outreach drafts and the LinkedIn queue.",
+      "surface": "/growth"
+    },
+    {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:home",
@@ -2589,11 +2849,14 @@
       "kind": "surface",
       "name": "Home",
       "narrative": "Home is the landing surface of the paw-enterprise client: a live widget grid (pinned pockets, the member 'intent of the day' board), an activity river, and a chat pill. Point a user here when they want their day at a glance or a place to start — everything else is one hop away.",
+      "presentation": "window",
       "requires": [],
+      "slash": "home",
       "summary": "The OS home screen: live Ripple widget grid, workspace activity feed, greeting, and chat pill.",
       "surface": "/"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:integrations",
@@ -2609,6 +2872,7 @@
       "kind": "surface",
       "name": "Integrations",
       "narrative": "The Integrations settings page manages workspace-level third-party credentials (web search, OAuth apps, image generation). Point a user here to wire up or fix an external service; connectors bound to pockets draw on these credentials. This is the home surface of the Connector primitive.",
+      "presentation": "window",
       "requires": [
         "primitive:connector"
       ],
@@ -2616,6 +2880,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "agent_openable": true,
       "gist": "",
       "how": "",
       "id": "surface:knowledge",
@@ -2630,11 +2895,14 @@
       "kind": "surface",
       "name": "Knowledge",
       "narrative": "The Knowledge surface hosts the workspace-level KB browser — compiled, searchable articles built from the workspace's files and sources. Point a user here to read or verify what the workspace knows about a topic.",
+      "presentation": "inline",
       "requires": [],
+      "slash": "knowledge",
       "summary": "Workspace knowledge-base browser: compiled articles from source files and documents, searchable.",
       "surface": "/knowledge"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:meetings",
@@ -2648,11 +2916,14 @@
       "kind": "surface",
       "name": "Meetings",
       "narrative": "The Meetings surface is the unified meetings timeline. Point a user here to review past and upcoming meetings and their details; meeting preferences live at /settings/meetings.",
+      "presentation": "window",
       "requires": [],
+      "slash": "meetings",
       "summary": "Unified meetings timeline.",
       "surface": "/meetings"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:mission-control",
@@ -2667,16 +2938,22 @@
         "plan",
         "analytics",
         "in flight",
-        "mission control"
+        "mission control",
+        "tasks",
+        "my tasks",
+        "task list"
       ],
       "kind": "surface",
       "name": "Deep Work",
       "narrative": "Deep Work is the operator surface at /deep-work — a unified work feed (Feed, Cycles, Analytics tabs) with per-item actions and project filters, plus the approvals tray where a human reviews and resolves the agent proposals the Instinct gate raises. Point a user here to run the workspace's ongoing work: what is in flight, what needs attention, what is waiting on approval, and how it is trending. It moved here from /mission-control on 2026-06-12 (the old URL still 308-redirects); the UI has always been labeled Deep Work.",
+      "presentation": "inline",
       "requires": [],
+      "slash": "deep-work",
       "summary": "Operator + approvals surface at /deep-work: unified work feed with cycles, plan, activity, and analytics tabs, plus the approvals tray, filterable by project.",
       "surface": "/deep-work"
     },
     {
+      "agent_openable": true,
       "gist": "",
       "how": "",
       "id": "surface:pockets",
@@ -2692,13 +2969,16 @@
       "kind": "surface",
       "name": "Pockets",
       "narrative": "The Pockets surface lists every pocket in the workspace and opens each one's live canvas (/pockets/<id>). After creating or editing a pocket, point the user here to see and use it. This is the home surface of the Pocket primitive.",
+      "presentation": "inline",
       "requires": [
         "primitive:pocket"
       ],
+      "slash": "pockets",
       "summary": "Pockets dashboard: the list of workspace pockets plus the canvas detail view for each one.",
       "surface": "/pockets"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:security",
@@ -2717,13 +2997,16 @@
       "kind": "surface",
       "name": "Security",
       "narrative": "Security is the paw-shield console at /security — origin-side AI behavioral defense, gated to workspace owners. It shows the live decisions feed (what the shield allowed or blocked), defense stats, the config (thresholds and allow-list), and the mode switch that arms or disarms the shield. Point an owner here to watch what the defense layer is doing, tune its threat thresholds, manage the allow-list, or change the defense mode. Non-owners see a denied state; the endpoints are owner-gated server-side too.",
+      "presentation": "window",
       "requires": [
         "role:owner"
       ],
+      "slash": "security",
       "summary": "Owner-gated paw-shield console at /security: live AI-defense decisions feed, stats, config, and the defense-mode switch.",
       "surface": "/security"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:settings",
@@ -2739,11 +3022,36 @@
       "kind": "surface",
       "name": "Settings",
       "narrative": "Settings hosts per-user pages (profile, security, notifications, preferences, API keys) and the workspace admin area under /settings/workspace (members, channels, integrations, policy, memory, SSO, voice — including the workspace plan). Point a user here to change how their account or workspace behaves.",
+      "presentation": "window",
       "requires": [],
+      "slash": "settings",
       "summary": "Personal + workspace settings: profile, security, notifications, preferences, API keys, and the workspace admin area.",
       "surface": "/settings"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "",
+      "id": "surface:ship",
+      "keywords": [
+        "deploy",
+        "deployment",
+        "server",
+        "box",
+        "managed deploy",
+        "ship it"
+      ],
+      "kind": "surface",
+      "name": "Ship",
+      "narrative": "The /ship console is the managed-deploy surface: boxes (servers) the workspace deploys to, their apps and deploy status, in a three-pane layout with a chat rail. Point a user here when they want to deploy or check on a deployed app; publishing a website is Sites, not Ship.",
+      "presentation": "window",
+      "requires": [],
+      "slash": "ship",
+      "summary": "Managed-deploy console: provision boxes and ship apps to them.",
+      "surface": "/ship"
+    },
+    {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:sites",
@@ -2760,13 +3068,16 @@
       "kind": "surface",
       "name": "Sites",
       "narrative": "The Sites surface shows the workspace's published websites as a card gallery and opens each site's detail (/sites/<siteId>). Describing a site in its chat rail triggers the create-then-publish flow. After publishing a website, point the user here to see the live site and manage it.",
+      "presentation": "inline",
       "requires": [
         "primitive:sites"
       ],
+      "slash": "sites",
       "summary": "Sites gallery: published Paw Sites as cards, with a chat rail that drives the create-and-publish flow.",
       "surface": "/sites"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:studio",
@@ -2783,11 +3094,14 @@
       "kind": "surface",
       "name": "Studio",
       "narrative": "Studio is the media-generation surface: the user describes an image or short video in the chat rail, the agent generates it, and results land in a gallery pocket on the left. Point a user here for any describe-to-media request.",
+      "presentation": "inline",
       "requires": [],
+      "slash": "studio",
       "summary": "Media generation gallery: describe an image or short video in the rail and the agent generates it into the gallery.",
       "surface": "/studio"
     },
     {
+      "agent_openable": true,
       "gist": "",
       "how": "",
       "id": "surface:studio_editor",
@@ -2809,11 +3123,14 @@
       "kind": "surface",
       "name": "Timeline Editor",
       "narrative": "The timeline editor is where generated or uploaded media is ASSEMBLED into one finished video. Tracks hold clips; the agent can arrange, trim, split and order them, place captions at given timings, lay audio into lanes and set transitions, all in one batch that lands as a single undo step. It does NOT generate footage — that is /studio. Point a user here when they have media and want to cut it together, caption it, or export it.",
+      "presentation": "window",
       "requires": [],
+      "slash": "studio/editor",
       "summary": "Video timeline editor: arrange clips on tracks, trim them, add captions and titles, set transitions, and export the cut.",
       "surface": "/studio/editor"
     },
     {
+      "agent_openable": false,
       "gist": "",
       "how": "",
       "id": "surface:workspace-admin",
@@ -2828,9 +3145,812 @@
       "kind": "surface",
       "name": "Workspace Admin",
       "narrative": "Workspace Admin is the workspace-scoped settings area: workspace name and plan, members, channels, integrations, memory, policy, SSO, voice, and advanced options. Point a user here for anything that affects the whole workspace — members, policy, SSO, and workspace identity. For billing, usage, plans, and the wallet, point the user at the dedicated /settings/billing surface instead.",
+      "presentation": "window",
       "requires": [],
       "summary": "Workspace administration: name, plan, members, channels, integrations, memory, policy, SSO, voice, advanced.",
       "surface": "/settings/workspace"
+    },
+    {
+      "applies_to": [
+        "room"
+      ],
+      "gist": "",
+      "how": "the 'Catch me up' action on a room",
+      "id": "verb:catch-up",
+      "keywords": [
+        "summary of room",
+        "room recap",
+        "recap"
+      ],
+      "kind": "verb",
+      "name": "Catch me up",
+      "narrative": "A composer verb in the no-UI shell. The room's 'Catch me up' action sends the room's recent messages to the agent, which summarizes them. Read-only: nothing is posted. The agent side of this is the read-only room tools.",
+      "requires": [],
+      "risk": "read",
+      "summary": "One-tap room summary: the agent reads the room's recent messages and sums them up.",
+      "surface": "",
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "file"
+      ],
+      "gist": "",
+      "how": "the Delete verb on a file",
+      "id": "verb:file-delete",
+      "keywords": [
+        "delete file",
+        "remove file",
+        "trash file"
+      ],
+      "kind": "verb",
+      "name": "Delete file",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: delete it. Risky and NOT undoable — confirm with the user first.",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Permanently delete a file from Files.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "file"
+      ],
+      "gist": "",
+      "how": "the Download verb on a file",
+      "id": "verb:file-download",
+      "keywords": [
+        "download",
+        "save locally",
+        "download file"
+      ],
+      "kind": "verb",
+      "name": "Download file",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: download it. Read-only.",
+      "requires": [],
+      "risk": "read",
+      "summary": "Download a file from Files to the device.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "file"
+      ],
+      "gist": "",
+      "how": "the Move verb on a file",
+      "id": "verb:file-move",
+      "keywords": [
+        "move file",
+        "move to folder",
+        "relocate",
+        "organize"
+      ],
+      "kind": "verb",
+      "name": "Move file",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: move it to another folder.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Move a file into another folder in Files.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "file"
+      ],
+      "gist": "",
+      "how": "the Rename verb on a file",
+      "id": "verb:file-rename",
+      "keywords": [
+        "rename file",
+        "rename",
+        "new name",
+        "change the name"
+      ],
+      "kind": "verb",
+      "name": "Rename file",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: rename it in place. Its links and id stay the same.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Give a file in Files a new name.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "file"
+      ],
+      "gist": "",
+      "how": "the Share link verb on a file",
+      "id": "verb:file-share-link",
+      "keywords": [
+        "share link",
+        "share file",
+        "shareable link",
+        "send file link"
+      ],
+      "kind": "verb",
+      "name": "Share file link",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: mint a share link. Undoable — the link can be revoked.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Make a share link for a file so others can open it.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "file"
+      ],
+      "gist": "",
+      "how": "the Summarize verb on a file",
+      "id": "verb:file-summarize",
+      "keywords": [
+        "summarize file",
+        "tl;dr",
+        "what is in this file",
+        "file summary"
+      ],
+      "kind": "verb",
+      "name": "Summarize file",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a file: the agent reads the file and summarizes it. Read-only.",
+      "requires": [],
+      "risk": "read",
+      "summary": "Ask the agent for a summary of a file's contents.",
+      "surface": "",
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "article"
+      ],
+      "gist": "",
+      "how": "the Add note verb in knowledge",
+      "id": "verb:knowledge-add-note",
+      "keywords": [
+        "add note",
+        "add to kb",
+        "save to knowledge",
+        "jot down"
+      ],
+      "kind": "verb",
+      "name": "Add to knowledge",
+      "narrative": "A composer verb in the no-UI shell. An object verb in Knowledge: add a note as a new article.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Add a note to the knowledge base.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "article"
+      ],
+      "gist": "",
+      "how": "the Summarize verb on a knowledge article",
+      "id": "verb:knowledge-summarize",
+      "keywords": [
+        "summarize article",
+        "article summary",
+        "kb summary"
+      ],
+      "kind": "verb",
+      "name": "Summarize article",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a knowledge article: the agent summarizes it. Read-only.",
+      "requires": [],
+      "risk": "read",
+      "summary": "Ask the agent to summarize a knowledge article.",
+      "surface": "",
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "message"
+      ],
+      "gist": "",
+      "how": "the Delete verb on your own message",
+      "id": "verb:message-delete",
+      "keywords": [
+        "delete message",
+        "unsend",
+        "remove my message"
+      ],
+      "kind": "verb",
+      "name": "Delete own message",
+      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: delete it. Risky, not undoable.",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Delete a message you sent.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "message"
+      ],
+      "gist": "",
+      "how": "the Edit verb on your own message",
+      "id": "verb:message-edit",
+      "keywords": [
+        "edit message",
+        "fix typo",
+        "change my message"
+      ],
+      "kind": "verb",
+      "name": "Edit own message",
+      "narrative": "A composer verb in the no-UI shell. An object verb on your own chat message: edit its text. Risky because others see the change; undoable (the old text is put back).",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Edit a message you sent.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "message"
+      ],
+      "gist": "",
+      "how": "the React verb on a message",
+      "id": "verb:message-react",
+      "keywords": [
+        "react",
+        "emoji",
+        "reaction",
+        "thumbs up"
+      ],
+      "kind": "verb",
+      "name": "React to message",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: react with an emoji.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Add an emoji reaction to a chat message.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "message"
+      ],
+      "gist": "",
+      "how": "the Reply verb on a message",
+      "id": "verb:message-reply",
+      "keywords": [
+        "reply",
+        "respond",
+        "thread reply",
+        "answer"
+      ],
+      "kind": "verb",
+      "name": "Reply to message",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a chat message: reply in the thread. Risky: the reply posts as the user where others see it, and it can't be unsent from the composer.",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Reply to a chat message in its thread.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "panel"
+      ],
+      "gist": "",
+      "how": "the Keep as pocket verb on a panel",
+      "id": "verb:panel-keep",
+      "keywords": [
+        "keep panel",
+        "save panel",
+        "keep this",
+        "pin panel"
+      ],
+      "kind": "verb",
+      "name": "Keep as pocket",
+      "narrative": "A composer verb in the no-UI shell. An object verb on an ephemeral Ripple panel the agent drew in the thread: keep it as a Pocket so it persists. Undoable.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Keep a Ripple panel from the thread as a Pocket.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "pocket"
+      ],
+      "gist": "",
+      "how": "the Change this verb on a pocket",
+      "id": "verb:pocket-change",
+      "keywords": [
+        "change this pocket",
+        "edit pocket",
+        "tweak app"
+      ],
+      "kind": "verb",
+      "name": "Change this pocket",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Pocket: 'Change this' hands the agent an edit request for that Pocket's canvas.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Ask the agent to change a Pocket you're looking at.",
+      "surface": "",
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "pocket"
+      ],
+      "gist": "",
+      "how": "the Delete verb on a pocket",
+      "id": "verb:pocket-delete",
+      "keywords": [
+        "delete pocket",
+        "remove pocket",
+        "delete app"
+      ],
+      "kind": "verb",
+      "name": "Delete pocket",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Pocket: delete it. Risky, not undoable — confirm first.",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Delete a Pocket and its canvas.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "pocket"
+      ],
+      "gist": "",
+      "how": "the Rename verb on a pocket",
+      "id": "verb:pocket-rename",
+      "keywords": [
+        "rename pocket",
+        "rename app"
+      ],
+      "kind": "verb",
+      "name": "Rename pocket",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Pocket (workspace app container): rename it.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Rename a Pocket.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "channel"
+      ],
+      "gist": "",
+      "how": "type /send #channel your message in the composer",
+      "id": "verb:send",
+      "keywords": [
+        "send",
+        "post",
+        "message to channel",
+        "post in channel",
+        "send a message",
+        "tell the channel",
+        "announce"
+      ],
+      "kind": "verb",
+      "name": "Send to a channel",
+      "narrative": "A composer verb in the no-UI shell. /send #channel <text> posts the text into that channel AS THE USER, so everyone in the channel sees it under their name. It is risky because it speaks for the user in front of others and a sent message cannot be unsent from the composer. Suggest it when the user wants to say something in a channel without opening the chat; to read a channel instead, use the read-only room tools.",
+      "requires": [],
+      "risk": "risky",
+      "slash": "send",
+      "summary": "Post a message into a chat channel as the user, straight from the composer.",
+      "surface": "",
+      "triggers": [
+        "slash"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "site"
+      ],
+      "gist": "",
+      "how": "type /site a calm dentist landing page in the composer",
+      "id": "verb:site",
+      "keywords": [
+        "build site",
+        "new site",
+        "site brief",
+        "make site"
+      ],
+      "kind": "verb",
+      "name": "Build a site",
+      "narrative": "A composer verb in the no-UI shell. /site <brief> hands the brief to the agent, which builds a Paw Site draft (a Pocket that can be published). Use it as the fast path for 'make me a site for ...'; publishing stays a separate, explicit step.",
+      "requires": [],
+      "risk": "safe",
+      "slash": "site",
+      "summary": "Ask the agent to build a website from a one-line brief, from the composer.",
+      "surface": "",
+      "triggers": [
+        "slash",
+        "agent"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "site"
+      ],
+      "gist": "",
+      "how": "the Change this verb on a site",
+      "id": "verb:site-change",
+      "keywords": [
+        "change this site",
+        "edit site",
+        "tweak site"
+      ],
+      "kind": "verb",
+      "name": "Change this site",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a site: 'Change this' hands the agent an edit request for that site's draft.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Ask the agent to change a site you're looking at.",
+      "surface": "",
+      "triggers": [
+        "verb",
+        "agent"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "site"
+      ],
+      "gist": "",
+      "how": "the Copy URL verb on a site",
+      "id": "verb:site-copy-url",
+      "keywords": [
+        "copy url",
+        "copy link",
+        "site url"
+      ],
+      "kind": "verb",
+      "name": "Copy site URL",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a published site: copy its URL. Read-only.",
+      "requires": [],
+      "risk": "read",
+      "summary": "Copy a published site's URL.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "site"
+      ],
+      "gist": "",
+      "how": "the Delete verb on a site",
+      "id": "verb:site-delete",
+      "keywords": [
+        "delete site",
+        "remove site",
+        "take down"
+      ],
+      "kind": "verb",
+      "name": "Delete site",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a site: delete it. Risky, not undoable — confirm first.",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Delete a site.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "site"
+      ],
+      "gist": "",
+      "how": "the Open live verb on a site",
+      "id": "verb:site-open-live",
+      "keywords": [
+        "view live",
+        "live url",
+        "visit site"
+      ],
+      "kind": "verb",
+      "name": "Open live site",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a published site: open the live URL. Read-only.",
+      "requires": [],
+      "risk": "read",
+      "summary": "Open the published site in a new tab.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "site"
+      ],
+      "gist": "",
+      "how": "the Publish verb on a site",
+      "id": "verb:site-publish",
+      "keywords": [
+        "publish draft",
+        "make it live",
+        "push live"
+      ],
+      "kind": "verb",
+      "name": "Publish site draft",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a Paw Site draft: publish it live. Risky because it makes the draft public.",
+      "requires": [],
+      "risk": "risky",
+      "summary": "Publish a site draft so it is live.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "type /task Fix login @rohit in the composer (alias /new-task)",
+      "id": "verb:task",
+      "keywords": [
+        "new task",
+        "create task",
+        "add a task",
+        "todo",
+        "to-do",
+        "remind",
+        "follow up",
+        "ticket"
+      ],
+      "kind": "verb",
+      "name": "New task",
+      "narrative": "A composer verb in the no-UI shell. /task <title> @person creates a task (the alias /new-task does the same). Mention a teammate to assign it. Suggest it when the user wants a to-do recorded or handed to someone, e.g. 'you can also type /task Fix login @rohit'.",
+      "requires": [],
+      "risk": "safe",
+      "slash": "task",
+      "summary": "Create a task from the composer, optionally assigned to a teammate with @name.",
+      "surface": "",
+      "triggers": [
+        "slash"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Assign verb on a task",
+      "id": "verb:task-assign",
+      "keywords": [
+        "assign",
+        "assign task",
+        "hand off",
+        "delegate",
+        "reassign"
+      ],
+      "kind": "verb",
+      "name": "Assign",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: hand it to a teammate.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Assign a task to a teammate.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Complete verb on a task",
+      "id": "verb:task-complete",
+      "keywords": [
+        "complete",
+        "mark done",
+        "check off",
+        "finish",
+        "close out"
+      ],
+      "kind": "verb",
+      "name": "Mark done",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: mark it complete. Undoable (reopen it).",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Mark a task done.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Due today / Due tomorrow / Due next week verbs on a task",
+      "id": "verb:task-due",
+      "keywords": [
+        "due date",
+        "due today",
+        "due tomorrow",
+        "due next week",
+        "deadline",
+        "schedule task"
+      ],
+      "kind": "verb",
+      "name": "Set due date",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: set its due date to today, tomorrow or next week.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Set a task due today, tomorrow or next week.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Reject verb on a task",
+      "id": "verb:task-reject",
+      "keywords": [
+        "reject task",
+        "decline task",
+        "won't do"
+      ],
+      "kind": "verb",
+      "name": "Reject",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: reject a proposed task.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Reject a task proposed to you.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Rename verb on a task",
+      "id": "verb:task-rename",
+      "keywords": [
+        "rename task",
+        "retitle",
+        "change task title"
+      ],
+      "kind": "verb",
+      "name": "Rename",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: change its title. Undoable (the old title is put back).",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Give a task a new title.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Reopen verb on a task",
+      "id": "verb:task-reopen",
+      "keywords": [
+        "reopen",
+        "reopen task",
+        "not done"
+      ],
+      "kind": "verb",
+      "name": "Reopen",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: reopen a completed task.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Reopen a completed task.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": true
+    },
+    {
+      "applies_to": [
+        "task"
+      ],
+      "gist": "",
+      "how": "the Snooze verb on a task",
+      "id": "verb:task-snooze",
+      "keywords": [
+        "snooze",
+        "later",
+        "postpone",
+        "defer"
+      ],
+      "kind": "verb",
+      "name": "Snooze",
+      "narrative": "A composer verb in the no-UI shell. An object verb on a task: snooze it out of the way for a day. The composer offers no undo for it.",
+      "requires": [],
+      "risk": "safe",
+      "summary": "Snooze a task so it comes back later.",
+      "surface": "",
+      "triggers": [
+        "verb"
+      ],
+      "undo": false
     },
     {
       "gist": "",

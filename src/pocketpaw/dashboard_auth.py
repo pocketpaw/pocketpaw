@@ -1,7 +1,13 @@
 """Authentication middleware and token management for PocketPaw dashboard.
 
 Extracted from dashboard.py — contains:
-- ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled proxy)
+- ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled
+  proxy); remote hosts are rejected before any settings are loaded
+- ``_auth_dispatch()`` — the auth cascade; the per-IP ``api_limiter`` applies
+  only to callers that are neither authenticated here nor resolved by the EE
+  auth bridge (``request.state.ee_user_authenticated``, a limiter-only flag).
+  Signed-in cloud users, guests included, are exempt; guest-JWT minting is
+  capped separately by ``guest_mint_limiter`` (3/hr per IP)
 - ``verify_token()`` — standalone token verification
 - ``auth_middleware()`` — HTTP middleware (registered by dashboard.py)
 - ``auth_router`` — APIRouter with session token, cookie login/logout, QR code,
@@ -10,6 +16,7 @@ Extracted from dashboard.py — contains:
 
 import hmac
 import io
+import json
 import logging
 import re
 
@@ -89,11 +96,13 @@ def _is_genuine_localhost(request_or_ws) -> bool:
 
     The ``localhost_auth_bypass`` setting (default True) controls whether genuine
     localhost connections skip auth.  Set to False to require tokens everywhere.
-    """
-    settings = Settings.load()
-    if not settings.localhost_auth_bypass:
-        return False
 
+    The cheap checks (client host, proxy headers) run first so remote traffic
+    never pays for ``Settings.load()`` (~5 ms: config.json + credential store).
+    All three conditions must hold, so the order does not change the result.
+    The setting is still read fresh (not via the cached ``get_settings()``)
+    because out-of-process config edits do not clear that cache.
+    """
     client_host = request_or_ws.client.host if request_or_ws.client else None
     if client_host not in _LOCALHOST_ADDRS:
         return False
@@ -109,7 +118,7 @@ def _is_genuine_localhost(request_or_ws) -> bool:
         if headers.get(hdr):
             return False
 
-    return True
+    return bool(Settings.load().localhost_auth_bypass)
 
 
 # ---------------------------------------------------------------------------
@@ -373,11 +382,16 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     # Brute-force guard for login / register / bearer-login (OWASP A07).
     # These paths used to be unconditionally exempt from rate limiting, which
-    # left an unbounded brute-force window. The per-(ip, email) bucket prevents
-    # an attacker from rotating the email field behind one IP to slip the
-    # per-IP api_limiter. fastapi-users reads the form body downstream, so we
-    # cache the body bytes on request.state and the ASGI wrapper in
-    # AuthMiddleware.__call__ replays them via a wrapped `receive`.
+    # left an unbounded brute-force window. The bucket is per (ip, email), so
+    # rotating the email behind one IP falls to the per-IP api_limiter, while
+    # distinct signups from one office IP do not share a bucket. The email is
+    # read by Content-Type: login posts an OAuth2 form ("username"), register
+    # posts JSON ("email"). request.form() does not raise on a JSON body, it
+    # returns an empty form, so JSON must be parsed explicitly. A missing or
+    # unparseable email keys on "" (per-IP), the conservative fallback.
+    # Downstream handlers read the body again, so we cache the bytes on
+    # request.state and the ASGI wrapper in AuthMiddleware.__call__ replays
+    # them via a wrapped `receive`.
     if request.method == "POST" and path in _LOGIN_RATE_LIMITED_PATHS:
         try:
             body_bytes = await request.body()
@@ -387,22 +401,14 @@ async def _auth_dispatch(request: Request) -> Response | None:
             request.state.cached_body = body_bytes
         email = ""
         try:
-            form = await request.form()
-            # fastapi-users uses OAuth2PasswordRequestForm — field is "username".
-            # /register receives JSON with an "email" field instead.
-            email = str(form.get("username") or form.get("email") or "").strip().lower()
+            if "json" in request.headers.get("content-type", "").lower():
+                payload = json.loads(body_bytes or b"{}")
+                fields = payload if isinstance(payload, dict) else {}
+            else:
+                fields = await request.form()
+            email = str(fields.get("username") or fields.get("email") or "").strip().lower()
         except Exception:
-            # JSON body on /register — best-effort parse for the email key.
-            try:
-                import json as _json
-
-                payload = _json.loads(body_bytes.decode("utf-8") or "{}")
-                if isinstance(payload, dict):
-                    email = (
-                        str(payload.get("email") or payload.get("username") or "").strip().lower()
-                    )
-            except Exception:
-                email = ""
+            email = ""
         key = f"login:{client_ip}:{email}"
         rl_info = login_limiter.check(key)
         if not rl_info.allowed:
@@ -655,16 +661,23 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # Runs now that the auth cascade above has set is_valid / full_access.
     # Authenticated callers are EXEMPT from this per-IP bucket:
     #   - full_access (master token / dashboard session / genuine localhost) is
-    #     already fully trusted — and is the bug we're fixing: the desktop
-    #     editor fans many /api/v1/* calls out of the single localhost IP, which
-    #     used to drain one shared 30-token bucket and 429.
+    #     already fully trusted; the desktop editor fans many /api/v1/* calls
+    #     out of the single localhost IP, which one 30-token bucket can't hold.
     #   - api-key callers already passed their own per-key limiter above
     #     (apikey:<id>); the per-IP bucket would only double-limit them.
     #   - oauth callers authenticated by token, not by IP.
-    # UNauthenticated /api (and any other non-exempt) traffic still hits the
-    # per-IP api_limiter, so the brute-force / abuse cap is preserved. The
+    #   - cloud users whose fastapi-users JWT the EE auth bridge resolved to an
+    #     active, non-revoked user (``ee_user_authenticated``), guests included.
+    #     A static SPA reload fans out 20+ /api/v1/* calls, which a 30-token
+    #     bucket cannot absorb. The flag only skips this bucket: it sets neither
+    #     is_valid nor full_access, so it grants no route access (their routes
+    #     authenticate the JWT themselves, and non-/api/v1/ paths still 401
+    #     below). Minting a guest JWT is capped separately by
+    #     ``guest_mint_limiter`` (3/hr per IP).
+    # Everyone else (anonymous, garbage/revoked/inactive-user tokens) stays on
+    # the per-IP api_limiter, so the brute-force / abuse cap is preserved. The
     # separate login / auth-session / qr buckets are untouched.
-    if not is_valid:
+    if not is_valid and not getattr(request.state, "ee_user_authenticated", False):
         rl_info = api_limiter.check(client_ip)
         if not rl_info.allowed:
             return JSONResponse(

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud.growth import executor as growth_executor
 from pocketpaw_ee.cloud.growth import mock_delivery
 from pocketpaw_ee.cloud.growth import service as growth_service
 from pocketpaw_ee.cloud.models.workspace import Workspace
@@ -264,10 +265,15 @@ async def test_mock_deliver_blocks_an_ineligible_draft(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mock_on", [True, False])
 async def test_approve_uses_mock_delivery_only_when_on(
-    admin, tray, ws_id, gate_store, pool, authorized, mock_on
+    admin, tray, ws_id, gate_store, pool, authorized, mock_on, monkeypatch
 ):
+    # Mock delivery must work on the default deploy, which runs no growth
+    # worker; the real enqueue path needs one.
     if mock_on:
+        monkeypatch.delenv(growth_executor.GROWTH_WORKER_ENV, raising=False)
         await admin.patch("/api/v1/growth/settings", json={"mock_delivery": True})
+    else:
+        monkeypatch.setenv(growth_executor.GROWTH_WORKER_ENV, "true")
     prospect = await _prospect(admin)
     draft = await _draft(admin, prospect["id"])
     proposal = (await admin.post(f"/api/v1/growth/drafts/{draft['id']}/propose")).json()

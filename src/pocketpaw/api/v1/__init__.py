@@ -22,6 +22,10 @@
 #   (POST /api/v1/cloud/projects) for creating S3-backed project folders
 #   from the /code route's "New Cloud Project" card.
 #
+# Updated: 2026-10-01 (feat/atlas-canonical) — Added the Atlas read router
+#   (GET /api/v1/atlas/{surfaces,verbs,search}): the composer's slash commands,
+#   verb chips and command search read the atlas OS self-model from here.
+#
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
 
@@ -57,6 +61,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.intentions", "router", "Intentions"),
     ("pocketpaw.api.v1.files", "router", "Files"),
     ("pocketpaw.api.v1.unfurl", "router", "Unfurl"),
+    ("pocketpaw.api.v1.atlas", "router", "Atlas"),
     ("pocketpaw.api.v1.plan_mode", "router", "Plan Mode"),
     ("pocketpaw.api.v1.remote", "router", "Remote"),
     ("pocketpaw.api.v1.telegram", "router", "Telegram"),

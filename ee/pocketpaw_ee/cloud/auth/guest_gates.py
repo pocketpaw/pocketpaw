@@ -1,9 +1,13 @@
 # ee/pocketpaw_ee/cloud/auth/guest_gates.py — where guest limits are ENFORCED.
 #
 # Created 2026-09-01 (feat/byok-guest-backend).
+# Updated 2026-10-01 (CN-3): the daily turn counter is the shared
+# ``metering.service`` daily primitive (meter ``guest_turns``, subject = the
+# guest USER), not a guest-only collection. Same cap, same fail-closed spend.
 #
-# The budget lives in ``guest_budget`` (counters, fail-closed); this module is
-# the seams. Mirrors the billing gate split exactly (``credits/guards.py``):
+# The limits live in ``guest_budget``, the counter in ``metering.service``
+# (fail-closed); this module is the seams. Mirrors the billing gate split
+# exactly (``credits/guards.py``):
 #
 #   * ``assert_guest_turn_allowed`` — CHECK-ONLY, for the synchronous chat HTTP
 #     chokepoint (``chat/agent_router``). Raises the 402 the frontend's signup
@@ -34,6 +38,8 @@ from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import GuestKeyRequired, GuestLimitError
 from pocketpaw_ee.cloud.auth import guest_budget
+from pocketpaw_ee.cloud.metering import service as metering
+from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +84,10 @@ async def assert_guest_turn_allowed(user_id: str, workspace_id: str | None) -> N
     if not await _byok_key_configured(workspace_id or guest.active_workspace):
         raise GuestKeyRequired()
     cap = guest_budget.limits_for(guest).turns_per_day
-    if await guest_budget.turns_used_today(user_id) >= cap:
+    if (
+        await metering.used(subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS)
+        >= cap
+    ):
         raise GuestLimitError("turns")
 
 
@@ -111,9 +120,12 @@ async def reject_if_guest_over_limit(
         return True
 
     cap = guest_budget.limits_for(guest).turns_per_day
-    allowed, spent, cap = await guest_budget.try_spend_turn(user_id, cap)
-    if allowed:
-        logger.info("guest turn %d/%d for user=%s", spent, cap, user_id)
+    # Fails CLOSED (the default): a broken database must not become an
+    # unmetered free tier.
+    if await metering.try_spend(
+        subject_type="user", subject_id=user_id, meter=DailyMeter.GUEST_TURNS, cap=cap
+    ):
+        logger.info("guest turn claimed for user=%s (cap %d)", user_id, cap)
         return False
     await _emit_reject(run_id, transport, GuestLimitError("turns"))
     return True

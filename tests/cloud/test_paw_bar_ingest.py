@@ -1,4 +1,6 @@
 # tests/cloud/test_paw_bar_ingest.py — PR-B: HTTP surface + event ingest.
+# Updated 2026-10-01 (CN-7): TestInterpolate imports the shared
+#   sites_capture.ingest.interpolate and pins that paw-bar uses the same one.
 # Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
 #   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
 #   route (fix/pawbar-public-route-gates, 2026-09-26).
@@ -32,6 +34,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -204,6 +207,64 @@ class TestWidgetCRUDEndpoints:
         created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
         res = client.post(f"/paw-bar/widgets/{created['id']}/spec/rollback")
         assert res.status_code == 401
+
+
+class TestSpecMoneyUnits:
+    """PATCH /paw-bar/widgets/{id}/spec refuses a catalog with a non-2-decimal
+    currency from a client that does not send ``X-Paw-Money-Units: iso4217``:
+    that client writes major × 100, and re-sends minor-unit prices it read, so
+    the server can neither store nor convert what it sends."""
+
+    @staticmethod
+    def _save(client: TestClient, currency: str, **headers: str):
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        spec = _spec(widget_id=created["id"]).model_dump()
+        spec["catalog"] = [{"id": "tea", "name": "Tea", "price_cents": 1500, "currency": currency}]
+        res = client.patch(
+            f"/paw-bar/widgets/{created['id']}/spec",
+            json=spec,
+            headers={"X-Paw-Bar-Token": created["access_token"], **headers},
+        )
+        return res, created
+
+    def test_a_yen_catalog_from_an_old_client_is_409_and_not_written(
+        self, client: TestClient
+    ) -> None:
+        res, created = self._save(client, "JPY")
+        assert res.status_code == 409
+        assert res.json()["detail"] == "currency_units_client_outdated"
+        stored = client.get(
+            f"/paw-bar/widgets/{created['id']}",
+            headers={"X-Paw-Bar-Token": created["access_token"]},
+        ).json()
+        assert stored["spec"]["catalog"] == []
+
+    @staticmethod
+    def _stored_price(store: PawBarStore, widget_id: str) -> int:
+        # The catalog lands in the catalog store, not the spec. A private loop,
+        # not asyncio.run, which would clear the thread's current loop for the
+        # sync tests after this one.
+        loop = asyncio.new_event_loop()
+        try:
+            [item] = loop.run_until_complete(store.get_catalog_items(widget_id, ["tea"]))
+        finally:
+            loop.close()
+        return item.price_cents
+
+    def test_a_yen_catalog_with_the_header_is_stored_as_sent(
+        self, app_with_store, client: TestClient
+    ) -> None:
+        res, created = self._save(client, "JPY", **{"X-Paw-Money-Units": "iso4217"})
+        assert res.status_code == 200, res.text
+        assert res.json()["spec"]["catalog"] == []
+        assert self._stored_price(app_with_store[1], created["id"]) == 1500  # not converted
+
+    def test_a_usd_catalog_from_an_old_client_still_saves(
+        self, app_with_store, client: TestClient
+    ) -> None:
+        res, created = self._save(client, "USD")
+        assert res.status_code == 200, res.text
+        assert self._stored_price(app_with_store[1], created["id"]) == 1500
 
 
 # ---------------------------------------------------------------------------
@@ -462,18 +523,18 @@ class TestInjectionScreening:
 
 
 # ---------------------------------------------------------------------------
-# _interpolate helper behavior
+# interpolate helper behavior (shared with sites_capture since CN-7)
 # ---------------------------------------------------------------------------
 
 
 class TestInterpolate:
     def test_full_placeholder_returns_raw_value(self) -> None:
-        from pocketpaw_ee.paw_bar.router import _interpolate
+        from pocketpaw.sites_capture.ingest import interpolate as _interpolate
 
         assert _interpolate("{{ payload.count }}", {"payload": {"count": 42}}) == 42
 
     def test_mixed_string_stringifies(self) -> None:
-        from pocketpaw_ee.paw_bar.router import _interpolate
+        from pocketpaw.sites_capture.ingest import interpolate as _interpolate
 
         out = _interpolate(
             "Order {{ payload.item }} for {{ customer_ref }}",
@@ -482,10 +543,29 @@ class TestInterpolate:
         assert out == "Order latte for cust_a"
 
     def test_missing_path_resolves_to_empty_string_in_mixed_mode(self) -> None:
-        from pocketpaw_ee.paw_bar.router import _interpolate
+        from pocketpaw.sites_capture.ingest import interpolate as _interpolate
 
         out = _interpolate("Hi {{ payload.name }}!", {"payload": {}})
         assert out == "Hi !"
+
+    def test_paw_bar_and_capture_share_one_interpolate(self) -> None:
+        """paw-bar used to carry a private copy. Both ingest paths now resolve
+        templates through the same function, so they cannot drift apart."""
+        from pocketpaw_ee.paw_bar import router
+
+        from pocketpaw.sites_capture import ingest
+        from pocketpaw.sites_capture.models import SiteEventMapping
+
+        assert router.interpolate is ingest.interpolate
+        assert not hasattr(router, "_interpolate")
+        ctx = {"payload": {"item": "latte", "count": 2}, "customer_ref": "cust_abcd"}
+        fields = {"item": "{{ payload.item }}", "line": "{{ payload.count }}x {{ payload.item }}"}
+        mapping = SiteEventMapping(creates="Order", fields=fields)
+        assert (
+            ingest.interpolate_mapping(mapping, ctx)
+            == {k: router.interpolate(v, ctx) for k, v in fields.items()}
+            == {"item": "latte", "line": "2x latte"}
+        )
 
 
 # ---------------------------------------------------------------------------

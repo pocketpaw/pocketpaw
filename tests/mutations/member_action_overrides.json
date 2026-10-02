@@ -16,8 +16,8 @@
   {
     "label": "cache a failed read, pinning the member for the process lifetime",
     "file": "ee/pocketpaw_ee/guards/deps.py",
-    "find": "            exc_info=True,\n        )\n        return False\n\n    _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, overrides)",
-    "replace": "            exc_info=True,\n        )\n        _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, [])\n        return False\n\n    _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, overrides)",
+    "find": "            exc_info=True,\n        )\n        return False\n\n    if len(_ACTION_OVERRIDE_CACHE) >= _ACTION_OVERRIDE_MAX:",
+    "replace": "            exc_info=True,\n        )\n        _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, [])\n        return False\n\n    if len(_ACTION_OVERRIDE_CACHE) >= _ACTION_OVERRIDE_MAX:",
     "tests": ["tests/cloud/test_member_action_overrides.py"]
   },
   {

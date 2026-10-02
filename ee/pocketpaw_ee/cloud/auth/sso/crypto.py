@@ -65,6 +65,13 @@ def decrypt(ciphertext: str) -> str:
     return _get_fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
 
 
+def decrypt_with_ttl(ciphertext: str, ttl_seconds: int) -> str:
+    """``decrypt`` that also rejects a token minted more than ``ttl_seconds`` ago
+    (Fernet tokens carry their creation time). Raises ``InvalidToken`` either way;
+    used for short-lived signed links."""
+    return _get_fernet().decrypt(ciphertext.encode("utf-8"), ttl=ttl_seconds).decode("utf-8")
+
+
 def _reset_for_tests() -> None:
     global _fernet, _warned
     with _lock:

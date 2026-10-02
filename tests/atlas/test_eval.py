@@ -1,4 +1,24 @@
 # tests/atlas/test_eval.py — intent→capability ranking-regression eval
+# Updated: 2026-10-02 (feat/discover-index, review) — baseline 86 → 88: two of the
+# four new Discover cases rank 1 (the other two are rank_within 3 and rank 2).
+# Updated: 2026-10-01 (feat/atlas-canonical) — baseline 83 → 84: "edit code in the
+# ide" pins surface:code after its keywords moved off the bare noun "file".
+# Updated: 2026-10-01 (feat/atlas-canonical, live tie fix) — baseline 77 → 83: six
+# navigational cases ("show me my files", "go to chat", "show tasks", ...) land on
+# their surface now that a verb matching only its object noun is damped, plus
+# "download this file". Keyword tightening, no case repointed: task-complete and
+# surface:belt dropped the bare "task" token, Deep Work gained "tasks".
+# Updated: 2026-10-01 (feat/atlas-canonical, review pass) — baseline 67 → 77: cases
+# for verb:site, the three deletes, task rename and the five new surfaces. The
+# new surface:fabric name damped primitive:fabric on "what is fabric" until a
+# stray "fabric" moved from surface:foresight's summary to its narrative.
+# Updated: 2026-10-01 (feat/atlas-canonical) — baseline 57 → 67: ten cases pin
+# the new composer verbs (verb:send, verb:task, verb:file-rename, ...). Every
+# earlier case kept its rank with the 31 verb entries in the corpus.
+# Updated: 2026-10-01 (feat/rooms-read-tool) — baseline 53 → 57: two cases pin
+# capability:chat.read_rooms, two keep surface:chat on navigation / start-a-DM.
+# Updated: 2026-09-30 (feat/open-surface-tool) — baseline 50 → 53: three cases
+# pin capability:surface.open and keep surface:studio_editor on its own intent.
 # Updated: 2026-09-05 (feat/files-links) — baseline 43/44 → 45/46: two cases
 # pin surface:files on the backlinks and link-graph intents now that the
 # surface carries wikilink / backlink / graph vocabulary.
@@ -72,7 +92,7 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 50
+STRICT_HIT_BASELINE = 88
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

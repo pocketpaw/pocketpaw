@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Chat domain — group business logic (CRUD, membership, agents, DMs).
 
 Sole owner of writes to the ``Group`` Beanie document. Module-level
@@ -9,6 +11,18 @@ now gates on ``agents.service.ensure_can_use`` in addition to the
 workspace-membership check, so a group admin can no longer attach another
 user's PRIVATE agent (the DM path already enforced this in
 ``get_or_create_agent_dm``).
+
+Updated: 2026-10-01 (feat/meetings-instant, MC-1) — ``type="meeting"`` rooms
+back meetings. ``create_meeting_room`` / ``delete_meeting_room`` are their only
+writers; the room list (and the workspace message search that reuses it) leaves
+them out, ``get_group`` needs membership, and ``update_group`` refuses them so a
+host can't retype one into a listed room.
+
+Updated: 2026-10-01 (feat/meetings-by-code, MC-2) — ``is_meeting_room`` and
+``add_meeting_room_member`` back ``POST /meetings/by-code/{code}/join``. The
+meetings service checks the caller's workspace first; this only ever adds to a
+``type="meeting"`` room, so a meeting code can't grant entry to a chat room.
+``join_group`` still refuses meeting rooms (only public groups and channels).
 """
 
 from __future__ import annotations
@@ -20,6 +34,20 @@ from typing import Any, Literal
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    GroupAgentAdded,
+    GroupAgentRemoved,
+    GroupAgentUpdated,
+    GroupCreated,
+    GroupJoined,
+    GroupMemberAdded,
+    GroupMemberRemoved,
+    GroupMemberRole,
+    GroupUpdated,
+)
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
 from pocketpaw_ee.cloud.chat.domain import Group as _GroupDomain
 from pocketpaw_ee.cloud.chat.domain import GroupAgent as _GroupAgentDomain
 from pocketpaw_ee.cloud.chat.schemas import (
@@ -33,21 +61,7 @@ from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
 from pocketpaw_ee.cloud.models.group import MemberRole
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.notifications import service as notifications_service
-from pocketpaw_ee.cloud.realtime.bus import get_resolver
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
-    GroupAgentAdded,
-    GroupAgentRemoved,
-    GroupAgentUpdated,
-    GroupCreated,
-    GroupJoined,
-    GroupMemberAdded,
-    GroupMemberRemoved,
-    GroupMemberRole,
-    GroupUpdated,
-)
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
-from pocketpaw_ee.cloud.shared.time import iso_utc
 from pocketpaw_ee.guards.actions import GroupRole
 from pocketpaw_ee.guards.audit import log_denial
 
@@ -253,83 +267,15 @@ def _require_domain_group_admin(group: _GroupDomain, user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _group_response(group: _GroupDoc) -> dict:
-    """Convert a Group document to a frontend-compatible dict.
-
-    Populates member IDs -> {_id, name, email} and agent IDs ->
-    {_id, agent, name, role, respond_mode}.
-    Uses batch queries to avoid N+1 per-member / per-agent lookups.
-    """
-    from pocketpaw_ee.cloud.models.agent import Agent as AgentModel
-    from pocketpaw_ee.cloud.models.user import User
-
-    member_ids = [PydanticObjectId(uid) for uid in group.members]
-    users = await User.find({"_id": {"$in": member_ids}}).to_list() if member_ids else []
-    user_map = {str(u.id): u for u in users}
-
-    populated_members = []
-    for uid in group.members:
-        user = user_map.get(uid)
-        if user:
-            populated_members.append(
-                {
-                    "_id": str(user.id),
-                    "name": user.full_name or user.email,
-                    "email": user.email,
-                    "avatar": user.avatar,
-                }
-            )
-        else:
-            populated_members.append({"_id": uid, "name": uid, "email": ""})
-
-    agent_ids = [PydanticObjectId(ga.agent) for ga in group.agents]
-    agents = await AgentModel.find({"_id": {"$in": agent_ids}}).to_list() if agent_ids else []
-    agent_map = {str(a.id): a for a in agents}
-
-    populated_agents = []
-    for ga in group.agents:
-        agent_doc = agent_map.get(ga.agent)
-        populated_agents.append(
-            {
-                "_id": str(agent_doc.id) if agent_doc else ga.agent,
-                "agent": ga.agent,
-                "name": agent_doc.name if agent_doc else "Agent",
-                "uname": agent_doc.slug if agent_doc else "",
-                "avatar": agent_doc.avatar if agent_doc else "",
-                "role": ga.role,
-                "respond_mode": ga.respond_mode,
-            }
-        )
-
-    return {
-        "_id": str(group.id),
-        "workspace": group.workspace,
-        "name": group.name,
-        "slug": group.slug,
-        "description": group.description,
-        "type": group.type,
-        "visibility": getattr(group, "visibility", "public"),
-        "icon": group.icon,
-        "color": group.color,
-        "owner": group.owner,
-        "members": populated_members,
-        "memberRoles": dict(group.member_roles),
-        "agents": populated_agents,
-        "pinnedMessages": group.pinned_messages,
-        "archived": group.archived,
-        "lastMessageAt": iso_utc(group.last_message_at),
-        "messageCount": group.message_count,
-        "createdAt": iso_utc(group.createdAt),
-    }
-
-
 async def _populate_lookups_for_domain_groups(
     groups: list[_GroupDomain],
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
     """Batch-load user + agent details for the given domain groups.
 
     Returns ``(users_by_id, agents_by_id)`` ready for
-    ``group_to_wire_dict``. Two Mongo queries regardless of group count.
+    ``group_to_wire_dict``. Two Mongo queries regardless of group count, each
+    projected to the fields the wire dict renders (a User doc also carries
+    password hashes, MFA secrets and OAuth tokens that never leave here).
     """
     from pocketpaw_ee.cloud.models.agent import Agent as AgentModel
     from pocketpaw_ee.cloud.models.user import User
@@ -349,14 +295,18 @@ async def _populate_lookups_for_domain_groups(
                 user_oids.append(PydanticObjectId(uid))
             except Exception:
                 pass
-        user_docs = await User.find({"_id": {"$in": user_oids}}).to_list() if user_oids else []
-        for u in user_docs:
-            users_by_id[str(u.id)] = {
-                "_id": str(u.id),
-                "name": u.full_name or u.email,
-                "email": u.email,
-                "avatar": u.avatar,
-            }
+        if user_oids:
+            cursor = User.get_pymongo_collection().find(
+                {"_id": {"$in": user_oids}}, {"full_name": 1, "email": 1, "avatar": 1}
+            )
+            async for u in cursor:
+                email = u.get("email", "")
+                users_by_id[str(u["_id"])] = {
+                    "_id": str(u["_id"]),
+                    "name": u.get("full_name") or email,
+                    "email": email,
+                    "avatar": u.get("avatar", ""),
+                }
 
     agents_by_id: dict[str, dict[str, str]] = {}
     if all_agent_ids:
@@ -366,16 +316,17 @@ async def _populate_lookups_for_domain_groups(
                 agent_oids.append(PydanticObjectId(aid))
             except Exception:
                 pass
-        agent_docs = (
-            await AgentModel.find({"_id": {"$in": agent_oids}}).to_list() if agent_oids else []
-        )
-        for a in agent_docs:
-            agents_by_id[str(a.id)] = {
-                "_id": str(a.id),
-                "name": a.name,
-                "uname": a.slug,
-                "avatar": a.avatar,
-            }
+        if agent_oids:
+            cursor = AgentModel.get_pymongo_collection().find(
+                {"_id": {"$in": agent_oids}}, {"name": 1, "slug": 1, "avatar": 1}
+            )
+            async for a in cursor:
+                agents_by_id[str(a["_id"])] = {
+                    "_id": str(a["_id"]),
+                    "name": a.get("name", ""),
+                    "uname": a.get("slug", ""),
+                    "avatar": a.get("avatar", ""),
+                }
 
     return users_by_id, agents_by_id
 
@@ -388,11 +339,13 @@ async def _populate_lookups_for_domain_groups(
 async def _list_visible_in_workspace(workspace_id: str, user_id: str) -> list[_GroupDomain]:
     """Channels (public) and public groups in the workspace + private/DM groups
     the user is a member of. Excludes archived. Private channels are only
-    surfaced to members who have been granted access."""
+    surfaced to members who have been granted access. Meeting rooms are
+    hidden: they never appear here, even to their members."""
     docs = await _GroupDoc.find(
         {
             "workspace": workspace_id,
             "archived": False,
+            "type": {"$ne": MEETING_GROUP_TYPE},
             "$or": [
                 # Public groups and channels visible to all workspace members
                 {"type": "public"},
@@ -698,6 +651,52 @@ async def create_group(workspace_id: str, user_id: str, body: CreateGroupRequest
     return resp
 
 
+async def create_meeting_room(workspace_id: str, host_id: str, name: str) -> str:
+    """Create the hidden ``type="meeting"`` room behind a meeting; returns its id.
+
+    The host is owner and only member. No ``group.created`` event: the room is
+    hidden, so nothing should add it to a sidebar.
+    """
+    group = await _create_group_doc(
+        workspace_id=workspace_id,
+        name=name,
+        slug=_generate_slug(name),
+        owner=host_id,
+        type=MEETING_GROUP_TYPE,
+        members=[host_id],
+    )
+    return group.id  # no-event: hidden room, see docstring
+
+
+async def delete_meeting_room(group_id: str) -> None:
+    """Hard-delete a meeting room that never went live (instant-start rollback)."""
+    doc = await _GroupDoc.get(PydanticObjectId(group_id))
+    if doc is not None and doc.type == MEETING_GROUP_TYPE:
+        await doc.delete()  # no-event: its creation emitted none either
+
+
+async def is_meeting_room(group_id: str) -> bool:
+    """True when ``group_id`` is a hidden ``type="meeting"`` room."""
+    group = await _get_group_domain_or_none(group_id)
+    return group is not None and group.type == MEETING_GROUP_TYPE
+
+
+async def add_meeting_room_member(group_id: str, user_id: str) -> None:
+    """Add ``user_id`` to a meeting room (idempotent). Refuses any other room type.
+
+    Only the meetings join-by-code path calls this, after it has checked that the
+    caller belongs to the meeting's workspace and the meeting is still open.
+    """
+    group = await _get_group_domain_or_404(group_id)
+    if group.type != MEETING_GROUP_TYPE:
+        raise Forbidden("group.not_joinable", "Only meeting rooms are joined by meeting code")
+    if user_id in group.members:
+        return
+    await _add_member_doc(group_id, user_id)
+    get_resolver().invalidate_group(group_id)
+    # no-event: hidden room (no sidebar entry to add), same as create_meeting_room
+
+
 async def list_groups(workspace_id: str, user_id: str) -> list[dict]:
     """List groups visible to the user.
 
@@ -721,7 +720,7 @@ async def get_group(group_id: str, user_id: str) -> dict:
     from pocketpaw_ee.cloud.chat.dto import group_to_wire_dict
 
     group = await _get_group_domain_or_404(group_id)
-    if group.type in ("private", "dm") or (
+    if group.type in MEMBER_ONLY_GROUP_TYPES or (
         group.type == "channel" and group.visibility == "private"
     ):
         _require_domain_group_member(group, user_id)
@@ -736,6 +735,10 @@ async def update_group(group_id: str, user_id: str, body: UpdateGroupRequest) ->
     group = await _get_group_domain_or_404(group_id)
     if group.type == "dm":
         raise Forbidden("group.cannot_update_dm", "DM groups cannot be updated")
+    if group.type == MEETING_GROUP_TYPE:
+        # Retyping would put the hidden room in everyone's list; the meeting's
+        # title is edited through the meetings API.
+        raise Forbidden("group.cannot_update_meeting", "Meeting rooms cannot be updated")
     _require_domain_group_admin(group, user_id)
 
     new_slug = _generate_slug(body.name) if body.name is not None else None
@@ -1156,9 +1159,10 @@ async def suggest_channels(workspace_id: str, q: str, *, limit: int = 8) -> list
         "visibility": {"$ne": "private"},
     }
     if q:
+        pattern = re.escape(q)  # literal substring: no injection, no ReDoS
         cquery["$or"] = [
-            {"name": {"$regex": q, "$options": "i"}},
-            {"slug": {"$regex": q, "$options": "i"}},
+            {"name": {"$regex": pattern, "$options": "i"}},
+            {"slug": {"$regex": pattern, "$options": "i"}},
         ]
     docs = await _GroupDoc.find(cquery).limit(limit).to_list()
     return [

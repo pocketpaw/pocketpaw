@@ -1,6 +1,10 @@
 # tests/cloud/credits/test_enforcement.py — BC-4 run-start hard-block +
 # the chunk-3 monthly-quota fast-reject (feat/billing-quota-enforcement).
 #
+# Updated 2026-10-01 (CN-3): the router's billing leg is now
+# ``credits.guards.assert_within_billing``, so ``_enforce`` sets the flag where
+# the guard reads it. Every assertion is unchanged.
+#
 # Proves the credit gates at the SINGLE chat run-start chokepoint
 # (chat/agent_router.py::post_agent_chat):
 #   1. billing_enforced=True + balance 0  -> POST returns 402 credits.insufficient
@@ -100,8 +104,10 @@ class _StubTransport:
 
 
 def _enforce(monkeypatch, mod, *, on: bool) -> None:
-    """Point the router's ``get_settings`` at a stub carrying the flag."""
-    monkeypatch.setattr(mod, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
+    """Point the billing guard's ``get_settings`` at a stub carrying the flag."""
+    from pocketpaw_ee.cloud.credits import guards
+
+    monkeypatch.setattr(guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
 
 
 def _patch_run_internals(mod):

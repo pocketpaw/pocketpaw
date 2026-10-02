@@ -1,0 +1,83 @@
+[
+  {
+    "label": "the gallery resolves $source markers without the page memo",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "                    memo=resolve_memo,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_gallery_source_reads_do_not_grow_with_pocket_count"
+    ]
+  },
+  {
+    "label": "memoized source results are shared, not copied, across specs",
+    "file": "ee/pocketpaw_ee/cloud/ripple_resolver.py",
+    "find": "    resolved = {id(m): copy.deepcopy(r) for m, r in zip(markers, results, strict=True)}",
+    "replace": "    resolved = {id(m): r for m, r in zip(markers, results, strict=True)}",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_shared_source_results_are_not_aliased_across_pockets"
+    ]
+  },
+  {
+    "label": "the gallery resolves each pocket's team with its own user query",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "                    team_users=team_users,\n                )\n                for d in docs",
+    "replace": "                )\n                for d in docs",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_gallery_resolves_every_team_in_one_user_query"
+    ]
+  },
+  {
+    "label": "visible_pocket_refs admits another user's private pocket",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            {\"visibility\": \"workspace\"},\n        ],\n    }\n    if project_id is not None:",
+    "replace": "            {\"visibility\": {\"$ne\": None}},\n        ],\n    }\n    if project_id is not None:",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_refs_exclude_another_users_private_pocket"
+    ]
+  },
+  {
+    "label": "visible_pocket_refs drops the team branch",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            {\"owner\": user_id},\n            {\"team\": user_id},\n            {\"shared_with\": user_id},\n            {\"visibility\": \"workspace\"},\n        ],\n    }\n    if project_id is not None:",
+    "replace": "            {\"owner\": user_id},\n            {\"shared_with\": user_id},\n            {\"visibility\": \"workspace\"},\n        ],\n    }\n    if project_id is not None:",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_refs_include_shared_with_and_team_pockets"
+    ]
+  },
+  {
+    "label": "site_pocket_ids hydrates whole Site documents",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        {\"_id\": 0, \"pocket_id\": 1},\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_site_pocket_ids_reads_only_pocket_id"
+    ]
+  },
+  {
+    "label": "builtin-widgets rewrites every row even when nothing changed",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        if any(getattr(existing, k) != v for k, v in wanted.items()):",
+    "replace": "        if True:",
+    "tests": [
+      "tests/cloud/pockets/test_query_patterns.py::test_builtin_widgets_seeded_db_costs_no_write_in_a_new_process"
+    ]
+  },
+  {
+    "label": "run-start gates raise the LAST failure instead of the first",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "    for outcome in await asyncio.gather(*checks, return_exceptions=True):",
+    "replace": "    for outcome in reversed(await asyncio.gather(*checks, return_exceptions=True)):",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_the_earliest_declared_failure_wins"
+    ]
+  },
+  {
+    "label": "run-start gates run one after another",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "    for outcome in await asyncio.gather(*checks, return_exceptions=True):\n        if isinstance(outcome, BaseException):\n            raise outcome",
+    "replace": "    for c in checks:\n        await c",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_the_checks_overlap_instead_of_running_in_sequence"
+    ]
+  }
+]

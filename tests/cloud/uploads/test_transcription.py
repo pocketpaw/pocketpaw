@@ -1,5 +1,9 @@
 # test_transcription.py — T2 "Audio/video transcription at ingest".
 # Created: 2026-08-29 (T2).
+# Updated: 2026-10-01 (CN-3) — the daily cap is the shared ``metering.service``
+# primitive (meter ``file_transcription``, one ``DailyUsage`` collection);
+# ``_claim`` makes the claim exactly as ``transcription.py`` does. Assertions
+# unchanged, except the old ``(spent, cap)`` tuple checks became counter reads.
 #
 # Three failure shapes are being defended against here, and they are the ones
 # this codebase keeps shipping — a feature that reads as SWITCHED OFF rather
@@ -47,7 +51,9 @@ from pathlib import Path
 import pytest
 from pocketpaw_ee.cloud._core.realtime.events import FileReady
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
-from pocketpaw_ee.cloud.uploads import transcription, transcription_budget
+from pocketpaw_ee.cloud.metering import service as metering
+from pocketpaw_ee.cloud.metering.domain import DailyMeter
+from pocketpaw_ee.cloud.uploads import transcription
 from pocketpaw_ee.cloud.uploads.extracted_text import blob_key, load_extracted_text
 
 from pocketpaw.uploads.file_store import FileRecord
@@ -159,19 +165,35 @@ class _NoopComprehension:
 # ---------------------------------------------------------------------------
 
 
+async def _claim(workspace_id):
+    """One transcription claim, exactly as ``transcription.py`` makes it."""
+    return await metering.try_spend(
+        subject_type="workspace",
+        subject_id=workspace_id,
+        meter=DailyMeter.FILE_TRANSCRIPTION,
+        cap=metering.file_transcription_cap(),
+    )
+
+
+async def _used(workspace_id: str) -> int:
+    return await metering.used(
+        subject_type="workspace", subject_id=workspace_id, meter=DailyMeter.FILE_TRANSCRIPTION
+    )
+
+
 @pytest.fixture()
 async def beanie_with_budget():
     """Beanie bound to the upload docs AND the transcription counter.
 
     The package conftest deliberately does not register
-    ``FileTranscriptionUsage``, so every OTHER uploads test runs with an
+    the shared ``DailyUsage`` counter, so every OTHER uploads test runs with an
     unreadable counter and therefore a fail-CLOSED budget — belt and braces
     with the conftest's raising fal stub. Tests that need a transcription to
     actually happen ask for this fixture.
     """
     from beanie import init_beanie
     from mongomock_motor import AsyncMongoMockClient
-    from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
+    from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
     from pocketpaw_ee.cloud.uploads.models import FileFolder, FileUpload
     from pocketpaw_ee.cloud.uploads.share_models import ShareLink
 
@@ -184,7 +206,7 @@ async def beanie_with_budget():
 
     db.list_collection_names = _safe  # type: ignore[method-assign]
 
-    models = [FileUpload, FileFolder, ShareLink, FileTranscriptionUsage]
+    models = [FileUpload, FileFolder, ShareLink, DailyUsage]
     await init_beanie(database=db, document_models=models)
     try:
         yield db
@@ -388,14 +410,11 @@ class TestTheCeiling:
         Mutation: move the ``try_spend`` call above the duration check — the
         counter row appears and this goes red.
         """
-        from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 
         monkeypatch.setattr(transcription, "_call_fal", _FakeFal())
         await _transcribe(_media_file(tmp_path, _mp4_bytes(4 * 3600), "long.mp4"), "video/mp4")
 
-        day = datetime.now(UTC).strftime("%Y-%m-%d")
-        row = await FileTranscriptionUsage.find_one(FileTranscriptionUsage.key == f"w1:{day}")
-        assert row is None, "a refused file consumed a transcription slot"
+        assert await _used("w1") == 0, "a refused file consumed a transcription slot"
 
     async def test_an_oversized_file_is_refused_when_the_length_is_unreadable(
         self, tmp_path, beanie_with_budget, monkeypatch
@@ -462,55 +481,50 @@ class TestTheDailyCap:
         as "transcription is off" — not as a bug. Asserted on the class, not
         on the source text, so a rename in beanie itself also fails here.
         """
-        from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
-        assert hasattr(FileTranscriptionUsage, "get_pymongo_collection")
-        assert not hasattr(FileTranscriptionUsage, "get_motor_collection")
-        assert "get_pymongo_collection" in inspect.getsource(transcription_budget.try_spend)
+        assert hasattr(DailyUsage, "get_pymongo_collection")
+        assert not hasattr(DailyUsage, "get_motor_collection")
+        assert "get_pymongo_collection" in inspect.getsource(metering.try_spend)
 
     def test_the_document_is_registered_for_beanie_init(self):
         """An unregistered document raises at claim time, inside the
         fail-closed except. Same silent refusal, one layer up."""
         from pocketpaw_ee.cloud.models import get_all_documents
-        from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 
-        assert FileTranscriptionUsage in get_all_documents()
+        assert DailyUsage in get_all_documents()
 
     async def test_the_cap_refuses_the_next_claim(self, beanie_with_budget, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "2")
 
-        first = await transcription_budget.try_spend("w1")
-        second = await transcription_budget.try_spend("w1")
-        third = await transcription_budget.try_spend("w1")
+        first = await _claim("w1")
+        second = await _claim("w1")
+        third = await _claim("w1")
 
-        assert first[0] is True
-        assert second[0] is True
-        assert third[0] is False, "the third claim on a cap of 2 must be refused"
-        assert third[1:] == (2, 2)
+        assert first is True
+        assert second is True
+        assert third is False, "the third claim on a cap of 2 must be refused"
 
     async def test_a_refused_claim_does_not_consume_a_slot(self, beanie_with_budget, monkeypatch):
         """An over-cap claim is rolled back, so the counter cannot run away to
         thousands and leave the workspace refused long after midnight."""
-        from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "1")
 
-        await transcription_budget.try_spend("w1")
+        await _claim("w1")
         for _ in range(5):
-            await transcription_budget.try_spend("w1")
+            await _claim("w1")
 
-        day = datetime.now(UTC).strftime("%Y-%m-%d")
-        row = await FileTranscriptionUsage.find_one(FileTranscriptionUsage.key == f"w1:{day}")
-        assert row is not None
-        assert row.used == 1
+        assert await _used("w1") == 1
 
     async def test_one_workspace_cannot_spend_anothers_budget(
         self, beanie_with_budget, monkeypatch
     ):
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "1")
 
-        await transcription_budget.try_spend("w1")
-        assert (await transcription_budget.try_spend("w2"))[0] is True
+        await _claim("w1")
+        assert await _claim("w2") is True
 
     async def test_an_unreadable_counter_fails_CLOSED(self, monkeypatch):
         """No Beanie binding in this test, so the collection genuinely cannot
@@ -519,22 +533,42 @@ class TestTheDailyCap:
         costs money."""
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "5")
 
-        assert (await transcription_budget.try_spend("w1"))[0] is False
+        assert await _claim("w1") is False
 
     async def test_no_workspace_is_refused(self, beanie_with_budget, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "5")
-        assert (await transcription_budget.try_spend(""))[0] is False
-        assert (await transcription_budget.try_spend(None))[0] is False
+        assert await _claim("") is False
+        assert await _claim(None) is False
 
     async def test_a_zero_cap_disables_the_feature(self, beanie_with_budget, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "0")
-        allowed, _spent, cap = await transcription_budget.try_spend("w1")
-        assert allowed is False
-        assert cap == 0
+        assert await _claim("w1") is False
+        assert metering.file_transcription_cap() == 0
 
     async def test_a_nonsense_cap_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "one hundred")
-        assert transcription_budget.daily_cap() == 100
+        assert metering.file_transcription_cap() == 100
+
+    async def test_an_unreadable_counter_stops_the_spend(
+        self, tmp_path, beanie_with_budget, monkeypatch
+    ):
+        """``transcribe_media``'s own claim fails CLOSED: the counter raises,
+        so the paid endpoint is never reached."""
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+
+        fal = _FakeFal()
+        monkeypatch.setattr(transcription, "_call_fal", fal)
+        monkeypatch.setenv("POCKETPAW_FILE_TRANSCRIPTION_DAILY", "10")
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("counter unavailable")
+
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+
+        result = await _transcribe(_media_file(tmp_path, _mp3_bytes(60)))
+
+        assert result is None
+        assert fal.calls == [], "an unreadable counter let the paid call through"
 
     async def test_an_exhausted_budget_stops_the_spend(
         self, tmp_path, beanie_with_budget, monkeypatch

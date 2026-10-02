@@ -209,11 +209,13 @@
 #   * :func:`wait_for_preview_result` is the verify pipeline's way to block on a job:
 #     ``arq.jobs.Job.result(timeout, poll_delay)`` on this lane's queue.
 # The stderr rule below was amended to say exactly where build text may now go.
+#
+# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
+# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
 """SL-2 — the site-build arq job and its enqueue helper."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 import os
@@ -224,10 +226,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from arq import create_pool
-from arq.connections import ArqRedis, RedisSettings
 from arq.jobs import Job, JobStatus
 
+from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.build_state import BuildStatus, settle
 from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
@@ -878,30 +879,10 @@ def _log_outcome(site_id: str, result: BuildRunResult, settlement: BuildSettleme
 # The enqueue
 # ---------------------------------------------------------------------------
 
-_pool: ArqRedis | None = None
-_pool_lock = asyncio.Lock()
-
-
-async def _get_pool() -> ArqRedis:
-    """The process's arq pool — the same lazy double-checked pattern the chat-runs
-    executor and the jobs service both use, for the same reason: one pool per process,
-    and concurrent first-enqueues must not leak two."""
-    global _pool
-    if _pool is None:
-        async with _pool_lock:
-            if _pool is None:
-                url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
-                if not url:
-                    raise RuntimeError(
-                        "POCKETPAW_REDIS_URL is not set — the site-build lane needs Redis."
-                    )
-                _pool = await create_pool(RedisSettings.from_dsn(url))
-    return _pool
-
-
-def _reset_for_tests() -> None:
-    global _pool
-    _pool = None
+# The process-wide arq pool (one pool, closed on shutdown) lives in
+# _core.redis_client. ``_get_pool`` is this module's name for it: callers and
+# tests monkeypatch it here.
+_get_pool = get_arq_pool
 
 
 def _mint_job_id(site_id: str) -> str:

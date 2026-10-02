@@ -141,7 +141,7 @@ class TestPublishPlanGate:
 
     @pytest.mark.asyncio
     async def test_publish_pocket_on_go_plan_passes_the_gate(
-        self, beanie_test_db, recording_bus
+        self, beanie_test_db, recording_bus, monkeypatch
     ) -> None:
         """A go-plan workspace passes the gate and publishes. The generator
         + Cloudflare client are faked so this runs without Bun/workerd/CF; the
@@ -179,6 +179,11 @@ class TestPublishPlanGate:
         class _FakeCloudflare:
             async def put_worker(self, **_kwargs):  # noqa: ANN003
                 return None
+
+        # A live publish schedules a knowledge sync that compiles articles with
+        # a real agent backend. It outlives this test's event loop, and a Claude
+        # CLI connect left pending there keeps the interpreter from exiting.
+        monkeypatch.setattr(sites_service, "_schedule_site_knowledge_sync", lambda _site: None)
 
         with _patch_plan("go"):
             doc = await sites_service.publish_pocket(

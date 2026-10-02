@@ -1,8 +1,19 @@
 """Unread service — per-user unread counts across joined groups.
 
 Paired with the ReadState model. Unread for a group is the number of
-messages with _id > last_read_message_id; mention_unread is the cached
-counter on the ReadState row.
+non-deleted messages with ``_id > last_read_message_id`` (the reader's own
+messages and thread replies included); mention_unread is the cached counter
+on the ReadState row.
+
+``list_unreads`` reads all of the user's ReadStates in one ``$in`` query,
+counts each group through the ``(group, _id)`` index, stops each count at
+``UNREAD_CAP``, and runs the per-group counts bounded-concurrent. The client
+renders anything over 99 as "99+", so the cap is invisible on screen.
+``unread_count`` (the push body, "N new messages") stays exact.
+
+2026-10-01 (feat/meetings-instant, MC-1): meeting rooms (``type="meeting"``) are
+hidden, so ``list_unreads`` leaves them out — no sidebar badge for a room the
+sidebar never shows.
 """
 
 from __future__ import annotations
@@ -11,14 +22,25 @@ from datetime import UTC, datetime
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
 from pocketpaw_ee.cloud.models.read_state import ReadState as _ReadStateDoc
 
+# Per-group ceiling for the /unreads listing. Must stay above 99 so the
+# client's ``> 99 ? "99+"`` badge still fires.
+UNREAD_CAP = 100
+
 
 async def _list_member_groups(user_id: str, workspace_id: str) -> list[_GroupDoc]:
     return await _GroupDoc.find(
-        {"workspace": workspace_id, "archived": False, "members": user_id}
+        {
+            "workspace": workspace_id,
+            "archived": False,
+            "members": user_id,
+            "type": {"$ne": MEETING_GROUP_TYPE},
+        }
     ).to_list()
 
 
@@ -26,11 +48,22 @@ async def _get_read_state(user_id: str, group_id: str) -> _ReadStateDoc | None:
     return await _ReadStateDoc.find_one({"user": user_id, "group": group_id})
 
 
-async def _count_messages_after(group_id: str, last_message_id: str) -> int:
+async def _read_states_by_group(user_id: str, group_ids: list[str]) -> dict[str, _ReadStateDoc]:
+    """All of the user's ReadStates for ``group_ids``, in one query."""
+    if not group_ids:
+        return {}
+    rows = await _ReadStateDoc.find({"user": user_id, "group": {"$in": group_ids}}).to_list()
+    return {r.group: r for r in rows}
+
+
+async def _count_messages_after(
+    group_id: str, last_message_id: str, *, cap: int | None = None
+) -> int:
     """Count group messages with _id greater than last_message_id.
 
     ObjectIds sort monotonically by creation time, so $gt on _id works as
-    an ordered cursor without a separate timestamp field.
+    an ordered cursor without a separate timestamp field. ``cap`` stops the
+    count after that many rows.
 
     We filter on ``group`` alone (not ``context_type``) because legacy rows
     written before ``context_type`` existed in the schema have the field
@@ -43,18 +76,21 @@ async def _count_messages_after(group_id: str, last_message_id: str) -> int:
     except Exception:
         return 0
 
-    return await _MessageDoc.find(
+    query = _MessageDoc.find(
         {
             "group": group_id,
             "_id": {"$gt": after},
             "deleted": False,
         }
-    ).count()
+    )
+    if cap is not None:
+        query = query.limit(cap)
+    return await query.count()
 
 
 async def list_unreads(user_id: str, workspace_id: str) -> list[dict]:
     """For each group the user is a member of, return
-    ``{group_id, unread, mention_unread}``.
+    ``{group_id, unread, mention_unread}``, ``unread`` capped at ``UNREAD_CAP``.
 
     A user with no ReadState row (never acked a read) OR a row whose
     ``last_read_message_id`` is the empty string (row was created by
@@ -63,17 +99,23 @@ async def list_unreads(user_id: str, workspace_id: str) -> list[dict]:
     safe default; a subsequent ``mark_read`` corrects it.
     """
     groups = await _list_member_groups(user_id, workspace_id)
-    out: list[dict] = []
-    for group in groups:
-        state = await _get_read_state(user_id, str(group.id))
+    states = await _read_states_by_group(user_id, [str(g.id) for g in groups])
+
+    async def _row(group: _GroupDoc) -> dict:
+        state = states.get(str(group.id))
         if state is None or not state.last_read_message_id:
-            unread = group.message_count
-            mention_unread = state.mention_unread if state else 0
+            unread = min(group.message_count, UNREAD_CAP)
         else:
-            unread = await _count_messages_after(str(group.id), state.last_read_message_id)
-            mention_unread = state.mention_unread
-        out.append({"group_id": str(group.id), "unread": unread, "mention_unread": mention_unread})
-    return out
+            unread = await _count_messages_after(
+                str(group.id), state.last_read_message_id, cap=UNREAD_CAP
+            )
+        return {
+            "group_id": str(group.id),
+            "unread": unread,
+            "mention_unread": state.mention_unread if state else 0,
+        }
+
+    return await map_bounded(groups, _row)
 
 
 async def unread_count(user_id: str, group_id: str) -> int:

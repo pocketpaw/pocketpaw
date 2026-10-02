@@ -2,6 +2,37 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
+  startup (and then every 30 minutes with the cloud scheduler on); the owner
+  using their own listing doesn't raise `remix_count`.
+Updated: 2026-10-02 (feat/discover-moderation) — "Platform — Discover
+  Moderation": staff list (SUPPORT) and feature / unfeature / hide / unhide /
+  reindex (OPERATOR) under /api/v1/platform/discover, each audited.
+Updated: 2026-10-02 (feat/discover-index, hardening) — Discover reports are
+  limited to 10 an hour per user (`429 discover.report_rate_limited`); a
+  Discover hide also hides the source template (so re-publishing it doesn't
+  bring it back) and keeps a hidden listing; staff unhide ignores that
+  listing's earlier reporters; a 30-minute reindex refreshes `live_url`.
+Updated: 2026-10-01 (feat/discover-index) — Site templates gain `kind`,
+  `audiences` (accepted on save and PATCH) and `live_url` (the source site's
+  deployed URL) on every response; public, unhidden templates are mirrored into
+  the Discover index. Added "Discover — Public Index" (GET /discover,
+  GET /discover/{id} public and rate-limited; POST /discover/{id}/use and
+  /report signed in).
+Updated: 2026-10-01 (CN-3, fix/canon-daily-caps) — the guest-cap note names the
+shared daily counter (`metering.service.try_spend`) instead of the removed
+`guest_budget.try_spend_turn`.
+
+Updated: 2026-10-01 (feat/atlas-canonical) — added "Atlas — Surfaces, Verbs and
+  Search" (GET /api/v1/atlas/{surfaces,verbs,search}), and `open_surface`'s
+  route list now comes from atlas (`agent_openable` surfaces). Review pass: the
+  atlas routes need an active user and resolve the caller's role.
+Updated: 2026-10-01 (feat/rooms-read-tool) — added "Agent — Read Chat Rooms
+  (`list_rooms` / `read_room`)": the read-only in-process MCP tools over the
+  workspace's own chat rooms, their authz path, caps and scoping.
+Updated: 2026-09-30 (feat/open-surface-tool) — added "Agent — Open an App Surface
+  (`open_surface`)": the in-process MCP tool, the `open_surface` chat stream event
+  it produces, and the checks between the two.
 Updated: 2026-09-29 (feat/growth-prospect-actions) — Growth — Prospects: added
   POST /growth/prospects/{id}/research (one-prospect research run that fills
   gaps and stores a `research` profile + `researched_at` on the envelope) and
@@ -894,6 +925,316 @@ When the pocket already matches its template the write is **skipped**
 preview route, plus `403` when the caller lacks edit access — enforced even on
 the skipped no-write path so a non-editor cannot probe sync state.
 
+## Pockets — Duplicate a Site
+
+### `POST /pockets/{pocket_id}/duplicate`
+
+Copy a site pocket (`type: "site"`) into a new, independent site pocket owned by
+the caller. The original is not modified. Read access is enough: the caller must
+be able to read the source pocket under the same within-workspace rule as
+`GET /pockets/{id}`.
+
+The copy carries exactly the authored site: `engine`, `pattern`, `rippleSpec`,
+`source` (the whole map, including `paw.dependencies.json` and a dynamic site's
+`objects` / `sources` / `actions` / `auth` keys) and `keepsClientBundle`. Nothing else is copied: no sharing, team,
+agents, widgets, tools, connector allowlist (the copy allows none), surface
+profile or project, and nothing from the source's Site row (slug, domains, D1
+database, deployment).
+
+The copy gets its own fresh DRAFT Site row so it lists in the sites gallery. That
+row is never built or deployed and nothing is billed. Visibility: a private
+source gives a private copy; any other source (workspace or public) gives a
+workspace-visible copy, so a public site is never re-published. Emits
+`PocketCreated` and `site.created`.
+
+Source gate: the copy is never less gated than a new pocket. It is gated if the
+source is gated or if the source gate is on at copy time, so an older exempt
+pocket does not pass its exemption to a copy.
+
+Audit: a successful copy writes one `pocket.duplicated` workspace audit event
+(`actorId` = caller, `targetId` = new pocket id, metadata `source_pocket_id` and
+`source_visibility`). The write is best-effort; a refused duplicate writes none.
+
+Request body (optional):
+
+```json
+{ "name": "Spring launch" }
+```
+
+`name` defaults to `"<source name> (copy)"`, with the source name trimmed so the
+result fits the 100-character limit.
+
+Response `200`: the new pocket's wire dict, the same shape `POST /pockets`
+returns.
+
+Returns `404` for a missing or cross-tenant pocket, `403` when the caller can't
+read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site,
+and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
+Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
+
+## Site templates
+
+Save a site pocket as a template, then start new sites from it. A template is a
+frozen copy of the site's authored content (the same five fields a duplicate
+copies, plus the source's source-gate stamp), stored on its own. Editing or
+deleting the source site does not change the template, and deleting the template
+does not touch sites made from it.
+
+### Visibility
+
+| `visibility` | Who can list, read and use it |
+|---|---|
+| `private` (default) | The owner, in the template's workspace |
+| `workspace` | Every member of the template's workspace |
+| `public` | Every signed-in user in every workspace, unless reports have hidden it |
+
+Only the owner can change or delete a template. Anyone who can't see a template
+gets `404`, never `403`, whatever the operation.
+
+Making a template public (on save or with `PATCH`) runs these checks first:
+
+- **No private files.** Every string in the site's ripple spec and source files is
+  scanned for addresses of the workspace's own files: `/api/v1/uploads/...`,
+  `/api/v1/files...`, `/api/v1/media/...` (studio output), `/api/v1/auth/avatar/...`,
+  `/uploads/...` (relative, or on this deployment's host), bare upload and media
+  storage keys, and presigned object-storage links (`X-Amz-Signature`,
+  `X-Goog-Signature`, `Signature=`). Any match is `422`
+  `site_templates.private_assets`, and the message says how many. External
+  images (`https://images.unsplash.com/...`) and the public Sites asset rail are
+  allowed.
+- **No locked source.** If the source gate would withhold this source from the
+  owner's workspace, the request is `403` `site_templates.source_not_shareable`.
+- The Sites plan gate and the 2 MB size cap, as on save.
+
+Every response and event carries the template's metadata only, never its
+content. `owner` is the owner's user id for the owner and `null` for everyone
+else, and nothing names the owner's workspace. `hidden` is only ever `true` for
+the owner:
+
+```json
+{
+  "id": "665f1c...",
+  "name": "Bakery",
+  "description": "",
+  "visibility": "public",
+  "version": 1,
+  "engine": "svelte",
+  "pattern": "landing",
+  "owner": null,
+  "is_mine": false,
+  "hidden": false,
+  "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
+  "kind": "site",
+  "audiences": ["shop"],
+  "live_url": "https://bakery.pawsites.workers.dev",
+  "created_at": "2026-10-01T09:00:00Z",
+  "updated_at": "2026-10-01T09:00:00Z"
+}
+```
+
+`preview_image_url` is a screenshot of the source site, or `null`. On save the
+source site's current screenshot is copied to the public Sites asset rail under
+the template's own prefix (`sites-assets/{workspace}/template-{id}/`), so it
+loads for every viewer of a public template and outlives the source site. It is
+never the source site's private `/api/v1/uploads/...` link. The copy is
+best-effort: no screenshot yet, no public asset bucket on the deployment, or a
+file that isn't a PNG, JPEG, GIF or WebP image leaves it `null` and the save
+still succeeds. Deleting the template removes the image.
+
+`kind` (`site`, the default, `tool` or `game`) and `audiences` (any of `shop`,
+`design`, `everyone`, `fun`; default `[]`) describe the template for the
+Discover index. `live_url` is the source site's live URL when that site is
+deployed, else `null`; it is re-read on save, on every `PATCH` and on every
+Discover reindex (once at startup, then every 30 minutes when the cloud
+scheduler is on), so a renamed
+or unpublished site's URL catches up within one reindex. A public template is
+listed in Discover; making it private or deleting it removes the listing. A
+hidden template (reported here or on Discover) keeps a hidden listing, and a
+hide from either side hides both: the template leaves the public list and `use`,
+and changing its visibility back to `public` keeps it hidden.
+
+Events: `site_template.saved`, `site_template.updated`, `site_template.deleted`
+(to the owner) and `site_template.used` (to the user who used it, with the new
+`pocket_id`). Nothing fans out to a workspace or to all users. Audit,
+best-effort: `site_template.saved`, `.updated`, `.preview_refreshed`, `.deleted` in the owner's
+workspace; `site_template.used` and `.reported` in the acting user's workspace
+(`used` names the template's workspace only when it is the same one);
+`site_template.hidden` in the owner's workspace, with actor `system`.
+
+### `POST /site-templates`
+
+Save a site pocket as a template the caller owns.
+
+```json
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [] }
+```
+
+`name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
+needs read access to the pocket, as for a duplicate. Response `200`: the
+template's metadata.
+
+Errors: `403` (`plan.feature_denied`) when the plan does not include Sites; `404`
+for a missing or cross-tenant pocket; `403` (`pocket.access_denied`) for a
+private pocket the caller can't read; `422` for `pocket.not_a_site`,
+`site_templates.too_large` (the content is over 2 MB as JSON) and
+`site_templates.limit` (the workspace already has 50 templates); and for
+`public`, the publish checks above. Nothing is written on any error.
+
+### `GET /site-templates`
+
+Query: `scope` (`mine`, the default: your own templates in this workspace, any
+visibility; `workspace`: workspace-visibility templates in this workspace,
+yours included; `public`: public, non-hidden templates from every workspace),
+`limit` (1 to 50, default 50), `cursor`. Newest first. Response `200`:
+
+```json
+{ "templates": [ { "id": "..." } ], "next_cursor": "665f..." }
+```
+
+Pass `next_cursor` back as `cursor` for the next page; `null` marks the last one.
+A malformed cursor is `422` `site_templates.bad_cursor`.
+
+### `GET /site-templates/{template_id}`
+
+One template's metadata, if you can see it; otherwise `404`.
+
+### `PATCH /site-templates/{template_id}`
+
+Change any of `name`, `description`, `visibility`, `kind`, `audiences`. Owner only (`404` for anyone
+else). Setting `visibility` to `public` runs the publish checks. `version` does
+not change. Response `200`: the metadata.
+
+### `DELETE /site-templates/{template_id}`
+
+Delete a template you own. Response `200`: `{"id": "...", "deleted": true}`.
+`404` for anyone else's template. Sites made from it are unaffected.
+
+### `POST /site-templates/{template_id}/preview-refresh`
+
+Re-copy the source site's current screenshot onto a template you own, after the
+site has been republished or re-captured. No body. Response `200`: the metadata
+with the new `preview_image_url`; the previous image is deleted. Emits
+`site_template.updated`.
+
+Errors: `404` for anyone but the owner; `409`
+(`site_templates.no_source_preview`) when the source site no longer exists, has
+no screenshot, or the copy fails. The existing image is kept.
+
+### `POST /site-templates/{template_id}/use`
+
+Start a new private site pocket, owned by the caller, in the caller's own
+workspace, from a template the caller can see.
+
+```json
+{ "name": "Second bakery" }
+```
+
+The body is optional; `name` defaults to the template's name. The new pocket
+gets the template's content, records `template_id` and `template_version`, and a
+fresh draft Site row so it lists in the sites gallery (nothing is built or
+deployed). It is source-gated if the template's source was, or if the source
+gate is on now. Response `200`: `{"pocket_id": "..."}`.
+
+Errors: `404` for a template you can't see; `403` (`plan.feature_denied`) when
+your plan does not include Sites; `402` (`billing.pocket_limit`) when your
+workspace is at its plan's pocket cap. Both are checked against the caller's
+workspace, not the template's.
+
+### `POST /site-templates/{template_id}/report`
+
+Report a public template.
+
+```json
+{ "reason": "Spam, up to 500 chars" }
+```
+
+Response `200`: `{"id": "...", "reported": true}`. One report per user counts; a
+repeat is accepted and changes nothing. When three different users have
+reported a template it is hidden: it leaves the public list, and get and use
+return `404` for everyone but the owner, who still sees it with
+`"hidden": true`. There is no un-hide endpoint yet.
+
+Errors: `404` for a template you can't see or that is not public; `403`
+(`site_templates.own_template`) for the owner reporting their own.
+
+## Discover — Public Index
+
+One index of shareable items from every workspace, newest first. Today the only
+source is public site templates (`source: "site_template"`); a public template
+has one listing, hidden when the template is hidden. The two reads need no sign-in and
+are limited to 60 requests a minute per IP (shared between them); past that they
+return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
+user and act in the caller's active workspace.
+
+A listing on the wire is exactly these fields (never the owner, workspace,
+reports or the source item's id):
+
+```json
+{
+  "id": "6660a1...",
+  "source": "site_template",
+  "kind": "site",
+  "title": "Bakery",
+  "description": "",
+  "audiences": ["shop"],
+  "featured": false,
+  "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
+  "live_url": "https://bakery.pawsites.workers.dev",
+  "remix_count": 3,
+  "created_at": "2026-10-01T09:00:00Z"
+}
+```
+
+### `GET /discover` (public)
+
+Query params, all optional: `source`, `kind` (`site`, `tool`, `game`),
+`audience` (matches one of a listing's `audiences`), `q` (case-insensitive
+substring of title or description, up to 100 chars), `featured` (`true` /
+`false`), `cursor`, `limit` (1-50, default 24).
+
+Response `200`: `{"items": [<listing>, ...], "next_cursor": "6660a0..." | null}`.
+Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last
+page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
+`limit` above 50 returns `422`.
+
+### `GET /discover/{listing_id}` (public)
+
+Response `200`: one listing. `404` when it doesn't exist or has been hidden.
+
+### `POST /discover/{listing_id}/use` (signed in)
+
+Make your own copy of the listing's item in your workspace. The body is
+optional; `name` defaults to the item's name.
+
+```json
+{ "name": "My bakery" }
+```
+
+Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
+The source's own checks apply (a site template needs a plan with Sites), and
+`remix_count` goes up by one only when the copy succeeded, and not when the
+listing's owner uses their own listing. `404` for a missing
+or hidden listing.
+
+### `POST /discover/{listing_id}/report` (signed in)
+
+```json
+{ "reason": "Spam, up to 500 chars" }
+```
+
+Response `204`, no body. One report per user counts; a repeat changes nothing.
+Each user may send 10 reports an hour across all listings (repeats included);
+past that the route returns `429` with `discover.report_rate_limited`.
+Three different reporters hide the listing from both public reads, `use` and
+`report`, and hide the source item too: a hidden site template also leaves the
+/sites public list, and making it private and public again does not relist it.
+Staff unhide a listing with `POST /api/v1/platform/discover/{listing_id}/unhide`
+(see "Platform — Discover Moderation"). The source item is unhidden with it, the reports are cleared, and the users who reported it are
+recorded so their later reports on that listing are ignored. Hiding, unhiding,
+featuring and `use` each write an audit row. Errors: `404` for a missing or
+hidden listing; `403` (`discover.own_listing`) for the owner reporting their
+own; `429` past the report limit.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in
@@ -1756,6 +2097,58 @@ more.
 Edges are deduplicated (`[[B]]` twice in one note is one edge). `ghosts` are
 the link names no file resolves.
 
+## Agent — Read Chat Rooms (`list_rooms` / `read_room`)
+
+Two read-only in-process MCP tools that let the chat agent read the user's own
+PocketPaw chat rooms: channels like #general, groups and DMs. Before these
+existed, "catch me up on #general" got an answer about Slack not being
+connected. Registered via the `pocketpaw.mcp_servers` entry point (`rooms` →
+`pocketpaw_rooms` → `mcp__pocketpaw_rooms__list_rooms` /
+`mcp__pocketpaw_rooms__read_room`). Source:
+`ee/pocketpaw_ee/agent/mcp_servers/rooms.py`. Nothing here sends, edits or
+reacts.
+
+**`list_rooms`** `{ "query"?: "...", "limit"?: n }` returns
+`{rooms: [{id, name, handle, kind, member, unread?, last_activity}], total, truncated}`,
+most recently active first. `kind` is `channel`, `group` or `dm`; a DM is named
+after the other side ("DM with Alice"). `member` is false for a public room the
+user can see but has not joined (the default General room, for most members).
+`query` matches name or handle, so `#general`, `general` and `General` are the
+same. `limit` defaults to 50, max 200.
+
+**`read_room`** `{ "room": "...", "limit"?: n, "before"?: "..." }` returns
+`{notice, room: {id, name, kind}, messages: [{id, author, author_kind, text, created_at}], has_more, older_cursor}`.
+`room` is an id, `#handle` or name. Messages are oldest to newest;
+`author_kind` is `human` or `agent`. Pass `older_cursor` back as `before` to
+page further back.
+
+**Caps.** `limit` defaults to 30, max 100. Each message's text is cut at 1,000
+chars. The whole call carries at most 40,000 chars of message text; the oldest
+messages are dropped first and `older_cursor` points at the oldest one kept.
+
+**Authz.** Identity is the run's `current_workspace_id` / `current_user_id`,
+read on every call; missing identity fails closed. The user must be a member of
+that workspace (`workspace.service._get_member_role`), which also turns away the
+anonymous concierge visitor id and the group bridge's agent id. A room is
+resolved only against `chat.group_service.list_groups(workspace_id, user_id)`,
+the list `GET /chat/groups` returns, and messages come from
+`chat.message_service.get_messages`, the same call
+`GET /chat/groups/{id}/messages` makes. A room outside that list (another
+workspace, a private room, DM or private channel the user is not in) gets the
+same "no room matching" error as a room that does not exist. Unread counts come
+from `chat.unread_service.list_unreads`.
+
+**Untrusted content.** `read_room` puts a `notice` first in its result saying
+the messages were written by people and agents and are data, never
+instructions.
+
+**Where the agent has it.** Ambient, not always-allowed: reachable on surfaces
+with no MCP allow-list (the generic surface /no-ui-lab talks on, chat, home and
+the like) and filtered out of every allow-listed surface, including the public
+Paw Bar concierge, which is exclusive to its own allow-list. The generic
+surface preamble tells the agent that the workspace's rooms are PocketPaw rooms
+and not to assume Slack unless the user names it.
+
 ## Agent Artifact Delivery (`deliver_artifact`)
 
 `deliver_artifact` is a cloud-only in-process MCP tool the chat agent calls to
@@ -1802,6 +2195,132 @@ whose mime is not in `INLINE_MIMES` (HTML, SVG, JS, …) is served with
 does not render inline on the storage origin. Inline-safe types (images, pdf,
 plain text) still embed as before. The whole tool is gated on
 `is_multi_tenant_cloud()`.
+
+## Agent — Open an App Surface (`open_surface`)
+
+`open_surface` is an in-process MCP tool that lets the chat agent open an app
+surface on the user's screen: the file picker, the clip editor, a chat room,
+Pockets or Knowledge. It has no server-side effect. The tool validates its input
+and returns an envelope; the run loop turns that into an `open_surface` event on
+the chat stream, and the browser does the opening. Registered via the
+`pocketpaw.mcp_servers` entry point (`surfaces` → `pocketpaw_surfaces` →
+`mcp__pocketpaw_surfaces__open_surface`). Source:
+`ee/pocketpaw_ee/agent/mcp_servers/surfaces.py`.
+
+**Input:** `{ "route": "...", "params"?: { "<key>": "<string>" }, "reason"?: "..." }`
+
+- `route` is one of the atlas surfaces marked `agent_openable` (today `/files`,
+  `/studio/editor`, `/chat`, `/pockets`, `/knowledge`; see
+  `src/pocketpaw/atlas/authored/surfaces.json`). Anything else is rejected.
+  Settings pages, `/audit`, `/security`, `/admin*` and malformed routes are
+  refused even if atlas flags them. If atlas can't load, every route is refused,
+  and with no openable route the tool isn't registered at all.
+- `params` is a flat string-to-string map: at most 10 keys, keys up to 64 chars,
+  values up to 500. A JSON-string `params` is decoded first.
+- For `/studio/editor`, `params` is the clip handoff (`src`, `name`, `mime`,
+  `kind`), and `src` must be the file's own backend path,
+  `/api/v1/uploads/<file_id>` or `/api/v1/media/<name>` (one segment). External
+  and presigned URLs are rejected.
+- `reason` is an optional line (max 200 chars) shown to the user.
+
+**Stream event:** `event: open_surface`, `data: {route, params?, reason?}`.
+`params` and `reason` are omitted when empty. It is emitted in addition to the
+normal `tool_result` frame.
+
+**Checks between the tool and the event.** `run_core` promotes the envelope
+only when the tool result's name is exactly
+`mcp__pocketpaw_surfaces__open_surface` or `open_surface`; a result with an
+unresolved name is dropped. It then re-runs the tool's own validation on the
+payload. The reason is prompt injection: a web page or file the agent reads can
+contain a well-formed envelope, and promoting on text shape alone would let that
+content navigate the user's browser.
+
+**Where the agent has it.** The server is ambient but not always-allowed, so the
+tool is reachable on surfaces with no MCP allow-list (the generic chat surface,
+which is what the /no-ui-lab talks on) and on `/studio/editor`, whose allow-list
+names it so the agent can send the user to `/files` for another clip. Every
+other allow-listed surface filters it out, including the public Paw Bar
+concierge.
+
+## Atlas — Surfaces, Verbs and Search
+
+Atlas (`src/pocketpaw/atlas/`) is the one place that says which app surfaces and
+composer verbs exist, where they open, who can trigger them and how risky they
+are. The composer reads it here; the agent reads the same entries through
+`atlas_search`. Source: `src/pocketpaw/api/v1/atlas.py`.
+
+All three routes are read-only. They need an active signed-in user (a cloud
+session the auth bridge verified, for a user whose account is active) or a
+caller holding the `chat` scope; anyone else gets 403. Answers go through the
+atlas overlay for the caller's workspace. With a signed-in user and workspace,
+the overlay resolves the caller's workspace role, so role-gated entries (`role:*`
+in `requires`) show up only for roles that clear them: an owner sees the
+owner-only `surface:security` (29 surfaces), an admin or member doesn't (28), and
+the admin capability cards follow the same tiers. If the role can't be resolved,
+every role-gated entry stays hidden.
+
+### `GET /api/v1/atlas/surfaces`
+
+```json
+{ "surfaces": [ { "id": "surface:files", "name": "Files", "summary": "...",
+  "route": "/files", "slash": "files", "presentation": "inline",
+  "agent_openable": true, "keywords": ["files", "..."] } ] }
+```
+
+- `slash` is the composer command: the route without its leading `/`
+  (`files`, `deep-work`, `agents/activity`, `studio/editor`), `home` for `/`, or
+  `null` (settings sub-pages, `/decisions-graph`). The atlas build refuses a
+  slash that doesn't match its route.
+- `presentation` is `"inline"` for the views the no-UI shell renders in the
+  thread (`/chat`, `/files`, `/deep-work`, `/pockets`, `/sites`, `/knowledge`,
+  `/studio`) and `"window"` otherwise.
+- `agent_openable` marks the routes the agent's `open_surface` tool may open.
+  Settings pages, `/audit`, `/security` and `/admin*` can never be openable: the
+  atlas build refuses it and the tool filters them again.
+
+### `GET /api/v1/atlas/verbs`
+
+```json
+{ "verbs": [ { "id": "verb:send", "name": "Send to a channel", "summary": "...",
+  "slash": "send", "applies_to": ["channel"], "triggers": ["slash"],
+  "risk": "risky", "undo": false, "keywords": ["send", "..."] } ] }
+```
+
+- `applies_to`: the object types the verb acts on (`channel`, `file`, `task`,
+  `room`, `message`, `pocket`, `site`, `article`, `panel`).
+- `triggers`: `slash` (a composer command), `verb` (an action on the object),
+  `agent` (the agent does the work).
+- `risk`: `read` changes nothing; `safe` changes the user's workspace objects in
+  a benign or reversible way; `risky` speaks for the user where others read it
+  (send, reply, edit a sent message, publish) or deletes with no undo. `undo` is
+  true exactly where the composer offers an Undo.
+- Navigation is not a verb: the surface `slash` values cover it.
+
+### `GET /api/v1/atlas/search?q=<text>&kinds=surface,verb&limit=5`
+
+```json
+{ "query": "rename this file", "results": [ { "id": "verb:file-rename",
+  "kind": "verb", "name": "Rename file", "route": null, "slash": null,
+  "score": 0.769 } ] }
+```
+
+- `q`: 1 to 200 chars. `limit`: default 5, at least 1, values above 20 are
+  capped to 20. `kinds`: comma-separated subset of `surface`, `verb`,
+  `capability`, `primitive` (default: all four, at most 64 chars); anything else
+  is 422. Other
+  atlas kinds (widgets, connectors, skills, senses) never come back.
+- `route` is the entry's home route, or `null`.
+- `score` is 0..1, highest first. Atlas ranks by weighted word overlap (a name
+  match counts most, then keywords, summary and narrative). The API divides that
+  raw score by the score of a name match on every distinct query word, then
+  rounds to 3 places. A name that is the only one in atlas carrying the query
+  word scores 1.0 for a primitive and 0.96 for other kinds; a word many names
+  share is worth less.
+- A verb that matches only on its object noun ("files" for `verb:file-delete`)
+  scores at 0.4 of its raw match, so a navigational query ("show me my files")
+  lands on the surface with a clear margin; an action word ("delete",
+  "download") lifts that. Exact ties are deterministic: verbs last, then the
+  entry whose name the query covers more, then kind, then id.
 
 ## Sites — Native Editing
 
@@ -2290,7 +2809,7 @@ Response `200`:
   "badge_required": false,
   "custom_domain": true,
   "max_domained_sites": null,
-  "domained_sites_used": 2,
+  "domained_sites_used": 0,
   "domain_slots_available": true,
   "analytics": true,
   "concierge_entitled": false,
@@ -2307,6 +2826,10 @@ Response `200`:
 - `max_domained_sites` is `null` for uncapped. It reports what the plan grants, while
   `domain_slots_available` reports what the gate will actually do — they differ when
   enforcement is off.
+- The custom-domain allowance is per site. On the free plan every site may carry its
+  own domain (apex + `www`), and `domain_slots_available` turns false only once THIS
+  site holds both. Another site holding a domain never closes it.
+- `domained_sites_used` is kept for older clients and is always `0`.
 
 **`analytics` is a pre-check, not the answer.** The analytics endpoint's `status` stays
 authoritative, because entitlement alone cannot separate "your plan does not include
@@ -2476,9 +2999,27 @@ Response (all four endpoints share it):
   "plan_tier": "staff",
   "subscription_status": "active",
   "renewal_date": "2026-10-19T00:00:00",
-  "concierge_available": true
+  "concierge_available": true,
+  "concierge_entitled": true,
+  "concierge_enabled": true,
+  "concierge_exists": true
 }
 ```
+
+`concierge_available` is the public seams' answer: created **and** switched on
+**and** sold by the plan. Because it is an AND it cannot say which half is
+missing, so the response also carries each half on its own:
+
+| Field | Means |
+|-------|-------|
+| `concierge_entitled` | the site's plan sells a concierge (always `true` when sites billing is not enforced) |
+| `concierge_enabled` | the owner's switch; a concierge is created switched off |
+| `concierge_exists` | the owner has created the concierge |
+
+A panel explaining an empty snippet reads these, not `concierge_available`: a
+paid concierge that is created but not switched on is `concierge_entitled: true,
+concierge_enabled: false, concierge_available: false`, and it must not be told
+its plan does not include one. Servers older than these fields omit them.
 
 **The timestamps are UTC and carry no zone suffix.** Mongo stores UTC and hands
 back naive datetimes, so `verified_at` and `renewal_date` have no trailing `Z` —
@@ -2490,7 +3031,7 @@ enforces, so a panel never has to do that arithmetic itself.
 the one definition of the five gates a site must pass to earn a bar (plan,
 owner's kill switch, a key, a widget, a bound agent). `widget_id` / `agent_id`
 say **why** it is empty: an empty snippet beside a bound agent is the plan or the
-kill switch, an empty snippet beside an empty `agent_id` is provisioning that has
+kill switch (`concierge_entitled` / `concierge_enabled` say which), an empty snippet beside an empty `agent_id` is provisioning that has
 not completed yet — retry the bind, which re-runs the funnel.
 
 `site_key` is not a secret. It ships inside the snippet on a public page and is
@@ -2846,6 +3387,330 @@ You cannot. `DELETE /pockets/{id}` **refuses** with `409 pocket.has_site` while 
 published from it, rather than cascading — a cascade from there would bypass the forced
 export, so the one path that can destroy a site stays the one path that preserves its
 data first. Delete the site, then the pocket.
+
+## Leads
+
+A Lead is one way a visitor left their details on a site. `site_id` on these
+routes is the site's `script_name`, as on the Lead itself.
+
+| Route | Purpose |
+|---|---|
+| `GET /sites/{site_id}/leads?limit=` | Newest first, at most 500. |
+| `PATCH /sites/{site_id}/leads/{lead_id}` | `{"status"?: "new" \| "contacted" \| "won" \| "lost" \| "booked", "read"?: bool}` → the updated lead. `read: true` keeps the first read time; `false` marks it unread. Unknown status → 422. |
+| `POST /sites/{site_id}/leads/read-all` | Marks every unread lead on the site read → `{"updated": n}`. |
+
+All three need the `sites` plan feature. The GET needs `fabric.read`; the PATCH
+and read-all need `fabric.write`. All are scoped to the caller's workspace: another workspace's lead (or one on another site) is a 404,
+and read-all touches nothing there.
+
+A list item:
+
+```json
+{"id": "…", "site_id": "…", "form_type": "concierge",
+ "properties": {"name": "Priya", "email": "priya@x.com", "message": "20 jackets"},
+ "origin": "", "origin_unrecognized": false,
+ "source_kind": "concierge", "conversation_ref": "pp_w1:cust-0001",
+ "status": "new", "read_at": null, "created_at": "2026-10-01T09:30:00+00:00"}
+```
+
+`source_kind` is `form` (a site form), `concierge` (the visitor tapped Send on the
+concierge's lead card), `handoff` (a "talk to a person" request that carried an
+email or phone; one lead per conversation) or `booking`. `conversation_ref` is
+`<widget_id>:<customer_ref>`, the conversation the lead came from (`""` for a
+form). Leads written before these fields existed read as `status: "new"`,
+`read_at: null`, `source_kind: "form"`.
+
+A status change emits `lead.updated`, delivered to the site webhook only (when it
+is active and `lead_captured` routes to `webhook`), as
+`{"id": "evt_…", "type": "lead.updated", "data": {…the lead, with status…}}`. It
+rings no bell and sends no mail. Marking read emits nothing. A handoff lead's
+`lead.captured` is not routed: the handoff already notified the owner.
+
+### Leads from the concierge
+
+When `concierge_lead_capture` is on, the v2 concierge offers a lead card (a
+`form` whose verb is `send_to_team`, fields from `name`, `email`, `phone`,
+`message`, each optionally prefilled with `value` of at most 500 characters).
+Nothing is stored until the visitor taps Send, which posts:
+
+```http
+POST /paw-bar/action
+{"key": "<site key>", "w": "<widget id>", "customer_ref": "<visitor>",
+ "verb": "send_to_team", "args": {"name": "Priya", "email": "priya@x.com", "message": "…"}}
+```
+
+`args` carries only those four names; empty fields are left out. Rules: `name` at
+most 120 characters, `message` at most 2000, and an `email` and/or `phone` that
+look valid. Limits: 3 per visitor per 10 minutes, 30 per site per hour, taken
+atomically before the lead is written. A taken slot is never given back, so an
+attempt the injection screen drops still counts. The
+text goes through the same HIGH injection screen as site forms. `send_to_team`
+is reserved. Saving a spec that declares it (the spec PATCH routes and widget
+create) is `422 reserved_verb`. A spec already stored with it loads with that
+action dropped and a warning logged.
+
+| Response | Meaning |
+|---|---|
+| `200 {"ok": true, "result": {"message": "Sent. The team will get back to you."}}` | A Lead was written (`form_type` and `source_kind` `concierge`) and `lead.captured` fired. |
+| `422 {"detail": {"code", "field", "message"}}` | `field` names the form field to mark: `too_long` (name, message), `not_text`, `invalid_email`, `invalid_phone`, `contact_required` (field `email`). `field: null` (`unknown_field`, or `rejected` by the injection screen) is a generic retry. |
+| `429` | A lead limit. |
+| `409 lead_capture_off` | The owner turned lead capture off. |
+| `503 lead_unavailable` | The limit or the lead write couldn't be checked; nothing was stored. |
+
+## Owner notifications — email, signed webhooks, per-site recipients
+
+A captured lead, and a concierge handoff, reach the site's owner through three
+sinks: the in-app bell plus OS push, email (Cloudflare Email Service), and a
+signed webhook. Email and webhooks never run on the request that caused them:
+they are queued in the `notification_outbox` collection and a background
+sweeper sends them, retrying after 1 m, 5 m, 30 m, 2 h and 6 h before giving up.
+Slack deliveries go through the same queue. Each send has a hard 30 s deadline
+(an endpoint that doesn't answer in time counts as a failed try), and email is
+worked separately from webhooks and Slack, so a slow webhook never holds mail up.
+
+Push lock-screen text stays generic. Email and webhook payloads carry the
+lead itself (name, email, phone, message, every captured property, site name,
+form type and source), loaded when the delivery is sent.
+
+### Per-site settings
+
+Every route below is workspace-scoped (the caller's active workspace) and needs
+`notifications.manage` (workspace owner or admin). A member gets `403`; a site in
+another workspace is a `404`.
+
+#### `GET /sites/{site_id}/lead-notifications`
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "configured": false,
+  "include_owner": true,
+  "owner_email": "owner@acme.com",
+  "owner_email_status": "verified",
+  "emails": [
+    {"email": "team@acme.com", "status": "pending", "added_at": "…", "confirmed_at": null}
+  ],
+  "webhook_url": null,
+  "has_webhook_secret": false,
+  "webhook_secret": null,
+  "webhook_disabled_at": null,
+  "webhook_failure_count": 0,
+  "events": {
+    "lead_captured": ["email", "push"],
+    "handoff": ["email", "push"],
+    "booking": ["email", "push"]
+  },
+  "email_enabled": true
+}
+```
+
+A site that was never configured reads as the default: the workspace owner's
+account email, with `email` + `push` for every event. `owner_email_status` is
+`verified` when the account has verified that address (it gets mail with no
+extra step), or else `pending_confirm` until the owner clicks the same confirm
+link an added recipient gets, then `confirmed`. A lead sends that link
+automatically (at most once a day per site), and `POST .../recipients` with the
+owner's address re-sends it, under the same rate limits. `status` is `pending`
+(waiting for the confirm click), `confirmed`, or `bounced` (the mail provider
+reported a permanent bounce; re-add the address to try again). `email_enabled`
+is false while the server has no Cloudflare email credentials.
+
+#### `PUT /sites/{site_id}/lead-notifications`
+
+Partial update; omitted fields are kept.
+
+```json
+{
+  "include_owner": true,
+  "events": {"lead_captured": ["email", "push", "webhook"]},
+  "webhook_url": "https://hooks.example.com/paw",
+  "clear_webhook": false
+}
+```
+
+Sinks are `email`, `push` and `webhook`. `push` covers the bell row and the OS
+push together (every bell row is pushed). A `webhook_url` is checked against
+SSRF (https only, any port 1-65535, and every address the host resolves to must
+be globally routable, which also rules out 100.64.0.0/10; a failure is `403
+notifications.invalid_webhook_url` or `webhooks.private_address`). A NEW URL's
+signing secret comes back **once**, in this response's `webhook_secret`; later
+reads return `null`. Any save that names a webhook URL, the same one included,
+re-arms a webhook that was switched off.
+
+#### `POST /sites/{site_id}/lead-notifications/webhook-secret`
+
+Rotates the site webhook's signing secret and re-arms the webhook. The new
+secret comes back once in `webhook_secret`. For 24 hours after a rotation the
+old secret also signs (see "Webhook payload and signing"). `404` when the site
+has no webhook.
+
+#### `POST /sites/{site_id}/lead-notifications/recipients`
+
+Body `{"email": "team@acme.com"}`. Adds the address unconfirmed and emails it a
+confirm link that works for 7 days. Nothing else is sent to it until it is
+confirmed. At most 5 extra addresses per site (`422
+lead_notifications.too_many_recipients`); `422 lead_notifications.email_disabled`
+when the server can't send email; `422 lead_notifications.public_url_unset` in
+production when `POCKETPAW_PUBLIC_BASE_URL` is unset. Re-adding a pending
+address sends a fresh link and voids the old one. Confirm emails are limited to
+one per address per site every 30 minutes (`429
+lead_notifications.confirm_rate_limited`; removing and re-adding the address
+doesn't reset this) and 50 per workspace per day (`429
+lead_notifications.confirm_daily_cap`).
+
+#### `DELETE /sites/{site_id}/lead-notifications/recipients/{email}`
+
+Removes the address. Mail already queued for it is dropped at send time.
+
+#### `POST /sites/{site_id}/lead-notifications/test`
+
+Queues a test email to every address that may receive mail now and a test
+delivery (`type: "notification.test"`) to the site webhook. Returns
+`{"emails": ["owner@acme.com"], "webhook": true}`.
+
+#### `GET` / `POST /lead-notifications/confirm/{token}` (public)
+
+The link in the confirm email; the token is the credential, so no session is
+needed. `GET` only shows a page with a "Confirm this address" button and
+changes nothing, so mail scanners and link previews that fetch the link can't
+confirm on someone's behalf. The button `POST`s to the same path, which
+confirms (repeating it is harmless). The POST needs no session and no CSRF
+token: the path token is the credential. Both answer `400` when the link expired,
+was replaced by a newer one, or the address was removed, and both send
+`Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
+### Routing
+
+| Sink | Lead captured | Concierge handoff |
+|---|---|---|
+| `push` | bell + push to the workspace owner and admins | bell + push to the workspace owner |
+| `email` | the full lead; `reply_to` is the visitor's email when valid | a short notice linking to the conversation |
+| `webhook` | the site webhook, `type: "lead.captured"` | the site webhook, `type: "concierge.handoff"` |
+
+The workspace config (`/notifications/delivery-config`) stays the fallback: its
+Slack sink gets every site event (subject to its `routes`), and its webhook gets
+the event when the site has no webhook of its own. Each lead is delivered once
+per sink, not once per admin. A site event sent to the WORKSPACE webhook also
+carries the deprecated flat fields (`kind` = `lead_captured` /
+`paw_bar_needs_human`, `title`, `body`, `workspace_id`, `recipient_id: null`,
+`actor_id: null`) so receivers that filter on `kind` keep working. Three things
+still differ from a plain `notification.created` delivery: `id` is the event id
+(`evt_…`), not a notification id; `recipient_id` is `null`; and there is ONE
+delivery per event, where the old webhook received one per notified admin.
+Site webhooks get the envelope only.
+
+### Workspace webhook
+
+`GET` / `PUT /notifications/delivery-config` (admin) now sign the generic
+webhook the same way. The `PUT` response carries `webhook_secret` once, when a
+new URL (or a URL that had no secret) is saved; reads return
+`has_webhook_secret` instead. Any `PUT` naming a webhook URL re-arms it.
+`POST /notifications/delivery-config/webhook-secret` rotates it (returned once,
+old secret co-signs for 24 hours).
+
+A webhook saved before signing existed has no secret. It keeps receiving
+deliveries exactly as before, **unsigned**, and the config reports
+`"signed": false` so the settings screen can say "unsigned: rotate the secret to
+sign it". Saving it or rotating its secret turns signing on.
+Plain notifications arrive as `type: "notification.created"`. For
+compatibility with receivers built before the envelope, the old flat fields are
+also kept at the top level of the body:
+
+```json
+{
+  "id": "68f0c2…",
+  "type": "notification.created",
+  "created_at": "2026-10-01T09:30:00+00:00",
+  "data": {"id": "68f0c2…", "workspace_id": "…", "recipient_id": "…", "actor_id": null,
+           "kind": "mention", "title": "…", "body": "…"},
+  "workspace_id": "…", "recipient_id": "…", "actor_id": null,
+  "kind": "mention", "title": "…", "body": "…"
+}
+```
+
+The top-level `workspace_id`, `recipient_id`, `actor_id`, `kind`, `title` and
+`body` are **deprecated**: read them from `data`. They will be removed in a
+later release. There is no key clash: `id` is the notification id in both
+shapes (it is also the event id for this type, since each notification is
+delivered once per webhook). Every other event type (`lead.captured`,
+`concierge.handoff`, `notification.test`), and everything sent to a site
+webhook, uses the envelope only: `{id, type, created_at, data}`.
+
+### Webhook payload and signing
+
+```http
+POST /your/endpoint
+Content-Type: application/json
+X-Paw-Timestamp: 1700000000
+X-Paw-Signature: v1=<hex HMAC-SHA256(secret, "1700000000.<raw body>")>
+                 (v1=<new>,v1=<old> for 24 hours after a secret rotation)
+
+{"id":"evt_…","type":"lead.captured","created_at":"2026-10-01T09:30:00+00:00",
+ "data":{"id":"…","site_id":"…","site_name":"Bright Smile","form_type":"lead",
+         "name":"Priya","email":"priya@x.com","phone":"","message":"…",
+         "properties":{…},"source":{"kind":"form","form_type":"lead","origin":"…",
+         "origin_unrecognized":false,"conversation_ref":""},"created_at":"…"}}
+```
+
+`id` is the same on every retry of one delivery, so dedupe on it. Any non-2xx
+answer (redirects are not followed), or no complete answer within 30 s, is
+retried on the schedule above. Only the status code matters: a reply body is
+read up to 1 MB and the rest is ignored. The host is resolved and checked when
+each delivery is sent and the connection is pinned to the checked address, on a
+fresh connection per delivery (never one reused from another host); if DNS
+fails nothing is sent and the delivery is retried. After 10 deliveries in a row
+that ran out of retries, the webhook is switched off (`webhook_disabled_at`)
+until its URL is saved again or its secret rotated.
+
+To verify, recompute the HMAC over the timestamp header, a `.`, and the raw
+request body (before any JSON parsing), compare in constant time, and reject a
+timestamp more than 5 minutes old so a captured delivery can't be replayed:
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, timestamp: str, raw_body: bytes, signature: str) -> bool:
+    if abs(time.time() - int(timestamp)) > 300:
+        return False
+    expected = hmac.new(secret.encode(), timestamp.encode() + b"." + raw_body,
+                        hashlib.sha256).hexdigest()
+    return any(
+        part.strip().startswith("v1=") and hmac.compare_digest(part.strip()[3:], expected)
+        for part in signature.split(",")
+    )
+```
+
+Test vector: secret `whsec_test`, timestamp `1700000000`, body
+`{"id":"evt_1","type":"lead.captured"}` gives
+`v1=35aea954dafaba38bb223bdd493656857236540655f31dc96809ce7e59e0abe9`.
+
+### Email configuration
+
+| Variable | Purpose |
+|---|---|
+| `POCKETPAW_CF_EMAIL_ACCOUNT_ID` | Cloudflare account that owns the sending domain. |
+| `POCKETPAW_CF_EMAIL_API_TOKEN` | API token with permission to send email. Secret, never logged. |
+| `POCKETPAW_CF_EMAIL_FROM` | From address on the onboarded domain, e.g. `notifications@example.com`. |
+| `POCKETPAW_CF_EMAIL_FROM_NAME` | Display name. Default `PocketPaw`. |
+| `POCKETPAW_FRONTEND_BASE_URL` | Links to the lead and to notification settings. |
+| `POCKETPAW_PUBLIC_BASE_URL` | The confirm link points at this API origin. |
+
+Email is off, and the server logs that once, until the first three are set.
+Mail goes out through `POST /client/v4/accounts/{account_id}/email/sending/send`.
+A `429` or `5xx` from Cloudflare is retried. So are `401` and `403` (a bad token,
+or sending disabled on the account): those are fixed by an operator, not by
+dropping the mail. The server logs them at error level for operators, and the
+workspace owner/admins get one notice a day (kind `owner_email_failing`) saying
+lead email is delayed, the platform team has been alerted and queued mail will
+be retried. `400`/`422` (a bad message) are not retried.
+
+One-time ops step per sending domain, which adds the SPF and DKIM records
+(the domain must use Cloudflare DNS):
+
+```bash
+npx wrangler email sending enable example.com
+npx wrangler email sending dns get example.com   # check the records
+```
 
 ## Ship — Managed Deploys
 
@@ -3758,8 +4623,8 @@ and the guest's own `guest_limits` wins, so a single guest can still be lifted
 by their row. Both are unset in production and both ignore a non-integer, zero
 or negative value rather than applying it — there is deliberately no "disable
 guest limits" switch, because zero is what an operator types when they mean
-unlimited and `try_spend_turn` reads a cap of zero as *refuse every turn*. A dev
-box turns the caps off by setting them past anything it will reach:
+unlimited and the guest turn counter (`metering.service.try_spend`) reads a
+cap of zero as *refuse every turn*. A dev box turns the caps off by setting them past anything it will reach:
 
 ```bash
 export POCKETPAW_GUEST_SESSIONS=1000
@@ -4118,17 +4983,17 @@ the split is the security model:
 
 | Route | What it does |
 |---|---|
-| `GET /paw-bar/widget.js` | The embed loader a published page includes. |
-| `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. Every frame document, the shell included, also sends CSP `sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads`, so the browser sandboxes it whoever embeds it; no flag permits top navigation. |
-| `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. |
+| `GET /paw-bar/widget.js` | The embed loader a published page includes. `public, max-age=300` with a strong `ETag`; a matching `If-None-Match` gets a 304. |
+| `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. Every frame document, the shell included, also sends CSP `sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads`, so the browser sandboxes it whoever embeds it; no flag permits top navigation. A rendered frame is `private, max-age=60` (never `public`) and the key lookup behind it is memoised for 30 s, so a revoked key, a disabled concierge or an appearance edit reaches an open frame within about 90 s; the dead shell is `no-store`. Its `pawbar.js`/`pawbar.css` URLs carry `?v=<content hash>` and are served `immutable` for that exact version, `max-age=300` otherwise. |
+| `GET /paw-bar/spec/{widget_id}` | The widget's render spec. Legacy: only the frozen key-less widget fetches it. `public, max-age=60`, always with `Vary: Origin`. Its `catalog` is filled from the [catalog store](#catalog-store) (the first 200 products in the owner's order), so that client keeps working. |
 | `POST /paw-bar/events/{widget_id}` | Ingest a widget event: `{type, payload, customer_ref, signed_key?}`. A widget with a concierge agent requires `signed_key` (401 `signed_key_required` without it); an unbound legacy widget still accepts a key-less event from an allowed origin. Events count against their own per-minute budget, never the one chat uses. |
 | `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. A widget with a concierge agent requires `?signed_key=`. |
 | `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. Takes an optional `conversation_id`; omit it and the turn lands on the visitor's conversation in progress, which is what widget bundles built before that field send. Takes an optional `page: {"url", "title"}`, the host page the widget sits on; omit it and the turn is answered as before. A v2 site uses it only when the url is http(s) on the site's allowed origins (query and fragment dropped): an indexed page adds its title, summary and article, any other page only its title, cut to 120 characters and marked unverified. A `page` that isn't an object with a string `url` is ignored, never a 422; legacy sites ignore the field. On v2 the one `sources` frame is `{"items": [{"id", "title", "url"}], "sources": <same list>}`: exactly the knowledge the model was given, in order, with a title and url only for pages the site sync indexed. `message` is capped at 8000 characters (400 `message_too_long`). An `error` frame always carries `code: "agent.error"` and a generic message; the engine's own code is not relayed. |
 | `GET /paw-bar/conversations` | The visitor's own conversations on this bar, newest first, with a preview and which one is in progress. Scoped to the `customer_ref` the embed key already bound, so there is nothing to enumerate. |
 | `GET /paw-bar/conversations/{conversation_id}/messages` | One of the visitor's own conversations, oldest first. Each message is `{role, content, created_at}` only: the owner's view names which operator typed a line, the visitor's never does. |
 | `POST /paw-bar/conversations` | Start a fresh conversation. The current one is retired rather than deleted — it stays in the visitor's list and in the owner's inbox — and the next turn starts the agent cold instead of replaying the thread the visitor walked away from. |
-| `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. |
-| `GET /paw-bar/cart` | The visitor's own cart. |
+| `POST /paw-bar/action` | Run a verb the widget spec declares, or the built-in `send_to_team` (see [Leads from the concierge](#leads-from-the-concierge)). `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. A cart holds one currency: `add_to_cart` for a product priced in another currency than a non-empty cart is 409 `cart_currency_mismatch` and the cart is left as it was. |
+| `GET /paw-bar/cart` | The visitor's own cart: `{items, total_cents, currency, checkout_url}`, amounts in minor units of `currency` (see Money below). |
 | `POST /paw-bar/decision-contact` | Leave an email so a decision reaches the visitor after they close the page. The address is stored on the decision row only — never in agent context, the KB, or transcripts. |
 | `GET /paw-bar/messages/{widget_id}/{customer_ref}` | Poll for owner and system messages once a human has joined. Returns `role`, `content`, `at` and `bot_paused` — never notes, tags, assignee or contact address. Pass `conversation_id` to scope the read (and `bot_paused`) to the thread on screen; omitting it answers for the visitor's whole history, which is what a cached widget bundle does. |
 | `GET /paw-bar/articles` | The site's own synced pages, for a self-serve reading list. |
@@ -4139,10 +5004,17 @@ the split is the security model:
 |---|---|
 | `POST /paw-bar/admin/site/{site_id}/concierge` | Create the site's concierge. This is the only way one comes to exist: widget create, the settings PATCH, publishing and a connected-site attach never create one. Behind `paw_bar.manage`; 404 for a site outside your workspace, 409 `concierge_exists` when it already has one. It starts **off** (`concierge_enabled: false`), mints the site's widget if there is none (empty spec, no default actions; an existing widget is kept as it is), sets `concierge_runtime` from the v2 eval gate (`legacy` unless the deployment asks for `v2` and the committed gate report passes) and, for a legacy concierge, binds a dedicated agent; a v2 concierge gets no agent. Optional body `{"concierge_greeting": "..."}`. Returns 201 with the settings response. A published site shows the bar from its next publish after the concierge is switched on. |
 | `DELETE /paw-bar/admin/site/{site_id}/concierge` | Delete it: the marker is cleared and the switch turned off, so every public route treats the site as having none. A legacy agent is unbound from the widget, never deleted. `?delete_conversations=true` also purges the concierge's conversations, owner and visitor lines, visitor requests and carts; without it they are kept. 404 when the site has no concierge. Returns the settings response. |
-| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. |
+| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget, plus `concierge_exists` and `concierge_runtime`. The widget's `spec` comes without its catalog (`spec.catalog` is always `[]`); `widget.catalog_count` says how many products the [catalog store](#catalog-store) holds, and the catalog routes below page through them. |
 | `GET /paw-bar/admin/site/{site_id}/stats` | The concierge scoreboard for one site over one window (`?window=24h\|7d\|30d\|2w\|all`, default `30d`): conversations, distinct visitors, runs, messages, token volume broken into input / output / cached, and USD cost. Tokens and cost resolve through the same metering the workspace wallet bills with, so the panel and the invoice cannot disagree. `priced_runs` says how many runs carried usable metering — a backend that reports none reads as unpriced rather than as free. The scan is bounded and `truncated` says when it hit the cap. A malformed window is a 422, never a silently widened answer. |
-| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code` and the guided fields below. |
-| `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Catalog & Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec. |
+| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. Both return `concierge_exists` (whether the owner has created one) and `embed_snippet`, the exact tag the published site carries (built on `PAW_CAPTURE_API_BASE`), or `""` when the site has not earned a bar: no concierge created, no widget, no embed key, the concierge off, or a plan without it. Setting `concierge_enabled` writes the switch and nothing else; on a site with no concierge it has no effect for visitors. Also carries `concierge_runtime`, `concierge_allow_doc_code`, `concierge_lead_capture` (default `true`: the v2 concierge may offer the `send_to_team` lead card and the visitor's Send writes a Lead; `false` turns the card off everywhere) and the guided fields below. |
+| `PATCH /paw-bar/admin/site/{site_id}/widget/spec` | Save the site's concierge widget spec (the Actions editor). Body `{"spec": {...}}`, the full spec; returns `{"id", "spec"}`. Session-authed behind `paw_bar.manage`, no `X-Paw-Bar-Token`. The prior spec is archived as a revision, the same as `PATCH /paw-bar/widgets/{id}/spec`. `spec.widget_id` and `spec.pocket_id` are always set to the site's widget; whatever the body sends for them is ignored. 404 for a site outside your workspace or one with no concierge widget, 422 for an invalid spec, 422 `spec_too_large` past the [spec size cap](#spec-size-and-the-deprecated-catalog), 409 `currency_units_client_outdated` for a catalog with a non-2-decimal currency sent without `X-Paw-Money-Units: iso4217` (see Money below; the same rule holds on `PATCH /paw-bar/widgets/{id}/spec`). A non-empty `spec.catalog` is added to the catalog store (upserted by id, nothing deleted; see the deprecation note there); an absent or empty one leaves it alone. |
+| `GET /paw-bar/admin/site/{site_id}/catalog` | A page of the [catalog store](#catalog-store), in the owner's order: `?offset` (default 0), `?limit` (1-200, default 50), `?q` (keeps products whose name or description holds every word, prefix-matched). Returns `{"items", "total"}`; `total` counts what matched. Each item has the catalog fields plus `position`, `source`, `origin` and `updated_at` (see [Site sync](#site-sync)). Behind `paw_bar.read`. |
+| `PUT /paw-bar/admin/site/{site_id}/catalog/items/{item_id}` | Create or replace one product; returns it. A replaced product keeps its place, a new one goes last. The body is the catalog fields (`id` may be left out; one that differs from the path is 422 `item_id_mismatch`) plus an optional `source`. Behind `paw_bar.manage`. |
+| `POST /paw-bar/admin/site/{site_id}/catalog/items:bulk` | Create or replace up to 500 products in one transaction: body `{"items": [...]}`, returns `{"upserted", "total"}`. This is how an import is applied (in chunks of 500). Existing ids keep their place, new ones are appended in the order sent. A repeated id in one call is 422 `duplicate_id`. Behind `paw_bar.manage`. |
+| `DELETE /paw-bar/admin/site/{site_id}/catalog/items` | Remove products: body `{"ids": [...]}` (at most 500), returns `{"deleted", "total"}`. Unknown ids are ignored. A deleted id is remembered, so the [site sync](#site-sync) never adds it back. Behind `paw_bar.manage`. |
+| `POST /paw-bar/admin/site/{site_id}/catalog/reorder` | Body `{"ids": [...]}`: those products move to the front in that order, the rest keep their order after them. Returns `{"total"}`. Behind `paw_bar.manage`. |
+| `POST /paw-bar/admin/site/{site_id}/catalog/import/preview` | Read the products a store publishes on its own site, for the owner to review. Writes nothing: the owner applies the products they pick through `POST …/catalog/items:bulk`. Behind `paw_bar.manage`; 404 for a site outside your workspace. Body `{}`. Always a 200 with `{"status", "reason", "source", "host", "items", "total_found", "warnings"}`; see [Catalog import](#catalog-import). |
+| `POST /paw-bar/admin/site/{site_id}/catalog/import/csv` | Read the products in an uploaded CSV (multipart, field `file`, at most 2 MB, else 413 `too_large`). Writes nothing; same response shape as the preview, `source: "csv"`. See [CSV import](#csv-import). Behind `paw_bar.manage`. |
 | `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. One row per CONVERSATION, not per visitor — a visitor who asked four separate questions is four rows, each carrying its own `conversation_id` and its own last sentence. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
 | `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. Pass `conversation_id` to read ONE thread; without it the visitor's whole history is merged into a single transcript. Both sources narrow together — narrowing only the runs would interleave one thread's questions with every reply a human ever sent that visitor. Narrowing reads each turn's own session-key token rather than rebuilding a key from the conversation id and the widget's current agent, so a conversation that predates conversation identity — or one answered before its widget was bound to a dedicated agent — opens instead of 404-ing. A conversation the visitor really holds returns an empty transcript rather than a 404 when it has nothing in it yet. |
 | `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. Send `conversation_id` to file the thread you are READING; omit it and the visitor's conversation in progress is filed instead. |
@@ -4150,10 +5022,227 @@ the split is the security model:
 | `GET /paw-bar/admin/agent/{agent_id}/conversations` | The same inbox scoped to an agent rather than a site — the union across every site that agent serves. |
 | `GET /paw-bar/admin/site/{site_id}/decisions` | Gated actions awaiting a human. |
 | `GET /paw-bar/admin/site/{site_id}/handoffs` | Conversations a visitor asked to escalate. |
-| `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. |
+| `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. The response also carries the last [catalog site sync](#site-sync) a knowledge sync started: `catalog_synced_at` (`""` when none has run), `catalog_status` (`ok`, `partial`, `empty`, the import's failure reason, or `sync_failed`), `catalog_added`, `catalog_updated` and `catalog_sold_out`. The POST answers before its own catalog sync finishes, so these describe the previous one until the next GET. |
 | `GET/POST /paw-bar/admin/site/{site_id}/knowledge/faqs`, `PATCH/DELETE …/knowledge/faqs/{faq_id}` | Pinned answers: question/answer pairs a v2 concierge reads ahead of every KB hit, on every turn. GET returns `{site_id, faqs, max_count, max_chars}`; POST takes `{question, answer}` and returns the new FAQ (201); PATCH takes either field; DELETE is a 204. Both texts are stripped and must not be blank. Caps come from config (`POCKETPAW_PAWBAR_CONCIERGE_FAQ_MAX_COUNT`, default 15, and `…_FAQ_MAX_CHARS`, default 500 for question and answer together): 409 `faq_limit_reached`, 422 `faq_too_long`. GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `faq_id`, is a 404. The text is treated as data, never as instructions to the model. |
-| `GET/POST /paw-bar/admin/site/{site_id}/knowledge/sources`, `POST …/knowledge/sources/{source_id}/refetch`, `DELETE …/knowledge/sources/{source_id}` | Uploaded files and single links the concierge answers from, read into the site pocket KB. GET returns `{site_id, sources, plan, max_count, max_bytes, max_chars, accepted_types}`. POST is a form (multipart, or urlencoded for a link alone; a JSON body is a 422) with exactly one of `file` (`.pdf`, `.docx`, `.md`, `.txt`) or `url`, otherwise 422 `one_source_required` (a `url` over 2,048 characters is 422 `url_too_long`), and returns the new row with status `processing` (202); poll GET until it changes. A row is `{id, kind: "file"|"link", name, url, mime, size_bytes, status, reason, chars, truncated, article_ids, created_at, updated_at, indexed_at}`; `status` is `processing`, `ready`, `failed` (`reason`: `unreadable`, `unreachable`, `no_content`, `ingest_failed`, `kb_unavailable`, `interrupted`), `too_large`, `unsupported` or `blocked`. Refusals write nothing and carry the code as `detail`: 409 `over_limit`, 413 `too_large`, 415 `unsupported` (the type is sniffed from the bytes and must match the extension; the client `Content-Type` is ignored), 422 `blocked` (not a public http(s) address). Refetch re-reads a link (409 `not_a_link` for a file, 409 `already_processing`), DELETE un-indexes and is a 204. Links are fetched through the SSRF-safe fetcher, which re-checks every redirect hop. The file bytes are not stored. Caps come from config: `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_COUNT_FREE`/`_SITE`/`_STAFF` (3/20/50, by the site plan), `…_SOURCE_MAX_BYTES` (10 MiB), `…_SOURCE_MAX_CHARS` (100,000). GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `source_id`, is a 404. |
+| `GET/POST /paw-bar/admin/site/{site_id}/knowledge/sources`, `POST …/knowledge/sources/{source_id}/refetch`, `DELETE …/knowledge/sources/{source_id}` | Uploaded files and single links the concierge answers from, read into the site pocket KB. GET returns `{site_id, sources, plan, max_count, max_bytes, max_chars, accepted_types}`. POST is a form (multipart, or urlencoded for a link alone; a JSON body is a 422) with exactly one of `file` (`.pdf`, `.docx`, `.md`, `.txt`) or `url`, otherwise 422 `one_source_required` (a `url` over 2,048 characters is 422 `url_too_long`), and returns the new row with status `processing` (202); poll GET until it changes. A row is `{id, kind: "file"|"link", name, url, mime, size_bytes, status, reason, chars, truncated, article_ids, sections_total, sections_failed, sections_truncated, created_at, updated_at, indexed_at}`; a long document is compiled section by section, so `article_ids` lists one article per section that landed, `sections_failed` counts the sections that did not compile (the row is `ready` once one did) and `sections_truncated` the sections past `max_chars` that were never read; `status` is `processing`, `ready`, `failed` (`reason`: `unreadable`, `unreachable`, `no_content`, `ingest_failed`, `kb_unavailable`, `interrupted`), `too_large`, `unsupported` or `blocked`. Refusals write nothing and carry the code as `detail`: 409 `over_limit`, 413 `too_large`, 415 `unsupported` (the type is sniffed from the bytes and must match the extension; the client `Content-Type` is ignored), 422 `blocked` (not a public http(s) address). Refetch re-reads a link (409 `not_a_link` for a file, 409 `already_processing`), DELETE un-indexes and is a 204. Links are fetched through the SSRF-safe fetcher, which re-checks every redirect hop. The file bytes are not stored. Caps come from config: `POCKETPAW_PAWBAR_CONCIERGE_SOURCE_MAX_COUNT_FREE`/`_SITE`/`_STAFF` (3/20/50, by the site plan), `…_SOURCE_MAX_BYTES` (10 MiB), `…_SOURCE_MAX_CHARS` (100,000). GET gates on `paw_bar.read`, the writes on `paw_bar.manage`; a site outside your workspace, or an unknown `source_id`, is a 404. |
 | `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. Framed by the dashboard origin only, and carries the same CSP `sandbox` directive as the public frame. |
+
+#### Money
+
+Every amount field (`price_cents`, `total_cents`, `value_cents`, `amount_cents`) is an
+integer in ISO 4217 minor units of the currency next to it; the `_cents` names are
+historical. Most currencies have 2 decimals; the exceptions are 0 (BIF, CLP, DJF, GNF,
+ISK, JPY, KMF, KRW, PYG, RWF, UGX, UYI, VND, VUV, XAF, XOF, XPF), 3 (BHD, IQD, JOD, KWD,
+LYD, OMR, TND) and 4 (CLF, UYW). The table lives in `pocketpaw.money` and, identically,
+in `tests/fixtures/currency_exponents.json`, which the clients' copies are tested
+against. Currency codes are upper-cased; the agent ledger's per-currency totals group
+`usd` and `USD` together. Amounts stored before this rule (major × 100 for every
+currency) are converted once by the `money_minor_units_v1` migration in each SQLite
+store; client invoices in Mongo by `scripts/migrations/2026_10_01_invoice_minor_units.py`.
+
+A client that writes amounts in minor units sends the request header
+`X-Paw-Money-Units: iso4217`. Without it the server assumes a client built before this
+rule, which still sends major × 100:
+
+- `POST /sites/{site_id}/invoices` converts such an amount (÷100 for a 0-decimal
+  currency, ×10 for a 3-decimal one, unchanged for 2 decimals) before storing it.
+  Every invoice it records is stamped `amount_unit: "iso4217"`; `""` marks a legacy
+  row the migration script has not converted yet. The script converts only unstamped
+  rows and stamps each in the same write, so it is safe to run at any time, more than
+  once, before or after any client release. `amount_unit` is returned on each invoice.
+- `PATCH /paw-bar/widgets/{id}/spec` and `PATCH /paw-bar/admin/site/{site_id}/widget/spec`
+  refuse a catalog holding any item whose currency does not have 2 decimals with 409
+  `currency_units_client_outdated`. They do not convert, because an old client also
+  re-sends prices it read in minor units. Catalogs whose currencies all have 2 decimals
+  are the same in both conventions and save as before.
+
+#### Catalog store
+
+A concierge's products live in their own table beside the widget (`paw_bar.db`,
+`paw_bar_catalog_items`), not in the widget spec. Product cards, the cart, the agent
+ledger's cart value and the concierge's product list all read it, never what the model
+writes. It holds at most `POCKETPAW_PAWBAR_CATALOG_MAX_ITEMS` products (default 5,000);
+a write past that is 409 with `detail` `{"code": "catalog_full", "limit": <n>}` and
+writes nothing. A site with no concierge widget is 404 `no_concierge_widget` on every
+catalog route. Deleting the widget deletes its products.
+
+Only a blank `id` or a negative `price_cents` is a 422; the other fields are cleaned
+rather than rejected:
+
+| Field | Type | Rules |
+|---|---|---|
+| `id` | string | Required, unique within the catalog. Imported items use `shopify:<id>`, `woo:<id>` or `web:<hash of the page path>`; ids the editor mints start `item-`. |
+| `name` | string | Trimmed and cut to 200 characters. |
+| `price_cents` | int | Non-negative, in ISO 4217 minor units of `currency`: `350` is $3.50, `1500` is ¥1,500, `1250` is 1.250 KWD. The name is historical. A value over 10^12 is read as `0` (and logged), so one absurd stored price cannot make the spec unloadable. |
+| `currency` | string | Trimmed and upper-cased. Anything that isn't then 3 letters (including `""`) is stored as `USD`. |
+| `image_url` | string | An `http(s)://` URL of at most 2048 characters; anything else is stored as `""`. |
+| `url` | string | The product's page: an `http(s)://` URL or a site path starting with a single `/`, at most 2048 characters; anything else is stored as `""`. A product card links to it. |
+| `description` | string | Trimmed and cut to 300 characters. Shown on the product card. |
+| `in_stock` | bool or `null` | `null` when unknown. `false` lists the product last and marks it sold out in the list the concierge reads, so it stops recommending it. |
+
+Read back, an item also carries `position` (the owner's order), `source` (`manual`,
+`shopify`, `woocommerce`, `jsonld`, `opengraph`, `csv` or `site`; when a write leaves it
+out it is read off the id prefix, else `manual`), `origin` (`site` or `owner`, below) and
+`updated_at`.
+
+#### Site sync
+
+Every knowledge sync that reached the site (hosted: the pocket was read; connected: the
+crawl reached the verified origin) starts a background catalog sync for the site's
+concierge widget. It runs the same reader as the [import preview](#catalog-import) and
+writes the result itself, so the concierge can show the site's products as cards
+without the owner pressing Import. It never changes the knowledge sync's result, and a
+site with no concierge widget is not read. The rules, by `origin`:
+
+- A new product id is added with `origin: "site"`, after the existing products, until
+  the catalog cap; the rest are left out (logged) in the reader's order.
+- A `site` product is updated from the site (name, price, currency, image, url,
+  description, stock).
+- Any write through the catalog routes (PUT, bulk, a spec catalog) stores the product as
+  `origin: "owner"`; the sync never changes an `owner` product. Rows from before the
+  field existed are `owner`.
+- A deleted product is remembered per widget and never added back.
+- A `site` product the import no longer lists is set to `in_stock: false`, never
+  deleted, and only after a complete import: status `ok`, `total_found` no larger than
+  the items returned, no `skipped_by_robots` warning, and no product skipped for having
+  no currency. Products with no currency are skipped (their price units are unknown).
+
+The outcome is shown on `GET /paw-bar/admin/site/{site_id}/knowledge` (`catalog_*`).
+
+**What a concierge turn sees.** A catalog of at most 50 products is listed whole, in
+the owner's order. A bigger one is searched per turn: the product whose `url` is the
+visitor's page (if any), then the 20 best matches for the visitor's message, their
+last two messages and the page title (SQLite FTS5 over name and description, English
+stemming, the name weighted double; a `LIKE` scan where the SQLite build has no FTS5),
+then, when that search finds fewer than 3, the first 10 products in the owner's order.
+Duplicates are dropped. Both runtimes use the same rule. A product card may still name
+any product in the store, not only the ones listed: the server looks each id up when
+it fills the card in.
+
+#### Spec size and the deprecated catalog
+
+A widget spec is at most 64 KB, measured as JSON without its `catalog`. Every spec write
+checks it (`PATCH /paw-bar/widgets/{id}/spec`, `PATCH …/admin/site/{id}/widget/spec`,
+`POST /paw-bar/widgets/{id}/spec/rollback`) and answers 422 `spec_too_large`; specs
+already stored are never refused for their size.
+
+`spec.catalog` is deprecated and kept for one release so an older editor still works.
+A spec write whose `catalog` is non-empty adds those products to the catalog store
+(still at most 200 per write, the old limit): each is created or updated by `id`, in
+place, and nothing the body leaves out is deleted, so an older editor that loaded an
+empty list and saved one product adds that one product. The spec is stored without the
+catalog; an empty or absent `catalog` leaves the store alone. 409 `catalog_full` when
+the new ids would pass the cap, and the 409 `currency_units_client_outdated` check (see
+Money above) runs before any of it. Deleting or reordering products takes the catalog
+routes. A rollback ignores the `catalog` in an archived revision: the catalog is not
+versioned with the spec. The `catalog_to_table_v1` migration moves every
+stored spec's catalog into the store once, after `money_minor_units_v1`, one transaction
+per widget: the spec as it was is archived as a revision first, its products are added
+after any the store already holds for that widget (a product already there is kept as
+it is, nothing is deleted), and it logs the largest spec left. A spec save on a widget
+the migration has not reached yet moves that widget's catalog the same way before
+writing, so a save never drops it. `POST /paw-bar/widgets` applies the same size cap
+(422 `spec_too_large`) and item cap (409 `catalog_full`).
+
+#### Catalog import
+
+`POST /paw-bar/admin/site/{site_id}/catalog/import/preview` fetches from one host. A
+connected (foreign-origin) site is read on the first of its origins this workspace has
+verified within the last 30 days, the same rule as the knowledge crawl. A hosted Paw
+Site is read on its first live custom domain, else the host it was deployed to, with no
+ownership check, and with the sitemap / JSON-LD / OpenGraph reader only (no Shopify or
+WooCommerce endpoints); one that has not been deployed (no URL, or a local one) is
+`failed` / `site_not_deployed`. The site builders don't publish `Product` JSON-LD yet,
+so most hosted sites come back `empty`; CSV covers them. Every fetch sends the concierge
+crawler's user agent (`PawSitesConcierge/1.0`), checks robots.txt for every URL, follows
+redirects only on that host, and stops at 30 product pages (sitemap reader) or 40 MB.
+Shopify's `/products.json` is paged 250 at a time up to 20 pages and the WooCommerce
+Store API 100 at a time up to 50 pages, each stopping at a short page or the catalog
+cap.
+
+The whole run has one 60-second deadline: no fetch starts unless it can finish before
+it, so platform paging and the page walk stop there and return what they have read as
+`partial` with `deadline_reached`; `timeout` is reserved for a run that read no
+products by then. Sitemaps are read only as UTF-8 (a UTF-8 BOM is fine); one that is
+not UTF-8, declares another encoding, or carries a DOCTYPE or entity declaration is
+ignored.
+
+A price is read from a number or a string. A single comma followed by one or two digits
+and no dot is a decimal comma (`"19,99"` is 19.99); any other comma is a thousands
+separator (`"1,500"`, `"1,299.00"`). A product whose price does not fit (over
+10^12 minor units, or too large to compute) is skipped and counted in
+`skipped_bad_price:<n>`; the rest of the import stands.
+
+It reads Shopify's `/products.json` or the WooCommerce Store API when the homepage looks
+like one of them, and otherwise (or when that endpoint is refused, missing or
+robots-disallowed) the store's sitemap and product pages: schema.org `Product` JSON-LD
+first, then `og:type=product` tags. One item per product: a Shopify product's price is
+its cheapest available variant. Prices are converted to ISO 4217 minor units of the
+product's currency (WooCommerce's own `currency_minor_unit` is undone first); a product
+whose currency is unknown is converted as two decimals. Products are sorted in stock first, then in the store's
+order, and capped at the catalog cap (5,000 by default); `total_found` is the count
+before the cap.
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Products found and every page read. |
+| `partial` | Products found, but some pages could not be read, or the byte budget or the 60-second deadline ran out. |
+| `empty` | Nothing with a name and a price was found. |
+| `failed` | Nothing was read; `reason` says why. |
+
+`reason` is `""` or one of `site_not_deployed` (a hosted site with no public host;
+nothing is fetched), `origin_missing`, `origin_unverified`, `origin_verification_stale`,
+`blocked_by_robots` (robots.txt disallows the homepage for our crawler), `timeout` or
+`fetch_failed`. `source` is `shopify`, `woocommerce`, `jsonld`, `opengraph`, `csv` or
+`""`. `warnings` can hold `currency_unknown`, `skipped_no_price:<n>`,
+`skipped_bad_price:<n>`, `skipped_by_robots:<n>`, `pages_failed:<n>`,
+`byte_budget_reached`, `deadline_reached` and `robots_unreadable`.
+
+Each item has the catalog fields above. `image_url` is always `https://` or empty, and
+`url` is a site path on the verified host or empty. Re-importing returns the same ids
+for the same products, so the client can update the items it imported before. A `web:` id hashes the
+product's page path together with its name, so products without their own URL on one
+listing page stay distinct. robots.txt is fetched on the verified host only: if it
+redirects elsewhere it counts as unreadable (`robots_unreadable`, everything allowed),
+the knowledge crawl's policy for a robots file it can't read.
+
+#### CSV import
+
+`POST /paw-bar/admin/site/{site_id}/catalog/import/csv` reads an uploaded CSV (any site,
+hosted or connected) into the same preview. Headers are matched case-insensitively, `_`
+reads as a space, and the delimiter (`,`, `;` or tab) is detected. UTF-8 (with or
+without a BOM) is expected; anything else is read as Windows-1252.
+
+| Field | Header aliases (first non-empty one wins) |
+|---|---|
+| `id` | `id`, `handle`, `sku`, `variant sku`, `product id` |
+| `name` | `name`, `title`, `product`, `product name` |
+| `price` | `price`, `sale price`, `variant price`, `regular price` |
+| `currency` | `currency`, `currency code` |
+| `image_url` | `image`, `image url`, `photo`, `image src`, `images` (first URL), `variant image` |
+| `url` | `url`, `link`, `page`, `product url`, `permalink` |
+| `description` | `short description`, `description`, `body (html)`, `body html` |
+| `in_stock` | `in stock`, `in stock?`, `available`, `stock`, `variant inventory qty` (yes/no, true/false, 1/0, in stock / out of stock, or a quantity) |
+
+A price is a decimal in the row's currency, converted to its minor units. Currency
+symbols and spaces are ignored, then the same comma rule as the site import applies. With no `currency` column the items
+come back with `currency: ""` and a `currency_unknown` warning, for the dashboard to ask.
+`id` defaults to `csv:<slug of the name>`; a given id becomes `csv:<id>`.
+
+Platform exports upload as they are. Shopify's product export (`Handle`, `Title`,
+`Body (HTML)`, `Variant Price`, `Variant Inventory Qty`, `Image Src`, …) has extra rows per
+product carrying only the handle: they fold into the product (its lowest price, in stock
+when any variant is), and `url` defaults to `/products/<handle>`. WooCommerce's
+(`ID`, `Type`, `SKU`, `Name`, `Short description`, `In stock?`, `Sale price`,
+`Regular price`, `Images`, …) gets ids `woo:<ID>`, the ids the site import mints, so the
+two merge; `variation` rows are skipped (`skipped_variations:<n>`).
+
+Every product goes through the same cleaning as the site import. A row that can't be a
+product is a warning with its line number, `line:<n>:no_name`, `line:<n>:no_price` or
+`line:<n>:duplicate_id` (the first 50, then `more_row_warnings:<n>`), and the other rows
+still import (`status: "partial"`). Past the catalog cap reading stops with
+`row_cap_reached`. A file that can't be used is `failed` with `reason` `csv_empty`,
+`csv_unreadable`, `csv_no_name_column` or `csv_no_price_column`.
 
 #### Guided concierge fields (v2)
 
@@ -4172,10 +5261,29 @@ topics with `[]`. A value past its cap, outside its enum, or not a language code
 | `concierge_avoid_topics` | string[] | At most 10 topics of 80 characters each. Blank entries and case-insensitive duplicates are dropped. |
 | `concierge_escalation` | `{"mode": "handoff" \| "email" \| "none", "contact": string}` or `null` | Sent whole. `contact` is at most 120 characters and must be an email address when `mode` is `"email"`. It is kept for the other modes but not used. |
 
-Control and invisible formatting characters are stripped from every text value. None
-of these fields reaches the model's instructions: they are rendered into fixed
-sentences, with owner text quoted, in the data part of the request. See
+Control and invisible formatting characters are stripped from every text value. On v2
+none of these fields reaches the model's instructions: they are rendered into fixed
+sentences, with owner text quoted, in an `<owner-settings>` block in the data part of
+the request, and the fixed instructions tell the model to take its name, tone and
+manner from that block (and to call itself the site's assistant when no name is set).
+A legacy concierge run gets the same block appended to its instructions. See
 `docs/concepts/concierge-knowledge.mdx`.
+
+`concierge_name` also:
+
+- heads the widget. The frame boot's `agentName` is the look editor's own agent name
+  when one is set, otherwise `concierge_name`, on the public frame and the owner's
+  preview frame;
+- names the legacy runtime's dedicated agent (slug `concierge-<site_id>`). A PATCH
+  that changes it renames that agent and rewrites its persona, but only while they
+  still read as the generated ones: an agent the owner renamed or bound by hand is
+  left alone. Clearing the name goes back to `<Site name> Concierge`.
+
+A site's concierge agent never appears in tenant-facing agent listings: `GET /agents`,
+`POST /agents/discover`, `@`-mention suggestions, the agents surface snapshot and the
+planner's agent matching all leave it out. It is recognised by the `concierge` +
+`site:<id>` tags provisioning stamps, or by its `concierge-<site_id>` slug for older
+ones. `GET /agents/{id}` and the slug lookup still return it.
 
 Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the
@@ -5401,6 +6509,69 @@ not compiled.
 }
 ```
 
+## Platform — Discover Moderation
+
+Staff routes for the Discover index under `/api/v1/platform/discover`
+(`ee/pocketpaw_ee/cloud/platform/discover.py`). Like every `/platform` route they
+need a platform role and an interactive session cookie; a bearer token or API key
+is refused. The list is `platform.discover.read` (SUPPORT); every write is
+`platform.discover.moderate` (OPERATOR), so SUPPORT gets `403`
+(`platform.insufficient_role`) on them and a user with no platform role gets
+`403` (`platform.not_operator`) everywhere.
+
+Every write takes a body with a non-empty, free-text `reason` (`422`
+`platform.discover.invalid_reason` when blank) and is recorded as a
+`PlatformAuditEvent` (action `platform.discover.moderate`): written `attempted`
+before the change, then settled `applied` or `failed`. A listing write records
+`target_type: "discover_listing"`, the owner's workspace as `target_workspace`,
+and the listing id plus the verb and prior flags in `before`. The list read is
+recorded too, as `platform.discover.read`.
+
+```json
+{ "reason": "Spam reported by three users, confirmed" }
+```
+
+### `GET /api/v1/platform/discover` (SUPPORT)
+
+Every listing, hidden ones included, newest first. Query params, all optional:
+`source`, `hidden` (`true` / `false`), `featured` (`true` / `false`), `q` (as on the
+public list), `cursor`, `limit` (1-200, default 50). Response `200`:
+`{"items": [...], "next_cursor": ... | null}`, where each item is the staff view
+(never served on a public route):
+
+```json
+{
+  "id": "6660a1...", "source": "site_template", "source_id": "665f1c...",
+  "workspace_id": "w1", "owner": "u1", "kind": "site", "title": "Bakery",
+  "description": "", "live_url": "https://bakery.pawsites.workers.dev",
+  "featured": false, "hidden": true, "report_count": 3,
+  "dismissed_reporter_count": 0, "remix_count": 3,
+  "created_at": "2026-10-01T09:00:00Z"
+}
+```
+
+### `POST /api/v1/platform/discover/{listing_id}/feature` · `/unfeature` (OPERATOR)
+
+Sets `featured`; hidden listings can be featured too. Response `200`:
+`{"id", "featured", "hidden", "audit_event_id"}`. `404` for an unknown listing,
+with no audit row written.
+
+### `POST /api/v1/platform/discover/{listing_id}/hide` · `/unhide` (OPERATOR)
+
+Hide removes the listing from the public reads and hides the source item (a site
+template leaves the /sites public list); its reports are kept. Unhide brings both
+back, clears the reports and records their authors so their later reports on that
+listing are ignored. Same response and `404` as feature.
+
+### `POST /api/v1/platform/discover/reindex?source=site_template` (OPERATOR)
+
+Rebuilds one source's listings now: upserts every public item (a hidden one as a
+hidden listing) and removes listings whose item is gone or no longer public.
+Idempotent. `source` defaults to `site_template`, the only source that supports
+it; any other returns `422` (`discover.reindex_unsupported`). Response `200`:
+`{"source", "created", "updated", "unchanged", "removed", "audit_event_id"}`; a
+row is only written when something changed.
+
 ## Platform — Plan & Entitlement Overrides
 
 Cross-tenant operator routes under `/api/v1/platform/workspaces/{workspace_id}/entitlements*`
@@ -5542,8 +6713,23 @@ Batch form of `GET /sessions?agent_id=`, gated on `session.read_own`.
 
 `agent_ids` holds 1..100 ids. The answer has every requested id as a key, with
 the caller's own non-deleted sessions for that agent in the active workspace,
-newest activity first, and `[]` when there are none. All of it comes from one
-query.
+newest activity first, and `[]` when there are none. Each agent's list holds at
+most its 100 most recent sessions. The read count does not grow with the number
+of agents (one aggregation picks the ids, one query loads them).
+
+### `GET /api/v1/sessions`
+
+The caller's sessions in the active workspace, newest activity first, as a bare
+JSON list. Query params: `agent_id` (one agent's DM sessions), `surface`
+(`chat` also matches legacy rows with no surface), `limit` (default 200, 1..500)
+and `cursor`. Without `agent_id`, a response that stopped at `limit` carries an
+`X-Next-Cursor` header; send it back as `cursor` for the next page. The header
+is not in the CORS `expose_headers` list, so a cross-origin browser client
+cannot read it; the per-surface `GET /sessions/{chat,files,foresight,pocket-creation}`
+endpoints return the cursor in the body.
+
+`GET /api/v1/pockets/{id}/sessions` returns at most the 200 most recent threads.
+`GET /api/v1/sessions/runtime` takes `limit` 1..500; `total` counts every row.
 
 ```json
 { "sessions": { "agent-a": [ { "id": "…", "sessionId": "…", "agent": "agent-a" } ], "agent-b": [] } }

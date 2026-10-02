@@ -1,0 +1,83 @@
+[
+  {
+    "label": "the queued frame is never written, so a run waiting for a free slot has no stream and its reader sees only keep-alive pings",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/arq_executor.py",
+    "find": "        await _announce_queued(spec.run_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the queued frame is written on every submit, so a retried send puts 'queued' after the worker's own frames",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/arq_executor.py",
+    "find": "        if await transport.stream_exists(run_id):\n            return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the queued frame gets no TTL, so a stream created at enqueue for a run that is never driven lives in Redis forever",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/arq_executor.py",
+    "find": "        await transport.set_ttl(run_id, queued_stream_ttl_seconds())\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the sweeper only appends to an existing stream again, so a never-started run's reader waits about 32 minutes for its own cap",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/sweeper.py",
+    "find": "                if was_queued:\n",
+    "replace": "                if was_queued and await transport.stream_exists(doc.run_id):\n",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the queued arm uses the running cutoff, so the queued timeout env changes nothing",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/sweeper.py",
+    "find": "{\"status\": \"queued\", \"createdAt\": {\"$lt\": queued_cutoff or cutoff}}",
+    "replace": "{\"status\": \"queued\", \"createdAt\": {\"$lt\": cutoff}}",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "a busy provider's raw error text reaches the client again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                yield (\"error\", _backend_error_frame(message))",
+    "replace": "                yield (\"error\", {\"code\": \"agent.backend_error\", \"message\": message})",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the busy classifier drops its word boundaries, so a token count containing 429 reads as a rate limit",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "r\"\\b(?:429|529)\\b|",
+    "replace": "r\"(?:429|529)|",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the jail quota walk runs on the event loop again, stalling every run on it for seconds",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "await asyncio.to_thread(agent_jail.check_workspace_jail_quota, ctx.workspace_id)",
+    "replace": "agent_jail.check_workspace_jail_quota(ctx.workspace_id)",
+    "tests": [
+      "tests/cloud/runs/test_queue_saturation.py"
+    ]
+  },
+  {
+    "label": "the growth executor enqueues with no growth worker deployed, so the send waits in Redis forever while the Action reads executed",
+    "file": "ee/pocketpaw_ee/cloud/growth/executor.py",
+    "find": "        if not mock and not _growth_worker_enabled():\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/test_gate.py"
+    ]
+  }
+]

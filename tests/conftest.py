@@ -335,3 +335,19 @@ def _reset_paw_bar_public_ip_limiter():
         with limiter._lock:
             limiter._buckets.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def scheduled_catalog_syncs(monkeypatch):
+    """Record the background catalog syncs a knowledge sync schedules instead of
+    running them, so no test leaves a site import (network) loose on the loop.
+    Tests that care request this fixture and assert on the sites it holds; the
+    sync itself is tested by calling it directly."""
+    scheduled: list = []
+    try:
+        from pocketpaw_ee.paw_bar import catalog_sync
+    except Exception:  # noqa: BLE001 — OSS-only install: nothing to stub
+        yield scheduled
+        return
+    monkeypatch.setattr(catalog_sync, "_scheduler", scheduled.append)
+    yield scheduled

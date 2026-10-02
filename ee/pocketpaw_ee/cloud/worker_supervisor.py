@@ -1,9 +1,9 @@
 # ee/pocketpaw_ee/cloud/worker_supervisor.py — runs every arq lane in ONE process.
 #
-# Created 2026-09-04 (fix/queue-lanes, backend-perf C1). Splitting site builds onto their
-# own queue is only half the fix; a queue with no consumer is worse than a shared one,
-# because the job waits forever and nothing says so. This module is the consumer side:
-# it starts the chat lane and the site-build lane as two arq Workers on one event loop.
+# A queue with no consumer is worse than a shared one, because the job waits forever and
+# nothing says so. This module is the consumer side: it starts the chat lane, the
+# site-build lane and, when POCKETPAW_GROWTH_WORKER_ENABLED is on, the growth lane, as
+# arq Workers on one event loop.
 #
 # WHY ONE PROCESS AND NOT TWO CONTAINERS. Coolify ships the Dockerfile to the deploy host
 # by base64-encoding it into a single SSH command line, ONCE PER COMPOSE SERVICE THAT
@@ -12,7 +12,7 @@
 # deploy with ``posix_spawn() failed: Argument list too long``, raised by Coolify's PHP
 # before Docker ran at all, naming neither the service nor compose (paw-workspace #193,
 # reverted in #194). So a new lane cannot be a new service, and this is the supported
-# alternative: one container, one command, two lanes with independent ceilings.
+# alternative: one container, one command, lanes with independent ceilings.
 #
 # WHY NOT ``sh -c 'arq A & exec arq B'``. Backgrounding the first lane makes its death
 # invisible: the container stays up and healthy while site builds silently stop being
@@ -53,15 +53,22 @@ def default_lanes() -> list[type]:
     raise when ``POCKETPAW_REDIS_URL`` is unset, which is correct for a worker process
     and wrong for anything that merely imports the supervisor to inspect it.
 
-    The growth lane (``pocketpaw_ee.cloud.growth.worker``) is deliberately NOT here. It
-    has its own queue already and no consumer in the deployed compose file, so adding it
-    would not be a refactor — it would start executing outbound work that is currently
-    inert. That is a product decision, not a performance one.
+    The growth lane (``pocketpaw_ee.cloud.growth.worker``) runs only when
+    ``POCKETPAW_GROWTH_WORKER_ENABLED`` is on. It executes live outbound sends (email,
+    WhatsApp) and the daily follow-up cron, so it is opt-in. The same flag lets the web
+    process enqueue growth sends (``growth.executor``), so a deployment that sets it on
+    the backend must set it on the worker too, or approved sends queue with no consumer.
     """
     from pocketpaw_ee.cloud.chat.runs.worker import WorkerSettings as ChatWorkerSettings
+    from pocketpaw_ee.cloud.growth.executor import _growth_worker_enabled
     from pocketpaw_ee.sites.build_worker import WorkerSettings as SiteBuildWorkerSettings
 
-    return [ChatWorkerSettings, SiteBuildWorkerSettings]
+    lanes: list[type] = [ChatWorkerSettings, SiteBuildWorkerSettings]
+    if _growth_worker_enabled():
+        from pocketpaw_ee.cloud.growth.worker import WorkerSettings as GrowthWorkerSettings
+
+        lanes.append(GrowthWorkerSettings)
+    return lanes
 
 
 def lane_name(settings_cls: type) -> str:

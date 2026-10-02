@@ -1,81 +1,53 @@
-# ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
-# Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the OUT-OF-BAND
-#   thread vocabulary: ``OwnerMessageRole`` (owner | system | visitor) and
-#   ``OwnerMessage``, the rows of ``paw_bar_owner_messages``. These are the thread
-#   lines that have no ChatRunDoc: the owner's own replies, the system's
-#   explanations (the bot handing itself back), and a visitor line that arrived
-#   while the bot was muted and therefore never dispatched a run. They are NOT run
-#   docs on purpose — ``metering.sweeper.sweep_unbilled_runs`` bills every unbilled
-#   terminal run, so an owner reply shaped as one would charge the owner credits
-#   for typing their own sentence and count as agent compute that never happened.
-#   ``created_at`` is an ISO string in UTC (aware), matching ChatRunDoc.createdAt,
-#   so the transcript reader can merge both sources on one comparable clock.
-# Updated: 2026-07-30 (owner inbox, slice 1) — the conversation STATE vocabulary:
-#   ``ConversationState`` (open | needs_human | snoozed | closed),
-#   ``ConversationNote`` (an owner's private {author, text, at}) and
-#   ``Conversation`` — a thin lifecycle row over the concierge run docs, keyed by
-#   (widget_id, customer_ref). It stores NO messages: the transcript stays derived
-#   from ChatRunDoc and this row adds only lifecycle + operator metadata, so the
-#   queue and the log never disagree about what was said.
-# Updated: 2026-07-30 (async decision delivery) — DecisionStatus gains an
-#   optional ``contact_email`` (empty default). A visitor who leaves the page
-#   while their request is PENDING can leave an email; when the owner decides,
-#   the delivery hook sends the same customer-facing reply there. PII posture:
-#   the email lives ONLY on this row — see the field comment.
-# Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor-commerce
-#   vocabulary. PawBarSpec gains three optional fields: ``actions`` (declared
-#   verbs: {verb, policy in {auto,gated}, args flat-type-map, label}), ``catalog``
-#   (products: {id, name, price_cents>=0, currency, image_url, url}) and
-#   ``checkout_url`` (http(s), may carry a ``{cart_ref}`` placeholder). New
-#   validators reject a malformed declaration with a clear error (unique
-#   snake_case verbs, policy allowlist, flat arg types, unique catalog ids,
-#   non-negative int prices, http(s) checkout url). ``PawBarCartItem`` /
-#   ``PawBarCart`` are the visitor-scoped cart the store persists per
-#   (widget_id, customer_ref). All additive — a spec with none of these fields
-#   is byte-identical to today. SS-2 alignment lives in the executor, not here.
-# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — PawBarWidget +
-#   PawBarWidgetPublic gain `agent_id: str = ""`, mirroring the workspace_id
-#   column right beside it (same nullability/default). It binds a concierge
-#   widget to the agent that answers its chats; "" = unbound (legacy / no agent).
-#   The KB scope is NOT stored — it is derived where needed (as of D5, the union
-#   of `pocket:<pocket_id>` and `agent:<the widget's own agent_id>`, never a
-#   `workspace:` or `user:` scope) — so this is the only new tenancy-adjacent
-#   field.
-# Updated: 2026-07-11 (W4a tenancy seam) — PawBarWidget + PawBarWidgetPublic
-#   gain `workspace_id: str = ""` (in-row tenancy, same model as DecisionStatus).
-#   Empty string = legacy/single-tenant row; the store's scoped reads match it.
-# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawPrint*→PawBar* models).
-#   The separate one-word audit feed (past-tense record) is a DIFFERENT feature, untouched.
-# Created: 2026-04-13 (Move 3 PR-A) — Minimal, secure-by-design render vocabulary
-# (text / image / list / button / form / divider). No raw HTML, no script
-# injection paths. The widget.js bundle consumes PawBarSpec; the backend
-# consumes PawBarEvent on the ingest side.
-# Updated: 2026-06-10 (W0b security fix) — Added PawBarWidgetPublic, a
-# token-free projection of PawBarWidget used as the response model for
-# list/read endpoints so the per-widget access_token never leaves the server
-# in those payloads. The token is now only returned by the explicit,
-# authenticated create + rotate-token paths.
-# Updated: 2026-06-11 (gap2 — close the customer decision loop) — Added
-# DecisionStatus + DecisionState. An inbound customer event no longer dead-ends
-# at a Fabric object: it can raise an Instinct proposal, and the human's
-# decision (reply text + state) is recorded here as the deliverable the
-# customer surface polls back. DecisionStatus is keyed by (widget_id,
-# customer_ref) so a rendered widget can fetch "what did the owner decide about
-# my request?" without any owner credential. State machine: pending → delivered
-# (approved) | declined (rejected). This is the back-half of the loop the
-# module docstring promised since 2026-04-13 but never wired.
+# src/pocketpaw/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+#
+# The render vocabulary the widget bundle draws (``PawBarBlock``: text / image /
+# list / button / form / divider, no raw HTML, no script paths) inside a
+# ``PawBarSpec``, plus the visitor-commerce declarations on that spec: ``actions``
+# (unique snake_case verbs; only the cart verbs may be ``auto``, everything else is
+# ``gated`` to an Instinct proposal; the built-in ``send_to_team`` is reserved: a
+# stored spec that declares it loads with that action dropped and a warning, and
+# the owner save paths refuse it via ``reserved_verbs_dropped``) and an http(s)
+# ``checkout_url``. The product
+# catalog lives in its own table (``paw_bar.catalog_store``, rows read back as
+# ``PawBarCatalogRow``); ``PawBarSpec.catalog`` is DEPRECATED, kept one release so
+# an older editor's spec PATCH still works: the store adds a non-empty one to the
+# table on write (upsert by id, never a delete) and never stores it in the spec.
+# Its 200-item validator stays, since only those older clients send it.
+# ``spec_bytes`` is what the 64 KB spec cap (``MAX_SPEC_BYTES``) measures: the
+# spec without its catalog. Catalog items are the ONLY source of product data on a
+# card, so they are cleaned as untrusted input whether typed by the owner or
+# imported from the store's site: text truncated to its cap, a non-http(s) image
+# url or a ``url`` that is neither http(s) nor a single-slash site path blanked,
+# a bad currency read as USD, a price past ``MAX_CATALOG_PRICE_MINOR`` read as 0.
+# Cleaned, not rejected, because a stored spec is re-validated on every load
+# and must never become unloadable. Every amount
+# (``price_cents`` …) is ISO 4217 minor units of its currency (see
+# ``pocketpaw.money``); a cart holds one currency only.
+#
+# Also here: the widget row (``PawBarWidget``; ``PawBarWidgetPublic`` is its
+# token-free projection for reads, so the per-widget access token only leaves the
+# server on create / rotate), ingest events and their Fabric mappings, the
+# visitor cart, ``DecisionStatus`` (the owner's decision a visitor polls back,
+# keyed by widget + customer_ref; an optional contact email lives only on that
+# row), and the owner-inbox rows: ``Conversation`` (lifecycle over run docs, no
+# messages) and ``OwnerMessage`` (owner / system / muted-visitor lines that are
+# deliberately NOT run docs, so metering never bills them).
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from pocketpaw.fabric.models import _gen_id
+from pocketpaw.money import normalize_currency
+
+logger = logging.getLogger(__name__)
 
 _MAX_BLOCKS_PER_SPEC = 64
 _MAX_ITEMS_PER_LIST = 50
@@ -88,6 +60,12 @@ _MAX_SPEC_BYTES = 64 * 1024
 _MAX_ACTIONS_PER_SPEC = 16
 _MAX_ARGS_PER_ACTION = 12
 _MAX_CATALOG_ITEMS = 200
+_MAX_CATALOG_NAME_CHARS = 200
+_MAX_CATALOG_DESCRIPTION_CHARS = 300
+_MAX_CATALOG_URL_CHARS = 2048
+MAX_CATALOG_PRICE_MINOR = 10**12  # past this a price is a typo or a parse accident
+# Currency values already warned about, so a bad stored spec logs once, not per load.
+_WARNED_CURRENCIES: set[str] = set()
 _MAX_CART_ITEMS = 50
 # The arg-type names an action may declare — a FLAT map of {name: type-name}.
 # Nested/object args are rejected so the tool input schema stays simple and the
@@ -99,6 +77,9 @@ _ACTION_POLICIES = frozenset({"auto", "gated"})
 # MUST be "gated" — a non-cart effect auto-firing would violate the staffed-sites
 # rule that tenant-scoped effects only happen through an Instinct proposal.
 _AUTO_VERBS = frozenset({"add_to_cart", "checkout"})
+# Built-in verbs the executor handles itself (``send_to_team``: the concierge's
+# lead card). An owner can't declare one, so the name can only ever mean that.
+_RESERVED_VERBS = frozenset({"send_to_team"})
 # snake_case verb: lowercase, digits, underscores; must start with a letter.
 _VERB_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -224,7 +205,14 @@ class PawBarActionSpec(BaseModel):
 
 
 class PawBarCatalogItem(BaseModel):
-    """One product the concierge can add to a cart / render on a card."""
+    """One product the concierge can add to a cart / render on a card.
+
+    ``price_cents`` is ISO 4217 minor units of ``currency`` (¥1,500 is 1500,
+    $3.50 is 350, 1.250 KWD is 1250); the name is historical. ``url`` is the
+    product's page: an absolute http(s) URL or a site path (``/products/mug``),
+    which is how imported items store it. ``in_stock`` is None when the stock is
+    unknown; False marks the item sold out in the prompt.
+    """
 
     id: str
     name: str
@@ -232,6 +220,8 @@ class PawBarCatalogItem(BaseModel):
     currency: str = "USD"
     image_url: str = ""
     url: str = ""
+    description: str = ""
+    in_stock: bool | None = None
 
     @field_validator("id")
     @classmethod
@@ -240,16 +230,94 @@ class PawBarCatalogItem(BaseModel):
             raise ValueError("catalog item id is required")
         return value.strip()
 
+    # The text and link fields SANITISE rather than reject: specs are re-validated
+    # from SQLite on every load, so a strict rule here would make a widget saved
+    # before the rule existed unloadable. Only the id and price stay hard rules.
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _cap_name(cls, value: Any) -> Any:
+        return value.strip()[:_MAX_CATALOG_NAME_CHARS] if isinstance(value, str) else value
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _cap_description(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()[:_MAX_CATALOG_DESCRIPTION_CHARS]
+        return value
+
     @field_validator("price_cents")
     @classmethod
     def _non_negative_price(cls, value: int) -> int:
         if value < 0:
             raise ValueError("catalog item price_cents must be a non-negative integer")
+        if value > MAX_CATALOG_PRICE_MINOR:
+            # Coerced like the text fields: a stored spec must stay loadable.
+            logger.warning(
+                "paw_bar: catalog price_cents %d is past %d; reading it as 0",
+                value,
+                MAX_CATALOG_PRICE_MINOR,
+            )
+            return 0
         return value
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _currency_code(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            return normalize_currency(value)
+        except ValueError:
+            pass
+        if value not in _WARNED_CURRENCIES and len(_WARNED_CURRENCIES) < 256:
+            _WARNED_CURRENCIES.add(value)
+            logger.warning("paw_bar: catalog currency %r is not a 3-letter code; using USD", value)
+        return "USD"
+
+    @field_validator("image_url", mode="before")
+    @classmethod
+    def _http_image_url(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        v = value.strip()
+        if len(v) > _MAX_CATALOG_URL_CHARS or not v.lower().startswith(("http://", "https://")):
+            return ""
+        return v
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _http_or_path_url(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        v = value.strip()
+        is_path = v.startswith("/") and not v.startswith("//")
+        is_http = v.lower().startswith(("http://", "https://"))
+        if len(v) > _MAX_CATALOG_URL_CHARS or not (is_path or is_http):
+            return ""
+        return v
+
+
+class PawBarCatalogRow(PawBarCatalogItem):
+    """A catalog item as the catalog store holds it: the item plus its place in
+    the owner's order, where it came from (``manual`` | ``shopify`` |
+    ``woocommerce`` | ``jsonld`` | ``opengraph`` | ``csv`` | ``site``), when it
+    was last written, and who owns it: ``origin`` is ``site`` while the site
+    sync keeps it in step with the site, ``owner`` once the owner made or edited
+    it (the sync never touches those)."""
+
+    position: int = 0
+    source: str = "manual"
+    updated_at: str = ""
+    origin: Literal["site", "owner"] = "owner"
 
 
 class PawBarSpec(BaseModel):
-    """The payload the widget fetches and renders."""
+    """The payload the widget fetches and renders.
+
+    ``catalog`` is deprecated: the catalog is stored in ``paw_bar_catalog_items``.
+    A stored spec carries an empty one; the frozen public spec endpoint fills it
+    from the store on the way out."""
 
     widget_id: str
     pocket_id: str
@@ -258,6 +326,7 @@ class PawBarSpec(BaseModel):
     blocks: list[PawBarBlock] = Field(default_factory=list)
     # C1 action registry — all optional; a spec without them is unchanged.
     actions: list[PawBarActionSpec] = Field(default_factory=list)
+    # Deprecated (see the class docstring); only an older client's PATCH sets it.
     catalog: list[PawBarCatalogItem] = Field(default_factory=list)
     checkout_url: str = ""
 
@@ -278,6 +347,8 @@ class PawBarSpec(BaseModel):
             if action.verb in seen:
                 raise ValueError(f"duplicate action verb {action.verb!r} — verbs must be unique")
             seen.add(action.verb)
+            if action.verb in _RESERVED_VERBS:
+                continue  # dropped by _drop_reserved_verbs below
             # SS-2: a non-cart verb must never be "auto" — only visitor-scoped
             # cart verbs auto-fire; everything else is gated to an Instinct proposal.
             if action.policy == "auto" and action.verb not in _AUTO_VERBS:
@@ -287,6 +358,29 @@ class PawBarSpec(BaseModel):
                     "every other verb must be 'gated'"
                 )
         return value
+
+    # The reserved verbs this spec declared and validation dropped. Never stored
+    # (a private attribute); the owner save paths read it to refuse the save.
+    _reserved_dropped: list[str] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="after")
+    def _drop_reserved_verbs(self) -> PawBarSpec:
+        """Coerce, don't fail: a stored spec is re-validated on every load, so one
+        declared built-in verb must not make the widget unloadable. The action is
+        dropped with a warning; saving such a spec is refused at the route."""
+        dropped = [a.verb for a in self.actions if a.verb in _RESERVED_VERBS]
+        if dropped:
+            logger.warning(
+                "paw-bar spec %s declared reserved verb(s) %s; dropped", self.widget_id, dropped
+            )
+            self.actions = [a for a in self.actions if a.verb not in _RESERVED_VERBS]
+            self._reserved_dropped = dropped
+        return self
+
+    @property
+    def reserved_verbs_dropped(self) -> list[str]:
+        """Reserved verbs this spec declared (and validation dropped)."""
+        return list(self._reserved_dropped)
 
     @field_validator("catalog")
     @classmethod
@@ -690,7 +784,10 @@ class OwnerMessage(BaseModel):
 
 
 class PawBarCartItem(BaseModel):
-    """One line in a visitor's cart — a catalog snapshot plus a quantity."""
+    """One line in a visitor's cart — a catalog snapshot plus a quantity.
+
+    ``price_cents`` is ISO 4217 minor units of ``currency``; the name is historical.
+    """
 
     id: str
     name: str
@@ -698,13 +795,31 @@ class PawBarCartItem(BaseModel):
     currency: str = "USD"
     qty: int = 1
 
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _currency_code(cls, value: Any) -> Any:
+        return _cart_currency(value)
+
+
+def _cart_currency(value: Any) -> Any:
+    """Upper-case a stored cart currency; a malformed one reads as USD (rows
+    written before normalisation must stay loadable)."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return normalize_currency(value)
+    except ValueError:
+        return "USD"
+
 
 class PawBarCart(BaseModel):
     """A visitor's cart summary — what GET /paw-bar/cart returns.
 
     Keyed by ``(widget_id, customer_ref)`` in the store; this value object is the
     read model the endpoint + the executor return. ``total_cents`` is derived
-    from the items so callers never re-sum.
+    from the items so callers never re-sum. A cart holds ONE currency: the store
+    refuses a line in another currency (``cart_currency_mismatch``), so the total
+    is always ISO 4217 minor units of ``currency`` (the name is historical).
     """
 
     widget_id: str
@@ -714,9 +829,20 @@ class PawBarCart(BaseModel):
     checkout_url: str = ""
     updated_at: datetime = Field(default_factory=datetime.now)
 
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _currency_code(cls, value: Any) -> Any:
+        return _cart_currency(value)
+
     @property
     def total_cents(self) -> int:
         return sum(item.price_cents * item.qty for item in self.items)
+
+
+def spec_bytes(spec: PawBarSpec) -> int:
+    """The size the spec cap measures: the serialized spec WITHOUT its catalog,
+    which lives in its own table and has its own item cap."""
+    return len(spec.model_copy(update={"catalog": []}).model_dump_json().encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +857,9 @@ MAX_SPEC_BYTES = _MAX_SPEC_BYTES
 MAX_ACTIONS_PER_SPEC = _MAX_ACTIONS_PER_SPEC
 MAX_ARGS_PER_ACTION = _MAX_ARGS_PER_ACTION
 MAX_CATALOG_ITEMS = _MAX_CATALOG_ITEMS
+MAX_CATALOG_NAME_CHARS = _MAX_CATALOG_NAME_CHARS
+MAX_CATALOG_DESCRIPTION_CHARS = _MAX_CATALOG_DESCRIPTION_CHARS
+MAX_CATALOG_URL_CHARS = _MAX_CATALOG_URL_CHARS
 MAX_CART_ITEMS = _MAX_CART_ITEMS
 ACTION_ARG_TYPES = _ACTION_ARG_TYPES
 ACTION_POLICIES = _ACTION_POLICIES

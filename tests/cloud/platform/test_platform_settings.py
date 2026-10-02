@@ -203,7 +203,7 @@ async def test_billing_llm_proxy_and_payments_groups_are_built(
     page = await platform_settings.get_platform_settings(request=_request(), operator=operator)
 
     keys = {g.key for g in page.groups}
-    assert keys == {"billing", "llm_proxy", "payments"}
+    assert keys == {"billing", "llm_proxy", "payments", "owner_email"}
     llm_group = next(g for g in page.groups if g.key == "llm_proxy")
     assert any(f.name == "litellm_api_base" for f in llm_group.fields)
 

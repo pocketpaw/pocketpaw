@@ -115,8 +115,8 @@ dependencies = [
     # far past the workspace 7-day supply-chain minimum-age rule).
     "asyncssh>=2.14.2",
     # --- Background worker (Tier 2 resumable chat runs) ---
-    # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
-    # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
+    # arq backs the process-wide enqueue pool (`cloud._core.redis_client`) and
+    # the worker processes (`chat/runs/worker.py` and the job workers).
     "arq>=0.26.0",
     # --- File storage (S3 + GCS) ---
     "boto3>=1.34.0",
@@ -312,6 +312,8 @@ meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
 timeline = "pocketpaw_ee.extensions:CloudTimelineMcpProvider"
+surfaces = "pocketpaw_ee.extensions:CloudSurfacesMcpProvider"
+rooms = "pocketpaw_ee.extensions:CloudRoomsMcpProvider"
 site_media = "pocketpaw_ee.extensions:CloudSiteMediaMcpProvider"
 other_hand = "pocketpaw_ee.extensions:CloudOtherHandMcpProvider"
 
@@ -438,6 +440,12 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 #   uv run lint-imports --config ee/pyproject.toml
 [tool.importlinter]
 root_packages = ["pocketpaw_ee"]
+# Why include_external_packages: "Email — no SMTP" forbids the stdlib
+# `smtplib`, and import-linter only accepts an external forbidden module when
+# the graph is built with externals (top-level names only, never submodules).
+# Every other contract here forbids internal modules, so turning this on
+# changes nothing for them; all 38 pre-existing contracts stay KEPT with it.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Pockets — Beanie writes only from service.py"
@@ -534,6 +542,29 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.temporal_sweep_state"]
 
 [[tool.importlinter.contracts]]
+# Added 2026-10-01 (CN-3): every daily cap counts through one DailyUsage doc,
+# and only metering.service should touch it. This is a DENY-LIST of the current
+# callers (the modules that each owned a private counter before), not a full
+# allow-list: a new module importing the doc is not caught here.
+name = "DailyUsage — Beanie writes only from metering/service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.metering.domain",
+    "pocketpaw_ee.cloud.metering.dto",
+    "pocketpaw_ee.cloud.chat.agent_router",
+    "pocketpaw_ee.cloud.chat.runs.run_core",
+    "pocketpaw_ee.cloud.uploads.upload_budget",
+    "pocketpaw_ee.cloud.uploads.listeners",
+    "pocketpaw_ee.cloud.uploads.transcription",
+    "pocketpaw_ee.cloud.auth.guest_budget",
+    "pocketpaw_ee.cloud.auth.guest_gates",
+    "pocketpaw_ee.cloud.other_hand.router",
+    "pocketpaw_ee.agent.mcp_servers.other_hand",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.daily_usage"]
+
+[[tool.importlinter.contracts]]
 name = "InstinctApprovals — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
@@ -561,6 +592,71 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.instinct_rule",
     "pocketpaw_ee.cloud.models.instinct_workspace_config",
 ]
+
+[[tool.importlinter.contracts]]
+name = "SiteTemplates — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Only ``site_templates.service`` owns the SiteTemplate Beanie writes;
+    # dto/domain/router go through it.
+    "pocketpaw_ee.cloud.site_templates.dto",
+    "pocketpaw_ee.cloud.site_templates.domain",
+    "pocketpaw_ee.cloud.site_templates.router",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.site_template"]
+
+[[tool.importlinter.contracts]]
+name = "SiteTemplates — reads pockets only through the pockets service"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # A template reads its source pocket through ``pockets.service`` (workspace
+    # filter, read access, site check) and never touches the Pocket doc itself.
+    "pocketpaw_ee.cloud.site_templates.dto",
+    "pocketpaw_ee.cloud.site_templates.domain",
+    "pocketpaw_ee.cloud.site_templates.router",
+    "pocketpaw_ee.cloud.site_templates.service",
+    "pocketpaw_ee.cloud.site_templates.service_admin",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.pocket"]
+
+[[tool.importlinter.contracts]]
+name = "Discover — Beanie writes only from service.py/service_admin.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # DS-1 (feat/discover-index). Only ``discover.service`` and
+    # ``discover.service_admin`` own the DiscoverListing Beanie reads/writes;
+    # dto/domain/sources/listeners go through them.
+    "pocketpaw_ee.cloud.discover.dto",
+    "pocketpaw_ee.cloud.discover.domain",
+    "pocketpaw_ee.cloud.discover.sources",
+    "pocketpaw_ee.cloud.discover.listeners",
+    "pocketpaw_ee.cloud.discover.router",
+    # DS-5 (feat/discover-moderation): the platform moderation routes go
+    # through ``discover.service_admin`` too.
+    "pocketpaw_ee.cloud.platform.discover",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.discover_listing"]
+
+[[tool.importlinter.contracts]]
+name = "Discover — reads site templates only through its services"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Discover reads templates through ``site_templates.service`` /
+    # ``site_templates.service_admin`` and never touches the SiteTemplate doc.
+    "pocketpaw_ee.cloud.discover.dto",
+    "pocketpaw_ee.cloud.discover.domain",
+    "pocketpaw_ee.cloud.discover.sources",
+    "pocketpaw_ee.cloud.discover.listeners",
+    "pocketpaw_ee.cloud.discover.service",
+    "pocketpaw_ee.cloud.discover.service_admin",
+    "pocketpaw_ee.cloud.discover.router",
+    "pocketpaw_ee.cloud.platform.discover",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.site_template"]
 
 [[tool.importlinter.contracts]]
 name = "AutomationsStatus — Beanie writes only from service.py"
@@ -1155,3 +1251,66 @@ forbidden_modules = [
 # an external package and import-linter forbidden contracts only accept
 # top-level external packages. The script is wired into the same CI
 # step as `lint-imports` — see `Makefile` / `.github/workflows/ci.yml`.
+
+# Canonicalization Wave 0 guards (CN-1, 2026-10-01). Each lands green with
+# today's violators in ignore_imports; that list is the ratchet and only shrinks.
+# unmatched alerting is off so PRs that remove a violator merge in any order.
+# Why: copies of a primitive drift apart, so new code reuses the canonical one.
+# Known gap: this checks direct imports of the submodule only, so
+# `from pocketpaw_ee.cloud.models import InstinctApproval` (the models/__init__
+# re-export) is NOT caught here. scripts/dup-ratchet covers that path with its
+# "InstinctApproval via the models re-export" row (max 0).
+[[tool.importlinter.contracts]]
+name = "InstinctApprovals — no new writers"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
+ignore_imports = [
+    # models/__init__ re-exports it for init_beanie; service.py is the one writer.
+    "pocketpaw_ee.cloud.models -> pocketpaw_ee.cloud.models.instinct_approval",
+    "pocketpaw_ee.cloud.instinct_approvals.service -> pocketpaw_ee.cloud.models.instinct_approval",
+]
+
+[[tool.importlinter.contracts]]
+name = "Realtime — import from _core.realtime only"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw_ee.cloud.realtime"]
+ignore_imports = [
+    "pocketpaw_ee.cloud -> pocketpaw_ee.cloud.realtime.audience",
+    "pocketpaw_ee.cloud -> pocketpaw_ee.cloud.realtime.bus",
+    "pocketpaw_ee.cloud.chat.group_service -> pocketpaw_ee.cloud.realtime.bus",
+    "pocketpaw_ee.cloud.chat.group_service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.chat.group_service -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.chat.message_service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.chat.message_service -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.chat.router -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.chat.router -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.livekit.invites -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.livekit.invites -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.livekit.router -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.livekit.router -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.pockets.agent_context -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.pockets.agent_context -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.shared.agent_bridge -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.shared.agent_bridge -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.uploads.multipart_service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.uploads.multipart_service -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.uploads.service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.uploads.service -> pocketpaw_ee.cloud.realtime.events",
+]
+
+[[tool.importlinter.contracts]]
+name = "Email — no SMTP"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["smtplib"]
+ignore_imports = [
+    "pocketpaw_ee.paw_bar.mailer -> smtplib",
+]

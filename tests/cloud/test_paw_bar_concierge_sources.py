@@ -17,6 +17,8 @@
 #     address is caught by the per-hop re-check during the fetch;
 #   * the status lifecycle: processing, ready, failed{reason}, too_large,
 #     unsupported, blocked, and a stuck row read as failed/interrupted;
+#   * every ingest, engine or parser failure logs its cause with the source id
+#     (a missing parser at error: a deployment fault, not the owner's file);
 #   * removal and ``delete_sources`` un-index, without touching an article another
 #     source or the page sync still holds; a row removed mid-ingest leaves no orphan;
 #   * tenancy (404) and the role gate (403), nothing written;
@@ -28,6 +30,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import socket
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -729,6 +732,80 @@ async def test_an_unreadable_pdf_fails_without_reaching_the_kb(owner, caps, jobs
     assert kb.ingested == []
 
 
+def _source_logs(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "pocketpaw_ee.paw_bar.knowledge_routes"]
+
+
+@pytest.mark.asyncio
+async def test_an_ingest_failure_logs_its_cause(owner, caps, jobs, kb, caplog):
+    """BUG (2026-10-01): a PDF failed with ingest_failed and nothing was logged,
+    so the cause (a compile rejected as an echo) was invisible in Logfire."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeEngineUnavailable
+
+    site = await _site()
+    sid = str(site.id)
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.paw_bar.knowledge_routes"):
+        kb.fail = RuntimeError("compile failed: looks like a verbatim echo")
+        await _upload(owner, sid, "a.txt", b"some words")
+        await jobs.run()
+        kb.fail = KnowledgeEngineUnavailable("old binary")
+        await _upload(owner, sid, "b.txt", b"other words")
+        await jobs.run()
+
+    rows = {r["name"]: r for r in (await _list(owner, sid))["sources"]}
+    [failed, unavailable] = _source_logs(caplog)
+    assert failed.levelno == logging.WARNING
+    assert rows["a.txt"]["id"] in failed.getMessage()
+    assert "file" in failed.getMessage()
+    assert "verbatim echo" in failed.getMessage()
+    assert failed.exc_info is not None
+    assert unavailable.levelno == logging.WARNING
+    assert rows["b.txt"]["id"] in unavailable.getMessage()
+    assert "old binary" in unavailable.getMessage()
+    assert unavailable.exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_a_missing_pdf_parser_logs_an_error_not_a_bad_file(
+    owner, caps, jobs, kb, monkeypatch, caplog
+):
+    """A parser that is not installed fails every PDF: that is a deployment fault,
+    logged at error. A file the parser rejects is the owner's, logged at warning."""
+    from pocketpaw_ee.paw_bar import knowledge_sources
+
+    def no_pypdf(*_a: Any) -> str:
+        try:
+            raise ImportError("No module named 'pypdf'")
+        except ImportError as exc:
+            raise RuntimeError("pypdf not installed — run: pip install pypdf") from exc
+
+    def corrupt(*_a: Any) -> str:
+        raise ValueError("EOF marker not found")
+
+    site = await _site()
+    sid = str(site.id)
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.paw_bar.knowledge_routes"):
+        monkeypatch.setattr(knowledge_sources, "_extract_with_local", no_pypdf)
+        await _upload(owner, sid, "guide.pdf", _PDF_FACT)
+        await jobs.run()
+        monkeypatch.setattr(knowledge_sources, "_extract_with_local", corrupt)
+        await _upload(owner, sid, "other.pdf", _PDF_FACT)
+        await jobs.run()
+
+    rows = {r["name"]: r for r in (await _list(owner, sid))["sources"]}
+    assert rows["guide.pdf"]["reason"] == rows["other.pdf"]["reason"] == "unreadable"
+    [missing, bad] = _source_logs(caplog)
+    assert missing.levelno == logging.ERROR
+    assert rows["guide.pdf"]["id"] in missing.getMessage()
+    assert "pypdf not installed" in missing.getMessage()
+    assert bad.levelno == logging.WARNING
+    assert rows["other.pdf"]["id"] in bad.getMessage()
+    assert "EOF marker" in bad.getMessage()
+    assert kb.ingested == []
+
+
 @pytest.mark.asyncio
 async def test_a_row_stuck_processing_reads_as_interrupted(owner, caps, jobs, kb, web):
     from pocketpaw_ee.cloud.models.site import ConciergeKnowledgeSource
@@ -988,3 +1065,187 @@ def test_mount_cloud_serves_the_source_routes():
         ("DELETE", base + "/{source_id}"),
         ("POST", base + "/{source_id}/refetch"),
     } <= served
+
+
+# --------------------------------------------------------------------------- #
+# 10. A long document is ingested section by section
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def sections(monkeypatch):
+    """The REAL sectioned ingest under the routes, faked only at the LLM and the
+    kb binary (``_kb``): ``.kb`` holds the articles, ``.compiler`` the prompts."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import _Compiler, _FakeKb, _install
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    fake = _FakeKb()
+    monkeypatch.setattr(knowledge, "_kb", fake)
+    return SimpleNamespace(kb=fake, compiler=_install(monkeypatch, _Compiler()))
+
+
+def _chapters(count: int, marker: str = "", topic: str = "Chapter") -> bytes:
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import _long_doc
+
+    return _long_doc(count, marker).replace("Chapter", topic).encode()
+
+
+@pytest.mark.asyncio
+async def test_a_long_upload_records_every_section_article(owner, caps, jobs, sections):
+    site = await _site()
+    sid = str(site.id)
+
+    source_id = (await _upload(owner, sid, "prices.md", _chapters(5))).json()["id"]
+    await jobs.run()
+
+    [row] = (await _list(owner, sid))["sources"]
+    assert row["status"] == "ready"
+    assert (row["sections_total"], row["sections_failed"], row["sections_truncated"]) == (5, 0, 0)
+    assert sorted(row["article_ids"]) == sorted(sections.kb.articles)
+    assert len(row["article_ids"]) == 5
+
+    assert (await owner.delete(_BASE.format(sid=sid) + f"/{source_id}")).status_code == 204
+    assert sorted(sections.kb.deleted) == sorted(row["article_ids"])
+    assert sections.kb.articles == {}
+
+
+@pytest.mark.asyncio
+async def test_a_partly_failed_document_is_ready_with_counts(owner, caps, jobs, sections, caplog):
+    import json as _json
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import _restructure
+
+    def fail_marked(section: str, prompt: str) -> str:
+        return "no" if "BROKEN" in section else _json.dumps(_restructure(section))
+
+    sections.compiler.respond = fail_marked
+    site = await _site()
+
+    with caplog.at_level(logging.WARNING):
+        await _upload(owner, str(site.id), "prices.md", _chapters(4, marker="BROKEN"))
+        await jobs.run()
+
+    [row] = (await _list(owner, str(site.id)))["sources"]
+    assert (row["status"], row["reason"]) == ("ready", "")
+    assert (row["sections_total"], row["sections_failed"]) == (4, 1)
+    assert len(row["article_ids"]) == 3
+    assert any("3 of 4 sections" in r.getMessage() for r in _source_logs(caplog))
+
+
+@pytest.mark.asyncio
+async def test_a_document_whose_every_section_fails_is_ingest_failed(owner, caps, jobs, sections):
+    sections.compiler.respond = lambda section, prompt: "no"
+    site = await _site()
+
+    await _upload(owner, str(site.id), "prices.md", _chapters(3))
+    await jobs.run()
+
+    [row] = (await _list(owner, str(site.id)))["sources"]
+    assert (row["status"], row["reason"]) == ("failed", "ingest_failed")
+    assert row["article_ids"] == []
+    assert sections.kb.payloads == []
+
+
+@pytest.mark.asyncio
+async def test_refetching_a_long_page_replaces_the_whole_old_set(owner, caps, jobs, sections, web):
+    web.serve("https://public.example/prices", _chapters(4, topic="Spring").decode())
+    site = await _site()
+    sid = str(site.id)
+    source_id = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    await jobs.run()
+    [before] = (await _list(owner, sid))["sources"]
+    assert len(before["article_ids"]) == 4
+
+    web.serve("https://public.example/prices", _chapters(3, topic="Summer").decode())
+    assert (await owner.post(_BASE.format(sid=sid) + f"/{source_id}/refetch")).status_code == 202
+    await jobs.run()
+
+    [after] = (await _list(owner, sid))["sources"]
+    assert after["status"] == "ready" and len(after["article_ids"]) == 3
+    assert not set(after["article_ids"]) & set(before["article_ids"])
+    assert sorted(sections.kb.deleted) == sorted(before["article_ids"])
+    assert sorted(sections.kb.articles) == sorted(after["article_ids"])
+
+
+@pytest.mark.asyncio
+async def test_sections_past_the_char_cap_are_counted(owner, caps, jobs, sections):
+    doc = _chapters(6)
+    caps(max_chars=len(doc) // 2)
+    site = await _site()
+
+    await _upload(owner, str(site.id), "prices.md", doc)
+    await jobs.run()
+
+    [row] = (await _list(owner, str(site.id)))["sources"]
+    assert row["status"] == "ready" and row["truncated"] is True
+    assert row["sections_truncated"] >= 2
+    ingested = "".join(p["raw_text"] for p in sections.kb.payloads)
+    assert "Chapter 6" not in ingested
+
+
+@pytest.mark.asyncio
+async def test_two_sources_with_one_file_name_both_stay_indexed(owner, caps, jobs, sections):
+    """Each source's id is hashed into its section titles, so a second
+    "price-list.pdf" lands beside the first instead of overwriting it, and
+    removing one leaves the other searchable."""
+    site = await _site()
+    sid = str(site.id)
+    a = (await _upload(owner, sid, "price-list.md", _chapters(3))).json()["id"]
+    await _upload(owner, sid, "price-list.md", _chapters(3))
+    await jobs.run()
+
+    rows = {r["id"]: r for r in (await _list(owner, sid))["sources"]}
+    [ids_a, ids_b] = [rows[k]["article_ids"] for k in sorted(rows, key=lambda k: k != a)]
+    assert len(ids_a) == len(ids_b) == 3 and not set(ids_a) & set(ids_b)
+    assert sorted(sections.kb.articles) == sorted(ids_a + ids_b)
+
+    assert (await owner.delete(_BASE.format(sid=sid) + f"/{a}")).status_code == 204
+    assert sorted(sections.kb.articles) == sorted(ids_b)
+
+
+@pytest.mark.asyncio
+async def test_refetch_with_unchanged_content_keeps_its_article_ids(
+    owner, caps, jobs, sections, web
+):
+    web.serve("https://public.example/prices", _chapters(3).decode())
+    site = await _site()
+    sid = str(site.id)
+    source_id = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    await jobs.run()
+    [before] = (await _list(owner, sid))["sources"]
+
+    await owner.post(_BASE.format(sid=sid) + f"/{source_id}/refetch")
+    await jobs.run()
+
+    [after] = (await _list(owner, sid))["sources"]
+    assert after["article_ids"] == before["article_ids"]
+    assert sections.kb.deleted == []
+    assert len(sections.kb.articles) == 3
+
+
+@pytest.mark.asyncio
+async def test_refetch_replaces_only_its_own_set(owner, caps, jobs, sections, web):
+    """Two link sources reading one URL share a label; refetching one swaps its
+    articles and leaves the other's alone."""
+    web.serve("https://public.example/prices", _chapters(3, topic="Spring").decode())
+    site = await _site()
+    sid = str(site.id)
+    a = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    b = (await _link(owner, sid, "https://public.example/prices")).json()["id"]
+    await jobs.run()
+    rows = {r["id"]: r for r in (await _list(owner, sid))["sources"]}
+    old_a, kept_b = rows[a]["article_ids"], rows[b]["article_ids"]
+    assert not set(old_a) & set(kept_b)
+
+    web.serve("https://public.example/prices", _chapters(2, topic="Summer").decode())
+    await owner.post(_BASE.format(sid=sid) + f"/{a}/refetch")
+    await jobs.run()
+
+    rows = {r["id"]: r for r in (await _list(owner, sid))["sources"]}
+    assert rows[b]["article_ids"] == kept_b
+    assert sorted(sections.kb.deleted) == sorted(old_a)
+    assert sorted(sections.kb.articles) == sorted(rows[a]["article_ids"] + kept_b)

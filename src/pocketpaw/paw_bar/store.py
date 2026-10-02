@@ -1,160 +1,75 @@
-# ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
-# Updated: 2026-09-28 (feat/concierge-manual-create, CR-12) — new
-#   purge_widget_conversations: deleting a concierge "with its conversations"
-#   drops the widget's conversation, owner-message, decision and cart rows, after
-#   checking the widget belongs to the caller's workspace.
-# Updated: 2026-09-26 (fix/pawbar-public-route-gates) — the rate limiter grew
-#   BUCKETS and an atomic admit. paw_bar_events gains ``bucket TEXT DEFAULT ''``
-#   (additive ALTER, old rows land in the shared '' bucket). record_event,
-#   count_events_since and within_rate_limit take ``bucket`` and count only that
-#   bucket, so the public event-ingest route ("events") can no longer fill the
-#   budget visitor chat reads (''). New admit_event does the count and the
-#   insert in ONE ``BEGIN IMMEDIATE`` transaction behind a PER-WIDGET asyncio
-#   lock, so a concurrent burst cannot all see "under the cap" and all insert,
-#   and one busy widget never queues another. Atomic per SQLite file, which
-#   means per replica: separate replicas with separate disks each count alone.
-# Updated: 2026-08-24 (inbox freshness) — new list_recent_owner_messages: the
-#   newest out-of-band lines for a PAGE of visitors in ONE bounded read, so the
-#   owner's conversation list can say what was said LAST instead of what the last
-#   RUN said. Owner + visitor roles by default; SYSTEM is excluded, because a
-#   resume notice becoming an inbox preview replaces a person's words with
-#   boilerplate and re-sorts the queue on an automatic event.
-# Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the lines that
-#   have no run doc get a home, and a muted bot gets a deadline:
-#   * new paw_bar_owner_messages table (sibling of paw_bar_conversations, same
-#     additive-migration + workspace-scoped conventions): owner replies, system
-#     explanations, and visitor lines that arrived while the bot was muted.
-#     add_owner_message writes one, list_owner_messages reads a thread oldest-first
-#     with a strict ``after`` cursor and a cap. Timestamps are ISO UTC (aware) so
-#     they sort against ChatRunDoc.createdAt on one clock.
-#   * paw_bar_conversations gains ``bot_paused_at`` (additive ALTER): when the mute
-#     started. update_conversation stamps it whenever bot_paused flips on and
-#     clears it when it flips off, so every writer gets the bookkeeping for free.
-#   * IDLE AUTO-RESUME, computed on READ like the snooze expiry: a mute whose last
-#     owner activity is older than BOT_PAUSE_IDLE_HOURS reads as un-paused
-#     everywhere (``_EFFECTIVE_BOT_PAUSED_SQL``), and auto_resume_bot_if_idle
-#     materializes it — one atomic UPDATE, then a single system message so the
-#     thread explains itself. No sweeper, so a forgotten mute always ends.
-# Updated: 2026-07-30 (owner inbox, slice 1) — new paw_bar_conversations table:
-#   the thin lifecycle row that turns the concierge log into a queue, keyed
-#   UNIQUE(widget_id, customer_ref). Mirrors the paw_bar_decisions conventions
-#   (SCHEMA_SQL for fresh DBs + additive _migrate_columns ALTERs for deployed
-#   ones, a _conversation_workspace_scope tenancy fragment). Methods:
-#   upsert_conversation_on_visitor_turn (lazy create-or-touch — bumps the unread
-#   counter and AUTO-REOPENS a closed/snoozed row, leaving needs_human alone),
-#   ensure_conversation (create-without-touch, for the first owner-side read),
-#   get_conversation / list_conversations / update_conversation (whitelisted
-#   fields; a single ``note`` APPENDS) / conversation_counts. Snooze expiry is
-#   computed on READ via _EFFECTIVE_STATE_SQL — a snooze ends on time with no
-#   sweeper process. list_widgets also gains an ``agent_id`` filter so the
-#   agent-scoped inbox can resolve one agent's widgets in one query.
-# Updated: 2026-07-30 (async decision delivery) — paw_bar_decisions gains a
-#   contact_email TEXT DEFAULT '' column (additive: SCHEMA_SQL for fresh DBs +
-#   _migrate_columns ALTER for deployed ones, same pattern as workspace_id).
-#   New attach_contact_email(widget_id, customer_ref, email, workspace_id):
-#   stamps the email onto that visitor's PENDING rows only (a decided row is
-#   already answered on-page) and returns the count. set_decision deliberately
-#   does NOT touch the column, so the delivery hook can read it off the flipped
-#   row. The email is row-only PII — see the DecisionStatus field comment.
-# Updated: 2026-07-16 (D2 owner aggregation reads) — added two widget-keyed
-#   decision reads for the per-site Concierge dashboard: list_decisions_for_widget
-#   (recent decisions for ONE widget, newest first) and count_pending_decisions
-#   (cheap COUNT of the widget's undecided rows for the overview). Both filter on
-#   ``widget_id`` ONLY — deliberately NOT on the in-row ``workspace_id`` column,
-#   because that column stores the widget OWNER (decision_loop.resolve_workspace_id
-#   returns widget.owner, e.g. "user:maya"), NOT the physical workspace id the
-#   dashboard authenticates with. The caller resolves the widget workspace-scoped
-#   FIRST (site -> Site -> its paw-bar widget, all tenant-scoped), so a widget_id
-#   in hand already belongs to the caller's tenant; scoping the decision read on
-#   the owner column too would wrongly hide every row. This is the airtight
-#   cross-site isolation seam (one widget -> its own decisions only).
-# Updated: 2026-07-16 (C1 hardening) — count_events_since gains an optional
-#   event_type filter so the dedicated gated-action rate cap can count only
-#   proposal-generating actions ("pawbar_gated_action") separately from the
-#   overall widget traffic.
-# Updated: 2026-07-16 (Paw Bar action registry, C1) — new paw_bar_carts table:
-#   the visitor-scoped cart, keyed by (widget_id, customer_ref), holding the
-#   cart's items (a JSON list of {id,name,price_cents,currency,qty}) + currency +
-#   timestamps. get_cart reads it, upsert_cart_item merges one line (qty caps +
-#   MAX_CART_ITEMS ceiling), clear_cart empties it. Pure SQLite / no EE import —
-#   the "auto" add_to_cart path is the only writer, the checkout path reads. New
-#   table via CREATE IF NOT EXISTS, so no ALTER migration is needed (a pre-existing
-#   paw_bar.db just gains the table on next _ensure_schema). No TTL in v1
-#   (tracked as a follow-up).
-# Updated: 2026-07-14 (migration) — _ensure_schema runs _migrate_columns BEFORE
-#   executescript: additively ALTER-adds any missing workspace_id/agent_id columns
-#   to a pre-existing paw_bar_widgets (and workspace_id to paw_bar_decisions) so the
-#   SCHEMA_SQL indexes don't fail with "no such column" on a DB created before those
-#   columns. Supersedes the "no migration" note below — a deployed host CAN carry a
-#   stale paw_bar.db (the T5 pilot smoke hit exactly this).
-# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — paw_bar_widgets gains an
-#   agent_id TEXT DEFAULT '' column, mirroring the workspace_id column beside it.
-#   create_widget writes it; _row_to_widget reads it (get/list/update_spec/
-#   rotate_token round-trip it for free — they SELECT * and rebuild via
-#   _row_to_widget). (The former "no migration" note is now handled by the
-#   additive migration above.)
-# Updated: 2026-07-11 (W4a spec revisions) — new paw_bar_spec_revisions table:
-#   update_spec archives the PRIOR spec with a monotonic per-widget revision
-#   number (same transaction as the update); latest_spec_revision reads the
-#   newest one; rollback_spec restores it via update_spec (so the rollback is
-#   itself archived + reversible) and honors the same workspace scoping.
-# Updated: 2026-07-11 (W4a tenancy seam) — paw_bar_widgets gains an in-row
-#   workspace_id column + index and a _widget_workspace_scope helper (verbatim
-#   clone of _decision_workspace_scope: legacy ''/NULL rows always match, None
-#   means unscoped). get/list/update_spec/rotate_token/delete_widget take an
-#   optional workspace_id and scope both reads and mutations to that tenant —
-#   another tenant's widget id resolves to None / mutates nothing. Hard schema
-#   change, no migration: the widget has zero deployments.
-# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawBarStore, tables
-#   paw_print_*→paw_bar_*, db paw_print.db→paw_bar.db). Hard-rename — widget has zero
-#   deployments, so no persisted rows to migrate. The separate one-word audit feed
-#   (the past-tense record, spelled as one word) is a DIFFERENT feature, unaffected.
-# Created: 2026-04-13 (Move 3 PR-A) — CRUD for PawBarWidget + append-only
-# PawBarEvent log. Token rotation invalidates any cached copies. Event ingest
-# + rate-limit logic lives in PR-B; this module only handles persistence.
-# Updated: 2026-06-11 (gap2 — close the customer decision loop) — Added the
-# paw_bar_decisions table + upsert_decision / set_decision /
-# get_latest_decision. This is the delivery sink for the back-half of the loop:
-# an inbound event raises an Instinct proposal and parks a PENDING DecisionStatus
-# here; on human approval/rejection the EE approve hook flips it to
-# delivered/declined; the customer surface polls get_latest_decision by
-# (widget_id, customer_ref). Pure SQLite — no EE import, OSS-boundary clean.
-# Updated: 2026-06-11 (gap-housekeeping) — get_decision_by_action /
-# set_decision now take an optional workspace_id and scope the lookup +
-# UPDATE to that tenant (via the new _decision_workspace_scope helper, which
-# also matches the empty-string/NULL legacy rows). The EE delivery hook threads
-# the workspace off the approved Action's blob so a cross-tenant action id flips
-# nothing. The hot-lookup indexes the decision-loop needs already ship in
-# SCHEMA_SQL: idx_pp_decisions_action covers the instinct_action_id lookup and
-# idx_pp_decisions_customer covers the (widget_id, customer_ref) poll.
+# src/pocketpaw/paw_bar/store.py — Async SQLite persistence for Paw Bar
+# (PawBarStore): widgets and spec revisions, each widget's product catalog
+# (``catalog_store.CatalogStoreMixin``: rows + FTS5 search), the append-only event
+# log that backs the rate limiter, customer decisions, visitor carts, and the owner
+# inbox (conversations + owner messages). Pure SQLite, no EE import (OSS boundary).
 #
-# Updated: 2026-08-26 (feat/concierge-conversation-quota) — added
-#   count_conversations_started_since(widget_id, since, workspace_id): how many
-#   conversations this widget STARTED at or after a boundary, counted by
-#   created_at. The enterprise layer's monthly concierge allowance is built on it;
-#   the counting lives here because the rows do, and no billing knowledge crosses
-#   into the OSS core.
-#
-#   TWO THINGS IT DELIBERATELY DOES NOT DO. It does not filter on ``active``: a
-#   retired row is a conversation that happened, and excluding them would make
-#   "start over" a way to loop for free. And it does not count messages or runs —
-#   the ladder sells CONVERSATIONS, so a thread carrying fifty turns is one.
-#
-#   ``since`` is compared as a NAIVE LOCAL ISO string because that is what
-#   ``created_at`` holds (the writers use ``datetime.now().isoformat()``). An
-#   aware boundary renders with an offset that sorts after every stored value and
-#   makes the count 0 — a quota that silently never fires.
+# Invariants a reader must not break:
+#   * The file runs in WAL mode, set once in _ensure_schema (it persists in the
+#     file). Several server processes share one paw_bar.db, and WAL lets readers
+#     proceed while another connection holds the write lock; under the default
+#     rollback journal every read queued behind the writer. WAL needs a LOCAL
+#     disk: it relies on shared memory, so a network filesystem breaks it.
+#   * Every connection carries an explicit busy timeout (_BUSY_TIMEOUT_S), and
+#     schema setup runs once per process behind _schema_lock.
+#   * Schema changes are additive: SCHEMA_SQL for fresh files, _migrate_columns
+#     ALTERs (run BEFORE SCHEMA_SQL) for deployed ones, so an old file never
+#     fails on an index over a missing column. Row rewrites are one-shot data
+#     migrations (pocketpaw.sqlite_migrations.run_once, recorded in
+#     schema_migrations): money_minor_units_v1 moved non-2-decimal amounts to
+#     ISO 4217 minor units; catalog_to_table_v1 (after it, and only once it is
+#     recorded) moved spec catalogs into rows. A cart holds one currency
+#     (CartCurrencyMismatch).
+#   * A spec is stored WITHOUT a catalog: create_widget / update_spec ADD a
+#     non-empty ``spec.catalog`` to the catalog table in the same transaction
+#     (upsert by id, never a delete: an older editor that loaded an empty catalog
+#     and saved one product must not wipe the rest); an empty or absent one
+#     leaves the table alone. update_spec also moves a stored spec's catalog the
+#     migration has not reached yet (rows already there win), so a save cannot
+#     drop it. A rollback never restores a revision's catalog.
+#     delete_widget removes its rows and its catalog tombstones.
+#   * Tenancy is in-row: the *_workspace_scope helpers match the caller's
+#     workspace plus legacy ''/NULL rows; None means unscoped. On decisions the
+#     column holds the widget OWNER, so widget-keyed decision reads filter on
+#     widget_id only and rely on the caller resolving the widget scoped first.
+#   * admit_event (and admit_capped_event, one event type over longer windows)
+#     counts and inserts in ONE BEGIN IMMEDIATE transaction behind a per-widget
+#     asyncio lock, so a burst cannot all read "under the cap". Events
+#     carry a rate bucket, so public event ingest cannot fill the chat budget.
+#     Atomic per SQLite file, which means per replica. With Redis configured the
+#     EE router admits in Redis instead (pocketpaw_ee.paw_bar.admit) and only
+#     calls record_event; rows still land here either way.
+#   * Snooze expiry and the idle bot-pause auto-resume are computed on READ, so
+#     no sweeper is needed.
+#   * count_conversations_started_since compares ``since`` as a NAIVE local ISO
+#     string (what created_at holds) and counts retired rows too; the enterprise
+#     monthly concierge allowance depends on both. Owner-message timestamps,
+#     by contrast, are AWARE ISO UTC so they sort against ChatRunDoc.createdAt.
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import weakref
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from pocketpaw.money import DEFAULT_EXPONENT, convert_legacy_minor, exponent, normalize_currency
+from pocketpaw.paw_bar.catalog_store import (
+    CATALOG_SCHEMA_SQL,
+    CatalogStoreMixin,
+    add_missing_rows,
+    catalog_max_items,
+    clean_items,
+    clean_legacy_catalog,
+    ensure_catalog_search,
+    migrate_catalog_out_of_specs,
+    upsert_rows,
+)
 from pocketpaw.paw_bar.models import (
     MAX_CART_ITEMS,
     Conversation,
@@ -173,6 +88,93 @@ from pocketpaw.paw_bar.models import (
     _gen_owner_message_id,
     _gen_token,
 )
+from pocketpaw.sqlite_migrations import is_applied, run_once
+
+logger = logging.getLogger(__name__)
+
+# The money data migration's marker in ``schema_migrations``.
+MONEY_MIGRATION = "money_minor_units_v1"
+
+
+class CartCurrencyMismatch(ValueError):
+    """A cart line's currency differs from the (non-empty) cart's currency."""
+
+    code = "cart_currency_mismatch"
+
+    def __init__(self, cart_currency: str, item_currency: str) -> None:
+        super().__init__(
+            f"cart is in {cart_currency}; cannot add an item priced in {item_currency}"
+        )
+        self.cart_currency = cart_currency
+        self.item_currency = item_currency
+
+
+def _convert_lines(lines: Any, default_currency: Any, table: str, counts: Counter) -> bool:
+    """Re-express ``price_cents`` on each dict line from the old ×100 rule.
+
+    Lines whose currency has exponent 2 (or no integer price) are left alone.
+    Returns True when any line changed; ``counts`` gains ``(table, CODE)`` hits.
+    """
+    if not isinstance(lines, list):
+        return False
+    changed = False
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        code = line.get("currency") or default_currency or "USD"
+        price = line.get("price_cents")
+        if not isinstance(price, int) or isinstance(price, bool):
+            continue
+        if exponent(code) == DEFAULT_EXPONENT:
+            continue
+        line["price_cents"] = convert_legacy_minor(price, code)
+        counts[(table, str(code).strip().upper())] += 1
+        changed = True
+    return changed
+
+
+async def _migrate_money_minor_units(db: aiosqlite.Connection) -> None:
+    """Old amounts were "major × 100" for every currency; make them ISO minor units.
+
+    Covers widget-spec catalogs, archived spec revisions (so a rollback restores
+    correct units) and cart lines. Totals are derived, so nothing else stores
+    money here. A row whose JSON does not parse is left exactly as found.
+    """
+    counts: Counter = Counter()
+    for table, key in (("paw_bar_widgets", "id"), ("paw_bar_spec_revisions", "id")):
+        async with db.execute(f"SELECT {key}, spec FROM {table}") as cur:  # noqa: S608
+            rows = await cur.fetchall()
+        for row_id, raw in rows:
+            try:
+                spec = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            if _convert_lines(spec.get("catalog"), "USD", table, counts):
+                await db.execute(
+                    f"UPDATE {table} SET spec = ? WHERE {key} = ?",  # noqa: S608
+                    (json.dumps(spec), row_id),
+                )
+    async with db.execute(
+        "SELECT widget_id, customer_ref, items, currency FROM paw_bar_carts"
+    ) as cur:
+        carts = await cur.fetchall()
+    for widget_id, customer_ref, raw, currency in carts:
+        try:
+            items = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            continue
+        if _convert_lines(items, currency, "paw_bar_carts", counts):
+            await db.execute(
+                "UPDATE paw_bar_carts SET items = ? WHERE widget_id = ? AND customer_ref = ?",
+                (json.dumps(items), widget_id, customer_ref),
+            )
+    if counts:
+        for (table, code), n in sorted(counts.items()):
+            logger.info("paw_bar money migration: %s %s: %d amount(s) converted", table, code, n)
+    else:
+        logger.info("paw_bar money migration: no non-2-decimal amounts to convert")
 
 
 def _as_note(value: Any) -> ConversationNote:
@@ -201,6 +203,10 @@ def _as_note(value: Any) -> ConversationNote:
         note = note.model_copy(update={"at": datetime.now().isoformat()})
     return note
 
+
+# sqlite3's own default, made explicit: how long a connection waits for another
+# process's write lock before raising "database is locked".
+_BUSY_TIMEOUT_S = 5.0
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS paw_bar_widgets (
@@ -533,12 +539,18 @@ def _conversation_workspace_scope(workspace_id: str | None) -> tuple[str | None,
     return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
 
 
-class PawBarStore:
+class PawBarStore(CatalogStoreMixin):
     """Async SQLite store — same shape as InstinctStore so the wiring is familiar."""
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
+        # Set at schema setup: whether this SQLite has FTS5 (else LIKE search).
+        self._catalog_fts = False
+        # Serializes the first _ensure_schema in this process. Many connections
+        # switching a fresh file to WAL at once can get "database is locked"
+        # without the busy timeout ever applying (seen on Windows).
+        self._schema_lock = asyncio.Lock()
         # One lock PER WIDGET serializes admit_event's count-then-insert in this
         # process, so a burst on one widget queues here instead of contending for
         # SQLite's write lock, and never queues behind another tenant's widget
@@ -552,7 +564,15 @@ class PawBarStore:
     async def _ensure_schema(self) -> None:
         if self._initialized:
             return
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._schema_lock:
+            if not self._initialized:
+                await self._create_schema()
+
+    async def _create_schema(self) -> None:
+        async with self._conn() as db:
+            # WAL persists in the file, so setting it here covers every later
+            # connection. A ":memory:" db answers "memory" and stays as it is.
+            await db.execute("PRAGMA journal_mode=WAL")
             # Additive column migration BEFORE executescript. A paw_bar.db created
             # before the W4a workspace_id add (2026-07-11) or the T3 agent_id add
             # already has a paw_bar_widgets table, so CREATE TABLE IF NOT EXISTS
@@ -562,7 +582,23 @@ class PawBarStore:
             # no-op and SCHEMA_SQL builds the full schema below). Idempotent.
             await self._migrate_columns(db)
             await db.executescript(SCHEMA_SQL)
+            await db.executescript(CATALOG_SCHEMA_SQL)
             await db.commit()
+            self._catalog_fts = await ensure_catalog_search(db)
+            # One-shot data migrations, recorded in schema_migrations. A failure
+            # rolls the file back untouched and is retried on the next process
+            # start; it must not take the whole Paw Bar down with it.
+            try:
+                await run_once(db, MONEY_MIGRATION, _migrate_money_minor_units)
+            except Exception:
+                logger.exception("paw_bar: %s failed; data left unmigrated", MONEY_MIGRATION)
+            # Catalogs leave the spec only once their amounts are minor units: the
+            # money migration converts spec catalogs, never catalog rows.
+            try:
+                if await is_applied(db, MONEY_MIGRATION):
+                    await migrate_catalog_out_of_specs(db)
+            except Exception:
+                logger.exception("paw_bar: catalog migration failed; catalogs left in specs")
         self._initialized = True
 
     @staticmethod
@@ -585,6 +621,15 @@ class PawBarStore:
         # counting exactly where it did.
         if "paw_bar_events" in existing and "bucket" not in await _columns("paw_bar_events"):
             await db.execute("ALTER TABLE paw_bar_events ADD COLUMN bucket TEXT DEFAULT ''")
+        # paw_bar_catalog_items: origin — who owns a row ('site' while the site
+        # sync keeps it, 'owner' otherwise). Every row written before it existed
+        # is the owner's, so the sync never overwrites one.
+        if "paw_bar_catalog_items" in existing and "origin" not in await _columns(
+            "paw_bar_catalog_items"
+        ):
+            await db.execute(
+                "ALTER TABLE paw_bar_catalog_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'owner'"
+            )
         # paw_bar_widgets: workspace_id (W4a) + agent_id (T3). Column names are
         # literals (never user input), so the f-string ALTER is injection-safe.
         if "paw_bar_widgets" in existing:
@@ -741,11 +786,41 @@ class PawBarStore:
         )
 
     def _conn(self) -> aiosqlite.Connection:
-        return aiosqlite.connect(self._db_path)
+        return aiosqlite.connect(self._db_path, timeout=_BUSY_TIMEOUT_S)
+
+    @staticmethod
+    async def _widget_in_scope(
+        db: aiosqlite.Connection, widget_id: str, workspace_id: str | None
+    ) -> bool:
+        """Whether the widget exists (in ``workspace_id``'s scope when given)."""
+        sql = "SELECT 1 FROM paw_bar_widgets WHERE id = ?"
+        params: list[Any] = [widget_id]
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        async with db.execute(sql, params) as cur:
+            return await cur.fetchone() is not None
+
+    @staticmethod
+    def _split_catalog(widget_id: str, spec: PawBarSpec) -> tuple[PawBarSpec, list[Any] | None]:
+        """``(spec without catalog, cleaned items or None)``. None when the spec
+        carries no catalog, which leaves the catalog table untouched."""
+        if not spec.catalog:
+            return spec, None
+        logger.info(
+            "paw_bar: spec write for widget %s carried %d catalog item(s); "
+            "added to the catalog store (spec.catalog is deprecated)",
+            widget_id,
+            len(spec.catalog),
+        )
+        return spec.model_copy(update={"catalog": []}), clean_items(spec.catalog)
 
     # ---------------- Widgets ----------------
 
     async def create_widget(self, widget: PawBarWidget) -> PawBarWidget:
+        spec, catalog = self._split_catalog(widget.id, widget.spec)
+        widget = widget.model_copy(update={"spec": spec})
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
@@ -773,6 +848,10 @@ class PawBarStore:
                     widget.updated_at.isoformat(),
                 ),
             )
+            if catalog is not None:
+                await upsert_rows(
+                    db, widget.id, catalog, datetime.now().isoformat(), catalog_max_items()
+                )
             await db.commit()
         return widget
 
@@ -841,9 +920,11 @@ class PawBarStore:
         existing = await self.get_widget(widget_id, workspace_id=workspace_id)
         if existing is None:
             return None
+        spec, catalog = self._split_catalog(widget_id, spec)
+        now = datetime.now().isoformat()
         ws_cond, ws_params = _widget_workspace_scope(workspace_id)
         sql = "UPDATE paw_bar_widgets SET spec = ?, updated_at = ? WHERE id = ?"
-        params: list[Any] = [spec.model_dump_json(), datetime.now().isoformat(), widget_id]
+        params: list[Any] = [spec.model_dump_json(), now, widget_id]
         if ws_cond:
             sql += f" AND {ws_cond}"
             params.extend(ws_params)
@@ -862,7 +943,17 @@ class PawBarStore:
                 "INSERT INTO paw_bar_spec_revisions (widget_id, revision, spec) VALUES (?, ?, ?)",
                 (widget_id, next_revision, existing.spec.model_dump_json()),
             )
+            # A stored spec the catalog migration has not reached yet still holds
+            # its catalog. Move it before the new spec overwrites it (a lazy,
+            # per-widget migration; rows already there win), then apply the body.
+            if existing.spec.catalog:
+                legacy = clean_legacy_catalog(
+                    [c.model_dump() for c in existing.spec.catalog], widget_id
+                )
+                await add_missing_rows(db, widget_id, legacy, now)
             await db.execute(sql, params)
+            if catalog is not None:
+                await upsert_rows(db, widget_id, catalog, now, catalog_max_items())
             await db.commit()
         return await self.get_widget(widget_id, workspace_id=workspace_id)
 
@@ -888,7 +979,9 @@ class PawBarStore:
         The restore is itself an ``update_spec`` — the CURRENT spec is archived
         as a new revision before being replaced, so a rollback is always
         auditable and itself reversible. Returns ``None`` when the widget does
-        not exist in the caller's workspace scope OR when no revision exists.
+        not exist in the caller's workspace scope OR when no revision exists. A
+        revision's ``catalog`` is ignored: the catalog is not versioned with the
+        spec, and restoring an old one would overwrite the live catalog.
         """
         widget = await self.get_widget(widget_id, workspace_id=workspace_id)
         if widget is None:
@@ -897,6 +990,7 @@ class PawBarStore:
         if latest is None:
             return None
         _, archived_spec = latest
+        archived_spec = archived_spec.model_copy(update={"catalog": []})
         return await self.update_spec(widget_id, archived_spec, workspace_id=workspace_id)
 
     async def update_fields(
@@ -976,8 +1070,15 @@ class PawBarStore:
         await self._ensure_schema()
         async with self._conn() as db:
             cur = await db.execute(sql, params)
+            deleted = (cur.rowcount or 0) > 0
+            if deleted:
+                for table in ("paw_bar_catalog_items", "paw_bar_catalog_tombstones"):
+                    await db.execute(
+                        f"DELETE FROM {table} WHERE widget_id = ?",  # noqa: S608 — literal
+                        (widget_id,),
+                    )
             await db.commit()
-            return (cur.rowcount or 0) > 0
+            return deleted
 
     # The per-visitor tables a concierge's conversations live in. Events, spec
     # revisions and the widget itself are the BAR's history, not a conversation.
@@ -1066,11 +1167,7 @@ class PawBarStore:
             " FROM paw_bar_events"
             " WHERE widget_id = ? AND timestamp >= ? AND COALESCE(bucket, '') = ?"
         )
-        lock = self._admit_locks.get(event.widget_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._admit_locks[event.widget_id] = lock
-        async with lock:
+        async with self._admit_lock(event.widget_id):
             async with self._conn() as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
@@ -1080,6 +1177,69 @@ class PawBarStore:
                         row = await cur.fetchone()
                     total, per_customer = (row[0], row[1]) if row else (0, 0)
                     if total >= overall_per_min or per_customer >= per_customer_per_min:
+                        await db.rollback()
+                        return False
+                    await db.execute(self._INSERT_EVENT_SQL, self._event_params(event, bucket))
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
+        return True
+
+    def _admit_lock(self, widget_id: str) -> asyncio.Lock:
+        lock = self._admit_locks.get(widget_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._admit_locks[widget_id] = lock
+        return lock
+
+    async def admit_capped_event(
+        self,
+        event: PawBarEvent,
+        *,
+        per_customer: int,
+        customer_window: timedelta,
+        overall: int,
+        overall_window: timedelta,
+        bucket: str = "",
+        now: datetime | None = None,
+    ) -> bool:
+        """``admit_event`` for a cap on ONE event type over longer windows: count
+        this widget's ``event.type`` rows (at most ``per_customer`` for this
+        customer_ref within ``customer_window``, ``overall`` within
+        ``overall_window``) and insert ``event`` in the same ``BEGIN IMMEDIATE``
+        transaction behind the same per-widget lock. The event IS the slot: a
+        caller admits first and acts after, so a burst can't all read "under the
+        cap". Returns False (nothing written) when a cap is reached; raises on a
+        store error, and the caller decides whether that fails open or closed."""
+        await self._ensure_schema()
+        at = now or datetime.now()
+        count_sql = (
+            "SELECT"
+            " COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN customer_ref = ? AND timestamp >= ? THEN 1 ELSE 0 END), 0)"
+            " FROM paw_bar_events"
+            " WHERE widget_id = ? AND type = ? AND COALESCE(bucket, '') = ? AND timestamp >= ?"
+        )
+        overall_start = (at - overall_window).isoformat()
+        customer_start = (at - customer_window).isoformat()
+        params = (
+            overall_start,
+            event.customer_ref,
+            customer_start,
+            event.widget_id,
+            event.type,
+            bucket,
+            min(overall_start, customer_start),
+        )
+        async with self._admit_lock(event.widget_id):
+            async with self._conn() as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    async with db.execute(count_sql, params) as cur:
+                        row = await cur.fetchone()
+                    total, mine = (row[0], row[1]) if row else (0, 0)
+                    if total >= overall or mine >= per_customer:
                         await db.rollback()
                         return False
                     await db.execute(self._INSERT_EVENT_SQL, self._event_params(event, bucket))
@@ -2134,12 +2294,20 @@ class PawBarStore:
         If the product id is already in the cart the quantities add (capped at
         the model's per-line qty ceiling by the caller); a new id appends, up to
         ``MAX_CART_ITEMS`` distinct lines (an over-cap add is dropped rather than
-        raising — the visitor keeps the cart they have). The cart currency tracks
-        the first line added. Idempotent per call; the executor owns the qty caps.
+        raising — the visitor keeps the cart they have). A cart holds ONE currency:
+        an empty cart takes the line's currency, and a line in any other currency
+        raises :class:`CartCurrencyMismatch` with the cart unchanged, so
+        ``total_cents`` never adds yen to dollars. Idempotent per call; the
+        executor owns the qty caps.
         """
+        item_currency = normalize_currency(item.currency)
         cart = await self.get_cart(widget_id, customer_ref) or PawBarCart(
-            widget_id=widget_id, customer_ref=customer_ref, currency=item.currency
+            widget_id=widget_id, customer_ref=customer_ref, currency=item_currency
         )
+        if not cart.items:
+            cart.currency = item_currency
+        elif cart.currency != item_currency:
+            raise CartCurrencyMismatch(cart.currency, item_currency)
         merged = False
         for line in cart.items:
             if line.id == item.id:

@@ -13,6 +13,8 @@
 #     ``find_run_usage_since`` (CR-5's daily spend read) -> no spend, so every
 #     case runs under the cap instead of through its failed-read fallback;
 #   * ``_settings`` -> the settings the run was given;
+#   * the catalog store -> a throwaway ``PawBarStore`` holding the case's widget,
+#     so the per-turn catalog and card hydration read real rows;
 #   * ``_build_model`` -> a replay ``FunctionModel`` in recorded mode, and left
 #     alone in real mode (the deployment's configured pydantic_ai model).
 #
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -91,6 +94,10 @@ def _seams(settings: Any, replay: str | None, seen: dict[str, Any]) -> Iterator[
             seen["raw"] += chunk or ""
             return super().feed(chunk)
 
+        async def afeed(self, chunk: str) -> list[str]:
+            seen["raw"] += chunk or ""
+            return await super().afeed(chunk)
+
     def _build_prompt(*args: Any, **kwargs: Any) -> str:
         prompt = real_build_prompt(*args, **kwargs)
         seen["prompt"] = prompt
@@ -138,9 +145,16 @@ async def run_case(case: dict[str, Any], settings: Any, *, replay: str | None = 
     site = seed.make_site(case["site"], case.get("site_overrides"))
     seen: dict[str, Any] = {"raw": "", "prompt": "", "knowledge": []}
     frames: list[bytes] = []
-    with _seams(settings, replay, seen):
+    from pocketpaw.paw_bar.store import PawBarStore
+
+    with (
+        _seams(settings, replay, seen),
+        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
+    ):
+        store = PawBarStore(f"{tmp}/paw_bar.db")
+        stored = await store.create_widget(widget)
         async for frame in concierge_runtime.run_concierge_v2(
-            widget,
+            stored,
             site,
             None,
             case["message"],
@@ -151,6 +165,7 @@ async def run_case(case: dict[str, Any], settings: Any, *, replay: str | None = 
             session_key=f"eval:{case['id']}",
             history=list(case.get("history") or []),
             stored_user_text=case["message"],
+            store=store,
         ):
             frames.append(frame)
 
@@ -158,11 +173,7 @@ async def run_case(case: dict[str, Any], settings: Any, *, replay: str | None = 
     final = "".join(d.get("content", "") for e, d in events if e == "chunk")
     sources = next((d.get("items") or [] for e, d in events if e == "sources"), [])
     error = next((d.get("code", "error") for e, d in events if e == "error"), "")
-    frame = (
-        concierge_runtime.FRAME_DOC_CODE
-        if getattr(site, "concierge_allow_doc_code", False) is True
-        else concierge_runtime.FRAME
-    )
+    frame = concierge_runtime.frame_for(site)
     page = case.get("page") or {}
     turn = Turn(
         final_text=final,
@@ -174,6 +185,7 @@ async def run_case(case: dict[str, Any], settings: Any, *, replay: str | None = 
         gated_args=seed.gated_args(widget),
         page_text=seen["prompt"].split("<knowledge>", 1)[0] if page else "",
         error=error,
+        lead_capture=concierge_runtime.lead_capture_on(site),
     )
     return CaseRun(turn=turn, prompt_fingerprint=prompt_fingerprint(frame, seen["prompt"]))
 

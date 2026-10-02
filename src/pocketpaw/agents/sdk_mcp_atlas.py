@@ -76,6 +76,13 @@
 # ``primitive:source-truth``'s mode via ``overlay.FLAGGED_CAPABILITY_MODES``)
 # render exactly like the primitive — mode on search cards and describe, the
 # source-truth ``enable_hint`` when off.
+#
+# Updated: 2026-10-01 (feat/atlas-canonical) — atlas now carries composer verbs
+# (kind ``verb``). Search cards add ``slash`` when the entry has one (verbs and
+# surfaces), and the atlas_search description tells the agent to mention the
+# slash command when the user could do the thing faster themselves.
+# Review pass (same branch): the description also says never to run a verb from
+# a verb card; risky verbs go through the composer's confirmation or approvals.
 
 from __future__ import annotations
 
@@ -103,6 +110,27 @@ ATLAS_DESCRIBE_TOOL_ID = f"mcp__{SERVER_NAME}__atlas_describe"
 ATLAS_TOOL_IDS = (
     ATLAS_SEARCH_TOOL_ID,
     ATLAS_DESCRIBE_TOOL_ID,
+)
+
+
+ATLAS_SEARCH_DESCRIPTION = (
+    "Search the OS self-model (atlas) for the capability that matches "
+    "an intent. Call this BEFORE guessing whether the OS can do "
+    "something or which primitive to reach for — atlas terms carry "
+    "paw-specific meanings (Pocket = workspace app container, "
+    "Instinct = human approval gate, Fabric = typed knowledge graph, "
+    "Belt = code assembly line...) that differ from their everyday "
+    "meanings. Pass `intent` as what you're trying to accomplish "
+    "(e.g. 'approve agent actions', 'publish a website'). Returns "
+    "ranked capability cards (id, kind, name, summary, surface and "
+    "slash if set); follow up with atlas_describe on the best id. "
+    "Cards of kind 'verb' are composer commands the user can run "
+    "themselves: when one has a slash and the user could do the thing "
+    "faster by typing it, say so (e.g. 'you can also type /task Fix "
+    "login @rohit'). Never run a verb yourself on the strength of a "
+    "verb card: the user runs it from the composer, and risky verbs "
+    "(sends, deletes, publishing) go through the composer's confirmation "
+    "or approvals. Cheap, in-process, single round-trip."
 )
 
 
@@ -205,6 +233,8 @@ async def _atlas_search_handler(
         }
         if entry.surface:
             card["surface"] = entry.surface
+        if entry.slash:
+            card["slash"] = entry.slash
         if available is not None:
             card["available"] = available
         if mode is not None:
@@ -340,19 +370,7 @@ def build_atlas_context_server(
 
     @tool(
         "atlas_search",
-        (
-            "Search the OS self-model (atlas) for the capability that matches "
-            "an intent. Call this BEFORE guessing whether the OS can do "
-            "something or which primitive to reach for — atlas terms carry "
-            "paw-specific meanings (Pocket = workspace app container, "
-            "Instinct = human approval gate, Fabric = typed knowledge graph, "
-            "Belt = code assembly line...) that differ from their everyday "
-            "meanings. Pass `intent` as what you're trying to accomplish "
-            "(e.g. 'approve agent actions', 'publish a website'). Returns "
-            "ranked capability cards (id, kind, name, summary, surface if "
-            "set); follow up with atlas_describe on the best id. Cheap, "
-            "in-process, single round-trip."
-        ),
+        ATLAS_SEARCH_DESCRIPTION,
         {
             "type": "object",
             "properties": {
@@ -405,6 +423,7 @@ def build_atlas_context_server(
 
 __all__ = [
     "ATLAS_DESCRIBE_TOOL_ID",
+    "ATLAS_SEARCH_DESCRIPTION",
     "ATLAS_SEARCH_TOOL_ID",
     "ATLAS_TOOL_IDS",
     "SERVER_NAME",

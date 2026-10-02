@@ -24,7 +24,7 @@
 # gone stale. Same failure as the original, one field later: custom-domain
 # entitlement moved to ``max_domained_sites`` on 2026-08-21 and never reached the
 # wire, so the cards kept answering "custom domain?" from ``cloudflare_features``.
-# The two disagree on the FREE FLOOR — one domained site, zero resold Cloudflare
+# The two disagree on the FREE FLOOR — a domain per site, zero resold Cloudflare
 # features — so the tier a buyer reads first is the tier the card got wrong. The
 # last test asserts the DTO against ``site_domain_allowance`` rather than a
 # literal, because a card promising what the gate refuses is the real thing to
@@ -196,7 +196,7 @@ def test_the_free_tier_ships_its_domain_grant_on_the_wire():
     """FREE INCLUDES A CUSTOM DOMAIN, and its card has to be able to say so.
 
     This is the assertion the storefront was missing a field for. The floor grants
-    one domained site with no subscription (captain, 2026-08-21) while reselling no
+    every site a domain with no subscription while reselling no
     Cloudflare features at all, because that collection means only RESOLD
     Cloudflare capability. A card reading the feature list to answer "custom
     domain?" therefore printed an X on the one tier that gets one for nothing.

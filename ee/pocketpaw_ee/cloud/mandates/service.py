@@ -25,16 +25,22 @@
 #   slice 4: trigger_shift (foreman → plan gate)
 #   slice 5: get_pawprints
 #   autopilot (feat/belt-autopilot): set_autopilot (start/stop Foresight-seeded
-#     simulated users feeding the feedback patrol) + repo_for_mandate (the
-#     dispatcher/autopilot surface read).
+#     simulated users feeding the feedback patrol; the loop starts only where
+#     ``autopilot.runs_here()``, and every change is announced to the other web
+#     processes) + repo_for_mandate (the dispatcher/autopilot surface read).
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
 # find; emit an event on every write (or ``# no-event: <reason>``); errors via
 # ``_core.errors`` CloudError subclasses (never HTTPException).
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
+#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from datetime import UTC, datetime, timedelta
@@ -177,27 +183,43 @@ async def list_mandates(workspace_id: str, user_id: str, body: Any = None) -> di
     """List the workspace's mandates with a per-mandate health summary.
 
     Health = last shift state, open gate count (shifts awaiting approval), and
-    total sighting count. ``body`` is unused (read path)."""
+    total sighting count. ``body`` is unused (read path). Three queries in all,
+    whatever the mandate count: the mandates, then one shift aggregation and
+    one sighting aggregation grouped by mandate, run concurrently."""
     # no-event: read-only path; emit only on writes.
     docs = await MandateDoc.find(MandateDoc.workspace == workspace_id).sort("-createdAt").to_list()
+    ids = [str(d.id) for d in docs]
+    shift_rows, sighting_rows = await asyncio.gather(
+        _aggregate(
+            ShiftDoc,
+            [
+                {"$match": {"workspace": workspace_id, "mandate_id": {"$in": ids}}},
+                {"$sort": {"no": -1}},
+                {
+                    "$group": {
+                        "_id": "$mandate_id",
+                        "last_state": {"$first": "$state"},
+                        "open_gates": {"$sum": {"$cond": [{"$eq": ["$state", "in_gate"]}, 1, 0]}},
+                    }
+                },
+            ],
+        ),
+        _aggregate(
+            SightingDoc,
+            [
+                {"$match": {"workspace": workspace_id, "mandate_id": {"$in": ids}}},
+                {"$group": {"_id": "$mandate_id", "n": {"$sum": 1}}},
+            ],
+        ),
+    )
+    shifts = {r["_id"]: r for r in shift_rows}
+    sightings = {r["_id"]: r["n"] for r in sighting_rows}
     out: list[dict[str, Any]] = []
     for doc in docs:
         mandate_id = str(doc.id)
-        last_shift = (
-            await ShiftDoc.find(
-                ShiftDoc.workspace == workspace_id, ShiftDoc.mandate_id == mandate_id
-            )
-            .sort("-no")
-            .first_or_none()
-        )
-        open_gate_count = await ShiftDoc.find(
-            ShiftDoc.workspace == workspace_id,
-            ShiftDoc.mandate_id == mandate_id,
-            ShiftDoc.state == "in_gate",
-        ).count()
-        sighting_count = await SightingDoc.find(
-            SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
-        ).count()
+        shift = shifts.get(mandate_id) or {}
+        open_gate_count = shift.get("open_gates", 0)
+        sighting_count = sightings.get(mandate_id, 0)
         out.append(
             {
                 "id": mandate_id,
@@ -206,7 +228,7 @@ async def list_mandates(workspace_id: str, user_id: str, body: Any = None) -> di
                 "repo_id": doc.surface.repo_id,
                 "cadence": doc.charter.cadence,
                 "health": {
-                    "last_shift_state": last_shift.state if last_shift else None,
+                    "last_shift_state": shift.get("last_state"),
                     "open_gate_count": open_gate_count,
                     "sighting_count": sighting_count,
                 },
@@ -215,6 +237,17 @@ async def list_mandates(workspace_id: str, user_id: str, body: Any = None) -> di
             }
         )
     return {"mandates": out}
+
+
+async def _aggregate(model: Any, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run a raw aggregation. Motor's ``aggregate()`` returns a coroutine and
+    mongomock-motor's a plain cursor, hence the ``isawaitable`` check (the
+    repo's cross-driver idiom; Beanie's ``Document.aggregate`` breaks under the
+    test harness)."""
+    cursor = model.get_pymongo_collection().aggregate(pipeline)
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    return [row async for row in cursor]
 
 
 def _autopilot_to_wire(doc: MandateDoc) -> dict[str, Any]:
@@ -501,12 +534,18 @@ async def set_autopilot(
         # sightings, THEN start the loop (which skips its own immediate cycle so
         # the first cycle isn't double-filed). The cycle never raises.
         await autopilot_mod.run_autopilot_cycle(workspace_id, mandate_id, users=users)
-        await autopilot_mod.start_autopilot(workspace_id, mandate_id, users, run_immediate=False)
+        # With several web processes only the lease holder runs loops; it hears
+        # about this start through announce_change below.
+        if autopilot_mod.runs_here():
+            await autopilot_mod.start_autopilot(
+                workspace_id, mandate_id, users, run_immediate=False
+            )
     else:  # stop
         await autopilot_mod.stop_autopilot(mandate_id)
         users = doc.autopilot.users if doc.autopilot else 3
         doc.autopilot = Autopilot(on=False, users=users)
         await doc.save()
+    autopilot_mod.announce_change(mandate_id)
 
     await emit(
         mandate_events.MandateAutopilotChanged(
@@ -950,33 +989,19 @@ def _emit_stood_down_close(
 async def _persist_plan_chain_ids(*, store: Any, action_id: str, proposed_event_id: str) -> None:
     """Back-write ``proposed_event_id`` onto the persisted ``_belt_plan`` blob
     (the correlation_id was minted before the blob was built, so it's already
-    correct). Direct SQL update — the same pattern the belt MCP propose uses.
+    correct). Store-API write — the same pattern the belt MCP propose uses.
     Best-effort."""
-    import json as _json
 
-    import aiosqlite
-
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
     try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(BELT_PLAN_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["proposed_event_id"] = proposed_event_id
-        params[BELT_PLAN_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key=BELT_PLAN_PARAM_KEY,
+            updates={"proposed_event_id": proposed_event_id},
+        )
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "mandate: failed to persist chain ids onto action %s — human.corrected "

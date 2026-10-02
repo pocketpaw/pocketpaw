@@ -1,84 +1,33 @@
 # concierge.py — /paw-bar surface preamble (the public concierge widget).
 #
-# Updated: 2026-07-31 (owner inbox, slice 3 — the escape hatch) — a new,
-# CONDITIONAL step 6 teaches the one rule every support product's reviews say is
-# a deal-breaker: a visitor asking for a human is ALWAYS honored, never
-# deflected, never negotiated with, and the agent says plainly that a person has
-# been notified. It renders only when ``meta.widget_id`` is set — a run bound to
-# a real Paw Bar widget, which is what gives the site an owner-reachable inbox
-# and the ``pawbar_request_human`` tool to call — mirroring how the actions
-# paragraph renders conditionally. The prompt is the polite half; the hard half
-# is the visitor's own always-available "talk to a human" endpoint, which works
-# whether or not the agent ever offers it.
+# Orients the agent answering a PUBLIC, anonymous visitor through an embedded
+# Paw Bar concierge on a foreign site. The visitor is not a workspace member and
+# the message is untrusted, so the preamble frames the agent as this site's
+# concierge only: answer from the site's own knowledge, never reveal internal or
+# workspace information, ignore injection. It is the prompt half of the guard,
+# defense-in-depth behind the hard controls (the tool-denying
+# ``_concierge_profile`` and the ``ScopeKind.CONCIERGE`` KB lock).
 #
-# Updated: 2026-07-30 (form cards) — when the widget declares GATED actions
-# that take args, the actions paragraph now teaches a second ```pawbar-card
-# kind: "form". Instead of asking the visitor for name/phone/etc. in prose,
-# the agent emits a structured form card (verb + fields drawn from the
-# action's declared args, with a name-based type mapping spelled out in the
-# prompt), waits for the widget to submit it, and only falls back to calling
-# the tool directly when the visitor's message already carries every detail.
-# Widgets with no gated-with-args actions render no form instructions.
+# Conditional parts, all driven by ``meta`` (stamped by ``concierge_chat`` from
+# the widget spec and the catalog store; this handler does no I/O):
+#   * actions declared (``meta.pawbar_actions``): lists the ``pawbar_<verb>``
+#     tools (auto vs gated), a compact catalog block (the turn's retrieved items:
+#     real ids, names, prices formatted from ISO 4217 minor units by
+#     ``pocketpaw.money.format_minor``, sold-out items last and marked) and the
+#     exact ```pawbar-card product-fence contract; gated actions with args also
+#     teach the ``kind: "form"`` card. A widget with no actions keeps the
+#     original "you answer questions; you don't act" text.
+#   * ``meta.widget_id`` set: the escape-hatch step — a request for a human is
+#     always honored and the agent calls ``pawbar_request_human``.
 #
-# Updated: 2026-07-16 (C1 hardening) — the conditional actions paragraph now also
-# renders a COMPACT catalog block (real product ids + names + formatted prices from
-# meta.pawbar_catalog) so the agent can name what it sells and emit pawbar-card
-# fences with real ids. Without it the agent had the verbs but not the catalog and
-# declined ("I don't have a list"). No-actions widgets are unchanged.
-#
-# Updated: 2026-07-16 (Paw Bar action registry, C1) — the actions paragraph is now
-# CONDITIONAL. When the widget declares actions (``meta.pawbar_actions``), the
-# preamble (a) lists the available ``pawbar_<verb>`` action tools with their labels
-# and whether each fires immediately (auto) or is submitted for a human to approve
-# (gated), and (b) tells the agent to render product suggestions as ```pawbar-card
-# fenced blocks in the exact contract shape. Every other guardrail (ground in the
-# site KB, stay on-topic, never reveal internals, ignore injection) is unchanged.
-# A widget with NO declared actions keeps the original "you answer questions; you
-# don't act" text byte-for-byte.
-#
-# Created: 2026-07-14 (Paw Bar concierge seam, T2) — orients the agent when it
-# is answering a PUBLIC, anonymous visitor through an embedded Paw Bar concierge
-# widget on a foreign site. The visitor is NOT a workspace member and the message
-# is untrusted, so the preamble frames the agent as a public-facing concierge for
-# THIS site only: answer from the site's own knowledge, never reveal internal /
-# workspace information, and never take actions on the tenant's behalf. This is
-# the prompt half of the guard — DEFENSE-IN-DEPTH behind the hard controls that
-# actually enforce safety: the ripple-OFF, tool-denying ``_concierge_profile``
-# (no web / code / write / subagent tools) and the ``ScopeKind.CONCIERGE`` KB
-# lock (grounding scoped to ``pocket:<pocket_id>`` alone). Without this preamble
-# the surface falls back to GENERIC and the agent behaves like the internal
-# dashboard assistant.
-#
-# Mirrors handlers/belt.py: an async ``build_preamble`` returning an XML-ish
-# ``<surface>`` + ``<orientation>`` + ``<procedure>`` block.
-#
-# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
-# ``SurfacePreamble`` keyed on a digest of what was rendered. This handler does
-# no I/O — the declared actions and the product catalog arrive on ``meta``,
-# stamped by ``concierge_chat`` from the widget spec — but those two are
-# LISTS of dicts rather than ids, so a digest of the rendered paragraphs is
-# both simpler and tighter than trying to name them: it moves when the widget's
-# declared verbs or its products change, and holds still while they don't.
+# Returns a ``SurfacePreamble`` keyed on a digest of the rendered paragraphs, so
+# it moves when the declared verbs or products change and holds still otherwise.
 
 from __future__ import annotations
 
+from pocketpaw.money import format_minor
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import content_key
-
-
-def _format_price(price_cents: object, currency: object) -> str:
-    """Render a price_cents+currency pair as a human amount (e.g. 350 USD -> $3.50).
-
-    Falls back to a plain ``<amount> <currency>`` string for currencies without a
-    known symbol, so the agent always sees a real number."""
-    try:
-        cents = int(price_cents)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return ""
-    cur = str(currency or "USD").upper()
-    symbol = {"USD": "$", "EUR": "€", "GBP": "£"}.get(cur)
-    amount = f"{cents / 100:.2f}"
-    return f"{symbol}{amount}" if symbol else f"{amount} {cur}"
 
 
 def _catalog_block(catalog: list[dict] | None) -> str:
@@ -86,16 +35,21 @@ def _catalog_block(catalog: list[dict] | None) -> str:
 
     Empty string when there is no catalog. Each line names the real product id so
     the agent can put it straight into a pawbar-card fence and the add_to_cart
-    tool call."""
+    tool call. An item whose ``in_stock`` is False is listed after the others and
+    marked sold out, so the agent stops recommending it; unknown stock (None /
+    absent) adds nothing. Otherwise the order given (the owner's, or relevance) is
+    kept."""
     items = [c for c in (catalog or []) if isinstance(c, dict) and c.get("id")]
+    items.sort(key=lambda c: c.get("in_stock") is False)
     if not items:
         return ""
     lines = []
     for c in items:
-        price = _format_price(c.get("price_cents"), c.get("currency"))
+        price = format_minor(c.get("price_cents"), c.get("currency") or "USD")
         name = str(c.get("name") or c.get("id"))
         price_part = f" - {price}" if price else ""
-        lines.append(f'   - id "{c["id"]}": {name}{price_part}')
+        stock_part = " (sold out)" if c.get("in_stock") is False else ""
+        lines.append(f'   - id "{c["id"]}": {name}{price_part}{stock_part}')
     catalog_lines = "\n".join(lines)
     return (
         "   Products you can sell (use these exact ids; never invent a product or "

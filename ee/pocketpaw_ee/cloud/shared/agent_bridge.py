@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Bridge between cloud chat events and the PocketPaw agent pool.
 
 Pure cross-domain orchestrator: subscribes to the legacy ``message.sent``
@@ -93,9 +95,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
     AgentError,
     AgentPlanUpdated,
     AgentStreamChunk,
@@ -103,6 +104,7 @@ from pocketpaw_ee.cloud.realtime.events import (
     AgentStreamStart,
     AgentToolUse,
 )
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
 from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use
@@ -245,6 +247,7 @@ async def _dispatch_agent_responses(data: dict) -> None:
                 group_members=group.members,
                 attachments=attachments,
                 response_label=None,
+                trigger_message_id=data.get("message_id"),
             )
         except Exception:
             logger.exception(
@@ -287,6 +290,7 @@ async def _dispatch_agent_responses(data: dict) -> None:
             group_members=group.members,
             attachments=None,
             response_label="Final response:",
+            trigger_message_id=data.get("message_id"),
         )
     except Exception:
         logger.exception(
@@ -416,9 +420,12 @@ async def _smart_relevance_check(agent_id: str, content: str) -> bool:
             return False
 
         from pocketpaw.agents.registry import get_backend_class
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
-        settings = Settings.load()
+        # ``Settings.load()`` re-parses config + env (~115 ms) on every group
+        # message. The cached instance is shared process-wide, so copy before
+        # overriding the backend and model.
+        settings = get_settings().model_copy(deep=True)
         settings.agent_backend = "claude_agent_sdk"
         settings.claude_sdk_model = "claude-haiku-4-5-20251001"
 
@@ -500,8 +507,13 @@ async def _run_agent_response(
     group_members: list[str],
     attachments: list[dict] | None = None,
     response_label: str | None = None,
+    trigger_message_id: str | None = None,
 ) -> str | None:
     """Run an agent's response and stream it to the group.
+
+    ``trigger_message_id`` is the stored message that triggered the run. It is
+    already in the group's recent messages (``send_message`` inserts before it
+    emits) and it is the prompt, so it is left out of the history.
 
     ``attachments`` carries the triggering user message's files (shape matches
     ``ee.cloud.models.message.Attachment``: ``type``, ``url``, ``name``,
@@ -512,14 +524,18 @@ async def _run_agent_response(
     from pocketpaw.agents.pool import get_agent_pool
     from pocketpaw_ee.cloud.chat import message_service
     from pocketpaw_ee.cloud.chat.agent_service import (
+        TurnBinding,
         attach_agent_identity,
         attach_delivered_artifacts_collector,
+        bind_turn,
         detach_agent_identity,
         detach_delivered_artifacts_collector,
+        unbind_turn,
     )
 
     pool = get_agent_pool()
     session_key = f"cloud:{group_id}:{agent_id}"
+    trigger_content = user_message
 
     # Match the DM path's shape (``src/pocketpaw/agents/loop.py``) — append an
     # "Attached files" block to the prompt so agents can reason about channel
@@ -542,13 +558,12 @@ async def _run_agent_response(
 
     # Fetch recent conversation history from cloud Messages.
     recent_msgs = await message_service.list_recent_for_group(group_id, limit=20)
-    history = [
-        {
-            "role": "assistant" if m.sender_type == "agent" else "user",
-            "content": m.content,
-        }
-        for m in recent_msgs
-    ]
+    history = await _group_history_for_agent(
+        recent_msgs,
+        agent_id,
+        trigger_message_id=trigger_message_id,
+        trigger_content=trigger_content,
+    )
 
     # Inject knowledge context from agent's knowledge engine
     knowledge_context = ""
@@ -611,6 +626,12 @@ async def _run_agent_response(
     # SDK task's tool appends onto the same object this function drains below.
     delivered_artifacts: list[dict[str, Any]] = []
     delivered_token = attach_delivered_artifacts_collector(delivered_artifacts)
+    # A warm client's MCP tools keep the context they were connected in (turn 1's
+    # collector); the turn slot hands them THIS run's instead.
+    turn_handle = bind_turn(
+        session_key,
+        TurnBinding(workspace_id=workspace_id, user_id=agent_id, artifacts=delivered_artifacts),
+    )
     try:
         async for event in pool.run(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
@@ -717,6 +738,7 @@ async def _run_agent_response(
         logger.exception("Agent %s response failed in group %s", agent_id, group_id)
         full_text = full_text or "[Agent response failed]"
     finally:
+        unbind_turn(turn_handle)
         detach_agent_identity(identity_tokens)
         detach_delivered_artifacts_collector(delivered_token)
 
@@ -809,6 +831,53 @@ async def _run_agent_response(
         len(final_text),
     )
     return final_text
+
+
+async def _group_history_for_agent(
+    messages: list[Any],
+    agent_id: str,
+    *,
+    trigger_message_id: str | None,
+    trigger_content: str,
+) -> list[dict[str, str]]:
+    """The group's recent messages as ``agent_id``'s conversation history.
+
+    Only this agent's own replies are ``assistant`` turns. Everyone else, other
+    agents included, is a ``user`` line prefixed with their name, so the model
+    can tell who said what and never mistakes another agent's reply for its own.
+    Human names come from one batched lookup. The triggering message is dropped
+    (by id; by a trailing content match when the event carried no id).
+    """
+    kept = [m for m in messages if not trigger_message_id or str(m.id) != trigger_message_id]
+    if (
+        not trigger_message_id
+        and kept
+        and kept[-1].sender_type != "agent"
+        and kept[-1].content == trigger_content
+    ):
+        kept.pop()
+
+    human_ids = {m.sender for m in kept if m.sender_type != "agent" and m.sender}
+    names: dict[str, str] = {}
+    if human_ids:
+        try:
+            from pocketpaw_ee.cloud.auth.service import resolve_display_names
+
+            names = await resolve_display_names(human_ids)
+        except Exception:
+            logger.debug("group history: display-name lookup failed", exc_info=True)
+
+    history: list[dict[str, str]] = []
+    for m in kept:
+        if m.sender_type == "agent" and m.agent == agent_id:
+            history.append({"role": "assistant", "content": m.content})
+            continue
+        if m.sender_type == "agent":
+            name = m.sender_name or m.agent or "Another agent"
+        else:
+            name = m.sender_name or names.get(m.sender or "") or "A member"
+        history.append({"role": "user", "content": f"{name}: {m.content}"})
+    return history
 
 
 def _record_step(

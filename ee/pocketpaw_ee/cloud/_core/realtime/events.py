@@ -60,6 +60,9 @@
 #   ``AgentPlanUpdated`` (type="agent.plan_updated") for the agent plan panel.
 #   Emitted by ``shared/agent_bridge.py`` when a backend's plan tool call
 #   normalizes to a plan that actually changed.
+# Updated: 2026-10-01 (DS-1, feat/discover-index) — added the five
+#   ``discover.listing.*`` events (upserted / removed / used / reported /
+#   moderated) for the Discover index. No audience entry: they stay in-process.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -1009,6 +1012,61 @@ class RuleCreated(Event):
 @dataclass
 class RuleArchived(Event):
     EVENT_TYPE: ClassVar[str] = "instinct.rule.archived"
+
+
+# Site templates (``site_templates.service``). Payload is the template's meta as
+# the recipient sees it, plus ``workspace_id`` and ``user_id`` (the one recipient:
+# the owner, or for ``used`` the caller); ``SiteTemplateUsed`` adds the new
+# ``pocket_id``. ``updated`` covers a metadata edit and a report-triggered hide.
+# Never the snapshot: it carries the site's source.
+@dataclass
+class SiteTemplateSaved(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.saved"
+
+
+@dataclass
+class SiteTemplateDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.deleted"
+
+
+@dataclass
+class SiteTemplateUsed(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.used"
+
+
+@dataclass
+class SiteTemplateUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.updated"
+
+
+# Discover index (``discover.service`` / ``service_admin``). Payload carries
+# ``listing_id``, ``source`` and ``source_id``; ``used`` adds ``workspace_id`` and
+# ``user_id`` (the caller), ``reported`` the reporter, ``moderated`` the new
+# ``featured`` / ``hidden``. No audience: listings are public, so none of these
+# fan out to sockets; they exist for in-process listeners and the audit trail.
+@dataclass
+class DiscoverListingUpserted(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.upserted"
+
+
+@dataclass
+class DiscoverListingRemoved(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.removed"
+
+
+@dataclass
+class DiscoverListingUsed(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.used"
+
+
+@dataclass
+class DiscoverListingReported(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.reported"
+
+
+@dataclass
+class DiscoverListingModerated(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.moderated"
 
 
 # Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write

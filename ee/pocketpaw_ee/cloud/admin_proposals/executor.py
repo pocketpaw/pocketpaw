@@ -114,6 +114,9 @@
 #     splats ``args`` into the service, so an agent cannot smuggle an extra kwarg
 #     (e.g. a ``role="owner"`` on an invite, or a ``seats`` bump on a workspace
 #     update) into a call the human didn't approve.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -634,15 +637,12 @@ async def _persist_outcome(
 ) -> None:
     """Back-write the outcome onto the persisted ``_admin_action`` blob.
 
-    Direct SQL update — the same pattern the external-action executor's
+    Store-API write — the same pattern the external-action executor's
     ``_persist_outcome`` uses. Best-effort: a write failure leaves the blob
     without the structured outcome but the free-text ``mark_executed`` /
     ``mark_failed`` outcome still records it. The structured outcome is ALSO the
     idempotency signal ``_already_executed`` reads.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -660,13 +660,7 @@ async def _persist_outcome(
         }
         params[ADMIN_ACTION_PARAM_KEY] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — back-write is best-effort
         logger.warning(
             "admin_action: failed to persist outcome onto action %s — the "

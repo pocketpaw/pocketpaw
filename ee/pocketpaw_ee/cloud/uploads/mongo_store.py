@@ -90,6 +90,7 @@ metadata-only (Captain Option A).
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
@@ -129,6 +130,25 @@ class KbTrackedRecord(NamedTuple):
     article_id: str
     scope: str | None
     record: FileRecord
+
+
+def _under_prefix_filter(workspace: str, prefix: str) -> dict[str, Any]:
+    """Live files in ``workspace`` whose folder is ``prefix`` or below it.
+
+    Exactly the old Python test ``fp == prefix or (prefix != "/" and
+    fp.startswith(prefix + "/"))`` with ``fp = folder_path or "/"``: a row with
+    no folder reads as root. The descendant clause is an anchored regex on the
+    ``re.escape``d prefix, so ``.``, ``(`` or ``+`` in a folder name match
+    themselves and a sibling like ``/a.b`` never matches ``/a-b``.
+    """
+    clauses: list[dict[str, Any]] = [{"folder_path": prefix}]
+    if prefix != "/":
+        clauses.append({"folder_path": {"$regex": "^" + re.escape(prefix + "/")}})
+    # A missing / null / empty folder_path reads as "/", which only "/" matches
+    # (and "", whose descendant clause "/" prefixes everything).
+    if prefix in ("/", ""):
+        clauses.append({"folder_path": {"$in": [None, ""]}})
+    return {"workspace": workspace, "deleted_at": None, "$or": clauses}
 
 
 class MongoFileStore:
@@ -327,10 +347,8 @@ class MongoFileStore:
         if old_prefix == new_prefix:
             return 0
         count = 0
-        cursor = FileUpload.find(
-            FileUpload.workspace == workspace,
-            FileUpload.deleted_at == None,  # noqa: E711
-        )
+        # The query narrows to candidates; the loop below keeps the exact test.
+        cursor = FileUpload.find(_under_prefix_filter(workspace, old_prefix))
         async for d in cursor:
             fp = d.folder_path or "/"
             if fp == old_prefix:
@@ -344,32 +362,22 @@ class MongoFileStore:
         return count
 
     async def soft_delete_under_prefix(self, workspace: str, prefix: str) -> int:
-        """Soft-delete every live file under ``prefix`` (at or below)."""
-        count = 0
-        now = datetime.now(UTC)
-        cursor = FileUpload.find(
-            FileUpload.workspace == workspace,
-            FileUpload.deleted_at == None,  # noqa: E711
+        """Soft-delete every live file under ``prefix`` (at or below).
+
+        One ``update_many`` that stamps ``deleted_at`` and nothing else; the
+        per-row saves it replaced wrote no other field (nothing here emits a
+        per-file event). Returns the number of rows deleted.
+        """
+        # no-event: soft-delete of a folder's files; the folder route owns it.
+        res = await FileUpload.get_pymongo_collection().update_many(
+            _under_prefix_filter(workspace, prefix),
+            {"$set": {"deleted_at": datetime.now(UTC)}},
         )
-        async for d in cursor:
-            fp = d.folder_path or "/"
-            if fp == prefix or (prefix != "/" and fp.startswith(prefix + "/")):
-                d.deleted_at = now
-                await d.save()
-                count += 1
-        return count
+        return res.modified_count
 
     async def count_under_prefix(self, workspace: str, prefix: str) -> int:
-        count = 0
-        cursor = FileUpload.find(
-            FileUpload.workspace == workspace,
-            FileUpload.deleted_at == None,  # noqa: E711
-        )
-        async for d in cursor:
-            fp = d.folder_path or "/"
-            if fp == prefix or (prefix != "/" and fp.startswith(prefix + "/")):
-                count += 1
-        return count
+        """Live files at or below ``prefix``, counted server-side."""
+        return await FileUpload.find(_under_prefix_filter(workspace, prefix)).count()
 
     async def get_scoped(self, file_id: str, workspace: str) -> FileRecord | None:
         doc = await FileUpload.find_one(

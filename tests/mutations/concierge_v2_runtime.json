@@ -88,7 +88,7 @@
   {
     "label": "the output filter is bypassed — raw deltas, code and all, reach the visitor",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                for piece in fences.feed(delta or \"\"):",
+    "find": "                for piece in await fences.afeed(delta or \"\"):",
     "replace": "                for piece in [delta] if delta else []:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code",
@@ -223,7 +223,7 @@
   {
     "label": "the compact manifest leaves the prompt — the model is never told how to write a card",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    parts.append(_cards_paragraph(declared))",
+    "find": "    parts.append(_cards_paragraph(declared, has_catalog=bool(catalog), lead_capture=lead_capture))",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_prompt_carries_the_compact_manifest_and_no_tool_advice"
@@ -279,8 +279,8 @@
   {
     "label": "the doc-code frame is used for every site — the model is told it may quote code everywhere",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        frame = FRAME_DOC_CODE if allow_doc_code else FRAME",
-    "replace": "        frame = FRAME_DOC_CODE",
+    "find": "    doc_code = getattr(site, \"concierge_allow_doc_code\", False) is True",
+    "replace": "    doc_code = True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_doc_code_flag_picks_the_frame_and_the_filter",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_frame_is_the_first_and_constant_part_of_the_prompt"
@@ -411,7 +411,7 @@
   },
   {
     "label": "CR-3: page_key stops folding about/index.html into about",
-    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "file": "src/pocketpaw/paw_bar/pages.py",
     "find": "    key = re.sub(r\"(^|/)index$\", \"\", key)",
     "replace": "    key = key",
     "tests": [

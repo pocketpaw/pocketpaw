@@ -1,0 +1,42 @@
+[
+  {
+    "label": "drop the exemption: flagged users go back on the per-IP bucket",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "    if not is_valid and not getattr(request.state, \"ee_user_authenticated\", False):\n        rl_info = api_limiter.check(client_ip)",
+    "replace": "    if not is_valid:\n        rl_info = api_limiter.check(client_ip)",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_double_reload_burst_is_not_throttled",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_member_flood_is_not_limited_and_leaves_the_ip_bucket_alone",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_guest_flood_is_not_limited"
+    ]
+  },
+  {
+    "label": "exempt every caller, not only flagged ones",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "    if not is_valid and not getattr(request.state, \"ee_user_authenticated\", False):\n        rl_info = api_limiter.check(client_ip)",
+    "replace": "    if not is_valid and False:\n        rl_info = api_limiter.check(client_ip)",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_anonymous_flood_is_still_limited",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_garbage_jwt_flood_is_still_limited",
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_deleted_user_jwt_stays_on_the_ip_bucket"
+    ]
+  },
+  {
+    "label": "the bridge flags inactive users too",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "        if getattr(user, \"is_active\", False):\n            request.state.ee_user_authenticated = True\n",
+    "replace": "        if True:\n            request.state.ee_user_authenticated = True\n",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_rate_limit.py::test_inactive_user_flood_is_still_limited"
+    ]
+  },
+  {
+    "label": "rotate the token by writing the file in place",
+    "file": "src/pocketpaw/config.py",
+    "find": "    fd, tmp = tempfile.mkstemp(dir=token_path.parent, prefix=\".access_token.\", suffix=\".tmp\")\n    try:\n        with os.fdopen(fd, \"w\") as f:\n            f.write(token)\n        os.replace(tmp, token_path)\n    except BaseException:\n        Path(tmp).unlink(missing_ok=True)\n        raise\n",
+    "replace": "    tempfile.gettempdir()\n    token_path.write_text(token)\n",
+    "tests": [
+      "tests/test_dashboard_security.py::TestAccessTokenCache::test_rotation_swaps_in_a_new_file"
+    ]
+  }
+]

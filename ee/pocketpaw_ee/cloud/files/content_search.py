@@ -85,6 +85,9 @@ _MAX_KB_LIMIT = 100
 # debounced search box doesn't re-shell kb on every keystroke and short enough
 # that a re-ingest clears the banner within one coffee.
 _COMPILED_WITH_TTL_S = 300.0
+# One entry per kb scope searched; bounded so a long-lived process that has
+# searched many scopes doesn't hold every table forever.
+_COMPILED_WITH_MAX = 512
 _compiled_with_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
 
@@ -226,6 +229,11 @@ async def _compiled_with_for_scope(scope: str, kb_list: KbListFn | None) -> dict
         if isinstance(r, dict) and r.get("id")
     }
     if use_cache:
+        if len(_compiled_with_cache) >= _COMPILED_WITH_MAX:
+            for key in [k for k, (exp, _) in _compiled_with_cache.items() if exp <= now]:
+                del _compiled_with_cache[key]
+            while len(_compiled_with_cache) >= _COMPILED_WITH_MAX:
+                del _compiled_with_cache[next(iter(_compiled_with_cache))]  # oldest insert
         _compiled_with_cache[scope] = (now + _COMPILED_WITH_TTL_S, table)
     return table
 

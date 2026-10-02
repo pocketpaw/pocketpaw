@@ -107,8 +107,8 @@
   {
     "label": "the mock-delivery setting is ignored — approvals always enqueue the real job",
     "file": "ee/pocketpaw_ee/cloud/growth/executor.py",
-    "find": "        if channel in MOCK_DELIVERY_CHANNELS and await mock_delivery.is_mock_delivery_on(",
-    "replace": "        if False and await mock_delivery.is_mock_delivery_on(",
+    "find": "        mock = channel in MOCK_DELIVERY_CHANNELS and await mock_delivery.is_mock_delivery_on(",
+    "replace": "        mock = False and await mock_delivery.is_mock_delivery_on(",
     "tests": "tests/cloud/growth/test_delivery_queue.py::test_approve_uses_mock_delivery_only_when_on"
   },
   {
@@ -145,5 +145,12 @@
     "find": "    return (datetime.now(UTC) - started).total_seconds() < stale_after\n",
     "replace": "    return True\n",
     "tests": "tests/cloud/growth/test_delivery_queue.py::test_deliver_approved_starts_only_idle_approved_drafts"
+  },
+  {
+    "label": "the no-worker refusal also blocks mock delivery, so mock sends never happen on a default deploy",
+    "file": "ee/pocketpaw_ee/cloud/growth/executor.py",
+    "find": "        if not mock and not _growth_worker_enabled():\n",
+    "replace": "        if not _growth_worker_enabled():\n",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_approve_uses_mock_delivery_only_when_on"
   }
 ]

@@ -39,7 +39,8 @@
 # zip entries pass. Absolute same-origin URLs in HTML/CSS are rewritten
 # root-relative; CSS url()/@import refs are chased same-origin. robots.txt is
 # honored for our UA and '*'; a FAILED robots fetch degrades to a report warning
-# rather than blocking the import.
+# rather than blocking the import. ``load_robots`` / ``allowed_by_robots`` are
+# public so the concierge catalog import applies the same robots rule.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 
@@ -255,14 +256,20 @@ def _normalize(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
 
 
-async def _load_robots(
-    fetcher: SafeFetcher, seed: Any
+async def load_robots(
+    fetcher: SafeFetcher, seed: Any, *, allowed_host: str | None = None
 ) -> tuple[robotparser.RobotFileParser | None, str | None]:
     """Fetch + parse robots.txt. Missing/failed → (None, warning-or-None): we
-    proceed politely, noting the failure on the report when the FETCH errored."""
+    proceed politely, noting the failure on the report when the FETCH errored.
+
+    Public with ``allowed_by_robots`` because the concierge catalog import
+    (``paw_bar.catalog_import``) honours robots by the same rule as this crawl.
+    ``allowed_host`` pins the robots fetch's redirects to one host (the import
+    passes its verified host); a redirect off it is a failed fetch, so allow-all
+    with the warning. The crawl passes None, as it always has."""
     robots_url = urlunparse((seed.scheme, seed.netloc, "/robots.txt", "", "", ""))
     try:
-        result = await fetcher.fetch(robots_url)
+        result = await fetcher.fetch(robots_url, allowed_host=allowed_host)
     except CrawlBudgetExceeded:
         raise
     except (CrawlError, ValidationError, httpx.HTTPError):
@@ -274,7 +281,7 @@ async def _load_robots(
     return parser, None
 
 
-def _allowed_by_robots(
+def allowed_by_robots(
     robots: robotparser.RobotFileParser | None, url: str, user_agent: str
 ) -> bool:
     """robots for the UA WE ANNOUNCE, not a hardcoded one. A caller that fetches
@@ -395,7 +402,7 @@ async def crawl_site(
         return safe
 
     try:
-        robots, robots_warning = await _load_robots(fetcher, seed)
+        robots, robots_warning = await load_robots(fetcher, seed)
         if robots_warning:
             result.warnings.append(robots_warning)
 
@@ -420,7 +427,7 @@ async def crawl_site(
         while queue and result.stats.pages_fetched < page_budget:
             page_url, depth = queue.popleft()
             is_seed = page_url == seed_url
-            if not _allowed_by_robots(robots, page_url, user_agent):
+            if not allowed_by_robots(robots, page_url, user_agent):
                 result.stats.skipped_by_robots += 1
                 if is_seed:
                     raise CrawlError(
@@ -525,7 +532,7 @@ async def crawl_site(
         asset_slots = 0
         while fetch_assets and asset_queue and asset_slots < MAX_CRAWL_ASSETS:
             asset_url = asset_queue.popleft()
-            if not _allowed_by_robots(robots, asset_url, user_agent):
+            if not allowed_by_robots(robots, asset_url, user_agent):
                 result.stats.skipped_by_robots += 1
                 continue
             try:

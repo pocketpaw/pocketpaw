@@ -1,50 +1,61 @@
-# ee/paw_bar/actions.py — the shared Paw Bar action executor (C1).
-# Updated: 2026-08-01 (AL-2, paw-bar emitters) — a SUCCESSFUL auto verb now
-#   records ``paw.visitor.action`` in the agent ledger, carrying ``value_cents``
-#   priced from the widget spec's own catalog (add_to_cart: the product's
-#   declared price × the qty added; checkout: the cart total the link was
-#   rendered for). This is the only ledger kind that routinely carries money,
-#   and it is what turns "the concierge answered some questions" into "the
-#   concierge put $X in carts". The emit sits in ``execute_action`` after the
-#   verb dispatch rather than inside ``_do_add_to_cart`` / ``_do_checkout``: one
-#   call site means the verbs cannot drift about the row's shape, and the auto
-#   branch was restructured (assign-then-return) purely to give it that seam.
-#   Gated verbs are NOT emitted here — they execute nothing, and their proposal
-#   and its approval are already AL-1's rows on the Instinct choke point.
-#   Failure paths emit nothing: an unknown product or an empty cart changed no
-#   state and belongs on no board. The emitter never raises (paw_bar/ledger.py).
-# Created: 2026-07-16 (Paw Bar action registry, C1) — the SINGLE code path both
-#   the public POST /paw-bar/action endpoint and the concierge agent's per-verb
-#   tools run through, so a visitor and the agent get identical validation +
-#   effects. SS-2 alignment: agent-facing action tools NEVER execute tenant-scoped
-#   effects. Only VISITOR-scoped state (the visitor's own cart / a handoff link)
-#   auto-fires; every "gated" verb emits an Instinct proposal (via
-#   decision_loop.propose_customer_action) and executes NOTHING. Checkout is a
-#   handoff LINK — the agent never runs payment.
+# ee/paw_bar/actions.py — the shared Paw Bar action executor.
 #
-#   execute_action(widget, workspace_id, customer_ref, verb, args):
-#     * validates the verb is declared on the spec, that every arg key is declared,
-#       coerces each arg to its declared flat type (str/int/float/bool), caps
-#       string args at 256 chars and clamps qty to 1..99;
-#     * auto + add_to_cart: the product_id must exist in the catalog; upserts the
-#       visitor's cart and returns the updated cart summary;
-#     * auto + checkout: renders checkout_url ({cart_ref} → an opaque, non-
-#       reversible cart handle); an empty cart returns a 409-style error;
-#     * gated verb: raises an Instinct proposal (the only effect) and returns a
-#       pending outcome the visitor polls on the existing decision endpoint.
-#   Returns a plain ``ActionOutcome`` (no FastAPI/MCP coupling); the endpoint maps
-#   it to HTTP, the tool maps it to an MCP result. Every executed/proposed action
-#   is recorded as a paw_bar event marker (the layer's existing audit + rate-limit
-#   mechanism) plus a structured log line.
+# The SINGLE code path both the public POST /paw-bar/action endpoint and the
+# legacy concierge agent's per-verb tools run through, so a visitor and the agent
+# get identical validation and effects. Only VISITOR-scoped state (the visitor's
+# own cart, a checkout link) auto-fires; every "gated" verb raises an Instinct
+# proposal (decision_loop.propose_customer_action) and executes nothing. Checkout
+# is a handoff LINK; the agent never runs payment.
+#
+#   execute_action(widget, workspace_id, customer_ref, verb, args, site=...):
+#     * send_to_team (built in, reserved, never declared): the lead card's Send.
+#       Reachable only when the caller passes the front gate's ``site`` (the public
+#       route does; the agent's tool path doesn't), and only while the site's
+#       ``concierge_lead_capture`` is on (409 otherwise). Fields name <=120,
+#       email/phone (one required, contact_form checks), message <=2000; 3 per
+#       visitor per 10 minutes, 30 per site per hour (429), admitted atomically
+#       BEFORE the write by recording the ``pawbar_lead`` marker in the same
+#       transaction that counts (a slot is never given back; a store error is 503,
+#       no lead). Writes a Lead via leads.capture_internal (HIGH
+#       injection screen there) with conversation_ref "<widget_id>:<customer_ref>".
+#       A field refusal is 422 with ``detail`` {code, field, message}; any other
+#       422 has field None (paw-bar's lead form reads exactly this).
+#     * declared verbs: every arg key declared, coerced to its flat type
+#       (str/int/float/bool), strings capped at 256, qty clamped to 1..99;
+#     * auto add_to_cart: the product must be in the widget's catalog; a cart holds
+#       one currency (409 ``cart_currency_mismatch``, cart unchanged);
+#     * auto checkout: renders checkout_url ({cart_ref} -> an opaque cart handle);
+#       an empty cart is a 409;
+#     * gated verb: raises the proposal (own per-visitor cap) and returns pending.
+#   Returns an ``ActionOutcome`` the endpoint maps to HTTP and the tool to MCP.
+#   Every action records a paw_bar event marker (audit + rate limit). A successful
+#   auto verb or send_to_team records ``paw.visitor.action`` in the agent ledger
+#   (never raises); amounts are ISO 4217 minor units. Failures record no ledger row.
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# The built-in lead verb. Reserved: ``PawBarActionSpec`` refuses it as an owner
+# action, so it can only mean this.
+SEND_TO_TEAM_VERB = "send_to_team"
+# Marker type every send_to_team attempt that got past field checks records; the
+# two lead caps count it.
+LEAD_MARKER_TYPE = "pawbar_lead"
+LEAD_FIELD_CAPS: dict[str, int] = {"name": 120, "email": 254, "phone": 40, "message": 2000}
+LEADS_PER_VISITOR = 3
+LEAD_VISITOR_WINDOW = timedelta(minutes=10)
+LEADS_PER_SITE = 30
+LEAD_SITE_WINDOW = timedelta(hours=1)
+LEAD_SENT_MESSAGE = "Sent. The team will get back to you."
+_LEAD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _MAX_ARG_STR = 256
 _MIN_QTY = 1
@@ -58,14 +69,18 @@ class ActionOutcome:
     ``ok`` is the success flag; ``result`` is the verb-specific payload; ``cart``
     is the visitor's cart summary (a JSON-safe dict) when the verb touched it;
     ``error`` is a stable machine code on failure; ``http_status`` is the status
-    the endpoint should return (200 ok, 409 empty-cart/unavailable, 422 bad
-    verb/args)."""
+    the endpoint should return (200 ok, 409 empty-cart/unavailable/
+    cart_currency_mismatch, 422 bad verb/args, 429 a rate cap). ``detail``, when
+    set, is the structured refusal the endpoint returns instead of ``error``
+    ({code, field, message} for send_to_team). Amounts in ``cart`` are ISO 4217
+    minor units of its ``currency``."""
 
     ok: bool
     result: dict[str, Any] = field(default_factory=dict)
     cart: dict[str, Any] | None = None
     error: str = ""
     http_status: int = 200
+    detail: dict[str, Any] | None = None
 
 
 def _fail(error: str, http_status: int) -> ActionOutcome:
@@ -217,19 +232,25 @@ async def execute_action(
     args: dict[str, Any],
     *,
     store: Any | None = None,
+    site: Any | None = None,
 ) -> ActionOutcome:
-    """Execute one declared Paw Bar action — the shared endpoint + tool code path.
+    """Execute one Paw Bar action — the shared endpoint + tool code path.
 
     ``widget`` is the resolved :class:`PawBarWidget`; ``workspace_id`` is its
     resolved tenant (used to scope the gated Instinct proposal); ``customer_ref``
     is the anonymous visitor handle; ``verb`` / ``args`` are the requested action.
-    See the module header for the full contract. Never raises for a caller error —
-    returns an :class:`ActionOutcome` with a stable code + status hint.
+    ``site`` is the Site the public front gate resolved; only with it is the
+    built-in send_to_team verb reachable. See the module header for the full
+    contract. Never raises for a caller error — returns an :class:`ActionOutcome`
+    with a stable code + status hint.
     """
     if store is None:
         from pocketpaw.stores import get_paw_bar_store
 
         store = get_paw_bar_store()
+
+    if verb == SEND_TO_TEAM_VERB and site is not None:
+        return await _do_send_to_team(store, widget, site, workspace_id, customer_ref, args)
 
     spec = getattr(widget, "spec", None)
     declared_actions = list(getattr(spec, "actions", []) or [])
@@ -272,6 +293,7 @@ async def execute_action(
                 spec=spec,
                 result=outcome.result,
                 cart=outcome.cart,
+                store=store,
             )
         return outcome
 
@@ -283,13 +305,14 @@ async def _do_add_to_cart(
     store: Any, widget: Any, spec: Any, customer_ref: str, args: dict[str, Any]
 ) -> ActionOutcome:
     from pocketpaw.paw_bar.models import PawBarCartItem
+    from pocketpaw.paw_bar.store import CartCurrencyMismatch
 
     widget_id = str(getattr(widget, "id", "") or "")
     product_id = str(args.get("product_id", "") or "")
     if not product_id:
         return _fail("missing_product_id", 422)
-    catalog = {item.id: item for item in (getattr(spec, "catalog", []) or [])}
-    product = catalog.get(product_id)
+    found = await store.get_catalog_items(widget_id, [product_id])
+    product = found[0] if found else None
     if product is None:
         return _fail("unknown_product", 422)
 
@@ -308,7 +331,32 @@ async def _do_add_to_cart(
         currency=product.currency,
         qty=qty,
     )
-    cart = await store.upsert_cart_item(widget_id, customer_ref, item)
+    try:
+        cart = await store.upsert_cart_item(widget_id, customer_ref, item)
+    except CartCurrencyMismatch as exc:
+        # One currency per cart, so the total is always a real amount. The cart
+        # is unchanged; the visitor checks out first or picks a same-currency item.
+        logger.info(
+            "paw_bar.action.refused verb=add_to_cart widget=%s product=%s cart=%s item=%s",
+            widget_id,
+            product_id,
+            exc.cart_currency,
+            exc.item_currency,
+        )
+        return ActionOutcome(
+            ok=False,
+            error=CartCurrencyMismatch.code,
+            http_status=409,
+            result={
+                "message": (
+                    f"Your cart is in {exc.cart_currency}, and this item is priced in "
+                    f"{exc.item_currency}. Check out first, or pick items in "
+                    f"{exc.cart_currency}."
+                ),
+                "cart_currency": exc.cart_currency,
+                "item_currency": exc.item_currency,
+            },
+        )
     await _record_action_marker(store, widget_id, customer_ref, "add_to_cart", "auto", True)
     logger.info(
         "paw_bar.action.executed verb=add_to_cart widget=%s product=%s qty=%s",
@@ -415,4 +463,139 @@ async def _do_gated(
     )
 
 
-__all__ = ["ActionOutcome", "cart_wire", "execute_action"]
+# --------------------------------------------------------------------------- #
+# send_to_team — the lead card's Send
+# --------------------------------------------------------------------------- #
+
+
+def _lead_refusal(code: str, message: str, field_name: str | None = None) -> ActionOutcome:
+    """A 422 in the shape paw-bar's lead form reads: ``{code, field, message}``.
+    ``field`` names one of the form's fields, or is None for a generic refusal."""
+    return ActionOutcome(
+        ok=False,
+        error=code,
+        http_status=422,
+        detail={"code": code, "field": field_name, "message": message},
+    )
+
+
+def _lead_fields(args: Any) -> tuple[dict[str, str] | None, ActionOutcome | None]:
+    """Validate the lead card's args; ``(fields, None)`` or ``(None, refusal)``.
+    Empty values are dropped (the client omits them too)."""
+    from pocketpaw.sites_capture.contact_form import looks_like_email, looks_like_phone
+
+    if not isinstance(args, dict):
+        return None, _lead_refusal("bad_request", "Something went wrong. Please try again.")
+    fields: dict[str, str] = {}
+    for name, raw in args.items():
+        cap = LEAD_FIELD_CAPS.get(name)
+        if cap is None:
+            return None, _lead_refusal("unknown_field", "Something went wrong. Please try again.")
+        if not isinstance(raw, str):
+            return None, _lead_refusal("not_text", "Enter text here.", name)
+        value = _LEAD_CONTROL_CHARS.sub("", raw).strip()
+        if len(value) > cap:
+            return None, _lead_refusal("too_long", f"Keep this under {cap} characters.", name)
+        if value:
+            fields[name] = value
+    email, phone = fields.get("email"), fields.get("phone")
+    if email and not looks_like_email(email):
+        return None, _lead_refusal("invalid_email", "Enter a valid email address.", "email")
+    if phone and not looks_like_phone(phone):
+        return None, _lead_refusal("invalid_phone", "Enter a valid phone number.", "phone")
+    if not email and not phone:
+        return None, _lead_refusal(
+            "contact_required", "Add an email or phone number so the team can reply.", "email"
+        )
+    return fields, None
+
+
+async def _admit_lead(store: Any, widget_id: str, customer_ref: str) -> bool | None:
+    """Take one lead slot: 3 per visitor per 10 minutes, 30 per site (its widget)
+    per hour. The ``pawbar_lead`` marker is written by the SAME transaction that
+    counts (``store.admit_capped_event``), BEFORE the lead is written, so a
+    parallel burst with rotated visitor handles can't all read "under the cap".
+    True admitted, False capped, None the store failed (the caller fails closed:
+    no admission, no lead).
+
+    A slot is never given back, even when the write that follows fails (the
+    injection screen drops it, or Mongo errors). Failed attempts spend budget
+    on purpose: a bot that trips the screen exhausts the site's hourly cap
+    without producing a single email."""
+    from pocketpaw.paw_bar.models import PawBarEvent
+
+    try:
+        return await store.admit_capped_event(
+            PawBarEvent(
+                widget_id=widget_id,
+                type=LEAD_MARKER_TYPE,
+                payload={"policy": "builtin", "verb": SEND_TO_TEAM_VERB},
+                customer_ref=customer_ref,
+            ),
+            per_customer=LEADS_PER_VISITOR,
+            customer_window=LEAD_VISITOR_WINDOW,
+            overall=LEADS_PER_SITE,
+            overall_window=LEAD_SITE_WINDOW,
+        )
+    except Exception:  # noqa: BLE001 — fail closed, see the docstring
+        logger.warning("lead admission failed for widget %s", widget_id, exc_info=True)
+        return None
+
+
+async def _do_send_to_team(
+    store: Any,
+    widget: Any,
+    site: Any,
+    workspace_id: str,
+    customer_ref: str,
+    args: Any,
+) -> ActionOutcome:
+    from pocketpaw_ee.cloud.leads import service as leads_service
+    from pocketpaw_ee.paw_bar import ledger
+
+    widget_id = str(getattr(widget, "id", "") or "")
+    if getattr(site, "concierge_lead_capture", True) is False:
+        return _fail("lead_capture_off", 409)
+    fields, refusal = _lead_fields(args)
+    if refusal is not None:
+        return refusal
+    admitted = await _admit_lead(store, widget_id, customer_ref)
+    if admitted is None:
+        return _fail("lead_unavailable", 503)
+    if not admitted:
+        return _fail("lead_rate_limit", 429)
+    try:
+        lead = await leads_service.capture_internal(
+            site=site,
+            form_type="concierge",
+            kind="concierge",
+            properties=fields,
+            conversation_ref=ledger.conversation_id(widget_id, customer_ref),
+        )
+    except Exception:  # noqa: BLE001 — a store error is a retry, never a 500
+        logger.warning("send_to_team lead write failed for widget %s", widget_id, exc_info=True)
+        return _fail("lead_unavailable", 503)
+    # The slot taken above stays spent whether or not the screen dropped it.
+    if lead is None:
+        return _lead_refusal("rejected", "We couldn't send that. Please reword it and try again.")
+    logger.info("paw_bar.action.executed verb=send_to_team widget=%s lead=%s", widget_id, lead.id)
+    result = {"message": LEAD_SENT_MESSAGE}
+    await ledger.emit_visitor_action(
+        widget=widget,
+        workspace_id=workspace_id,
+        customer_ref=customer_ref,
+        verb=SEND_TO_TEAM_VERB,
+        spec=getattr(widget, "spec", None),
+        result=result,
+        store=store,
+    )
+    return ActionOutcome(ok=True, result=result)
+
+
+__all__ = [
+    "LEAD_MARKER_TYPE",
+    "SEND_TO_TEAM_VERB",
+    "ActionOutcome",
+    "cart_wire",
+    "execute_action",
+]

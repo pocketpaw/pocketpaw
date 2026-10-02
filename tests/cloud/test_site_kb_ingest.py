@@ -1,27 +1,23 @@
 # tests/cloud/test_site_kb_ingest.py — site content → the pocket KB its concierge
-# reads (ee.pocketpaw_ee.sites.kb_ingest).
-# Updated 2026-09-28 (feat/concierge-page-aware, CR-3): a sync that ingested also
-# writes ``kb_page_index`` (the crawl index), so the own-fields test allows it.
-# Created 2026-07-26. A dedicated concierge reads exactly ONE scope,
-# pocket:<pocket_id>, and nothing used to put the site's own pages there, so the
-# agent was live and knowledge-empty. Layers:
+# reads (ee.pocketpaw_ee.sites.kb_ingest). A dedicated concierge reads exactly ONE
+# scope, pocket:<pocket_id>, and this module is what fills it. Layers:
 #   * Extraction (pure, no I/O): HTML strips script/style but keeps the title and
 #     image alt text; Svelte drops script/style blocks and template expressions;
 #     ripple walks the spec for copy while skipping structural keys, and renders
 #     price-ish numbers with their key so they are retrievable.
 #   * Article sources: deterministic and kb-safe, so a re-sync UPDATES rather than
 #     duplicating, and "/", "index.html" and a SvelteKit root route are one article.
-#   * Sync: ingests into pocket:<id>, records the ids on the Site, prunes only the
-#     ids it previously wrote (the scope is shared with owner-uploaded files, which
-#     must survive), and reports rather than raises on an empty or broken read.
+#   * Sync: ingests into pocket:<id>, records the ids (and the crawl index) on the
+#     Site, prunes only the ids it previously wrote (the scope is shared with
+#     owner-uploaded files), reports rather than raises on an empty or broken read,
+#     and records a crash (sync_failed, previous ids kept) without ever raising.
 #   * Triggers: a live publish and an agent provision each schedule a sync; a
-#     PREVIEW publish does not.
-# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): a crash inside the
-#   sync is recorded on the Site (sync_failed, a fresh kb_synced_at, previous ids
-#   kept) like every other failure, and recording it never raises.
+#     PREVIEW publish does not. A sync that read the pocket schedules the catalog
+#     sync, and a failing catalog import changes neither the report nor the catalog.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 import pytest
@@ -591,3 +587,128 @@ async def test_a_per_page_kb_error_still_skips_only_that_page(monkeypatch):
 
     assert calls["kb"] == 3
     assert report.error == "ingest_failed"
+
+
+# --------------------------------------------------------------------------- #
+# The catalog follows the knowledge: a sync schedules the site's catalog sync
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_sync_schedules_the_catalog_sync(monkeypatch, scheduled_catalog_syncs):
+    _patch_kb(monkeypatch, ingested=[], removed=[])
+    _patch_pocket(
+        monkeypatch,
+        {"engine": "html", "source": {"index.html": f"<p>{_long('Mugs for sale.')}</p>"}},
+    )
+    site = _FakeSite()
+
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert scheduled_catalog_syncs == [site]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_pocket_schedules_no_catalog_sync(monkeypatch, scheduled_catalog_syncs):
+    _patch_pocket(monkeypatch, None)
+
+    await kb_ingest.sync_site_knowledge(_FakeSite())
+
+    assert scheduled_catalog_syncs == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_catalog_import_changes_neither_the_report_nor_the_catalog(
+    monkeypatch, scheduled_catalog_syncs, tmp_path
+):
+    from pocketpaw_ee.paw_bar import catalog_import, catalog_sync
+    from pocketpaw_ee.paw_bar.catalog_import import CatalogImportPreview
+
+    from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
+    from pocketpaw.paw_bar.store import PawBarStore
+
+    store = PawBarStore(tmp_path / "paw_bar.db")
+    widget = await store.create_widget(
+        PawBarWidget(
+            pocket_id="pocket-1",
+            owner="user:maya",
+            workspace_id="ws-1",
+            spec=PawBarSpec(widget_id="w", pocket_id="pocket-1"),
+        )
+    )
+    await store.upsert_catalog_items(widget.id, [{"id": "p1", "name": "Mine", "price_cents": 5}])
+    monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda: store)
+
+    async def _failed(site, **_kw):
+        return CatalogImportPreview(status="failed", reason="fetch_failed")
+
+    monkeypatch.setattr(catalog_import, "preview_catalog_import", _failed)
+    _patch_kb(monkeypatch, ingested=[], removed=[])
+    _patch_pocket(
+        monkeypatch,
+        {"engine": "html", "source": {"index.html": f"<p>{_long('Mugs for sale.')}</p>"}},
+    )
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+    before = (asdict(report), list(site.kb_article_ids), site.kb_sync_error, site.kb_synced_at)
+    [scheduled] = scheduled_catalog_syncs
+    await catalog_sync.safe_sync_site_catalog(scheduled)
+
+    after = (asdict(report), list(site.kb_article_ids), site.kb_sync_error, site.kb_synced_at)
+    assert after == before
+    assert report.error == "" and report.ingested == 1
+    items, _ = await store.list_catalog(widget.id)
+    assert [i.id for i in items] == ["p1"]
+    assert site.catalog_sync_status == "fetch_failed"
+
+
+# --------------------------------------------------------------------------- #
+# A long page is several section articles
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_long_page_records_every_section_and_prunes_the_old_set(monkeypatch):
+    """The real sectioned ingest, faked at the LLM and the kb binary: a page past
+    the section size lands as several articles, all recorded on the Site, the
+    first standing for the page; a re-sync that produces a new set prunes every
+    id of the old one."""
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import (
+        _Compiler,
+        _FakeKb,
+        _install,
+        _long_doc,
+    )
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    kb = _FakeKb()
+    monkeypatch.setattr(knowledge, "_kb", kb)
+    _install(monkeypatch, _Compiler())
+
+    def page(topic: str, count: int) -> dict:
+        body = "".join(
+            f"<h2>{line[2:]}</h2>" if line.startswith("# ") else f"<p>{line}</p>"
+            for line in _long_doc(count).replace("Chapter", topic).split("\n\n")
+        )
+        return {"engine": "html", "source": {"pricing.html": body}}
+
+    _patch_pocket(monkeypatch, page("Spring", 4))
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert (report.ingested, report.error) == (1, "")
+    first = list(site.kb_article_ids)
+    assert len(first) > 1 and sorted(first) == sorted(kb.articles)
+    [entry] = site.kb_page_index.values()
+    assert entry["id"] == first[0]
+
+    _patch_pocket(monkeypatch, page("Summer", 3))
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert sorted(kb.deleted) == sorted(first)
+    assert sorted(site.kb_article_ids) == sorted(kb.articles)
+    assert not set(site.kb_article_ids) & set(first)

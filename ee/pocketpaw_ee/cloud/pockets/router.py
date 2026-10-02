@@ -221,6 +221,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     BulkDispatchResponse,
     CreatePocketRequest,
     DispatchBulkRequest,
+    DuplicatePocketRequest,
     GrantPocketConnectorRequest,
     HomePocketResponse,
     MergeSpecRequest,
@@ -488,6 +489,20 @@ async def get_pocket(
     # its docstring for why gating it would stop sites being built rather than
     # hide them. A new endpoint that returns a pocket belongs on this one too.
     return await pockets_service.get_for_wire(pocket_id, user_id)
+
+
+@router.post("/{pocket_id}/duplicate")
+async def duplicate_pocket(
+    pocket_id: str,
+    body: DuplicatePocketRequest | None = None,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Copy a site pocket into a new one the caller owns. Returns the new pocket's
+    wire dict, the same shape ``POST /pockets`` returns."""
+    return await pockets_service.duplicate_pocket(
+        workspace_id, user_id, pocket_id, body or DuplicatePocketRequest()
+    )
 
 
 @router.patch("/{pocket_id}", dependencies=[Depends(require_pocket_edit)])

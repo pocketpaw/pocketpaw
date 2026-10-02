@@ -1,5 +1,15 @@
 """LiveKit MeetingProvider — wraps existing livekit.service for the
-unified meetings platform."""
+unified meetings platform.
+
+2026-09-30 (fix/livekit-call-security): ``start()`` passes the meeting's
+workspace to ``create_room`` so a scheduled start goes through the plan's daily
+call budget (it used to skip it), and it records the room name and the budget
+deadline on the meeting's own row instead of letting ``create_room`` insert a
+second "Instant call" row. ``create()`` refuses a ``group_id`` the caller is
+not a member of in their workspace (``livekit.room_forbidden``).
+
+2026-10-01 (feat/meetings-instant): ``end()`` passes the workspace to
+``end_room`` so every in_progress row for the room closes, not only this one."""
 
 from __future__ import annotations
 
@@ -37,6 +47,10 @@ class LiveKitProvider:
         """
         group_id = body.group_id
         if group_id:
+            # The meeting starts and ends this group's call, so the caller must
+            # be a member of it in this workspace. Unchecked, a user could
+            # schedule on another workspace's group and end its running call.
+            await livekit_service.require_call_group(group_id, ctx.user_id, ctx.workspace_id)
             room_name = livekit_service.room_name_for_group(group_id)
             provider_payload = {"group_id": group_id, "room_name": room_name}
         else:
@@ -51,13 +65,22 @@ class LiveKitProvider:
     async def start(self, ctx: RequestContext, meeting) -> ProviderStartResult:
         """Create the LiveKit room + spawn the in-call agent.
 
-        Idempotent: create_room is a no-op if the room already exists.
+        Idempotent: create_room is a no-op if the room already exists. Raises
+        ``CallLimitError`` when the workspace has no call time left today.
+        ``meeting`` is the row the caller saves afterwards, so the fields set
+        here are persisted with its status change.
         """
         group_id = meeting.raw_provider_payload.get("group_id")
         if not group_id:
             raise ValueError("LiveKit start requires group_id in provider_payload")
 
-        result = await livekit_service.create_room(group_id)
+        result = await livekit_service.create_room(
+            group_id, ctx.workspace_id, ctx.user_id or "", record_meeting=False
+        )
+        # end_room and the budget watchdog look the call's row up by room name.
+        meeting.provider_meeting_id = result["room_name"]
+        if result.get("call_budget_deadline") is not None:
+            meeting.call_budget_deadline = result["call_budget_deadline"]
 
         return ProviderStartResult(
             provider_payload_updates={
@@ -75,7 +98,7 @@ class LiveKitProvider:
         """Stop agent + delete room."""
         group_id = meeting.raw_provider_payload.get("group_id")
         if group_id:
-            await livekit_service.end_room(group_id)
+            await livekit_service.end_room(group_id, ctx.workspace_id)
 
     # ----- SupportsRecording -----
 

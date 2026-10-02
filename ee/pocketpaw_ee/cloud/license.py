@@ -7,38 +7,22 @@ the private key lives only on the license server.
 Key format: base64(payload_json + "." + signature_hex)
 Payload: {"org": "acme-inc", "plan": "team", "seats": 10, "exp": "2027-01-01"}
 
-Changes:
-  - 2026-06-10 (security R2b review — staging-posture blind spot): Added an
-    ``_is_ambiguous_nonprod_label()`` helper (mirroring auth.core's) and a LOUD
-    ``logger.warning`` in ``enforce_license_key_posture()`` for the case that
-    used to pass SILENTLY: a deployment labelled non-dev/non-prod (e.g.
-    ``POCKETPAW_ENV=staging``) that hasn't set an operator
-    ``POCKETPAW_LICENSE_PUBLIC_KEY`` and so is still verifying against the
-    BYPASSABLE committed DEV key. Production posture still hard-RAISES; explicit
-    dev/unset stays a silent no-op. Boot behaviour is unchanged — only the
-    warning signal is added.
-  - 2026-06-10 (sov/w1a-deploy): Added a production-posture guard so a
-    tenant can't silently run on the BYPASSABLE committed DEV public key.
-    ``_using_dev_public_key()`` reports whether the active verifier is the
-    baked-in DEV key (i.e. no operator ``POCKETPAW_LICENSE_PUBLIC_KEY`` is
-    set). ``enforce_license_key_posture()`` (mirrors W0e's AUTH_SECRET gate
-    in ``ee/cloud/auth/core.py`` and reuses its ``_is_production()`` helper
-    when importable, with a local fallback) RAISES under production posture
-    if the DEV key is in use, and is invoked from ``load_license()`` /
-    ``get_license()`` so the EE gate refuses to validate a license against a
-    public key anyone in the repo can forge against. Dev/test posture is
-    unchanged (warns only).
-  - 2026-06-10 (sov/w0a-license): Replaced the "Replace with your actual
-    public key" placeholder with a real, baked-in DEV Ed25519 public key
-    (``_DEV_PUBLIC_KEY_HEX``). Verification now resolves the public key in
-    this order: ``POCKETPAW_LICENSE_PUBLIC_KEY`` env (production / operator
-    key) → the baked-in DEV key. The HMAC-SHA256 fallback only fires when
-    *no* Ed25519 public key resolves AND ``POCKETPAW_LICENSE_SECRET`` is
-    set, so a default install now verifies Ed25519-minted keys out of the
-    box. The matching private key for the DEV public key lives in
-    ``ee/pocketpaw_ee/cloud/_dev_license_key.py`` (dev-only, clearly
-    marked); production minting supplies its own operator private key. See
-    ``ee/pocketpaw_ee/cloud/mint.py`` for the minting path.
+Public key resolution: ``POCKETPAW_LICENSE_PUBLIC_KEY`` (the operator key),
+else the baked-in DEV key ``_DEV_PUBLIC_KEY_HEX`` whose private half lives in
+``_dev_license_key.py`` (dev-only; minting is in ``mint.py``). An HMAC-SHA256
+fallback with ``POCKETPAW_LICENSE_SECRET`` applies only on the DEV key; an
+operator key that rejects a signature is a hard reject.
+
+Posture: ``enforce_license_key_posture()`` RAISES under production posture when
+the forgeable DEV key is active, warns loudly for an ambiguous non-prod label
+(e.g. ``staging``), and is silent in dev. It runs on every uncached load.
+
+Caching: ``_cached_license`` holds the loaded payload, or the
+``_NO_LICENSE`` sentinel when the load failed (no key, or an invalid one). A
+payload is kept for the process; the sentinel only for ``_NO_LICENSE_TTL_SECONDS``,
+after which the next call re-runs the load once, so a key added or fixed in
+``.env`` after boot is picked up without a restart. Setting
+``_cached_license = None`` invalidates either result.
 """
 
 from __future__ import annotations
@@ -48,7 +32,9 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import UTC, datetime
+from typing import Final
 
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -212,7 +198,21 @@ def enforce_license_key_posture() -> None:
         )
 
 
-_cached_license: LicensePayload | None = None
+#: Stored in ``_cached_license`` once a load failed (no key, or a key that did
+#: not verify), so the per-request ``require_license`` stops re-running
+#: ``load_dotenv()``, the posture check and the signature check. Living in the
+#: same slot means ``_cached_license = None`` invalidates the negative result
+#: exactly as it does a positive one. ``_license_error`` keeps the reason.
+_NO_LICENSE: Final = object()
+
+#: How long a failed load is trusted before the next call re-checks the env.
+#: Short, so a key added or fixed after boot opens the gate within a minute.
+_NO_LICENSE_TTL_SECONDS: Final = 60.0
+
+#: ``time.monotonic()`` deadline for the sentinel; meaningless otherwise.
+_no_license_until = 0.0
+
+_cached_license: LicensePayload | object | None = None
 _license_error: str | None = None
 
 
@@ -282,10 +282,13 @@ def validate_license_key(key: str) -> LicensePayload:
 
 def load_license() -> LicensePayload | None:
     """Load license from env var POCKETPAW_LICENSE_KEY. Returns None if absent/invalid."""
-    global _cached_license, _license_error
+    global _cached_license, _license_error, _no_license_until
 
-    if _cached_license is not None:
-        return _cached_license
+    if _cached_license is _NO_LICENSE:
+        if time.monotonic() < _no_license_until:
+            return None
+    elif _cached_license is not None:
+        return _cached_license  # type: ignore[return-value]
 
     # Ensure .env is loaded
     try:
@@ -305,7 +308,8 @@ def load_license() -> LicensePayload | None:
     key = os.environ.get("POCKETPAW_LICENSE_KEY", "").strip()
     if not key:
         _license_error = "No license key configured (set POCKETPAW_LICENSE_KEY)"
-        # Don't log on every check — only first time
+        _cached_license = _NO_LICENSE
+        _no_license_until = time.monotonic() + _NO_LICENSE_TTL_SECONDS
         return None
 
     try:
@@ -320,14 +324,19 @@ def load_license() -> LicensePayload | None:
         return _cached_license
     except ValueError as exc:
         _license_error = str(exc)
+        _cached_license = _NO_LICENSE
+        _no_license_until = time.monotonic() + _NO_LICENSE_TTL_SECONDS
         logger.warning("Enterprise license invalid: %s", exc)
         return None
 
 
 def get_license() -> LicensePayload | None:
     """Return cached license or None."""
-    if _cached_license is not None:
-        return _cached_license
+    if _cached_license is _NO_LICENSE:
+        if time.monotonic() < _no_license_until:
+            return None
+    elif _cached_license is not None:
+        return _cached_license  # type: ignore[return-value]
     return load_license()
 
 

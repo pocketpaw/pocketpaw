@@ -11,7 +11,7 @@
 # the placeholder keys, then the full pricing spec: FIVE tiers on the approved
 # ladder, rekeyed off basic/pro/business.
 #
-#   free    $0    per site (the floor)   badge on, 1 domained site
+#   free    $0    per site (the floor)   badge on, a custom domain per site
 #   site    $7    per site               badge off, custom domain
 #   staff   $19   per site               + the visitor concierge, 200 conv/mo
 #   studio  $39   per ORG, flat          white-label across 5 included sites
@@ -291,7 +291,7 @@ def test_both_paid_rungs_still_drop_the_badge_and_take_a_domain():
 
 
 def test_the_free_floor_keeps_its_one_domained_site():
-    """Free includes a custom domain on ONE site. This is the one place the
+    """Free includes a custom domain on every site. This is the one place the
     catalog knowingly departs from the written pricing spec, which says
     subdomain-only — the captain's call, and the acquisition hook. Repricing must
     not quietly take it away."""

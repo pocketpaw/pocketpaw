@@ -2043,6 +2043,10 @@ def test_run_accepts_every_kwarg_the_pool_forwards():
     src = inspect.getsource(pool.AgentPool.run)
     forwarded = set(re.findall(r'run_kwargs\["(\w+)"\]\s*=', src))
     forwarded |= {"system_prompt", "history", "session_key"}
+    # ``turn_context`` is an opt-in: the pool sends it only to a backend whose
+    # ``run`` declares it (the Claude SDK), and a backend that does not keeps the
+    # per-turn layers inside the one assembled prompt, which is what this one wants.
+    forwarded -= {"turn_context"}
     assert "deny_mcp_tool_ids" in forwarded, "regex stopped matching the pool's table"
 
     accepted = set(inspect.signature(PydanticAIBackend.run).parameters)
