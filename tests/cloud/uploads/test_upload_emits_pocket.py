@@ -4,6 +4,9 @@
 # and the FileReady event payload. The legacy emit shape is regression-
 # tested in ``test_upload_emits.py``; this file covers the new
 # pocket-aware shape.
+#
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Pocket-id propagation through ``EEUploadService.upload_many``."""
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from pocketpaw_ee.cloud.realtime.events import FileReady
+from pocketpaw_ee.cloud._core.realtime.events import FileReady
 from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
 from pocketpaw.uploads.service import BulkUploadResult

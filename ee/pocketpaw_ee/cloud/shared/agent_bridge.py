@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Bridge between cloud chat events and the PocketPaw agent pool.
 
 Pure cross-domain orchestrator: subscribes to the legacy ``message.sent``
@@ -93,9 +95,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
     AgentError,
     AgentPlanUpdated,
     AgentStreamChunk,
@@ -103,6 +104,7 @@ from pocketpaw_ee.cloud.realtime.events import (
     AgentStreamStart,
     AgentToolUse,
 )
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
 from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use

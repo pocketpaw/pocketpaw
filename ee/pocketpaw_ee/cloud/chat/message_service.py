@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Chat domain — message business logic (CRUD, reactions, threads, pins, search).
 
 Sole owner of writes to the ``Message`` Beanie document. Module-level
@@ -41,6 +43,19 @@ from typing import cast
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    GroupUpdated,
+    MessageDeleted,
+    MessageEdited,
+    MessageNew,
+    MessageReaction,
+    MessageSent,
+    MessageUiStateUpdated,
+    ThreadClosed,
+    ThreadCreated,
+    UnreadUpdate,
+)
 from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.chat import group_service, unread_service
 from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
@@ -67,19 +82,6 @@ from pocketpaw_ee.cloud.models.message import Reaction as _ReactionDoc
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.notifications import service as notifications_service
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
-    GroupUpdated,
-    MessageDeleted,
-    MessageEdited,
-    MessageNew,
-    MessageReaction,
-    MessageSent,
-    MessageUiStateUpdated,
-    ThreadClosed,
-    ThreadCreated,
-    UnreadUpdate,
-)
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.time import iso_utc
