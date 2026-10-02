@@ -1,4 +1,6 @@
 # events.py — Realtime Event dataclass registry for the cloud bus.
+# Updated 2026-10-02 (feat/studio-templates): StudioTemplateSaved / Updated /
+#   Deleted (``studio_template.*``), same payload shape as the site-template ones.
 # Each subclass pins an EVENT_TYPE literal that routes both the WebSocket
 # fan-out and any in-process bus subscribers.
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
@@ -1037,6 +1039,24 @@ class SiteTemplateUsed(Event):
 @dataclass
 class SiteTemplateUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "site_template.updated"
+
+
+# Studio templates (``studio_templates.service``). Payload is the template's wire
+# shape for its owner plus ``workspace_id`` and ``user_id`` (the one recipient).
+# ``updated`` covers a metadata edit and a Discover hide / unhide.
+@dataclass
+class StudioTemplateSaved(Event):
+    EVENT_TYPE: ClassVar[str] = "studio_template.saved"
+
+
+@dataclass
+class StudioTemplateUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "studio_template.updated"
+
+
+@dataclass
+class StudioTemplateDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "studio_template.deleted"
 
 
 # Discover index (``discover.service`` / ``service_admin``). Payload carries
