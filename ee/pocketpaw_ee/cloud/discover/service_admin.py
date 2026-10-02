@@ -50,6 +50,9 @@
 # ``iter_public`` and works for any registered source that has one (unknown or
 # unsupported -> ``discover.reindex_unsupported``, as before). The site-template
 # mapping and ``live_url`` refresh moved to ``sources``.
+#
+# Updated 2026-10-02 (feat/studio-templates): ``_view`` carries ``media_kind`` /
+# ``media_url`` onto the public card. ``STUDIO_TEMPLATE`` names the new source.
 
 from __future__ import annotations
 
@@ -84,6 +87,7 @@ from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 
 SITE_TEMPLATE = "site_template"
+STUDIO_TEMPLATE = "studio_template"
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -107,6 +111,8 @@ def _view(doc: DiscoverListing) -> DiscoverListingView:
         hidden=doc.hidden,
         remix_count=doc.remix_count,
         created_at=doc.createdAt,
+        media_kind=doc.media_kind,
+        media_url=doc.media_url,
     )
 
 
@@ -488,6 +494,7 @@ async def set_hidden(listing_id: str, hidden: bool) -> dict:
 
 __all__ = [
     "SITE_TEMPLATE",
+    "STUDIO_TEMPLATE",
     "count_reports",
     "get_public",
     "hide_listing",

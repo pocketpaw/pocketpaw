@@ -17,6 +17,13 @@
 # mapped to listing fields plus ``id`` / ``public`` / ``hidden`` (see
 # ``DiscoverSource``); the site-template mapping (``name`` -> ``title``) and its
 # reindex-time ``live_url`` refresh moved here from ``service_admin``.
+#
+# Updated 2026-10-02 (feat/studio-templates): the ``studio_template`` source
+# (kinds image / video / music). Its rows come from
+# ``studio_templates.service_admin`` already in listing shape (absolute media
+# URLs, ``media_kind`` / ``media_url``). Its ``use`` returns the template's
+# ``{recipe, uses_input_images}`` and creates nothing: the caller runs the
+# recipe in Studio themselves.
 
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from typing import Any
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.site_templates import service as site_templates_service
 from pocketpaw_ee.cloud.site_templates import service_admin as site_templates_admin
+from pocketpaw_ee.cloud.studio_templates import service_admin as studio_templates_admin
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,25 @@ async def _iter_site_templates() -> AsyncIterator[dict[str, Any]]:
         yield _site_template_row(row)
 
 
+async def _use_studio_template(
+    workspace_id: str, user_id: str, source_id: str, name: str | None
+) -> dict:
+    """The template's recipe for the caller to run in Studio; no copy, no write."""
+    # admin-cross-tenant: a user in any workspace remixes another's public
+    # template; ``recipe_for_discover`` returns only public, unhidden ones.
+    result = await studio_templates_admin.recipe_for_discover(source_id)
+    if result is None:
+        raise NotFound("studio_template", source_id)
+    return result
+
+
+async def _iter_studio_templates() -> AsyncIterator[dict[str, Any]]:
+    # admin-cross-tenant: the Discover reindex spans every workspace's public
+    # studio templates.
+    for row in await studio_templates_admin.iter_public_for_discover():
+        yield row
+
+
 def register_builtin_sources() -> None:
     register_source(
         DiscoverSource(
@@ -129,6 +156,16 @@ def register_builtin_sources() -> None:
             set_hidden=site_templates_admin.set_hidden_from_discover,
             get_public=_get_site_template,
             iter_public=_iter_site_templates,
+        )
+    )
+    register_source(
+        DiscoverSource(
+            name="studio_template",
+            kinds=frozenset({"image", "video", "music"}),
+            use=_use_studio_template,
+            set_hidden=studio_templates_admin.set_hidden_from_discover,
+            get_public=studio_templates_admin.get_for_discover,
+            iter_public=_iter_studio_templates,
         )
     )
 
