@@ -10,7 +10,8 @@
 # Updated 2026-10-02 (feat/partners-earnings, PH-11): GET /partners/summary and
 #   GET /partners/earnings?months= (fabric.read, active partner).
 # Updated 2026-10-02 (feat/partners-commissions, PH-13): POST /partners/pay-link
-#   (fabric.write) — a one-time link the partner's client pays for a site's year.
+#   (``sites.buy_plan``, like /sell: a paid link changes the site's plan and rail)
+#   — a one-time link the partner's client pays for a site's year.
 
 from __future__ import annotations
 
@@ -85,7 +86,7 @@ async def sell(body: PartnerSellRequest, ctx: Ctx) -> PartnerSaleOut:
     return await service.sell(ctx, body=body)
 
 
-@router.post("/pay-link", response_model=PartnerPayLinkOut, dependencies=_WRITE)
+@router.post("/pay-link", response_model=PartnerPayLinkOut, dependencies=_BUY)
 async def pay_link(body: PartnerPayLinkRequest, ctx: Ctx) -> PartnerPayLinkOut:
     return await service.create_pay_link(ctx, body=body)
 

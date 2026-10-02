@@ -25,6 +25,9 @@
 # link to reuse). ``list_offers`` adds the client price; ``list_sites`` adds
 # ``billing_mode``; ``summary`` / ``earnings`` add commission credits read from
 # the ledger (``partner_commission`` grants plus their clawbacks, net).
+# Review fix: the pay link reserves its slot through
+# ``sites.reserve_client_pay_link`` (a conditional push), so a double submit opens
+# one Dodo payment; a failed checkout releases the reservation.
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -331,7 +334,9 @@ async def create_pay_link(
     Priced at the LIST yearly price in the partner's billing country. Nothing
     moves here: the year and the partner's commission land when the verified
     payment matches the pending record this writes. An open link for the same plan
-    and price is handed back rather than minted twice.
+    and price is handed back rather than minted twice; one for another plan is a
+    409. The slot is reserved before Dodo is called, so a double submit is one
+    payment.
     """
     body = PartnerPayLinkRequest.model_validate(body)
     profile = await _active_profile(ctx)
@@ -341,38 +346,36 @@ async def create_pay_link(
     currency, amount = site_plans.partner_client_price(body.sku, profile.billing_country)
 
     from pocketpaw_ee.cloud.billing import service as billing_service
-    from pocketpaw_ee.cloud.models.site import PartnerClientPayment
     from pocketpaw_ee.sites import service as sites_service
 
-    doc, reusable = await sites_service.client_pay_link_target(
+    doc, reusable, token = await sites_service.reserve_client_pay_link(
         workspace_id=workspace_id,
         site_id=body.site_id,
         sku=body.sku,
         currency=currency,
         amount_minor=amount,
+        client_id=body.client_id,
     )
-    checkout_url = reusable.checkout_url if reusable is not None else ""
-    if reusable is None:
-        checkout = await billing_service.create_partner_client_checkout(
-            workspace_id=workspace_id,
-            user_id=ctx.user_id,
-            site_id=str(doc.id),
-            amount_minor=amount,
-            currency=currency,
-            provider=provider,
-        )
-        await sites_service.add_partner_payment(
-            workspace_id=workspace_id,
-            site_id=str(doc.id),
-            record=PartnerClientPayment(
-                payment_id=checkout.gateway_ref,
-                sku=body.sku,
+    if reusable is not None:
+        checkout_url = reusable.checkout_url
+    else:
+        try:
+            checkout = await billing_service.create_partner_client_checkout(
+                workspace_id=workspace_id,
+                user_id=ctx.user_id,
+                site_id=str(doc.id),
                 amount_minor=amount,
                 currency=currency,
-                client_id=body.client_id,
-                checkout_url=checkout.checkout_url,
-                created_at=datetime.now(UTC),
-            ),
+                provider=provider,
+            )
+        except BaseException:
+            await sites_service.release_client_pay_link(site_id=str(doc.id), token=token)
+            raise
+        await sites_service.fill_client_pay_link(
+            site_id=str(doc.id),
+            token=token,
+            payment_id=checkout.gateway_ref,
+            checkout_url=checkout.checkout_url,
         )
         checkout_url = checkout.checkout_url
     # no-event: a pending link changes nothing anyone sees until it is paid.
