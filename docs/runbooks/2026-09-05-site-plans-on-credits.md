@@ -14,6 +14,13 @@ Updated 2026-10-02 (`feat/partners-sell`, PH-2): **Paw Partners sell yearly
 plans.** See "Partner yearly plans" below. A renewal now buys one *period* of the
 tier, which is still one month for every public rung.
 
+Updated 2026-10-02 (`feat/partners-commissions`, PH-13): **a third rail,
+`client`.** A partner's client can pay a site's year directly through a one-time
+pay link, and the partner earns a commission. See "Client-paid partner sites"
+below. Also: a Dodo `payment.succeeded` that carries a `subscription_id` is now
+recorded and never granted as a top-up, which applies to workspace-plan
+subscriptions too.
+
 ## What was broken
 
 Selecting a paid plan for a site produced a site that said **pending payment** and
@@ -420,6 +427,59 @@ The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
   on D with no new `site_plan` ledger debit for that renewal was the replay.
 - The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
   not from the 1st of the month.
+
+## Client-paid partner sites (`billing_rail: "client"`)
+
+A partner calls `POST /partners/pay-link`. That opens a one-time Dodo payment on
+the credits product (USD, or the INR credits product for an IN partner) at the
+plan's list yearly price, and appends a record to the site's `partner_payments`:
+`{payment_id, sku, amount_minor, currency, client_id, checkout_url, created_at,
+status: "pending"}`. `payment_id` is the id Dodo returned when the link was made.
+
+When `payment.succeeded` arrives, the webhook looks that payment id up in
+`partner_payments` before doing anything else. A match is never granted as a
+top-up. If the currency, the amount (the total, or the total minus `tax` when tax
+was added on top) and the product all match the record, one write flips the
+record to `paid` and puts the site on the plan for 12 months: `billing_rail:
+"client"`, `subscription_status: "active"`, `partner_client_id` set. The same
+write freezes `commission_credits` and `rate_bps` on the record. The commission
+is then granted to the partner's workspace (ledger cause `partner_commission`,
+key `<payment_id>:commission`), and the site is republished as a content edit so
+the badge and co-brand mark follow the plan. If anything doesn't match, or the
+wallet bought the site after the link went out, the record becomes `flagged`
+with a `flag_reason` and nothing moves. The client has paid for nothing at that
+point, so refund them in Dodo.
+
+Commission is 25% of the US cents paid, net of tax, floored. INR converts the way
+INR top-ups do. Founding partners (`Workspace.partner.founding`) get 40% on
+payments within 24 months of the site's first client payment. The rule lives in
+`partners/_calc.py::commission_rate_bps`, and that is the only place to change it.
+
+The renewal sweep never debits a `client` site. Once `renewal_date` passes, it
+drops the site to `free` / `none` and leaves it published. A new paid link in
+the last 30 days of the year adds a year from `renewal_date`.
+
+A `refund.succeeded` or `dispute.lost` within 60 days of `paid_at` flips the
+record to `reversed`, drops the site to free, and debits the commission the
+ledger shows was granted (cause `partner_commission_reversal`, key
+`<payment_id>:commission:reversal`, may go negative). A refund and a dispute on
+the same payment take it once. After 60 days the commission stays.
+
+Things to know:
+
+- A metadata tag `kind: partner_client_payment` on a payment that matches no
+  record is logged at ERROR and NOT granted. If Dodo ever reported a different
+  payment id at completion than at creation, real client payments would land
+  here instead of becoming top-ups in the partner's wallet. Check the log, find
+  the site by `metadata.site_id`, and settle by hand.
+- Changing the plan of a `client` site through publish is refused with
+  `sites.legacy_billing_rail`, whose message talks about "the old payment
+  provider". The refusal is intended (a plan change would need a second client
+  payment); the wording is out of date.
+- A refund of an earlier payment inside 60 days of a later renewal payment still
+  drops the site to free, although the later year was paid. Restore the row by
+  hand if that happens.
+- Find client-paid payments: `db.sites.find({"partner_payments.payment_id": "<id>"})`.
 
 ### Behaviour change for EVERY workspace: a refused upgrade no longer strands a live site
 

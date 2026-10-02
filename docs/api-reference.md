@@ -2,6 +2,11 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/partners-commissions, PH-13) — Paw Partners: new
+  POST /partners/pay-link (the partner's client pays a site's year through a
+  one-time link; the partner earns a commission in credits). Offers carry the
+  client's list price, sold sites carry billing_mode, summary and earnings carry
+  commission credits.
 Updated: 2026-10-02 (feat/partners-earnings, PH-11) — Paw Partners: POST /partners/sell
   takes an optional price_minor + currency (booked as a paid receipt on the site's
   client record) and returns invoice_id; new GET /partners/summary and
@@ -1029,9 +1034,12 @@ the profile. Both return `{workspace_id, partner}` and write a platform audit ro
 ### `GET /partners/offers`
 
 The partner-only yearly plans at the caller's `billing_country` price:
-`[{sku, period_months, price_credits, conversation_allowance, label}]`
-(1 credit = $0.01). Today: `site_year` (1,700 credits in IN, 2,900 elsewhere) and
-`staff_year` (5,600 / 8,900; 1,200 conversations a year). Needs `fabric.read`;
+`[{sku, period_months, price_credits, conversation_allowance, label,
+client_price_minor, client_currency}]` (1 credit = $0.01). Today: `site_year`
+(1,700 credits in IN, 2,900 elsewhere) and `staff_year` (5,600 / 8,900; 1,200
+conversations a year). `client_price_minor` + `client_currency` are what the
+partner's client pays through a pay link: `site_year` ₹3,588 (`358800`, `INR`) in
+IN, $84 (`8400`, `USD`) elsewhere; `staff_year` ₹11,988 / $228. Needs `fabric.read`;
 **403** `partner.not_active` unless the profile is ACTIVE. These plans are not in
 the public plan catalog.
 
@@ -1087,10 +1095,53 @@ renewal_date, partner_client_id, subscription_status, invoice_id}`.
 - A plan change after `renewal_date` has passed (before the renewal sweep runs) is
   charged as one fresh period of the new plan, starting now.
 
+### `POST /partners/pay-link`
+
+Body `{client_id, site_id, sku}`, `sku` one of `site_year` | `staff_year`
+(**422** otherwise). Opens a one-time payment link the partner sends its client.
+The client pays the plan's list price for one year in the partner's billing
+currency (see `client_price_minor` on the offers). Returns:
+
+```json
+{"checkout_url": "https://...", "site_id": "...", "sku": "staff_year",
+ "amount_minor": 1198800, "currency": "INR"}
+```
+
+Nothing changes on the site until the payment lands. When Dodo confirms it, the
+site goes on the plan for 12 months (`billing_rail` `client`), its
+`partner_client_id` is set, and the partner's wallet gets a commission in credits:
+25% of the amount paid net of tax, in US cents (an INR payment converts through
+Dodo's USD settlement figure, or the configured FX rate when that is missing or
+implausible). Founding partners get 40% on payments made within 24 months of
+that site's first client payment. The partner's wallet is never charged for a
+client-paid site, and the renewal sweep does not renew it: at `renewal_date` the
+site drops to the free tier and stays published, unless the client has paid a new
+link. A refund or lost dispute within 60 days of the payment takes that payment's
+commission back (the wallet can go negative) and drops the site to the free tier.
+After 60 days nothing is taken back.
+
+- Needs `fabric.write` and an ACTIVE profile (**403** `partner.not_active`).
+  Another workspace's client or site is **404**.
+- **409** `partners.site_already_paid` when the site is already on a paid plan,
+  paid by the wallet or by a client. The one exception is the renewal: a
+  client-paid site in the last 30 days of its year can take a link for the same
+  plan, and that payment adds a year from the current `renewal_date`.
+- **409** `partners.site_on_plan` (carried by the workspace plan),
+  `partners.foreign_site` (concierge-only site), `partners.site_not_live` (not
+  published yet).
+- Asking again for the same plan and price within 7 days returns the open link
+  instead of making a second one.
+- Only a payment for a link created here counts, matched on Dodo's payment id.
+  If the amount, currency or product Dodo reports differs from the link, or the
+  site was bought with the wallet in the meantime, the payment is flagged:
+  nothing is activated and no commission is paid. Those need a refund by hand.
+
 ### `GET /partners/sites`
 
 The workspace's sold sites: `[{site_id, name, url, plan_tier, renewal_date,
-partner_client_id, client_name}]`, ordered by `renewal_date` (sites with none come first). Optional
+partner_client_id, client_name, billing_mode}]`, where `billing_mode` is `client`
+when the client paid the year through a pay link and `partner` when the wallet
+bought it, ordered by `renewal_date` (sites with none come first). Optional
 `due_within_days` (0–3660) keeps only sites whose `renewal_date` is within that
 many days (a site with no renewal date is never due); without it, every sold
 site is returned, including lapsed ones with a null date. Needs `fabric.read` and
@@ -1106,7 +1157,8 @@ The partner's earnings at a glance:
   "spent_credits_30d": 1700, "spent_credits_total": 10200,
   "revenue_30d": [{"currency": "INR", "amount_minor": 299900}],
   "revenue_total": [{"currency": "INR", "amount_minor": 1499500},
-                    {"currency": "USD", "amount_minor": 5000}]
+                    {"currency": "USD", "amount_minor": 5000}],
+  "commission_credits_30d": 3350, "commission_credits_total": 9120
 }
 ```
 
@@ -1121,12 +1173,15 @@ the sites that are sold to a client NOW, in credits (1 credit = $0.01). That
 includes debits made before the site was sold, for example the partner's own
 earlier paid publish of that site. Needs `fabric.read`; **403**
 `partner.not_active` without an ACTIVE profile.
+`commission_credits_30d` / `commission_credits_total` are the credits earned on
+client pay-link payments, minus any taken back after a refund or lost dispute.
 
 ### `GET /partners/earnings?months=12`
 
 One row per UTC calendar month, newest first, including months with no
 activity: `[{month: "YYYY-MM", sales, revenue: [{currency, amount_minor}],
-spent_credits}]`. `sales` is the number of `site_plan` debits on currently-sold
+spent_credits, commission_credits}]`. `commission_credits` is that month's
+commissions minus that month's clawbacks. `sales` is the number of `site_plan` debits on currently-sold
 sites that month: purchases, renewals AND plan changes each count as one, so an
 upgrade is a sale. `revenue` and `spent_credits` follow the summary's rules. `months` is 1–24 (default 12; **422** outside it).
 Needs `fabric.read` and an ACTIVE profile.
