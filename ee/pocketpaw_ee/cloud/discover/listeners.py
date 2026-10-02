@@ -22,8 +22,8 @@
 #
 # Updated 2026-10-02 (feat/discover-source-contract): site-template events call
 # ``service_admin.sync_source("site_template", id)``. The periodic loop and the
-# startup backfill reindex EVERY registered source; a failing source is logged
-# and the others still run.
+# startup backfill reindex every registered source that has ``iter_public``; a
+# failing source is logged and the others still run.
 
 from __future__ import annotations
 
