@@ -13,6 +13,12 @@
 # / ``stop_discover_reindex`` run ``reindex("site_template")`` every 30 minutes
 # (missed events, stale ``live_url``). Wired in ``mount_cloud`` behind
 # ``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` and a ``leased`` lock like the other loops.
+#
+# Updated 2026-10-02 (feat/discover-index, review): the loop runs its first pass
+# at once (pass, then sleep), so templates that were public before a deploy are
+# listed on boot. With the scheduler flag off, ``start_discover_backfill`` runs
+# ONE background pass at startup (fire-and-forget, logged on failure);
+# ``stop_discover_backfill`` cancels it if it is still running at shutdown.
 
 from __future__ import annotations
 
@@ -34,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 REINDEX_INTERVAL_SECONDS = 30 * 60
 _REINDEX_TASK_KEY = "discover_reindex_task"
+_BACKFILL_TASK_KEY = "discover_backfill_task"
 
 
 async def on_site_template_changed(event: Event) -> None:
@@ -55,16 +62,40 @@ def register_discover_listeners() -> None:
         bus.subscribe(event_cls.EVENT_TYPE, on_site_template_changed)
 
 
+async def _reindex_once() -> None:
+    """One reindex pass. A failure is logged, never raised; ``CancelledError``
+    propagates for a clean shutdown."""
+    try:
+        result = await service_admin.reindex(service_admin.SITE_TEMPLATE)
+        logger.info("discover: reindex %s", result)
+    except Exception:
+        logger.exception("discover: reindex failed")
+
+
 async def _run_reindex_loop() -> None:
-    """Sleep, reindex, repeat. A failed pass is logged so one bad sweep can't
-    kill the loop; ``CancelledError`` propagates for a clean shutdown."""
+    """Reindex, sleep, repeat. The first pass runs at once so a fresh deploy
+    lists templates that were already public."""
     while True:
+        await _reindex_once()
         await asyncio.sleep(REINDEX_INTERVAL_SECONDS)
-        try:
-            result = await service_admin.reindex(service_admin.SITE_TEMPLATE)
-            logger.info("discover: periodic reindex %s", result)
-        except Exception:
-            logger.exception("discover: periodic reindex failed")
+
+
+async def start_discover_backfill(app: Any) -> None:
+    """Without the scheduler: run one reindex pass in the background and return
+    at once (off the startup path). Idempotent, so several processes doing it
+    is harmless."""
+    task = asyncio.create_task(_reindex_once(), name="discover-backfill")
+    setattr(app.state, _BACKFILL_TASK_KEY, task)  # hold a reference: no GC
+
+
+async def stop_discover_backfill(app: Any) -> None:
+    """Cancel the startup backfill if it is still running."""
+    task = getattr(app.state, _BACKFILL_TASK_KEY, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 async def start_discover_reindex(app: Any) -> None:
@@ -90,6 +121,8 @@ async def stop_discover_reindex(app: Any) -> None:
 __all__ = [
     "on_site_template_changed",
     "register_discover_listeners",
+    "start_discover_backfill",
     "start_discover_reindex",
+    "stop_discover_backfill",
     "stop_discover_reindex",
 ]
