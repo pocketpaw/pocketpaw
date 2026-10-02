@@ -17,6 +17,14 @@
 # recorded (``sell_site_plan`` returns its key), with an id derived from that key
 # so a double submit books one receipt; a failed receipt write leaves the sale
 # standing with ``invoice_id=None``; ``summary`` reads the sold sites once.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): ``create_pay_link`` —
+# a one-time checkout the partner's client pays for a site's year at list price
+# (``site_plans.partner_client_price``), through ``billing.service.
+# create_partner_client_checkout``; the pending record lands on the Site via the
+# sites owner (``client_pay_link_target`` refuses 404/409 and hands back an open
+# link to reuse). ``list_offers`` adds the client price; ``list_sites`` adds
+# ``billing_mode``; ``summary`` / ``earnings`` add commission credits read from
+# the ledger (``partner_commission`` grants plus their clawbacks, net).
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -64,6 +72,8 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerEarningsMonthOut,
     PartnerMoneyOut,
     PartnerOfferOut,
+    PartnerPayLinkOut,
+    PartnerPayLinkRequest,
     PartnerProfileOut,
     PartnerSaleOut,
     PartnerSellRequest,
@@ -72,6 +82,9 @@ from pocketpaw_ee.cloud.partners.dto import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Mirrors ``billing.service.CLIENT_BILLING_RAIL`` (the client paid the year).
+_CLIENT_RAIL = "client"
 
 
 def _default_store() -> FabricJournalStore:
@@ -289,16 +302,87 @@ async def delete_client(
 
 async def list_offers(ctx: RequestContext) -> list[PartnerOfferOut]:
     profile = await _active_profile(ctx)
-    return [
-        PartnerOfferOut(
-            sku=tier.key,
-            period_months=tier.period_months,
-            price_credits=site_plans.partner_price_usd(tier.key, profile.billing_country) * 100,
-            conversation_allowance=tier.conversation_allowance,
-            label=tier.display_name,
+    offers = []
+    for tier in site_plans.list_partner_plans():
+        currency, amount = site_plans.partner_client_price(tier.key, profile.billing_country)
+        offers.append(
+            PartnerOfferOut(
+                sku=tier.key,
+                period_months=tier.period_months,
+                price_credits=site_plans.partner_price_usd(tier.key, profile.billing_country) * 100,
+                conversation_allowance=tier.conversation_allowance,
+                label=tier.display_name,
+                client_price_minor=amount,
+                client_currency=currency,
+            )
         )
-        for tier in site_plans.list_partner_plans()
-    ]
+    return offers
+
+
+async def create_pay_link(
+    ctx: RequestContext,
+    *,
+    body: Any,
+    store: FabricJournalStore | None = None,
+    provider: Any = None,
+) -> PartnerPayLinkOut:
+    """A one-time link the partner's client pays for ``site_id``'s year (PH-13).
+
+    Priced at the LIST yearly price in the partner's billing country. Nothing
+    moves here: the year and the partner's commission land when the verified
+    payment matches the pending record this writes. An open link for the same plan
+    and price is handed back rather than minted twice.
+    """
+    body = PartnerPayLinkRequest.model_validate(body)
+    profile = await _active_profile(ctx)
+    workspace_id: str = ctx.workspace_id  # type: ignore[assignment]  # active => resolved
+    # Scoped read: another workspace's client is a 404 here.
+    await get_client(ctx, client_id=body.client_id, store=store)
+    currency, amount = site_plans.partner_client_price(body.sku, profile.billing_country)
+
+    from pocketpaw_ee.cloud.billing import service as billing_service
+    from pocketpaw_ee.cloud.models.site import PartnerClientPayment
+    from pocketpaw_ee.sites import service as sites_service
+
+    doc, reusable = await sites_service.client_pay_link_target(
+        workspace_id=workspace_id,
+        site_id=body.site_id,
+        sku=body.sku,
+        currency=currency,
+        amount_minor=amount,
+    )
+    checkout_url = reusable.checkout_url if reusable is not None else ""
+    if reusable is None:
+        checkout = await billing_service.create_partner_client_checkout(
+            workspace_id=workspace_id,
+            user_id=ctx.user_id,
+            site_id=str(doc.id),
+            amount_minor=amount,
+            currency=currency,
+            provider=provider,
+        )
+        await sites_service.add_partner_payment(
+            workspace_id=workspace_id,
+            site_id=str(doc.id),
+            record=PartnerClientPayment(
+                payment_id=checkout.gateway_ref,
+                sku=body.sku,
+                amount_minor=amount,
+                currency=currency,
+                client_id=body.client_id,
+                checkout_url=checkout.checkout_url,
+                created_at=datetime.now(UTC),
+            ),
+        )
+        checkout_url = checkout.checkout_url
+    # no-event: a pending link changes nothing anyone sees until it is paid.
+    return PartnerPayLinkOut(
+        checkout_url=checkout_url,
+        site_id=str(doc.id),
+        sku=body.sku,
+        amount_minor=amount,
+        currency=currency,
+    )
 
 
 async def sell(
@@ -385,6 +469,7 @@ async def list_sites(
             partner_client_id=d.partner_client_id,
             # An archived client keeps its sold sites; the name is just gone.
             client_name=names.get(d.partner_client_id or "", ""),
+            billing_mode="client" if d.billing_rail == _CLIENT_RAIL else "partner",
         )
         for d in docs
     ]
@@ -442,6 +527,28 @@ async def _site_plan_debits(workspace_id: str, site_ids: set[str]) -> list[Any]:
             return out
 
 
+async def _commission_entries(workspace_id: str) -> list[Any]:
+    """Applied commission grants and their clawbacks (negative), for the ledger net."""
+    from pocketpaw_ee.cloud.billing.service import (
+        PARTNER_COMMISSION_CAUSE,
+        PARTNER_COMMISSION_REVERSAL_CAUSE,
+    )
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    out: list[Any] = []
+    for cause in (PARTNER_COMMISSION_CAUSE, PARTNER_COMMISSION_REVERSAL_CAUSE):
+        cursor: str | None = None
+        # ponytail: same unindexed (workspace, cause) ledger scan as _site_plan_debits.
+        while True:
+            page, cursor = await credits_service.history(
+                workspace_id, limit=200, cursor=cursor, cause=cause
+            )
+            out += [e for e in page if e.applied]
+            if cursor is None:
+                break
+    return out
+
+
 async def summary(
     ctx: RequestContext, *, store: FabricJournalStore | None = None
 ) -> PartnerSummaryOut:
@@ -451,6 +558,7 @@ async def summary(
     docs = await sites_service.list_partner_sites(workspace_id)
     debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
     receipts = _paid_receipts(docs)
+    commissions = await _commission_entries(workspace_id)
     now = datetime.now(UTC)
     since, due_by = now - timedelta(days=30), now + timedelta(days=30)
     return PartnerSummaryOut(
@@ -465,6 +573,10 @@ async def summary(
         spent_credits_total=sum(-e.amount_delta for e in debits),
         revenue_30d=_money(r for r in receipts if _aware(r.issued_at) >= since),
         revenue_total=_money(receipts),
+        commission_credits_30d=sum(
+            e.amount_delta for e in commissions if _aware(e.created_at) >= since
+        ),
+        commission_credits_total=sum(e.amount_delta for e in commissions),
     )
 
 
@@ -483,6 +595,7 @@ async def earnings(ctx: RequestContext, *, months: int = 12) -> list[PartnerEarn
     docs = await sites_service.list_partner_sites(workspace_id)
     debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
     receipts = _paid_receipts(docs)
+    commissions = await _commission_entries(workspace_id)
     rows = []
     for key in keys:
         month_debits = [e for e in debits if _month(e.created_at) == key]
@@ -492,6 +605,9 @@ async def earnings(ctx: RequestContext, *, months: int = 12) -> list[PartnerEarn
                 sales=len(month_debits),
                 revenue=_money(r for r in receipts if _month(r.issued_at) == key),
                 spent_credits=sum(-e.amount_delta for e in month_debits),
+                commission_credits=sum(
+                    e.amount_delta for e in commissions if _month(e.created_at) == key
+                ),
             )
         )
     return rows

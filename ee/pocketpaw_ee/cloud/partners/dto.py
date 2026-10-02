@@ -9,11 +9,16 @@
 # ``price_minor`` + ``currency`` (what the partner charged its client, validated
 # BEFORE the wallet is touched); the sale returns ``invoice_id``; summary and
 # monthly-earnings response shapes.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): client pay link request /
+# response; offers carry the client's list price (``client_price_minor`` +
+# ``client_currency``); sold sites carry ``billing_mode`` ("partner" = the wallet
+# paid, "client" = the client paid a link); summary and earnings carry the
+# commission credits, net of clawbacks.
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, StringConstraints
 
@@ -80,6 +85,10 @@ class PartnerOfferOut(BaseModel):
     price_credits: int
     conversation_allowance: int
     label: str
+    # What the partner's client pays us for this plan through a pay link (list
+    # price), in ISO-4217 minor units of ``client_currency``.
+    client_price_minor: int
+    client_currency: str
 
 
 class PartnerSellRequest(BaseModel):
@@ -92,6 +101,20 @@ class PartnerSellRequest(BaseModel):
     price_minor: int | None = Field(default=None, ge=0, le=MAX_MINOR)
     # Defaults to INR for an IN partner, else USD.
     currency: Currency | None = None
+
+
+class PartnerPayLinkRequest(BaseModel):
+    client_id: str = Field(min_length=1, max_length=200)
+    site_id: str = Field(min_length=1, max_length=64)
+    sku: Literal["site_year", "staff_year"]
+
+
+class PartnerPayLinkOut(BaseModel):
+    checkout_url: str
+    site_id: str
+    sku: str
+    amount_minor: int
+    currency: str
 
 
 class PartnerSaleOut(BaseModel):
@@ -113,6 +136,9 @@ class PartnerSiteOut(BaseModel):
     renewal_date: datetime | None
     partner_client_id: str | None
     client_name: str
+    # "client" when the client paid this site's year through a pay link, else
+    # "partner" (the partner's wallet bought it).
+    billing_mode: Literal["partner", "client"]
 
 
 class PartnerMoneyOut(BaseModel):
@@ -131,6 +157,9 @@ class PartnerSummaryOut(BaseModel):
     spent_credits_total: int
     revenue_30d: list[PartnerMoneyOut]
     revenue_total: list[PartnerMoneyOut]
+    # Credits earned on client payments, net of clawbacks (1 credit = $0.01).
+    commission_credits_30d: int
+    commission_credits_total: int
 
 
 class PartnerEarningsMonthOut(BaseModel):
@@ -138,3 +167,4 @@ class PartnerEarningsMonthOut(BaseModel):
     sales: int
     revenue: list[PartnerMoneyOut]
     spent_credits: int
+    commission_credits: int

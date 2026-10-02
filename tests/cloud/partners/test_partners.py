@@ -44,6 +44,9 @@
 # Review fixes: no receipt without a newly recorded debit (zero-delta return to a
 # paid tier, resume of a closing site); a double submit books one receipt and both
 # responses carry its id; a failed receipt write leaves the sale standing.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): summary / earnings shapes
+# carry the commission fields (zero here; commissions are covered in
+# test_partner_commissions.py).
 
 from __future__ import annotations
 
@@ -1017,6 +1020,8 @@ async def test_http_summary_and_earnings(partners_http) -> None:
         "spent_credits_total": 0,
         "revenue_30d": [],
         "revenue_total": [],
+        "commission_credits_30d": 0,
+        "commission_credits_total": 0,
     }
     r = await client.get("/api/v1/partners/earnings?months=2")
     assert r.status_code == 200, r.text
@@ -1656,6 +1661,8 @@ async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
             {"currency": "INR", "amount_minor": 299900},
             {"currency": "USD", "amount_minor": 5000},
         ],
+        "commission_credits_30d": 0,
+        "commission_credits_total": 0,
     }
 
     def key(dt: datetime) -> str:
@@ -1668,18 +1675,21 @@ async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
             "sales": 2,
             "revenue": [{"currency": "INR", "amount_minor": 299900}],
             "spent_credits": 1700 + 2900,
+            "commission_credits": 0,
         },
         {
             "month": key(now - relativedelta(months=1)),
             "sales": 0,
             "revenue": [],
             "spent_credits": 0,
+            "commission_credits": 0,
         },
         {
             "month": key(now - relativedelta(months=2)),
             "sales": 1,
             "revenue": [{"currency": "USD", "amount_minor": 5000}],
             "spent_credits": 2900,
+            "commission_credits": 0,
         },
     ]
     assert len(await service.earnings(ctx, months=24)) == 24

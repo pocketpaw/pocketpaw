@@ -9,6 +9,8 @@
 #   ``sites.buy_plan`` (ADMIN) because a sale spends the workspace wallet.
 # Updated 2026-10-02 (feat/partners-earnings, PH-11): GET /partners/summary and
 #   GET /partners/earnings?months= (fabric.read, active partner).
+# Updated 2026-10-02 (feat/partners-commissions, PH-13): POST /partners/pay-link
+#   (fabric.write) — a one-time link the partner's client pays for a site's year.
 
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerClientUpdateRequest,
     PartnerEarningsMonthOut,
     PartnerOfferOut,
+    PartnerPayLinkOut,
+    PartnerPayLinkRequest,
     PartnerProfileOut,
     PartnerSaleOut,
     PartnerSellRequest,
@@ -79,6 +83,11 @@ async def list_offers(ctx: Ctx) -> list[PartnerOfferOut]:
 @router.post("/sell", response_model=PartnerSaleOut, dependencies=_BUY)
 async def sell(body: PartnerSellRequest, ctx: Ctx) -> PartnerSaleOut:
     return await service.sell(ctx, body=body)
+
+
+@router.post("/pay-link", response_model=PartnerPayLinkOut, dependencies=_WRITE)
+async def pay_link(body: PartnerPayLinkRequest, ctx: Ctx) -> PartnerPayLinkOut:
+    return await service.create_pay_link(ctx, body=body)
 
 
 @router.get("/sites", response_model=list[PartnerSiteOut], dependencies=_READ)
