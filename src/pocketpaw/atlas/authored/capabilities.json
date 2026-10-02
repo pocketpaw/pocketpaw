@@ -519,6 +519,28 @@
         "public templates",
         "workspace templates"
       ]
+    },
+    {
+      "id": "capability:discover.remix",
+      "kind": "capability",
+      "name": "Browse, remix and publish on Discover",
+      "summary": "Browse the free tools, games and site templates people publish to Discover, remix one into your workspace, or publish your own.",
+      "narrative": "Discover lists every public site template (and, later, other shareable items) across all workspaces, without the owner's name. Browsing needs no sign-in. Remixing (use) makes a brand-new private copy in the caller's own workspace through the item's source, with the source's own plan and cap checks; the owner's use of their own listing is not counted as a remix. A signed-in user can report a listing once; three reports from different users hide it. Publishing to Discover is making a site template public (see capability:sites.save_as_template); making it private or deleting it takes the listing down.",
+      "how": "HTTP only, no agent tool: GET /api/v1/discover?source&kind&audience&q&featured&limit&cursor (no sign-in); GET /api/v1/discover/{id}; POST /api/v1/discover/{id}/use {name?} returns {source, result}; POST /api/v1/discover/{id}/report {reason}",
+      "surface": "/discover",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "discover",
+        "remix",
+        "use a template",
+        "free tool",
+        "community templates",
+        "browse published",
+        "report a listing",
+        "publish to discover"
+      ]
     }
   ]
 }
