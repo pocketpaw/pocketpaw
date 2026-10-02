@@ -440,6 +440,12 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 #   uv run lint-imports --config ee/pyproject.toml
 [tool.importlinter]
 root_packages = ["pocketpaw_ee"]
+# Why include_external_packages: "Email — no SMTP" forbids the stdlib
+# `smtplib`, and import-linter only accepts an external forbidden module when
+# the graph is built with externals (top-level names only, never submodules).
+# Every other contract here forbids internal modules, so turning this on
+# changes nothing for them; all 38 pre-existing contracts stay KEPT with it.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Pockets — Beanie writes only from service.py"
@@ -1214,3 +1220,66 @@ forbidden_modules = [
 # an external package and import-linter forbidden contracts only accept
 # top-level external packages. The script is wired into the same CI
 # step as `lint-imports` — see `Makefile` / `.github/workflows/ci.yml`.
+
+# Canonicalization Wave 0 guards (CN-1, 2026-10-01). Each lands green with
+# today's violators in ignore_imports; that list is the ratchet and only shrinks.
+# unmatched alerting is off so PRs that remove a violator merge in any order.
+# Why: copies of a primitive drift apart, so new code reuses the canonical one.
+# Known gap: this checks direct imports of the submodule only, so
+# `from pocketpaw_ee.cloud.models import InstinctApproval` (the models/__init__
+# re-export) is NOT caught here. scripts/dup-ratchet covers that path with its
+# "InstinctApproval via the models re-export" row (max 0).
+[[tool.importlinter.contracts]]
+name = "InstinctApprovals — no new writers"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
+ignore_imports = [
+    # models/__init__ re-exports it for init_beanie; service.py is the one writer.
+    "pocketpaw_ee.cloud.models -> pocketpaw_ee.cloud.models.instinct_approval",
+    "pocketpaw_ee.cloud.instinct_approvals.service -> pocketpaw_ee.cloud.models.instinct_approval",
+]
+
+[[tool.importlinter.contracts]]
+name = "Realtime — import from _core.realtime only"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw_ee.cloud.realtime"]
+ignore_imports = [
+    "pocketpaw_ee.cloud -> pocketpaw_ee.cloud.realtime.audience",
+    "pocketpaw_ee.cloud -> pocketpaw_ee.cloud.realtime.bus",
+    "pocketpaw_ee.cloud.chat.group_service -> pocketpaw_ee.cloud.realtime.bus",
+    "pocketpaw_ee.cloud.chat.group_service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.chat.group_service -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.chat.message_service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.chat.message_service -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.chat.router -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.chat.router -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.livekit.invites -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.livekit.invites -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.livekit.router -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.livekit.router -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.pockets.agent_context -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.pockets.agent_context -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.shared.agent_bridge -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.shared.agent_bridge -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.uploads.multipart_service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.uploads.multipart_service -> pocketpaw_ee.cloud.realtime.events",
+    "pocketpaw_ee.cloud.uploads.service -> pocketpaw_ee.cloud.realtime.emit",
+    "pocketpaw_ee.cloud.uploads.service -> pocketpaw_ee.cloud.realtime.events",
+]
+
+[[tool.importlinter.contracts]]
+name = "Email — no SMTP"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["smtplib"]
+ignore_imports = [
+    "pocketpaw_ee.paw_bar.mailer -> smtplib",
+]
