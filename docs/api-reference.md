@@ -30,6 +30,11 @@ Updated: 2026-10-02 (feat/partners-earnings, PH-11) — Paw Partners: POST /part
   debit, idempotent under a double submit, spend/sales semantics spelled out.
 Updated: 2026-10-02 (feat/partners-cobrand, PH-5) — "Hide the PocketPaw badge":
   partner-sold sites carry the partner co-brand mark instead of the badge.
+Updated: 2026-10-02 (feat/partners-whatsapp-leads, PH-6) — "Partner leads on
+  WhatsApp" under Owner notifications: a lead on a partner-sold site goes to the
+  opted-in shop owner on WhatsApp through the platform MSG91 account
+  (POCKETPAW_MSG91_PLATFORM_*), capped at 30 a day per number; a client PATCH
+  that changes the number clears the opt-in.
 Updated: 2026-10-02 (feat/partners-sell, PH-2) — Paw Partners: GET /partners/offers,
   POST /partners/sell, GET /partners/sites (yearly partner plans paid from the
   partner's credit wallet).
@@ -1077,6 +1082,9 @@ non-member is **403**.
 
 Partial update (only sent fields change; an empty body writes nothing) or delete
 (**204**). Same 403 rule; a client from another workspace is **404**.
+Changing `whatsapp` clears `whatsapp_opt_in_at` unless the same PATCH sets it:
+consent was given for the old number. New-lead WhatsApp messages go only to an
+opted-in number (see "Partner leads on WhatsApp").
 
 **Delete archives.** The client disappears from every read, but the org journal
 keeps its full history, including the WhatsApp number and GSTIN. There is no
@@ -4117,6 +4125,63 @@ One-time ops step per sending domain, which adds the SPF and DKIM records
 npx wrangler email sending enable example.com
 npx wrangler email sending dns get example.com   # check the records
 ```
+
+### Partner leads on WhatsApp
+
+A lead captured on a site a partner sold to a client (`partner_client_id` set by
+`POST /partners/sell`) also goes to that client, the shop owner, on WhatsApp. The
+shop owner never signs in, so this is how they hear about the lead. It is sent
+only when the client has a `whatsapp` number AND `whatsapp_opt_in_at` is set,
+and only for `lead.captured` (a handoff lead is not routed, as above). The
+site's `events` settings don't control it; the client's consent does, and
+`whatsapp` is not accepted as a sink by `PUT /sites/{site_id}/lead-notifications`.
+
+The message goes out from the PLATFORM's MSG91 account (not the workspace's
+`msg91` connector used by /growth) as the pre-approved template, with this one
+body variable, on one line and at most 900 characters:
+
+```text
+New enquiry for {site name} via Paw Sites by PocketPaw: {visitor name} — {message} Contact: {phone or email}
+```
+
+The contact is kept whole and the message is cut to fit (the site name is cut at
+80 characters, the visitor name at 120). In the visitor's text, WhatsApp
+formatting marks (`*`, `_`, `~`, backticks) are removed and links are broken
+(`https://` becomes `hxxps://`), so a visitor can't style the message or plant a
+tappable link. The lead email already carries the visitor's phone and email, so
+the WhatsApp text includes one of them: the shop owner has no other way to reply.
+
+Register the template as `{{1}}` plus a short fixed prefix, and end it with an
+opt-out line such as "Reply STOP or ask <partner name> to stop these messages".
+Meta's 1024-character limit covers the whole body, so keep the fixed text under
+about 100 characters. Inbound STOP is not handled yet; for now the partner clears
+the opt-in.
+
+Consent follows the number: a client PATCH that changes `whatsapp` clears
+`whatsapp_opt_in_at` unless the same PATCH sets it again.
+
+Delivery uses the same outbox and retry schedule as webhooks (sink `whatsapp`,
+worked in the webhook lane). The row holds only the lead id and site id; the text
+is built when it is sent. At send time the client must still be opted in, on the
+same number, and not archived, or the row is dropped; if that check can't be made
+(the lookup fails) the row is retried. An MSG91 `4xx` (other than `429`) or a
+rejected send is dropped, and a `429`, `5xx` or network error is retried. Only the
+error code and HTTP status are stored. The other sinks never wait on it.
+
+Each message is paid for, so one number gets at most 30 a day per workspace
+(rolling 24 hours, counted on the outbox). Past that, leads are still saved and
+emailed; each skipped one logs one warning (lead and site ids only).
+
+| Variable | Purpose |
+|---|---|
+| `POCKETPAW_MSG91_PLATFORM_AUTHKEY` | Authkey of the platform MSG91 account. Secret, never logged. |
+| `POCKETPAW_MSG91_PLATFORM_INTEGRATED_NUMBER` | The WhatsApp sender number on that account. |
+| `POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE` | Name of the approved new-lead template (one body variable). |
+| `POCKETPAW_MSG91_PLATFORM_LANGUAGE` | Template language code. Default `en`. |
+
+Until the first three are set, nothing is queued: each skipped lead logs one
+warning (lead and site ids only), and the lead, bell, email and webhook go out as
+usual.
 
 ## Ship — Managed Deploys
 

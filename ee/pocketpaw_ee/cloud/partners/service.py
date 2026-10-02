@@ -57,6 +57,10 @@
 # ``get_active_profile`` / ``get_client`` are consumed by later PH tasks by name.
 # ``partner_profile_for_workspace`` is the billing seam's loader
 # (``billing.enforcement.sites_enforced_for``).
+# Updated 2026-10-02 (feat/partners-whatsapp-leads, PH-6): consent follows the
+# number. A PATCH that changes ``whatsapp`` clears ``whatsapp_opt_in_at`` unless
+# the same PATCH sets it, so a new number never inherits the old one's opt-in
+# (lead WhatsApp messages go only to opted-in numbers).
 
 from __future__ import annotations
 
@@ -316,6 +320,12 @@ async def update_client(
         if field in ("name", "whatsapp", "notes") and value is None:
             continue  # required on the record; null means "leave it"
         changes[field] = _iso(value) if field == "whatsapp_opt_in_at" else value
+    if (
+        "whatsapp" in changes
+        and changes["whatsapp"] != current.properties.get("whatsapp")
+        and "whatsapp_opt_in_at" not in changes
+    ):
+        changes["whatsapp_opt_in_at"] = None  # consent was given for the old number
     if not changes:
         # no-event: empty PATCH writes nothing.
         return _to_out(_client_from_object(current, workspace_id=workspace_id))

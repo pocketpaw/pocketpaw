@@ -16,6 +16,10 @@ tags: ["api", "configuration"]
   (settlement-first conversion with a 0.5x-2x sanity band, bulk bonus tiers,
   pro-rata reversals, Rs.100 minimum; INR routes on Dodo's product id, and
   metadata never sets an amount).
+  Updated 2026-10-02 (feat/partners-whatsapp-leads, PH-6) — added "Paw Partners —
+  lead WhatsApp" with the four POCKETPAW_MSG91_PLATFORM_* settings: the platform
+  MSG91 account that sends a partner-sold site's new leads to the opted-in shop
+  owner.
   Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2/SA-3 section
   below rather than adding a second one, with the one operator fact the variables
   alone do not carry: the READ needs an Account Analytics Read token scope that the
@@ -170,6 +174,20 @@ Independent of the flag, the `<current-pocket>` widget summary is bounded to 2,0
 | `whatsapp_verify_token` | `POCKETPAW_WHATSAPP_VERIFY_TOKEN` | string | — | Webhook verify token |
 | `whatsapp_allowed_phone_numbers` | `POCKETPAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | string[] | `[]` | Allowed numbers (comma-separated) |
 | `whatsapp_neonize_db` | `POCKETPAW_WHATSAPP_NEONIZE_DB` | string | `~/.pocketpaw/neonize.db` | Neonize DB path |
+
+## Paw Partners — lead WhatsApp
+
+The platform's own MSG91 account. A new lead on a site a partner sold goes to the
+shop owner's WhatsApp when the owner opted in. This is separate from the
+per-workspace `msg91` connector that /growth uses. Nothing is sent until the first
+three are set. Delivery details: "Partner leads on WhatsApp" in `docs/api-reference.md`.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `msg91_platform_authkey` | `POCKETPAW_MSG91_PLATFORM_AUTHKEY` | string | — | MSG91 authkey. Secret, stored encrypted, never logged |
+| `msg91_platform_integrated_number` | `POCKETPAW_MSG91_PLATFORM_INTEGRATED_NUMBER` | string | — | WhatsApp sender number on the account |
+| `msg91_platform_lead_template` | `POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE` | string | — | Approved new-lead template name (one body variable) |
+| `msg91_platform_language` | `POCKETPAW_MSG91_PLATFORM_LANGUAGE` | string | `en` | Template language code |
 
 ## Signal
 

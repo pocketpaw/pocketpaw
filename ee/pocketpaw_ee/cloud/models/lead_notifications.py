@@ -19,6 +19,11 @@
 # can't confirm. The webhook secret is Fernet ciphertext; after a rotation the
 # previous one keeps signing for a grace window. After 10 consecutive dead
 # deliveries the webhook is switched off until it is saved again.
+#
+# Updated 2026-10-02 (PH-6): ``LeadSink`` gains "whatsapp". It is routed by the
+# shop owner's consent, not by these settings: a lead on a partner-sold site goes
+# to the partner client's WhatsApp when that client opted in. ``events`` never
+# needs to list it, and the settings API doesn't accept it.
 
 from __future__ import annotations
 
@@ -31,7 +36,7 @@ from pymongo import IndexModel
 
 # The site events an owner can route, and the sinks each can go to.
 LEAD_EVENTS: tuple[str, ...] = ("lead_captured", "handoff", "booking")
-LeadSink = Literal["email", "webhook", "push"]
+LeadSink = Literal["email", "webhook", "push", "whatsapp"]
 DEFAULT_EVENT_SINKS: list[str] = ["email", "push"]
 MAX_EXTRA_RECIPIENTS = 5
 

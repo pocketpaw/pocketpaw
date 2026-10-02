@@ -30,6 +30,19 @@
 # ``dispatch_lead_updated`` is narrower: a status change goes to the site webhook
 # only (when it is active and the owner routes ``lead_captured`` to it), with no
 # bell, mail or workspace fallback, since the owner made the change themselves.
+#
+# Partner lead WhatsApp (PH-6, 2026-10-02): a ``lead_captured`` on a partner-sold
+# site (``Site.partner_client_id``) also queues one ``whatsapp`` row to the
+# partner client's number, sent from the platform MSG91 account. The gate is the
+# client's consent (a ``whatsapp`` number AND ``whatsapp_opt_in_at``), not the
+# site's ``events``; the client is read through ``partners.service.get_client``
+# with a system context in the site's own workspace, so an archived client, a
+# deactivated partner or another workspace's client is simply no target. The
+# same check runs again at send time. With no platform credentials the row is
+# skipped with one warning; email, webhook and push are unaffected either way.
+# Each message is paid, so one number gets at most ``WHATSAPP_DAILY_CAP`` rows per
+# workspace per rolling 24 h (counted on the outbox itself); past it, one warning
+# per skipped lead.
 
 from __future__ import annotations
 
@@ -42,7 +55,7 @@ from typing import Any
 
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud._core.errors import NotFound, RateLimited, ValidationError
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, RateLimited, ValidationError
 from pocketpaw_ee.cloud.models.lead_notifications import (
     DEFAULT_EVENT_SINKS,
     LEAD_EVENTS,
@@ -60,6 +73,7 @@ CONFIRM_RESEND_INTERVAL = timedelta(minutes=30)
 CONFIRM_DAILY_CAP = 50
 WEBHOOK_DISABLE_THRESHOLD = 10
 CONFIRM_KIND = "lead_notifications_confirm"
+WHATSAPP_DAILY_CAP = 30
 _VALID_SINKS = frozenset({"email", "webhook", "push"})
 
 # Webhook ``type`` per site event.
@@ -730,6 +744,82 @@ async def record_webhook_result(workspace_id: str, site_id: str, *, ok: bool) ->
     )
 
 
+async def partner_whatsapp_target(
+    workspace_id: str, site: _SiteDoc | None, *, strict: bool = False
+) -> str | None:
+    """The partner client's WhatsApp number for a partner-sold site, when the
+    client exists in this workspace, is not archived and opted in. None otherwise.
+    A lookup that fails is None too, unless ``strict`` (the outbox's send-time
+    check), where it raises so the row is retried rather than dropped."""
+    client_id = getattr(site, "partner_client_id", None) if site is not None else None
+    if not client_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+        from pocketpaw_ee.cloud.partners import service as partners_service
+
+        ctx = RequestContext(
+            user_id="system.leads.whatsapp",
+            workspace_id=workspace_id,
+            request_id="lead-whatsapp",
+            scope=ScopeKind.WORKSPACE,
+            started_at=_now(),
+        )
+        client = await partners_service.get_client(ctx, client_id=client_id)
+    except (NotFound, Forbidden):  # archived / deleted client, or partner not active
+        return None
+    except Exception:
+        if strict:
+            raise
+        logger.warning("partner client lookup failed for site %s", site.id, exc_info=True)
+        return None
+    if client.whatsapp and client.whatsapp_opt_in_at:
+        return client.whatsapp
+    return None
+
+
+async def _partner_whatsapp_row(
+    workspace_id: str, site: _SiteDoc, kind: str, lead_id: str
+) -> dict[str, Any] | None:
+    """The ``whatsapp`` outbox row for a lead on a partner-sold site, or None."""
+    from pocketpaw_ee.cloud.growth import msg91
+    from pocketpaw_ee.cloud.notifications import outbox
+
+    number = await partner_whatsapp_target(workspace_id, site)
+    if number is None:
+        return None
+    sent_today = await outbox.count_recent(
+        workspace=workspace_id,
+        kind=kind,
+        since=_now() - timedelta(days=1),
+        sink="whatsapp",
+        target=number,
+    )
+    if sent_today >= WHATSAPP_DAILY_CAP:
+        logger.warning(
+            "partner lead WhatsApp skipped for lead=%s site=%s: daily cap of %d reached",
+            lead_id,
+            site.id,
+            WHATSAPP_DAILY_CAP,
+        )
+        return None
+    if msg91.resolve_platform_credentials() is None:
+        logger.warning(
+            "partner lead WhatsApp skipped for lead=%s site=%s: set "
+            "POCKETPAW_MSG91_PLATFORM_AUTHKEY, _INTEGRATED_NUMBER and _LEAD_TEMPLATE",
+            lead_id,
+            site.id,
+        )
+        return None
+    return {
+        "workspace": workspace_id,
+        "kind": kind,
+        "sink": "whatsapp",
+        "target": number,
+        "payload": {"lead_id": lead_id, "site_ref": str(site.id)},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Event routing
 # ---------------------------------------------------------------------------
@@ -758,7 +848,7 @@ async def dispatch_site_event(
     from pocketpaw_ee.cloud.notifications import email as email_mod
     from pocketpaw_ee.cloud.notifications import service as notifications_service
 
-    counts = {"push": 0, "email": 0, "webhook": 0}
+    counts = {"push": 0, "email": 0, "webhook": 0, "whatsapp": 0}
     site: _SiteDoc | None = None
     settings = SiteNotificationSettings(workspace=workspace_id, site_id="")
     try:
@@ -829,10 +919,18 @@ async def dispatch_site_event(
                     "webhook_ref": f"site:{site.id}",
                 }
             )
+        if site is not None and lead_id and event == "lead_captured":
+            try:
+                row = await _partner_whatsapp_row(workspace_id, site, kind, lead_id)
+            except Exception:  # never costs the owner their email / webhook
+                logger.warning("partner WhatsApp routing failed for lead=%s", lead_id)
+                row = None
+            if row is not None:
+                rows.append(row)
         if rows:
             await outbox.enqueue_many(rows)
-        counts["email"] = sum(1 for r in rows if r["sink"] == "email")
-        counts["webhook"] = sum(1 for r in rows if r["sink"] == "webhook")
+        for sink in ("email", "webhook", "whatsapp"):
+            counts[sink] = sum(1 for r in rows if r["sink"] == sink)
 
         # Workspace fallback: its Slack always, its webhook only when the site
         # has none of its own. That webhook predates the envelope and its
@@ -906,6 +1004,7 @@ __all__ = [
     "get_settings",
     "owner_email",
     "owner_identity",
+    "partner_whatsapp_target",
     "record_bounce",
     "record_webhook_result",
     "recipient_allowed",

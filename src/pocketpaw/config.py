@@ -2508,6 +2508,37 @@ class Settings(BaseSettings):
         description="Display name on owner notification email. POCKETPAW_CF_EMAIL_FROM_NAME.",
     )
 
+    # Partner lead WhatsApp — the platform's OWN MSG91 account (Paw Partners). A
+    # lead on a partner-sold site reaches the shop owner on WhatsApp from this
+    # account when the owner opted in. Unrelated to the per-workspace ``msg91``
+    # connector that /growth uses (that one deliberately has no env fallback).
+    # The sink stays OFF until authkey, integrated number and template are set.
+    msg91_platform_authkey: str | None = Field(
+        default=None,
+        description=(
+            "MSG91 authkey of the platform account that sends partner lead "
+            "WhatsApp messages. Set via POCKETPAW_MSG91_PLATFORM_AUTHKEY. NEVER logged."
+        ),
+    )
+    msg91_platform_integrated_number: str | None = Field(
+        default=None,
+        description=(
+            "The WhatsApp sender number registered on that MSG91 account. Set via "
+            "POCKETPAW_MSG91_PLATFORM_INTEGRATED_NUMBER."
+        ),
+    )
+    msg91_platform_lead_template: str | None = Field(
+        default=None,
+        description=(
+            "Name of the pre-approved WhatsApp template for a new lead; its one body "
+            "variable carries the message. Set via POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE."
+        ),
+    )
+    msg91_platform_language: str = Field(
+        default="en",
+        description="Language code of that template. POCKETPAW_MSG91_PLATFORM_LANGUAGE.",
+    )
+
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price
     # primitives). A completed chat run is billed by its real compute cost times
     # a flat markup, converted from USD into integer credits. These two settings

@@ -16,6 +16,10 @@
 # text: a handoff email or webhook row carries the notification's title and body,
 # which may quote the visitor (e.g. the handoff question). Finished rows expire
 # after 30 days.
+#
+# Updated 2026-10-02 (PH-6): ``whatsapp`` sink — a partner lead sent to the shop
+# owner's WhatsApp (target = E.164 number) through the platform MSG91 account.
+# Its payload is ``lead_id`` + ``site_ref`` only, like the lead email.
 
 from __future__ import annotations
 
@@ -34,8 +38,9 @@ def _now() -> datetime:
 class NotificationOutboxItem(Document):
     workspace: str
     kind: str
-    sink: Literal["email", "webhook", "slack"]
-    # Email address for ``email``; URL for ``webhook`` / ``slack``.
+    sink: Literal["email", "webhook", "slack", "whatsapp"]
+    # Email address for ``email``; URL for ``webhook`` / ``slack``; E.164 number
+    # for ``whatsapp``.
     target: str
     payload: dict[str, Any] = Field(default_factory=dict)
     # "workspace:<id>" or "site:<site object id>" — whose secret signs a webhook

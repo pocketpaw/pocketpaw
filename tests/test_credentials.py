@@ -5,6 +5,7 @@
 #         file permissions, and log secret scrubbing.
 # Updated 2026-06-24: expected SECRET_FIELDS now includes the Dodo billing
 #         secrets (dodo_payments_api_key, dodo_webhook_secret).
+# Updated 2026-10-02 (PH-6): ... and msg91_platform_authkey (partner lead WhatsApp).
 
 import json
 import logging
@@ -546,6 +547,7 @@ class TestSecretFieldsList:
             "dodo_webhook_secret",
             "shield_api_token",
             "cf_email_api_token",
+            "msg91_platform_authkey",
         }
         assert SECRET_FIELDS == expected
 
