@@ -334,28 +334,42 @@ async def sync_site_template(template_id: str) -> None:
 
 
 async def reindex(source: str) -> dict:
-    """Idempotent backfill: upsert every public item of ``source`` (a hidden
-    one as a hidden listing, ``live_url`` re-read from the source site) and
-    remove listings whose item is gone or no longer public. Only
+    """Idempotent backfill: upsert every public item of ``source`` whose listing
+    is missing or differs (a hidden one as a hidden listing, ``live_url``
+    re-read from the source site) and remove listings whose item is gone or no
+    longer public. Returns created / updated / unchanged / removed counts. Only
     ``site_template`` is supported."""
     # admin-cross-tenant: rebuilds the public index across every workspace.
     if source != SITE_TEMPLATE:
         raise ValidationError("discover.reindex_unsupported", f"Cannot reindex {source!r}")
     rows = await site_templates_admin.iter_public_for_discover()
     keep = {row["id"] for row in rows}
+    existing = {
+        doc.source_id: doc
+        for doc in await DiscoverListing.find({"source": SITE_TEMPLATE}).to_list()
+    }
+    counts = {"created": 0, "updated": 0, "unchanged": 0}
     for row in rows:
         # ponytail: one site lookup per public template; batch by pocket id if
         # public templates reach the thousands.
         row["live_url"] = await site_templates_admin.refresh_live_url(row["id"])
-        await upsert_from_source(
-            SITE_TEMPLATE, row["id"], _site_template_fields(row), hide=row["hidden"]
-        )
-    stale = await DiscoverListing.find(
-        {"source": SITE_TEMPLATE, "source_id": {"$nin": sorted(keep)}}
-    ).to_list()
+        fields = UpsertListingRequest.model_validate(_site_template_fields(row)).model_dump()
+        doc = existing.get(row["id"])
+        if doc is None:
+            counts["created"] += 1
+        elif any(getattr(doc, k) != v for k, v in fields.items()) or (
+            row["hidden"] and not doc.hidden
+        ):
+            counts["updated"] += 1
+        else:
+            # no-event: the listing already matches its source.
+            counts["unchanged"] += 1
+            continue
+        await upsert_from_source(SITE_TEMPLATE, row["id"], fields, hide=row["hidden"])
+    stale = [doc for source_id, doc in existing.items() if source_id not in keep]
     for doc in stale:
         await remove_from_source(SITE_TEMPLATE, doc.source_id)
-    return {"source": source, "upserted": len(keep), "removed": len(stale)}
+    return {"source": source, **counts, "removed": len(stale)}
 
 
 # ---------------------------------------------------------------------------
