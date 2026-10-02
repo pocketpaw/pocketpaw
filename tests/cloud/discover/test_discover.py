@@ -436,6 +436,19 @@ async def test_use_listing_returns_the_pocket_and_counts_once(recording_bus) -> 
 
 
 @pytest.mark.asyncio
+async def test_using_your_own_listing_does_not_count_a_remix() -> None:
+    meta = await _template(visibility="public")
+    await service_admin.sync_site_template(meta["id"])
+    listing_id = str((await _listing(meta["id"])).id)
+
+    used = await service.use_listing(WS, OWNER, listing_id)
+    assert used["result"]["pocket_id"]
+    assert (await DiscoverListing.get(listing_id)).remix_count == 0
+    audit = await AuditEvent.find({"action": "discover.listing_used"}).to_list()
+    assert [(a.workspace, a.actor_id) for a in audit] == [(WS, OWNER)]
+
+
+@pytest.mark.asyncio
 async def test_failed_use_does_not_count() -> None:
     # A listing whose template is gone (the sync has not caught up yet).
     listing_id = await _upsert("650000000000000000000000")

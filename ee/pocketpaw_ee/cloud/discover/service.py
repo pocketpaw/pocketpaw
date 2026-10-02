@@ -23,7 +23,8 @@
 # Updated 2026-10-02 (feat/discover-index, review): no direct listing reads or
 # writes here; the remix ``$inc``, report ``$push``, report count and auto-hide
 # go through named ``service_admin`` functions (each marked cross-tenant), and
-# audit rows through the public ``service_admin.record_audit``.
+# audit rows through the public ``service_admin.record_audit``. The owner using
+# their own listing is allowed and audited but doesn't count as a remix.
 
 from __future__ import annotations
 
@@ -51,7 +52,8 @@ async def use_listing(
     listing (or an item the source no longer lets the caller see)."""
     doc = await service_admin.public_doc(listing_id)
     result = await get_source(doc.source).use(workspace_id, user_id, doc.source_id, name)
-    await service_admin.increment_remix(listing_id)
+    if user_id != doc.owner:  # the owner's own use isn't a remix
+        await service_admin.increment_remix(listing_id)
     await service_admin.record_audit(
         workspace_id, user_id, "discover.listing_used", listing_id, source=doc.source
     )
