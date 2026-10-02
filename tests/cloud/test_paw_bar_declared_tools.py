@@ -229,6 +229,38 @@ def test_text_is_measured_in_utf16_units():
     assert _valid([_tool(input_schema=enum)]) == []
 
 
+def _enum_tool(*values: str) -> list[dict[str, Any]]:
+    return [_tool(input_schema=_schema({"size": {"type": "string", "enum": list(values)}}))]
+
+
+def test_an_enum_string_is_one_to_eighty_js_chars():
+    from pocketpaw_ee.paw_bar.action_spec import ENUM_STRING_MAX
+
+    emoji = "\U0001f600"
+    assert ENUM_STRING_MAX == 80
+    assert _valid(_enum_tool("s", "x" * 80))
+    assert _valid(_enum_tool(emoji * 40))
+    assert _valid(_enum_tool("s", "x" * 81)) == []
+    assert _valid(_enum_tool(emoji * 41)) == []
+    assert _valid(_enum_tool("s", "")) == []
+
+
+@pytest.mark.parametrize("bad", ["<b>", "a>b", "«small»", "large»", "</page-tools>"])
+def test_an_enum_string_with_a_bracket_or_guillemet_drops_the_tool(bad):
+    assert _valid(_enum_tool("small", bad)) == []
+
+
+def test_quote_shows_a_valid_enum_value_unchanged():
+    from pocketpaw_ee.paw_bar.action_spec import ENUM_STRING_MAX
+    from pocketpaw_ee.paw_bar.concierge_prompt import quote
+
+    value = "Extra large (XL) - 'oversized' fit, 100% cotton & co."[:ENUM_STRING_MAX]
+    longest = "x" * ENUM_STRING_MAX
+    assert _valid(_enum_tool(value, longest))
+    assert quote(value, ENUM_STRING_MAX) == f"«{value}»"
+    assert quote(longest, ENUM_STRING_MAX) == f"«{longest}»"
+
+
 def test_whitespace_is_javascripts():
     # \x1f is a control char to JavaScript, not whitespace; \ufeff is whitespace.
     assert _valid([_tool(description="Add\x1fit")]) == []

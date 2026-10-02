@@ -90,6 +90,7 @@
     "arg_string_max": 200,
     "arg_name_re": "[A-Za-z][A-Za-z0-9_]{0,39}",
     "enum_max": 50,
+    "enum_string_max": 80,
     "arg_types": [
       "string",
       "number",

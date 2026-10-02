@@ -893,7 +893,10 @@ _TOOL_RULE = (
 
 def _tool_arg_line(name: str, prop: dict[str, Any], required: bool) -> str:
     """One argument of a declared tool: name, type, required or optional, its
-    bounds, and its description «quoted»."""
+    bounds, and its description «quoted». A valid string enum value already fits
+    ``quote`` (``action_spec.ENUM_STRING_MAX``, no brackets or guillemets), so
+    quoting never cuts it short or swaps a character."""
+    from pocketpaw_ee.paw_bar.action_spec import ENUM_STRING_MAX
     from pocketpaw_ee.paw_bar.concierge_prompt import quote
 
     parts = [f"{name}: {prop['type']}", "required" if required else "optional"]
@@ -906,7 +909,9 @@ def _tool_arg_line(name: str, prop: dict[str, Any], required: bool) -> str:
     if "maxLength" in prop:
         parts.append(f"at most {prop['maxLength']} characters")
     if "enum" in prop:
-        values = [quote(v, 80) if isinstance(v, str) else json.dumps(v) for v in prop["enum"]]
+        values = [
+            quote(v, ENUM_STRING_MAX) if isinstance(v, str) else json.dumps(v) for v in prop["enum"]
+        ]
         parts.append("one of " + " ".join(values))
     line = ", ".join(parts)
     if prop.get("description"):

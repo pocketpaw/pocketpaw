@@ -117,6 +117,7 @@ def test_the_shared_bounds_are_the_servers():
     assert bounds["arg_string_max"] == action_spec.ARG_STRING_MAX
     assert bounds["arg_name_re"] == action_spec.ARG_NAME_RE.pattern
     assert bounds["enum_max"] == action_spec.ENUM_MAX
+    assert bounds["enum_string_max"] == action_spec.ENUM_STRING_MAX
     assert tuple(bounds["arg_types"]) == action_spec.ARG_TYPES
 
 
@@ -134,6 +135,7 @@ def test_every_shared_bound_is_checked():
         "arg_string_max",
         "arg_name_re",
         "enum_max",
+        "enum_string_max",
         "arg_types",
     }
 

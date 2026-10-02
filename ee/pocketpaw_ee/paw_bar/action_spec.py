@@ -68,6 +68,11 @@ TOOL_SCHEMA_MAX = 2_048
 ARG_STRING_MAX = 200
 ARG_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,39}")
 ENUM_MAX = 50
+# A string enum value: 1 to ENUM_STRING_MAX chars (JS length), none of ``< > « »``,
+# so the prompt's quote() never cuts or swaps a character of it, and it can't
+# open a block or close its own quote.
+ENUM_STRING_MAX = 80
+_ENUM_STRING_BAD = frozenset("<>«»")
 ARG_TYPES: tuple[str, ...] = ("string", "number", "integer", "boolean")
 _PROPERTY_KEYS = frozenset({"type", "description", "enum", "minimum", "maximum", "maxLength"})
 _SCHEMA_KEYS = frozenset({"type", "properties", "required"})
@@ -233,6 +238,10 @@ def _fits(kind: str, value: Any) -> bool:
     return _number(value)
 
 
+def _valid_enum_string(value: str) -> bool:
+    return 1 <= _js_len(value) <= ENUM_STRING_MAX and not _ENUM_STRING_BAD & set(value)
+
+
 def _valid_property(prop: Any) -> bool:
     if not isinstance(prop, dict) or not set(prop) <= _PROPERTY_KEYS:
         return False
@@ -247,7 +256,7 @@ def _valid_property(prop: Any) -> bool:
             return False
         if not all(_fits(kind, v) for v in enum):
             return False
-        if kind == "string" and any(_js_len(v) > ARG_STRING_MAX for v in enum):
+        if kind == "string" and not all(_valid_enum_string(v) for v in enum):
             return False
     bounds = [b for b in ("minimum", "maximum") if b in prop]
     if bounds and (kind not in ("number", "integer") or not all(_number(prop[b]) for b in bounds)):
@@ -469,6 +478,7 @@ def render_action(
 
 __all__ = [
     "ARG_STRING_MAX",
+    "ENUM_STRING_MAX",
     "LABEL_MAX",
     "TARGET_ID_RE",
     "TARGET_MAX",
