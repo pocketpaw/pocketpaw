@@ -50,6 +50,8 @@
 #
 # Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
 # process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -230,23 +232,13 @@ async def _persist_outcome(
     Action's own terminal status is the authoritative record.
     """
     try:
-        import json as _json
-
-        import aiosqlite
-
         blob["outcome"] = {
             "status": status,
             "detail": detail[:500],
             "executed_at": datetime.now(UTC).isoformat(),
         }
         params = {GROWTH_SEND_PARAM_KEY: blob}
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — structured outcome is best-effort
         logger.warning(
             "growth: failed to persist outcome onto action %s (the Action's "

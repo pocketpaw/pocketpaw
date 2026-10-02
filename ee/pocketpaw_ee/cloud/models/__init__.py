@@ -1,5 +1,8 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-10-01 (DS-1, feat/discover-index) — added ``DiscoverListing`` (one
+public Discover card per source item; see discover/service_admin.py).
+
 Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added ``MeetingKnock`` (a guest
 asking to join a meeting; see meetings/lobby_service.py).
 
@@ -220,6 +223,7 @@ from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
+from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
@@ -480,6 +484,7 @@ __all__ = [
     "SiteOriginClaim",
     "SiteRateCounter",
     "SiteTemplate",
+    "DiscoverListing",
     "SpendReconciliation",
     "StudioGeneration",
     "Subscription",
@@ -639,6 +644,9 @@ def get_all_documents():
         # User-saved site templates. Only ``ee.cloud.site_templates.service``
         # writes it.
         SiteTemplate,
+        # Discover index (DS-1): one public card per source item. Only
+        # ``ee.cloud.discover.service`` / ``service_admin`` write it.
+        DiscoverListing,
         SiteDesignBrief,
         SiteExport,
         # SF-8 — the proof that a workspace controls an origin. The later

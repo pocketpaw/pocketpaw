@@ -2,6 +2,18 @@
 # cloud.realtime re-export shim is deleted.
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Updated 2026-10-01 (feat/discover-index): ``mount_cloud`` registers the Discover
+sources and the site-template -> listing sync after ``init_realtime``, and mounts
+the Discover router (``/api/v1/discover``) next to site templates.
+
+Updated 2026-10-02 (feat/discover-index, hardening): behind
+``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` a leased loop reindexes Discover from site
+templates every 30 minutes.
+
+Updated 2026-10-02 (feat/discover-index, review): that loop's first pass runs at
+startup; with the scheduler flag off, one background Discover reindex pass runs
+at startup instead (fire-and-forget), so templates public before a deploy list.
+
 ``mount_cloud(app)`` is the cloud's single entry point (reached through the
 ``pocketpaw.routes`` entry-point). It mounts every domain router under
 ``/api/v1`` (each domain keeps a thin router over a service that owns its
@@ -9,10 +21,11 @@ Beanie writes), installs the CSRF and EE auth-bridge middleware (the bridge
 grants OSS ``full_access`` only to platform superusers), runs
 ``init_realtime()``, and only then registers the bus subscribers and bridges
 that need the singleton bus: upload -> KB indexing, pocket outcomes, audit
-mirroring into the SQLite store, tasks/meeting/lead/alert notifications, push
-fan-out, the Mission Control activity buffer, and built-in plus entry-point
-workspace jobs. Public routes that must stay unauthenticated (the Dodo webhook,
-share-link GETs) are mounted separately from their authenticated siblings.
+mirroring into the SQLite store, the Discover index sync (site templates ->
+listings), tasks/meeting/lead/alert notifications, push fan-out, the Mission
+Control activity buffer, and built-in plus entry-point workspace jobs. Public
+routes that must stay unauthenticated (the Dodo webhook, share-link GETs) are
+mounted separately from their authenticated siblings.
 
 Background loops are collected as lifespan hooks and run by
 ``_install_cloud_lifespan`` inside the host's lifespan (after Mongo is open).
@@ -287,6 +300,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.daytona.router import router as daytona_router
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
+    from pocketpaw_ee.cloud.discover.router import router as discover_router
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
@@ -391,6 +405,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Site templates — save a site pocket as a private template, list / get /
     # delete them, and start a new site from one (POST /site-templates/{id}/use).
     app.include_router(site_templates_router, prefix="/api/v1")
+    # Discover (DS-1) — the public index of shareable items (GET /discover,
+    # GET /discover/{id}, no sign-in, per-IP limited) plus signed-in use / report.
+    app.include_router(discover_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
@@ -980,6 +997,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_upload_listeners()
 
+    # Discover index (DS-1): register the built-in sources (site templates) and
+    # keep listings in sync with site-template events. Same constraint as the
+    # upload listeners: subscribe AFTER init_realtime installed the bus.
+    from pocketpaw_ee.cloud.discover.listeners import register_discover_listeners
+    from pocketpaw_ee.cloud.discover.sources import register_builtin_sources
+
+    register_builtin_sources()
+    register_discover_listeners()
+
     # Pocket outcomes ledger subscriber (RFC 05 M2b.2). Appends every
     # ``pocket.outcome`` event to its workspace-scoped JSONL ledger so
     # ``GET /api/v1/outcomes`` can count business outcomes. Same
@@ -1274,6 +1300,48 @@ def mount_cloud(app: FastAPI) -> None:
         @on_shutdown
         async def _stop_websandbox_reaper() -> None:
             await _websandbox_reaper.stop()
+
+    # Discover reindex (DS-1 hardening). Every 30 minutes it re-syncs the public
+    # Discover index from site templates: repairs a missed or failed event sync
+    # and refreshes ``live_url`` (sites emit no rename / unpublish / delete
+    # events). Same scheduler gate and lease as the loops above.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.discover.listeners import (
+            start_discover_reindex,
+            stop_discover_reindex,
+        )
+
+        _discover_reindex = leased(
+            "discover_reindex",
+            lambda: start_discover_reindex(app),
+            lambda: stop_discover_reindex(app),
+        )
+
+        @on_startup
+        async def _start_discover_reindex() -> None:
+            await _discover_reindex.start()
+
+        @on_shutdown
+        async def _stop_discover_reindex() -> None:
+            await _discover_reindex.stop()
+
+    else:
+        # No scheduler: one fire-and-forget backfill pass at startup, so
+        # templates that were public before this deploy still get listed. Not
+        # leased: the pass is idempotent, so several processes running it is
+        # harmless. The hook returns at once (off the startup critical path).
+        from pocketpaw_ee.cloud.discover.listeners import (
+            start_discover_backfill,
+            stop_discover_backfill,
+        )
+
+        @on_startup
+        async def _start_discover_backfill() -> None:
+            await start_discover_backfill(app)
+
+        @on_shutdown
+        async def _stop_discover_backfill() -> None:
+            await stop_discover_backfill(app)
 
     # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
     # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a

@@ -2,6 +2,20 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-02 (feat/discover-index, review) — Discover reindexes once at
+  startup (and then every 30 minutes with the cloud scheduler on); the owner
+  using their own listing doesn't raise `remix_count`.
+Updated: 2026-10-02 (feat/discover-index, hardening) — Discover reports are
+  limited to 10 an hour per user (`429 discover.report_rate_limited`); a
+  Discover hide also hides the source template (so re-publishing it doesn't
+  bring it back) and keeps a hidden listing; staff unhide ignores that
+  listing's earlier reporters; a 30-minute reindex refreshes `live_url`.
+Updated: 2026-10-01 (feat/discover-index) — Site templates gain `kind`,
+  `audiences` (accepted on save and PATCH) and `live_url` (the source site's
+  deployed URL) on every response; public, unhidden templates are mirrored into
+  the Discover index. Added "Discover — Public Index" (GET /discover,
+  GET /discover/{id} public and rate-limited; POST /discover/{id}/use and
+  /report signed in).
 Updated: 2026-10-01 (feat/atlas-canonical) — added "Atlas — Surfaces, Verbs and
   Search" (GET /api/v1/atlas/{surfaces,verbs,search}), and `open_surface`'s
   route list now comes from atlas (`agent_openable` surfaces). Review pass: the
@@ -998,6 +1012,9 @@ the owner:
   "is_mine": false,
   "hidden": false,
   "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
+  "kind": "site",
+  "audiences": ["shop"],
+  "live_url": "https://bakery.pawsites.workers.dev",
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
@@ -1012,6 +1029,18 @@ best-effort: no screenshot yet, no public asset bucket on the deployment, or a
 file that isn't a PNG, JPEG, GIF or WebP image leaves it `null` and the save
 still succeeds. Deleting the template removes the image.
 
+`kind` (`site`, the default, `tool` or `game`) and `audiences` (any of `shop`,
+`design`, `everyone`, `fun`; default `[]`) describe the template for the
+Discover index. `live_url` is the source site's live URL when that site is
+deployed, else `null`; it is re-read on save, on every `PATCH` and on every
+Discover reindex (once at startup, then every 30 minutes when the cloud
+scheduler is on), so a renamed
+or unpublished site's URL catches up within one reindex. A public template is
+listed in Discover; making it private or deleting it removes the listing. A
+hidden template (reported here or on Discover) keeps a hidden listing, and a
+hide from either side hides both: the template leaves the public list and `use`,
+and changing its visibility back to `public` keeps it hidden.
+
 Events: `site_template.saved`, `site_template.updated`, `site_template.deleted`
 (to the owner) and `site_template.used` (to the user who used it, with the new
 `pocket_id`). Nothing fans out to a workspace or to all users. Audit,
@@ -1025,7 +1054,7 @@ workspace; `site_template.used` and `.reported` in the acting user's workspace
 Save a site pocket as a template the caller owns.
 
 ```json
-{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private" }
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [] }
 ```
 
 `name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
@@ -1059,7 +1088,7 @@ One template's metadata, if you can see it; otherwise `404`.
 
 ### `PATCH /site-templates/{template_id}`
 
-Change any of `name`, `description`, `visibility`. Owner only (`404` for anyone
+Change any of `name`, `description`, `visibility`, `kind`, `audiences`. Owner only (`404` for anyone
 else). Setting `visibility` to `public` runs the publish checks. `version` does
 not change. Response `200`: the metadata.
 
@@ -1115,6 +1144,84 @@ return `404` for everyone but the owner, who still sees it with
 
 Errors: `404` for a template you can't see or that is not public; `403`
 (`site_templates.own_template`) for the owner reporting their own.
+
+## Discover — Public Index
+
+One index of shareable items from every workspace, newest first. Today the only
+source is public site templates (`source: "site_template"`); a public template
+has one listing, hidden when the template is hidden. The two reads need no sign-in and
+are limited to 60 requests a minute per IP (shared between them); past that they
+return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
+user and act in the caller's active workspace.
+
+A listing on the wire is exactly these fields (never the owner, workspace,
+reports or the source item's id):
+
+```json
+{
+  "id": "6660a1...",
+  "source": "site_template",
+  "kind": "site",
+  "title": "Bakery",
+  "description": "",
+  "audiences": ["shop"],
+  "featured": false,
+  "preview_image_url": "https://assets.example.com/sites-assets/w1/template-665f1c.../3fa9c1d0e2b4a6f8-preview.png",
+  "live_url": "https://bakery.pawsites.workers.dev",
+  "remix_count": 3,
+  "created_at": "2026-10-01T09:00:00Z"
+}
+```
+
+### `GET /discover` (public)
+
+Query params, all optional: `source`, `kind` (`site`, `tool`, `game`),
+`audience` (matches one of a listing's `audiences`), `q` (case-insensitive
+substring of title or description, up to 100 chars), `featured` (`true` /
+`false`), `cursor`, `limit` (1-50, default 24).
+
+Response `200`: `{"items": [<listing>, ...], "next_cursor": "6660a0..." | null}`.
+Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last
+page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
+`limit` above 50 returns `422`.
+
+### `GET /discover/{listing_id}` (public)
+
+Response `200`: one listing. `404` when it doesn't exist or has been hidden.
+
+### `POST /discover/{listing_id}/use` (signed in)
+
+Make your own copy of the listing's item in your workspace. The body is
+optional; `name` defaults to the item's name.
+
+```json
+{ "name": "My bakery" }
+```
+
+Response `200`: `{"source": "site_template", "result": {"pocket_id": "..."}}`.
+The source's own checks apply (a site template needs a plan with Sites), and
+`remix_count` goes up by one only when the copy succeeded, and not when the
+listing's owner uses their own listing. `404` for a missing
+or hidden listing.
+
+### `POST /discover/{listing_id}/report` (signed in)
+
+```json
+{ "reason": "Spam, up to 500 chars" }
+```
+
+Response `204`, no body. One report per user counts; a repeat changes nothing.
+Each user may send 10 reports an hour across all listings (repeats included);
+past that the route returns `429` with `discover.report_rate_limited`.
+Three different reporters hide the listing from both public reads, `use` and
+`report`, and hide the source item too: a hidden site template also leaves the
+/sites public list, and making it private and public again does not relist it.
+There is no unhide endpoint yet. When staff unhide a listing, the source item is
+unhidden with it, the reports are cleared, and the users who reported it are
+recorded so their later reports on that listing are ignored. Hiding, unhiding,
+featuring and `use` each write an audit row. Errors: `404` for a missing or
+hidden listing; `403` (`discover.own_listing`) for the owner reporting their
+own; `429` past the report limit.
 
 ## Skills — Per-Backend API Skills
 

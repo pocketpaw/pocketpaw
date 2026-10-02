@@ -44,9 +44,12 @@
 # Populating its diff in place keeps one durable run record per task (provenance
 # to the mandate shift stays on the blob) and reuses the EXACT applyable shape
 # the belt executor expects (``base_branch`` + ``diff`` + cleared
-# ``station_pending`` — see ``belt/executor.py`` schema-2 guard). The direct-SQL
+# ``station_pending`` — see ``belt/executor.py`` schema-2 guard). The store-API
 # blob update mirrors ``belt/executor.py::_persist_run_result`` and the MCP
-# server's ``_persist_chain_ids`` — the same pattern, no new store method.
+# server's ``persist_chain_ids`` — the same pattern, no new store method.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -234,14 +237,11 @@ class HeadlessDevelopRunner:
         files_changed: int,
     ) -> None:
         """Populate the queued blob with the produced diff and clear
-        ``station_pending``. Direct-SQL blob update — the SAME pattern as
+        ``station_pending``. Store-API blob update — the SAME pattern as
         ``belt/executor.py::_persist_run_result`` and the MCP server's
-        ``_persist_chain_ids`` (no new store method). The schema stays 2 so the
+        ``persist_chain_ids`` (no new store method). The schema stays 2 so the
         belt executor's schema guard passes. Best-effort but loud: a write
         failure records a note and leaves the run queued, never applyable."""
-        import json as _json
-
-        import aiosqlite
 
         try:
             action = await store.get_action(action_id)
@@ -274,13 +274,7 @@ class HeadlessDevelopRunner:
             blob.pop("headless_error", None)
             params[_CODE_CHANGE_PARAM_KEY] = blob
 
-            async with aiosqlite.connect(store._db_path) as db:
-                await db.execute(
-                    "UPDATE instinct_actions SET parameters = ?,"
-                    " updated_at = datetime('now') WHERE id = ?",
-                    (_json.dumps(params), action_id),
-                )
-                await db.commit()
+            await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — a write failure must not crash dispatch
             logger.warning(
                 "headless: failed to attach diff to action %s — leaving it queued",
@@ -333,9 +327,6 @@ class HeadlessDevelopRunner:
         applyable. The run STAYS queued (``station_pending=True``, no diff) so a
         human can still drive the station or the dispatcher can retry — we never
         approve or fail the Action out from under the human gate. Best-effort."""
-        import json as _json
-
-        import aiosqlite
 
         try:
             action = await store.get_action(action_id)
@@ -351,13 +342,7 @@ class HeadlessDevelopRunner:
             blob["diff"] = ""
             blob["headless_error"] = reason
             params[_CODE_CHANGE_PARAM_KEY] = blob
-            async with aiosqlite.connect(store._db_path) as db:
-                await db.execute(
-                    "UPDATE instinct_actions SET parameters = ?,"
-                    " updated_at = datetime('now') WHERE id = ?",
-                    (_json.dumps(params), action_id),
-                )
-                await db.commit()
+            await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — never crash on the failure-note path
             logger.debug("headless: failed to record headless_error note", exc_info=True)
 
