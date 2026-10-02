@@ -31,7 +31,8 @@
 # now ``sync_source("site_template", id)``.
 #
 # Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
-# ``media_kind`` / ``media_url``.
+# ``media_kind`` / ``media_url``; the listeners and the backfill pass also cover
+# the ``studio_template`` source.
 from __future__ import annotations
 
 from typing import Any
@@ -322,7 +323,8 @@ def test_register_discover_listeners_subscribes_the_three_events(monkeypatch) ->
 
     monkeypatch.setattr(listeners, "get_bus", lambda: _Bus())
     listeners.register_discover_listeners()
-    assert set(subscribed) == SYNCED
+    studio = {e.replace("site_", "studio_") for e in SYNCED}
+    assert set(subscribed) == SYNCED | studio
 
 
 @pytest.mark.asyncio
@@ -385,7 +387,7 @@ async def test_startup_backfill_runs_one_pass_and_logs_a_failure(monkeypatch, ca
     app = SimpleNamespace(state=SimpleNamespace())
     await listeners.start_discover_backfill(app)  # returns before the pass runs
     await asyncio.wait_for(app.state.discover_backfill_task, 1)
-    assert calls == ["site_template"]
+    assert calls == ["site_template", "studio_template"]
     assert "discover: reindex failed" in caplog.text
     await listeners.stop_discover_backfill(app)  # already done: a no-op
 
