@@ -47,6 +47,11 @@
 # Updated 2026-10-02 (feat/partners-commissions, PH-13): summary / earnings shapes
 # carry the commission fields (zero here; commissions are covered in
 # test_partner_commissions.py). The pay-link route needs ``sites.buy_plan``.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): a partner's first sale earns
+# the 1st-site milestone reward (``FIRST_SALE_REWARD``), so wallet assertions
+# after a sale add it; summary / earnings carry the reward and lifetime fields;
+# the "re-priced" renewal case uses a price whose tier discounts cannot land on
+# the old one. Tiers and rewards are covered in test_partner_tiers.py.
 
 from __future__ import annotations
 
@@ -74,6 +79,8 @@ from pocketpaw.fabric.journal_store import FabricJournalStore
 pytestmark = pytest.mark.asyncio
 
 PHONE = "+919876543210"
+# PH-15: the 1st distinct site sold credits this once (``_calc.MILESTONES``).
+FIRST_SALE_REWARD = 200
 
 
 def _ctx(workspace_id: str | None) -> RequestContext:
@@ -646,7 +653,7 @@ async def test_selling_site_year_debits_the_partner_price_and_redeploys(
         ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
     )
 
-    assert await _balance(wid) == 5000 - 1700, "exactly the IN price, not plan-carried"
+    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD, "exactly the IN price, not plan-carried"
     assert sale.plan_tier == "site_year"
     assert sale.subscription_status == "active"
     assert sale.partner_client_id == client_id
@@ -665,7 +672,7 @@ async def test_selling_site_year_debits_the_partner_price_and_redeploys(
     again = await service.sell(
         ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
     )
-    assert await _balance(wid) == 5000 - 1700
+    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD
     assert again.plan_tier == "site_year"
     assert not deploys
 
@@ -732,7 +739,7 @@ async def test_selling_a_year_to_a_monthly_site_is_a_fresh_purchase(
     )
 
     fresh = await Site.get(site_id)
-    assert await _balance(wid) == 5000 - 1700
+    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD
     assert fresh.plan_tier == "site_year"
     assert fresh.period_paid_usd == 17
     expected = datetime.now(UTC) + relativedelta(months=12)
@@ -1022,6 +1029,9 @@ async def test_http_summary_and_earnings(partners_http) -> None:
         "revenue_total": [],
         "commission_credits_30d": 0,
         "commission_credits_total": 0,
+        "rewards_credits_30d": 0,
+        "rewards_credits_total": 0,
+        "lifetime_sites_sold": 0,
     }
     r = await client.get("/api/v1/partners/earnings?months=2")
     assert r.status_code == 200, r.text
@@ -1087,11 +1097,11 @@ async def _sold_year(monkeypatch, store, *, renewal_in_days: int):
     await service.sell(
         ctx, body={"client_id": cid, "site_id": site_id, "sku": "site_year"}, store=store
     )
-    assert await _balance(wid) == 10_000 - 2900
+    assert await _balance(wid) == 10_000 - 2900 + FIRST_SALE_REWARD
     doc = await Site.get(site_id)
     doc.renewal_date = datetime.now(UTC) + timedelta(days=renewal_in_days)
     await doc.save()
-    return wid, ctx, site_id, cid, 10_000 - 2900
+    return wid, ctx, site_id, cid, 10_000 - 2900 + FIRST_SALE_REWARD
 
 
 async def _republish(wid: str, site_id: str, tier: str):
@@ -1173,7 +1183,7 @@ async def test_a_lapsed_year_moves_and_comes_back_only_by_paying(
     body = {"client_id": cid, "site_id": site_id, "sku": "site_year"}
     await service.sell(ctx, body=body, store=store)
     yearly = await Site.get(site_id)
-    assert await _balance(wid) == 10_000 - 700 - 2900
+    assert await _balance(wid) == 10_000 - 700 - 2900 + FIRST_SALE_REWARD
     assert (yearly.plan_tier, yearly.period_paid_usd) == ("site_year", 29)
 
 
@@ -1328,7 +1338,9 @@ async def test_a_renewal_with_no_price_lapses_and_keeps_the_site_up(
 
     paid = 0
     if case == "price_since_changed":
-        monkeypatch.setitem(site_plans._PARTNER_PRICE_USD, "site_year", {"default": 29, "IN": 19})
+        # 21, not 19: a re-price whose volume-tier discounts (PH-15) still include
+        # 17 (19 at silver = 17) would make 17 a real price again.
+        monkeypatch.setitem(site_plans._PARTNER_PRICE_USD, "site_year", {"default": 29, "IN": 21})
         paid = 17
     ws = WorkspaceDoc(name="gone", slug=f"gone-{case}", owner="u1", plan="go")
     await ws.insert()
@@ -1589,7 +1601,7 @@ async def test_a_priced_sale_books_one_paid_receipt(mongo_db, store, monkeypatch
     again = await service.sell(ctx, body=body, store=store)
     assert again.invoice_id is None
     assert len((await Site.get(site_id)).client_invoices) == 1, "re-sell books nothing"
-    assert await _balance(wid) == 5000 - 1700
+    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD
 
 
 async def test_a_bad_currency_is_refused_before_the_wallet_moves(
@@ -1615,7 +1627,7 @@ async def test_a_bad_currency_is_refused_before_the_wallet_moves(
     )
     [receipt] = (await Site.get(site_id)).client_invoices
     assert (receipt.id, receipt.currency, receipt.amount_cents) == (sale.invoice_id, "JPY", 1500)
-    assert await _balance(wid) == 5000 - 2900
+    assert await _balance(wid) == 5000 - 2900 + FIRST_SALE_REWARD
 
 
 async def _debit(wid: str, site_id: str, usd: int, *, at: datetime, applied: bool = True) -> None:
@@ -1700,6 +1712,12 @@ async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
         ],
         "commission_credits_30d": 0,
         "commission_credits_total": 0,
+        "rewards_credits_30d": 0,
+        "rewards_credits_total": 0,
+        # A, B and D: lifetime counts every site a partner rung was debited for
+        # (D's debit is on site_year though D is not a sold site today); the
+        # phantom on A is not a second count, and C was never debited.
+        "lifetime_sites_sold": 3,
     }
 
     def key(dt: datetime) -> str:
@@ -1713,6 +1731,7 @@ async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
             "revenue": [{"currency": "INR", "amount_minor": 299900}],
             "spent_credits": 1700 + 2900,
             "commission_credits": 0,
+            "rewards_credits": 0,
         },
         {
             "month": key(now - relativedelta(months=1)),
@@ -1720,6 +1739,7 @@ async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
             "revenue": [],
             "spent_credits": 0,
             "commission_credits": 0,
+            "rewards_credits": 0,
         },
         {
             "month": key(now - relativedelta(months=2)),
@@ -1727,6 +1747,7 @@ async def test_summary_and_earnings_over_a_seeded_book(mongo_db, store) -> None:
             "revenue": [{"currency": "USD", "amount_minor": 5000}],
             "spent_credits": 2900,
             "commission_credits": 0,
+            "rewards_credits": 0,
         },
     ]
     assert len(await service.earnings(ctx, months=24)) == 24
@@ -1828,7 +1849,7 @@ async def test_a_double_submitted_sale_books_one_receipt(mongo_db, store, monkey
     assert len(arrived) == 2, "both calls reached the publish path"
     assert a.invoice_id is not None and a.invoice_id == b.invoice_id
     assert [r.id for r in (await Site.get(site_id)).client_invoices] == [a.invoice_id]
-    assert await _balance(wid) == 5000 - 1700
+    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD
 
 
 async def test_a_failed_receipt_write_leaves_the_sale_standing(
@@ -1852,5 +1873,5 @@ async def test_a_failed_receipt_write_leaves_the_sale_standing(
 
     assert sale.invoice_id is None
     assert sale.plan_tier == "site_year"
-    assert await _balance(wid) == 5000 - 1700
+    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD
     assert (await Site.get(site_id)).client_invoices == []

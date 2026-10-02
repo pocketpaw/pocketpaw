@@ -303,6 +303,11 @@
 #   a listed event with no ledger movement alarms. A PARTIAL refund before the
 #   payment is processed no longer voids the record (alarms, left pending). The
 #   flagged-payment alarm names the actual flag.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``site_plan_price_usd`` prices
+#   a partner rung at the partner's volume-tier discount; a client payment's
+#   commission rate reads the partner's volume tier (it was passed the SKU); a
+#   paid client payment then runs ``partners.service.refresh_standing`` (tier
+#   upgrade + milestone rewards; never raises).
 from __future__ import annotations
 
 import logging
@@ -927,7 +932,7 @@ async def site_plan_price_usd(
             f"Site tier '{tier.key}' is sold by Paw Partners and this workspace has no "
             "partner profile to price it.",
         )
-    return site_plans.partner_price_usd(tier.key, profile.billing_country)
+    return site_plans.partner_price_usd(tier.key, profile.billing_country, profile.tier)
 
 
 async def subscribe(
@@ -2009,7 +2014,7 @@ async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any
             founding=bool(profile is not None and profile.founding),
             first_client_payment_at=first,
             paid_at=now,
-            tier=rec.sku,
+            tier=profile.tier if profile is not None else "bronze",
         )
         # The shop paid, so its year activates whatever the partner's state; a
         # partner that is not ACTIVE earns nothing automatically (manual review).
@@ -2055,6 +2060,10 @@ async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any
             },
         )
         moved = rec.commission_credits if result.created else 0
+    if rec.status == "paid":
+        # PH-15: tier upgrade + milestone rewards. Every paid delivery re-drives
+        # it (both idempotent), so a redelivery heals a crash right here.
+        await partners_service.refresh_standing(doc.workspace)
     if outcome == "activated":
         logger.info(
             "billing.webhook: partner client payment=%s activated site=%s on %s; commission "

@@ -12,6 +12,13 @@ An ``active`` profile turns the per-site billing seams on for that workspace
 PUT requires a body (no "empty body clears"); clearing is its own DELETE, the
 same split ``clear_overrides`` uses, so a client that drops the body cannot
 silently switch a partner's billing off.
+
+Updated 2026-10-02 (feat/partners-tiers, PH-15): the volume ``tier`` is
+system-owned now (``partners.service.refresh_standing``). The PUT can still set
+it — a manual promotion — and it stands until the next recompute moves it: an
+upgrade after a sale / client payment, or the monthly review. The PUT keeps the
+profile's ``tier_reviewed_at``, so a promotion is reviewed at the next month
+boundary rather than within minutes.
 """
 
 from __future__ import annotations
@@ -115,9 +122,11 @@ async def set_partner(
     """Set or update a workspace's partner profile."""
     _require_reason(body.reason)
     data = body.model_dump(exclude={"reason"})
+    # global-read: platform route; keep the original join date and tier review.
+    current = await partners_service.partner_profile_for_workspace(workspace_id)
+    if current is not None:
+        data["tier_reviewed_at"] = current.tier_reviewed_at
     if data["joined_at"] is None:
-        # global-read: platform route; keep the original join date across updates.
-        current = await partners_service.partner_profile_for_workspace(workspace_id)
         if current is not None:
             data["joined_at"] = current.joined_at
         else:

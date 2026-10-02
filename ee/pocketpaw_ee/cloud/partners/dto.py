@@ -14,6 +14,11 @@
 # ``client_currency``); sold sites carry ``billing_mode`` ("partner" = the wallet
 # paid, "client" = the client paid a link); summary and earnings carry the
 # commission credits, net of clawbacks.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``PartnerMeOut`` (the profile
+# plus volume-tier standing: active / lifetime sites, next tier, benefits) for
+# GET /partners/me — the platform route keeps the plain ``PartnerProfileOut``;
+# summary and earnings carry milestone reward credits; ``PartnerRewardOut`` is
+# one rung of the reward ladder.
 
 from __future__ import annotations
 
@@ -45,6 +50,39 @@ class PartnerProfileOut(BaseModel):
     billing_country: str
     founding: bool
     joined_at: datetime
+
+
+class PartnerNextTierOut(BaseModel):
+    name: str
+    at: int  # active sold sites the tier needs
+    remaining: int
+
+
+class PartnerBenefitsOut(BaseModel):
+    # Off the wholesale partner price (the offers already show it applied).
+    wholesale_discount_pct: float
+    # The tier's commission rate. A founding partner's site earns
+    # max(40%, this) for 24 months from that site's first client payment.
+    commission_pct: float
+
+
+class PartnerMeOut(PartnerProfileOut):
+    """GET /partners/me: the profile plus where the partner stands (PH-15)."""
+
+    # Sold sites (``partner_client_id`` set) with an active paid plan, whoever paid.
+    active_sites: int
+    # Distinct sites ever sold; never goes down (milestones count this).
+    lifetime_sites_sold: int
+    next_tier: PartnerNextTierOut | None
+    benefits: PartnerBenefitsOut
+
+
+class PartnerRewardOut(BaseModel):
+    """One milestone rung: ``credits`` once the ``sites``-th distinct site is sold."""
+
+    sites: int
+    credits: int
+    reached_at: datetime | None  # when the reward was credited; None = not yet
 
 
 class PartnerClientCreateRequest(BaseModel):
@@ -160,6 +198,10 @@ class PartnerSummaryOut(BaseModel):
     # Credits earned on client payments, net of clawbacks (1 credit = $0.01).
     commission_credits_30d: int
     commission_credits_total: int
+    # One-time milestone rewards (PH-15), credits.
+    rewards_credits_30d: int
+    rewards_credits_total: int
+    lifetime_sites_sold: int
 
 
 class PartnerEarningsMonthOut(BaseModel):
@@ -168,3 +210,4 @@ class PartnerEarningsMonthOut(BaseModel):
     revenue: list[PartnerMoneyOut]
     spent_credits: int
     commission_credits: int
+    rewards_credits: int

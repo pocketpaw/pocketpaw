@@ -33,6 +33,12 @@
 #   units (IN: Rs.3,588 / Rs.11,988; default: $84 / $228). One table beside the
 #   wholesale one; the pay link charges it and the webhook checks the payment
 #   against the figure stored when the link was made.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``partner_price_usd`` takes the
+#   partner's volume ``tier`` and charges floor(price x (1 - discount)) through
+#   ``partners._calc.discounted_usd`` (the one table of tier numbers), so the
+#   sale, a tier change, the renewal and the offers all read the discounted
+#   figure. ``partner_prices_usd`` now lists every country x tier price, so a
+#   removed partner's site still renews at the discounted figure it last paid.
 # Updated 2026-08-19 (feat/site-plan-catalog-inclusions): added the
 #   ``sells_concierge`` property — the catalog-level "does this tier sell the
 #   concierge", lifted out of ``resolve_site_entitlements`` where it lived as an
@@ -605,15 +611,18 @@ def list_partner_plans() -> list[SitePlanTier]:
     return [_build(key) for key in _PARTNER_TIER_ORDER]
 
 
-def partner_price_usd(tier_key: str, country: str) -> int:
-    """Whole USD for ONE PERIOD of a partner-only tier in ``country``.
+def partner_price_usd(tier_key: str, country: str, tier: str = "bronze") -> int:
+    """Whole USD for ONE PERIOD of a partner-only tier in ``country``, after the
+    partner's volume ``tier`` discount (PH-15; bronze = no discount).
 
     Falls back to the "default" row for a country without its own price. Raises
     KeyError for a tier that is not partner-only — a monthly rung has no partner
     price, and guessing one would charge the wrong amount.
     """
+    from pocketpaw_ee.cloud.partners import _calc
+
     row = _PARTNER_PRICE_USD[tier_key]
-    return row.get((country or "").upper(), row["default"])
+    return _calc.discounted_usd(row.get((country or "").upper(), row["default"]), tier)
 
 
 def partner_client_price(tier_key: str, country: str) -> tuple[str, int]:
@@ -625,8 +634,15 @@ def partner_client_price(tier_key: str, country: str) -> tuple[str, int]:
 
 
 def partner_prices_usd(tier_key: str) -> frozenset[int]:
-    """Every price ``tier_key`` is sold at, across countries (empty if not partner-only)."""
-    return frozenset(_PARTNER_PRICE_USD.get(tier_key, {}).values())
+    """Every price ``tier_key`` is sold at, across countries and volume tiers
+    (empty if not partner-only)."""
+    from pocketpaw_ee.cloud.partners import _calc
+
+    return frozenset(
+        _calc.discounted_usd(price, t.name)
+        for price in _PARTNER_PRICE_USD.get(tier_key, {}).values()
+        for t in _calc.TIERS
+    )
 
 
 def list_site_scoped_plans() -> list[SitePlanTier]:

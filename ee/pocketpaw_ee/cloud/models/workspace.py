@@ -6,6 +6,11 @@ Updated 2026-10-01 (feat/partners-foundation, PH-1): added ``PartnerProfile`` an
 an ``active`` profile turns the per-site billing seams on for THIS workspace
 (``billing.enforcement.sites_enforced``). Updated 2026-10-02: ``IsoCountry`` is the
 one billing-country validator; ``tier`` is a Literal of the known tiers.
+Updated 2026-10-02 (feat/partners-tiers, PH-15): ``tier`` is now SYSTEM-owned —
+recomputed from active sold sites (``partners.service.refresh_standing``), raised
+right after a sale / client payment, lowered only by the monthly sweep, which
+stamps ``tier_reviewed_at``. An operator-set tier stands until the next
+recompute that moves it.
 
 ``Workspace`` carries the tenant's plan, its members' roles, and the embedded
 config below. The sub-models are separated by WHAT THEY ARE, not by who edits
@@ -218,11 +223,15 @@ class PartnerProfile(BaseModel):
     """
 
     status: PartnerStatus
+    # System-owned since PH-15 (see the module docstring); the operator PUT can
+    # still set it, and the next recompute that moves it overwrites that value.
     tier: PartnerTier = "bronze"
     footer_name: str = Field(min_length=1, max_length=120)
     billing_country: IsoCountry = "IN"
     founding: bool = False
     joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # When the monthly tier sweep last reviewed (and maybe lowered) ``tier``.
+    tier_reviewed_at: datetime | None = None
 
 
 class Workspace(TimestampedDocument):

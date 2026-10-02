@@ -15,6 +15,9 @@
 # renewal sweep lapsing a client-paid site without touching the wallet; the
 # subscription-payment top-up guard; summary / earnings / sites / offers fields;
 # the delete cascade treating the client rail as done.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): a paid client payment also
+# earns the 1st-site milestone reward (``FIRST_SALE_REWARD``), which a refund
+# does not claw back; the commission rule test covers the tier rates.
 #
 # Harness: the REAL ``standardwebhooks`` signer and ``DodoProvider`` for webhook
 # verification (as test_inr_topup.py), the shared ``mongo_db`` fixture, a fake
@@ -56,6 +59,8 @@ SECRET = "whsec_" + base64.b64encode(b"billing-test-secret-key-32bytes!").decode
 USD_PRODUCT = "prod_credits_usd"
 INR_PRODUCT = "prod_credits_inr"
 PHONE = "+919876543210"
+# PH-15: the partner's 1st distinct site sold credits this once.
+FIRST_SALE_REWARD = 200
 
 
 # ---------------------------------------------------------------- harness
@@ -450,7 +455,7 @@ async def test_a_matched_payment_activates_the_year_and_pays_25_percent(
     assert (rec.status, rec.commission_credits, rec.rate_bps) == ("paid", 5_700, 2_500)
     assert await _lines(wid, "partner_commission") == [5_700]
     assert await _lines(wid, "top_up") == []  # the client's money is never a top-up
-    assert await credits.balance(wid) == 5_700
+    assert await credits.balance(wid) == 5_700 + FIRST_SALE_REWARD
     payment = await Payment.find_one(Payment.gateway_ref == "pay_link_1")
     assert payment.workspace == wid and payment.credits_granted == 0
     assert redeploys == [site_id]
@@ -628,7 +633,7 @@ async def test_a_refund_within_60_days_reverses_once_and_lapses(mongo_db, store)
     await _refund("pay_link_1", event_id="evt_dis", event_type="dispute.lost")
 
     assert await _lines(wid, "partner_commission_reversal") == [-5_700]
-    assert await credits.balance(wid) == 0
+    assert await credits.balance(wid) == FIRST_SALE_REWARD, "a milestone is never clawed back"
     site = await Site.get(site_id)
     assert site.partner_payments[0].status == "reversed"
     assert (site.plan_tier, site.subscription_status, site.renewal_date) == ("free", "none", None)
@@ -647,7 +652,7 @@ async def test_a_refund_after_60_days_claws_nothing_back(mongo_db, store) -> Non
     await _age_commission("pay_link_1", old)
     await _refund("pay_link_1", event_id="evt_late")
     assert await _lines(wid, "partner_commission_reversal") == []
-    assert await credits.balance(wid) == 5_700
+    assert await credits.balance(wid) == 5_700 + FIRST_SALE_REWARD
     site = await Site.get(site_id)
     assert site.subscription_status == "active" and site.partner_payments[0].status == "paid"
 

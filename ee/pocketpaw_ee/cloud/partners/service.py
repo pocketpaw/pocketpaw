@@ -30,6 +30,20 @@
 # one Dodo payment; a failed checkout releases the reservation.
 # Re-check fix: a reservation that went stale while Dodo answered is released
 # and refused (409 ``partners.link_in_progress``), never handed out.
+# Updated 2026-10-02 (feat/partners-tiers, PH-15): VOLUME TIERS + MILESTONES.
+# ``refresh_standing`` is the one owner helper: it recomputes the tier from the
+# ACTIVE sold sites (raise only; ``allow_downgrade`` from the monthly
+# ``sweep_partner_tiers``, kill switch ``POCKETPAW_PARTNER_TIER_SWEEP_ENABLED``)
+# through ``workspace.service.set_partner_tier`` (compare-and-set), then grants
+# every milestone the LIFETIME distinct sites sold has reached
+# (``partner_reward``, key ``partner_reward:<workspace_id>:<sites>``). It runs
+# after every ``sell`` and every paid client payment, and never raises. Lifetime
+# is read from the append-only ledger — a site counts once the wallet paid a
+# partner rung for it or its client's payment earned a commission — so a refund,
+# a lapse or a deleted site never lowers it, never re-triggers a milestone and
+# never claws one back. ``list_offers`` shows the discounted price; ``get_me``
+# adds the standing; ``summary`` / ``earnings`` add reward credits; ``rewards``
+# lists the ladder.
 # Updated 2026-10-02: ``_default_store`` delegates to the shared
 # ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
 # instead of building its own ``FabricJournalStore``, so client writes are
@@ -48,6 +62,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -64,6 +79,7 @@ from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, 
 from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+from pocketpaw_ee.cloud.partners import _calc
 from pocketpaw_ee.cloud.partners.domain import (
     CUSTOMER_TYPE_ID,
     CUSTOMER_TYPE_NAME,
@@ -71,15 +87,19 @@ from pocketpaw_ee.cloud.partners.domain import (
     PartnerClient,
 )
 from pocketpaw_ee.cloud.partners.dto import (
+    PartnerBenefitsOut,
     PartnerClientCreateRequest,
     PartnerClientOut,
     PartnerClientUpdateRequest,
     PartnerEarningsMonthOut,
+    PartnerMeOut,
     PartnerMoneyOut,
+    PartnerNextTierOut,
     PartnerOfferOut,
     PartnerPayLinkOut,
     PartnerPayLinkRequest,
     PartnerProfileOut,
+    PartnerRewardOut,
     PartnerSaleOut,
     PartnerSellRequest,
     PartnerSiteOut,
@@ -90,6 +110,11 @@ logger = logging.getLogger(__name__)
 
 # Mirrors ``billing.service.CLIENT_BILLING_RAIL`` (the client paid the year).
 _CLIENT_RAIL = "client"
+# Ledger cause of a one-time milestone reward (PH-15).
+PARTNER_REWARD_CAUSE = "partner_reward"
+# Set to 0 to stop the monthly tier review (downgrades) without a release.
+_TIER_SWEEP_VAR = "POCKETPAW_PARTNER_TIER_SWEEP_ENABLED"
+_TIER_SWEEP_BATCH = 200
 
 
 def _default_store() -> FabricJournalStore:
@@ -131,11 +156,26 @@ async def get_active_profile(ctx: RequestContext) -> PartnerProfile | None:
     return profile if profile is not None and profile.status == "active" else None
 
 
-async def get_profile(ctx: RequestContext) -> PartnerProfileOut:
+async def get_profile(ctx: RequestContext) -> PartnerMeOut:
     profile = await partner_profile_for_workspace(ctx.workspace_id)
     if profile is None:
         raise NotFound("partner_profile", ctx.workspace_id or "")
-    return PartnerProfileOut.model_validate(profile, from_attributes=True)
+    workspace_id: str = ctx.workspace_id  # type: ignore[assignment]  # profile => resolved
+    from pocketpaw_ee.sites import service as sites_service
+
+    active = _active_count(await sites_service.list_partner_sites(workspace_id))
+    up = _calc.next_tier(active)
+    base = PartnerProfileOut.model_validate(profile, from_attributes=True)
+    return PartnerMeOut(
+        **base.model_dump(),
+        active_sites=active,
+        lifetime_sites_sold=await _lifetime_sites_sold(workspace_id),
+        next_tier=PartnerNextTierOut(**up) if up is not None else None,
+        benefits=PartnerBenefitsOut(
+            wholesale_discount_pct=_calc.wholesale_discount_bps(profile.tier) / 100,
+            commission_pct=_calc.tier_commission_bps(profile.tier) / 100,
+        ),
+    )
 
 
 async def _active_profile(ctx: RequestContext) -> PartnerProfile:
@@ -314,7 +354,11 @@ async def list_offers(ctx: RequestContext) -> list[PartnerOfferOut]:
             PartnerOfferOut(
                 sku=tier.key,
                 period_months=tier.period_months,
-                price_credits=site_plans.partner_price_usd(tier.key, profile.billing_country) * 100,
+                # After the partner's volume-tier discount (PH-15).
+                price_credits=site_plans.partner_price_usd(
+                    tier.key, profile.billing_country, profile.tier
+                )
+                * 100,
                 conversation_allowance=tier.conversation_allowance,
                 label=tier.display_name,
                 client_price_minor=amount,
@@ -446,6 +490,9 @@ async def sell(
             logger.warning(
                 "partners.sell: receipt write failed site=%s err=%s", doc.id, type(exc).__name__
             )
+    # PH-15: a sale can lift the tier (the NEXT sale gets the discount) and reach a
+    # milestone. Never raises: the sale already stands.
+    await refresh_standing(workspace_id)
     # no-event: the sale runs the publish path, which emits SitePublished on deploy;
     # the receipt is the owner's own bookkeeping (see record_site_invoice).
     return PartnerSaleOut(
@@ -513,44 +560,17 @@ def _paid_receipts(docs: list[Any]) -> list[Any]:
     return [inv for d in docs for inv in d.client_invoices if inv.paid]
 
 
-async def _site_plan_debits(workspace_id: str, site_ids: set[str]) -> list[Any]:
-    """Applied ``site_plan`` debits for ``site_ids`` (purchases, renewals, changes)."""
-    from pocketpaw_ee.cloud.billing.service import SITE_PLAN_DEBIT_CAUSE
+async def _entries(workspace_id: str, *causes: str) -> list[Any]:
+    """Applied ledger entries of ``causes`` (a phantom never moved the wallet)."""
     from pocketpaw_ee.cloud.credits import service as credits_service
 
     out: list[Any] = []
-    cursor: str | None = None
-    # ponytail: ``history`` pages the workspace ledger by ``_id`` with a ``cause``
-    # filter, and there is no (workspace, cause) index, so every call scans the
-    # workspace's WHOLE ledger (compute spend included), not just site_plan rows.
-    # Add that index plus a since-bounded read when a busy partner's ledger makes
-    # this slow.
-    while True:
-        page, cursor = await credits_service.history(
-            workspace_id, limit=200, cursor=cursor, cause=SITE_PLAN_DEBIT_CAUSE
-        )
-        out += [
-            e
-            for e in page
-            # A phantom (applied False) never moved the wallet.
-            if e.applied and e.amount_delta_micro < 0 and e.ref.get("site_id") in site_ids
-        ]
-        if cursor is None:
-            return out
-
-
-async def _commission_entries(workspace_id: str) -> list[Any]:
-    """Applied commission grants and their clawbacks (negative), for the ledger net."""
-    from pocketpaw_ee.cloud.billing.service import (
-        PARTNER_COMMISSION_CAUSE,
-        PARTNER_COMMISSION_REVERSAL_CAUSE,
-    )
-    from pocketpaw_ee.cloud.credits import service as credits_service
-
-    out: list[Any] = []
-    for cause in (PARTNER_COMMISSION_CAUSE, PARTNER_COMMISSION_REVERSAL_CAUSE):
+    for cause in causes:
         cursor: str | None = None
-        # ponytail: same unindexed (workspace, cause) ledger scan as _site_plan_debits.
+        # ponytail: ``history`` pages the workspace ledger by ``_id`` with a ``cause``
+        # filter, and there is no (workspace, cause) index, so every call scans the
+        # workspace's WHOLE ledger (compute spend included). Add that index plus a
+        # since-bounded read when a busy partner's ledger makes this slow.
         while True:
             page, cursor = await credits_service.history(
                 workspace_id, limit=200, cursor=cursor, cause=cause
@@ -559,6 +579,27 @@ async def _commission_entries(workspace_id: str) -> list[Any]:
             if cursor is None:
                 break
     return out
+
+
+async def _site_plan_debits(workspace_id: str, site_ids: set[str]) -> list[Any]:
+    """Applied ``site_plan`` debits for ``site_ids`` (purchases, renewals, changes)."""
+    from pocketpaw_ee.cloud.billing.service import SITE_PLAN_DEBIT_CAUSE
+
+    return [
+        e
+        for e in await _entries(workspace_id, SITE_PLAN_DEBIT_CAUSE)
+        if e.amount_delta_micro < 0 and e.ref.get("site_id") in site_ids
+    ]
+
+
+async def _commission_entries(workspace_id: str) -> list[Any]:
+    """Applied commission grants and their clawbacks (negative), for the ledger net."""
+    from pocketpaw_ee.cloud.billing.service import (
+        PARTNER_COMMISSION_CAUSE,
+        PARTNER_COMMISSION_REVERSAL_CAUSE,
+    )
+
+    return await _entries(workspace_id, PARTNER_COMMISSION_CAUSE, PARTNER_COMMISSION_REVERSAL_CAUSE)
 
 
 async def summary(
@@ -571,12 +612,13 @@ async def summary(
     debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
     receipts = _paid_receipts(docs)
     commissions = await _commission_entries(workspace_id)
+    rewards = await _entries(workspace_id, PARTNER_REWARD_CAUSE)
     now = datetime.now(UTC)
     since, due_by = now - timedelta(days=30), now + timedelta(days=30)
     return PartnerSummaryOut(
         clients=len(await list_clients(ctx, store=store)),
         sites_sold=len(docs),
-        active_sites=sum(1 for d in docs if d.subscription_status == "active"),
+        active_sites=_active_count(docs),
         # Same rule as list_partner_sites(due_within_days=30): a null date is never due.
         renewals_due_30d=sum(
             1 for d in docs if d.renewal_date is not None and _aware(d.renewal_date) <= due_by
@@ -589,6 +631,9 @@ async def summary(
             e.amount_delta for e in commissions if _aware(e.created_at) >= since
         ),
         commission_credits_total=sum(e.amount_delta for e in commissions),
+        rewards_credits_30d=sum(e.amount_delta for e in rewards if _aware(e.created_at) >= since),
+        rewards_credits_total=sum(e.amount_delta for e in rewards),
+        lifetime_sites_sold=await _lifetime_sites_sold(workspace_id),
     )
 
 
@@ -608,6 +653,7 @@ async def earnings(ctx: RequestContext, *, months: int = 12) -> list[PartnerEarn
     debits = await _site_plan_debits(workspace_id, {str(d.id) for d in docs})
     receipts = _paid_receipts(docs)
     commissions = await _commission_entries(workspace_id)
+    rewards = await _entries(workspace_id, PARTNER_REWARD_CAUSE)
     rows = []
     for key in keys:
         month_debits = [e for e in debits if _month(e.created_at) == key]
@@ -620,6 +666,153 @@ async def earnings(ctx: RequestContext, *, months: int = 12) -> list[PartnerEarn
                 commission_credits=sum(
                     e.amount_delta for e in commissions if _month(e.created_at) == key
                 ),
+                rewards_credits=sum(e.amount_delta for e in rewards if _month(e.created_at) == key),
             )
         )
     return rows
+
+
+# ---------------------------------------------------------------- tiers + rewards (PH-15)
+
+
+def _active_count(docs: Iterable[Any]) -> int:
+    """Sold sites on an active paid plan, whoever paid (the tier's input)."""
+    return sum(1 for d in docs if d.subscription_status == "active")
+
+
+async def _lifetime_sites_sold(workspace_id: str) -> int:
+    """Distinct sites this partner has EVER sold, read from the append-only ledger.
+
+    A site counts once the wallet paid a partner rung for it (a ``site_plan``
+    debit on ``site_year`` / ``staff_year``) or its client's payment earned a
+    commission. Nothing is subtracted for a refund, a lapse or a deleted site, so
+    the figure only grows and a milestone is reached once.
+    """
+    from pocketpaw_ee.cloud.billing.service import PARTNER_COMMISSION_CAUSE, SITE_PLAN_DEBIT_CAUSE
+
+    rungs = {t.key for t in site_plans.list_partner_plans()}
+    sold = {
+        e.ref.get("site_id")
+        for e in await _entries(workspace_id, SITE_PLAN_DEBIT_CAUSE)
+        if e.amount_delta_micro < 0 and e.ref.get("plan_tier") in rungs
+    } | {
+        e.ref.get("site_id")
+        for e in await _entries(workspace_id, PARTNER_COMMISSION_CAUSE)
+        if e.amount_delta_micro > 0
+    }
+    sold.discard(None)
+    return len(sold)
+
+
+def _reward_key(workspace_id: str, sites: int) -> str:
+    return f"partner_reward:{workspace_id}:{sites}"
+
+
+async def _grant_milestones(workspace_id: str) -> None:
+    """Credit every milestone reached and not yet credited. Idempotent per key."""
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    lifetime = await _lifetime_sites_sold(workspace_id)
+    credits_for = dict(_calc.MILESTONES)
+    for sites in _calc.milestones_reached(lifetime):
+        result = await credits_service.grant(
+            workspace=workspace_id,
+            amount=credits_for[sites],
+            cause=PARTNER_REWARD_CAUSE,
+            idempotency_key=_reward_key(workspace_id, sites),
+            ref={"milestone": sites, "lifetime_sites_sold": lifetime},
+        )
+        if result.created:
+            logger.info(
+                "partners: workspace=%s reached the %d-site milestone; rewarded %d credits",
+                workspace_id,
+                sites,
+                credits_for[sites],
+            )
+
+
+async def refresh_standing(
+    workspace_id: str, *, allow_downgrade: bool = False, now: datetime | None = None
+) -> None:
+    """Recompute an ACTIVE partner's tier and grant any milestone it has reached.
+
+    Raises the tier as soon as the active sold sites earn it; lowers it only when
+    ``allow_downgrade`` (the monthly sweep, which also stamps
+    ``tier_reviewed_at``). Never raises: callers run it after money already moved
+    (a sale, a client payment), and both halves are safe to re-drive, so the next
+    sale, payment redelivery or monthly review heals a failure here.
+    """
+    try:
+        profile = await partner_profile_for_workspace(workspace_id)
+        if profile is None or profile.status != "active":
+            return
+        from pocketpaw_ee.cloud.workspace import service as workspace_service
+        from pocketpaw_ee.sites import service as sites_service
+
+        earned = _calc.tier_for(_active_count(await sites_service.list_partner_sites(workspace_id)))
+        up = _calc.rank(earned) > _calc.rank(profile.tier)
+        tier = earned if up or allow_downgrade else profile.tier
+        if tier != profile.tier or allow_downgrade:
+            await workspace_service.set_partner_tier(
+                workspace_id,
+                expected=profile.tier,
+                tier=tier,
+                reviewed_at=(now or datetime.now(UTC)) if allow_downgrade else None,
+            )
+            if tier != profile.tier:
+                logger.info(
+                    "partners: workspace=%s tier %s -> %s", workspace_id, profile.tier, tier
+                )
+        await _grant_milestones(workspace_id)
+    except Exception:
+        logger.exception("partners: refresh_standing failed for workspace=%s", workspace_id)
+
+
+def _tier_sweep_enabled() -> bool:
+    raw = (os.environ.get(_TIER_SWEEP_VAR) or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+async def sweep_partner_tiers(*, now: datetime | None = None) -> dict[str, int]:
+    """The monthly tier review: every active partner not yet reviewed this UTC
+    month is recomputed WITH downgrade (and its milestones healed).
+
+    Runs on the shared 5-minute heartbeat; ``tier_reviewed_at`` makes it monthly.
+    A partner whose review write lost a race stays unreviewed and is retried on
+    the next tick.
+    """
+    if not _tier_sweep_enabled():
+        return {"reviewed": 0}
+    at = now or datetime.now(UTC)
+    month_start = at.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # global-read: a system sweep over every active partner workspace.
+    docs = (
+        await _WorkspaceDoc.find(
+            {
+                "deleted_at": None,
+                "partner.status": "active",
+                "$or": [
+                    {"partner.tier_reviewed_at": None},
+                    {"partner.tier_reviewed_at": {"$lt": month_start}},
+                ],
+            }
+        )
+        .limit(_TIER_SWEEP_BATCH)
+        .to_list()
+    )
+    for ws in docs:
+        await refresh_standing(str(ws.id), allow_downgrade=True, now=at)
+    return {"reviewed": len(docs)}
+
+
+async def rewards(ctx: RequestContext) -> list[PartnerRewardOut]:
+    """The milestone ladder with when each rung was credited (None = not yet)."""
+    workspace_id = await _require_active(ctx)
+    got = {
+        e.ref.get("milestone"): _aware(e.created_at)
+        for e in await _entries(workspace_id, PARTNER_REWARD_CAUSE)
+    }
+    return [
+        PartnerRewardOut(sites=sites, credits=credits, reached_at=got.get(sites))
+        for sites, credits in _calc.MILESTONES
+    ]
