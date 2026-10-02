@@ -1,6 +1,9 @@
 # CI — runs tests and lint on every PR targeting dev/main or an
 # RFC integration branch (pattern: feat/*-integration).
 # Created: 2026-02-26
+# Updated: 2026-10-02 (fix/canon-cross-repo-pins) — the EE test job runs
+# tests/cloud/test_paw_bar_widget_js.py (vendored loader hash pin), which otherwise
+# sits in the tests/cloud blind spot.
 # Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the EE test job runs the two
 # public concierge tool-lockdown files, which otherwise sit in the tests/cloud
 # blind spot.
@@ -318,6 +321,15 @@ jobs:
         # case skips here (python-docx ships in ee[extraction], which this job does
         # not install). Mutations: tests/mutations/concierge_knowledge_sources.json.
         run: uv run pytest tests/cloud/test_paw_bar_concierge_sources.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Bar loader tests
+        # Same addopts escape. GET /paw-bar/widget.js serves a copy of paw-bar's
+        # built loader; this file pins that copy's sha256 to the paw-bar commit in
+        # paw-bar-loader.pin.json, so a hand edit or a stale copy fails here.
+        run: uv run pytest tests/cloud/test_paw_bar_widget_js.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
