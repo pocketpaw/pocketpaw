@@ -431,10 +431,18 @@ async def test_http_operator_sets_then_clears_a_partner_with_audit(platform_http
     assert r.json()["partner"]["billing_country"] == "IN"
     joined = r.json()["partner"]["joined_at"]
 
+    # PH-15: the monthly tier review stamp survives an operator PUT.
+    reviewed = datetime(2026, 10, 1, tzinfo=UTC)
+    doc = await WorkspaceDoc.get(ws.id)
+    doc.partner.tier_reviewed_at = reviewed
+    await doc.save()
+
     r = await client.put(
         _url(wid), json={"status": "suspended", "footer_name": "x", "reason": "late"}
     )
     assert r.status_code == 200 and r.json()["partner"]["joined_at"] == joined
+    kept = (await WorkspaceDoc.get(ws.id)).partner.tier_reviewed_at
+    assert kept.replace(tzinfo=UTC) == reviewed
 
     r = await client.request("DELETE", _url(wid), json={"reason": "left the program"})
     assert r.status_code == 200 and r.json()["partner"] is None
@@ -653,7 +661,8 @@ async def test_selling_site_year_debits_the_partner_price_and_redeploys(
         ctx, body={"client_id": client_id, "site_id": site_id, "sku": "site_year"}, store=store
     )
 
-    assert await _balance(wid) == 5000 - 1700 + FIRST_SALE_REWARD, "exactly the IN price, not plan-carried"
+    paid = 5000 + FIRST_SALE_REWARD - await _balance(wid)
+    assert paid == 1700, "exactly the IN price, not plan-carried"
     assert sale.plan_tier == "site_year"
     assert sale.subscription_status == "active"
     assert sale.partner_client_id == client_id
@@ -1041,6 +1050,37 @@ async def test_http_summary_and_earnings(partners_http) -> None:
         assert (await client.get(f"/api/v1/partners/earnings?months={bad}")).status_code == 422
     holder["user"] = _user(wid, None)
     assert (await client.get("/api/v1/partners/summary")).status_code == 403
+
+
+async def test_http_me_and_rewards(partners_http) -> None:
+    """PH-15: /me carries the tier standing; /rewards lists the milestone ladder."""
+    client, holder, wid = partners_http
+    holder["user"] = _user(wid, "member")
+    r = await client.get("/api/v1/partners/me")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    del body["joined_at"]
+    assert body == {
+        "status": "active",
+        "tier": "bronze",
+        "footer_name": "acme Prints",
+        "billing_country": "IN",
+        "founding": False,
+        "active_sites": 0,
+        "lifetime_sites_sold": 0,
+        "next_tier": {"name": "silver", "at": 10, "remaining": 10},
+        "benefits": {"wholesale_discount_pct": 0.0, "commission_pct": 25.0},
+    }
+    r = await client.get("/api/v1/partners/rewards")
+    assert r.status_code == 200, r.text
+    assert r.json() == [
+        {"sites": 1, "credits": 200, "reached_at": None},
+        {"sites": 10, "credits": 1000, "reached_at": None},
+        {"sites": 25, "credits": 3000, "reached_at": None},
+        {"sites": 50, "credits": 7500, "reached_at": None},
+    ]
+    holder["user"] = _user(wid, None)
+    assert (await client.get("/api/v1/partners/rewards")).status_code == 403
 
 
 async def test_http_pay_link_needs_the_buy_plan_action(partners_http, monkeypatch) -> None:
