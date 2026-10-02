@@ -1218,9 +1218,22 @@ class Settings(BaseSettings):
         ),
     )
     pawbar_concierge_max_tokens: int = Field(
-        default=600,
+        default=2000,
         ge=1,
-        description="Max output tokens for one v2 Paw Bar concierge reply.",
+        description=(
+            "Max output tokens for one v2 Paw Bar concierge reply. A reasoning "
+            "model's thinking counts against it, so it must hold thinking plus a card."
+        ),
+    )
+    pawbar_concierge_reasoning_effort: Literal["", "none", "minimal", "low", "medium", "high"] = (
+        Field(
+            default="",
+            description=(
+                "Reasoning effort for the v2 Paw Bar concierge, sent as OpenAI's "
+                "reasoning_effort. Empty sends nothing; set it only for a model "
+                "(or proxy) that accepts the field."
+            ),
+        )
     )
     # Pinned FAQs (``pocketpaw_ee.paw_bar.knowledge_routes``). Every pinned answer
     # rides ahead of the KB hits in the v2 runner's ~12,000-char knowledge budget,

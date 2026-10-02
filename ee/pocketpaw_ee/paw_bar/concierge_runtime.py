@@ -52,6 +52,14 @@
 # labels) and becomes the ``action`` frame; later ones, and all of them with page
 # actions off, are dropped. The model still has no tools: it only writes a fence.
 #
+# The reply budget (``pawbar_concierge_max_tokens``, default ``_MAX_TOKENS``) has
+# to hold a reasoning model's thinking plus a card; a reply cut off there keeps
+# what it streamed (an open fence is dropped) and ends normally. A visitor who
+# asks for a person (``contact_route.is_contact_request``) always gets a route to
+# the team: when the reply has no valid lead card, or the model failed, the
+# runner appends ``contact_route.contact_reply`` (a server-built send_to_team
+# form, or a pointer to "Talk to a person" with lead capture off).
+#
 # A transient provider failure (timeout, 429, 5xx, connection error) before any
 # text has streamed is retried once after a short backoff (``_is_transient``). A
 # turn that still cannot be answered (daily spend cap, monthly quota, provider
@@ -227,6 +235,9 @@ _HISTORY_CHARS = 4_000
 _HISTORY_LINE_CHARS = 800
 # The run doc's usage.backend, so the meter and the stats can tell v2 apart.
 _BACKEND = "pawbar_concierge_v2"
+# The reply's output-token cap when settings give none. A reasoning model's
+# thinking counts against it, so it has to fit thinking plus a card.
+_MAX_TOKENS = 2_000
 # The provider's per-request timeout (ModelSettings ``timeout``). A stalled
 # provider becomes the ``unavailable`` frame instead of a widget spinning forever.
 _PROVIDER_TIMEOUT_S = 30.0
@@ -1000,7 +1011,8 @@ def _build_model(settings: Any) -> Any:
 def _model_settings(
     settings: Any, workspace_id: str, *, tags: Sequence[str] = ()
 ) -> dict[str, Any]:
-    """Fixed output cap, temperature and timeout, plus spend attribution on the proxy.
+    """Fixed output cap, temperature and timeout, the optional reasoning effort,
+    plus spend attribution on the proxy.
 
     ``openai_user`` is set here, not through ``end_user_id_for``: that reads a
     ContextVar only the agent run loop binds, and this call is not in that loop,
@@ -1012,10 +1024,16 @@ def _model_settings(
     from pocketpaw.agents.spend_attribution import is_proxy_provider
 
     out: dict[str, Any] = {
-        "max_tokens": int(getattr(settings, "pawbar_concierge_max_tokens", 600) or 600),
+        "max_tokens": int(getattr(settings, "pawbar_concierge_max_tokens", 0) or _MAX_TOKENS),
         "temperature": _TEMPERATURE,
         "timeout": _PROVIDER_TIMEOUT_S,
     }
+    # Opt-in: a reasoning model spends the output budget thinking before it writes
+    # a word. Sent as OpenAI's reasoning_effort (the proxy forwards it); unset
+    # sends nothing, since a model that doesn't know the field may refuse it.
+    effort = str(getattr(settings, "pawbar_concierge_reasoning_effort", "") or "").strip()
+    if effort:
+        out["openai_reasoning_effort"] = effort
     try:
         provider, _model = _builder(settings)._parse_provider_model(_model_spec(settings))
     except Exception:  # noqa: BLE001 — attribution must never break the reply
@@ -1104,7 +1122,8 @@ class FenceFilter:
     one in a reply goes through ``action`` (``action_spec.render_action`` bound
     to the turn's origin and pages) and its result, or None, is ``self.action``;
     any later one, and every one when ``action`` is None (page actions off), is
-    dropped. A fence still open at ``close()`` is dropped.
+    dropped. A fence still open at ``close()`` is dropped. ``lead_card`` says
+    whether a lead card passed, so the runner knows the visitor has a form.
 
     Fences are found the way paw-bar's markdown finds them, which is not
     line-anchored: any ``` opens one, its tag runs to the end of the line, and the
@@ -1129,6 +1148,8 @@ class FenceFilter:
         self._render_action = action
         self._action_seen = False
         self.action: dict[str, Any] | None = None
+        # Whether a send_to_team form card passed (the runner's contact route).
+        self.lead_card = False
         self._lead_capture = lead_capture is True
         self._lookup = lookup
         self._verbs = list(verbs or ())
@@ -1205,7 +1226,17 @@ class FenceFilter:
         except Exception:  # noqa: BLE001 — an unreadable catalog drops the card
             logger.warning("concierge: catalog lookup for a card failed", exc_info=True)
             return ""
-        return render_card(body, items, verbs=self._verbs, lead_capture=self._lead_capture) or ""
+        return self._noted(
+            body, render_card(body, items, verbs=self._verbs, lead_capture=self._lead_capture)
+        )
+
+    def _noted(self, body: str, card: str | None) -> str:
+        """The rendered card ("" when dropped), noting a lead card that passed."""
+        if card and self._lead_capture and not self.lead_card:
+            from pocketpaw_ee.paw_bar.card_spec import has_lead_form
+
+            self.lead_card = has_lead_form(body)
+        return card or ""
 
     def _take_action(self, body: str) -> str:
         if self._render_action is None:
@@ -1226,9 +1257,11 @@ class FenceFilter:
         if tag == _CARD_LANG:
             from pocketpaw_ee.paw_bar.card_spec import render_card
 
-            return (
-                render_card(body, self._catalog, verbs=self._verbs, lead_capture=self._lead_capture)
-                or ""
+            return self._noted(
+                body,
+                render_card(
+                    body, self._catalog, verbs=self._verbs, lead_capture=self._lead_capture
+                ),
             )
         if (
             self._allow_doc_code
@@ -1394,6 +1427,16 @@ def _is_transient(exc: BaseException) -> bool:
     return False
 
 
+def _hit_output_cap(exc: BaseException) -> bool:
+    """pydantic_ai's error for a response the provider cut off at max_tokens
+    (finish_reason "length") before it held any usable output: a reasoning model
+    that spent the whole budget thinking. A cut-off reply that streamed text does
+    not raise; it simply ends."""
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+
+    return isinstance(exc, UnexpectedModelBehavior) and "token limit" in str(exc).lower()
+
+
 async def degrade_reply(widget: Any, reason: str) -> AsyncIterator[bytes]:
     """The SSE frames for a turn the concierge cannot answer: one ``unavailable``
     frame, then ``stream_end``.
@@ -1455,7 +1498,11 @@ async def run_concierge_v2(
     transient provider failure before any text is retried once; a failure that
     stands ends with ``degrade_reply`` (the ``unavailable`` frame, reason
     "temporary") after whatever already streamed, and the exception text never
-    reaches the visitor. A site at its daily spend cap gets ``degrade_reply``
+    reaches the visitor. Two failures end the turn normally instead: a reply cut
+    off at the output cap after it streamed text, and any failure on a turn
+    where the visitor asked for a person, which gets ``contact_reply``. That
+    route is also added to a contact turn the model answered without a valid
+    lead card. A site at its daily spend cap gets ``degrade_reply``
     alone (reason "limit"), with no run doc and no model call, and its owner is
     told once that UTC day.
     """
@@ -1463,6 +1510,7 @@ async def run_concierge_v2(
 
     from pocketpaw_ee.cloud.chat.runs import service as run_service
     from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+    from pocketpaw_ee.paw_bar.contact_route import contact_reply, is_contact_request
     from pocketpaw_ee.paw_bar.router import _sse
 
     settings = _settings()
@@ -1575,8 +1623,13 @@ async def run_concierge_v2(
         # Spend attribution: the proxy's spend row names the site and the widget.
         tags = [f"pawbar_site:{site_id}", f"pawbar_widget:{widget_id}"]
         model_settings = _model_settings(settings, workspace_id, tags=tags)
+        # A visitor asking for a person always leaves with a route to the team,
+        # whatever the model does (``contact_route``).
+        contact = is_contact_request(message)
         # One retry, only for a transient failure and only while the visitor has
         # seen nothing: a retry after text would repeat what they already read.
+        # A failure that stands still ends the turn normally when the reply was
+        # cut off at the output cap after text, or the visitor asked for a person.
         for attempt in (1, 2):
             fences = _new_fences()
             try:
@@ -1589,7 +1642,20 @@ async def run_concierge_v2(
                 break
             except Exception as exc:
                 if attempt > 1 or full_text or not _is_transient(exc):
-                    raise
+                    if not (contact or (full_text and _hit_output_cap(exc))):
+                        if _hit_output_cap(exc):
+                            logger.warning(
+                                "concierge v2: run %s hit the output cap before any text",
+                                run_id,
+                            )
+                        raise
+                    logger.warning(
+                        "concierge v2: run %s ended early (%s); keeping the reply",
+                        run_id,
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
+                    break
                 logger.warning(
                     "concierge v2: transient provider failure for run %s; retrying once",
                     run_id,
@@ -1599,6 +1665,12 @@ async def run_concierge_v2(
         for piece in fences.close():
             full_text += piece
             yield _sse("chunk", {"content": piece, "type": "text"})
+        if contact and not fences.lead_card:
+            for piece in contact_reply(
+                lead_capture=lead_capture_on(site), said_something=bool(full_text.strip())
+            ):
+                full_text += piece
+                yield _sse("chunk", {"content": piece, "type": "text"})
 
         # Exactly the knowledge the model was given. ``items`` is the CR-3 name;
         # the same list under ``sources`` keeps chips on bundles older than CR-7.

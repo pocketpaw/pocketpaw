@@ -31,8 +31,8 @@
   {
     "label": "the fixed output cap is dropped — reply length falls back to the model default",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "        \"max_tokens\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 600) or 600),",
-    "replace": "        \"max_tokenz\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 600) or 600),",
+    "find": "        \"max_tokens\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 0) or _MAX_TOKENS),",
+    "replace": "        \"max_tokenz\": int(getattr(settings, \"pawbar_concierge_max_tokens\", 0) or _MAX_TOKENS),",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_model_call_is_offered_zero_tools",
       "tests/cloud/test_paw_bar_concierge_v2.py::test_the_real_model_request_carries_no_tools_and_leads_with_the_frame"
@@ -606,6 +606,24 @@
     "replace": "        if False:\n            return False\n",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_degrade.py::test_the_owner_hears_about_the_cap_once_per_site_per_day"
+    ]
+  },
+  {
+    "label": "contact route: a visitor who asks for a person gets no form when the model wrote none",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if contact and not fences.lead_card:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_contact.py::test_a_contact_request_the_model_spent_on_thinking_gets_the_lead_card"
+    ]
+  },
+  {
+    "label": "contact route: a failed model on a contact request ends as unavailable again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                    if not (contact or (full_text and _hit_output_cap(exc))):\n",
+    "replace": "                    if True:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2_contact.py::test_a_contact_request_the_provider_failed_gets_the_lead_card"
     ]
   }
 ]
