@@ -12,16 +12,20 @@
 # absolute with ``POCKETPAW_PUBLIC_BASE_URL`` (read per call): a logged-out
 # Discover viewer is not on the backend origin. ``recipe_for_discover`` serves
 # ``use``: the recipe of a public, unhidden template, with no write anywhere.
+#
+# Updated 2026-10-02 (feat/studio-templates): the base URL comes from
+# ``_core.public_url.public_base_url`` (the dup-ratchet's one accessor) instead of
+# a direct env read.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
 
+from pocketpaw_ee.cloud._core.public_url import public_base_url
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import StudioTemplateUpdated
 from pocketpaw_ee.cloud.models.studio_template import StudioTemplate
@@ -34,8 +38,7 @@ _MEDIA_KINDS = {"image": "image", "video": "video", "music": "audio"}
 def _absolute(url: str | None) -> str | None:
     if not url or url.startswith(("http://", "https://")):
         return url or None
-    base = os.environ.get("POCKETPAW_PUBLIC_BASE_URL", "http://localhost:8888").rstrip("/")
-    return f"{base}/{url.lstrip('/')}"
+    return f"{public_base_url()}/{url.lstrip('/')}"
 
 
 def _discover_row(doc: StudioTemplate) -> dict[str, Any]:
