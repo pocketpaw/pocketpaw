@@ -335,8 +335,9 @@ auto-approves and blocks nothing. The CLI glob-matches `disallowed_tools` rules
 when it spawns, but the gate does not expand globs, so a pattern in
 `allow_tools` admits nothing and one in `deny_tools` is left to the CLI alone.
 On a turn with a deny set, a mode allow-list or an exclusive tool list, the
-backend also starts only the MCP servers that own at least one allowed tool, so
-the agent never sees tools it may not call.
+backend also starts only the MCP servers that own at least one allowed tool. A
+server whose every tool is out of scope never starts, so tool search cannot
+surface its tools.
 
 ### How it derives at bind / unbind
 
