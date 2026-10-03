@@ -8,7 +8,8 @@ Changes:
     that connects with no ``?token=`` and no other valid credential is
     accepted, then must send ``{"type": "auth", "ticket": "<ws_ticket>"}`` as
     its first frame within ``AUTH_FRAME_TIMEOUT_SECONDS``. The ticket is
-    redeemed with the EE ``consume_ws_ticket`` (single use). Any first-frame
+    redeemed with the EE ``consume_ws_ticket`` (single use), and only an active
+    superuser's ticket is admitted (the EE bridge's full_access rule). Any first-frame
     failure closes 4001. A ticket in the query string is still refused with
     4003 at the handshake. Existing token/cookie/bearer/protocol/localhost auth
     is unchanged.
@@ -53,7 +54,8 @@ async def _first_frame_ticket_ok(websocket: WebSocket) -> bool:
     Expects ``{"type": "auth", "ticket": "<ws_ticket>"}`` (``token`` is an
     alias, matching the cloud chat and websandbox sockets). Returns False on
     timeout, disconnect, bad JSON, wrong shape, an invalid or replayed ticket,
-    or an OSS install without the EE ticket store.
+    a ticket whose user is not an active superuser, or an OSS install without
+    the EE ticket store.
     """
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_FRAME_TIMEOUT_SECONDS)
@@ -67,12 +69,20 @@ async def _first_frame_ticket_ok(websocket: WebSocket) -> bool:
         return False
     try:
         from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
+        from pocketpaw_ee.cloud.models.user import User
     except ImportError:
         return False  # OSS install: no ticket store, fail closed.
     try:
-        return await consume_ws_ticket(ticket) is not None
+        user_id = await consume_ws_ticket(ticket)
+        if user_id is None:
+            return False
+        # Every other credential here is owner-level, and any active cloud user
+        # (guests too) can mint a ticket. Admit only platform admins: the same
+        # is_superuser rule the EE auth bridge uses for full_access.
+        user = await User.get(user_id)
+        return bool(user and user.is_active and user.is_superuser)
     except Exception as exc:  # noqa: BLE001 — fail closed on any store error
-        logger.warning("ws_ticket consume failed: %s", exc)
+        logger.warning("ws_ticket auth failed: %s", exc)
         return False
 
 

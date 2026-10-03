@@ -727,9 +727,11 @@ ignore_imports = [
     # all. Guarded by try/except; an OSS-only install has nothing to flush.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud._core.request_log",
     # The dashboard socket redeems a first-frame ws_ticket through the EE
-    # ticket store. Runtime import inside a try/except ImportError, so an
-    # OSS-only install fails closed (no ticket store, close 4001).
+    # ticket store, then loads the User to require an active superuser.
+    # Runtime imports inside a try/except ImportError, so an OSS-only install
+    # fails closed (no ticket store, close 4001).
     "pocketpaw.dashboard_ws -> pocketpaw_ee.cloud.auth.ws_tickets",
+    "pocketpaw.dashboard_ws -> pocketpaw_ee.cloud.models.user",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.client",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.store",
     # atlas resolves optional EE introspection (Fabric schema) and the
