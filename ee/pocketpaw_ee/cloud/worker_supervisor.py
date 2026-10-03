@@ -45,6 +45,7 @@ from arq.constants import default_queue_name
 from arq.worker import create_worker, func
 
 from pocketpaw.lens_checkins import automation_run
+from pocketpaw.lens_checkins import flush as flush_lens_checkins
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,8 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
         await asyncio.gather(*lane_tasks, stop_task, return_exceptions=True)
         for worker, name in zip(workers, names, strict=True):
             await _close_quietly(worker, name)
+        # Deliver the last paw-lens check-ins; 1 s budget, never raises.
+        await flush_lens_checkins(timeout=1.0)
 
 
 def main() -> int:

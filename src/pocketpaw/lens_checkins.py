@@ -26,6 +26,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext, suppress
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -102,9 +103,12 @@ def _spawn(coro: Awaitable[None]) -> asyncio.Task[None]:
 
 
 async def flush(timeout: float = 2.0) -> None:
-    """Wait for in-flight check-ins. For shutdown and tests."""
-    if _pending:
-        await asyncio.wait(set(_pending), timeout=timeout)
+    """Wait up to ``timeout`` for in-flight check-ins. Shutdown and tests. Never raises."""
+    try:
+        if _pending:
+            await asyncio.wait(set(_pending), timeout=timeout)
+    except Exception:  # noqa: BLE001 — shutdown must not trip on telemetry
+        logger.debug("lens check-in flush failed", exc_info=True)
 
 
 def _error_text(exc: BaseException) -> str:
@@ -118,20 +122,41 @@ def _error_text(exc: BaseException) -> str:
     return text[:MAX_ERROR_CHARS]
 
 
-def schedule_from_trigger(trigger: Any) -> dict[str, Any] | None:
-    """APScheduler trigger → check-in ``schedule``. None for one-shot triggers.
+# A known Monday..Sunday week, used to ask an APScheduler field which weekdays it matches.
+_WEEK = [datetime(2024, 1, d) for d in range(1, 8)]
 
-    ponytail: numeric day_of_week passes through as-is; APScheduler counts
-    0=Monday, crontab 0=Sunday. Named days (mon-fri) are exact.
+
+def _crontab_dow(field: Any) -> str:
+    """APScheduler day_of_week field → numeric crontab day_of_week.
+
+    APScheduler counts 0=Monday..6=Sunday, crontab 0=Sunday..6=Saturday, so the
+    field is evaluated (names, ranges, lists, steps alike) to the weekdays it
+    really fires on, then written as a crontab list. A wrapped crontab range
+    (fri-sun) is invalid, which is why this emits a list, never a range.
     """
+    if str(field) == "*":
+        return "*"
+    days = {
+        d.weekday()
+        for d in _WEEK
+        if any(expr.get_next_value(d, field) == d.weekday() for expr in field.expressions)
+    }
+    if len(days) == 7:
+        return "*"
+    return ",".join(str(n) for n in sorted((d + 1) % 7 for d in days))
+
+
+def schedule_from_trigger(trigger: Any) -> dict[str, Any] | None:
+    """APScheduler trigger → check-in ``schedule``. None for one-shot triggers."""
     fields = getattr(trigger, "fields", None)
     if fields:
-        by_name = {f.name: str(f) for f in fields}
-        return {
-            "crontab": " ".join(
-                by_name.get(k, "*") for k in ("minute", "hour", "day", "month", "day_of_week")
-            )
-        }
+        by_name = {f.name: f for f in fields}
+        parts = [
+            str(by_name[k]) if k in by_name else "*" for k in ("minute", "hour", "day", "month")
+        ]
+        dow = by_name.get("day_of_week")
+        parts.append(_crontab_dow(dow) if dow is not None else "*")
+        return {"crontab": " ".join(parts)}
     interval = getattr(trigger, "interval", None)
     if interval is not None and hasattr(interval, "total_seconds"):
         return {"interval_seconds": int(interval.total_seconds())}

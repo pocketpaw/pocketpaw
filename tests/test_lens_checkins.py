@@ -154,9 +154,32 @@ async def test_baggage_lands_on_child_spans(lens, capfire, monkeypatch):
     assert attrs["paw.automation.id"] == "m1"
 
 
+@pytest.mark.parametrize(
+    ("aps_dow", "crontab_dow"),
+    [
+        ("mon", "1"),
+        ("sun", "0"),
+        ("sat", "6"),
+        ("mon-fri", "1,2,3,4,5"),
+        ("fri-sun", "0,5,6"),  # wraps in crontab, so a list, never "5-0"
+        ("mon,wed,fri", "1,3,5"),
+        ("0", "1"),  # APScheduler 0 = Monday
+        ("6", "0"),  # APScheduler 6 = Sunday
+        ("5-6", "0,6"),
+        ("0,4", "1,5"),
+        ("*/2", "0,1,3,5"),  # mon, wed, fri, sun
+        ("*", "*"),
+        ("mon-sun", "*"),
+    ],
+)
+def test_day_of_week_is_translated_to_crontab_numbering(aps_dow, crontab_dow):
+    trigger = CronTrigger(minute="0", hour="9", day_of_week=aps_dow)
+    assert schedule_from_trigger(trigger) == {"crontab": f"0 9 * * {crontab_dow}"}
+
+
 def test_schedule_from_trigger():
     assert schedule_from_trigger(CronTrigger(minute="0", hour="9", day_of_week="mon-fri")) == {
-        "crontab": "0 9 * * mon-fri"
+        "crontab": "0 9 * * 1,2,3,4,5"
     }
     assert schedule_from_trigger(IntervalTrigger(minutes=5)) == {"interval_seconds": 300}
     assert schedule_from_trigger(DateTrigger(run_date="2030-01-01")) is None
@@ -260,3 +283,30 @@ async def test_resilient_query_is_traced(capfire, monkeypatch):
     assert len(spans) == 1
     assert spans[0]["attributes"]["pocketpaw.claude_sdk.mode"] == "stateless"
     assert spans[0]["attributes"]["gen_ai.operation.name"] == "invoke_agent"
+
+
+async def test_flush_delivers_a_pending_ok(lens):
+    seen, _ = lens
+
+    async def slow(request):
+        await asyncio.sleep(0.2)
+        seen.append({"body": json.loads(request.content)})
+        return httpx.Response(202)
+
+    lens_checkins._transport = httpx.MockTransport(slow)
+    async with automation_run("job", "slow"):
+        pass
+    assert lens_checkins._pending, "the ok post is still in flight when the job returns"
+    assert all(s["body"]["status"] != "ok" for s in seen)
+    await flush(timeout=1.0)
+    assert [s["body"]["status"] for s in seen if "status" in s["body"]][-1] == "ok"
+    assert not lens_checkins._pending
+
+
+async def test_flush_never_raises(monkeypatch):
+    async def boom(*a, **kw):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(lens_checkins, "_pending", {object()})
+    monkeypatch.setattr(lens_checkins.asyncio, "wait", boom)
+    await flush(timeout=0.1)

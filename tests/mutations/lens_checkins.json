@@ -88,5 +88,23 @@
     "tests": [
       "tests/test_lens_checkins.py"
     ]
+  },
+  {
+    "label": "lens: APScheduler day numbering sent unconverted",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "sorted((d + 1) % 7 for d in days)",
+    "replace": "sorted(days)",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: flush waits for nothing",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "            await asyncio.wait(set(_pending), timeout=timeout)",
+    "replace": "            pass",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
   }
 ]

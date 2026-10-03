@@ -741,3 +741,10 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
         await _bounded("mcp_servers", get_mcp_manager().stop_all(), timeout=8.0)
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)
+
+    # Deliver the last paw-lens check-ins (the final ``ok`` of a job that just
+    # finished). Last, so the schedulers and the ee hooks above have stopped.
+    # Bounded at 1 s; ``flush`` never raises.
+    from pocketpaw.lens_checkins import flush as flush_lens_checkins
+
+    await flush_lens_checkins(timeout=1.0)
