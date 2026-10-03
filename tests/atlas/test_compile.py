@@ -74,7 +74,7 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 12
-        assert len(surfs.entries) == 34
+        assert len(surfs.entries) == 35
         verbs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[3].read_text(encoding="utf-8")))
         assert {e.kind for e in verbs.entries} == {"verb"}
 
