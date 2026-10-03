@@ -6900,3 +6900,33 @@ Today the only `request_context` routes in a mapped family are the file
 version routes (`/files/{file_id}/versions…`, `/files/write`,
 `PUT /files/{file_id}`). The other rows apply as routes move onto
 `request_context`.
+
+## Agent health (paw-lens proxy)
+
+paw-lens is the internal trace store. The browser never calls it: these routes
+proxy its read API, scoped to the caller's active workspace. Enterprise only.
+
+| Route | paw-lens route |
+|---|---|
+| `GET /api/v1/lens/overview` | `GET /v1/overview` |
+| `GET /api/v1/lens/issues?status=open\|muted\|resolved` | `GET /v1/issues` |
+| `GET /api/v1/lens/issues/{fingerprint}` | `GET /v1/issues/{fingerprint}` |
+| `POST /api/v1/lens/issues/{fingerprint}/mute` `{"minutes": n}` | `POST /v1/issues/{fingerprint}/mute` |
+| `POST /api/v1/lens/issues/{fingerprint}/resolve` | `POST /v1/issues/{fingerprint}/resolve` |
+| `GET /api/v1/lens/runs/{trace_id}` | `GET /v1/runs/{trace_id}` |
+| `GET /api/v1/lens/agents` | `GET /v1/agents` |
+| `GET /api/v1/lens/monitors` | `GET /v1/monitors` |
+| `GET /api/v1/lens/monitors/{slug}` | `GET /v1/monitors/{slug}` |
+
+GET routes accept `since`. The proxy adds `workspace_id` from the session to
+every upstream call and drops any `workspace_id` the client sends. Response
+bodies are paw-lens's JSON, unchanged.
+
+- `POCKETPAW_LENS_API_URL` unset: every route returns `200 {"enabled": false}`
+  and makes no network call.
+- `POCKETPAW_LENS_API_TOKEN` is sent as `X-Lens-Token` and never logged.
+- Path params must match `[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`, otherwise `422`.
+- paw-lens down, slow (3 s timeout) or erroring: `503 lens.unavailable`.
+  paw-lens rejects the token: `503 lens.misconfigured`. paw-lens 404: `404
+  lens.not_found`. paw-lens 400: `400 lens.bad_request`.
+- Mute and resolve are open to any workspace member for now.
