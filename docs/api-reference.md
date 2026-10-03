@@ -2,6 +2,9 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-04 (feat/discover-slug) — Discover listings carry a stable
+  `slug`; `GET /discover/{id_or_slug}` takes an id or a slug (optional `source`
+  query param when two sources share one).
 Updated: 2026-10-03 (fix/paw-key-scopes) — "Workspace API key scopes": which
   route families each `paw_` key scope unlocks; everything else is a 403.
 Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
@@ -1564,6 +1567,7 @@ reports or the source item's id):
 ```json
 {
   "id": "6660a1...",
+  "slug": "bakery",
   "source": "site_template",
   "kind": "site",
   "title": "Bakery",
@@ -1578,6 +1582,14 @@ reports or the source item's id):
   "media_url": null
 }
 ```
+
+`slug` is the listing's URL handle: the title lowercased and folded to
+`a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), set
+when the listing is first indexed and never changed afterwards, so a renamed
+template keeps its link. Slugs are unique within a source; a second `Bakery`
+in the same source gets `bakery-2`, then `bakery-3`. A listing indexed before
+slugs existed reports its `id` as `slug` until the next reindex (at most 30
+minutes after a deploy) fills it in; the id works on the item route too.
 
 `media_kind` (`image`, `video`, `audio`) and `media_url` are set on studio
 template listings and `null` on site templates. Studio listings carry absolute
@@ -1598,7 +1610,12 @@ Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last
 page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
 `limit` above 50 returns `422`.
 
-### `GET /discover/{listing_id}` (public)
+### `GET /discover/{id_or_slug}` (public)
+
+Takes a listing id or its slug. The id is tried first, then the slug among
+unhidden listings. Because slugs are unique per source, `?source=studio_template`
+picks the source when two listings share a slug; without it the oldest match is
+returned.
 
 Response `200`: one listing. `404` when it doesn't exist or has been hidden.
 
