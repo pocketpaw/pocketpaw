@@ -126,9 +126,7 @@ def _summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _signals(
-    runs: list[dict[str, Any]], business: Business, site_blocks_ai_bots: bool
-) -> Signals:
+def _signals(runs: list[dict[str, Any]], business: Business, site_blocks_ai_bots: bool) -> Signals:
     ok = [r for r in runs if r["ok"]]
     judged = [r["judgement"] for r in ok if r["judgement"]]
     sources = [s for r in ok for s in r["sources"]]
@@ -192,9 +190,7 @@ async def run_check(
                 error = str(exc) if isinstance(exc, EngineError) else type(exc).__name__
                 logger.warning("ai_visibility: %s failed: %s", engine.name, error)
                 return {**base, "ok": False, "error": error[:500], "cost_usd": 0.0}
-            judged = await _judge_answer(
-                answer, business, decision_model, fallback_model, confirm
-            )
+            judged = await _judge_answer(answer, business, decision_model, fallback_model, confirm)
         judge_cost = judged.pop("judge_cost_usd")
         return {
             **base,

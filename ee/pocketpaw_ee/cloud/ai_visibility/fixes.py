@@ -103,8 +103,10 @@ RULES: list[tuple[str, Callable[[Signals], bool]]] = [
     *[(kind, _listing_gap(kind)) for kind in LISTING_TYPES],
     (
         "reviews",
-        lambda s: s.mentioned_any
-        and (not s.recommended_any or (s.avg_sentiment is not None and s.avg_sentiment < 2.5)),
+        lambda s: (
+            s.mentioned_any
+            and (not s.recommended_any or (s.avg_sentiment is not None and s.avg_sentiment < 2.5))
+        ),
     ),
     ("site_content", lambda s: not s.mentioned_any),
 ]
