@@ -351,3 +351,26 @@ async def test_the_procedure_does_not_offer_lower_thirds() -> None:
         "render full frame and opaque, so overlays like lower thirds are not possible yet" in flat
     )
     assert "animated stat, lower third" not in flat
+
+
+async def test_the_playhead_and_graphic_style_are_rendered() -> None:
+    preamble = await _render(_timeline(playhead_ms=10_000, graphic_style="velvet"))
+
+    assert "Playhead: 10.0s (10000 ms)" in preamble
+    assert "Graphic style: velvet" in preamble
+
+
+async def test_absent_playhead_and_style_render_nothing() -> None:
+    preamble = await _render(_timeline())
+
+    assert not _has_block(preamble, "Playhead:")
+    assert not _has_block(preamble, "Graphic style:")
+
+
+async def test_the_procedure_teaches_placement_on_the_render_call() -> None:
+    flat = " ".join((await _render(_timeline())).split())
+
+    assert "replace_range {from_ms: 10000, to_ms: 14000}" in flat
+    assert "data-duration set to exactly that span" in flat
+    assert "start_ms = the Playhead" in flat
+    assert "Use the Graphic style for new graphics unless the user names another" in flat
