@@ -34,6 +34,9 @@ Updated: 2026-10-01 (feat/discover-index, DS-1) — added
 Updated: 2026-10-02 (feat/discover-index, hardening) — added
 ``rate_limit_discover_report``, a per-user bucket (10/hour across all listings)
 on ``POST /discover/{id}/report``, so one account can't spray reports.
+
+``rate_limit_ai_check_public`` is a per-IP bucket (5/hour) on the public
+``POST /tools/ai-check``: every call spends platform money on AI engines.
 """
 
 from __future__ import annotations
@@ -79,6 +82,11 @@ _meeting_lookup_limiter = RateLimiter(rate=30.0 / 60.0, capacity=30)
 # 60 public Discover reads per minute per IP. The index is browsed before sign-in;
 # a person paging and opening cards needs a few dozen, a scraper gets 60 a minute.
 _discover_public_limiter = RateLimiter(rate=60.0 / 60.0, capacity=60)
+
+# 5 free AI checks per hour per IP. Each check is six paid engine calls, so a person
+# trying a few spellings of their business fits; a script does not (the daily spend
+# cap in ai_visibility is the backstop).
+_ai_check_public_limiter = RateLimiter(rate=5.0 / 3600.0, capacity=5)
 
 # 10 Discover reports per hour per user, across every listing. Three reporters
 # hide a listing, so a person reporting what they see needs a handful; a sock
@@ -160,6 +168,15 @@ async def rate_limit_discover_public(request: Request) -> None:
         raise RateLimited(
             "discover.rate_limited",
             "Too many requests - wait a moment and try again.",
+        )
+
+
+async def rate_limit_ai_check_public(request: Request) -> None:
+    """Per-IP bucket guarding the public POST /tools/ai-check (5/hour)."""
+    if not _ai_check_public_limiter.check(f"ai-check-public:{_client_ip(request)}").allowed:
+        raise RateLimited(
+            "tools.ai_check.rate_limited",
+            "Too many checks from here - try again in an hour.",
         )
 
 
@@ -266,6 +283,7 @@ async def rate_limit_slug_check(ctx: RequestContext = Depends(request_context)) 
 __all__ = [
     "client_ip",
     "consume_invite_create_tokens",
+    "rate_limit_ai_check_public",
     "rate_limit_discover_public",
     "rate_limit_discover_report",
     "rate_limit_invite_create",

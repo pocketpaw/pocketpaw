@@ -2586,6 +2586,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Free public AI check (AV-4, POST /api/v1/tools/ai-check).
+    turnstile_secret: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare Turnstile secret for the free AI check. Unset (dev) skips "
+            "verification with a warning. POCKETPAW_TURNSTILE_SECRET."
+        ),
+    )
+    ai_check_daily_usd: float = Field(
+        default=5.0,
+        description=(
+            "Daily USD cap on engine spend for anonymous free AI checks; past it the "
+            "endpoint answers 503. POCKETPAW_AI_CHECK_DAILY_USD."
+        ),
+    )
+
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price
     # primitives). A completed chat run is billed by its real compute cost times
     # a flat markup, converted from USD into integer credits. These two settings

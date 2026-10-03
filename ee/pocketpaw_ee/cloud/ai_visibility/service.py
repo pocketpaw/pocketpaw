@@ -1,6 +1,4 @@
-# AI visibility — service: run a check and store it.
-#
-# Created 2026-10-03 (feat/ai-visibility-core, AV-3).
+# AI visibility — service: run a check, store it, read spend back.
 #
 # ``run_check`` asks every engine every question ``runs`` times (concurrently,
 # at most ``concurrency`` calls in flight), judges each answer, picks one fix and
@@ -13,15 +11,18 @@
 # near miss goes to the optional ``confirm`` hook, else counts as not named
 # (``near_miss`` is kept on the row). Only a named answer goes to the decision
 # model for position + sentiment. Every judge failure is logged and the row keeps
-# ``judgement=None``; it never fails the check.
+# ``judgement=None``; it never fails the check. ``signals`` turns stored rows into
+# the inputs of ``fixes.pick_fix`` so a caller can pick a fix over a subset.
 #
 # Tenancy: ``workspace_id`` / ``site_id`` are None for an anonymous check (the
-# free public check AV-4 adds). Nothing reads checks back yet (AV-4 / AV-6).
+# free public check, ``public_check.py``); ``anonymous_spend_today`` sums those
+# for its daily spend cap.
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict
@@ -126,7 +127,7 @@ def _summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _signals(runs: list[dict[str, Any]], business: Business, site_blocks_ai_bots: bool) -> Signals:
+def signals(runs: list[dict[str, Any]], business: Business, site_blocks_ai_bots: bool) -> Signals:
     ok = [r for r in runs if r["ok"]]
     judged = [r["judgement"] for r in ok if r["judgement"]]
     sources = [s for r in ok for s in r["sources"]]
@@ -217,11 +218,11 @@ async def run_check(
         questions=questions,
         runs=list(rows),
         summary=_summary(list(rows)),
-        fix=pick_fix(_signals(list(rows), business, site_blocks_ai_bots)),
+        fix=pick_fix(signals(list(rows), business, site_blocks_ai_bots)),
         total_cost_usd=round(sum(r["cost_usd"] for r in rows), 6),
     )
     await doc.insert()
-    # no-event: nothing consumes checks until the AV-4 / AV-6 routes and views land.
+    # no-event: checks are read back by request (the routes), nothing subscribes.
     return _to_response(doc)
 
 
@@ -241,4 +242,20 @@ def _to_response(doc: AiVisibilityCheck) -> CheckResponse:
     )
 
 
-__all__ = ["QUESTION_TEMPLATES", "generate_questions", "run_check"]
+async def anonymous_spend_today(now: datetime | None = None) -> float:
+    """USD spent today (UTC) on anonymous checks (no workspace, no site)."""
+    now = now or datetime.now(UTC)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    docs = await AiVisibilityCheck.find(
+        {"workspace": None, "site_id": None, "createdAt": {"$gte": start}}
+    ).to_list()
+    return round(sum(d.total_cost_usd for d in docs), 6)
+
+
+__all__ = [
+    "QUESTION_TEMPLATES",
+    "anonymous_spend_today",
+    "generate_questions",
+    "run_check",
+    "signals",
+]

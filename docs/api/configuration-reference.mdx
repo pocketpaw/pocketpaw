@@ -202,6 +202,8 @@ skipped. All keys are secrets, stored encrypted and never logged.
 | `ai_visibility_anthropic_api_key` | `POCKETPAW_AI_VISIBILITY_ANTHROPIC_API_KEY` | string | — | Claude web search, and the judge fallback |
 | `ai_visibility_cf_account_id` | `POCKETPAW_AI_VISIBILITY_CF_ACCOUNT_ID` | string | — | Cloudflare account for Workers AI (Clef-flash judge) |
 | `ai_visibility_cf_api_token` | `POCKETPAW_AI_VISIBILITY_CF_API_TOKEN` | string | — | Cloudflare API token with Workers AI access |
+| `turnstile_secret` | `POCKETPAW_TURNSTILE_SECRET` | string | — | Cloudflare Turnstile secret for the free AI check; unset skips verification (dev only) |
+| `ai_check_daily_usd` | `POCKETPAW_AI_CHECK_DAILY_USD` | float | `5.0` | Daily engine-spend cap for anonymous free AI checks; past it the check answers 503 |
 
 ## Signal
 
