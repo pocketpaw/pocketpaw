@@ -19,6 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from ..lens_checkins import monitored_job
 from ..memory.manager import get_memory_manager
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,9 @@ class TriggerEngine:
 
             # Add new job
             self.scheduler.add_job(
-                self._fire_trigger,
+                monitored_job(
+                    self._fire_trigger, kind="intention", id=intention_id, trigger=trigger
+                ),
                 trigger=trigger,
                 args=[intention],
                 id=job_id,
@@ -200,9 +203,12 @@ class TriggerEngine:
             self.remove_intention(intention_id)
 
         try:
+            trigger = IntervalTrigger(minutes=check_minutes)
             self.scheduler.add_job(
-                self._fire_stale_trigger,
-                trigger=IntervalTrigger(minutes=check_minutes),
+                monitored_job(
+                    self._fire_stale_trigger, kind="intention", id=intention_id, trigger=trigger
+                ),
+                trigger=trigger,
                 args=[intention],
                 id=job_id,
                 replace_existing=True,

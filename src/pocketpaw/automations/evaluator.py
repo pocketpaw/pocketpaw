@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 
 from pocketpaw.automations.models import ExecutionMode, Rule, RuleType, UpdateRuleRequest
 from pocketpaw.automations.store import get_automation_store
+from pocketpaw.lens_checkins import automation_run
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,14 @@ class AutomationEvaluator:
         return False
 
     async def _fire_rule(self, rule: Rule) -> None:
-        """Fire a rule -- propose Instinct action or execute directly."""
+        """Fire a rule -- propose Instinct action or execute directly.
+
+        One paw-lens check-in pair per fire (kind ``automation_rule``).
+        """
+        async with automation_run("automation_rule", rule.id):
+            await self._dispatch_rule(rule)
+
+    async def _dispatch_rule(self, rule: Rule) -> None:
         store = get_automation_store()
         store.record_fire(rule.id)
 

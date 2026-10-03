@@ -18,6 +18,7 @@ from apscheduler.triggers.date import DateTrigger
 from dateutil import parser as date_parser
 
 from pocketpaw.daemon.triggers import parse_cron_expression
+from pocketpaw.lens_checkins import monitored_job
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -331,9 +332,10 @@ class ReminderScheduler:
 
                 await run_self_audit()
 
+            trigger = CronTrigger(**cron_kwargs)
             self.scheduler.add_job(
-                _run_audit,
-                trigger=CronTrigger(**cron_kwargs),
+                monitored_job(_run_audit, kind="job", id="self_audit", trigger=trigger),
+                trigger=trigger,
                 id="__self_audit__",
                 replace_existing=True,
             )
@@ -375,9 +377,15 @@ class ReminderScheduler:
     def _add_job(self, reminder: dict):
         """Add a scheduler job for a one-shot reminder."""
         trigger_time = _ensure_utc(datetime.fromisoformat(reminder["trigger_at"]))
+        self._schedule(reminder, DateTrigger(run_date=trigger_time))
+
+    def _schedule(self, reminder: dict, trigger) -> None:
+        """Register ``reminder`` under ``trigger``; each fire checks in to paw-lens."""
         self.scheduler.add_job(
-            self._trigger_reminder,
-            trigger=DateTrigger(run_date=trigger_time),
+            monitored_job(
+                self._trigger_reminder, kind="reminder", id=reminder["id"], trigger=trigger
+            ),
+            trigger=trigger,
             args=[reminder["id"]],
             id=reminder["id"],
             replace_existing=True,
@@ -387,13 +395,7 @@ class ReminderScheduler:
         """Add a scheduler job for a recurring reminder."""
         schedule = reminder.get("schedule", "")
         cron_kwargs = parse_cron_expression(schedule)
-        self.scheduler.add_job(
-            self._trigger_reminder,
-            trigger=CronTrigger(**cron_kwargs),
-            args=[reminder["id"]],
-            id=reminder["id"],
-            replace_existing=True,
-        )
+        self._schedule(reminder, CronTrigger(**cron_kwargs))
 
     def add_reminder(self, message: str) -> dict | None:
         """Add a reminder from a natural language message.

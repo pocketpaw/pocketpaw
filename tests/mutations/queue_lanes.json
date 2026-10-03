@@ -147,8 +147,8 @@
   {
     "label": "the lanes keep arq's own signal handling, so two Workers register SIGTERM handlers on one loop and the last one silently replaces the first - one lane never drains on shutdown",
     "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
-    "find": "    workers = [create_worker(cls, handle_signals=False) for cls in classes]",
-    "replace": "    workers = [create_worker(cls) for cls in classes]",
+    "find": "    workers = [create_worker(cls, handle_signals=False, **_monitored(cls)) for cls in classes]",
+    "replace": "    workers = [create_worker(cls, **_monitored(cls)) for cls in classes]",
     "tests": [
       "tests/cloud/test_worker_supervisor.py"
     ]

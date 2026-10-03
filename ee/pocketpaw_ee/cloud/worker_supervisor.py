@@ -20,6 +20,11 @@
 # supervisor treats ANY lane stopping as fatal to the process, so the container exits and
 # the restart policy brings both lanes back together.
 #
+# PAW-LENS. ``_monitored`` wraps every lane's job and cron functions (names unchanged,
+# so enqueuers still match) in ``automation_run("job", <name>)``: one check-in pair and
+# ``paw.automation.*`` span attributes per job. Interactive chat runs are excluded — they are
+# not automations, and ``execute_run`` stamps their workspace itself.
+#
 # EXIT CODES. 0 only when a signal asked us to stop. Non-zero when a lane ended on its
 # own, whether it raised or returned — an arq Worker's ``async_run`` is not supposed to
 # return while the process is meant to be serving, so a clean return is just as wrong as
@@ -29,6 +34,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import signal
@@ -36,7 +42,10 @@ import sys
 from typing import Any
 
 from arq.constants import default_queue_name
-from arq.worker import create_worker
+from arq.worker import create_worker, func
+
+from pocketpaw.lens_checkins import automation_run
+from pocketpaw.lens_checkins import flush as flush_lens_checkins
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +124,38 @@ async def _close_quietly(worker: Any, name: str) -> None:
         logger.warning("supervisor: closing lane %s failed", name, exc_info=True)
 
 
+#: Job names that are interactive runs, not automations; left unmonitored.
+_INTERACTIVE_JOBS = frozenset({"execute_run_job"})
+
+
+def _wrap(name: str, coroutine: Any) -> Any:
+    async def _job(ctx: Any, *args: Any, **kwargs: Any) -> Any:
+        async with automation_run("job", name):
+            return await coroutine(ctx, *args, **kwargs)
+
+    _job.__lens_monitor__ = ("job", name)  # type: ignore[attr-defined]
+    return _job
+
+
+def _monitored(settings_cls: type) -> dict[str, Any]:
+    """``create_worker`` overrides: the lane's functions and cron jobs, check-in wrapped."""
+    out: dict[str, Any] = {}
+    fns = [func(entry) for entry in getattr(settings_cls, "functions", None) or []]
+    if fns:
+        out["functions"] = [
+            f
+            if f.name in _INTERACTIVE_JOBS
+            else dataclasses.replace(f, coroutine=_wrap(f.name, f.coroutine))
+            for f in fns
+        ]
+    crons = getattr(settings_cls, "cron_jobs", None) or []
+    if crons:
+        out["cron_jobs"] = [
+            dataclasses.replace(c, coroutine=_wrap(c.name, c.coroutine)) for c in crons
+        ]
+    return out
+
+
 async def run_lanes(settings_classes: list[type] | None = None) -> int:
     """Run every lane until one stops or a stop signal arrives. Returns an exit code."""
     classes = list(default_lanes() if settings_classes is None else settings_classes)
@@ -124,7 +165,7 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
     # ``handle_signals=False`` because each arq Worker would otherwise install its OWN
     # SIGTERM handler on the shared loop, where the last one registered silently replaces
     # every earlier one. The supervisor owns the signal and stops the lanes itself.
-    workers = [create_worker(cls, handle_signals=False) for cls in classes]
+    workers = [create_worker(cls, handle_signals=False, **_monitored(cls)) for cls in classes]
     names = [lane_name(cls) for cls in classes]
     logger.info("supervisor: starting %d lane(s): %s", len(names), ", ".join(names))
 
@@ -162,6 +203,8 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
         await asyncio.gather(*lane_tasks, stop_task, return_exceptions=True)
         for worker, name in zip(workers, names, strict=True):
             await _close_quietly(worker, name)
+        # Deliver the last paw-lens check-ins; 1 s budget, never raises.
+        await flush_lens_checkins(timeout=1.0)
 
 
 def main() -> int:

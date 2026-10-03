@@ -65,6 +65,7 @@ from pocketpaw.agents.backend import (
 )
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.observability import detached_span
 from pocketpaw.security.rails import is_substring_blocked
 from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
@@ -2206,33 +2207,48 @@ class ClaudeSDKBackend(BaseAgentBackend):
         slow tool is never cut.
         """
         stream = self._query(prompt=prompt, options=options)
-        try:
-            timeout = self._connect_timeout()
+        # Same span name and gen_ai attributes as logfire's instrumentation of the
+        # persistent ClaudeSDKClient path, so a fallback turn is traced like one.
+        # Detached: this span is held across ``yield``, and an attached one would
+        # leak into the consumer and fail to detach when finalized elsewhere.
+        with detached_span(
+            "invoke_agent",
+            **{
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.provider.name": "anthropic",
+                "gen_ai.system": "anthropic",
+                "pocketpaw.claude_sdk.mode": "stateless",
+            },
+        ) as otel_span:
             try:
-                first = await asyncio.wait_for(anext(stream), timeout)
-            except StopAsyncIteration:
-                return
-            except TimeoutError:
-                raise RuntimeError(
-                    f"Claude CLI did not finish starting within {timeout:g}s"
-                ) from None
-            yield first
-            async for event in stream:
-                yield event
-        except Exception as exc:
-            if "MessageParseError" in type(exc).__name__:
-                logger.warning("Unreadable SDK event ended the stateless query: %s", exc)
-                yield _STATELESS_STREAM_CUT
-            else:
-                raise
-        finally:
-            # Closing the SDK's generator is what ends its CLI subprocess.
-            aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
+                timeout = self._connect_timeout()
                 try:
-                    await aclose()
-                except Exception as close_exc:  # noqa: BLE001
-                    logger.debug("closing the stateless query failed: %s", close_exc)
+                    first = await asyncio.wait_for(anext(stream), timeout)
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    raise RuntimeError(
+                        f"Claude CLI did not finish starting within {timeout:g}s"
+                    ) from None
+                yield first
+                async for event in stream:
+                    yield event
+            except Exception as exc:
+                if "MessageParseError" in type(exc).__name__:
+                    logger.warning("Unreadable SDK event ended the stateless query: %s", exc)
+                    if otel_span is not None:
+                        otel_span.record_exception(exc)
+                    yield _STATELESS_STREAM_CUT
+                else:
+                    raise
+            finally:
+                # Closing the SDK's generator is what ends its CLI subprocess.
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception as close_exc:  # noqa: BLE001
+                        logger.debug("closing the stateless query failed: %s", close_exc)
 
     async def _resilient_receive(self, client):
         """Iterate over client messages, recovering from parse errors.

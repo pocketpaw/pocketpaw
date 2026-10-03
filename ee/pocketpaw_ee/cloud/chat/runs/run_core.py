@@ -77,6 +77,7 @@ from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
 from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
     get_session_supervisor,
 )
+from pocketpaw.observability import baggage  # type: ignore[import-untyped]
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
@@ -2867,7 +2868,13 @@ async def execute_run(spec: RunSpec) -> None:
     # descendant SDK task) appends onto the SAME list this task drains at persist
     # time. The ``as`` target stays in scope after the block, so the post-loop
     # persist below can still read it once the ContextVar is reset.
-    with mark_cloud_chat_run(), collect_delivered_artifacts() as delivered_artifacts:
+    # paw-lens attribution: every span this run opens (prewarm task included,
+    # create_task copies the context) carries the run's workspace.
+    with (
+        mark_cloud_chat_run(),
+        collect_delivered_artifacts() as delivered_artifacts,
+        baggage(**{"paw.workspace_id": ctx.workspace_id}),
+    ):
         # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
         # subprocess for this session NOW — concurrently with the remaining pre-turn
         # work below (mark-running, typing broadcast, and inside _drive_agent_loop:

@@ -61,6 +61,8 @@ import logging
 import os
 from datetime import UTC, datetime
 
+from pocketpaw_ee.cloud._core.periodic import sweep_tick
+
 logger = logging.getLogger(__name__)
 
 # Default cadence: 1h per RFC 03 v2 "typically hourly". Configurable
@@ -253,7 +255,8 @@ async def _loop() -> None:
         # outer guard defends against an unexpected failure in the
         # scan helper itself so the loop never dies.
         try:
-            await run_one_pass()
+            async with sweep_tick("temporal_scheduler", interval):
+                await run_one_pass()
         except asyncio.CancelledError:
             raise
         except Exception:
