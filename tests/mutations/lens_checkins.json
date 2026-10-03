@@ -20,10 +20,28 @@
   {
     "label": "lens: job exception swallowed",
     "file": "src/pocketpaw/lens_checkins.py",
-    "find": "status, error = \"error\", _error_text(exc)\n        raise",
+    "find": "status, error = \"error\", _error_text(exc)\n            raise",
     "replace": "status, error = \"error\", _error_text(exc)",
     "tests": [
       "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: check-ins lose the tick's trace_id",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "base[\"trace_id\"] = trace_id",
+    "replace": "pass",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens proxy: agent_id filter unvalidated",
+    "file": "ee/pocketpaw_ee/cloud/lens/router.py",
+    "find": "AgentId = Annotated[str | None, Query(pattern=_AGENT_ID)]",
+    "replace": "AgentId = Annotated[str | None, Query()]",
+    "tests": [
+      "tests/cloud/lens/test_router.py"
     ]
   },
   {

@@ -3,9 +3,10 @@
 # Covers the check-in pair, the error path (re-raise unchanged), paw-lens being
 # down / slow / 500 (job unaffected, bounded), disabled (zero requests), the
 # token header, run attributes reaching a child span but never a ``baggage``
-# header, cancellation posting no final check-in, the stateless claude_sdk span
-# surviving finalization in another task, and that every OSS APScheduler
-# site hands add_job a monitored function.
+# header, the tick's trace_id in both check-ins (absent with Logfire off),
+# cancellation posting no final check-in, the stateless claude_sdk span
+# surviving finalization in another task, and that every OSS APScheduler site
+# hands add_job a monitored function.
 """Tests for pocketpaw.lens_checkins."""
 
 from __future__ import annotations
@@ -165,6 +166,37 @@ async def test_baggage_lands_on_child_spans(lens, run_attrs):
     assert attrs["paw.workspace_id"] == "ws-1"
     assert attrs["paw.automation.kind"] == "mandate"
     assert attrs["paw.automation.id"] == "m1"
+
+
+async def test_trace_id_sent_and_matches_the_ticks_spans(lens, run_attrs, monkeypatch):
+    import logfire
+
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_ENABLED", "1")
+    async with automation_run("mandate", "m1", workspace_id="ws-1"):
+        with logfire.span("child"):
+            pass
+    await flush()
+    seen, _ = lens
+    trace_ids = {s["body"]["trace_id"] for s in seen}
+    assert len(seen) == 2 and len(trace_ids) == 1
+    trace_id = trace_ids.pop()
+    assert len(trace_id) == 32 and trace_id == trace_id.lower()
+    int(trace_id, 16)
+    spans = {s["name"]: s for s in run_attrs.exporter.exported_spans_as_dict()}
+    tick, child = spans["automation mandate:m1"], spans["child"]
+    assert f"{child['context']['trace_id']:032x}" == trace_id
+    assert child["parent"]["span_id"] == tick["context"]["span_id"]
+    assert tick["attributes"]["paw.automation.id"] == "m1"
+
+
+async def test_no_trace_id_when_logfire_off(lens, monkeypatch):
+    monkeypatch.delenv("POCKETPAW_LOGFIRE_ENABLED", raising=False)
+    async with automation_run("mandate", "m1"):
+        pass
+    await flush()
+    seen, _ = lens
+    assert len(seen) == 2
+    assert all("trace_id" not in s["body"] for s in seen)
 
 
 def test_run_attributes_never_leave_in_a_baggage_header(run_attrs):

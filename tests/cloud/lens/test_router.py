@@ -7,7 +7,9 @@
 # Covers: disabled (no URL, no request), pass-through, workspace_id injection
 # (client-sent one ignored), token header, mute body, timeout -> 503
 # lens.unavailable, 404 -> 404, 401 -> 503 lens.misconfigured, bad path -> 422,
-# and the real lens.manage RBAC guard on mute/resolve (member 403, admin passes).
+# the runs list and span detail routes, the agent_id / automation / status /
+# limit filters (forwarded when valid, 422 with no upstream call when not), and
+# the real lens.manage RBAC guard on mute/resolve (member 403, admin passes).
 
 from __future__ import annotations
 
@@ -88,7 +90,7 @@ def client() -> TestClient:
 
 def test_disabled_returns_enabled_false_without_network(client, monkeypatch, upstream, seen):
     _settings(monkeypatch, "")
-    for path in ("/overview", "/issues", "/agents", "/monitors", "/runs/t1"):
+    for path in ("/overview", "/issues", "/agents", "/monitors", "/runs", "/runs/t1/spans/s1"):
         resp = client.get(f"/api/v1/lens{path}")
         assert resp.status_code == 200, path
         assert resp.json() == {"enabled": False}
@@ -239,3 +241,81 @@ def test_admin_and_owner_can_resolve(monkeypatch, upstream, seen, role):
 def test_member_can_read(monkeypatch, upstream):
     _settings(monkeypatch, "http://lens:8790")
     assert _app("member").get("/api/v1/lens/overview").status_code == 200
+
+
+def test_runs_list_forwards_filters(client, monkeypatch, upstream, seen):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(lambda req: httpx.Response(200, json=[{"trace_id": "a" * 32}]))
+    resp = client.get(
+        "/api/v1/lens/runs",
+        params={
+            "agent_id": "69e51d5c57ff64b3903868fe",
+            "automation": "reminder:r1",
+            "status": "error",
+            "since": "24h",
+            "limit": 200,
+            "workspace_id": "ws_evil",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == [{"trace_id": "a" * 32}]
+    req = seen[0]
+    assert req.url.path == "/v1/runs"
+    assert dict(req.url.params) == {
+        "agent_id": "69e51d5c57ff64b3903868fe",
+        "automation": "reminder:r1",
+        "status": "error",
+        "since": "24h",
+        "limit": "200",
+        "workspace_id": "ws_test",
+    }
+
+
+def test_runs_list_sends_only_set_filters(client, monkeypatch, upstream, seen):
+    _settings(monkeypatch, "http://lens:8790")
+    assert client.get("/api/v1/lens/runs").status_code == 200
+    assert dict(seen[0].url.params) == {"workspace_id": "ws_test"}
+
+
+def test_span_detail_proxied(client, monkeypatch, upstream, seen):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(lambda req: httpx.Response(200, json={"span_id": "b" * 16}))
+    resp = client.get(f"/api/v1/lens/runs/{'a' * 32}/spans/{'b' * 16}")
+    assert resp.status_code == 200
+    assert resp.json() == {"span_id": "b" * 16}
+    assert seen[0].url.path == f"/v1/runs/{'a' * 32}/spans/{'b' * 16}"
+    assert seen[0].url.params["workspace_id"] == "ws_test"
+
+
+@pytest.mark.parametrize("path", ["/overview", "/issues", "/agents", "/runs"])
+def test_agent_id_forwarded(client, monkeypatch, upstream, seen, path):
+    _settings(monkeypatch, "http://lens:8790")
+    assert client.get(f"/api/v1/lens{path}", params={"agent_id": "ag_1-x"}).status_code == 200
+    assert seen[0].url.params["agent_id"] == "ag_1-x"
+
+
+@pytest.mark.parametrize(
+    ("path", "params"),
+    [
+        ("/overview", {"agent_id": "a.b"}),
+        ("/issues", {"agent_id": "a" * 65}),
+        ("/agents", {"agent_id": ""}),
+        ("/runs", {"agent_id": "a/b"}),
+        ("/runs", {"automation": "../x"}),
+        ("/runs", {"automation": "a" * 200}),
+        ("/runs", {"status": "running"}),
+        ("/runs", {"limit": 0}),
+        ("/runs", {"limit": 201}),
+        ("/runs", {"limit": "ten"}),
+    ],
+)
+def test_bad_filters_rejected(client, monkeypatch, upstream, seen, path, params):
+    _settings(monkeypatch, "http://lens:8790")
+    assert client.get(f"/api/v1/lens{path}", params=params).status_code == 422
+    assert seen == []
+
+
+def test_bad_span_id_rejected(client, monkeypatch, upstream, seen):
+    _settings(monkeypatch, "http://lens:8790")
+    assert client.get("/api/v1/lens/runs/t1/spans/-x").status_code == 422
+    assert seen == []
