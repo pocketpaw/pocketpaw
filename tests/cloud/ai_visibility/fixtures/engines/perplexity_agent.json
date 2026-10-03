@@ -1,0 +1,31 @@
+{
+  "id": "resp_pplx_01",
+  "status": "completed",
+  "model": "openai/gpt-6-luna",
+  "output": [
+    {
+      "type": "search_results",
+      "queries": ["best pizza Austin"],
+      "results": [
+        {"id": 1, "title": "Home Slice Pizza", "url": "https://www.homeslicepizza.com/", "snippet": "NY style pizza on South Congress", "date": "2026-08-01", "source": "web"},
+        {"id": 2, "title": "THE 10 BEST Pizza Places in Austin", "url": "https://www.tripadvisor.com/Restaurants-g30196-c31-Austin_Texas.html", "snippet": "Best pizza in Austin", "date": "2026-07-14", "source": "web"},
+        {"id": 3, "title": "Via 313 Pizza", "url": "https://www.via313.com/", "snippet": "Detroit style", "date": "2026-06-30", "source": "web"},
+        {"id": 4, "title": "Joe's Pizza - Google Maps", "url": "https://www.google.com/maps/place/Joe's+Pizza/@30.26,-97.77", "snippet": "4.6 stars", "date": "2026-09-01", "source": "web"}
+      ]
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {"type": "output_text", "text": "Top picks in Austin: Home Slice Pizza for New York slices [1], Via 313 for Detroit style [web:3], and the TripAdvisor list has more options [2]."}
+      ]
+    }
+  ],
+  "output_text": "Top picks in Austin: Home Slice Pizza for New York slices [1], Via 313 for Detroit style [web:3], and the TripAdvisor list has more options [2].",
+  "usage": {
+    "input_tokens": 1000,
+    "output_tokens": 120,
+    "total_tokens": 1120,
+    "cost": {"currency": "USD", "input_cost": 0.0001, "output_cost": 0.00006, "total_cost": 0.00266}
+  }
+}
