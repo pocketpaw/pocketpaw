@@ -10,11 +10,15 @@
 # the runs list and span detail routes, the agent_id / automation / status /
 # limit filters (forwarded when valid, 422 with no upstream call when not), the
 # real lens.manage RBAC guard on mute/resolve (member 403, admin passes), and
-# Privacy A: a member gets run/span/issue content stripped plus
-# ``content_hidden``, an admin gets the upstream body untouched.
+# Privacy A: a member gets every read through ``service.redact`` (span
+# attributes allowlisted, events dropped, errors / summaries / finding text /
+# check-in errors blanked, issue titles rebuilt from detector and tool, log span
+# names replaced by their template) plus ``content_hidden``; an admin gets the
+# upstream body untouched.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -299,27 +303,105 @@ def test_bad_span_id_rejected(client, monkeypatch, upstream, seen):
 
 
 # --- Privacy A -------------------------------------------------------------
+# Payload shapes follow paw-lens's run / span / issue / monitor JSON. Span
+# attributes carry the real instrumentation keys that hold content:
+# instrument_mcp ``request``/``response``, instrument_anthropic
+# ``request_data``/``response_data``, pydantic-ai ``final_result``, logfire's
+# ``logfire.msg``, the gen_ai payload keys, plus an exception event.
 
 _RUN = {
     "run": {"trace_id": "a" * 32, "summary": "user asked for payroll", "status": "error"},
-    "spans": [{"span_id": "s1", "tool": "search", "args_preview": "q=salary"}],
-    "findings": [{"detector": "tool_error", "message": "search failed"}],
+    "spans": [
+        {
+            "span_id": "s1",
+            "kind": "tool",
+            "name": "execute_tool search",
+            "tool": "search",
+            "args_preview": "q=salary",
+            "status": "error",
+            "error": "HTTP 500: no salary row for alice",
+        },
+        {"span_id": "s2", "kind": "log", "name": "alice asked for payroll", "status": "ok"},
+    ],
+    "findings": [
+        {
+            "fingerprint": "fp1",
+            "detector": "tool_error",
+            "severity": "high",
+            "span_id": "s1",
+            "tool": "search",
+            "message": "search failed: no salary row for alice",
+            "evidence": {"error": "no salary row for alice"},
+            "seen_at": "t",
+        }
+    ],
     "overview": {"text": "- user asked for payroll", "model": "m", "created_at": "t"},
+    "mcp_summary": {"calls": 2, "by_method": {"tools/list": 2}},
+}
+
+_ALLOWED_ATTRS = {
+    "gen_ai.request.model": "claude",
+    "gen_ai.response.model": "claude-x",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.tool.name": "search",
+    "gen_ai.agent.name": "Sales Bot",
+    "gen_ai.usage.input_tokens": 10,
+    "gen_ai.usage.output_tokens": 4,
+    "operation.cost": 0.01,
+    "paw.workspace_id": "ws_test",
+    "paw.agent.id": "ag1",
+    "http.method": "POST",
+    "http.route": "/v1/x",
+    "http.status_code": 500,
+    "http.request.method": "POST",
+    "http.response.status_code": 500,
+    "db.system": "mongodb",
 }
 _SPAN = {
     "span_id": "s1",
+    "kind": "log",
+    "name": "alice asked for payroll",
+    "status": "error",
+    "error": "no salary row for alice",
     "attributes": {
+        **_ALLOWED_ATTRS,
         "gen_ai.input.messages": "[secret prompt]",
         "gen_ai.output.messages": "[secret answer]",
         "gen_ai.system_instructions": "be nice",
         "gen_ai.tool.call.arguments": '{"q":"salary"}',
         "gen_ai.tool.call.result": "rows",
         "pydantic_ai.all_messages": "[...]",
-        "gen_ai.request.model": "claude",
+        "request": {"method": "tools/call", "params": {"arguments": {"q": "alice salary"}}},
+        "response": '{"content": [{"text": "alice: 100k"}]}',
+        "request_data": '{"messages": [{"role": "user", "content": "payroll for alice"}]}',
+        "response_data": '{"message": {"content": "alice earns 100k"}}',
+        "final_result": "alice earns 100k",
+        "logfire.msg": "alice asked for payroll",
+        "logfire.msg_template": "{user} asked for {topic}",
+        "logfire.json_schema": '{"properties": {"user": {}}}',
+        "user": "alice",
     },
-    "events": [{"name": "log", "attributes": {"gen_ai.input.messages": "x", "level": "info"}}],
+    "events": [
+        {
+            "name": "exception",
+            "attributes": {
+                "exception.message": "no salary row for alice",
+                "exception.stacktrace": "Traceback ... alice",
+            },
+        }
+    ],
     "messages": {"input": [{"role": "user"}], "output": [], "system": []},
     "tool": {"name": "search", "call_id": "c1", "arguments": {"q": "salary"}, "result": "rows"},
+}
+_ISSUES = [
+    {"fingerprint": "fp1", "detector": "tool_error", "tool": "search", "title": "search: alice"},
+    {"fingerprint": "fp2", "detector": "user_feedback", "tool": "", "title": "alice is upset"},
+]
+_MONITOR = {
+    "slug": "reminder:r1",
+    "kind": "reminder",
+    "status": "error",
+    "recent": [{"checkin_id": "c1", "status": "error", "error": "SMTP refused alice@x"}],
 }
 
 
@@ -328,7 +410,10 @@ def _content_routes():
         ("/runs", [{"trace_id": "a" * 32, "summary": "secret"}]),
         (f"/runs/{'a' * 32}", _RUN),
         (f"/runs/{'a' * 32}/spans/s1", _SPAN),
-        ("/issues/fp1", {"fingerprint": "fp1", "runs": [{"trace_id": "t", "summary": "secret"}]}),
+        ("/issues", _ISSUES),
+        ("/issues/fp1", {**_ISSUES[0], "runs": [{"trace_id": "t", "summary": "secret"}]}),
+        ("/monitors", [_MONITOR]),
+        ("/monitors/reminder:r1", _MONITOR),
     ]
 
 
@@ -348,34 +433,94 @@ def test_member_run_detail_stripped(monkeypatch, upstream):
     assert got["content_hidden"] is True
     assert got["run"]["summary"] == ""
     assert got["run"]["status"] == "error"
-    assert got["spans"][0] == {"span_id": "s1", "tool": "search", "args_preview": ""}
-    assert got["findings"] == _RUN["findings"]
+    assert got["spans"][0] == {
+        "span_id": "s1",
+        "kind": "tool",
+        "name": "execute_tool search",
+        "tool": "search",
+        "args_preview": "",
+        "status": "error",
+        "error": "",
+    }
+    # A log span's list name is its formatted message; the list has no template.
+    assert got["spans"][1]["name"] == "log"
+    assert got["findings"] == [
+        {
+            "fingerprint": "fp1",
+            "detector": "tool_error",
+            "severity": "high",
+            "span_id": "s1",
+            "tool": "search",
+            "seen_at": "t",
+            "message": "",
+            "evidence": None,
+        }
+    ]
     assert got["overview"] is None
+    assert got["mcp_summary"] == _RUN["mcp_summary"]
+    assert "alice" not in json.dumps(got)
 
 
-def test_member_span_detail_stripped(monkeypatch, upstream):
+def test_member_span_detail_allowlisted(monkeypatch, upstream):
     _settings(monkeypatch, "http://lens:8790")
     upstream(lambda req: httpx.Response(200, json=_SPAN))
     got = _app("member").get(f"/api/v1/lens/runs/{'a' * 32}/spans/s1").json()
     assert got["content_hidden"] is True
     assert got["messages"] is None
     assert got["tool"] == {"name": "search", "call_id": "c1", "arguments": None, "result": None}
-    attrs = got["attributes"]
-    assert attrs["gen_ai.request.model"] == "claude"
-    for key in _SPAN["attributes"]:
-        if key != "gen_ai.request.model":
-            assert attrs[key] == "[hidden]", key
-    assert got["events"][0]["attributes"] == {"gen_ai.input.messages": "[hidden]", "level": "info"}
+    assert got["attributes"] == _ALLOWED_ATTRS
+    assert got["events"] == []
+    assert got["error"] == "" and got["status"] == "error"
+    assert got["name"] == "{user} asked for {topic}"
+    assert "alice" not in json.dumps(got)
 
 
-def test_member_runs_list_and_issue_stripped(monkeypatch, upstream):
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        {"logfire.msg": "alice paid", "logfire.msg_template": "alice paid"},
+        {"logfire.msg": "alice paid"},
+        {},
+    ],
+)
+def test_member_log_span_without_real_template_is_named_log(monkeypatch, upstream, attrs):
+    _settings(monkeypatch, "http://lens:8790")
+    body = {"span_id": "s1", "kind": "log", "name": "alice paid", "attributes": attrs}
+    upstream(lambda req: httpx.Response(200, json=body))
+    got = _app("member").get(f"/api/v1/lens/runs/{'a' * 32}/spans/s1").json()
+    assert got["name"] == "log"
+
+
+def test_member_issues_list_and_detail_stripped(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
+    member = _app("member")
+    upstream(lambda req: httpx.Response(200, json=_ISSUES))
+    titles = [i["title"] for i in member.get("/api/v1/lens/issues").json()]
+    assert titles == ["tool_error · search", "user_feedback"]
+    detail = {**_ISSUES[0], "runs": [{"trace_id": "t", "summary": "secret"}]}
+    upstream(lambda req: httpx.Response(200, json=detail))
+    got = member.get("/api/v1/lens/issues/fp1").json()
+    assert got["title"] == "tool_error · search"
+    assert got["runs"] == [{"trace_id": "t", "summary": ""}]
+    assert got["content_hidden"] is True
+
+
+def test_member_runs_list_stripped(monkeypatch, upstream):
     _settings(monkeypatch, "http://lens:8790")
     upstream(lambda req: httpx.Response(200, json=[{"trace_id": "t", "summary": "secret"}]))
+    assert _app("member").get("/api/v1/lens/runs").json() == [{"trace_id": "t", "summary": ""}]
+
+
+def test_member_monitor_checkin_errors_stripped(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
     member = _app("member")
-    assert member.get("/api/v1/lens/runs").json() == [{"trace_id": "t", "summary": ""}]
-    upstream(lambda req: httpx.Response(200, json={"runs": [{"summary": "secret"}]}))
-    got = member.get("/api/v1/lens/issues/fp1").json()
-    assert got == {"runs": [{"summary": ""}], "content_hidden": True}
+    upstream(lambda req: httpx.Response(200, json=[_MONITOR]))
+    listed = member.get("/api/v1/lens/monitors").json()
+    assert listed[0]["recent"] == [{"checkin_id": "c1", "status": "error", "error": ""}]
+    upstream(lambda req: httpx.Response(200, json=_MONITOR))
+    one = member.get("/api/v1/lens/monitors/reminder:r1").json()
+    assert one["recent"][0]["error"] == "" and one["status"] == "error"
+    assert one["kind"] == "reminder"
 
 
 def test_member_disabled_body_untouched(monkeypatch, upstream):

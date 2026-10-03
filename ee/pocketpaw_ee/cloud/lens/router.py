@@ -14,9 +14,9 @@
 # match ``_AGENT_ID`` (422 otherwise) so nothing can path-inject into the
 # upstream URL; a leading alphanumeric blocks ``.``/``..``.
 #
-# Reads are member-level, but runs, run detail, span detail and issue detail
-# pass ``full`` = "caller holds ``lens.manage``" so the service redacts message
-# and tool content for non-admins (Privacy A, ``service.redact``). Mute/resolve
+# Reads are member-level, but every read passes ``full`` = "caller holds
+# ``lens.manage``" so the service redacts message, tool and error content for
+# non-admins (Privacy A, ``service.redact``). Mute/resolve
 # are writes that silence alerting for the whole workspace, so they require
 # ``lens.manage`` (ADMIN), as does the overview POST (it spends LLM tokens and
 # reads full content). Responses may be lists, hence ``response_model=None``.
@@ -59,18 +59,21 @@ AgentId = Annotated[str | None, Query(pattern=_AGENT_ID)]
 
 
 @router.get("/overview", response_model=None)
-async def overview(workspace_id: WorkspaceId, since: Since = None, agent_id: AgentId = None) -> Any:
-    return await service.overview(workspace_id, since, agent_id)
+async def overview(
+    workspace_id: WorkspaceId, full: FullContent, since: Since = None, agent_id: AgentId = None
+) -> Any:
+    return await service.overview(workspace_id, since, agent_id, full=full)
 
 
 @router.get("/issues", response_model=None)
 async def list_issues(
     workspace_id: WorkspaceId,
+    full: FullContent,
     status: Literal["open", "muted", "resolved"] | None = None,
     since: Since = None,
     agent_id: AgentId = None,
 ) -> Any:
-    return await service.list_issues(workspace_id, status, since, agent_id)
+    return await service.list_issues(workspace_id, status, since, agent_id, full=full)
 
 
 @router.get("/issues/{fingerprint}", response_model=None)
@@ -135,16 +138,18 @@ async def get_span(
 
 @router.get("/agents", response_model=None)
 async def list_agents(
-    workspace_id: WorkspaceId, since: Since = None, agent_id: AgentId = None
+    workspace_id: WorkspaceId, full: FullContent, since: Since = None, agent_id: AgentId = None
 ) -> Any:
-    return await service.list_agents(workspace_id, since, agent_id)
+    return await service.list_agents(workspace_id, since, agent_id, full=full)
 
 
 @router.get("/monitors", response_model=None)
-async def list_monitors(workspace_id: WorkspaceId, since: Since = None) -> Any:
-    return await service.list_monitors(workspace_id, since)
+async def list_monitors(workspace_id: WorkspaceId, full: FullContent, since: Since = None) -> Any:
+    return await service.list_monitors(workspace_id, since, full=full)
 
 
 @router.get("/monitors/{slug}", response_model=None)
-async def get_monitor(workspace_id: WorkspaceId, slug: Slug, since: Since = None) -> Any:
-    return await service.get_monitor(workspace_id, slug, since)
+async def get_monitor(
+    workspace_id: WorkspaceId, full: FullContent, slug: Slug, since: Since = None
+) -> Any:
+    return await service.get_monitor(workspace_id, slug, since, full=full)

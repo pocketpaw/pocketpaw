@@ -6931,15 +6931,24 @@ call. The proxy adds `workspace_id` from the session to
 every upstream call and drops any `workspace_id` the client sends. Response
 bodies are paw-lens's JSON, unchanged for workspace admins.
 
-**Content privacy.** Only a workspace admin or owner (`lens.manage`) sees message
-and tool content. For anyone else the runs list, run detail, span detail and
-issue detail come back with run `summary` and span-list `args_preview` set to
-`""`, the run's AI `overview` and span `messages` set to `null`, `tool.arguments` and `tool.result` set to
-`null`, and every attribute (span or event) whose key starts with
-`gen_ai.input.`, `gen_ai.output.`, `gen_ai.system_instructions`,
-`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` or
-`pydantic_ai.all_messages` replaced by `"[hidden]"`. Object bodies gain
-`"content_hidden": true`; the runs list is an array, so it is stripped without
+**Content privacy.** Only a workspace admin or owner (`lens.manage`) sees message,
+tool and error content. For anyone else every read (overview, agents, issues,
+runs, run, span, monitors) goes through one redaction: run `summary`, span-list
+`args_preview`, every span `error` and every monitor check-in `error` become
+`""` (the `status` beside each still says it failed); the run's AI `overview`
+and span `messages` become `null`; `tool` keeps only `name` and `call_id`
+(`arguments` and `result` are `null`); `findings` keep `fingerprint`,
+`detector`, `severity`, `tool`, `span_id` and `seen_at`, with `message` `""`
+and `evidence` `null`; span `events` become `[]`; and span `attributes` are cut
+to an allowlist (`gen_ai.usage.*`, `gen_ai.request.model`,
+`gen_ai.response.model`, `gen_ai.operation.name`, `gen_ai.tool.name`,
+`gen_ai.agent.name`, `operation.cost`, `paw.*`, `http.method`, `http.route`,
+`http.status_code`, `http.request.method`, `http.response.status_code`,
+`db.system`); every other key is dropped. Issue `title`s become
+`"<detector> · <tool>"` (or just the detector), since paw-lens builds them
+from error text or user feedback. A log span's `name` (its formatted message)
+becomes its `logfire.msg_template` when logfire extracted one, else `"log"`.
+Object bodies gain `"content_hidden": true`; list bodies are stripped without
 the flag. The `pocketpaw_lens` agent tools apply the same rule.
 
 **Chat surface.** A chat send with `surface: "agent_health"` (the
