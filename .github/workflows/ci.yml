@@ -4,6 +4,9 @@
 # Updated: 2026-10-03 (fix/paw-bar-frame-headers) — the EE test job runs
 # tests/cloud/test_paw_bar_frame.py (frame CSP + dashboard header middleware),
 # which otherwise sits in the tests/cloud blind spot.
+# Updated: 2026-10-03 (feat/dashboard-ws-ticket-auth) — the EE test job runs
+# tests/cloud/auth/test_dashboard_ws_ticket.py (first-frame ws_ticket auth on
+# /api/v1/ws), which otherwise sits in the tests/cloud blind spot.
 # Updated: 2026-10-02 (fix/canon-cross-repo-pins) — the EE test job runs
 # tests/cloud/test_paw_bar_widget_js.py (vendored loader hash pin), which otherwise
 # sits in the tests/cloud blind spot.
