@@ -6931,3 +6931,26 @@ bodies are paw-lens's JSON, unchanged.
   lens.not_found`. paw-lens 400: `400 lens.bad_request`.
 - Mute and resolve need a workspace admin or owner (`lens.manage`); a member
   gets `403 workspace.insufficient_role`. Reads are open to any member.
+
+### Monitors: check-ins and run attribution
+
+Scheduled work checks in to paw-lens (`POST /v1/checkins`, `X-Lens-Token`)
+through `pocketpaw.lens_checkins.automation_run`: `in_progress` when a run
+starts, then `ok` or `error` (scrubbed, at most 500 chars). The monitor slug is
+`<kind>:<id>`; the first check-in registers it with its schedule (`crontab` or
+`interval_seconds`). Posts run in the background with a 1 s budget and never
+fail or delay the job. `POCKETPAW_LENS_API_URL` unset: no check-ins are sent.
+
+| Kind | What checks in | Id |
+|---|---|---|
+| `reminder` | reminders; meeting reminder jobs | reminder id; `meeting_reminder` |
+| `intention` | cron and stale-session intentions | intention id |
+| `heartbeat` | Mission Control heartbeat | job id |
+| `automation_rule` | each automation rule fire | rule id |
+| `mandate` | mandate autopilot cycles | mandate id |
+| `sweep` | each cloud sweep iteration (`_core/periodic.sweep_tick`) | sweep name |
+| `job` | arq jobs and crons (not chat runs), meeting auto-start/end, self-audit | function name |
+
+Each run also sets `paw.workspace_id`, `paw.automation.kind` and
+`paw.automation.id` as Logfire baggage, so its spans carry them. Interactive
+chat runs carry `paw.workspace_id` only.
