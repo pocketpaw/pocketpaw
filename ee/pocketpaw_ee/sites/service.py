@@ -1,6 +1,12 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-10-03 (feat/ai-ready-sites, AV-1): the workers branch of
+# ``_deploy_site_doc`` hands ``deploy_workers`` an ``ai_ready`` input
+# (``_ai_ready_inputs``: training opt-in, IndexNow key, canonical host) and the upsert
+# persists a freshly minted IndexNow key; ``update_site_ai_visibility`` backs
+# ``PATCH /sites/{id}/ai-visibility``.
+#
 # Updated 2026-10-02 (feat/partners-commissions, PH-13 re-check):
 # ``fill_client_pay_link`` fills only a reservation younger than
 # ``_RESERVATION_TTL`` and returns whether it did, so a slow request whose slot
@@ -1318,6 +1324,7 @@ from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
     DomainStatusResponse,
+    SiteAiVisibilityUpdate,
     SiteAnalyticsBreakdown,
     SiteAnalyticsResponse,
     SiteAnalyticsSeries,
@@ -2621,6 +2628,7 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # VS-3: the owner's badge preference. getattr-defaulted True so a row that
         # predates the field reads the model default rather than raising.
         badge_hidden=bool(getattr(doc, "badge_hidden", True)),
+        ai_training_allowed=bool(getattr(doc, "ai_training_allowed", False)),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
         # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
         # None for a static publish / any DB-loaded doc / a single-flight no-op).
@@ -3974,6 +3982,8 @@ async def _deploy_site_doc(
         mode = "wfp"
 
     url = ""
+    # AV-1: the IndexNow key the workers deploy published, persisted below ("" = none).
+    indexnow_key = ""
     # SA-4: did THIS deploy actually leave a pageview counter in front of the site?
     # Only the workers branch can, so every other target answers False without asking.
     # ``analytics_since`` is written from this below.
@@ -4037,6 +4047,16 @@ async def _deploy_site_doc(
             # VS-1: the Worker this site already lives under, read from its row, so a
             # re-publish overwrites that Worker rather than deploying a second one.
             deploy_name = await _site_worker_name_for(workspace_id=workspace_id, site_id=site_id)
+        # AV-1: what the AI-ready files need from the row (owner's training opt-in,
+        # the IndexNow key, the canonical host). A key minted here is persisted by the
+        # upsert below, so the key file and the stored key never disagree.
+        ai_inputs = await _ai_ready_inputs(
+            workspace_id=workspace_id,
+            site_id=site_id,
+            site_name=site_name,
+            deploy_name=deploy_name,
+        )
+        indexnow_key = ai_inputs.indexnow_key
         try:
             url = await deploy_w(
                 site_id,
@@ -4044,6 +4064,7 @@ async def _deploy_site_doc(
                 engine=engine,
                 analytics_entitled=counts_pageviews,
                 worker_name=deploy_name,
+                ai_ready=ai_inputs,
             )
         except Exception:
             if rename is not None:
@@ -4157,6 +4178,7 @@ async def _deploy_site_doc(
             # SE-2b: persist the builder origin (or "") so a component-edit republish
             # can re-apply it and the site stays editable across edits.
             builder_origin=builder_origin or "",
+            indexnow_key=indexnow_key,
             # Seed capture config so a lead lands with no manual Mongo edit: a default
             # mapping keyed on the form_type the generated endpoint sends, and the
             # local dev origins so the local smoke works. add_domain() appends the
@@ -4203,6 +4225,8 @@ async def _deploy_site_doc(
         # silently), so guard on is_dynamic.
         if is_dynamic:
             doc.d1_database_id = d1_database_id
+        if indexnow_key and not doc.indexnow_key:
+            doc.indexnow_key = indexnow_key
         await doc.save()
 
     # The site's content just changed, so the knowledge its concierge answers from
@@ -4223,6 +4247,37 @@ async def _deploy_site_doc(
     # all still gets its cards' marks.
     _schedule_site_favicon(doc)
     return doc
+
+
+async def _ai_ready_inputs(
+    *, workspace_id: str, site_id: str, site_name: str, deploy_name: str
+) -> Any:
+    """AV-1 — the ``ai_ready.AiReadyInputs`` a workers deploy writes the AI-ready
+    files from. A FIRST publish has no row yet: training stays opted out and a fresh
+    IndexNow key is minted (the upsert persists it). The host is the first LIVE custom
+    domain, else the row's workers.dev host when it is still this Worker's, else ""
+    (``deploy_workers`` derives it from the Worker name and PAW_CF_WORKERS_SUBDOMAIN).
+    """
+    from urllib.parse import urlparse
+
+    from pocketpaw_ee.sites.ai_ready import AiReadyInputs
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    host = next(
+        (d.hostname for d in getattr(doc, "domains", None) or [] if d.status == "live"),
+        "",
+    )
+    if not host:
+        prior = urlparse(getattr(doc, "url", "") or "").hostname or ""
+        if prior.endswith(".workers.dev") and prior.split(".", 1)[0] == deploy_name:
+            host = prior
+    return AiReadyInputs(
+        site_name=site_name,
+        description=getattr(doc, "description", "") or "",
+        ai_training_allowed=bool(getattr(doc, "ai_training_allowed", False)),
+        indexnow_key=getattr(doc, "indexnow_key", "") or secrets.token_hex(16),
+        host=host,
+    )
 
 
 async def _embed_concierge_bar(
@@ -7847,6 +7902,25 @@ async def update_site_branding(
     site = await _load(workspace_id, site_id)
     # no-event: the preference only changes what the NEXT stamp does. No search
     # index, soul memory or ripple view reads it, and the site response carries it.
+    return _to_response(site)
+
+
+async def update_site_ai_visibility(
+    *, workspace_id: str, site_id: str, body: SiteAiVisibilityUpdate
+) -> SiteResponse:
+    """Set whether AI-training crawlers may use this site (AV-1).
+
+    Stored now, applied on the next publish (the robots.txt is part of the built
+    artifact, for the same no-redeploy reason ``update_site_branding`` gives). A
+    repeat of the stored value writes nothing; a change is a targeted ``set()``.
+    """
+    body = SiteAiVisibilityUpdate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+    if bool(getattr(site, "ai_training_allowed", False)) != body.ai_training_allowed:
+        await site.set({"ai_training_allowed": body.ai_training_allowed})
+        site = await _load(workspace_id, site_id)
+    # no-event: only the NEXT publish's robots.txt reads it; no search index, soul
+    # memory or ripple view does, and the site response carries it.
     return _to_response(site)
 
 

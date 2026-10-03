@@ -1,6 +1,8 @@
 # ee/pocketpaw_ee/sites/dto.py — request/response DTOs for the Sites control
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+# Updated: 2026-10-03 (feat/ai-ready-sites, AV-1) — ``SiteAiVisibilityUpdate`` (the
+# ``PATCH /sites/{id}/ai-visibility`` body) and ``SiteResponse.ai_training_allowed``.
 # Updated: 2026-09-24 (PP-2) — SiteStatusResponse carries ``verification``, a COUNTS-ONLY
 # summary of the current source's verification verdict (contract §6): status (passed /
 # failed / unverified / pending / none), error_count, checked_at, content_hash. No
@@ -406,6 +408,9 @@ class SiteResponse(BaseModel):
     # ``badge_required``). A free site can read True here and still be badged. True
     # for every row that predates the field, matching the model default.
     badge_hidden: bool = True
+    # AV-1: whether the generated robots.txt lets AI TRAINING crawlers in. False (the
+    # default) blocks them; search/assistant crawlers are allowed either way.
+    ai_training_allowed: bool = False
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -659,6 +664,14 @@ class SiteBrandingUpdate(BaseModel):
     """
 
     badge_hidden: bool
+
+
+class SiteAiVisibilityUpdate(BaseModel):
+    """PATCH body for a site's AI-crawler policy (AV-1). One required switch:
+    ``ai_training_allowed`` opts the site in to AI-training crawlers in its generated
+    robots.txt. Search and assistant crawlers are never blocked."""
+
+    ai_training_allowed: bool
 
 
 class SitePreviewRefreshResponse(BaseModel):

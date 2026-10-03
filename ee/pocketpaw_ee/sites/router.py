@@ -3,6 +3,9 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-10-03 (feat/ai-ready-sites, AV-1): ``PATCH /sites/{id}/ai-visibility`` sets
+# the owner's AI-training opt-in for the generated robots.txt.
+#
 # Updated 2026-10-02 (feat/partners-sell, PH-2): the site-plan request door
 # refuses partner-only rungs (sold only through /partners/sell).
 # Updated 2026-10-02 (feat/partners-foundation, PH-1): the foreign-concierge
@@ -333,6 +336,7 @@ from pocketpaw_ee.sites.dto import (
     OriginVerificationResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteAiVisibilityUpdate,
     SiteAnalyticsResponse,
     SiteAssetDeleteRequest,
     SiteAssetListResponse,
@@ -1396,6 +1400,24 @@ async def update_site_branding(
     workspace, tenant-scoped, so a missing or cross-tenant site is a 404.
     """
     return await sites_service.update_site_branding(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+    )
+
+
+@router.patch("/sites/{site_id}/ai-visibility", response_model=SiteResponse)
+async def update_site_ai_visibility(
+    site_id: str,
+    body: SiteAiVisibilityUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Let AI-training crawlers use this site, or not (AV-1).
+
+    ``ai_training_allowed`` changes only the training lines of the robots.txt the
+    next publish writes; search and assistant crawlers are always allowed. Authorized
+    like ``PATCH /sites/{id}/branding``; a missing or cross-tenant site is a 404.
+    """
+    return await sites_service.update_site_ai_visibility(
         workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )
 

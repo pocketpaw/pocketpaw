@@ -378,3 +378,78 @@ async def test_explicit_host_wins(tmp_path, monkeypatch) -> None:
     )
     assert "https://www.acme.com/about" in (out / "sitemap.xml").read_text()
     assert pings[0][0] == "www.acme.com"
+
+
+# ---------------------------------------------------------------- publish seam + endpoint
+
+
+class _FakeGenerator:
+    async def build(self, **kw):
+        from pocketpaw_ee.sites.generator_client import BuildResult
+
+        return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
+
+
+async def _publish_recording(seen: list, pocket_id: str = "pk-ai"):
+    from pocketpaw_ee.sites import service as sites_service
+
+    async def _deploy(site_id, project_dir, *, worker_name=None, ai_ready=None, **_):
+        seen.append(ai_ready)
+        return f"https://{worker_name}.acct.workers.dev"
+
+    return await sites_service.publish(
+        workspace_id="ws-ai",
+        user_id="u1",
+        pocket_id=pocket_id,
+        ripple_spec={"type": "container"},
+        theme={},
+        name="Acme Bakery",
+        _generator=_FakeGenerator(),
+        _bundle_reader=lambda d: b"",
+        _workers_deploy=_deploy,
+    )
+
+
+async def test_publish_mints_one_indexnow_key_and_reads_the_flag(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.dto import SiteAiVisibilityUpdate
+
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    seen: list = []
+
+    site = await _publish_recording(seen)
+    first = seen[0]
+    assert first.ai_training_allowed is False
+    assert re.fullmatch(r"[0-9a-f]{32}", first.indexnow_key)
+    assert site.indexnow_key == first.indexnow_key
+
+    resp = await sites_service.update_site_ai_visibility(
+        workspace_id="ws-ai",
+        site_id=str(site.id),
+        body=SiteAiVisibilityUpdate(ai_training_allowed=True),
+    )
+    assert resp.ai_training_allowed is True
+
+    await _publish_recording(seen)
+    second = seen[1]
+    assert second.indexnow_key == first.indexnow_key  # minted once, reused
+    assert second.ai_training_allowed is True
+    # the row's own workers.dev host is reused for absolute URLs on a republish
+    assert second.host == f"{site.worker_name}.acct.workers.dev"
+
+
+async def test_ai_visibility_is_tenant_scoped(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.dto import SiteAiVisibilityUpdate
+
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    site = await _publish_recording([], pocket_id="pk-ai-2")
+    with pytest.raises(NotFound):
+        await sites_service.update_site_ai_visibility(
+            workspace_id="someone-else",
+            site_id=str(site.id),
+            body=SiteAiVisibilityUpdate(ai_training_allowed=True),
+        )
