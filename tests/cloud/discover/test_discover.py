@@ -1,38 +1,21 @@
-# tests/cloud/discover/test_discover.py — the Discover index (DS-1 part 1).
+# tests/cloud/discover/test_discover.py — the Discover index.
 #
-# Created 2026-10-01 (feat/discover-index). Pins: the SiteTemplate Discover fields
-# (kind, audiences, live_url) default and round-trip through save / PATCH; the
-# event sync (public save lists, PATCH private / delete / report-hide unlist, and a
-# re-sync never unhides a listing Discover reports hid); ``list_public`` (only
-# unhidden rows, every filter, cursor paging); the public wire is exactly the
-# allow-list; ``use_listing`` returns the source result and counts one remix;
-# ``report_listing`` (one per user, owner refused, third reporter hides);
-# ``reindex`` idempotence; and the source registry.
+# Pins: the SiteTemplate Discover fields (kind, audiences, live_url) default and
+# round-trip through save / PATCH; the event sync (public save lists, PATCH
+# private / delete / report-hide unlist, a re-sync never unhides a listing
+# Discover reports hid, and an upsert that loses the insert race retries);
+# ``list_public`` (only unhidden rows, every filter, cursor paging); the public
+# wire is exactly the allow-list; ``use_listing`` returns the source result and
+# counts one remix (not for the owner); ``report_listing`` (one per user, owner
+# refused, dismissed reporters ignored, third reporter hides here and at the
+# source); staff hide / unhide / feature with their audit rows; the periodic and
+# startup reindex, its idempotence and its live_url refresh; the (hidden, _id)
+# index; the source registry and the listeners for both sources. Slug rules
+# live in test_discover_slug.py.
 #
 # ``RecordingBus.subscribe`` is a no-op (tests/cloud/conftest.py), so the sync
-# tests replay the recorded site-template events into the real handler.
-#
-# Updated 2026-10-01 (feat/discover-index): the plan-gate and source-registry
-# autouse fixtures moved to conftest.py (shared with the router tests); unhiding
-# a listing clears its reports.
-#
-# Updated 2026-10-02 (feat/discover-index, hardening): a Discover hide reaches the
-# template and survives private -> public; staff unhide restores both; dismissed
-# reporters are ignored; reindex keeps hidden listings and refreshes live_url;
-# the periodic reindex loop; audit rows for use / feature / hide; the
-# (hidden, _id) index.
-#
-# Updated 2026-10-02 (feat/discover-index, review): the reindex loop's first pass
-# runs at once; the no-scheduler startup backfill runs one pass and logs a
-# failure; an upsert that loses the insert race retries as an update; a no-op
-# reindex writes and emits nothing; using your own listing doesn't count a remix.
-#
-# Updated 2026-10-02 (feat/discover-source-contract): ``sync_site_template`` is
-# now ``sync_source("site_template", id)``.
-#
-# Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
-# ``media_kind`` / ``media_url``; the listeners and the backfill pass also cover
-# the ``studio_template`` source.
+# tests replay the recorded site-template events into the real handler. The
+# plan-gate and source-registry autouse fixtures are in conftest.py.
 from __future__ import annotations
 
 from typing import Any
@@ -57,6 +40,7 @@ STRANGERS = ("u3", "u4", "u5")
 
 PUBLIC_KEYS = {
     "id",
+    "slug",
     "source",
     "kind",
     "title",

@@ -1,27 +1,24 @@
 # router.py — FastAPI router for the Discover index (/discover).
 #
-# Created 2026-10-01 (feat/discover-index, DS-1). Thin HTTP surface over
-# ``discover.service_admin`` (public reads) and ``discover.service`` (signed-in
-# use / report). Mounted under /api/v1 from ``ee/pocketpaw_ee/cloud/__init__.py``.
+# Thin HTTP surface over ``discover.service_admin`` (public reads) and
+# ``discover.service`` (signed-in use / report). Mounted under /api/v1 from
+# ``ee/pocketpaw_ee/cloud/__init__.py``.
 #
 # Routes:
 #   GET  /discover                     — PUBLIC page of listings (per-IP 60/min)
-#   GET  /discover/{listing_id}        — PUBLIC one listing (per-IP 60/min)
+#   GET  /discover/{id_or_slug}        — PUBLIC one listing by id or slug (per-IP 60/min)
 #   POST /discover/{listing_id}/use    — signed in: copy the item into your workspace
-#   POST /discover/{listing_id}/report — signed in: report a listing (204)
+#   POST /discover/{listing_id}/report — signed in: report a listing (204; 10/hour per user)
 #
 # The public reads take no user dependency: the dashboard auth middleware lets
 # /api/v1/* through and the EE auth bridge only stamps a user when a token is
 # present, so no exemption entry is needed (same as GET /meetings/by-code/{code}).
 # No Beanie doc import here (import-linter "Discover" contracts); errors are
 # CloudError subclasses mapped by the global handler.
-#
-# Updated 2026-10-02 (feat/discover-index, hardening): POST /report is limited to
-# 10 an hour per user (``rate_limit_discover_report``, 429).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from pocketpaw_ee.cloud._core.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud._core.rate_limit import (
@@ -58,13 +55,17 @@ async def list_listings(query: ListPublicListingsRequest = Depends()) -> dict:
 
 
 @router.get(
-    "/{listing_id}",
+    "/{id_or_slug}",
     response_model=PublicListingResponse,
     dependencies=[Depends(rate_limit_discover_public)],
 )
-async def get_listing(listing_id: str) -> dict:
-    """PUBLIC — no sign-in. One unhidden listing; 404 when missing or hidden."""
-    return await service_admin.get_public(listing_id)
+async def get_listing(
+    id_or_slug: str, source: str | None = Query(default=None, max_length=64)
+) -> dict:
+    """PUBLIC — no sign-in. One unhidden listing, by id or by slug; ``source``
+    picks the source when two share a slug (else the oldest listing wins). 404
+    when missing or hidden."""
+    return await service_admin.get_public(id_or_slug, source)
 
 
 @router.post("/{listing_id}/use", response_model=UseListingResponse)

@@ -1,12 +1,11 @@
 # Discover — domain value object.
 #
-# Created 2026-10-01 (feat/discover-index): a frozen view of one listing, built in
-# ``service_admin.py`` from a DiscoverListing doc. Tenancy (``workspace_id``) and
-# ``owner`` are required with no defaults; the public wire mapping
-# (``service_admin._public``) deliberately drops them, along with ``hidden`` and
-# ``source_id``. Reports never enter the view.
-#
-# Updated 2026-10-02 (feat/studio-templates): ``media_kind`` / ``media_url``.
+# A frozen view of one listing, built in ``service_admin._view`` from a
+# DiscoverListing doc. Tenancy (``workspace_id``) and ``owner`` are required with
+# no defaults; the public wire mapping (``service_admin._public``) deliberately
+# drops them, along with ``hidden`` and ``source_id``. Reports never enter the
+# view. ``slug`` is always a string here: a row not yet backfilled reports its
+# id, which the public item route accepts in the slug's place.
 
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ class DiscoverListingView:
     workspace_id: str
     owner: str
     id: str
+    slug: str
     source: str
     source_id: str
     kind: str
