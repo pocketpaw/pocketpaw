@@ -13,12 +13,13 @@ PUT requires a body (no "empty body clears"); clearing is its own DELETE, the
 same split ``clear_overrides`` uses, so a client that drops the body cannot
 silently switch a partner's billing off.
 
-Updated 2026-10-02 (feat/partners-tiers, PH-15): the volume ``tier`` is
-system-owned now (``partners.service.refresh_standing``). The PUT can still set
-it — a manual promotion — and it stands until the next recompute moves it: an
-upgrade after a sale / client payment, or the monthly review. The PUT keeps the
-profile's ``tier_reviewed_at``, so a promotion is reviewed at the next month
-boundary rather than within minutes.
+The volume ``tier`` is system-owned (``partners.service.refresh_standing``). The
+PUT can still set it, a manual promotion, and it stands until the next recompute
+moves it: an upgrade after a sale / client payment, or the monthly review. The
+PUT keeps the profile's ``tier_reviewed_at``, so a promotion is reviewed at the
+next month boundary rather than within minutes, and keeps the partner's own
+public-profile fields (slug, display name, ...), which only the partner edits
+through PATCH /partners/me/profile.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from pocketpaw_ee.cloud.models.workspace import (
 )
 from pocketpaw_ee.cloud.partners import service as partners_service
 from pocketpaw_ee.cloud.partners.dto import PartnerProfileOut
+from pocketpaw_ee.cloud.partners.service import PUBLIC_PROFILE_FIELDS
 from pocketpaw_ee.cloud.platform import audit
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 
@@ -126,6 +128,8 @@ async def set_partner(
     current = await partners_service.partner_profile_for_workspace(workspace_id)
     if current is not None:
         data["tier_reviewed_at"] = current.tier_reviewed_at
+        # The partner's own public profile is not the operator's to reset.
+        data.update(current.model_dump(include=PUBLIC_PROFILE_FIELDS))
     if data["joined_at"] is None:
         if current is not None:
             data["joined_at"] = current.joined_at

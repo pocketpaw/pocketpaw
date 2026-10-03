@@ -277,6 +277,26 @@ async def get_public(id_or_slug: str) -> dict:
     return _public(await public_doc_by_id_or_slug(id_or_slug))
 
 
+async def list_public_for_workspaces(workspace_ids: list[str]) -> dict[str, list[dict]]:
+    """Unhidden listings of ``workspace_ids`` as public cards, newest first,
+    grouped by workspace (a workspace with none is absent). The public partner
+    profile shows a partner's listed sites through this; the card shape is the
+    same allow-list as the index."""
+    # admin-cross-tenant: public cards only; the workspace ids come from the
+    # public partner directory, which lists them by the partner's own choice.
+    if not workspace_ids:
+        return {}
+    rows = (
+        await DiscoverListing.find({"hidden": {"$ne": True}, "workspace": {"$in": workspace_ids}})
+        .sort([("_id", -1)])
+        .to_list()
+    )
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        out.setdefault(row.workspace, []).append(_public(row))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Use / report writes (called by ``service``)
 # ---------------------------------------------------------------------------
@@ -548,6 +568,7 @@ __all__ = [
     "get_staff",
     "list_all",
     "list_public",
+    "list_public_for_workspaces",
     "public_doc",
     "public_doc_by_id_or_slug",
     "push_report",
