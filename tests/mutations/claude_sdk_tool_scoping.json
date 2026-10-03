@@ -116,5 +116,23 @@
     "tests": [
       "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_bare_external_entry_starts_the_server_under_its_config_name"
     ]
+  },
+  {
+    "label": "the skill path loses Bash + Skill to the pocket lock",
+    "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
+    "find": "            run_kwargs[\"allow_sdk_tools\"] = frozenset({\"Bash\", \"Skill\"})",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
+    ]
+  },
+  {
+    "label": "a backend without allow_sdk_tools is handed it anyway (deep_agents raises)",
+    "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
+    "find": "        if \"allow_sdk_tools\" in inspect.signature(backend.run).parameters:",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
+    ]
   }
 ]
