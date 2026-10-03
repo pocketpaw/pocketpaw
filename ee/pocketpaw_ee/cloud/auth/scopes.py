@@ -1,11 +1,16 @@
+# 2026-10-03 (fix/paw-key-scopes): scopes ARE enforced now, in
+#   ``_core/context.request_context`` for paw_ bearers.
 # 2026-10-01 (CN-2): docstring no longer claims ``require_scope`` checks
 #   ``ctx.scopes`` — the ee dependency that did was deleted.
 """API-key scope registry.
 
 Scopes are coarse permissions attached to API keys. JWT-authenticated
 requests carry ``ctx.scopes is None``; API-key requests carry the key's
-concrete list on ``RequestContext.scopes``. Nothing enforces that list on
-routes today (see ``_core/context.py``).
+concrete list on ``RequestContext.scopes``. ``request_context`` enforces it:
+``_core/context._API_KEY_SCOPES`` maps each route family plus method to one of
+these scopes, and a key that lacks it gets a 403. A family with no entry is
+refused to every key. Routes that authenticate with the JWT-only dependencies
+(``current_active_user`` and friends) never accept a ``paw_`` key at all.
 """
 
 from __future__ import annotations
