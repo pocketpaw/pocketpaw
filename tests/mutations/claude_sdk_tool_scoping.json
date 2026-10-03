@@ -1,0 +1,92 @@
+[
+  {
+    "label": "the gate waves every call through — every surface restriction is a no-op again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            if _tool_gate_allows(name, allowed):\n                return {}",
+    "replace": "            if True:\n                return {}",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
+    ]
+  },
+  {
+    "label": "the gate is never registered — allowed_tools is back to auto-approve only",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                self._HookMatcher(matcher=None, hooks=[_tool_gate_hook(allowed_tools)]),\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
+    ]
+  },
+  {
+    "label": "the gate fails open on malformed input",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            logger.exception(\"Tool gate failed; denying the call\")",
+    "replace": "            return {}",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_the_gate_denies_malformed_input_instead_of_raising"
+    ]
+  },
+  {
+    "label": "a full tool id admits every name below it",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if _mcp_server_of(entry) and entry.count(\"__\") == 1",
+    "replace": "        if _mcp_server_of(entry)",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_the_gate_rule"
+    ]
+  },
+  {
+    "label": "a bare server entry admits every server whose name starts the same",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        name.startswith(f\"{entry}__\")",
+    "replace": "        name.startswith(entry)",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_bare_server_entry_admits_that_server_and_no_other"
+    ]
+  },
+  {
+    "label": "the pinned built-ins ignore policy and deny — a denied Bash is offered again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            builtins = [t for t in allowed_tools if not t.startswith(\"mcp__\")]",
+    "replace": "            builtins = list(all_sdk_tools)",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_builtin_is_unpinned_disallowed_and_refused"
+    ]
+  },
+  {
+    "label": "ToolSearch is not pinned — tool search goes off and every MCP schema loads up front",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            options_kwargs[\"tools\"] = list(dict.fromkeys([*builtins, \"ToolSearch\"]))",
+    "replace": "            options_kwargs[\"tools\"] = builtins",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_turn_pins_its_builtins_plus_tool_search"
+    ]
+  },
+  {
+    "label": "the deny set never reaches disallowed_tools",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            options_kwargs[\"disallowed_tools\"] = sorted(deny_mcp_tool_ids)",
+    "replace": "            pass",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_disallowed_tools_carries_the_whole_deny_set"
+    ]
+  },
+  {
+    "label": "claude.ai connectors load into every agent on a subscription login",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        sdk_env[\"ENABLE_CLAUDEAI_MCP_SERVERS\"] = \"false\"",
+    "replace": "        pass",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_claude_ai_connectors_are_off_on_a_default_turn"
+    ]
+  },
+  {
+    "label": "a per-run extra env switches claude.ai connectors back on",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        sdk_env[\"ENABLE_CLAUDEAI_MCP_SERVERS\"] = \"false\"",
+    "replace": "        sdk_env.setdefault(\"ENABLE_CLAUDEAI_MCP_SERVERS\", \"false\")",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_nothing_switches_claude_ai_connectors_back_on"
+    ]
+  }
+]

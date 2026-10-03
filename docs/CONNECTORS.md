@@ -1,54 +1,9 @@
 <!--
-  Connectors documentation.
-  Updated: 2026-07-02 (AW-3 egress default-close) — clarified the "Development
-  against localhost" section: the egress guard rejects internal/metadata IPs BY
-  DEFAULT; POCKETPAW_ALLOW_INTERNAL_URLS opens the escape ONLY when set to an
-  explicit truthy value; unset ⇒ reject (safe production posture).
-  Updated: 2026-06-28 (AW-1/AW-2 connector egress guard) — added the "Egress
-  allow-list (SSRF protection)" section: the POCKETPAW_CONNECTOR_EGRESS_GUARD
-  flag (default-deny posture, off by default for safe rollout), the optional
-  top-level `allowed_hosts:` YAML key + the per-workspace WorkspaceConnector
-  `allowed_hosts` field, how the effective allow-list is auto-seeded (declared
-  base-URL host + auth-endpoint host, templated hosts resolved at call time)
-  and how to add hosts, the dev escape POCKETPAW_ALLOW_INTERNAL_URLS, and the
-  fail-closed-on-config-error / cookie-jar-preserving guarantees.
-  Updated: 2026-06-12 (connector-store-unification CS-6) — added the
-  "Lifecycle: definitions, state, cache" section: the three layers a connector
-  lives in (YAML definitions with two scan dirs + CWD precedence, the durable
-  state store at ~/.pocketpaw/connectors/state, and the in-memory adapter
-  cache), restart semantics, and the presence-based "connected" status.
-  Updated: 2026-06-12 (workspace-scope reach) — the agent tool surface now
-  reaches workspace-scoped connectors: list_connector_actions returns the
-  current pocket's bound connectors PLUS the workspace-enabled ones (deduped
-  by name), unanchored chats (no pocket) reach exactly the workspace-scoped
-  set, and connector_execute passes for pocket-bound OR workspace-scoped
-  rows (executing with workspace-scope credentials when unanchored). The
-  read-first / write-blocked trust gate is unchanged.
-  Updated: 2026-06-11 (connector cookie/session auth) — documented two new
-  auth methods on the DirectREST engine: `cookie` (emits a Cookie: header from
-  a declared credential, name set via auth.credential) and `header` (emits an
-  arbitrary header named by auth.header — the escape hatch for keys that are
-  not Bearer tokens). Both are additive; api_key/bearer/basic are unchanged.
-  Updated: 2026-06-11 (firestore-fabric-ingest) — added the "Firestore → Fabric
-  ingestion worker" section: the cloud background worker that mirrors selected
-  Firestore collections into Fabric objects per a per-workspace mapping config,
-  with a real high-water cursor, upsert-by-source, and tenant-stamped writes.
-  Updated: 2026-06-08 (sense-mcp / Sense tier chunk 4) — added the Senses
-  section: the "Sense" glossary entry, the sense-vs-connector distinction, and
-  the two new agent tools (list_senses / sense_execute on the same
-  pocketpaw_connectors MCP server) that address a capability instead of a
-  provider, with the resolver binding it to the tenant's enabled connector.
-  Updated: 2026-06-08 (connector-mcp-execution / keystone) — documented the
-  agent-callable connector tool surface (list_connector_actions /
-  connector_execute on the pocketpaw_connectors MCP server), the v1
-  read-first / write-blocked policy, how a connector becomes usable in a room
-  (bind scope=pocket + token in config + the derived skill), and the GitHub +
-  Gmail examples.
-  Updated: 2026-06-07 (M3 connector→skill auto-authoring) — documented the
-  optional ``surface_profile`` YAML block and the connector→skill/tool
-  auto-authoring path (derivation at bind/unbind from the full enabled set, the
-  Gmail reference, and the coexistence rule with hand-set ripple_mode /
-  system_message_override).
+  Connectors documentation: how a connector is defined (YAML), stored and cached,
+  authenticated, held to an egress allow-list, how it auto-authors a pocket's
+  skill and tool allow/deny (`surface_profile`), how chat calls it (the
+  pocketpaw_connectors MCP server, read-first / writes blocked), the Firestore to
+  Fabric ingest worker, and Senses above connectors. History lives in git.
 -->
 
 # Connectors — Data Source Integration
@@ -172,8 +127,8 @@ allowed_hosts:                    # OPTIONAL — extra egress allow-list hosts
 
 surface_profile:                  # OPTIONAL — connector→skill/tool auto-authoring
   skill: my_service               # a skill to load in rooms with this connector
-  allow_tools: []                 # tool-id patterns to add to the SDK allowlist
-  deny_tools: []                  # tool-id patterns to deny
+  allow_tools: []                 # exact tool ids to add to the SDK allowlist
+  deny_tools: []                  # exact tool ids to deny
 ```
 
 The `surface_profile` block is optional. Connectors without it parse and behave
@@ -351,12 +306,21 @@ optional `surface_profile` block to the connector YAML:
 ```yaml
 surface_profile:
   skill: gmail                    # skill name loaded for rooms with this connector
-  allow_tools: ["mcp__*gmail*"]   # tool-id glob patterns to ALLOW (optional)
-  deny_tools: []                  # tool-id glob patterns to DENY (optional)
+  allow_tools: []                 # exact tool ids to ALLOW (optional)
+  deny_tools: []                  # exact tool ids to DENY (optional)
 ```
 
 All three keys are optional; a block with none of them is treated as no block.
 Connectors with no block contribute nothing.
+
+Tool entries are matched exactly, never as globs. An entry is a full
+`mcp__<server>__<tool>` id or a built-in name (`Bash`, `Read`, ...); an allow
+entry may also be a bare `mcp__<server>`, which admits every tool on that server.
+The Claude SDK backend enforces the resulting set when a tool is CALLED: a
+PreToolUse gate refuses anything outside the turn's allowed tools, the built-in
+list handed to the CLI is pinned to that set, and denied ids are also passed as
+`disallowed_tools`. The CLI runs with `bypassPermissions`, where the SDK's
+`allowed_tools` on its own only auto-approves and blocks nothing.
 
 ### How it derives at bind / unbind
 
