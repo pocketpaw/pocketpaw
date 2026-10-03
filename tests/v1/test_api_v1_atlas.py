@@ -283,12 +283,12 @@ class TestOverlay:
     def test_owner_sees_owner_gated_surface(self, client, monkeypatch):
         _with_role(monkeypatch, "owner")
         ids = _surface_ids(client)
-        assert "surface:security" in ids and len(ids) == 31
+        assert "surface:security" in ids and len(ids) == 32
 
     def test_member_does_not(self, client, monkeypatch):
         _with_role(monkeypatch, "member")
         ids = _surface_ids(client)
-        assert "surface:security" not in ids and len(ids) == 30
+        assert "surface:security" not in ids and len(ids) == 31
 
     @pytest.mark.parametrize("kw", [{"role": None}, {"role": "owner", "prime_raises": True}])
     def test_unresolved_role_fails_closed(self, client, monkeypatch, kw):

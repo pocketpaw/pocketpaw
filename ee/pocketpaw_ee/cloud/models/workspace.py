@@ -1,16 +1,14 @@
 """Workspace document — one per deployment/org, and the sub-models embedded in it.
 
-Updated 2026-10-01 (feat/partners-foundation, PH-1): added ``PartnerProfile`` and
-``Workspace.partner``. Set only by the platform route in
-``cloud/platform/partners.py`` (via the workspace service's platform partner writer);
-an ``active`` profile turns the per-site billing seams on for THIS workspace
-(``billing.enforcement.sites_enforced``). Updated 2026-10-02: ``IsoCountry`` is the
-one billing-country validator; ``tier`` is a Literal of the known tiers.
-Updated 2026-10-02 (feat/partners-tiers, PH-15): ``tier`` is now SYSTEM-owned —
-recomputed from active sold sites (``partners.service.refresh_standing``), raised
-right after a sale / client payment, lowered only by the monthly sweep, which
-stamps ``tier_reviewed_at``. An operator-set tier stands until the next
-recompute that moves it.
+``PartnerProfile`` / ``Workspace.partner`` (Paw Partners): the operator fields are
+set only by the platform route in ``cloud/platform/partners.py`` (via the workspace
+service's platform partner writer); an ``active`` profile turns the per-site
+billing seams on for THIS workspace (``billing.enforcement.sites_enforced``).
+``IsoCountry`` is the one country validator. ``tier`` is SYSTEM-owned: recomputed
+from active sold sites (``partners.service.refresh_standing``), raised right after
+a sale / client payment, lowered only by the monthly sweep, which stamps
+``tier_reviewed_at``; an operator-set tier stands until the next recompute that
+moves it. The public-profile fields are the partner's own (see the class).
 
 ``Workspace`` carries the tenant's plan, its members' roles, and the embedded
 config below. The sub-models are separated by WHAT THEY ARE, not by who edits
@@ -49,6 +47,11 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator
 from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
+from pocketpaw_ee.cloud.partners.domain import (
+    PARTNER_SLUG_PATTERN,
+    PartnerService,
+    validate_partner_slug,
+)
 
 
 class WorkspaceSettings(BaseModel):
@@ -212,6 +215,10 @@ def normalize_iso2(v: str) -> str:
 IsoCountry = Annotated[str, AfterValidator(normalize_iso2)]
 PartnerStatus = Literal["applied", "active", "suspended"]
 PartnerTier = Literal["bronze", "silver", "gold"]
+# Vocabulary shared with the wire DTOs: ``partners.domain`` (pure constants).
+PartnerSlug = Annotated[
+    str, Field(pattern=PARTNER_SLUG_PATTERN), AfterValidator(validate_partner_slug)
+]
 
 
 class PartnerProfile(BaseModel):
@@ -219,7 +226,13 @@ class PartnerProfile(BaseModel):
 
     ``None`` on the workspace = not a partner. Only ``status == "active"`` turns
     on site billing for the workspace; ``applied`` and ``suspended`` do not.
-    Written only by the workspace service's platform partner writer.
+    The operator fields are written by the workspace service's platform partner
+    writer; the public-profile fields (``slug`` .. ``public``) by the partner
+    itself through ``partners.service.update_public_profile`` (a targeted
+    ``$set``, ``workspace.service.set_partner_public_profile``). ``slug`` is
+    unique across workspaces (partial unique index below plus a service
+    pre-check). A profile is listed in the public directory only when
+    ``status == "active"`` and ``public`` is True.
     """
 
     status: PartnerStatus
@@ -232,6 +245,16 @@ class PartnerProfile(BaseModel):
     joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # When the monthly tier sweep last reviewed (and maybe lowered) ``tier``.
     tier_reviewed_at: datetime | None = None
+    # Public profile (PW-7). Shown on /partners/directory and /partners/{slug}
+    # only while ``public`` and ``status == "active"``.
+    slug: PartnerSlug | None = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    city: str | None = Field(default=None, min_length=1, max_length=80)
+    country: IsoCountry | None = None
+    services: list[PartnerService] = Field(default_factory=list, max_length=5)
+    bio: str | None = Field(default=None, max_length=600)
+    contact_url: str | None = Field(default=None, pattern=r"^https://", max_length=300)
+    public: bool = False
 
 
 class Workspace(TimestampedDocument):
@@ -312,4 +335,12 @@ class Workspace(TimestampedDocument):
             # while the tenant count is small, and the honest fix later is a
             # text index or a normalised lowercase field, not a bigger regex.
             IndexModel([("name", 1)], name="name_1"),
+            # Public partner slug, unique across workspaces. Partial so the
+            # many workspaces with no partner (or no slug) never collide.
+            IndexModel(
+                [("partner.slug", 1)],
+                name="partner_slug_1",
+                unique=True,
+                partialFilterExpression={"partner.slug": {"$type": "string"}},
+            ),
         ]

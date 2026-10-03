@@ -1302,6 +1302,85 @@ The milestone ladder with when each reward was credited:
 
 Needs `fabric.read` and an ACTIVE profile (**403** `partner.not_active`).
 
+### `PATCH /partners/me/profile`
+
+The caller's public partner profile; only the fields sent change. Body
+(`extra` forbidden):
+
+```json
+{
+  "slug": "ravi-prints",
+  "display_name": "Ravi Prints",
+  "city": "Bengaluru",
+  "country": "IN",
+  "services": ["print", "design"],
+  "bio": "Flex and vinyl since 2009.",
+  "contact_url": "https://wa.me/919876543210",
+  "public": true
+}
+```
+
+`slug` is `^[a-z0-9-]{3,60}$`, unique across workspaces, and may not be one of
+`me, clients, offers, sell, pay-link, sites, summary, earnings, rewards,
+directory, apply, profile` (those are route segments). `services` is a subset of
+`print, design, web, marketing, photo` (up to 5). `bio` is at most 600 chars,
+`contact_url` must start with `https://`, `country` is ISO-3166 alpha-2 (upper-cased).
+`public: true` needs a `slug` and a `display_name`. Returns the same shape as
+`GET /partners/me`, which now carries these eight fields too (defaults: nulls,
+`services: []`, `public: false`). `fabric.write`. **404** when the workspace is not a
+partner (an applied partner may fill its profile in ahead of activation; it is listed
+only once active). **422** `partners.invalid_profile` (pattern, reserved slug, unknown
+service), `partners.profile_incomplete`; **409** `partners.slug_taken`. An operator
+`PUT /platform/workspaces/{id}/partner` leaves these fields as they are.
+
+### `GET /partners/directory` (public)
+
+No sign-in. Partners with `status: active` and `public: true`, newest first.
+Query params, all optional: `city` (case-insensitive exact match), `service`
+(one of the five), `cursor`, `limit` (1-50, default 24). Limited to 60 requests a
+minute per IP, shared with `GET /partners/{slug}`; past that `429`
+`partners.rate_limited`. A bad cursor is `422` `partners.bad_cursor`.
+
+Response `200`: `{"items": [<partner>, ...], "next_cursor": "..." | null}`. A
+partner on the wire is exactly these fields (never `footer_name`,
+`billing_country`, `founding` or `status`):
+
+```json
+{
+  "slug": "ravi-prints",
+  "display_name": "Ravi Prints",
+  "city": "Bengaluru",
+  "country": "IN",
+  "services": ["print", "design"],
+  "bio": "Flex and vinyl since 2009.",
+  "contact_url": "https://wa.me/919876543210",
+  "tier": "bronze",
+  "joined_at": "2026-10-01T09:00:00Z",
+  "sites": [<Discover listing>, ...]
+}
+```
+
+`sites` are the partner workspace's public Discover listings, the same card as
+`GET /discover` (see Discover below), newest first.
+
+### `GET /partners/{slug}` (public)
+
+No sign-in; same rate limit as the directory. One partner by slug, `404` when
+there is no such slug or the partner is not active or not public. Registered
+after every fixed `/partners/<segment>` route, so `GET /partners/me` and the other
+signed-in reads still answer as before (401 without a token).
+
+### `POST /partners/apply` (public)
+
+No sign-in. Body (`extra` forbidden): `name` (1-120), `email`, `city` (1-80),
+`country` (ISO-2), `services` (1-5 of the five), `message` (up to 2000, optional),
+`turnstile_token`. The Cloudflare Turnstile token is checked first (`400`
+`partners.turnstile_failed`; skipped with a warning when
+`POCKETPAW_TURNSTILE_SECRET` is unset). Then exactly one Instinct proposal is
+filed in the platform's own scope (not a tenant's), carrying the application
+under `_partner_application`; nothing is written to any workspace. **204**.
+Limited to 5 applications an hour per IP (`429` `partners.apply_rate_limited`).
+
 ## Site templates
 
 Save a site pocket as a template, then start new sites from it. A template is a
