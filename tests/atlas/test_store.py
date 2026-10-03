@@ -101,6 +101,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:audit",
     "surface:security",
     "surface:agents-activity",
+    "surface:agent-health",
     "surface:fabric",
     "surface:ship",
     "surface:growth",
