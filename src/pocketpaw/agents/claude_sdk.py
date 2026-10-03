@@ -1627,7 +1627,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # uncallable). Allow each enabled external server wholesale with a bare
         # ``mcp__<server>`` entry — the Claude Code permission convention that
         # admits all of a server's tools — gated by the same tool policy that
-        # gates registration.
+        # gates registration. The server segment is spelled the way the CLI
+        # names the tools (every char outside [A-Za-z0-9_-] becomes ``_``), or
+        # the tool gate would never match a server called e.g. "My Notes".
         try:
             from pocketpaw.mcp.config import load_mcp_config
 
@@ -1638,7 +1640,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     continue
                 if not self._policy.is_mcp_server_allowed(cfg.name):
                     continue
-                ids.append(f"mcp__{cfg.name}")
+                ids.append(f"mcp__{re.sub(r'[^a-zA-Z0-9_-]', '_', cfg.name)}")
         except Exception as exc:  # noqa: BLE001
             logger.debug("External MCP server allowlist not added: %s", exc)
 
