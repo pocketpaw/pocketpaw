@@ -3,7 +3,8 @@
 # One module-level function per paw-lens route. Each takes the caller's
 # ``workspace_id`` (from ``current_workspace_id``, never the request) and sends
 # it upstream as the ``workspace_id`` query param on every call, GETs and POSTs
-# alike. Optional filters (``since``, ``status``) are forwarded only when set.
+# alike. Optional filters (``since``, ``status``, ``agent_id``, ``automation``,
+# ``limit``) are forwarded only when set.
 #
 # Settings are read at call time, not import, so test overrides apply (the
 # cached ``get_settings`` still needs a restart in prod). An empty URL short-circuits to
@@ -48,14 +49,22 @@ async def _call(
     )
 
 
-async def overview(workspace_id: str, since: str | None = None) -> Any:
-    return await _call("GET", "/v1/overview", workspace_id, {"since": since})
+async def overview(workspace_id: str, since: str | None = None, agent_id: str | None = None) -> Any:
+    return await _call("GET", "/v1/overview", workspace_id, {"since": since, "agent_id": agent_id})
 
 
 async def list_issues(
-    workspace_id: str, status: str | None = None, since: str | None = None
+    workspace_id: str,
+    status: str | None = None,
+    since: str | None = None,
+    agent_id: str | None = None,
 ) -> Any:
-    return await _call("GET", "/v1/issues", workspace_id, {"status": status, "since": since})
+    return await _call(
+        "GET",
+        "/v1/issues",
+        workspace_id,
+        {"status": status, "since": since, "agent_id": agent_id},
+    )
 
 
 async def get_issue(workspace_id: str, fingerprint: str, since: str | None = None) -> Any:
@@ -72,12 +81,36 @@ async def resolve_issue(workspace_id: str, fingerprint: str) -> Any:
     return await _call("POST", f"/v1/issues/{fingerprint}/resolve", workspace_id)
 
 
+async def list_runs(
+    workspace_id: str,
+    agent_id: str | None = None,
+    automation: str | None = None,
+    status: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+) -> Any:
+    params = {
+        "agent_id": agent_id,
+        "automation": automation,
+        "status": status,
+        "since": since,
+        "limit": str(limit) if limit is not None else None,
+    }
+    return await _call("GET", "/v1/runs", workspace_id, params)
+
+
 async def get_run(workspace_id: str, trace_id: str, since: str | None = None) -> Any:
     return await _call("GET", f"/v1/runs/{trace_id}", workspace_id, {"since": since})
 
 
-async def list_agents(workspace_id: str, since: str | None = None) -> Any:
-    return await _call("GET", "/v1/agents", workspace_id, {"since": since})
+async def get_span(workspace_id: str, trace_id: str, span_id: str) -> Any:
+    return await _call("GET", f"/v1/runs/{trace_id}/spans/{span_id}", workspace_id)
+
+
+async def list_agents(
+    workspace_id: str, since: str | None = None, agent_id: str | None = None
+) -> Any:
+    return await _call("GET", "/v1/agents", workspace_id, {"since": since, "agent_id": agent_id})
 
 
 async def list_monitors(workspace_id: str, since: str | None = None) -> Any:

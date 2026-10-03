@@ -2916,11 +2916,14 @@ async def execute_run(spec: RunSpec) -> None:
     # time. The ``as`` target stays in scope after the block, so the post-loop
     # persist below can still read it once the ContextVar is reset.
     # paw-lens attribution: every span this run opens (prewarm task included,
-    # create_task copies the context) carries the run's workspace.
+    # create_task copies the context) carries the run's workspace and agent.
+    # ``target_agent_id``, not ``spec.agent_id``: the spec's id is only a hint
+    # the scope resolver may override (e.g. /code routes to the code agent), and
+    # ``target_agent_id`` is the agent the pool actually runs.
     with (
         mark_cloud_chat_run(),
         collect_delivered_artifacts() as delivered_artifacts,
-        baggage(**{"paw.workspace_id": ctx.workspace_id}),
+        baggage(**{"paw.workspace_id": ctx.workspace_id, "paw.agent.id": ctx.target_agent_id}),
     ):
         # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
         # subprocess for this session NOW — concurrently with the remaining pre-turn

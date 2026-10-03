@@ -7083,19 +7083,28 @@ proxy its read API, scoped to the caller's active workspace. Enterprise only.
 | `GET /api/v1/lens/issues/{fingerprint}` | `GET /v1/issues/{fingerprint}` |
 | `POST /api/v1/lens/issues/{fingerprint}/mute` `{"minutes": n}` | `POST /v1/issues/{fingerprint}/mute` |
 | `POST /api/v1/lens/issues/{fingerprint}/resolve` | `POST /v1/issues/{fingerprint}/resolve` |
+| `GET /api/v1/lens/runs?agent_id=&automation=&status=ok\|error&limit=` | `GET /v1/runs` |
 | `GET /api/v1/lens/runs/{trace_id}` | `GET /v1/runs/{trace_id}` |
+| `GET /api/v1/lens/runs/{trace_id}/spans/{span_id}` | `GET /v1/runs/{trace_id}/spans/{span_id}` |
 | `GET /api/v1/lens/agents` | `GET /v1/agents` |
 | `GET /api/v1/lens/monitors` | `GET /v1/monitors` |
 | `GET /api/v1/lens/monitors/{slug}` | `GET /v1/monitors/{slug}` |
 
-GET routes accept `since`. The proxy adds `workspace_id` from the session to
+GET routes accept `since`. `overview`, `issues`, `agents` and the runs list
+also take `agent_id` (must match `[A-Za-z0-9_-]{1,64}`) to narrow to one agent.
+The runs list (newest first) filters by `automation` (a monitor slug,
+`<kind>:<id>`), `status` (`ok` or `error`) and `limit` (1 to 200, paw-lens
+defaults to 50); a value outside those rules is a `422` and no upstream call.
+The span route returns one span's attributes, events, gen_ai messages and tool
+call. The proxy adds `workspace_id` from the session to
 every upstream call and drops any `workspace_id` the client sends. Response
 bodies are paw-lens's JSON, unchanged.
 
 - `POCKETPAW_LENS_API_URL` unset: every route returns `200 {"enabled": false}`
   and makes no network call.
 - `POCKETPAW_LENS_API_TOKEN` is sent as `X-Lens-Token` and never logged.
-- Path params must match `[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`, otherwise `422`.
+- Path params and `automation` must match `[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`,
+  otherwise `422`.
 - paw-lens down, slow (3 s timeout) or erroring: `503 lens.unavailable`.
   paw-lens rejects the token: `503 lens.misconfigured`. paw-lens 404: `404
   lens.not_found`. paw-lens 400: `400 lens.bad_request`.
@@ -7110,6 +7119,10 @@ starts, then `ok` or `error` (scrubbed, at most 500 chars). The monitor slug is
 `<kind>:<id>`; the first check-in registers it with its schedule (`crontab` or
 `interval_seconds`). Posts run in the background with a 1 s budget and never
 fail or delay the job. `POCKETPAW_LENS_API_URL` unset: no check-ins are sent.
+The run opens a current span named `automation <kind>:<id>`, so everything the
+tick does is one trace; with Logfire on, both check-ins carry that trace's
+`trace_id` (32 lowercase hex) so paw-lens can link a check-in to its trace.
+With Logfire off the field is omitted.
 
 | Kind | What checks in | Id |
 |---|---|---|
@@ -7124,5 +7137,6 @@ fail or delay the job. `POCKETPAW_LENS_API_URL` unset: no check-ins are sent.
 Each run also stamps `paw.workspace_id`, `paw.automation.kind` and
 `paw.automation.id` on its spans as attributes (a span processor, not OTel
 baggage, so nothing goes out in a `baggage` header). Interactive chat runs
-carry `paw.workspace_id` only. A cancelled run (shutdown) posts no final
+carry `paw.workspace_id` and `paw.agent.id` (the id of the agent serving the
+run). A cancelled run (shutdown) posts no final
 check-in; set `max_runtime_s` to have paw-lens time it out.
