@@ -46,6 +46,10 @@ never trains the agent's soul. Invariants worth keeping:
   prewarm task is created, so both are inherited by it;
 - the host-cancel cleanup is shielded and tracked, and the worker drains it
   (``drain_pending_cleanups``) before closing the database.
+- every step of the backend's generator (and its final ``aclose``) runs in
+  one Context, so spans it holds across ``yield`` attach and detach cleanly.
+  That ``aclose`` is time-bounded and a cancel during it is deferred, so it
+  never skips the sink/turn/supervisor bookkeeping after it.
 
 Changes: 2026-10-01 (CN-3, fix/canon-daily-caps) — the daily turn cap claims
 through ``metering.service.try_spend`` (the one daily usage primitive) instead
@@ -55,6 +59,7 @@ of ``turn_budget``, which is gone. Same cap, same env, same fail-open.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -215,6 +220,8 @@ def _stream_ttl() -> int:
 # cutoff is 10 minutes, so 30s leaves a wide margin for a slow Mongo write or a
 # busy event loop before a healthy run could look dead.
 _DEFAULT_HEARTBEAT_SECONDS = 30.0
+# Upper bound on closing the backend generator in ``_drive_agent_loop``'s teardown.
+_ACLOSE_TIMEOUT_SECONDS = 5.0
 
 
 def _heartbeat_seconds() -> float:
@@ -1699,6 +1706,7 @@ async def _drive_agent_loop(
 
     handled_pocket_ids: set[str] = set()
     next_event_task: asyncio.Task[Any] | None = None
+    agent_iter: Any = None
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
     # Supervised native-resume bookkeeping (feat/session-supervisor SS-5).
     # Pre-init OUTSIDE the ``try`` so the ``finally`` / ``except`` can always
@@ -2142,6 +2150,12 @@ async def _drive_agent_loop(
                 run_kwargs.pop("session_handle", None)
                 run_kwargs.pop("warm_client", None)
                 run_kwargs.pop("on_client_built", None)
+        # Every step of ``agent_iter`` runs in this ONE Context, copied after the
+        # turn's bindings are set. Each step is its own task, and a task otherwise
+        # runs in a fresh copy, so a span the backend holds across ``yield``
+        # (logfire's ``invoke_agent``) would attach in one copy and fail to detach
+        # in another.
+        step_ctx = contextvars.copy_context()
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -2152,7 +2166,7 @@ async def _drive_agent_loop(
         async def _next_event() -> Any:
             return await agent_iter.__anext__()
 
-        next_event_task = asyncio.create_task(_next_event())
+        next_event_task = asyncio.create_task(_next_event(), context=step_ctx)
         next_queue_task = asyncio.create_task(side_channel_queue.get())
         while True:
             if await is_cancelled():
@@ -2190,7 +2204,7 @@ async def _drive_agent_loop(
                 sup_completed_ok = True
                 next_event_task = None
                 break
-            next_event_task = asyncio.create_task(_next_event())
+            next_event_task = asyncio.create_task(_next_event(), context=step_ctx)
             if etype == "message":
                 yield (
                     "chunk",
@@ -2425,6 +2439,21 @@ async def _drive_agent_loop(
             t.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        # A cancel can land before the pending step ever ran, leaving the backend
+        # suspended mid-turn; close it in the steps' Context, not from a GC finalizer.
+        # Bounded and shielded: a wedged close or a second cancel must not skip
+        # the bookkeeping below (busy counter, sinks). A cancel is re-raised last.
+        close_cancelled = False
+        if agent_iter is not None:
+            close_task = asyncio.create_task(agent_iter.aclose(), context=step_ctx)
+            try:
+                await asyncio.wait_for(asyncio.shield(close_task), _ACLOSE_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                close_cancelled = True
+                logger.debug("cancelled while closing the agent generator", exc_info=True)
+            except BaseException:
+                close_task.cancel()
+                logger.debug("closing the agent generator failed or timed out", exc_info=True)
         try:
             detach_sse_event_sink(sink_token)
         except Exception:
@@ -2474,6 +2503,8 @@ async def _drive_agent_loop(
                 _sup.mark_run_end(sup_acq.runtime)
             except Exception:
                 logger.debug("session-supervisor run-end bookkeeping failed", exc_info=True)
+        if close_cancelled:
+            raise asyncio.CancelledError
 
 
 async def _iter_agent_events(

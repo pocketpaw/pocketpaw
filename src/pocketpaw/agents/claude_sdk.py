@@ -43,6 +43,8 @@ image-returning tools, the subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS
 the in-process MCP servers (pocketpaw, planner, atlas, ...) are gated by the
 ToolPolicy and the per-surface allow/deny sets.
 Images ride every persistent send; the stateless ``query()`` cannot carry them.
+Tracing: persistent turns are read through ``receive_response()``, the method
+logfire's SDK instrumentation patches; the stateless path opens its own span.
 """
 
 import asyncio
@@ -678,6 +680,40 @@ def _history_fingerprint(entry: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+def _parse_tolerant_client(base: type) -> type:
+    """``base`` (the SDK's ``ClaudeSDKClient``) with a ``receive_messages()`` that
+    survives ``MessageParseError``.
+
+    The SDK parses each frame inside its ``receive_messages()`` generator, so one
+    unreadable frame kills that generator. This override re-creates it over the
+    same message channel and carries on. It subclasses rather than wraps so
+    logfire's patches on the base class (``__init__``, ``query``,
+    ``receive_response``) still apply.
+    """
+
+    class ParseTolerantClaudeSDKClient(base):
+        async def receive_messages(self):
+            consecutive = 0
+            while consecutive < 50:  # safety valve
+                try:
+                    async for msg in super().receive_messages():
+                        consecutive = 0
+                        yield msg
+                    return
+                except Exception as exc:
+                    if "MessageParseError" not in type(exc).__name__:
+                        raise
+                    consecutive += 1
+                    logger.debug(
+                        "Skipping unreadable SDK event (retry %d), re-creating iterator: %s",
+                        consecutive,
+                        exc,
+                    )
+            logger.error("Too many consecutive MessageParseErrors — aborting stream")
+
+    return ParseTolerantClaudeSDKClient
+
+
 class _HistoryWatermark:
     """The stored history a live client already holds (see the block above)."""
 
@@ -978,7 +1014,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             # Store references
             self._query = query
-            self._ClaudeSDKClient = ClaudeSDKClient
+            self._ClaudeSDKClient = _parse_tolerant_client(ClaudeSDKClient)
             self._ClaudeAgentOptions = ClaudeAgentOptions
             self._HookMatcher = HookMatcher
             self._AssistantMessage = AssistantMessage
@@ -2251,46 +2287,31 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         logger.debug("closing the stateless query failed: %s", close_exc)
 
     async def _resilient_receive(self, client):
-        """Iterate over client messages, recovering from parse errors.
+        """One turn from a persistent client: its messages through the ResultMessage.
 
-        Uses ``receive_messages()`` directly (not ``receive_response()``)
-        and handles generator death from ``MessageParseError`` by
-        re-creating the iterator from the same underlying anyio channel.
+        Reads ``client.receive_response()``, the method logfire's Claude Agent SDK
+        instrumentation patches: the turn's ``invoke_agent`` span, its ``chat``
+        spans and the state its injected tool hooks need all live inside it.
+        Parse errors are recovered beneath it, in the client class's own
+        ``receive_messages`` (``_parse_tolerant_client``), so a recovered error
+        neither ends the turn early (leaking its tail into the next turn) nor
+        splits it into two traces. Test doubles that only define
+        ``receive_messages`` are read through that, up to the ResultMessage.
 
-        When ``parse_message()`` raises inside the SDK's
-        ``receive_messages()`` generator, the exception kills the entire
-        generator chain.  The old ``_safe_iter`` wrapper caught the error
-        and called ``continue``, but the generator was already dead — so
-        the next ``__anext__()`` returned ``StopAsyncIteration`` and the
-        loop exited early, leaving unconsumed events in the channel that
-        leaked into the *next* turn.
-
-        This method instead re-creates the ``receive_messages()``
-        iterator after a parse error, which reads from the same
-        underlying anyio memory channel and picks up where it left off.
+        The inner stream is run to its own end, and closed here if the consumer
+        abandons the turn: logfire's span is attached across its ``yield``, and a
+        generator left suspended is finalized later from another context, where
+        the span fails to detach and is never exported.
         """
-        _max_consecutive_errors = 50  # safety valve
-        _consecutive = 0
-        while _consecutive < _max_consecutive_errors:
-            try:
-                async for msg in client.receive_messages():
-                    _consecutive = 0  # reset on every successful message
-                    yield msg
-                    if self._ResultMessage and isinstance(msg, self._ResultMessage):
-                        return  # normal completion
-                # Generator ended naturally (end-of-stream) without ResultMessage
-                return
-            except Exception as exc:
-                if "MessageParseError" in type(exc).__name__:
-                    _consecutive += 1
-                    logger.debug(
-                        "Skipping unrecognised SDK event (retry %d), re-creating iterator: %s",
-                        _consecutive,
-                        exc,
-                    )
-                    continue
-                raise  # re-raise non-parse errors
-        logger.error("Too many consecutive MessageParseErrors — aborting stream")
+        response = getattr(client, "receive_response", None)
+        stream = response() if response is not None else client.receive_messages()
+        try:
+            async for msg in stream:
+                yield msg
+                if response is None and isinstance(msg, self._ResultMessage or ()):
+                    return
+        finally:
+            await stream.aclose()
 
     async def _build_options(
         self,
@@ -3530,10 +3551,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         if image_attachments
                         else turn_text
                     )
-                    # Use _resilient_receive instead of receive_response() +
-                    # _safe_iter.  This handles MessageParseError by
-                    # re-creating the iterator from the same anyio channel,
-                    # preventing stale events from leaking into the next turn.
+                    # _resilient_receive reads one turn through receive_response()
+                    # (traced by logfire) and survives MessageParseError, so
+                    # stale events cannot leak into the next turn.
                     event_stream = self._resilient_receive(_persistent_client)
                     logger.info("Persistent client: _resilient_receive() ready")
                 except Exception as client_err:
