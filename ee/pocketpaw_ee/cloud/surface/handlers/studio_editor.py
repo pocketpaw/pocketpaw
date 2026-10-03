@@ -15,8 +15,9 @@
 # required clipId / assetId, and tests/cloud/surface/test_entity_id_contract.py
 # derives addressable kinds from the MCP tool schemas). Ids therefore render as
 # ``…tail``, and the tool's validator resolves tails back through
-# ``pockets.id_resolve``. A MOTION GRAPHICS block carries each authored motion
-# graphic's id and HTML source (capped), so an edit rewrites it in place via
+# ``pockets.id_resolve``. A MOTION GRAPHICS block carries each motion graphic's
+# id and HTML source (capped), whether the agent wrote it or the user made it
+# from the Graphics gallery, so an edit rewrites it in place via
 # ``add_motion_graphic``'s ``replace_asset_id`` instead of adding a second one.
 #
 # Changes: 2026-09-30 (feat/open-surface-tool) — ONLY PLACE WHAT EXISTS now also
@@ -378,10 +379,13 @@ Honesty (this surface has burned people before):
 To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
 Never batch an export with edits — it would render a half-built timeline.
 
-For a motion graphic, load the `hyperframes-core` skill and call
-`mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
-composition (plus `replace_asset_id` when editing one that exists). It renders
-in the browser after the call returns: say it is rendering, never that it is done.
+For a motion graphic, load the `hyperframes-core` and `studio-motion` skills and
+call `mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
+composition (plus `replace_asset_id` when editing one that exists). Graphics the
+user makes with the editor's Graphics button are listed under MOTION GRAPHICS
+too (data-preset and data-style on the root); edit them the same way, with
+replace_asset_id. It renders in the browser after the call returns: say it is
+rendering, never that it is done.
 </studio-editor-procedure>"""
 
 _NO_TIMELINE = """\
