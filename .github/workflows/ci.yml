@@ -288,9 +288,11 @@ jobs:
 
       - name: Run paw-lens proxy tests
         # Same addopts escape. Proves the lens proxy injects the caller's
-        # workspace_id (never a client-supplied one) and degrades to a 503,
-        # never a 500, when paw-lens is down.
-        run: uv run pytest tests/cloud/lens -o addopts="" -q --tb=short
+        # workspace_id (never a client-supplied one), degrades to a 503, never a
+        # 500, when paw-lens is down, redacts content for non-admins, and that
+        # the lens MCP tools load only on the agent_health surface (whose
+        # handler test rides along, since tests/cloud/surface has no CI step).
+        run: uv run pytest tests/cloud/lens tests/cloud/surface/test_agent_health_handler.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
