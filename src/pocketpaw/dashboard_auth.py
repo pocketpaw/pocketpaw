@@ -12,6 +12,11 @@ Extracted from dashboard.py — contains:
 - ``auth_middleware()`` — HTTP middleware (registered by dashboard.py)
 - ``auth_router`` — APIRouter with session token, cookie login/logout, QR code,
   and token regeneration endpoints
+
+Updated: 2026-10-03 — ``/api/v1/ws`` joins ``_WS_AUTH_OPTIONAL_PATHS`` so a
+browser can authenticate the dashboard socket with a first-frame ws_ticket.
+The route handler (``dashboard_ws.websocket_handler``) still runs the full
+token/cookie/bearer/protocol/localhost check and refuses everything else.
 """
 
 import hmac
@@ -174,7 +179,7 @@ async def verify_token(
 # ---------------------------------------------------------------------------
 
 
-_WS_AUTH_OPTIONAL_PATHS: tuple[str, ...] = ("/ws/cloud",)
+_WS_AUTH_OPTIONAL_PATHS: tuple[str, ...] = ("/ws/cloud", "/api/v1/ws")
 """WebSocket paths whose route handler does its own auth.
 
 The cloud EE router authenticates ``/ws/cloud`` via a short-lived
@@ -185,6 +190,13 @@ scope gate below, so accepting them here would require duplicating the
 EE verifier — instead we let the route handler reject with a typed
 close code, matching the existing HTTP ``auth_optional_prefixes``
 pattern for ``/api/v1/*``.
+
+``/api/v1/ws`` (the dashboard socket) is listed because a first-frame
+ws_ticket arrives only after the upgrade, so this pre-upgrade gate can't see
+it. ``dashboard_ws.websocket_handler`` repeats every check below, refuses a
+bad ``?token=`` with 4003 at the handshake, and otherwise demands the ticket
+frame (close 4001 on failure). ``/ws`` and ``/v1/ws`` stay gated here, so
+first-frame auth is only reachable on ``/api/v1/ws``.
 """
 
 
@@ -462,6 +474,8 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/pawbar-app",
         # NOTE: /ws, /v1/ws, /api/v1/ws are no longer exempted here — WebSocket
         # scopes are now authenticated at the middleware level (issue #883).
+        # /api/v1/ws is in _WS_AUTH_OPTIONAL_PATHS for first-frame ws_ticket
+        # auth; its handler does the full check itself.
         "/api/auth/login",
         "/api/v1/docs",
         "/api/v1/redoc",

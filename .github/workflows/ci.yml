@@ -4,6 +4,9 @@
 # Updated: 2026-10-03 (fix/paw-bar-frame-headers) — the EE test job runs
 # tests/cloud/test_paw_bar_frame.py (frame CSP + dashboard header middleware),
 # which otherwise sits in the tests/cloud blind spot.
+# Updated: 2026-10-03 (feat/dashboard-ws-ticket-auth) — the EE test job runs
+# tests/cloud/auth/test_dashboard_ws_ticket.py (first-frame ws_ticket auth on
+# /api/v1/ws), which otherwise sits in the tests/cloud blind spot.
 # Updated: 2026-10-02 (fix/canon-cross-repo-pins) — the EE test job runs
 # tests/cloud/test_paw_bar_widget_js.py (vendored loader hash pin), which otherwise
 # sits in the tests/cloud blind spot.
@@ -290,6 +293,16 @@ jobs:
           tests/cloud/other_hand/test_illustrate_tool.py
           tests/cloud/test_agent_router_run_start_gates.py
           tests/cloud/credits/test_enforcement.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run dashboard WS ticket auth tests
+        # Same addopts escape. /api/v1/ws accepts a single-use ws_ticket in its
+        # first frame; this file is the only proof that a ticket works once, a
+        # replay or a ?token= ticket is refused, a bad or missing first frame
+        # closes 4001 without hanging, and the old token/cookie auth still holds.
+        run: uv run pytest tests/cloud/auth/test_dashboard_ws_ticket.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

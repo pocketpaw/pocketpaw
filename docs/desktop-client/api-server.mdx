@@ -7,6 +7,10 @@ keywords: ["pocketpaw serve", "api server", "headless mode", "rest api", "websoc
 tags: ["api", "server", "headless", "rest"]
 ---
 
+{/* 2026-10-03 (feat/dashboard-ws-ticket-auth): documented first-frame
+    ws_ticket auth on /api/v1/ws and its close codes (4003 handshake, 4001
+    first frame); ticket path is superuser-only. */}
+
 # API Server (`pocketpaw serve`)
 
 The `pocketpaw serve` command starts PocketPaw as a **headless API server** without the web dashboard frontend. It exposes the full REST API and WebSocket endpoints, making it ideal for:
@@ -262,7 +266,28 @@ ws.onmessage = (event) => {
 };
 ```
 
-WebSocket paths: `/ws`, `/api/v1/ws`, `/v1/ws` (all equivalent).
+WebSocket paths: `/ws`, `/api/v1/ws`, `/v1/ws` (all equivalent for the auth above).
+
+### Ticket auth in the first frame (`/api/v1/ws` only)
+
+Browsers on Enterprise cloud can't put a long-lived token in a WebSocket URL
+safely. Instead they mint a short-lived, single-use ticket with
+`POST /api/v1/auth/ws/ticket` and send it as the first frame:
+
+```javascript
+const ws = new WebSocket('wss://your-host/api/v1/ws'); // no ?token=
+ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', ticket: TICKET }));
+```
+
+- Send the auth frame within 5 seconds of the connection opening.
+- Each ticket works once and expires 30 seconds after minting. A replay is refused.
+- Only a platform admin (an active superuser) gets in this way. A ticket for
+  any other account closes `4001`, because this socket has full owner access.
+- Never put a ticket in `?token=`. It is refused at the handshake.
+- Close codes: `4003` means the handshake credential was bad. `4001` means the
+  first frame was missing, malformed, or carried an invalid or used ticket.
+- `/ws` and `/v1/ws` don't take first-frame tickets.
+- An OSS install has no ticket store, so first-frame auth always closes `4001`.
 
 ## Comparison: `serve` vs Default Mode
 

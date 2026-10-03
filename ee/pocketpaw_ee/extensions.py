@@ -26,6 +26,10 @@ With several web processes (`POCKETPAW_REALTIME_BUS=redis-streams`) the
 scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
 cluster, and the jail GC once per host. `on_shutdown` stops what it started.
 
+Changes (2026-10-03, dashboard ws ticket): ``CloudAuthProvider`` gains
+``redeem_dashboard_ws_ticket`` so the OSS dashboard socket can redeem a
+first-frame ws_ticket (active superusers only) without importing EE.
+
 Changes (2026-10-02, PH-15): ``_sweeps`` runs ``sweep_partner_tiers``.
 
 Changes (2026-10-01, CN-4): `on_shutdown` closes the shared arq pool via
@@ -278,6 +282,11 @@ class CloudAuthProvider:
         from pocketpaw_ee.cloud.auth.core import current_optional_user
 
         return current_optional_user
+
+    async def redeem_dashboard_ws_ticket(self, ticket: str) -> bool:
+        from pocketpaw_ee.cloud.auth.ws_tickets import redeem_dashboard_ws_ticket
+
+        return await redeem_dashboard_ws_ticket(ticket)
 
 
 class CloudRouteProvider:

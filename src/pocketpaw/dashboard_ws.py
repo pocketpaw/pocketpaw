@@ -4,18 +4,30 @@ Extracted from dashboard.py — contains the main websocket_handler() function
 and helper functions: handle_tool(), handle_file_navigation(), handle_file_browse().
 
 Changes:
+  - 2026-10-03: First-frame ws_ticket auth on the dashboard socket. A client
+    that connects with no ``?token=`` and no other valid credential is
+    accepted, then must send ``{"type": "auth", "ticket": "<ws_ticket>"}`` as
+    its first frame within ``AUTH_FRAME_TIMEOUT_SECONDS``. The ticket is
+    redeemed through the ``pocketpaw.auth`` extension provider (EE's
+    ``redeem_dashboard_ws_ticket``: single use, active superusers only, the EE
+    bridge's full_access rule). No provider means fail closed. Any first-frame
+    failure closes 4001. A ticket in the query string is still refused with
+    4003 at the handshake. Existing token/cookie/bearer/protocol/localhost auth
+    is unchanged.
   - 2026-03-08: Fix switch_session silently dropping requests for non-existent or
     path-traversal session IDs (caused WS hang). Now sends empty session_history response.
 """
 
 import asyncio
 import base64
+import json
 import logging
 import uuid
 from pathlib import Path
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from pocketpaw import _registry
 from pocketpaw.config import Settings, get_access_token, validate_api_keys
 from pocketpaw.dashboard_state import (
     _settings_lock,
@@ -31,6 +43,42 @@ from pocketpaw.security.session_tokens import verify_session_token
 from pocketpaw.skills import SkillExecutor, get_skill_loader
 
 logger = logging.getLogger(__name__)
+
+# First-frame ws_ticket auth (same shape as the websandbox WS). Module-level so
+# tests can shrink the timeout.
+AUTH_FRAME_TIMEOUT_SECONDS = 5.0
+_CLOSE_AUTH_FRAME = 4001
+
+
+async def _first_frame_ticket_ok(websocket: WebSocket) -> bool:
+    """Read the first frame of an accepted socket and redeem its ws_ticket.
+
+    Expects ``{"type": "auth", "ticket": "<ws_ticket>"}`` (``token`` is an
+    alias, matching the cloud chat and websandbox sockets). Returns False on
+    timeout, disconnect, bad JSON, wrong shape, an invalid or replayed ticket,
+    a ticket whose user is not an active superuser, or an OSS install with no
+    ``pocketpaw.auth`` provider.
+    """
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_FRAME_TIMEOUT_SECONDS)
+        frame = json.loads(raw)
+    except Exception:  # noqa: BLE001 — timeout, disconnect, non-JSON
+        return False
+    if not isinstance(frame, dict) or frame.get("type") != "auth":
+        return False
+    ticket = frame.get("ticket") or frame.get("token")
+    if not isinstance(ticket, str) or not ticket:
+        return False
+    # EE redeems the ticket (and enforces active-superuser) behind the
+    # ``pocketpaw.auth`` provider. No provider or no method: OSS install, fail closed.
+    redeem = getattr(_registry.first("pocketpaw.auth"), "redeem_dashboard_ws_ticket", None)
+    if redeem is None:
+        return False
+    try:
+        return bool(await redeem(ticket))
+    except Exception as exc:  # noqa: BLE001 — fail closed on any provider error
+        logger.warning("ws_ticket auth failed: %s", exc)
+        return False
 
 
 def _api_key_response(message: str, warnings: list[str] | None = None) -> dict:
@@ -108,6 +156,8 @@ async def websocket_handler(
                 logger.debug("OAuth token verification failed: %s", exc)
         return False
 
+    had_query_token = bool(token)
+
     # Check HTTP-only session cookie
     cookie_token = websocket.cookies.get("pocketpaw_session")
     logger.info(
@@ -144,20 +194,36 @@ async def websocket_handler(
         is_localhost,
     )
 
+    accepted = False
     if not _token_valid(token) and not is_localhost:
-        logger.warning(
-            "WebSocket auth failed: token=%s, cookie=%s, localhost=%s",
-            "present" if token else "missing",
-            "present" if cookie_token else "missing",
-            is_localhost,
-        )
-        await websocket.close(
-            code=4003,
-            reason="Unauthorized: invalid or missing authentication token",
-        )
-        return
+        if had_query_token:
+            # A bad ?token= (including a ws_ticket, which never rides the URL)
+            # is refused at the handshake, as before.
+            logger.warning(
+                "WebSocket auth failed: token=%s, cookie=%s, localhost=%s",
+                "present" if token else "missing",
+                "present" if cookie_token else "missing",
+                is_localhost,
+            )
+            await websocket.close(
+                code=4003,
+                reason="Unauthorized: invalid or missing authentication token",
+            )
+            return
+        # No URL credential: authenticate from a first-frame ws_ticket so the
+        # ticket never travels in the URL. accept() must come before receive.
+        await websocket.accept()
+        accepted = True
+        if not await _first_frame_ticket_ok(websocket):
+            logger.warning("WebSocket first-frame ticket auth failed: %s", client_ip)
+            try:
+                await websocket.close(code=_CLOSE_AUTH_FRAME, reason="Missing or invalid ticket")
+            except Exception:  # noqa: BLE001 — client already gone
+                pass
+            return
 
-    await websocket.accept()
+    if not accepted:
+        await websocket.accept()
 
     # Track connection
     active_connections.append(websocket)
