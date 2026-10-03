@@ -189,6 +189,20 @@ three are set. Delivery details: "Partner leads on WhatsApp" in `docs/api-refere
 | `msg91_platform_lead_template` | `POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE` | string | — | Approved new-lead template name (one body variable) |
 | `msg91_platform_language` | `POCKETPAW_MSG91_PLATFORM_LANGUAGE` | string | `en` | Template language code |
 
+### AI visibility checks
+
+The platform's own provider accounts used to ask AI search engines whether they
+name a business (`ee/pocketpaw_ee/cloud/ai_visibility`). An engine with no key is
+skipped. All keys are secrets, stored encrypted and never logged.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `ai_visibility_openai_api_key` | `POCKETPAW_AI_VISIBILITY_OPENAI_API_KEY` | string | — | OpenAI Responses API with web search |
+| `ai_visibility_perplexity_api_key` | `POCKETPAW_AI_VISIBILITY_PERPLEXITY_API_KEY` | string | — | Perplexity Agent API |
+| `ai_visibility_anthropic_api_key` | `POCKETPAW_AI_VISIBILITY_ANTHROPIC_API_KEY` | string | — | Claude web search, and the judge fallback |
+| `ai_visibility_cf_account_id` | `POCKETPAW_AI_VISIBILITY_CF_ACCOUNT_ID` | string | — | Cloudflare account for Workers AI (Clef-flash judge) |
+| `ai_visibility_cf_api_token` | `POCKETPAW_AI_VISIBILITY_CF_API_TOKEN` | string | — | Cloudflare API token with Workers AI access |
+
 ## Signal
 
 | Setting | Env Variable | Type | Default | Description |

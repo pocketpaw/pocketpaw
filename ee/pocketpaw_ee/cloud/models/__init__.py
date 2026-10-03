@@ -1,5 +1,9 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-10-03 (AV-3, feat/ai-visibility-core) — added ``AiVisibilityCheck``
+(one stored "do AI assistants name this business?" check). Kept out of
+``__all__``: only ``ee.cloud.ai_visibility.service`` imports it.
+
 Updated: 2026-10-02 (feat/studio-templates) — added ``StudioTemplate`` (a Studio
 generation published as a template; see studio_templates/service.py).
 
@@ -236,6 +240,7 @@ from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
+from pocketpaw_ee.cloud.models.ai_visibility_check import AiVisibilityCheck
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
@@ -648,6 +653,9 @@ def get_all_documents():
         # Studio generations published as templates. Only
         # ``ee.cloud.studio_templates.service`` / ``service_admin`` write it.
         StudioTemplate,
+        # AI visibility checks (AV-3). Only ``ee.cloud.ai_visibility.service``
+        # writes it.
+        AiVisibilityCheck,
         SiteDesignBrief,
         SiteExport,
         # SF-8 — the proof that a workspace controls an origin. The later

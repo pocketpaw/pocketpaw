@@ -2539,6 +2539,41 @@ class Settings(BaseSettings):
         description="Language code of that template. POCKETPAW_MSG91_PLATFORM_LANGUAGE.",
     )
 
+    # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
+    # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).
+    # An engine whose key is unset is skipped. All secrets, NEVER logged.
+    ai_visibility_openai_api_key: str | None = Field(
+        default=None,
+        description="OpenAI key for AI visibility checks. POCKETPAW_AI_VISIBILITY_OPENAI_API_KEY.",
+    )
+    ai_visibility_perplexity_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Perplexity key for AI visibility checks. POCKETPAW_AI_VISIBILITY_PERPLEXITY_API_KEY."
+        ),
+    )
+    ai_visibility_anthropic_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Anthropic key for AI visibility checks (web search engine and the judge "
+            "fallback). POCKETPAW_AI_VISIBILITY_ANTHROPIC_API_KEY."
+        ),
+    )
+    ai_visibility_cf_account_id: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare account id for the Workers AI decision model (Clef-flash). "
+            "POCKETPAW_AI_VISIBILITY_CF_ACCOUNT_ID."
+        ),
+    )
+    ai_visibility_cf_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare API token with Workers AI access, for Clef-flash. "
+            "POCKETPAW_AI_VISIBILITY_CF_API_TOKEN."
+        ),
+    )
+
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price
     # primitives). A completed chat run is billed by its real compute cost times
     # a flat markup, converted from USD into integer credits. These two settings
