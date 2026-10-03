@@ -352,8 +352,9 @@ Runs in the user's browser and can take minutes. Never call this in the same
 turn as an edit — it would render a half-built timeline."""
 
 ADD_MOTION_GRAPHIC_DESCRIPTION = """\
-Create a motion graphic — title card, kinetic type, animated stat, logo sting,
-lower third — and put it on the open /studio/editor timeline.
+Create a motion graphic — title card, kinetic type, animated stat, logo sting
+— and put it on the open /studio/editor timeline. It renders full frame and
+opaque, so overlays like lower thirds are not possible yet.
 
 Author it as a HyperFrames composition per the `hyperframes-core` skill: ONE
 self-contained HTML file whose root element carries data-composition-id,

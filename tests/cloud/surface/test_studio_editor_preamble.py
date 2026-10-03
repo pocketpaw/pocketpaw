@@ -340,3 +340,14 @@ async def test_the_procedure_loads_both_motion_skills_and_covers_gallery_graphic
     assert "`studio-motion`" in preamble
     assert "Graphics button" in preamble
     assert "data-preset" in preamble and "data-style" in preamble
+
+
+async def test_the_procedure_does_not_offer_lower_thirds() -> None:
+    """The render is opaque, so a motion graphic cannot overlay footage. The
+    procedure says so instead of listing lower thirds as something it makes."""
+    flat = " ".join((await _render(_timeline())).split())
+
+    assert (
+        "render full frame and opaque, so overlays like lower thirds are not possible yet" in flat
+    )
+    assert "animated stat, lower third" not in flat
