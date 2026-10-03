@@ -357,6 +357,16 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run public partner profile tests
+        # Same addopts escape. The partner directory, /partners/{slug} and
+        # /partners/apply answer anonymous callers; this file is the only proof
+        # that a private partner field never reaches the wire, that hidden
+        # partners stay hidden, and that both public buckets return 429.
+        run: uv run pytest tests/cloud/partners/test_partner_public.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run dashboard WS ticket auth tests
         # Same addopts escape. /api/v1/ws accepts a single-use ws_ticket in its
         # first frame; this file is the only proof that a ticket works once, a

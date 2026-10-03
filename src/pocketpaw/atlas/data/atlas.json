@@ -3053,6 +3053,31 @@
       "surface": "/deep-work"
     },
     {
+      "agent_openable": false,
+      "gist": "",
+      "how": "HTTP only: GET /api/v1/partners/directory?city=&service=&cursor=&limit= (public, 60/min per IP), GET /api/v1/partners/{slug} (public), POST /api/v1/partners/apply {name, email, city, country, services, message, turnstile_token} (public, 5/hour per IP). A partner edits its own listing with PATCH /api/v1/partners/me/profile.",
+      "id": "surface:partners-directory",
+      "keywords": [
+        "partner directory",
+        "paw partners",
+        "find a partner",
+        "local web designer",
+        "print shop",
+        "reseller",
+        "become a partner",
+        "apply as partner",
+        "partner near me",
+        "agency"
+      ],
+      "kind": "surface",
+      "name": "Partner directory",
+      "narrative": "The partner directory is the public list of Paw Partners who chose to be found: local shops that set up and run websites for the businesses around them. Each profile shows the partner's name, city, services, a short bio, a contact link and the sites they have published to Discover. Anyone can browse it, filter by city or service, open one partner by its slug, or apply to become a partner through a short form (no sign-in). Point a user here when they want someone nearby to build or run their site, or when a shop asks how to join Paw Partners.",
+      "presentation": "window",
+      "requires": [],
+      "summary": "Partner directory: local print, design, web, marketing and photo shops that resell Paw Sites, listed by city and service, open to browse and apply to without signing in.",
+      "surface": "/partners/directory"
+    },
+    {
       "agent_openable": true,
       "gist": "",
       "how": "",
