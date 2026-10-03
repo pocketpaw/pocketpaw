@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 _client = LensClient()
 
+# Id patterns shared by the HTTP router and the MCP tools. A leading
+# alphanumeric blocks ``.``/``..``, so nothing can path-inject upstream.
+SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+AGENT_ID = r"^[A-Za-z0-9_-]{1,64}$"
+
 OVERVIEW_TIMEOUT_SECONDS = 60.0
 OVERVIEW_MAX_BYTES = 8 * 1024  # paw-lens rejects a longer overview text
 DIGEST_MAX_CHARS = 24_000

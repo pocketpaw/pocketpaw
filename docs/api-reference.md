@@ -7112,6 +7112,14 @@ issue detail come back with run `summary` and span-list `args_preview` set to
 `"content_hidden": true`; the runs list is an array, so it is stripped without
 the flag. The `pocketpaw_lens` agent tools apply the same rule.
 
+**Chat surface.** A chat send with `surface: "agent_health"` (the
+`/agent-health` pages; `meta.run_id` is the run the user has open, echoed only
+when it is a 32-hex trace id) gets a preamble pointing the agent at the
+`pocketpaw_lens` tools: `lens_overview`, `lens_runs`, `lens_run` (pass
+`span_id` for one span), `lens_issues` and `lens_monitors`. They are read-only,
+always scoped to the chat's workspace, and exist on this surface only: the
+server is in `SURFACE_SCOPED_MCP_SERVERS`, so no other chat registers it.
+
 **AI overview.** `POST /runs/{trace_id}/overview` (admin only, else `403`)
 returns `{text, model, created_at}`. When the run detail already carries an
 `overview` it is returned as is, with no LLM call, unless `?refresh=1`.
