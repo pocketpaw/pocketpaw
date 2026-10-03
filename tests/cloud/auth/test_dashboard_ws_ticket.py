@@ -5,6 +5,10 @@ Created: 2026-10-03 — covers the new first-frame path in
 ``mint_ws_ticket`` (fakeredis-backed) works once, a replay is refused, a ticket
 in ``?token=`` is refused at the handshake, a bad or missing first frame closes
 4001 without hanging, and the existing token/middleware auth is unchanged.
+
+Updated: 2026-10-03 — the ticket path admits only an active superuser (the EE
+auth bridge's full_access rule). Tickets are minted for seeded Users; a normal
+active user and an inactive superuser are refused with 4001.
 """
 
 from __future__ import annotations
@@ -19,9 +23,11 @@ from unittest.mock import patch
 import fakeredis
 import fakeredis.aioredis
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.auth.ws_tickets import mint_ws_ticket
+from pocketpaw_ee.cloud.models.user import User
 from starlette.websockets import WebSocketDisconnect
 
 _TOKEN = "dash-ws-ticket-test-token"
@@ -47,8 +53,29 @@ def fake_redis(monkeypatch):
     return server
 
 
+@pytest_asyncio.fixture
+async def users(mongo_db):  # noqa: ARG001 — forces Beanie init
+    """Seed a superuser, a normal active user and an inactive superuser."""
+    ids = {}
+    for key, active, superuser in (
+        ("admin", True, True),
+        ("member", True, False),
+        ("inactive_admin", False, True),
+    ):
+        user = User(
+            email=f"{key}@dash-ws.test",
+            hashed_password="x",
+            is_active=active,
+            is_verified=True,
+            is_superuser=superuser,
+        )
+        await user.insert()
+        ids[key] = str(user.id)
+    return ids
+
+
 @pytest.fixture
-def client(fake_redis):  # noqa: ARG001
+def client(fake_redis, users):  # noqa: ARG001
     from pocketpaw.dashboard import app
 
     with (
@@ -70,15 +97,15 @@ def _close_code(ws) -> int:
     return exc.value.code
 
 
-def test_valid_ticket_first_frame_connects(client):
-    ticket = _run(mint_ws_ticket("user-1"))
+def test_valid_ticket_first_frame_connects(client, users):
+    ticket = _run(mint_ws_ticket(users["admin"]))
     with client.websocket_connect("/api/v1/ws") as ws:
         ws.send_json({"type": "auth", "ticket": ticket})
         assert ws.receive_json()["type"] == "connection_info"
 
 
-def test_replayed_ticket_rejected(client):
-    ticket = _run(mint_ws_ticket("user-1"))
+def test_replayed_ticket_rejected(client, users):
+    ticket = _run(mint_ws_ticket(users["admin"]))
     with client.websocket_connect("/api/v1/ws") as ws:
         ws.send_json({"type": "auth", "ticket": ticket})
         assert ws.receive_json()["type"] == "connection_info"
@@ -87,8 +114,8 @@ def test_replayed_ticket_rejected(client):
         assert _close_code(ws) == 4001
 
 
-def test_ticket_in_query_string_refused(client):
-    ticket = _run(mint_ws_ticket("user-1"))
+def test_ticket_in_query_string_refused(client, users):
+    ticket = _run(mint_ws_ticket(users["admin"]))
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(f"/api/v1/ws?token={ticket}") as ws:
             ws.receive_json()
@@ -135,10 +162,25 @@ def test_bad_query_token_still_4003(client):
     assert exc.value.code == 4003
 
 
-def test_legacy_ws_path_still_gated_by_middleware(client):
-    ticket = _run(mint_ws_ticket("user-1"))
+def test_legacy_ws_path_still_gated_by_middleware(client, users):
+    ticket = _run(mint_ws_ticket(users["admin"]))
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect("/ws") as ws:
             ws.send_json({"type": "auth", "ticket": ticket})
             ws.receive_json()
     assert exc.value.code == 4003
+
+
+@pytest.mark.parametrize("who", ["member", "inactive_admin"])
+def test_non_superuser_ticket_closes_4001(client, users, who):
+    ticket = _run(mint_ws_ticket(users[who]))
+    with client.websocket_connect("/api/v1/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": ticket})
+        assert _close_code(ws) == 4001
+
+
+def test_ticket_for_unknown_user_closes_4001(client):
+    ticket = _run(mint_ws_ticket("000000000000000000000000"))
+    with client.websocket_connect("/api/v1/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": ticket})
+        assert _close_code(ws) == 4001

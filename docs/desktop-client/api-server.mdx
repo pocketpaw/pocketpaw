@@ -9,7 +9,7 @@ tags: ["api", "server", "headless", "rest"]
 
 {/* 2026-10-03 (feat/dashboard-ws-ticket-auth): documented first-frame
     ws_ticket auth on /api/v1/ws and its close codes (4003 handshake, 4001
-    first frame). */}
+    first frame); ticket path is superuser-only. */}
 
 # API Server (`pocketpaw serve`)
 
@@ -281,6 +281,8 @@ ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', ticket: TICKET }));
 
 - Send the auth frame within 5 seconds of the connection opening.
 - Each ticket works once and expires 30 seconds after minting. A replay is refused.
+- Only a platform admin (an active superuser) gets in this way. A ticket for
+  any other account closes `4001`, because this socket has full owner access.
 - Never put a ticket in `?token=`. It is refused at the handshake.
 - Close codes: `4003` means the handshake credential was bad. `4001` means the
   first frame was missing, malformed, or carried an invalid or used ticket.
