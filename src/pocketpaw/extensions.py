@@ -11,6 +11,10 @@ Each Protocol documents the entry-point group that carries its implementations.
 An entry-point points at a zero-arg callable (usually the class itself) that
 the registry instantiates once and caches.
 
+Updated: 2026-10-03 (dashboard ws ticket) — ``AuthProvider`` gained
+``redeem_dashboard_ws_ticket`` so the dashboard socket can redeem a first-frame
+ws_ticket through the registry instead of importing EE.
+
 Updated: 2026-06-12 (connector-store-unification CS-3) — added
 ``ConnectorStateStoreProvider`` (group ``pocketpaw.connector_state_stores``)
 so EE can back the ConnectorRegistry's durable state with the cloud DB
@@ -82,6 +86,15 @@ class AuthProvider(Protocol):
     """
 
     def current_optional_user(self) -> Any: ...
+
+    async def redeem_dashboard_ws_ticket(self, ticket: str) -> bool:
+        """Consume a first-frame ws_ticket for the dashboard socket.
+
+        True only when the ticket is valid, unused, and belongs to an active
+        superuser. Core treats a provider without this method as "no ticket
+        support" and fails closed.
+        """
+        ...
 
 
 @runtime_checkable

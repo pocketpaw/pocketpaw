@@ -9,6 +9,11 @@ in ``?token=`` is refused at the handshake, a bad or missing first frame closes
 Updated: 2026-10-03 — the ticket path admits only an active superuser (the EE
 auth bridge's full_access rule). Tickets are minted for seeded Users; a normal
 active user and an inactive superuser are refused with 4001.
+
+Updated: 2026-10-03 — the handler reaches EE through the ``pocketpaw.auth``
+entry-point provider (no direct EE import). These tests resolve it through the
+real installed entry point, the same discovery production uses; an OSS-path
+test removes the provider and expects 4001.
 """
 
 from __future__ import annotations
@@ -181,6 +186,27 @@ def test_non_superuser_ticket_closes_4001(client, users, who):
 
 def test_ticket_for_unknown_user_closes_4001(client):
     ticket = _run(mint_ws_ticket("000000000000000000000000"))
+    with client.websocket_connect("/api/v1/ws") as ws:
+        ws.send_json({"type": "auth", "ticket": ticket})
+        assert _close_code(ws) == 4001
+
+
+def test_ticket_redeem_resolves_through_pocketpaw_auth_entry_point():
+    from pocketpaw_ee.extensions import CloudAuthProvider
+
+    from pocketpaw import _registry
+
+    provider = _registry.first("pocketpaw.auth")
+    assert isinstance(provider, CloudAuthProvider)
+    assert callable(provider.redeem_dashboard_ws_ticket)
+
+
+def test_no_auth_provider_closes_4001(client, users, monkeypatch):
+    """OSS install: no ``pocketpaw.auth`` provider, so even a superuser ticket fails closed."""
+    from pocketpaw import _registry
+
+    monkeypatch.setattr(_registry, "first", lambda group: None)
+    ticket = _run(mint_ws_ticket(users["admin"]))
     with client.websocket_connect("/api/v1/ws") as ws:
         ws.send_json({"type": "auth", "ticket": ticket})
         assert _close_code(ws) == 4001
