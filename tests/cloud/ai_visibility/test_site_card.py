@@ -172,6 +172,7 @@ async def test_check_needs_staff_questions_and_a_day_between(client, enqueued) -
 
     staff = await _site()
     empty = await client.post(_url(staff, "/check"))
+    assert empty.status_code == 422
     assert empty.json()["error"]["code"] == "ai_visibility.questions"
 
     await client.put(_url(staff, "/questions"), json={"questions": ["best pizza in Austin"]})
@@ -227,6 +228,16 @@ async def test_job_writes_a_check_the_card_maps(client, enqueued, engines) -> No
     assert set(check["fix"]) == {"id", "text", "we_can_apply"}
     ran_at = datetime.fromisoformat(check["ran_at"])
     assert datetime.fromisoformat(check["next_run_at"]) - ran_at == timedelta(days=30)
+
+
+async def test_first_check_in_flight_shows_empty_numbers(client, enqueued) -> None:
+    staff = await _site()
+    await client.put(_url(staff, "/questions"), json={"questions": ["best pizza in Austin"]})
+    await client.post(_url(staff, "/check"))
+    check = (await client.get(_url(staff))).json()["check"]
+    assert check["status"] == "pending"
+    assert check["engines"] == [] and check["sources"] == [] and check["fix"] is None
+    assert check["ran_at"] is None and check["next_run_at"] is None
 
 
 async def test_job_without_engines_fails(client, enqueued, monkeypatch) -> None:
