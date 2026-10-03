@@ -6,9 +6,12 @@
 # first check-in for an unknown monitor registers it, schedule included. Slug is
 # ``<kind>:<id>``.
 #
-# ``automation_run`` wraps one run. It also stamps ``paw.workspace_id`` /
-# ``paw.automation.kind`` / ``paw.automation.id`` (observability.baggage, a
-# ContextVar, not OTel baggage) on every span the run opens. A cancelled run
+# ``automation_run`` wraps one run. It opens a current span ``automation
+# <kind>:<id>`` so the run's spans form one trace, sends that trace's 32-hex
+# ``trace_id`` in both check-ins (omitted when Logfire is off), and stamps
+# ``paw.workspace_id`` / ``paw.automation.kind`` / ``paw.automation.id``
+# (observability.baggage, a ContextVar, not OTel baggage) on every span the run
+# opens, the automation span included. A cancelled run
 # posts no final check-in. ``monitored_job`` is the APScheduler form:
 # wrap the job function once where it is handed to ``add_job``.
 #
@@ -32,7 +35,7 @@ from typing import Any
 
 import httpx
 
-from pocketpaw.observability import baggage
+from pocketpaw.observability import baggage, span
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +167,17 @@ def schedule_from_trigger(trigger: Any) -> dict[str, Any] | None:
     return None
 
 
+def _trace_id(tick: Any) -> str | None:
+    """32-hex trace id of the automation span, or None when tracing is off."""
+    if tick is None:  # observability.span is a nullcontext when Logfire is off
+        return None
+    try:
+        ctx = tick.get_span_context()
+        return f"{ctx.trace_id:032x}" if ctx and ctx.is_valid else None
+    except Exception:  # noqa: BLE001 — a tracing hiccup must not reach the job
+        return None
+
+
 @asynccontextmanager
 async def automation_run(
     kind: str,
@@ -197,32 +211,38 @@ async def automation_run(
         if value is not None:
             base[key] = value
 
-    started = _spawn(_post(*endpoint, {**base, "status": "in_progress"})) if endpoint else None
     status: str | None
     status, error = "ok", None
-    try:
-        with baggage(
+    with (
+        baggage(
             **{
                 "paw.workspace_id": workspace_id,
                 "paw.automation.kind": kind,
                 "paw.automation.id": id,
             }
-        ):
+        ),
+        span(f"automation {kind}:{id}") as tick,
+    ):
+        trace_id = _trace_id(tick)
+        if trace_id:
+            base["trace_id"] = trace_id
+        started = _spawn(_post(*endpoint, {**base, "status": "in_progress"})) if endpoint else None
+        try:
             yield
-    except Exception as exc:
-        status, error = "error", _error_text(exc)
-        raise
-    except BaseException:
-        # Cancellation (shutdown), KeyboardInterrupt, GeneratorExit: not a failed
-        # run. Post nothing; paw-lens times the run out via max_runtime if set.
-        status = None
-        raise
-    finally:
-        if endpoint and status is not None:
-            body = {**base, "status": status}
-            if error:
-                body["error"] = error
-            _spawn(_post(*endpoint, body, after=started))
+        except Exception as exc:
+            status, error = "error", _error_text(exc)
+            raise
+        except BaseException:
+            # Cancellation (shutdown), KeyboardInterrupt, GeneratorExit: not a failed
+            # run. Post nothing; paw-lens times the run out via max_runtime if set.
+            status = None
+            raise
+        finally:
+            if endpoint and status is not None:
+                body = {**base, "status": status}
+                if error:
+                    body["error"] = error
+                _spawn(_post(*endpoint, body, after=started))
 
 
 def monitored_job(
