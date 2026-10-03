@@ -223,6 +223,7 @@ from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
+from pocketpaw_ee.cloud.models.ai_visibility_check import AiVisibilityCheck
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
@@ -240,7 +241,6 @@ from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
-from pocketpaw_ee.cloud.models.ai_visibility_check import AiVisibilityCheck
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (

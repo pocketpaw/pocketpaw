@@ -206,9 +206,7 @@ def passage_for(text: str, business: Business, limit: int = 2000) -> str:
 class DecisionModel(Protocol):
     name: str
 
-    async def decide(
-        self, state: str, questions: dict[str, Any]
-    ) -> tuple[dict[str, Any], float]:
+    async def decide(self, state: str, questions: dict[str, Any]) -> tuple[dict[str, Any], float]:
         """Jev-shaped answers keyed by question id, and the call's cost in USD."""
         ...
 
@@ -321,9 +319,7 @@ class ClefFlash:
         self._token = api_token
         self._transport = transport
 
-    async def decide(
-        self, state: str, questions: dict[str, Any]
-    ) -> tuple[dict[str, Any], float]:
+    async def decide(self, state: str, questions: dict[str, Any]) -> tuple[dict[str, Any], float]:
         data = await post_json(
             self._url,
             {"Authorization": f"Bearer {self._token}"},
@@ -334,7 +330,9 @@ class ClefFlash:
         )
         result = data.get("result", data) if isinstance(data.get("result"), dict) else data
         usage = result.get("usage") or {}
-        cost = token_cost(self.model_id, usage.get("input_tokens", usage.get("prompt_tokens", 0)), 0)
+        cost = token_cost(
+            self.model_id, usage.get("input_tokens", usage.get("prompt_tokens", 0)), 0
+        )
         return result.get("answers") or {}, cost
 
 
@@ -355,14 +353,12 @@ class HaikuFallback:
         self.model = model
         self._transport = transport
 
-    async def decide(
-        self, state: str, questions: dict[str, Any]
-    ) -> tuple[dict[str, Any], float]:
+    async def decide(self, state: str, questions: dict[str, Any]) -> tuple[dict[str, Any], float]:
         prompt = (
             "Answer each question about the TEXT. Reply with one JSON object only, keyed by "
-            "question id. For a 'choice' question give {\"choice\": <option>, \"confidence\": "
+            'question id. For a \'choice\' question give {"choice": <option>, "confidence": '
             "0..1}; for a 'score' question {\"score\": <0-based index into criteria>, "
-            "\"confidence\": 0..1}; for a 'noul' question {\"noul\": <probability of yes>}.\n\n"
+            '"confidence": 0..1}; for a \'noul\' question {"noul": <probability of yes>}.\n\n'
             f"QUESTIONS: {json.dumps(questions)}\n\nTEXT:\n{state}"
         )
         data = await post_json(
@@ -377,7 +373,9 @@ class HaikuFallback:
             transport=self._transport,
             timeout=30.0,
         )
-        text = "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text")
+        text = "".join(
+            b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text"
+        )
         match = re.search(r"\{.*\}", text, re.DOTALL)
         answers = json.loads(match.group(0)) if match else {}
         usage = data.get("usage") or {}
