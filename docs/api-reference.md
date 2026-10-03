@@ -6929,4 +6929,5 @@ bodies are paw-lens's JSON, unchanged.
 - paw-lens down, slow (3 s timeout) or erroring: `503 lens.unavailable`.
   paw-lens rejects the token: `503 lens.misconfigured`. paw-lens 404: `404
   lens.not_found`. paw-lens 400: `400 lens.bad_request`.
-- Mute and resolve are open to any workspace member for now.
+- Mute and resolve need a workspace admin or owner (`lens.manage`); a member
+  gets `403 workspace.insufficient_role`. Reads are open to any member.

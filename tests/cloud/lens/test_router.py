@@ -6,7 +6,8 @@
 # so these run the real router -> service -> client path with no network.
 # Covers: disabled (no URL, no request), pass-through, workspace_id injection
 # (client-sent one ignored), token header, mute body, timeout -> 503
-# lens.unavailable, 404 -> 404, 401 -> 503 lens.misconfigured, bad path -> 422.
+# lens.unavailable, 404 -> 404, 401 -> 503 lens.misconfigured, bad path -> 422,
+# and the real lens.manage RBAC guard on mute/resolve (member 403, admin passes).
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.lens import service as lens_service
 from pocketpaw_ee.cloud.lens.client import LensClient
 from pocketpaw_ee.cloud.lens.router import router as lens_router
@@ -58,14 +60,30 @@ def _settings(monkeypatch, url: str) -> None:
     )
 
 
-@pytest.fixture
-def client() -> TestClient:
+def _app(role: str) -> TestClient:
+    """Lens router with the real RBAC guard; the user holds ``role`` in ws_test."""
     app = FastAPI()
     add_error_handler(app)
     app.include_router(lens_router, prefix="/api/v1")
     app.dependency_overrides[require_license] = lambda: None
     app.dependency_overrides[current_workspace_id] = lambda: "ws_test"
+    user = SimpleNamespace(
+        id="u1",
+        is_active=True,
+        active_workspace="ws_test",
+        workspaces=[SimpleNamespace(workspace="ws_test", role=role)],
+    )
+
+    async def _user():
+        return user
+
+    app.dependency_overrides[current_active_user] = _user
     return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return _app("admin")
 
 
 def test_disabled_returns_enabled_false_without_network(client, monkeypatch, upstream, seen):
@@ -199,3 +217,25 @@ def test_bad_status_filter_rejected(client, monkeypatch, upstream, seen):
     _settings(monkeypatch, "http://lens:8790")
     assert client.get("/api/v1/lens/issues", params={"status": "all"}).status_code == 422
     assert seen == []
+
+
+@pytest.mark.parametrize("action", ["mute", "resolve"])
+def test_member_cannot_mute_or_resolve(monkeypatch, upstream, seen, action):
+    _settings(monkeypatch, "http://lens:8790")
+    resp = _app("member").post(f"/api/v1/lens/issues/fp1/{action}", json={"minutes": 60})
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "workspace.insufficient_role"
+    assert seen == []
+
+
+@pytest.mark.parametrize("role", ["admin", "owner"])
+def test_admin_and_owner_can_resolve(monkeypatch, upstream, seen, role):
+    _settings(monkeypatch, "http://lens:8790")
+    resp = _app(role).post("/api/v1/lens/issues/fp1/resolve")
+    assert resp.status_code == 200
+    assert seen[0].url.path == "/v1/issues/fp1/resolve"
+
+
+def test_member_can_read(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
+    assert _app("member").get("/api/v1/lens/overview").status_code == 200

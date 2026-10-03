@@ -546,6 +546,7 @@ class TestSecretFieldsList:
             "dodo_payments_api_key",
             "dodo_webhook_secret",
             "shield_api_token",
+            "lens_api_token",
             "cf_email_api_token",
             "msg91_platform_authkey",
         }

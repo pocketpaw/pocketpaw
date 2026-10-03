@@ -9,9 +9,9 @@
 # dropped. Path params must match ``_SAFE_ID`` (422 otherwise) so nothing can
 # path-inject into the upstream URL; a leading alphanumeric blocks ``.``/``..``.
 #
-# Mute/resolve are member-level: there is no ``lens.*`` action in the guards
-# ACTIONS table yet. Gate them with ``require_action_any_workspace`` once one
-# exists. Responses may be lists, hence ``response_model=None``.
+# Reads are member-level. Mute/resolve are writes that silence alerting for the
+# whole workspace, so they require ``lens.manage`` (ADMIN). Responses may be
+# lists, hence ``response_model=None``.
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Path, Query
 
-from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action_any_workspace
 from pocketpaw_ee.cloud.lens import service
 from pocketpaw_ee.cloud.lens.dto import MuteIssueRequest
 from pocketpaw_ee.cloud.license import require_license
@@ -29,6 +29,8 @@ router = APIRouter(
     tags=["Lens"],
     dependencies=[Depends(require_license)],
 )
+
+_MANAGE = [Depends(require_action_any_workspace("lens.manage"))]
 
 _SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
 
@@ -60,14 +62,14 @@ async def get_issue(
     return await service.get_issue(workspace_id, fingerprint, since)
 
 
-@router.post("/issues/{fingerprint}/mute", response_model=None)
+@router.post("/issues/{fingerprint}/mute", response_model=None, dependencies=_MANAGE)
 async def mute_issue(
     workspace_id: WorkspaceId, fingerprint: Fingerprint, body: MuteIssueRequest
 ) -> Any:
     return await service.mute_issue(workspace_id, fingerprint, body.minutes)
 
 
-@router.post("/issues/{fingerprint}/resolve", response_model=None)
+@router.post("/issues/{fingerprint}/resolve", response_model=None, dependencies=_MANAGE)
 async def resolve_issue(workspace_id: WorkspaceId, fingerprint: Fingerprint) -> Any:
     return await service.resolve_issue(workspace_id, fingerprint)
 
