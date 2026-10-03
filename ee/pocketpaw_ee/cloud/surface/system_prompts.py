@@ -1,5 +1,12 @@
 # system_prompts.py — Per-surface system-prompt overrides.
 #
+# Updated: 2026-09-15 (feat/agent-ink-color-prompt) — the Otherhand op block
+# gained COLOUR: the five named pens the page renders, and the restraint that
+# is the harder half of the feature. The pen names are the OTHER HALF of a
+# decision that lives in paw-enterprise `src/lib/core/other-hand/types.ts`
+# (INK_PALETTE): a name not in that map draws in normal ink, silently, so the
+# two lists have to be edited together or the agent holds a pen it cannot use.
+#
 # Created: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — the text side
 # of ``SurfaceProfile.system_message_override``, which had been declared-but-inert
 # since 2026-06-05 (feat/surface-profile-bias-kill).
@@ -259,6 +266,36 @@ The op vocabulary, in full. Every op has a `t` (type):
 Those nine are the whole vocabulary. Anything else is dropped by the renderer
 without a word, so an invented op type is silently nothing — do not reach for
 one.
+
+COLOUR. Every stroke op above may carry a `"color"`, and almost none of them
+should. The page is written in one near-black ink; that is the default and it
+is right for nearly everything you draw. A coloured op is an EXCEPTION you are
+making on purpose, to mark the ONE thing on the page that matters most — a
+warning, a correction, the answer itself. One coloured element in a reply is
+normal, two is the ceiling. Colour every op and you have told the reader that
+nothing is important; colour for prettiness and the page becomes a chart of
+your moods rather than an answer. When in doubt, use no colour.
+
+The pens are NAMED, and these five names are the whole set:
+
+  red      wrong, dangerous, a warning
+  green    right, confirmed, the answer
+  rust     caution — the step to be careful at
+  purple   an aside, a note off the main line
+  magenta  a name or term worth finding again
+
+  {"t":"text","x":100,"y":600,"s":"Never run this on live data","color":"red"}
+  {"t":"circle","cx":300,"cy":400,"r":60,"color":"green"}
+
+Never invent a pen and never write a colour code. `"color":"#ff0000"`, "crimson",
+"orange", "blue" and everything else off that list are ignored, and the op
+draws in normal ink instead — so a guessed colour costs you the emphasis you
+wanted and you will not be told. An `image` op takes no pen; a picture carries
+its own colours.
+
+One more reason the list is short: the user's own handwriting is BLUE, and
+none of your five pens are. Their hand stays theirs at a glance, whatever you
+reach for.
 
 WHEN TO GENERATE A PICTURE (the `image` op): only when the thing itself is
 PICTORIAL — anatomy in the flesh, a historical scene, an organism, a texture,

@@ -286,6 +286,31 @@ def test_profile_carries_the_page_ops_output_contract() -> None:
     # The pointer to the other half, so whoever changes a number finds it.
     assert "other-hand/types.ts" in override
 
+    # The pens, in full. Same shape of decision as the size ladder: the names
+    # are matched against paw-enterprise's INK_PALETTE and a name that is not
+    # in that map draws in normal ink WITHOUT a word, so a pen missing here is
+    # a pen the agent holds and never reaches for, and a pen invented here is
+    # emphasis the agent thinks it applied and did not.
+    assert "  red      wrong, dangerous, a warning" in override
+    assert "  green    right, confirmed, the answer" in override
+    assert "  rust     caution — the step to be careful at" in override
+    assert "  purple   an aside, a note off the main line" in override
+    assert "  magenta  a name or term worth finding again" in override
+
+    # RESTRAINT is the half that actually decides whether this feature is any
+    # good. A vocabulary with no brake on it produces a rainbow, and a rainbow
+    # marks nothing. Pinned as sentences rather than a keyword because the
+    # brake is the argument, not the word "color".
+    # (Each phrase sits on ONE line of the prompt — a phrase that crosses a
+    # wrap fails against the prompt's own newline, which is not a regression.)
+    assert "and almost none of them" in override
+    assert "two is the ceiling" in override
+    assert "When in doubt, use no colour." in override
+
+    # The closed-set prohibition. Without it the agent writes "#ff0000" and
+    # draws in plain ink without being told.
+    assert "Never invent a pen and never write a colour code" in override
+
 
 def test_profile_offers_only_the_tools_the_prompt_names() -> None:
     """The bridged tool surface is derived from the OSS allow-list and pinned.
@@ -348,9 +373,11 @@ class TestShowingDataDoctrine:
         from pocketpaw_ee.cloud.surface.system_prompts import OTHER_HAND_SYSTEM_PROMPT as p
 
         # The source skill is written for HTML/CSS with art-directed palettes.
-        # This surface is one ink colour on cream paper, so importing its colour
-        # and typography rules would spend tokens on instructions the renderer
-        # cannot execute — the "prompt may not command what the agent cannot do"
-        # rule in CLAUDE.md.
+        # This surface is five named pens on cream paper (2026-09-15; one ink
+        # before that), so importing its colour and typography rules would
+        # spend tokens on instructions the renderer cannot execute — the
+        # "prompt may not command what the agent cannot do" rule in CLAUDE.md.
+        # "hex" stays on the list on purpose: the pen prohibition says "colour
+        # code" so this guard keeps catching a pasted CSS rule.
         for leaked in ("hex", "Tailwind", "font-size", "CSS", "keyframe"):
             assert leaked not in p, f"{leaked!r} leaked in from the HTML skill"
