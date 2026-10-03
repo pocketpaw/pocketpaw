@@ -1,263 +1,14 @@
 # ee/pocketpaw_ee/sites/dto.py — request/response DTOs for the Sites control
-# plane. Distinct request and response shapes per the cloud 4-file rules.
-# Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
-# Updated: 2026-09-24 (PP-2) — SiteStatusResponse carries ``verification``, a COUNTS-ONLY
-# summary of the current source's verification verdict (contract §6): status (passed /
-# failed / unverified / pending / none), error_count, checked_at, content_hash. No
-# message ever rides it — the diagnostics are agent-only.
-# Updated: 2026-09-23 — SiteResponse carries ``foreign_origin`` + ``allowed_origins``
-# so the gallery can tell a connected site (Paw Bar on a customer-hosted page)
-# from a draft that was never published.
+# plane. Distinct request and response shapes per the cloud 4-file rules: a body
+# model (``*Request`` / ``*Update``) is never reused as a response.
 #
-# ONE SHAPE HERE CARRIES A SECRET: ``OriginClaimResponse.token`` is the
-# domain-ownership proof the claiming workspace publishes on its own site. It
-# belongs only in the response to the workspace that asked for it — never in a
-# list, a card, or anything another tenant can read.
-#
-# ``ForeignConciergeResponse.site_key`` IS NOT ONE, and the distinction is worth
-# keeping straight because the two travel together on the same surface: the embed
-# key ships inside a ``<script>`` tag on a page anyone can view, is origin-bound,
-# and is revoked by rotation. ``SiteResponse`` has carried it since RFC 12 for
-# the same reason. The token above is the only secret on this module.
-#
-# Updated 2026-09-23 (VS-4, feat/sites-rename): ``SiteResponse`` carries ``slug`` (the
-# address the site serves at) and ``slug_pending`` (the address it moves to on its next
-# publish). Added ``SlugAvailability`` (``GET /sites/slug-available``) and
-# ``SlugRenameRequest`` (``PUT /sites/{id}/slug``).
-# Updated 2026-09-23 (feat/sites-badge-switch, VS-3): added ``SiteBrandingUpdate``
-# (the ``PATCH /sites/{id}/branding`` body, one required ``badge_hidden`` bool) and
-# ``SiteResponse.badge_hidden``, so the builder can render the badge switch from
-# the same site read it already makes.
-#
-# Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
-# ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
-# ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a
-# tenancy decision rather than an oversight: the DESTINATION reads it for a site
-# that still belongs to another workspace, so it carries only what somebody needs
-# in order to decide whether to accept — never the signed key, the capture config,
-# the lead count or the client record.
-# Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): added
-# ``SiteDeleteQueuedResponse`` and ``SiteDeleteStatusResponse``, the two wire
-# shapes of the site-delete lane. Both carry status as a plain ``str`` rather than
-# a literal, and the poll has NO terminal success value — the cascade's last step
-# deletes the document the status field lives on, so success is the 404. Read the
-# class docstrings before tightening either, because both looseness calls are
-# load-bearing against the shipped client.
-#
-# Updated 2026-09-04 (AD-4 — the overview chart's data): added
-# ``SiteAnalyticsSeriesPoint`` / ``SiteAnalyticsSeries`` and ``SiteAnalyticsResponse.series``,
-# the per-bucket views and visitors the chart under the headline numbers draws. Two things
-# about it are contracts rather than implementation detail. EVERY bucket in the range is
-# present, including the ones nobody visited, because a chart handed only the buckets that
-# had traffic draws a straight line across a quiet Sunday and reports it as no Sunday at
-# all. And every ``bucket`` stamp is UTC, said out loud on the model, because an axis
-# labelled ``1PM`` that means UTC is five and a half hours wrong for a reader in Mumbai and
-# nothing on the screen would say so.
-#
-# Updated 2026-09-04 (AD-2 — the visit metrics on the wire): added
-# ``SiteAnalyticsVisits`` and ``SiteAnalyticsResponse.visits``, the visits / bounce rate /
-# visit duration block the overview leads with. It carries this model's absence rule
-# further than the metrics above it needed to: a bounce rate over zero visits and a mean
-# duration over zero measurable visits are both None rather than 0.0, because a ratio of
-# nothing is not a result of nothing. And the block ITSELF is None, with ``"visits"`` named
-# in ``unrecorded``, when every row in the window was written before the counter learned to
-# stamp a visit id — the FOURTH empty state, which is the device class's problem one metric
-# over.
-#
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
-# ``SiteAnalyticsResponse`` / ``SiteAnalyticsBreakdown`` and the three
-# ``ANALYTICS_STATUS_*`` constants, backing GET /sites/{site_id}/analytics. The
-# shape is a discriminated one because the alternative renders three different
-# customer situations as the same panel of zeros: not on a plan that buys
-# analytics, on one but never republished since, and genuinely no traffic. Every
-# metric is None unless the status says the numbers are real, and a FAILED read is
-# not a status value at all — it is an error response, so an outage can never arrive
-# looking like a quiet week.
-#
-# Updated 2026-09-02 (SA-5 — the entitlement on the wire): added
-# ``SiteEntitlementsResponse.analytics``, resolved by the same predicate the publish
-# seam and the read endpoint use. Without it the dashboard's only way to learn that
-# a site's plan excludes analytics was to request the numbers and read the refusal,
-# which is the exact shape this response type was created to stop.
-#
-# Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane):
-# ``NativeArtifactResponse`` gained ``build_status`` / ``build_reason`` /
-# ``build_job_id`` and defaulted ``body_html`` / ``css`` to empty strings. A cold
-# native-artifact read no longer builds in the request — it queues a sandbox build and
-# returns a handle — so the model now carries both shapes. The status vocabulary is the
-# publish lane's, reused verbatim rather than re-minted: a client already treats an
-# unrecognised ``build_status`` as in-progress, and a second set of names for the same
-# idea is how a failure comes to read as progress.
-#
-# Updated 2026-08-12 (sites Settings consolidation — the client record gets a
-# backend): added ``SiteClientResponse`` / ``SiteClientUpdate`` / ``SiteInvoiceOut``
-# / ``SiteInvoiceCreate``, backing GET+PATCH /sites/{site_id}/client and
-# POST /sites/{site_id}/invoices. The builder's Settings surface had held the
-# owner's client details and manual receipts in COMPONENT STATE with a comment
-# saying persistence was a later task, so every value typed there was gone on
-# reload and on a site switch — the panel demonstrated its own contract without
-# honouring it. ``SiteClientUpdate`` is three-way (absent ≠ empty) so a partial
-# edit cannot blank a field the caller never sent, and money is integer minor
-# units end to end so no receipt is ever a float on the wire.
-#
-# Updated 2026-08-10 (SL-3 — the build lane reaches the wire): added
-# ``SiteResponse.build_reason`` and put all three build fields
-# (``build_status`` / ``build_reason`` / ``build_job_id``) on ``SiteStatusResponse``
-# too.
-#
-# SG-9i DECLARED ``build_status`` AND ``build_job_id`` ON ``SiteResponse`` AND NOTHING
-# EVER POPULATED THEM. ``service._to_response`` builds the DTO field by field and never
-# passed either, so every response carried the field DEFAULTS: ``build_status`` was
-# frozen at "none" for every site, no matter what the row said, and there was no
-# ``build_reason`` field at all. The frontend build-status UI reads all three — so it was
-# polling a value that could not change, which looks exactly like a build that never
-# starts. The populating half is in ``service.py``; this file only ever declared the
-# shape, which is why the gap survived a review: both halves looked complete alone.
-#
-# Updated 2026-06-01 (Phase 3 — local fake-deploy): SiteResponse carries ``url``,
-# the deployed site's openable address. LOCAL mode returns the localhost URL the
-# per-site static server serves so the caller (and the cmux smoke) can open the
-# published site directly. Empty in the CF path in v1 (reached via custom
-# domain). The frontend Site type mirrors this in Phase 4.
-#
-# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
-# added SitePreviewResponse and SiteStatusResponse, the two by-pocket read DTOs
-# the #432 frontend already calls (getSitePreviewByPocket / getSiteStatusByPocket
-# in core/sites/api.ts). Field names/types mirror the frontend types.ts EXACTLY:
-# preview is {pocket_id, engine, content} (content optional — absent when nothing
-# drafted; a rippleSpec for engine="ripple", a {path: contents} source map for
-# engine="svelte"); status is {pocket_id, status, is_live} plus the optional
-# site_id the frontend type also declares. Without these, every Preview-tab fetch
-# 404'd and the builder showed "Nothing to preview yet".
-# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added
-# MakeEditableRequest (the body for POST /sites/by-pocket/{pocket_id}/editable;
-# builder_origin optional) and SiteResponse.builder_origin so the UI can tell
-# whether a published site carries the edit-bridge (non-empty = editable).
-# Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
-# SiteStatusResponse gains ``has_unpublished_changes`` — the Branch primitive now
-# derives draft/published from the version pointers (versions.get_draft /
-# get_published), so a pocket can carry a draft NEWER than its published version.
-# This flag (default False, backward-compatible) lets the builder badge "has
-# unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
-# semantics are unchanged in shape; only their derivation moves onto versions.
-# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): SiteStatusResponse gains
-# ``url`` — the canonical live address of the pocket's deployed site. With stable
-# per-pocket identity (one Site doc per pocket) pocket_status reads the ONE
-# canonical doc and surfaces its non-null url, so the builder/gallery link to the
-# address the latest build actually serves at instead of a stale dupe's url=None.
-# Optional (default None, backward-compatible) — None when no deployed site exists.
-# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two DTOs
-# for the Branch-primitive surfaces — SiteVersionResponse + VersionHistoryResponse
-# (the ordered version timeline GET /sites/by-pocket/{pocket_id}/versions returns)
-# and RequestPublishResponse (the Action created by POST
-# /sites/by-pocket/{pocket_id}/request-publish, the clean entry to the merge gate
-# so the client never hand-builds the Instinct proposal).
-# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7): added AuditFinding +
-# AuditResponse — the response shape for POST /sites/by-pocket/{pocket_id}/audit
-# (the first non-editor PRODUCER). Each finding carries a ``fix_prompt`` the UI
-# feeds to the EXISTING edit path so the fix lands as a reviewable draft; there is
-# NO new apply endpoint (BP-7 reuses edit_svelte_component / refine).
-# Updated 2026-06-19 (P2b-backend — "Last Deployed"): SiteResponse and
-# SiteStatusResponse gain ``deployed_at`` — the ISO-8601 string of the pocket's most
-# recent successful live deploy (the Site doc's ``deployed_at``), or None before the
-# first deploy. The builder/gallery surface a "Last deployed <time>" label without a
-# second fetch. Optional (default None) so the field is backward-compatible.
-# Updated 2026-06-20 (DS-1a — surface dynamic-site pattern): SiteResponse and
-# SiteStatusResponse gain ``pattern`` — the SOURCE pocket's authoring pattern
-# ("dynamic" for a live-data site, "landing" for a marketing page, "" / other for
-# the rest). It lives on ``Pocket.pattern``, not the Site, so the service resolves
-# it from the source pocket (sites/service.py: patterns_for_pockets) per list +
-# status response. The frontend uses it to badge dynamic sites in the gallery.
-# Default "" so the field is backward-compatible and empty-safe (a pocket with no
-# pattern, or a missing/cross-tenant pocket, reads "").
-# Updated 2026-06-20 (DS-3 — read a dynamic site's D1 data): added the read-only
-# DTOs the operator data-view (DS-4 FE) consumes:
-#   * SiteDataTableInfo — one declared table {name, fields, primary_key} from the
-#     dynamic pocket's spec ``objects``. Always available (it comes from the spec),
-#     even when the live D1 data is not reachable.
-#   * SiteDataTablesResponse — the response of
-#     GET /sites/by-pocket/{pocket_id}/data: {pocket_id, available, reason, tables}.
-#     ``available`` is False with ``reason="live_on_cloudflare_only"`` in local/dev
-#     mode (no live D1 to read), but ``tables`` is still listed from the spec so the
-#     UI degrades cleanly instead of erroring.
-#   * SiteDataRowsResponse — the response of
-#     GET /sites/by-pocket/{pocket_id}/data/{table}: {pocket_id, table, available,
-#     reason, columns, rows}. ``rows`` is the D1 rows (capped); ``columns`` is the
-#     table's declared field names. In local mode ``available`` is False and ``rows``
-#     is empty, but ``columns`` is still listed from the spec.
-# These are READ-ONLY views (no request DTO — the inputs are path params); the
-# data view never writes through this surface.
-# Updated 2026-06-24 (feat/charge-first-sites): ``SiteResponse`` gains
-# ``checkout_url`` — the Dodo annual-checkout link a PAID-tier publish returns.
-# A paid publish defers the live deploy: it creates the site as PENDING
-# (deployed=False) and returns this link the caller redirects the buyer to; the
-# site deploys + goes live only when the ``subscription.active`` webhook confirms
-# payment. None for a free/base publish (which deploys immediately) and for any
-# non-publish response (default None, backward-compatible).
-# Updated 2026-06-24 (S2 review fix): ``DomainRequest.hostname`` now carries a
-# permissive DNS-hostname validator (label-dot-label, letters/digits/hyphens, no
-# leading/trailing/double dots, total length capped) so an obviously-malformed
-# host is rejected at the DTO (422) before it reaches Cloudflare. Kept permissive
-# — it accepts any real registrable hostname, it only blocks garbage.
-# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added the request
-# / response models for POST /sites/by-pocket/{pocket_id}/leaf-edits — LeafEdit
-# ({uid, op}), LeafEditsRequest ({edits}), LeafEditVerdict ({uid, applied, reason?})
-# and LeafEditsResponse ({pocket_id, results}). The native editor forwards its
-# already-rendered {uid, op} edits and the endpoint returns one verdict per edit.
-# ``op`` rides as an open dict — its {kind:setText|setProp,...} shape is validated
-# downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary.
-# Updated 2026-07-09 (DP0-4 — publish async split): ``SiteResponse`` gains
-# ``provision_status`` (none | provisioning | provisioned | failed) and
-# ``provision_job_id``. A DYNAMIC-site publish no longer deploys inline — it enqueues
-# the durable ``provision_site`` job and returns immediately with
-# ``provision_status="provisioning"`` / ``deployed=False`` and the enqueued job id;
-# the site goes live only when the job finalizes. Both default to "none" / None so a
-# static publish and every non-publish response stay backward-compatible.
-# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added NativeArtifactResponse
-# ({pocket_id, body_html, css}) — the response of GET
-# /sites/by-pocket/{pocket_id}/native-artifact. ``body_html`` is the armed svelte
-# build's ``<body>`` inner HTML (the data-uid-stamped leaves + the embedded
-# ``paw-edit-manifest`` script); ``css`` is the built stylesheet(s) concatenated into
-# one string. The native editor injects both into a shadow root to render the site
-# natively instead of framing an iframe.
-# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): ``SiteResponse`` and
-# ``SiteStatusResponse`` gain ``engine`` ("svelte" | "ripple"; "" when unresolved) —
-# the sibling of DS-1a's ``pattern``, resolved from the source Pocket.engine so the
-# gallery can badge each card's engine (Custom vs Ripple) without a per-site fetch.
-# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): ``SiteResponse`` gains
-# ``import_report`` (the persisted import summary — None for non-imported sites),
-# and two new DTOs back the import surface: ImportFromUrlRequest ({url}, shape-
-# validated in the service) and ImportFromUrlResponse ({site_id, pocket_id,
-# status:"queued"} — the 202 body; the crawler is the next stacked slice). The zip
-# import endpoint reuses SiteResponse (it publishes live through the html path).
-# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot):
-# ``SiteResponse`` (which IS the gallery list item — GET /sites is
-# ``response_model=list[SiteResponse]``) and ``SiteStatusResponse`` gain
-# ``preview_image_url`` — the stored URL of a screenshot of the site's live page,
-# resolved from the Site doc's own field. The sibling of ``pattern`` / ``engine``
-# in role: one more thing the card needs that would otherwise cost a per-card
-# fetch. None when no screenshot has landed (never deployed, no public url,
-# capture failed, Cloudflare unconfigured) — the card then falls back to its text
-# layout, so the field is optional, empty-safe and backward-compatible.
-# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): the refresh
-# POLICY is now written onto both ``preview_image_url`` fields instead of being
-# inferrable only from where the capture is called — re-captured on every
-# successful deploy (so a republish updates the card), plus an explicit refresh, no
-# TTL, and a different uploads link every capture. New DTO
-# ``SitePreviewRefreshResponse`` ({site_id, preview_image_url}) backs that explicit
-# path, POST /sites/{site_id}/preview-refresh. It is deliberately its own response
-# rather than a reused ``SiteResponse``: the call answers one question ("what is
-# the new picture"), and unlike every deploy-triggered capture it REPORTS failure
-# — a person asked for it and is waiting on the answer.
-# Updated 2026-09-02 (the card's MARK): both DTOs gain ``favicon_url`` — the site's
-# own icon, for the chip that had been a hard-coded globe on every card alike. It sits
-# beside ``preview_image_url`` and answers a different question ("whose site is this"
-# rather than "what does it look like"), and it differs from it in one way worth
-# knowing before reading either field: this one carries a data: URI INLINE rather than
-# an uploads link. An icon is a few KB, so paying for a blob row and a per-card auth
-# grant to serve it would cost more than the bytes; ``sites.favicon`` holds the cap
-# that keeps a list response bounded and drops anything over it. None whenever the
-# site declares no icon we can use, so the card falls back to the globe.
+# ``SiteResponse`` is the one wire shape for a site, mapped from the document in
+# ``service._to_response``; every field defaults so rows written before it existed
+# still serialize. Owner switches (``badge_hidden``, ``ai_training_allowed``) are the
+# stored PREFERENCE and reach the live page on the next publish. Status and
+# analytics responses carry counts and states only, never diagnostics text.
+# Length caps on owner-typed text live here, so an over-long value is a 422 at the
+# edge rather than a silently truncated record.
 
 from __future__ import annotations
 
@@ -406,6 +157,9 @@ class SiteResponse(BaseModel):
     # ``badge_required``). A free site can read True here and still be badged. True
     # for every row that predates the field, matching the model default.
     badge_hidden: bool = True
+    # AV-1: whether the generated robots.txt lets AI TRAINING crawlers in. False (the
+    # default) blocks them; search/assistant crawlers are allowed either way.
+    ai_training_allowed: bool = False
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -659,6 +413,14 @@ class SiteBrandingUpdate(BaseModel):
     """
 
     badge_hidden: bool
+
+
+class SiteAiVisibilityUpdate(BaseModel):
+    """PATCH body for a site's AI-crawler policy (AV-1). One required switch:
+    ``ai_training_allowed`` opts the site in to AI-training crawlers in its generated
+    robots.txt. Search and assistant crawlers are never blocked."""
+
+    ai_training_allowed: bool
 
 
 class SitePreviewRefreshResponse(BaseModel):

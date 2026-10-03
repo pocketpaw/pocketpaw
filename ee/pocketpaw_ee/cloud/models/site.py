@@ -666,6 +666,14 @@ class Site(TimestampedDocument):
     # migration. Written only through ``PATCH /sites/{id}/branding``, which refuses
     # True with a 402 on a site that is not entitled.
     badge_hidden: bool = True
+    # AV-1: the owner's opt-in for AI TRAINING crawlers (GPTBot, ClaudeBot, CCBot, ...).
+    # Changes only the training lines of the robots.txt every workers deploy writes;
+    # search and assistant bots are never blocked. Default False = training opted out.
+    # Written through ``PATCH /sites/{id}/ai-visibility``; takes effect on next publish.
+    ai_training_allowed: bool = False
+    # AV-1: this site's IndexNow key, minted on its first workers publish and kept for
+    # life (IndexNow ties the key file at ``/<key>.txt`` to the host). "" until then.
+    indexnow_key: str = ""
     # Paw Bar concierge (D1 / SS-6): the opening line the glass bar renders. Rides
     # into the frame's ``window.__PAWBAR__`` config as ``greeting``; the glass app
     # reads it in a parallel slice and falls back to its own default when "".
