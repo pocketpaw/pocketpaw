@@ -8,12 +8,14 @@
 # paw.internal + workspace stamped during the call, the digest cap, and the
 # injection guards: the call is tool-less (``tools_enabled=False``, forwarded by
 # the KB adapter and refused on a backend without the switch) and the digest is
-# fenced as untrusted data.
+# fenced as untrusted data. Cost guards: concurrent calls for one run share a
+# single generation, and a refresh within the cooldown returns the cached one.
 
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -219,6 +221,49 @@ def test_refresh_regenerates_over_cache(monkeypatch, upstream, seen):
     assert resp.json()["text"].startswith("- asked")
     assert len(_FakeLLM.calls) == 1
     assert any(r.method == "PUT" for r in seen)
+
+
+@pytest.mark.parametrize(("age_s", "regenerated"), [(10, False), (120, True)])
+def test_refresh_cooldown(monkeypatch, upstream, seen, age_s, regenerated):
+    _settings(monkeypatch, "http://lens:8790")
+    created = (datetime.now(UTC) - timedelta(seconds=age_s)).isoformat()
+    cached = {"text": "- cached", "model": "m", "created_at": created}
+    upstream(_handler({**_DETAIL, "overview": cached}))
+    resp = _app("admin").post(URL, params={"refresh": "1"})
+    assert resp.status_code == 200
+    assert (resp.json() != cached) is regenerated
+    assert len(_FakeLLM.calls) == int(regenerated)
+    assert any(r.method == "PUT" for r in seen) is regenerated
+
+
+async def test_concurrent_overviews_share_one_generation(monkeypatch, upstream, seen):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(_handler(_DETAIL))
+    release = asyncio.Event()
+
+    class _Slow(_FakeLLM):
+        async def complete(self, prompt, system_prompt="", *, tools_enabled=True):
+            _FakeLLM.calls.append({"prompt": prompt})
+            await release.wait()
+            return "- one"
+
+    monkeypatch.setattr(lens_service, "PocketPawCompilerBackend", _Slow)
+    runs = [
+        asyncio.create_task(
+            lens_service.run_overview("ws_test", TRACE, refresh=True, generated_by=who)
+        )
+        for who in ("u1", "u2")
+    ]
+    async with asyncio.timeout(2):
+        while not _FakeLLM.calls:
+            await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # the second caller is waiting, not generating
+    release.set()
+    first, second = await asyncio.gather(*runs)
+    assert first == second and first["text"] == "- one"
+    assert len(_FakeLLM.calls) == 1
+    assert sum(r.method == "PUT" for r in seen) == 1
+    assert lens_service._overview_inflight == {}
 
 
 @pytest.mark.parametrize("reply", [RuntimeError("backend down"), ""])
