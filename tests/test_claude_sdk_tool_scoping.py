@@ -189,6 +189,24 @@ async def test_a_bare_server_entry_admits_that_server_and_no_other() -> None:
     assert not await _allows(options, "mcp__foobar__x")
 
 
+def test_an_external_server_entry_is_spelled_the_way_the_cli_names_its_tools() -> None:
+    """Claude Code names an MCP tool ``mcp__<server>__<tool>`` with every character
+    of the server name outside ``[A-Za-z0-9_-]`` replaced by ``_``. An entry built
+    from the raw config name would never match, and the gate would refuse every
+    tool on a server called, say, "My Notes.v2"."""
+    from types import SimpleNamespace
+
+    from pocketpaw.agents.claude_sdk import _tool_gate_allows
+
+    cfg = SimpleNamespace(
+        name="My Notes.v2", transport="stdio", command="x", args=[], env={}, url="", enabled=True
+    )
+    with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[cfg]):
+        ids = frozenset(_backend()._collect_mcp_tool_ids())
+
+    assert _tool_gate_allows("mcp__My_Notes_v2__search", ids)
+
+
 # ── built-ins: pinned, so the CLI's other tools never reach the agent ────────
 
 
