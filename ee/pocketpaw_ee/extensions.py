@@ -156,8 +156,10 @@ _TICK_ONLY_SWEEPS = frozenset({"backfill_tenant_keys"})
 
 async def _run_sweeps(*, boot: bool = False) -> None:
     from pocketpaw_ee.cloud._core.lease import may_run
+    from pocketpaw_ee.cloud._core.periodic import sweep_tick
 
     cluster, per_host = _sweeps()
+    interval = _sweep_interval_seconds()
     for lease, fns in ((_sweep_lease, cluster), (_jail_lease, per_host)):
         if not may_run(lease):
             continue
@@ -165,7 +167,8 @@ async def _run_sweeps(*, boot: bool = False) -> None:
             if boot and fn.__name__ in _TICK_ONLY_SWEEPS:
                 continue
             try:
-                await fn()
+                async with sweep_tick(fn.__name__, interval):
+                    await fn()
             except Exception:
                 _run_sweeper_logger.exception("%s tick failed", fn.__name__)
 

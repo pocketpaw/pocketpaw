@@ -37,6 +37,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
 
+from pocketpaw_ee.cloud._core.periodic import sweep_tick
 from pocketpaw_ee.cloud.automations_status.service import sweeps_enabled_for_workspace
 from pocketpaw_ee.cloud.cycles import service as cycles_service
 from pocketpaw_ee.cloud.cycles.snapshot_job import snapshot_all_active
@@ -77,24 +78,26 @@ async def _run_scheduler_loop() -> None:
             logger.info("cycle.scheduler: loop cancelled — exiting")
             raise
 
-        try:
-            workspaces = await cycles_service.list_active_workspace_ids()
-        except Exception:
-            logger.exception("cycle.scheduler: failed to list active workspaces")
-            continue
-
-        for ws in workspaces:
-            # Per-workspace opt-out (feat/external-alerting-c2c3): a tenant that
-            # turned its background sweeps off is skipped here. The gate fails
-            # OPEN, so a config-read hiccup keeps the always-on default.
-            if not await sweeps_enabled_for_workspace(ws):
-                logger.debug("cycle.scheduler: workspace=%s opted out — skipping", ws)
-                continue
+        # One paw-lens check-in per midnight pass (cron: UTC midnight).
+        async with sweep_tick("cycle_snapshots", crontab="0 0 * * *"):
             try:
-                count = await snapshot_all_active(ws)
-                logger.info("cycle.scheduler: workspace=%s snapshotted=%d", ws, count)
+                workspaces = await cycles_service.list_active_workspace_ids()
             except Exception:
-                logger.exception("cycle.scheduler: pass failed for workspace=%s", ws)
+                logger.exception("cycle.scheduler: failed to list active workspaces")
+                continue
+
+            for ws in workspaces:
+                # Per-workspace opt-out (feat/external-alerting-c2c3): a tenant that
+                # turned its background sweeps off is skipped here. The gate fails
+                # OPEN, so a config-read hiccup keeps the always-on default.
+                if not await sweeps_enabled_for_workspace(ws):
+                    logger.debug("cycle.scheduler: workspace=%s opted out — skipping", ws)
+                    continue
+                try:
+                    count = await snapshot_all_active(ws)
+                    logger.info("cycle.scheduler: workspace=%s snapshotted=%d", ws, count)
+                except Exception:
+                    logger.exception("cycle.scheduler: pass failed for workspace=%s", ws)
 
 
 async def start_in_process_scheduler(app: FastAPI) -> None:

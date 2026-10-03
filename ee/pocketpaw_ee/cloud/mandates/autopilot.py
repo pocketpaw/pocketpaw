@@ -61,6 +61,8 @@ import re
 from pathlib import Path
 from typing import Any, Protocol
 
+from pocketpaw.lens_checkins import automation_run
+
 logger = logging.getLogger(__name__)
 
 # Default cycle interval (seconds) — env ``POCKETPAW_MANDATE_AUTOPILOT_INTERVAL``.
@@ -520,7 +522,13 @@ async def _autopilot_loop(
             logger.info("autopilot: loop for mandate %s cancelled — exiting", mandate_id)
             raise
         try:
-            await run_autopilot_cycle(workspace_id, mandate_id, users=users)
+            async with automation_run(
+                "mandate",
+                mandate_id,
+                schedule={"interval_seconds": interval},
+                workspace_id=workspace_id,
+            ):
+                await run_autopilot_cycle(workspace_id, mandate_id, users=users)
         except Exception:  # noqa: BLE001 — a bad cycle never sinks the loop
             logger.warning("autopilot: cycle failed for mandate %s", mandate_id, exc_info=True)
 

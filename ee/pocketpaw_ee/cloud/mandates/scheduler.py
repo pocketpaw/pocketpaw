@@ -44,6 +44,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from pocketpaw_ee.cloud._core.periodic import sweep_tick
+
 logger = logging.getLogger(__name__)
 
 # Default sweep interval (seconds) — env ``POCKETPAW_MANDATE_SCHEDULER_INTERVAL``.
@@ -168,7 +170,8 @@ async def _scheduler_loop(interval: int, *, run_immediate: bool) -> None:
             logger.info("scheduler: loop cancelled — exiting")
             raise
         try:
-            await run_scheduler_tick()
+            async with sweep_tick("mandate_scheduler", interval):
+                await run_scheduler_tick()
         except Exception:  # noqa: BLE001 — a bad tick never sinks the loop
             logger.warning("scheduler: tick failed", exc_info=True)
 
