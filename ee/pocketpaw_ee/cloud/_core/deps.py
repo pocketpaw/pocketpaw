@@ -6,7 +6,8 @@ access control. Domain-specific guards (group, agent, pocket) live in
 their owning modules; until those modules migrate, they remain in
 ``ee.cloud.shared.deps``.
 
-The action-based guard machinery (``require_action``, ``require_membership``)
+The action-based guard machinery (``require_action``, ``require_membership``,
+and the non-raising ``action_allowed_any_workspace``)
 delegates to ``pocketpaw.ee.guards`` (the platform-wide RBAC package) for
 the actual policy lookup. We translate platform ``GuardForbidden``
 exceptions to cloud-native ``Forbidden`` so the standard error envelope
@@ -31,7 +32,7 @@ from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.guards.audit import log_denial
-from pocketpaw_ee.guards.deps import check_workspace_action
+from pocketpaw_ee.guards.deps import check_workspace_action, has_workspace_action
 from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
 
 # ---------------------------------------------------------------------------
@@ -130,6 +131,25 @@ def require_action_any_workspace(
     user's ``active_workspace``. Use when the route has no
     ``{workspace_id}`` path param."""
     return require_action(action, workspace_dep=current_workspace_id)
+
+
+def action_allowed_any_workspace(
+    action: str,
+) -> Callable[..., Coroutine[Any, Any, bool]]:
+    """Non-raising twin of ``require_action_any_workspace``: resolves to a bool.
+
+    For routes every member may call but whose response depends on the role
+    (e.g. agent-health content is redacted for non-admins). No denial is audited.
+    """
+
+    async def _allowed(
+        user: User = Depends(current_active_user),
+        workspace_id: str = Depends(current_workspace_id),
+    ) -> bool:
+        return await has_workspace_action(user, workspace_id, action)
+
+    _allowed.__name__ = f"action_allowed_{action.replace('.', '_')}"
+    return _allowed
 
 
 async def require_membership(

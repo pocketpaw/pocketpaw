@@ -249,6 +249,25 @@ async def check_workspace_action(user: Any, workspace_id: str, action: str) -> W
     return role
 
 
+async def has_workspace_action(user: Any, workspace_id: str, action: str) -> bool:
+    """Non-raising ``check_workspace_action``: True when ``user`` may perform ``action``.
+
+    For read paths that DEGRADE rather than deny (e.g. agent-health content
+    redaction for non-admins). Same order — membership, role, then override —
+    but no denial is audited, since a member reading a page is not a denial.
+    """
+    try:
+        role = resolve_workspace_role(user, workspace_id)
+    except Forbidden:
+        return False
+    try:
+        check_action(action, role)
+        return True
+    except Forbidden:
+        user_id = str(getattr(user, "id", "") or "")
+        return bool(user_id) and await _has_action_override(workspace_id, user_id, action)
+
+
 #: Cached override lookups, keyed by (workspace_id, user_id) -> (expires_at, actions).
 #:
 #: The previous version had no expiry and said so: "Lives for process lifetime
