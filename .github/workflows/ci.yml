@@ -1,6 +1,9 @@
 # CI — runs tests and lint on every PR targeting dev/main or an
 # RFC integration branch (pattern: feat/*-integration).
 # Created: 2026-02-26
+# Updated: 2026-10-03 (fix/paw-bar-frame-headers) — the EE test job runs
+# tests/cloud/test_paw_bar_frame.py (frame CSP + dashboard header middleware),
+# which otherwise sits in the tests/cloud blind spot.
 # Updated: 2026-10-02 (fix/canon-cross-repo-pins) — the EE test job runs
 # tests/cloud/test_paw_bar_widget_js.py (vendored loader hash pin), which otherwise
 # sits in the tests/cloud blind spot.
@@ -370,6 +373,16 @@ jobs:
         run: >-
           uv run pytest tests/cloud/test_paw_bar_widget_js.py
           tests/cloud/test_paw_bar_actions_js.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Bar frame tests
+        # Same addopts escape. GET /paw-bar/frame is the iframe a customer's site
+        # embeds. This file proves the frame-ancestors allowlist and CSP sandbox,
+        # the dead shell, and that the self-hosted dashboard's security-headers
+        # middleware keeps the frame's own headers (no X-Frame-Options: DENY, mic open).
+        run: uv run pytest tests/cloud/test_paw_bar_frame.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

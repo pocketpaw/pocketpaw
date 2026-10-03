@@ -1,5 +1,11 @@
 # tests/cloud/test_paw_bar_frame.py — Paw Bar glass FRAME endpoint + CSP origin
 #
+# Updated 2026-10-03 (fix/paw-bar-frame-headers): Layer 4 runs the real frame
+# endpoint behind the dashboard's ``security_headers_middleware``. The live frame
+# keeps its frame-ancestors allowlist + sandbox, its own mic Permissions-Policy and
+# gets no X-Frame-Options; the dead shell keeps its ``frame-ancestors *`` + sandbox
+# CSP and no XFO. The dead shell's CSP now names ``frame-ancestors *`` explicitly.
+#
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
 # defaults to a concierge its owner has CREATED and switched on
 # (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
@@ -641,14 +647,11 @@ class TestDeadFrameShell:
 # --------------------------------------------------------------------------- #
 
 
-def _assert_sandboxed(res, frame_ancestors: str | None) -> None:
+def _assert_sandboxed(res, frame_ancestors: str) -> None:
     csp = res.headers["content-security-policy"]
     directives = _directives(csp)
     assert _SANDBOX_DIRECTIVE in directives
-    if frame_ancestors is None:
-        assert not any(d.startswith("frame-ancestors") for d in directives)
-    else:
-        assert frame_ancestors in directives
+    assert frame_ancestors in directives
     # The one thing the sandbox exists to stop: the frame steering the top page.
     assert "allow-top-navigation" not in csp
 
@@ -669,8 +672,8 @@ async def test_dead_frame_for_disabled_concierge_is_sandboxed(frame_client):
     )
     assert res.status_code == 403
     assert "pawbar:dead" in res.text
-    # The dead shell never had an embedder gate; it gains the sandbox and nothing else.
-    _assert_sandboxed(res, None)
+    # The dead shell never had an embedder gate; it says so (frame-ancestors *).
+    _assert_sandboxed(res, "frame-ancestors *")
 
 
 @pytest.mark.asyncio
@@ -678,11 +681,64 @@ async def test_dead_frame_for_empty_allowlist_is_sandboxed(frame_client):
     await _site(allowed_origins=[])
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert res.status_code == 403
-    _assert_sandboxed(res, None)
+    _assert_sandboxed(res, "frame-ancestors *")
 
 
 def test_dead_frame_shell_is_sandboxed() -> None:
     from pocketpaw_ee.paw_bar.router import _dead_frame_response
 
     res = _dead_frame_response("https://brewco.com", ["brewco.com"])
-    assert res.headers["content-security-policy"] == _SANDBOX_DIRECTIVE
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors *")
+
+
+# --------------------------------------------------------------------------- #
+# Layer 4 — behind the dashboard's security_headers_middleware (self-hosted)
+# --------------------------------------------------------------------------- #
+# The self-hosted dashboard app runs every response through
+# ``security_headers_middleware``. It used to assign its strict headers over the
+# frame's own: ``frame-ancestors 'none'`` replaced the allowlist (and the sandbox),
+# ``X-Frame-Options: DENY`` was added, and ``microphone=()`` killed dictation. The
+# bar could not embed on any customer site. These run the real frame endpoint
+# through the real middleware.
+
+
+@pytest_asyncio.fixture
+async def dashboard_frame_client(mongo_db):
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.paw_bar.router import router
+
+    from pocketpaw.dashboard import security_headers_middleware
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(router)
+    app.middleware("http")(security_headers_middleware)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+@pytest.mark.asyncio
+async def test_dashboard_middleware_keeps_the_frame_headers(dashboard_frame_client):
+    await _site(allowed_origins=["brewco.com"])
+    res = await dashboard_frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors brewco.com:*")
+    assert "x-frame-options" not in {k.lower() for k in res.headers}
+    perms = res.headers["permissions-policy"]
+    assert "microphone=(self)" in perms
+    assert "microphone=()" not in perms
+    # Headers the frame does not set itself still get the dashboard defaults.
+    assert res.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_middleware_keeps_the_dead_frame_headers(dashboard_frame_client):
+    await _site(concierge_enabled=False)
+    res = await dashboard_frame_client.get(
+        "/paw-bar/frame", params={"key": _VALID_KEY, "po": "https://brewco.com"}
+    )
+    assert res.status_code == 403
+    assert "pawbar:dead" in res.text
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors *")
+    assert "x-frame-options" not in {k.lower() for k in res.headers}

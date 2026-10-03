@@ -3,6 +3,10 @@
 Lightweight FastAPI server that serves the frontend and handles WebSocket communication.
 
 Changes:
+  - 2026-10-03: security_headers_middleware uses setdefault semantics, so a response's
+    own security headers survive. X-Frame-Options is skipped only when the response's
+    own CSP carries frame-ancestors (fails closed otherwise). Unblocks the paw-bar
+    frame (frame-ancestors allowlist + microphone) on self-hosted deploys.
   - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler,
     broadcasts health_update on status transitions.
   - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check,
@@ -164,19 +168,29 @@ async def security_headers_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
-    # Allow the file-content endpoint to be embedded in same-origin iframes
-    # (used by the in-app PDF/file viewer modal).
-    is_file_content = request.url.path.startswith("/api/v1/files/content")
-    if is_file_content:
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    else:
-        response.headers["X-Frame-Options"] = "DENY"
+    # setdefault, never assign: a response that wrote its own security header keeps
+    # it. The paw-bar frame documents ship their own CSP (frame-ancestors allowlist
+    # + sandbox) and Permissions-Policy (microphone for dictation); assigning over
+    # them stopped the bar from embedding on any customer site.
+    #
+    # X-Frame-Options is skipped ONLY when the response's own CSP has a
+    # frame-ancestors directive: that directive owns framing, and XFO DENY beside an
+    # allowlist blocks the frame in browsers that honour XFO. A response CSP without
+    # frame-ancestors (say, a script policy) still gets XFO, so framing fails closed.
+    # A route that means to be frameable says so (the paw-bar dead shell sends
+    # ``frame-ancestors *``).
+    if "frame-ancestors" not in response.headers.get("content-security-policy", ""):
+        # The file-content endpoint is embedded in same-origin iframes (the in-app
+        # PDF/file viewer modal).
+        is_file_content = request.url.path.startswith("/api/v1/files/content")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN" if is_file_content else "DENY")
 
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     # CSP: allow self + CDN + strictly nonced scripts (Alpine evaluates allowed via unsafe-eval)
-    response.headers["Content-Security-Policy"] = (
+    response.headers.setdefault(
+        "Content-Security-Policy",
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' "
         "https://cdn.jsdelivr.net https://unpkg.com; "
@@ -185,11 +199,13 @@ async def security_headers_middleware(request: Request, call_next):
         "img-src 'self' data: blob:; "
         "connect-src 'self' ws: wss: https://cdn.jsdelivr.net https://unpkg.com; "
         "frame-src 'self'; "
-        "frame-ancestors 'none'"
+        "frame-ancestors 'none'",
     )
     # HSTS only when accessed via HTTPS (tunnel or reverse proxy)
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     return response
 
 

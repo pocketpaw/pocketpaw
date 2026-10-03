@@ -4,7 +4,8 @@ Covers:
   - Tunnel auth bypass fix (_is_genuine_localhost)
   - Rate limiting (burst, refill, 429 responses, per-IP isolation)
   - Session tokens (create, verify, expired, tampered, master regen)
-  - Security headers
+  - Security headers (2026-10-03: a response's own CSP / Permissions-Policy survive
+    the middleware; X-Frame-Options is skipped only when that CSP has frame-ancestors)
   - CORS rejection of non-matching origins
   - WebSocket tunnel auth
 """
@@ -402,6 +403,54 @@ class TestSecurityHeaders:
         # Regular HTTP request — no HSTS
         resp = test_client.get("/")
         assert "Strict-Transport-Security" not in resp.headers
+
+    def test_response_own_headers_survive(self):
+        """A route that authors its own CSP and Permissions-Policy keeps them, and
+        gets no X-Frame-Options when that CSP has frame-ancestors. A CSP without it
+        still gets DENY. The paw-bar frame
+        relies on this to embed on customer sites with the mic available."""
+        from fastapi import FastAPI
+        from fastapi.responses import HTMLResponse
+        from starlette.testclient import TestClient
+
+        from pocketpaw.dashboard import security_headers_middleware
+
+        app = FastAPI()
+        csp = "frame-ancestors brewco.com:*; sandbox allow-scripts"
+        perms = "microphone=(self)"
+
+        @app.get("/framed")
+        def framed():
+            return HTMLResponse(
+                "", headers={"Content-Security-Policy": csp, "Permissions-Policy": perms}
+            )
+
+        @app.get("/scripted")
+        def scripted():
+            return HTMLResponse("", headers={"Content-Security-Policy": "script-src 'self'"})
+
+        @app.get("/plain")
+        def plain():
+            return HTMLResponse("")
+
+        app.middleware("http")(security_headers_middleware)
+        client = TestClient(app)
+
+        resp = client.get("/framed")
+        assert resp.headers["Content-Security-Policy"] == csp
+        assert resp.headers["Permissions-Policy"] == perms
+        assert "X-Frame-Options" not in resp.headers
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+
+        # Own CSP without frame-ancestors: CSP kept, framing still fails closed.
+        resp = client.get("/scripted")
+        assert resp.headers["Content-Security-Policy"] == "script-src 'self'"
+        assert resp.headers["X-Frame-Options"] == "DENY"
+
+        resp = client.get("/plain")
+        assert resp.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+        assert "microphone=()" in resp.headers["Permissions-Policy"]
 
 
 class TestFrontendSvgSafety:
