@@ -1,9 +1,9 @@
 # tests/cloud/lens/test_router.py — the /api/v1/lens/* paw-lens proxy.
 #
 # A FastAPI app mounts the lens router with the CloudError handler, the license
-# dep waived and the workspace pinned to "ws_test". The service's LensClient is
-# swapped for one on an httpx.MockTransport that records every upstream request,
-# so these run the real router -> service -> client path with no network.
+# dep waived and the workspace pinned to "ws_test". conftest's ``upstream`` swaps
+# the service's LensClient for one on an httpx.MockTransport that records every
+# upstream request, so these run the real router -> service -> client path with no network.
 # Covers: disabled (no URL, no request), pass-through, workspace_id injection
 # (client-sent one ignored), token header, mute body, timeout -> 503
 # lens.unavailable, 404 -> 404, 401 -> 503 lens.misconfigured, bad path -> 422,
@@ -304,6 +304,7 @@ _RUN = {
     "run": {"trace_id": "a" * 32, "summary": "user asked for payroll", "status": "error"},
     "spans": [{"span_id": "s1", "tool": "search", "args_preview": "q=salary"}],
     "findings": [{"detector": "tool_error", "message": "search failed"}],
+    "overview": {"text": "- user asked for payroll", "model": "m", "created_at": "t"},
 }
 _SPAN = {
     "span_id": "s1",
@@ -349,6 +350,7 @@ def test_member_run_detail_stripped(monkeypatch, upstream):
     assert got["run"]["status"] == "error"
     assert got["spans"][0] == {"span_id": "s1", "tool": "search", "args_preview": ""}
     assert got["findings"] == _RUN["findings"]
+    assert got["overview"] is None
 
 
 def test_member_span_detail_stripped(monkeypatch, upstream):

@@ -7104,7 +7104,7 @@ bodies are paw-lens's JSON, unchanged for workspace admins.
 **Content privacy.** Only a workspace admin or owner (`lens.manage`) sees message
 and tool content. For anyone else the runs list, run detail, span detail and
 issue detail come back with run `summary` and span-list `args_preview` set to
-`""`, span `messages` set to `null`, `tool.arguments` and `tool.result` set to
+`""`, the run's AI `overview` and span `messages` set to `null`, `tool.arguments` and `tool.result` set to
 `null`, and every attribute (span or event) whose key starts with
 `gen_ai.input.`, `gen_ai.output.`, `gen_ai.system_instructions`,
 `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` or
