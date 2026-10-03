@@ -1,0 +1,65 @@
+[
+  {
+    "label": "Turnstile rejection ignored - bots spend the platform's engine budget",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/public_check.py",
+    "find": "    if not ok:\n        raise BadRequest(",
+    "replace": "    if False:\n        raise BadRequest(",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_turnstile_failure_is_400_and_costs_nothing"
+    ]
+  },
+  {
+    "label": "Turnstile network error fails open",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/public_check.py",
+    "find": "        logger.warning(\"ai_check: Turnstile verify failed: %s\", type(exc).__name__)\n        ok = False",
+    "replace": "        logger.warning(\"ai_check: Turnstile verify failed: %s\", type(exc).__name__)\n        ok = True",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_turnstile_success_and_network_error"
+    ]
+  },
+  {
+    "label": "daily spend cap never trips",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/public_check.py",
+    "find": "    if await service.anonymous_spend_today() >= cap:",
+    "replace": "    if await service.anonymous_spend_today() >= cap * 1000:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_daily_spend_cap"
+    ]
+  },
+  {
+    "label": "spend cap counts workspace checks too - paying sites starve the free tool",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "        {\"workspace\": None, \"site_id\": None, \"createdAt\": {\"$gte\": start}}",
+    "replace": "        {\"createdAt\": {\"$gte\": start}}",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_spend_cap_ignores_workspace_checks"
+    ]
+  },
+  {
+    "label": "per-IP limiter never refuses",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    if not _ai_check_public_limiter.check(f\"ai-check-public:{_client_ip(request)}\").allowed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_per_ip_rate_limit"
+    ]
+  },
+  {
+    "label": "the named question's echo counts as a mention - every business reads as mentioned",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/public_check.py",
+    "find": "    unprompted = [r for r in ok if r[\"question\"] != named_q]",
+    "replace": "    unprompted = list(ok)",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_named_question_echo_does_not_count_as_mentioned"
+    ]
+  },
+  {
+    "label": "public response leaks a non-allow-listed field",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/dto.py",
+    "find": "    mentioned: bool\n    engine: Literal[\"ChatGPT\"] = \"ChatGPT\"",
+    "replace": "    mentioned: bool\n    total_cost_usd: float = 0.0\n    engine: Literal[\"ChatGPT\"] = \"ChatGPT\"",
+    "tests": [
+      "tests/cloud/ai_visibility/test_public_check.py::test_happy_path_returns_only_the_public_allow_list"
+    ]
+  }
+]

@@ -561,6 +561,27 @@
         "reuse a prompt",
         "remix a generation"
       ]
+    },
+    {
+      "id": "capability:tools.ai_check",
+      "kind": "capability",
+      "name": "Free check: does ChatGPT name my business",
+      "summary": "A free, no-sign-in check of whether ChatGPT names a local business when asked about its kind of business in its city, with the sources it read and one fix.",
+      "narrative": "Anyone can run it without signing in: give a business name, a city and optionally its website. It asks ChatGPT (with web search) three local questions, twice each, and answers mentioned or not mentioned, never a rank or a score: one question names the business, so only the other two decide 'mentioned'. It also lists up to ten web pages the assistant read (own site, Google Business Profile, Yelp, TripAdvisor, Reddit, directories) and one plain next step. Results are approximate, from AI assistant APIs. Limited to 5 checks an hour per address and a daily platform budget; a Cloudflare Turnstile check blocks bots.",
+      "how": "HTTP only, no agent tool: POST /api/v1/tools/ai-check {name, city, website?, turnstile_token} (no sign-in) returns {mentioned, engine, answers_checked, competitors, sources: [{type, url}], fix: {id, text}}",
+      "surface": "",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "ai visibility",
+        "does chatgpt mention my business",
+        "ai search",
+        "chatgpt recommends",
+        "show up in ai answers",
+        "free ai check",
+        "ai seo"
+      ]
     }
   ]
 }

@@ -1,4 +1,5 @@
 # tests/atlas/test_eval.py — intent→capability ranking-regression eval
+# Baseline 90: the free AI check case (capability:tools.ai_check) ranks 1.
 # Updated: 2026-10-02 (feat/studio-templates) — baseline 88 → 89: the new
 # studio-template case ranks 1.
 # Updated: 2026-10-02 (feat/discover-index, review) — baseline 86 → 88: two of the
@@ -94,7 +95,7 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 89
+STRICT_HIT_BASELINE = 90
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit
