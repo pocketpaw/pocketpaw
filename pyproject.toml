@@ -726,6 +726,10 @@ ignore_imports = [
     # FastAPI(lifespan=...), so the queued tail is flushed from here or not at
     # all. Guarded by try/except; an OSS-only install has nothing to flush.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud._core.request_log",
+    # The dashboard socket redeems a first-frame ws_ticket through the EE
+    # ticket store. Runtime import inside a try/except ImportError, so an
+    # OSS-only install fails closed (no ticket store, close 4001).
+    "pocketpaw.dashboard_ws -> pocketpaw_ee.cloud.auth.ws_tickets",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.client",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.store",
     # atlas resolves optional EE introspection (Fabric schema) and the
