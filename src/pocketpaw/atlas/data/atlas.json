@@ -2422,9 +2422,23 @@
       ],
       "kind": "skill",
       "name": "studio-editor",
-      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". Also invoke for \"make a title card\", \"add an intro animation\", \"make a motion graphic\", \"animate this stat\", \"add a lower third\" — authored as HyperFrames HTML. You do NOT generate footage or AI media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
+      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". Also invoke for \"make a title card\", \"add an intro animation\", \"make a motion graphic\", \"animate this stat\", \"add a logo sting\" — authored as HyperFrames HTML. You do NOT generate footage or AI media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
       "requires": [],
       "summary": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /studio-motion in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:studio-motion",
+      "keywords": [
+        "studio-motion"
+      ],
+      "kind": "skill",
+      "name": "studio-motion",
+      "narrative": "The house motion-graphics vocabulary for the /studio/editor timeline: six named styles, five text effects and five presets (title, statement, logo, stat, chart), written for the browser renderer behind add_motion_graphic. Load it together with `hyperframes-core` whenever the user asks for a title card, kinetic type, a logo reveal, an animated number, a bar chart or any other motion graphic on the editor, and before restyling or editing one listed under MOTION GRAPHICS. It does not cover arranging clips; that is `studio-editor`.",
+      "requires": [],
+      "summary": "The house motion-graphics vocabulary for the /studio/editor timeline: six named styles, five text effects and five presets (title, statement, logo, stat, chart), written for the browser renderer…",
       "surface": ""
     },
     {

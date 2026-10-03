@@ -1,0 +1,58 @@
+[
+  {
+    "label": "the /studio/editor profile stops loading studio-motion",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "skill_names=frozenset({\"studio-editor\", \"hyperframes-core\", \"studio-motion\"}),",
+    "replace": "skill_names=frozenset({\"studio-editor\", \"hyperframes-core\"}),",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  },
+  {
+    "label": "the procedure stops naming studio-motion",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "load the `hyperframes-core` and `studio-motion` skills and",
+    "replace": "load the `hyperframes-core` skill and",
+    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py"]
+  },
+  {
+    "label": "the skill's frontmatter name drifts from its directory",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/SKILL.md",
+    "find": "name: studio-motion\n",
+    "replace": "name: studio-motions\n",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  },
+  {
+    "label": "SKILL.md links a reference file that does not exist",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/SKILL.md",
+    "find": "Full working examples for every preset: [references/presets.md](references/presets.md).",
+    "replace": "Full working examples for every preset: [references/presets.md](references/preset.md).",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  },
+  {
+    "label": "the logo example loses its root duration and the validator would refuse it",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
+    "find": "data-duration=\"4\" data-preset=\"logo\"",
+    "replace": "data-preset=\"logo\"",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  },
+  {
+    "label": "the chart example's timeline is no longer paused",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
+    "find": "gsap.timeline({paused:true,defaults:{ease:\"sine.out\"",
+    "replace": "gsap.timeline({defaults:{ease:\"sine.out\"",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  },
+  {
+    "label": "the statement example names a style the house does not have",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
+    "find": "data-style=\"velvet\"",
+    "replace": "data-style=\"plush\"",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  },
+  {
+    "label": "the stat example's clip stops spanning the root duration",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
+    "find": "<section class=\"clip\" data-start=\"0\" data-duration=\"4\">\n<div class=\"mg-stage\">\n<p class=\"mg-display mg-num\">",
+    "replace": "<section class=\"clip\" data-start=\"0\" data-duration=\"3\">\n<div class=\"mg-stage\">\n<p class=\"mg-display mg-num\">",
+    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+  }
+]

@@ -328,3 +328,26 @@ async def test_a_motion_graphic_lists_its_id_and_source() -> None:
     block = preamble.split("MOTION GRAPHICS", 1)[1]
     assert ASSET_OLD[-8:] in block
     assert html in block
+
+
+async def test_the_procedure_loads_both_motion_skills_and_covers_gallery_graphics() -> None:
+    """Graphics made from the editor's Graphics button arrive under MOTION
+    GRAPHICS like the agent's own, so the procedure must say they are edited the
+    same way and name the skill that knows their house shape."""
+    preamble = await _render(_timeline())
+
+    assert "`hyperframes-core`" in preamble
+    assert "`studio-motion`" in preamble
+    assert "Graphics button" in preamble
+    assert "data-preset" in preamble and "data-style" in preamble
+
+
+async def test_the_procedure_does_not_offer_lower_thirds() -> None:
+    """The render is opaque, so a motion graphic cannot overlay footage. The
+    procedure says so instead of listing lower thirds as something it makes."""
+    flat = " ".join((await _render(_timeline())).split())
+
+    assert (
+        "render full frame and opaque, so overlays like lower thirds are not possible yet" in flat
+    )
+    assert "animated stat, lower third" not in flat
