@@ -4273,7 +4273,7 @@ async def _ai_ready_inputs(
             host = prior
     return AiReadyInputs(
         site_name=site_name,
-        description=getattr(doc, "description", "") or "",
+        description=(getattr(doc, "description", None) or "").strip(),
         ai_training_allowed=bool(getattr(doc, "ai_training_allowed", False)),
         indexnow_key=getattr(doc, "indexnow_key", "") or secrets.token_hex(16),
         host=host,
