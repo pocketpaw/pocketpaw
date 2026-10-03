@@ -42,7 +42,8 @@
       {"id": "soul-protocol", "name": "Soul Protocol", "description": "External: portable identity + 5-tier memory (.soul). PocketPaw runtime, Fabric, and Instinct write to the soul journal (Decision Graph).", "tags": ["external"], "containers": []},
       {"id": "ripple", "name": "Ripple", "description": "External: Svelte 5 generative-UI runtime that renders rippleSpec into live UI. Pockets and the static/ripple site track compile through it.", "tags": ["external"], "containers": []},
       {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites; Email Service (REST) sends owner lead/handoff email.", "tags": ["external"], "containers": []},
-      {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []}
+      {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []},
+      {"id": "paw-lens", "name": "paw-lens", "description": "External: on-box agent/automation health service (Go). Receives OTLP traces from pocketpaw's Logfire exporter and serves a token-guarded read API that the cloud lens proxy forwards.", "tags": ["external"], "containers": []}
     ],
     "relationships": [
       {"source": "connectors", "target": "fabric", "description": "ingests typed records", "technology": "", "style": "sync"},
@@ -63,7 +64,9 @@
       {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
       {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
       {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},
-      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"}
+      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"},
+      {"source": "runtime", "target": "paw-lens", "description": "agent traces", "technology": "OTLP/HTTP", "style": "async"},
+      {"source": "pocketpaw-app", "target": "paw-lens", "description": "read API proxy", "technology": "HTTP + X-Lens-Token", "style": "sync"}
     ]
   }
 }
