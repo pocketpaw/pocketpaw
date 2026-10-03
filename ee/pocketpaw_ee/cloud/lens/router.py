@@ -5,6 +5,7 @@
 #   GET  /lens/issues?status= · /lens/issues/{fingerprint}
 #   GET  /lens/runs?automation=&status=&limit= · /lens/runs/{trace_id}
 #   GET  /lens/runs/{trace_id}/spans/{span_id}
+#   POST /lens/runs/{trace_id}/overview?refresh=  (AI overview, admin only)
 #   POST /lens/issues/{fingerprint}/mute {minutes} · /lens/issues/{fingerprint}/resolve
 # GETs accept ``since``; overview, issues, agents and the runs list also take
 # ``agent_id``. License-gated; the workspace is the caller's active workspace.
@@ -17,7 +18,8 @@
 # pass ``full`` = "caller holds ``lens.manage``" so the service redacts message
 # and tool content for non-admins (Privacy A, ``service.redact``). Mute/resolve
 # are writes that silence alerting for the whole workspace, so they require
-# ``lens.manage`` (ADMIN). Responses may be lists, hence ``response_model=None``.
+# ``lens.manage`` (ADMIN), as does the overview POST (it spends LLM tokens and
+# reads full content). Responses may be lists, hence ``response_model=None``.
 
 from __future__ import annotations
 
@@ -110,6 +112,18 @@ async def get_run(
     workspace_id: WorkspaceId, full: FullContent, trace_id: TraceId, since: Since = None
 ) -> Any:
     return await service.get_run(workspace_id, trace_id, since, full=full)
+
+
+@router.post("/runs/{trace_id}/overview", response_model=None)
+async def run_overview(
+    workspace_id: WorkspaceId,
+    trace_id: TraceId,
+    user: Annotated[Any, Depends(require_action_any_workspace("lens.manage"))],
+    refresh: bool = False,
+) -> Any:
+    return await service.run_overview(
+        workspace_id, trace_id, refresh=refresh, generated_by=str(user.id)
+    )
 
 
 @router.get("/runs/{trace_id}/spans/{span_id}", response_model=None)

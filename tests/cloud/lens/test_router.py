@@ -25,35 +25,10 @@ from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.lens import service as lens_service
-from pocketpaw_ee.cloud.lens.client import LensClient
 from pocketpaw_ee.cloud.lens.router import router as lens_router
 from pocketpaw_ee.cloud.license import require_license
 
 TOKEN = "lens-secret-xyz"
-
-
-@pytest.fixture
-def seen() -> list[httpx.Request]:
-    return []
-
-
-@pytest.fixture
-def upstream(monkeypatch, seen):
-    """Install a MockTransport-backed client; returns a setter for the handler."""
-    state = {"handler": lambda req: httpx.Response(200, json={"ok": True})}
-
-    def _transport_handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return state["handler"](request)
-
-    monkeypatch.setattr(
-        lens_service, "_client", LensClient(_transport=httpx.MockTransport(_transport_handler))
-    )
-
-    def _set(handler) -> None:
-        state["handler"] = handler
-
-    return _set
 
 
 def _settings(monkeypatch, url: str) -> None:
