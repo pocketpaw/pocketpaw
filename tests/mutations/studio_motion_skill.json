@@ -37,8 +37,8 @@
   {
     "label": "the chart example's timeline is no longer paused",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
-    "find": "const EASE = \"sine.out\";\n  const D = Number(document.getElementById(\"root\").dataset.duration);\n  const tl = gsap.timeline({ paused: true });",
-    "replace": "const EASE = \"sine.out\";\n  const D = Number(document.getElementById(\"root\").dataset.duration);\n  const tl = gsap.timeline();",
+    "find": "gsap.timeline({paused:true,defaults:{ease:\"sine.out\"",
+    "replace": "gsap.timeline({defaults:{ease:\"sine.out\"",
     "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
   },
   {
@@ -51,8 +51,8 @@
   {
     "label": "the stat example's clip stops spanning the root duration",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
-    "find": "<section class=\"clip\" data-start=\"0\" data-duration=\"4\">\n    <div class=\"stage\">\n      <div class=\"figure\">",
-    "replace": "<section class=\"clip\" data-start=\"0\" data-duration=\"3\">\n    <div class=\"stage\">\n      <div class=\"figure\">",
+    "find": "<section class=\"clip\" data-start=\"0\" data-duration=\"4\">\n<div class=\"mg-stage\">\n<p class=\"mg-display mg-num\">",
+    "replace": "<section class=\"clip\" data-start=\"0\" data-duration=\"3\">\n<div class=\"mg-stage\">\n<p class=\"mg-display mg-num\">",
     "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
   }
 ]

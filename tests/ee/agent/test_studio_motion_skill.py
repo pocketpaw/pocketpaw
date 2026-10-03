@@ -75,9 +75,10 @@ def test_each_example_keeps_the_house_contract(html: str) -> None:
     clips = re.findall(r'<section class="clip" data-start="0" data-duration="([^"]+)"', html)
     duration = re.search(r'data-duration="([^"]+)"', root).group(1)
     assert clips == [duration]
+    assert f"const D={duration};" in html
 
-    assert html.count("gsap.timeline({ paused: true })") == 1
-    assert 'window.__timelines["mg"] = tl;' in html
+    assert html.count("gsap.timeline({paused:true") == 1
+    assert 'window.__timelines["mg"]=tl;' in html
     assert "<canvas" not in html
     assert "Math.random" not in html and "Date.now" not in html
     assert len(html) < 20_000
