@@ -1,66 +1,33 @@
 # ee/pocketpaw_ee/cloud/partners/service.py — Paw Partners tenant service.
 #
-# Created 2026-10-01 (feat/partners-foundation, PH-1). Reads the caller's own
-# partner profile and does tenant-scoped CRUD on clients. Client routes require
-# an ACTIVE partner profile (``Forbidden`` otherwise).
-# Updated 2026-10-02 (feat/partners-sell, PH-2): ``list_offers`` (partner-only
-# plans at the caller's country price), ``sell`` (validates the client, then
-# ``sites.service.sell_site_plan`` — the ordinary paid-publish path — debits the
-# wallet, redeploys and stamps ``partner_client_id``) and ``list_sites``.
-# Updated 2026-10-02 (feat/partners-earnings, PH-11): ``sell`` optionally records
-# what the partner charged its client as a PAID receipt on the site's existing
-# client record (``sites.service.record_site_invoice`` — no second writer), only
-# when the sale really happened. ``summary`` and ``earnings`` read the sold sites'
-# paid receipts (per currency, never FX-mixed) and their ``site_plan`` debits
-# (through ``credits.service.history``) for the partner earnings view.
-# Review fixes: the receipt is booked only against a debit the sale newly
-# recorded (``sell_site_plan`` returns its key), with an id derived from that key
-# so a double submit books one receipt; a failed receipt write leaves the sale
-# standing with ``invoice_id=None``; ``summary`` reads the sold sites once.
-# Updated 2026-10-02 (feat/partners-commissions, PH-13): ``create_pay_link`` —
-# a one-time checkout the partner's client pays for a site's year at list price
-# (``site_plans.partner_client_price``), through ``billing.service.
-# create_partner_client_checkout``; the pending record lands on the Site via the
-# sites owner (``client_pay_link_target`` refuses 404/409 and hands back an open
-# link to reuse). ``list_offers`` adds the client price; ``list_sites`` adds
-# ``billing_mode``; ``summary`` / ``earnings`` add commission credits read from
-# the ledger (``partner_commission`` grants plus their clawbacks, net).
-# Review fix: the pay link reserves its slot through
-# ``sites.reserve_client_pay_link`` (a conditional push), so a double submit opens
-# one Dodo payment; a failed checkout releases the reservation.
-# Re-check fix: a reservation that went stale while Dodo answered is released
-# and refused (409 ``partners.link_in_progress``), never handed out.
-# Updated 2026-10-02 (feat/partners-tiers, PH-15): VOLUME TIERS + MILESTONES.
-# ``refresh_standing`` is the one owner helper: it recomputes the tier from the
-# ACTIVE sold sites (raise only; ``allow_downgrade`` from the monthly
-# ``sweep_partner_tiers``, kill switch ``POCKETPAW_PARTNER_TIER_SWEEP_ENABLED``)
-# through ``workspace.service.set_partner_tier`` (compare-and-set), then grants
-# every milestone the LIFETIME distinct sites sold has reached
-# (``partner_reward``, key ``partner_reward:<workspace_id>:<sites>``). It runs
-# after every ``sell`` and every paid client payment, and never raises. Lifetime
-# is read from the append-only ledger — a site counts once the wallet paid a
-# partner rung for it or its client's payment earned a commission — so a refund,
-# a lapse or a deleted site never lowers it, never re-triggers a milestone and
-# never claws one back. ``list_offers`` shows the discounted price; ``get_me``
-# adds the standing; ``summary`` / ``earnings`` add reward credits; ``rewards``
-# lists the ladder.
-# Updated 2026-10-02: ``_default_store`` delegates to the shared
-# ``pocketpaw.fabric.default_journal_store()`` (same as ``people.service``)
-# instead of building its own ``FabricJournalStore``, so client writes are
-# also projected into the per-workspace FabricStore read model.
-# Updated 2026-10-02: PATCH re-reads via the scoped ``_load``; empty PATCH is a
-# no-op; the operator switch moved to ``cloud/platform/partners.py``.
-# Updated 2026-10-01: clients are Fabric ``Customer`` objects in the org
-# journal (``FabricJournalStore``), scope ``workspace:<id>`` = tenancy, copying
-# ``people/service.py``. The journal's ``fabric.object.*`` events ARE the
-# emit-on-write, so no cloud realtime event is fired. Delete = Fabric archive.
-# ``get_active_profile`` / ``get_client`` are consumed by later PH tasks by name.
-# ``partner_profile_for_workspace`` is the billing seam's loader
-# (``billing.enforcement.sites_enforced_for``).
-# Updated 2026-10-02 (feat/partners-whatsapp-leads, PH-6): consent follows the
-# number. A PATCH that changes ``whatsapp`` clears ``whatsapp_opt_in_at`` unless
-# the same PATCH sets it, so a new number never inherits the old one's opt-in
-# (lead WhatsApp messages go only to opted-in numbers).
+# Everything here acts for the caller's OWN workspace (``ctx.workspace_id``);
+# the cross-tenant public reads live in ``service_admin``. Client routes need an
+# ACTIVE partner profile (``Forbidden`` otherwise); the profile read and the
+# public-profile edit need only a profile (``NotFound`` otherwise).
+#
+# * Clients are Fabric ``Customer`` objects in the org journal (shared
+#   ``default_journal_store``, scope ``workspace:<id>`` = tenancy, like
+#   ``people/service.py``). The journal's ``fabric.object.*`` events ARE the
+#   emit-on-write. Delete = archive. A PATCH that changes ``whatsapp`` clears
+#   ``whatsapp_opt_in_at`` unless the same PATCH sets it (consent follows the number).
+# * Selling runs the ordinary paid-publish path (``sites.service.sell_site_plan``)
+#   and books at most one paid receipt per newly recorded debit (id derived from
+#   the debit key, so a double submit books one). ``create_pay_link`` reserves the
+#   site's slot before Dodo is called; a stale reservation is released and refused.
+# * Earnings read the sold sites' paid receipts (per currency, never FX-mixed) and
+#   the ledger (``credits.service.history``) for debits, commissions and rewards.
+# * Tiers and milestones: ``refresh_standing`` is the one owner (raise only;
+#   ``allow_downgrade`` from the monthly ``sweep_partner_tiers``, kill switch
+#   ``POCKETPAW_PARTNER_TIER_SWEEP_ENABLED``) through ``workspace.service.
+#   set_partner_tier``; lifetime sites sold is read from the append-only ledger so
+#   it never goes down. Never raises: it runs after money already moved.
+# * Public profile (PW-7): ``update_public_profile`` validates the MERGED profile
+#   through ``PartnerProfile`` (reserved slug, closed service set), checks slug
+#   uniqueness, writes a targeted ``$set`` through ``workspace.service.
+#   set_partner_public_profile`` and emits ``PartnerProfileUpdated``.
+#
+# ``get_active_profile`` / ``get_client`` are consumed by later PH tasks by name;
+# ``partner_profile_for_workspace`` is the billing seam's loader.
 
 from __future__ import annotations
 
@@ -74,12 +41,16 @@ from typing import Any
 from uuid import uuid4
 
 from beanie import PydanticObjectId
+from pydantic import ValidationError as PydanticValidationError
+from pymongo.errors import DuplicateKeyError
 from soul_protocol.spec.journal import Actor
 
 from pocketpaw.fabric.journal_store import FabricJournalStore
 from pocketpaw.fabric.models import FabricObject, FabricQuery
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import PartnerProfileUpdated
 from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.models.workspace import PartnerProfile
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
@@ -103,6 +74,7 @@ from pocketpaw_ee.cloud.partners.dto import (
     PartnerPayLinkOut,
     PartnerPayLinkRequest,
     PartnerProfileOut,
+    PartnerPublicProfileIn,
     PartnerRewardOut,
     PartnerSaleOut,
     PartnerSellRequest,
@@ -119,6 +91,11 @@ PARTNER_REWARD_CAUSE = "partner_reward"
 # Set to 0 to stop the monthly tier review (downgrades) without a release.
 _TIER_SWEEP_VAR = "POCKETPAW_PARTNER_TIER_SWEEP_ENABLED"
 _TIER_SWEEP_BATCH = 200
+# The partner's own fields on ``PartnerProfile`` (PW-7); the operator PUT carries
+# them across untouched.
+PUBLIC_PROFILE_FIELDS = frozenset(
+    {"slug", "display_name", "city", "country", "services", "bio", "contact_url", "public"}
+)
 
 
 def _default_store() -> FabricJournalStore:
@@ -172,6 +149,7 @@ async def get_profile(ctx: RequestContext) -> PartnerMeOut:
     base = PartnerProfileOut.model_validate(profile, from_attributes=True)
     return PartnerMeOut(
         **base.model_dump(),
+        **profile.model_dump(include=PUBLIC_PROFILE_FIELDS),
         active_sites=active,
         lifetime_sites_sold=await _lifetime_sites_sold(workspace_id),
         next_tier=PartnerNextTierOut(**up) if up is not None else None,
@@ -180,6 +158,64 @@ async def get_profile(ctx: RequestContext) -> PartnerMeOut:
             commission_pct=_calc.tier_commission_bps(profile.tier) / 100,
         ),
     )
+
+
+async def _slug_taken(slug: str, workspace_id: str) -> bool:
+    # global-read: slug uniqueness spans every workspace by definition.
+    other = await _WorkspaceDoc.find_one(
+        {"partner.slug": slug, "deleted_at": None, "_id": {"$ne": _oid(workspace_id)}}
+    )
+    return other is not None
+
+
+async def update_public_profile(ctx: RequestContext, payload: Any) -> PartnerMeOut:
+    """PATCH the caller's public partner profile; only the fields sent change.
+
+    404 when the workspace is not a partner (any status may edit; the directory
+    shows only active + public). The merged profile is validated as a whole, so
+    a reserved slug or an unknown service is a 422 ``partners.invalid_profile``;
+    ``public=True`` needs a slug and a display name (422
+    ``partners.profile_incomplete``); a slug another workspace holds is a 409
+    ``partners.slug_taken`` (pre-check, and the unique index for the race).
+    """
+    body = PartnerPublicProfileIn.model_validate(payload)
+    profile = await partner_profile_for_workspace(ctx.workspace_id)
+    if profile is None:
+        raise NotFound("partner_profile", ctx.workspace_id or "")
+    workspace_id: str = ctx.workspace_id  # type: ignore[assignment]  # profile => resolved
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        # no-event: empty PATCH writes nothing.
+        return await get_profile(ctx)
+    try:
+        merged = PartnerProfile(**{**profile.model_dump(), **changes})
+    except PydanticValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(x) for x in first.get("loc", ()))
+        raise ValidationError("partners.invalid_profile", f"{field}: {first['msg']}") from None
+    if merged.public and not (merged.slug and merged.display_name):
+        raise ValidationError(
+            "partners.profile_incomplete", "A public profile needs a slug and a display name"
+        )
+    taken = ConflictError("partners.slug_taken", "That slug is already taken")
+    if merged.slug and merged.slug != profile.slug and await _slug_taken(merged.slug, workspace_id):
+        raise taken
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    try:
+        ok = await workspace_service.set_partner_public_profile(
+            workspace_id, merged.model_dump(include=set(changes))
+        )
+    except DuplicateKeyError:
+        raise taken from None
+    if not ok:
+        raise NotFound("partner_profile", workspace_id)
+    await emit(
+        PartnerProfileUpdated(
+            data={"workspace_id": workspace_id, "slug": merged.slug, "public": merged.public}
+        )
+    )
+    return await get_profile(ctx)
 
 
 async def _active_profile(ctx: RequestContext) -> PartnerProfile:

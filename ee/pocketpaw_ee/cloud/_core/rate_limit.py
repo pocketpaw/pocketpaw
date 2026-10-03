@@ -37,10 +37,17 @@ on ``POST /discover/{id}/report``, so one account can't spray reports.
 
 ``rate_limit_ai_check_public`` is a per-IP bucket (5/hour) on the public
 ``POST /tools/ai-check``: every call spends platform money on AI engines.
+
+``per_ip_limit`` builds a per-IP Depends from a limiter, a bucket prefix and the
+429 code / message; new public routes use it instead of copying a function.
+``rate_limit_partner_public`` (60/min, the public partner directory and profile
+reads) and ``rate_limit_partner_apply`` (5/hour, ``POST /partners/apply``, each
+call files an operator proposal) are built with it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from ipaddress import ip_address
 
 from fastapi import Depends, Request
@@ -93,6 +100,12 @@ _ai_check_public_limiter = RateLimiter(rate=5.0 / 3600.0, capacity=5)
 # account sweeping the index gets 10 an hour.
 _discover_report_limiter = RateLimiter(rate=10.0 / 3600.0, capacity=10)
 
+# Public partner directory / profile reads: same shape as the Discover reads.
+_partner_public_limiter = RateLimiter(rate=60.0 / 60.0, capacity=60)
+# Partner applications: each one lands a proposal in front of an operator. A
+# person applies once; a script gets 5 an hour.
+_partner_apply_limiter = RateLimiter(rate=5.0 / 3600.0, capacity=5)
+
 # Knocks (a guest asking to join). Per IP: a guest knocks once, maybe again after
 # a denial. Per code: every knock puts a card in front of the people in the call,
 # so one meeting can't be flooded by many addresses either.
@@ -141,6 +154,33 @@ def _client_ip(request: Request) -> str:
 def client_ip(request: Request) -> str:
     """Public name for ``_client_ip`` (same rightmost-XFF rule)."""
     return _client_ip(request)
+
+
+def per_ip_limit(
+    limiter: RateLimiter, *, prefix: str, code: str, message: str
+) -> Callable[[Request], Awaitable[None]]:
+    """A per-IP ``Depends`` over ``limiter``: 429 ``code`` when the bucket is empty."""
+
+    async def dep(request: Request) -> None:
+        if not limiter.check(f"{prefix}:{_client_ip(request)}").allowed:
+            raise RateLimited(code, message)
+
+    dep.__name__ = f"rate_limit_{prefix.replace('-', '_')}"
+    return dep
+
+
+rate_limit_partner_public = per_ip_limit(
+    _partner_public_limiter,
+    prefix="partner-public",
+    code="partners.rate_limited",
+    message="Too many requests - wait a moment and try again.",
+)
+rate_limit_partner_apply = per_ip_limit(
+    _partner_apply_limiter,
+    prefix="partner-apply",
+    code="partners.apply_rate_limited",
+    message="Too many applications from here - try again in an hour.",
+)
 
 
 async def rate_limit_social_exchange(request: Request) -> None:
@@ -291,5 +331,8 @@ __all__ = [
     "rate_limit_meeting_knock",
     "rate_limit_meeting_knock_poll",
     "rate_limit_meeting_lookup",
+    "rate_limit_partner_apply",
+    "rate_limit_partner_public",
     "rate_limit_slug_check",
+    "per_ip_limit",
 ]
