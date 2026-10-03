@@ -15,7 +15,9 @@ native-resume launches none. ``prewarm`` therefore takes no history.
 
 Warm-client key (``_client_cache_key``): session key, cwd, model, allowed tools,
 the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
-plugin/skills digest and the tenant scope. Any change forces a fresh subprocess.
+plugin/skills digest, the tenant scope and any surface-scoped MCP servers the
+client carries. Any change forces a fresh subprocess; the same key gates reuse
+of a supervisor-leased client (WH-1).
 Per-run skill dirs are cached per digest and dropped on eviction or cleanup.
 
 Lifecycle invariants:
@@ -67,7 +69,12 @@ from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.observability import detached_span
 from pocketpaw.security.rails import is_substring_blocked
-from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy, ungranted_surface_servers
+from pocketpaw.tools.policy import (
+    OPT_IN_MCP_SERVERS,
+    SURFACE_SCOPED_MCP_SERVERS,
+    ToolPolicy,
+    ungranted_surface_servers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1950,7 +1957,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{prompt_key}:"
             f"{plugin_digest}:"
             f"{tenant_scope}"
-        )
+        ) + cls._scoped_servers_key(options)
+
+    @staticmethod
+    def _scoped_servers_key(options: Any) -> str:
+        """The surface-scoped MCP servers (``SURFACE_SCOPED_MCP_SERVERS``) this
+        client was connected with. The server set is fixed at connect(), and a
+        granted server stays registered even when a deny strips its ids off the
+        allowlist, so the allowlist alone cannot tell such a client apart: a
+        client warmed on ``agent_health`` (with ``pocketpaw_lens``) would be
+        reused by any surface with the same allowlist. Empty when none is
+        present, which keeps every other key byte-for-byte unchanged."""
+        servers = getattr(options, "mcp_servers", None)
+        names = sorted(n for n in servers or () if n in SURFACE_SCOPED_MCP_SERVERS)
+        return f":scoped={','.join(names)}" if names else ""
 
     async def _get_or_create_client(
         self,
