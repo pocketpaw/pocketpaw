@@ -582,6 +582,27 @@
         "free ai check",
         "ai seo"
       ]
+    },
+    {
+      "id": "capability:sites.ai_visibility",
+      "kind": "capability",
+      "name": "Monthly AI visibility check for a Staff site",
+      "summary": "On the Staff plan, a site gets a monthly check of whether ChatGPT, Perplexity and Claude name the business for the owner's questions, with sources, competitors and one fix.",
+      "narrative": "Each Staff site can ask up to ten owner-written questions (what a customer would ask an AI assistant) of ChatGPT, Perplexity (search) and Claude, three times each, once a month and on demand at most once a day. The card shows per assistant how often it named the business ('named in 4 of 9 answers', approximate, from AI assistant APIs, never a rank), which kinds of sources it read, which competitors it named, and one fix. Fixes Paw Sites makes itself (letting AI crawlers in, refreshing the site's AI-ready files) apply with one click by republishing the site; the rest are steps on other sites, such as a Google Business Profile.",
+      "how": "HTTP only, no agent tool: GET /api/v1/sites/{id}/ai-visibility; PUT /api/v1/sites/{id}/ai-visibility/questions {questions}; POST /api/v1/sites/{id}/ai-visibility/check (202); POST /api/v1/sites/{id}/ai-visibility/apply-fix {fix_id} (202)",
+      "surface": "/sites",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "ai visibility",
+        "monthly ai check",
+        "named by chatgpt",
+        "perplexity",
+        "ai assistants recommend my site",
+        "ai search report",
+        "staff plan"
+      ]
     }
   ]
 }

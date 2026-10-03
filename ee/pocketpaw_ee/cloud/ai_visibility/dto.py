@@ -4,7 +4,9 @@
 # internal view, never sent to an anonymous caller. The free public check
 # (``POST /tools/ai-check``) speaks ``AiCheckRequest`` / ``AiCheckResponse``, both
 # ``extra="forbid"`` so a field can only reach the public wire by being added here
-# on purpose; every URL in the response is absolute https.
+# on purpose; every URL in the response is absolute https. The Staff card
+# (``/sites/{id}/ai-visibility``) reads ``SiteVisibilityResponse`` and writes
+# ``SetQuestionsRequest`` / ``ApplyFixRequest``.
 
 from __future__ import annotations
 
@@ -83,11 +85,93 @@ class AiCheckResponse(BaseModel):
     fix: AiCheckFix
 
 
+class SetQuestionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[str] = Field(min_length=1, max_length=10)
+
+    @field_validator("questions")
+    @classmethod
+    def _clean(cls, value: list[str]) -> list[str]:
+        out = [q.strip() for q in value]
+        if any(not 3 <= len(q) <= 200 for q in out):
+            raise ValueError("each question must be 3 to 200 characters")
+        return out
+
+
+class ApplyFixRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fix_id: str = Field(min_length=1, max_length=40)
+
+
+class EngineSummary(BaseModel):
+    label: str
+    named: int
+    of: int
+    failed: int
+
+
+class NameCount(BaseModel):
+    name: str
+    count: int
+
+
+class TypeCount(BaseModel):
+    type: SourceType
+    count: int
+
+
+class SiteFix(BaseModel):
+    id: str
+    text: str
+    we_can_apply: bool
+
+
+class SiteCheck(BaseModel):
+    status: Literal["pending", "running", "done", "failed"]
+    ran_at: datetime | None
+    next_run_at: datetime | None
+    questions: list[str]
+    engines: list[EngineSummary]
+    competitors: list[NameCount]
+    sources: list[TypeCount]
+    fix: SiteFix | None
+
+
+class SiteVisibilityResponse(BaseModel):
+    """The Staff card. ``questions`` is what the next check will ask (the
+    owner's list); ``check.questions`` is what the shown check asked."""
+
+    ai_training_allowed: bool
+    plan_allows_check: bool
+    questions: list[str]
+    check: SiteCheck | None
+
+
+class CheckQueuedResponse(BaseModel):
+    status: Literal["pending"] = "pending"
+
+
+class ApplyFixResponse(BaseModel):
+    republish: Literal["started"] = "started"
+
+
 __all__ = [
     "AiCheckFix",
     "AiCheckRequest",
     "AiCheckResponse",
     "AiCheckSource",
+    "ApplyFixRequest",
+    "ApplyFixResponse",
+    "CheckQueuedResponse",
     "CheckResponse",
+    "EngineSummary",
+    "NameCount",
+    "SetQuestionsRequest",
+    "SiteCheck",
+    "SiteFix",
+    "SiteVisibilityResponse",
     "SourceType",
+    "TypeCount",
 ]

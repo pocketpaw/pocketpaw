@@ -55,7 +55,7 @@ def test_pick_fix(signals: Signals, fix_id: str) -> None:
 
 
 def test_we_can_apply_only_site_fixes() -> None:
-    assert {k for k, (_, can) in FIXES.items() if can} == {"ai_access", "site_content"}
+    assert {k for k, (_, can) in FIXES.items() if can} == {"ai_access"}
     assert set(FIXES) == set(FIX_IDS)
     fix = pick_fix(_with(site_blocks_ai_bots=True))
     assert fix["we_can_apply"] is True and fix["text"]

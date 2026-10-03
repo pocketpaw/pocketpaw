@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core import rate_limit
-from pocketpaw_ee.cloud.ai_visibility import public_check
+from pocketpaw_ee.cloud.ai_visibility import public_check, service
 from pocketpaw_ee.cloud.ai_visibility.domain import EngineAnswer, Location
 from pocketpaw_ee.cloud.ai_visibility.dto import AiCheckRequest
 from pocketpaw_ee.cloud.ai_visibility.engines import EngineError
@@ -208,5 +208,5 @@ async def test_request_dto_forbids_extra_fields_and_normalises_website(client) -
 
 
 async def test_business_type_guess() -> None:
-    assert public_check.guess_business_type("Smile Dental Care") == "dentist"
-    assert public_check.guess_business_type("Acme Holdings") == "business"
+    assert service.guess_business_type("Smile Dental Care") == "dentist"
+    assert service.guess_business_type("Acme Holdings") == "business"
