@@ -326,9 +326,15 @@ class CloudLifecycleHook:
         await ensure_default_agent_all_workspaces()
         # Back-fill the dedicated /code agent (exclusive file-tool set) beside it
         # so an existing workspace resolves /code turns without a first-turn seed.
-        from pocketpaw_ee.cloud.agents.service import ensure_code_agent_all_workspaces
+        from pocketpaw_ee.cloud.agents.service import (
+            ensure_code_agent_all_workspaces,
+            ensure_growth_researcher_agent_all_workspaces,
+            ensure_growth_writer_agent_all_workspaces,
+        )
 
         await ensure_code_agent_all_workspaces()
+        await ensure_growth_researcher_agent_all_workspaces()
+        await ensure_growth_writer_agent_all_workspaces()
 
         # Persist Haiku-generated chat titles into MongoDB.
         try:

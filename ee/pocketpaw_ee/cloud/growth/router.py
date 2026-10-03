@@ -4,6 +4,8 @@
 # dependency on every route — services never see raw ``Request`` objects, and
 # every read/write is workspace-scoped inside the service (cross-tenant ids
 # 404). Mounted under ``/api/v1`` → final paths ``/api/v1/growth/prospects``.
+# Deletion is POST /prospects/bulk-delete (1..500 ids, counts back) and DELETE
+# /prospects/{id} (204, 404 outside the workspace), both at ``growth.write``.
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — create / get /
 # list (tier/status/source filters) / update. Later slices add ingestion,
@@ -90,6 +92,10 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateIcpRequest,
     CreateProspectRequest,
+    DeleteProspectsRequest,
+    DeleteProspectsResponse,
+    DraftProspectRequest,
+    DraftProspectResponse,
     DraftResponse,
     IcpPreviewResponse,
     IcpResponse,
@@ -135,6 +141,21 @@ async def bulk_ingest_prospects(
     error entries; the rest land. Idempotent — re-posting the same payload
     updates the existing rows instead of duplicating them."""
     return await growth_service.bulk_ingest(ctx, body)
+
+
+@router.post(
+    "/prospects/bulk-delete",
+    response_model=DeleteProspectsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def bulk_delete_prospects(
+    body: DeleteProspectsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DeleteProspectsResponse:
+    """Delete up to 500 prospects and every draft on them. Ids that are
+    malformed, unknown or in another workspace are skipped; the counts say
+    what was actually removed. Message-log rows are kept."""
+    return await growth_service.delete_prospects(ctx, body.ids)
 
 
 @router.get(
@@ -231,6 +252,54 @@ async def update_prospect(
     return await growth_service.update(ctx, prospect_id, body)
 
 
+@router.delete(
+    "/prospects/{prospect_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def delete_prospect(
+    prospect_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Delete one prospect and its drafts, through the same service path as
+    bulk delete. 404 when the prospect is not in the caller's workspace."""
+    await growth_service.delete_prospect(ctx, prospect_id)
+    return Response(status_code=204)
+
+
+@router.post(
+    "/prospects/{prospect_id}/research",
+    response_model=ProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def research_prospect(
+    prospect_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ProspectResponse:
+    """Research this one prospect and fold the findings in: a structured
+    ``research`` profile, gaps filled (never overwritten), and a tier
+    suggested to an unqualified row. 503 when no research backend is wired,
+    502 when the run fails or returns nothing for this domain."""
+    return await growth_service.research_prospect(ctx, prospect_id)
+
+
+@router.post(
+    "/prospects/{prospect_id}/draft",
+    response_model=DraftProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def draft_prospect(
+    prospect_id: str,
+    body: DraftProspectRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DraftProspectResponse:
+    """Write first-touch drafts for this prospect on every channel it can be
+    reached on (or the ``channels`` asked for). Channels it cannot be reached
+    on, or that already hold a first-touch draft, come back in ``skipped``.
+    422 ``prospect.no_channel`` when none is left to write for."""
+    return await growth_service.draft_prospect(ctx, prospect_id, body)
+
+
 # ---------------------------------------------------------------------------
 # ICPs (feat/growth-discovery)
 # ---------------------------------------------------------------------------
@@ -291,7 +360,9 @@ async def update_icp(
     ctx: RequestContext = Depends(request_context),
 ) -> IcpResponse:
     """Edit an ICP. Changing ``criteria`` does not re-run anything — the next
-    tick (or a preview) picks the new text up, so tuning stays free."""
+    tick (or a preview) picks the new text up, so tuning stays free. A change
+    to what the research reads (criteria, geography, exclusions,
+    ``max_per_run``) clears the ICP's ``last_preview``."""
     return await growth_service.update_icp(ctx, icp_id, body)
 
 
@@ -304,8 +375,11 @@ async def preview_icp(
     icp_id: str,
     ctx: RequestContext = Depends(request_context),
 ) -> IcpPreviewResponse:
-    """Dry-run this ICP: research once, return what it WOULD file, write
-    nothing.
+    """Dry-run this ICP: research once and return what it WOULD file. Writes
+    no prospects; records the result on the ICP as its last preview (a failed
+    attempt included), so ``GET /icps`` and ``GET /icps/{id}`` still carry it
+    after a refresh. Editing the criteria, geography, exclusions or
+    ``max_per_run`` clears it.
 
     This is how someone comes to trust an ICP before switching its cadence on
     — criteria are prose, and prose that reads precisely to its author
@@ -313,7 +387,7 @@ async def preview_icp(
     back flagged ``already_known`` rather than hidden, because a preview full
     of them is the useful signal.
 
-    A POST despite writing nothing: it spends a real research pass, so it is
+    A POST: it spends a real research pass and records its result, so it is
     not safe to retry blindly and does not belong on a GET. It sits at
     ``growth.write`` for the same reason — it is not the outbound verb (it
     cannot reach a prospect), but it is not free either."""

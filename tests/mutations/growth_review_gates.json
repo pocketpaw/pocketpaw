@@ -23,8 +23,8 @@
   {
     "label": "tool output is collected again alongside the answer",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
-    "find": "            if getattr(event, \"type\", None) != \"message\":\n                continue",
-    "replace": "            if False:\n                continue",
+    "find": "        if getattr(event, \"type\", None) != \"message\":\n            continue",
+    "replace": "        if False:\n            continue",
     "tests": "tests/cloud/growth/test_researcher.py::TestToolOutputNeverPollutesTheAnswer"
   },
   {

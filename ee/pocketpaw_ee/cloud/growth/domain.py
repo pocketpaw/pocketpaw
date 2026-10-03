@@ -130,6 +130,10 @@ class Prospect:
     # nobody typed needs to open the source and check the claim. Empty on a
     # manually created prospect, which needs no such trail.
     source_urls: tuple[str, ...] = ()
+    # The structured profile from the last single-prospect research run, and
+    # when it ran. None until someone researches this row.
+    research: dict | None = None
+    researched_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -207,6 +211,8 @@ class Icp:
     max_per_run: int = DEFAULT_ICP_MAX_PER_RUN
     status: str = "active"  # IcpStatus
     last_run_at: datetime | None = None
+    last_preview: dict | None = None
+    last_preview_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

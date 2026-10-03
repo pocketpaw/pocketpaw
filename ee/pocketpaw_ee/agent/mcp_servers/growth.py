@@ -245,6 +245,8 @@ def _prospect_full(p: Any) -> dict[str, Any]:
         "linkedin_url": p.linkedin_url,
         "whatsapp_number": p.whatsapp_number,
         "opted_in": p.opted_in,
+        "research": p.research.model_dump() if p.research is not None else None,
+        "researched_at": p.researched_at,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     }
@@ -391,9 +393,14 @@ async def _list_drafts_handler(args: dict) -> dict:
     )
 
 
-def _icp_row(icp: Any) -> dict[str, Any]:
-    """One hunt, as the agent sees it."""
-    return {
+def _icp_row(icp: Any, *, full_preview: bool = False) -> dict[str, Any]:
+    """One hunt, as the agent sees it.
+
+    The last preview comes back in full only on a single-hunt read; a list row
+    carries a compact summary of it (how many companies, and any error) so a
+    list of hunts does not dump every stored research brief into the turn."""
+    last_preview = getattr(icp, "last_preview", None)
+    row: dict[str, Any] = {
         "id": str(getattr(icp, "id", "")),
         "name": getattr(icp, "name", ""),
         "criteria": getattr(icp, "criteria", ""),
@@ -403,7 +410,18 @@ def _icp_row(icp: Any) -> dict[str, Any]:
         "max_per_run": getattr(icp, "max_per_run", 0),
         "status": getattr(icp, "status", ""),
         "last_run_at": getattr(icp, "last_run_at", None),
+        "last_preview_at": getattr(icp, "last_preview_at", None),
     }
+    if last_preview is None:
+        row["last_preview"] = None
+    elif full_preview:
+        row["last_preview"] = last_preview.model_dump()
+    else:
+        row["last_preview"] = {
+            "found": len(last_preview.items),
+            "error": last_preview.error,
+        }
+    return row
 
 
 async def _list_icps_handler(args: dict) -> dict:
@@ -439,7 +457,7 @@ async def _get_icp_handler(args: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc, "read that hunt")
 
-    return _success_response({"icp": _icp_row(icp)})
+    return _success_response({"icp": _icp_row(icp, full_preview=True)})
 
 
 async def _create_icp_handler(args: dict) -> dict:
@@ -509,7 +527,7 @@ async def _preview_icp_handler(args: dict) -> dict:
     return _success_response(
         {
             "icp_id": preview.icp_id,
-            "wrote_nothing": True,
+            "wrote_no_prospects": True,
             "error": preview.error,
             "notes": preview.notes,
             "items": [
@@ -1118,7 +1136,11 @@ def _build_tools() -> list[Any] | None:
 
     @tool(
         "growth_get_icp",
-        "Read one hunt in full — its criteria, geography, exclusions and cadence.",
+        (
+            "Read one hunt in full — its criteria, geography, exclusions, "
+            "cadence, and the result of its last preview (cleared whenever the "
+            "criteria change)."
+        ),
         {
             "type": "object",
             "properties": {"icp_id": {"type": "string"}},
@@ -1172,10 +1194,11 @@ def _build_tools() -> list[Any] | None:
         "growth_preview_icp",
         (
             "Dry-run a hunt: research once and report what it WOULD file. "
-            "Writes nothing — no prospect is created. This is how a human "
-            "decides whether the criteria are worded well before committing to "
-            "a schedule, so run it after creating a hunt and show them the "
-            "result.\n\n"
+            "Writes no prospects — none is created. The result is recorded on "
+            "the hunt as its last preview, so the Hunts page still shows it "
+            "after a refresh. This is how a human decides whether the criteria "
+            "are worded well before committing to a schedule, so run it after "
+            "creating a hunt and show them the result.\n\n"
             "`emails` in the result are only addresses that were actually seen "
             "on a page. An empty list is normal and correct — never present a "
             "constructed address as a finding."
