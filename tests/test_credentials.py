@@ -6,6 +6,7 @@
 # Updated 2026-06-24: expected SECRET_FIELDS now includes the Dodo billing
 #         secrets (dodo_payments_api_key, dodo_webhook_secret).
 # Updated 2026-10-02 (PH-6): ... and msg91_platform_authkey (partner lead WhatsApp).
+# Updated 2026-10-03 (AV-3): ... and the four ai_visibility_* provider secrets.
 
 import json
 import logging
@@ -549,6 +550,10 @@ class TestSecretFieldsList:
             "lens_api_token",
             "cf_email_api_token",
             "msg91_platform_authkey",
+            "ai_visibility_openai_api_key",
+            "ai_visibility_perplexity_api_key",
+            "ai_visibility_anthropic_api_key",
+            "ai_visibility_cf_api_token",
         }
         assert SECRET_FIELDS == expected
 
