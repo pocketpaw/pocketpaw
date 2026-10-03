@@ -294,6 +294,16 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run dashboard WS ticket auth tests
+        # Same addopts escape. /api/v1/ws accepts a single-use ws_ticket in its
+        # first frame; this file is the only proof that a ticket works once, a
+        # replay or a ?token= ticket is refused, a bad or missing first frame
+        # closes 4001 without hanging, and the old token/cookie auth still holds.
+        run: uv run pytest tests/cloud/auth/test_dashboard_ws_ticket.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run v2 concierge runner tests
         # Same addopts escape. The v2 runner answers anonymous visitors on
         # customers' sites in one model call, and this file is the only proof
