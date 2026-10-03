@@ -1747,6 +1747,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # paw-lens — the internal Go trace store. The cloud ``/api/v1/lens/*``
+    # router proxies its read API, scoped to the caller's workspace. Empty URL
+    # = lens disabled (every route answers {"enabled": false}, no network).
+    lens_api_url: str = Field(
+        default="",
+        description="Base URL of the paw-lens read API (internal network only).",
+    )
+    lens_api_token: str = Field(
+        default="",
+        description="Shared secret sent to paw-lens as 'X-Lens-Token'. Never logged.",
+    )
+
     # Security
     bypass_permissions: bool = Field(
         default=False, description="Skip permission prompts for agent actions (use with caution)"

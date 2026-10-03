@@ -630,6 +630,12 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(security_router, prefix="/api/v1")
 
+    # Agent health — the /api/v1/lens/* proxy to paw-lens (the internal trace
+    # store), scoped to the caller's workspace; {"enabled": false} when unset.
+    from pocketpaw_ee.cloud.lens.router import router as lens_router
+
+    app.include_router(lens_router, prefix="/api/v1")
+
     # Belt MANDATES — the standing-JOB primitive (feat/belt-mandates). The
     # /belt/mandates surface: charter CRUD, patrol intake (feedback), sightings
     # read, manual shift trigger (foreman → plan gate), and the pawprints feed.

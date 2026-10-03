@@ -286,6 +286,15 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run paw-lens proxy tests
+        # Same addopts escape. Proves the lens proxy injects the caller's
+        # workspace_id (never a client-supplied one) and degrades to a 503,
+        # never a 500, when paw-lens is down.
+        run: uv run pytest tests/cloud/lens -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run daily cap and run-start gate tests
         # Same addopts escape. Every daily cap (chat turns, uploads, file
         # comprehension, transcription, illustrations, guest turns) counts
