@@ -1,109 +1,31 @@
-# ee/pocketpaw_ee/cloud/growth/service.py — sole owner of Prospect writes
-# (service-is-repo; only this module imports ``models.prospect``). Tenancy:
-# every read filters on ``workspace``; a cross-tenant id raises NotFound so
-# existence never leaks. ``upsert_by_domain`` is the create-or-update seam the
-# later ingestion slices (Clay / directory imports) call — keyed on
-# (workspace_id, normalised domain), matching the unique index on the doc.
-# ``delete_prospects`` / ``delete_prospect`` remove prospects with all their
-# drafts (withdrawing pending send proposals best-effort) and leave the
-# ``MessageLog`` audit rows in place.
+# ee/pocketpaw_ee/cloud/growth/service.py — the /growth service and the SOLE
+# owner of the Prospect, Icp, Draft and MessageLog doc writes (service-is-repo;
+# the import-linter "Growth" contract keeps every other growth module, the
+# worker and the agent MCP surface off the doc classes).
 #
-# Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
-# store. No events yet: growth has no realtime subscriber in v1, so writes
-# carry ``# no-event:`` markers per the ee/cloud emit rule.
-# Updated 2026-07-27 (feat/growth-g2): ``bulk_ingest`` — per-row validation +
-# ``upsert_by_domain`` over a capped batch; a bad row records an indexed error
-# entry and the rest proceed (idempotent upserts, so no rollback is needed).
-# Updated 2026-07-27 (feat/growth-g3): drafts — ``create_draft`` (prospect must
-# exist in the workspace; first draft flips a new/qualified prospect to
-# ``drafted``), ``list_drafts`` (prospect/channel/status filters), and
-# ``transition`` — a dumb enforcer of ``DRAFT_TRANSITIONS`` (illegal moves →
-# 422 ``draft.illegal_transition``), no side effects; G-4 wires proposals on
-# top. This module also owns the Draft doc writes (same "Growth" contract).
-# Updated 2026-07-27 (feat/growth-g4): the Instinct send gate. The PUBLIC
-# ``transition`` now refuses gate-owned targets (``approved`` / ``sent``) with
-# 403 ``draft.gate_required`` — those edges belong to the gate machinery:
-# ``propose_send`` files a ``_growth_send`` Instinct proposal (and flips
-# draft→proposed via ``transition``), and ``gate_transition`` is the internal
-# seam the growth executor / dispatch worker use to walk gate-owned edges
-# (same legality table, explicit workspace_id, no RequestContext).
-# Updated 2026-07-28 (feat/growth-mcp): ``update_draft`` — a partial edit of a
-# draft's COPY, refused with 403 ``draft.not_editable`` for anything past
-# ``draft``. The guard is structural: from ``proposed`` on, the stored body IS
-# what the human reviews in the Tray and what the dispatch worker puts on the
-# wire, so an edit there would send copy nobody approved. The agent surface
-# (``agent/mcp_servers/growth.py``) is the caller that needed it.
-# Updated 2026-07-28 (feat/growth-api-scale): the list query grew a scale
-# surface — ``q`` (escaped case-insensitive regex across four fields, ceiling
-# documented on ``_prospect_filters``), four ``sort`` modes with the tier rank
-# WALKED rather than compared, and keyset cursor pagination returning
-# ``ProspectPageResponse`` ({items, next_cursor, total}) in place of a bare
-# list. Cursors carry their sort mode so a mid-scroll sort change 422s instead
-# of resuming against a key that means something else. ``prospect_facets``
-# counts tier/status/source in ONE workspace-scoped ``$facet`` aggregation,
-# each block excluding its own filter. ``propose_send_batch`` proposes a
-# selection of drafts by calling the EXISTING ``propose_send`` per id — one
-# gated Instinct proposal each, no batch proposal object and no second route
-# to ``approved``; partial success in the ``bulk_ingest`` style.
-# Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue —
-# ``linkedin_queue`` (proposed/approved linkedin drafts joined with their
-# prospect via two queries, newest first), ``linkedin_queue_markdown``
-# (copy-paste export grouped per prospect: connect note + after-accept
-# message), and ``mark_linkedin_sent`` (channel guard + the EXISTING
-# ``transition`` function, so approved→sent stays the only legal move and
-# proposed→sent 422s as ``draft.illegal_transition``). Deliberately manual —
-# no LinkedIn API, no automation (account-ban avoidance is the feature).
-# Updated 2026-07-27 (feat/growth-g5): the dispatch-worker seams —
-# ``get_draft_for_dispatch`` / ``get_prospect_for_dispatch`` (the worker is
-# handed only a draft id by the queue and derives tenancy FROM the row; see the
-# ``global-read`` justifications on those reads) and ``record_message_log``,
-# the sole writer of the ``MessageLog`` audit doc — one row per delivery
-# ATTEMPT, so a failure and its later retry both survive.
-# Updated 2026-07-27 (feat/growth-g7): the follow-up sweep's data seams — the
-# only Beanie access the cron sweep (``growth/followups.py``) gets, since the
-# import-linter "Growth" contract keeps the doc classes inside this module.
-# ``list_sent_drafts_for_followup`` (cross-tenant scan, the one deliberate
-# global read), ``list_channel_drafts`` / ``get_prospect_system`` /
-# ``mark_prospect_dead`` / ``create_followup_draft`` — all keyed on an explicit
-# ``workspace_id`` because the sweep runs under the worker's system identity,
-# mirroring ``upsert_by_domain`` and ``gate_transition``.
-# Updated 2026-07-27 (feat/growth-g6): the WhatsApp dispatch + inbound seams.
-# This module stays the sole owner of the Beanie writes the G-6 slice needs, so
-# ``growth/whatsapp.py`` (the dispatch branch) and ``growth/webhooks.py`` (the
-# MSG91 inbound webhook) never touch a doc class. It reuses G-5's
-# ``get_draft_for_dispatch`` / ``get_prospect_for_dispatch`` readers (G-6 had
-# built an identical pair under different names, collapsed at integration),
-# Updated 2026-07-28 (feat/growth-projects): a prospect may be JUST A DOMAIN.
-# ``name`` / ``company`` can now be empty (see ``dto.py``), so the LinkedIn
-# export titles its sections through ``_queue_heading`` — whichever of
-# name/company is known, else the domain, never a placeholder word — and the
-# queue row carries ``prospect_domain`` to make that fallback possible.
-# Also ``project_id`` on the prospect — the client container, consumed exactly
-# the way ``tasks`` consumes it: validated at entry by ``_ensure_project_in_
-# workspace`` (growth's own copy of the check, calling the same public
-# ``projects.service.exists_in_workspace`` seam — see that helper on why it is
-# not imported from ``tasks``), an optional three-valued filter on list /
-# facets / search, and nullable everywhere so a workspace without projects is
-# untouched. ``upsert_by_domain`` only ever SETS the project, never clears it.
-# ``record_whatsapp_attempt`` / ``finish_whatsapp_attempt`` /
-# ``count_whatsapp_attempts_since`` own the WhatsApp compliance record and its
-# rate-cap window, and ``record_whatsapp_inbound_reply`` applies the opt-in +
-# status flips an inbound reply implies.
-# Updated 2026-07-29 (feat/growth-discovery): the ICP store — ``create_icp`` /
-# ``get_icp`` / ``list_icps`` / ``update_icp`` / ``delete_icp``, the same
-# workspace-scoped shape as the prospect CRUD (identical 404s for malformed,
-# missing and cross-tenant ids). No uniqueness constraint: two ICPs may share a
-# name, told apart by ``project_id``. Delete leaves discovered prospects'
-# ``icp_id`` intact — see ``delete_icp`` on why provenance is not a foreign key.
-# Also ``upsert_by_domain`` learned the two provenance fields, both SET-ONLY
-# like ``project_id``: an enrichment call carrying neither must not erase the
-# record of where a discovered row came from.
-# Updated 2026-07-27 (integration/growth-v1): G-5's ``MessageLog`` and G-6's
-# ``WhatsAppSendLog`` were the same record under two names (parallel branches,
-# neither could see the other). Unified onto ``MessageLog``: the WhatsApp
-# writers above now insert and finalise ``MessageLog`` rows carrying
-# ``channel="whatsapp"``, and the rate-cap count filters on that channel so an
-# email send can never consume the WhatsApp budget.
+# Tenancy: every RequestContext read filters on ``workspace``, and malformed,
+# missing and cross-tenant ids raise the same NotFound so existence never
+# leaks. System seams (executor, dispatch worker, mock delivery, follow-up and
+# discovery crons) take an explicit ``workspace_id``; the few deliberate
+# cross-tenant reads carry ``global-read`` justifications.
+#
+# What it owns: prospect CRUD / bulk ingest / delete / research and the scale
+# list (escaped ``q`` search, four sorts, keyset cursors, facet counts);
+# ``upsert_by_domain`` (create-or-update on the normalised domain, set-only for
+# project and provenance fields); ICP CRUD + preview; drafts and their status
+# machine. ``transition`` is the public enforcer and refuses the gate-owned
+# targets; ``gate_transition`` is the only way onto ``approved`` / ``sent``,
+# used by the executor, the delivery paths and LinkedIn mark-sent.
+# ``propose_send`` / ``propose_send_batch`` file one gated Instinct proposal
+# per draft. Queues: the LinkedIn manual queue + markdown export, and
+# ``delivery_queue`` (per channel, latest MessageLog row attached).
+# ``deliver_approved`` and the growth settings drive mock delivery.
+#
+# MessageLog is the delivery audit and WhatsApp compliance record, one row per
+# ATTEMPT (``record_message_log``, ``record_delivery_attempt`` /
+# ``finish_delivery_attempt``). The WhatsApp hourly cap counts only rows that
+# reached a real provider — never ``blocked`` rows, never mock ones. Writes carry
+# ``# no-event:`` markers: growth has no realtime subscriber yet.
 
 from __future__ import annotations
 
@@ -130,6 +52,8 @@ from pocketpaw_ee.cloud.growth.domain import (
     DRAFT_TRANSITIONS,
     GATE_OWNED_TARGETS,
     MESSAGE_LOG_OUTCOMES,
+    MOCK_DELIVERY_CHANNELS,
+    MOCK_DELIVERY_PROVIDER,
     PROSPECT_SOURCE_ORDER,
     PROSPECT_STATUS_ORDER,
     PROVIDER_REACHED_OUTCOMES,
@@ -149,10 +73,14 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateProspectRequest,
     DeleteProspectsRequest,
     DeleteProspectsResponse,
+    DeliverApprovedResponse,
+    DeliveryQueueItemResponse,
+    DeliveryStateResponse,
     DraftProspectRequest,
     DraftProspectResponse,
     DraftResponse,
     DraftSkipped,
+    GrowthSettingsResponse,
     IcpLastPreviewResponse,
     IcpPreviewResponse,
     IcpResponse,
@@ -168,6 +96,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProspectResponse,
     TransitionDraftRequest,
     UpdateDraftRequest,
+    UpdateGrowthSettingsRequest,
     UpdateIcpRequest,
     UpdateProspectRequest,
     _normalise_domain,
@@ -1786,6 +1715,25 @@ async def propose_send_batch(
 # ---------------------------------------------------------------------------
 
 
+async def _prospects_for_drafts(workspace_id: str, drafts: list[Draft]) -> dict[str, Prospect]:
+    """The drafts' prospects by id, in one workspace-scoped query. A draft
+    whose prospect is gone (or whose ref is malformed) has no entry, and the
+    queue callers skip it rather than crash."""
+    prospect_oids = []
+    for draft in drafts:
+        try:
+            prospect_oids.append(PydanticObjectId(draft.prospect_id))
+        except Exception:  # noqa: BLE001 — malformed ref == orphan, skipped by callers
+            continue
+    prospects: dict[str, Prospect] = {}
+    if prospect_oids:
+        async for pdoc in _ProspectDoc.find(
+            {"workspace": workspace_id, "_id": {"$in": prospect_oids}}
+        ):
+            prospects[str(pdoc.id)] = _to_domain(pdoc)
+    return prospects
+
+
 async def linkedin_queue(
     ctx: RequestContext, *, limit: int = 100
 ) -> list[LinkedInQueueItemResponse]:
@@ -1811,19 +1759,7 @@ async def linkedin_queue(
         .limit(limit)
     )
     drafts = [_draft_to_domain(doc) async for doc in cursor]
-
-    prospect_oids = []
-    for draft in drafts:
-        try:
-            prospect_oids.append(PydanticObjectId(draft.prospect_id))
-        except Exception:  # noqa: BLE001 — malformed ref == orphan, skipped below
-            continue
-    prospects: dict[str, Prospect] = {}
-    if prospect_oids:
-        async for pdoc in _ProspectDoc.find(
-            {"workspace": workspace_id, "_id": {"$in": prospect_oids}}
-        ):
-            prospects[str(pdoc.id)] = _to_domain(pdoc)
+    prospects = await _prospects_for_drafts(workspace_id, drafts)
 
     items: list[LinkedInQueueItemResponse] = []
     for draft in drafts:
@@ -1935,6 +1871,179 @@ async def mark_linkedin_sent(ctx: RequestContext, draft_id: str) -> DraftRespons
             f"mark-sent is for linkedin drafts; this draft targets '{doc.channel}'",
         )
     return await gate_transition(workspace_id, draft_id, "sent")
+
+
+# ---------------------------------------------------------------------------
+# Per-channel delivery queues + mock delivery
+# ---------------------------------------------------------------------------
+
+_QUEUE_STATUSES = ("proposed", "approved", "sent")
+
+
+def _queue_recipient(prospect: Prospect, channel: str) -> str | None:
+    """Who a draft on this channel goes to — the same address the delivery
+    paths resolve (email takes the first entry that looks like an address)."""
+    if channel == "email":
+        return next((e for e in prospect.emails if e and "@" in e), None)
+    if channel == "whatsapp":
+        return prospect.whatsapp_number or None
+    return prospect.linkedin_url or None
+
+
+async def _latest_logs_by_draft(workspace_id: str, draft_ids: list[str]) -> dict[str, Any]:
+    """The newest ``MessageLog`` row per draft, in one query: rows come back
+    newest first and the first seen per draft wins."""
+    if not draft_ids:
+        return {}
+    latest: dict[str, Any] = {}
+    cursor = _MessageLogDoc.find({"workspace": workspace_id, "draft_id": {"$in": draft_ids}}).sort(
+        [("createdAt", -1), ("_id", -1)]
+    )
+    async for row in cursor:
+        latest.setdefault(row.draft_id, row)
+    return latest
+
+
+def _delivery_state(row: Any) -> DeliveryStateResponse:
+    return DeliveryStateResponse(
+        outcome=row.outcome,
+        provider=row.provider,
+        mock=row.provider == MOCK_DELIVERY_PROVIDER,
+        error=row.error or None,
+        sent_at=iso_utc(row.sent_at),
+        at=iso_utc(getattr(row, "updatedAt", None) or getattr(row, "createdAt", None)),
+    )
+
+
+async def delivery_queue(
+    ctx: RequestContext, channel: str, *, limit: int = 100
+) -> list[DeliveryQueueItemResponse]:
+    """One channel's outbound queue: its ``proposed`` / ``approved`` / ``sent``
+    drafts, newest first, each with its prospect, the resolved recipient and
+    the latest delivery attempt (``None`` before the first one). Drafts whose
+    prospect is gone are skipped, as in the LinkedIn queue."""
+    workspace_id = _require_workspace(ctx)
+    cursor = (
+        _DraftDoc.find(
+            {
+                "workspace": workspace_id,
+                "channel": channel,
+                "status": {"$in": list(_QUEUE_STATUSES)},
+            }
+        )
+        .sort(-_DraftDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+    )
+    drafts = [_draft_to_domain(doc) async for doc in cursor]
+    prospects = await _prospects_for_drafts(workspace_id, drafts)
+    logs = await _latest_logs_by_draft(workspace_id, [d.id for d in drafts])
+
+    items: list[DeliveryQueueItemResponse] = []
+    for draft in drafts:
+        prospect = prospects.get(draft.prospect_id)
+        if prospect is None:
+            continue
+        row = logs.get(draft.id)
+        items.append(
+            DeliveryQueueItemResponse(
+                draft=_draft_to_response(draft),
+                prospect_name=prospect.name,
+                prospect_company=prospect.company,
+                prospect_domain=prospect.domain,
+                tier=prospect.tier,
+                to=_queue_recipient(prospect, channel),
+                opted_in=prospect.opted_in,
+                delivery=_delivery_state(row) if row is not None else None,
+            )
+        )
+    return items
+
+
+async def get_growth_settings(ctx: RequestContext) -> GrowthSettingsResponse:
+    """The active workspace's growth settings. 404 when the workspace itself
+    cannot be found."""
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    settings = await workspace_service.get_settings(_require_workspace(ctx))
+    return GrowthSettingsResponse(mock_delivery=settings.growth_mock_delivery)
+
+
+async def update_growth_settings(
+    ctx: RequestContext, body: UpdateGrowthSettingsRequest
+) -> GrowthSettingsResponse:
+    """Persist the growth settings onto the active workspace's settings,
+    leaving every sibling setting as it was."""
+    body = UpdateGrowthSettingsRequest.model_validate(body)
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    settings = await workspace_service.patch_settings(
+        ctx, _require_workspace(ctx), {"growth_mock_delivery": body.mock_delivery}
+    )
+    return GrowthSettingsResponse(mock_delivery=settings.growth_mock_delivery)
+
+
+async def mock_delivery_enabled(workspace_id: str) -> bool:
+    """System seam: is mock delivery on for this workspace? Raises when the
+    workspace cannot be read — ``mock_delivery.is_mock_delivery_on`` is the
+    caller that turns any failure into "off"."""
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    settings = await workspace_service.get_settings(workspace_id)
+    return bool(settings.growth_mock_delivery)
+
+
+def _still_sending(row: Any, stale_after: float) -> bool:
+    """A ``sending`` row younger than ``stale_after`` seconds. An older one was
+    stranded by a restart that killed its in-process task."""
+    if getattr(row, "outcome", None) != "sending":
+        return False
+    started = getattr(row, "createdAt", None)
+    if started is None:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - started).total_seconds() < stale_after
+
+
+async def deliver_approved(ctx: RequestContext, channel: str) -> DeliverApprovedResponse:
+    """Start mock delivery for this channel's ``approved`` drafts that have no
+    attempt in flight — the rescue for drafts approved before mock delivery
+    was switched on, or whose in-process delivery a restart cut short.
+
+    422 ``queue.not_deliverable`` for a channel mock delivery does not cover
+    (LinkedIn is sent by hand); 409 ``growth.mock_delivery_off`` when the
+    workspace has not switched it on.
+    """
+    workspace_id = _require_workspace(ctx)
+    if channel not in MOCK_DELIVERY_CHANNELS:
+        raise ValidationError(
+            "queue.not_deliverable",
+            f"'{channel}' drafts are not delivered by the app — send them by hand",
+        )
+    if not await mock_delivery_enabled(workspace_id):
+        raise ConflictError(
+            "growth.mock_delivery_off",
+            "Mock delivery is off for this workspace — switch it on in growth settings first",
+        )
+
+    from pocketpaw_ee.cloud.growth import mock_delivery
+
+    draft_ids = [
+        str(doc.id)
+        async for doc in _DraftDoc.find(
+            {"workspace": workspace_id, "channel": channel, "status": "approved"}
+        ).limit(500)
+    ]
+    logs = await _latest_logs_by_draft(workspace_id, draft_ids)
+    stale_after = mock_delivery.stale_after_seconds()
+    started = [
+        draft_id
+        for draft_id in draft_ids
+        if not _still_sending(logs.get(draft_id), stale_after)
+        and mock_delivery.start_mock_delivery(workspace_id, draft_id, channel)
+    ]
+    # no-event: the delivery task writes MessageLog rows; the queue view polls.
+    return DeliverApprovedResponse(started=started)
 
 
 # ---------------------------------------------------------------------------
@@ -2329,6 +2438,39 @@ async def create_followup_draft(
 # ---------------------------------------------------------------------------
 
 
+async def record_delivery_attempt(
+    workspace_id: str,
+    *,
+    draft_id: str,
+    prospect_id: str,
+    channel: str,
+    provider: str,
+    to_address: str,
+    status: str,
+    blocked_reason: str = "",
+    opted_in_at_attempt: bool = False,
+    error: str = "",
+) -> str:
+    """Write the row for one delivery attempt on any channel/provider; return
+    its id. ``sending`` rows are finalised later by ``finish_delivery_attempt``;
+    ``blocked`` rows are guard refusals that never reached a provider."""
+    doc = _MessageLogDoc(
+        workspace=workspace_id,
+        draft_id=draft_id,
+        prospect_id=prospect_id,
+        channel=channel,
+        provider=provider,
+        to_address=to_address,
+        outcome=status,
+        blocked_reason=blocked_reason,
+        opted_in_at_attempt=opted_in_at_attempt,
+        error=error[:500] or None,
+    )
+    await doc.insert()
+    # no-event: growth has no realtime subscriber in v1; the sends view polls.
+    return str(doc.id)
+
+
 async def record_whatsapp_attempt(
     workspace_id: str,
     *,
@@ -2339,7 +2481,7 @@ async def record_whatsapp_attempt(
     blocked_reason: str = "",
     opted_in_at_attempt: bool = False,
 ) -> str:
-    """Write the compliance row for one WhatsApp send attempt; return its id.
+    """Write the compliance row for one MSG91 WhatsApp send attempt.
 
     Written BEFORE the provider is called (``status="sending"``) so an attempt
     that crashes mid-flight still leaves a trace, and so the rate-cap window
@@ -2347,23 +2489,20 @@ async def record_whatsapp_attempt(
     write ``status="blocked"`` with the machine-readable ``blocked_reason`` and
     are never followed by a provider call.
     """
-    doc = _MessageLogDoc(
-        workspace=workspace_id,
+    return await record_delivery_attempt(
+        workspace_id,
         draft_id=draft_id,
         prospect_id=prospect_id,
         channel="whatsapp",
         provider="msg91",
         to_address=to_number,
-        outcome=status,
+        status=status,
         blocked_reason=blocked_reason,
         opted_in_at_attempt=opted_in_at_attempt,
     )
-    await doc.insert()
-    # no-event: growth has no realtime subscriber in v1; the sends view polls.
-    return str(doc.id)
 
 
-async def finish_whatsapp_attempt(
+async def finish_delivery_attempt(
     log_id: str,
     *,
     workspace_id: str,
@@ -2372,7 +2511,8 @@ async def finish_whatsapp_attempt(
     error_code: str = "",
     error: str = "",
 ) -> None:
-    """Finalise a ``sending`` row to ``sent`` / ``failed``.
+    """Finalise a ``sending`` row to ``sent`` / ``failed``, whatever the
+    channel or provider.
 
     ``error`` is truncated here rather than at the call site so no caller can
     accidentally persist a full provider response (which may echo request
@@ -2382,11 +2522,9 @@ async def finish_whatsapp_attempt(
         oid = PydanticObjectId(log_id)
     except Exception:  # noqa: BLE001 — nothing to finalise
         return
-    # Tenant-filtered, per cloud rule 7. It was the module's one unfiltered
-    # query: latent, because the only caller passes a log_id it just minted —
-    # but the seam takes a bare id, so the first retry route or provider
-    # status-callback that passed a request-supplied one would let a tenant
-    # finalise another tenant's delivery audit row.
+    # Tenant-filtered, per cloud rule 7: the seam takes a bare id, so a caller
+    # that ever passed a request-supplied one must not be able to finalise
+    # another tenant's delivery audit row.
     doc = await _MessageLogDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         return
@@ -2403,6 +2541,10 @@ async def finish_whatsapp_attempt(
     # no-event: growth has no realtime subscriber in v1; the sends view polls.
 
 
+# The WhatsApp dispatch branch's name for the same finaliser.
+finish_whatsapp_attempt = finish_delivery_attempt
+
+
 async def count_whatsapp_attempts_since(workspace_id: str, since: datetime) -> int:
     """Count attempts that REACHED the provider in the window.
 
@@ -2416,6 +2558,8 @@ async def count_whatsapp_attempts_since(workspace_id: str, since: datetime) -> i
             # Scoped to the channel now that email and WhatsApp share one send
             # record — an email send must never consume the WhatsApp cap.
             "channel": "whatsapp",
+            # Mock deliveries never reach Meta, so they spend none of its budget.
+            "provider": {"$ne": MOCK_DELIVERY_PROVIDER},
             "outcome": {"$in": sorted(PROVIDER_REACHED_OUTCOMES)},
             "createdAt": {"$gte": since},
         }
@@ -2560,11 +2704,15 @@ __all__ = [
     "create",
     "create_draft",
     "create_followup_draft",
+    "deliver_approved",
+    "delivery_queue",
     "draft_prospect",
+    "finish_delivery_attempt",
     "finish_whatsapp_attempt",
     "gate_transition",
     "get",
     "get_draft_for_dispatch",
+    "get_growth_settings",
     "get_prospect_for_dispatch",
     "get_prospect_system",
     "linkedin_queue",
@@ -2575,12 +2723,15 @@ __all__ = [
     "list_sent_drafts_for_followup",
     "mark_linkedin_sent",
     "mark_prospect_dead",
+    "mock_delivery_enabled",
     "propose_send",
+    "record_delivery_attempt",
     "record_message_log",
     "record_whatsapp_attempt",
     "record_whatsapp_inbound_reply",
     "research_prospect",
     "transition",
     "update",
+    "update_growth_settings",
     "upsert_by_domain",
 ]
