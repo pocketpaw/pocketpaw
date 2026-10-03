@@ -3,19 +3,15 @@
 # a markdown copy of every page, the ``_headers`` rules that advertise those copies,
 # a LocalBusiness JSON-LD block, and the IndexNow key file. Plus the IndexNow ping.
 #
-# Created 2026-10-03 (feat/ai-ready-sites, AV-1). Why this exists: a site on
-# ``*.workers.dev`` lives on Cloudflare's zone, not ours, so the zone features that
-# would do this for us (managed robots.txt, Crawler Hints, Markdown for Agents)
-# cannot be switched on. Before this, a live site served only Cloudflare's
-# Content-Signals comment at /robots.txt and 404'd on /sitemap.xml and /llms.txt.
-# AI crawlers do not run JavaScript, and blocking OAI-SearchBot removes a site from
-# ChatGPT search answers, so the files have to ship inside the site itself.
+# Why the site carries them: workers.dev is Cloudflare's zone, so zone features
+# (managed robots.txt, Crawler Hints, Markdown for Agents) cannot be enabled for
+# it, and AI crawlers do not run JavaScript.
 #
-# Everything here is PURE except ``ping_indexnow``: builders take strings and return
-# strings/bytes, and ``workers_deploy`` does the disk writes. The one owner switch is
-# ``ai_training_allowed``; it changes only the training lines in robots.txt (the
-# Content-Signal ``ai-train`` value and the per-bot Disallow blocks). Search and
-# assistant bots are never blocked either way.
+# Everything here is PURE except ``ping_indexnow``; ``workers_deploy`` does the
+# disk writes. The owner switch ``ai_training_allowed`` changes only the training
+# lines (Content-Signal ``ai-train`` and the per-bot Disallow groups); search and
+# assistant bots are never blocked. Files we generate carry ``MARKER`` so a
+# republish replaces ours but never an author's own robots/sitemap/llms file.
 
 from __future__ import annotations
 

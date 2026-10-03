@@ -1,12 +1,10 @@
-# tests/ee/sites/test_ai_ready.py — AI-ready site files (AV-1).
-#
-# Created 2026-10-03 (feat/ai-ready-sites): the pure builders in
+# tests/ee/sites/test_ai_ready.py — AI-ready site files: the pure builders in
 # ``sites/ai_ready.py`` (robots training on/off, search bots never blocked, sitemap
 # absolute URLs, llms.txt, _headers syntax, JSON-LD present/absent, key file), the
-# IndexNow ping (never raises), and the ``deploy_workers`` wiring per engine: files
-# land in the engine's asset dir, are not excluded by ``.assetsignore`` while the
-# deploy scaffold still is, an author's robots.txt is kept, and the ping fires only
-# after a successful deploy and can never fail a publish.
+# IndexNow ping (never raises), the ``deploy_workers`` wiring per engine (files land
+# in the asset dir, are not excluded by ``.assetsignore``, the scaffold still is, an
+# author's robots.txt is kept, ping only after a successful deploy), and the publish
+# seam plus ``update_site_ai_visibility`` (key minted once, flag read, tenant-scoped).
 
 from __future__ import annotations
 

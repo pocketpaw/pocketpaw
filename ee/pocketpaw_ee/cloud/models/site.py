@@ -1,6 +1,4 @@
 # ee/pocketpaw_ee/cloud/models/site.py — a published Paw Site + its custom domains
-# Updated 2026-10-03 (feat/ai-ready-sites, AV-1): ``ai_training_allowed`` (owner opt-in for
-# AI-training crawlers in the generated robots.txt) and ``indexnow_key`` (minted once).
 # (SiteDomain tracks the Cloudflare-for-SaaS hostname lifecycle). Workspace-scoped.
 # Field comments below say what each field means; these are the cross-cutting rules.
 #
