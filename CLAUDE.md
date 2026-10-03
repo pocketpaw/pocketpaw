@@ -8,7 +8,7 @@ PocketPaw is a self-hosted AI agent that runs locally and is controlled via Tele
 
 ## Knowledge Base
 
-A codebase wiki lives at `docs/wiki/` — auto-generated from AST analysis + LLM compilation. **Read the relevant wiki article before modifying a module.**
+A codebase wiki lives at `docs-internal/wiki/` — auto-generated from AST analysis + LLM compilation. **Read the relevant wiki article before modifying a module.**
 
 ```bash
 # Search the KB from terminal
@@ -18,21 +18,23 @@ cd /path/to/knowledge-base && kb search "GroupService" --scope paw-cloud
 kb show group_service --scope paw-cloud
 
 # Rebuild after big changes (also runs automatically via PostCommit hook)
-kb build ./ee/cloud --scope paw-cloud --output docs/wiki/
+kb build ./ee/cloud --scope paw-cloud --output docs-internal/wiki/
 
 # Check wiki health
 kb lint --scope paw-cloud
 ```
 
 Key wiki articles for the enterprise cloud module:
-- `docs/wiki/index.md` — Full index with all articles
-- `docs/wiki/group_service.md` — Chat group CRUD, membership, agents
-- `docs/wiki/message_service.md` — Message CRUD, reactions, threads
-- `docs/wiki/service.md` (workspace) — Workspace CRUD, members, invites
-- `docs/wiki/agent_bridge.md` — Agent orchestration for cloud chat
-- `docs/wiki/errors.md` — CloudError hierarchy
+- `docs-internal/wiki/index.md` — Full index with all articles
+- `docs-internal/wiki/group_service.md` — Chat group CRUD, membership, agents
+- `docs-internal/wiki/message_service.md` — Message CRUD, reactions, threads
+- `docs-internal/wiki/service.md` (workspace) — Workspace CRUD, members, invites
+- `docs-internal/wiki/agent_bridge.md` — Agent orchestration for cloud chat
+- `docs-internal/wiki/errors.md` — CloudError hierarchy
 
 The wiki auto-rebuilds on commits that touch `ee/cloud/` files (via `.claude/hooks/kb-rebuild.sh`).
+
+Notes for working on the public docs site (`docs/`, built by litodocs) live in `docs-internal/docs-site/`. Anything under `docs/` is published to pocketpaw.xyz; internal plans and the wiki stay under `docs-internal/`.
 
 ## Commands
 
