@@ -23,11 +23,12 @@ def sweep_tick(
     name: str, interval_seconds: float | None = None, *, crontab: str | None = None
 ) -> AbstractAsyncContextManager[None]:
     """Wrap one sweep iteration: ``async with sweep_tick("name", interval): await tick()``."""
+    # Sub-second intervals would round to 0, which is no schedule at all.
     schedule = (
         {"crontab": crontab}
         if crontab
-        else {"interval_seconds": int(interval_seconds)}
-        if interval_seconds
+        else {"interval_seconds": round(interval_seconds)}
+        if interval_seconds and interval_seconds >= 1
         else None
     )
     return automation_run("sweep", name, schedule=schedule)

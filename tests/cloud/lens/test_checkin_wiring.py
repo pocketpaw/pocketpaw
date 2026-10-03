@@ -70,10 +70,14 @@ def test_sweep_tick_schedule_shapes(monkeypatch):
     periodic.sweep_tick("a", 300)
     periodic.sweep_tick("b", crontab="0 0 * * *")
     periodic.sweep_tick("c")
+    periodic.sweep_tick("d", 0.5)
+    periodic.sweep_tick("e", 2.6)
     assert [c[1]["schedule"] for c in calls] == [
         {"interval_seconds": 300},
         {"crontab": "0 0 * * *"},
         None,
+        None,
+        {"interval_seconds": 3},
     ]
     assert all(c[0][0] == "sweep" for c in calls)
 

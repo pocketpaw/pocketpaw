@@ -22,7 +22,7 @@
 #
 # PAW-LENS. ``_monitored`` wraps every lane's job and cron functions (names unchanged,
 # so enqueuers still match) in ``automation_run("job", <name>)``: one check-in pair and
-# ``paw.automation.*`` baggage per job. Interactive chat runs are excluded — they are
+# ``paw.automation.*`` span attributes per job. Interactive chat runs are excluded — they are
 # not automations, and ``execute_run`` stamps their workspace itself.
 #
 # EXIT CODES. 0 only when a signal asked us to stop. Non-zero when a lane ended on its

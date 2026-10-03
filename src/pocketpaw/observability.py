@@ -30,9 +30,14 @@
 #      suggest and which would delete the console handler — and with it the
 #      handler that install_scrubbing_filters() attaches the scrubbers to.
 #
-#   4. baggage() / span() — the only way the rest of the code opens a Logfire
-#      context, so nothing else imports the optional logfire package. baggage()
-#      sets OTel baggage, which configure() copies onto every child span.
+#   4. baggage() / span() / detached_span() — the only way the rest of the code
+#      opens a Logfire context, so nothing else imports the optional logfire
+#      package. baggage() is NOT OTel baggage: that propagator puts it in a
+#      ``baggage:`` header on every instrumented outbound request (Anthropic,
+#      connectors, webhooks). It sets a ContextVar that a span processor copies
+#      onto every span opened inside the block; nothing leaves the process.
+#      detached_span() never becomes the current span, so it is safe across a
+#      ``yield`` in an async generator.
 #
 # ALL OF IT IS INERT UNLESS POCKETPAW_LOGFIRE_ENABLED IS TRUTHY. Turning it on with
 # no LOGFIRE_TOKEN and no OTEL_EXPORTER_OTLP_ENDPOINT is not free and not useful:
@@ -47,7 +52,8 @@ import importlib.util
 import logging
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
+from contextvars import ContextVar
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -369,6 +375,8 @@ def configure_observability() -> bool:
             # internet-facing API that lets any caller graft spans onto our traces.
             distributed_tracing=False,
             scrubbing=logfire.ScrubbingOptions(extra_patterns=logfire_extra_scrub_patterns()),
+            # Copies baggage() values onto spans without touching OTel baggage.
+            additional_span_processors=[run_attributes_processor()],
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not configure logfire: %s", exc)
@@ -412,24 +420,41 @@ def install_logfire_bridge(level: str = "INFO") -> bool:
     return True
 
 
+#: Run attribution set by ``baggage()``. A ContextVar, so it follows the same
+#: task-copy rules OTel context did, without riding the baggage propagator.
+_RUN_ATTRIBUTES: ContextVar[dict[str, str]] = ContextVar("paw_run_attributes", default={})
+
+
+def run_attributes_processor() -> Any:
+    """A SpanProcessor that stamps the current ``baggage()`` values on each new span."""
+    from opentelemetry.sdk.trace import SpanProcessor
+
+    class _RunAttributesProcessor(SpanProcessor):
+        def on_start(self, span: Any, parent_context: Any = None) -> None:
+            attrs = _RUN_ATTRIBUTES.get()
+            if attrs:
+                span.set_attributes(attrs)
+
+    return _RunAttributesProcessor()
+
+
 @contextmanager
 def baggage(**values: Any) -> Iterator[None]:
-    """Attach ``values`` as OTel baggage for the block. ``None`` values are skipped.
+    """Stamp ``values`` on every span opened inside the block. ``None`` values are skipped.
 
-    Logfire's ``add_baggage_to_attributes`` (on by default) copies baggage onto
-    every span opened inside the block, so this is how a run's workspace and
-    automation ids reach its child spans. Pure context: no config gate needed,
-    and a no-op when logfire is not installed.
+    Nested blocks merge, inner keys winning. Kept OUT of OTel baggage on purpose:
+    the global propagator would send it as a header on every outbound HTTP call.
+    The processor ``configure_observability`` registers does the copying. Pure
+    context, so no config gate is needed and it works without logfire installed.
     """
     clean = {key: str(value) for key, value in values.items() if value is not None}
+    token = _RUN_ATTRIBUTES.set({**_RUN_ATTRIBUTES.get(), **clean})
     try:
-        import logfire
-    except ImportError:
-        cm: Any = nullcontext()
-    else:
-        cm = logfire.set_baggage(**clean) if clean else nullcontext()
-    with cm:
         yield
+    finally:
+        # A block exited from another context (a finalizer) has nothing to undo here.
+        with suppress(ValueError):
+            _RUN_ATTRIBUTES.reset(token)
 
 
 def span(name: str, **attributes: Any) -> Any:
@@ -445,3 +470,32 @@ def span(name: str, **attributes: Any) -> Any:
     except ImportError:
         return nullcontext()
     return logfire.span(name, **attributes)
+
+
+@contextmanager
+def detached_span(name: str, **attributes: Any) -> Iterator[Any]:
+    """A span that is started and ended here but never made the current span.
+
+    For an async generator that holds a span across ``yield``: an attached span
+    would leak into the consumer between iterations and fail to detach when the
+    generator is finalized from another task. Children do not nest under it.
+    Records ``Exception`` only; GeneratorExit and cancellation are not errors.
+    Yields the OTel span, or ``None`` when Logfire is off.
+    """
+    if not logfire_enabled():
+        yield None
+        return
+    try:
+        from opentelemetry import trace
+    except ImportError:
+        yield None
+        return
+    otel_span = trace.get_tracer("pocketpaw").start_span(name, attributes=attributes)
+    try:
+        yield otel_span
+    except Exception as exc:
+        otel_span.record_exception(exc)
+        otel_span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+        raise
+    finally:
+        otel_span.end()

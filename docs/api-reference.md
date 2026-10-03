@@ -6951,6 +6951,8 @@ fail or delay the job. `POCKETPAW_LENS_API_URL` unset: no check-ins are sent.
 | `sweep` | each cloud sweep iteration (`_core/periodic.sweep_tick`) | sweep name |
 | `job` | arq jobs and crons (not chat runs), meeting auto-start/end, self-audit | function name |
 
-Each run also sets `paw.workspace_id`, `paw.automation.kind` and
-`paw.automation.id` as Logfire baggage, so its spans carry them. Interactive
-chat runs carry `paw.workspace_id` only.
+Each run also stamps `paw.workspace_id`, `paw.automation.kind` and
+`paw.automation.id` on its spans as attributes (a span processor, not OTel
+baggage, so nothing goes out in a `baggage` header). Interactive chat runs
+carry `paw.workspace_id` only. A cancelled run (shutdown) posts no final
+check-in; set `max_runtime_s` to have paw-lens time it out.

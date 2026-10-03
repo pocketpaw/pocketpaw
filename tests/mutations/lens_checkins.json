@@ -83,8 +83,8 @@
   {
     "label": "claude_sdk: stateless query untraced",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "        with span(\n            \"invoke_agent\",",
-    "replace": "        with span(\n            \"invoke_agent_x\",",
+    "find": "        with detached_span(\n            \"invoke_agent\",",
+    "replace": "        with detached_span(\n            \"invoke_agent_x\",",
     "tests": [
       "tests/test_lens_checkins.py"
     ]

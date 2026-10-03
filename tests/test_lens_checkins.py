@@ -2,7 +2,9 @@
 #
 # Covers the check-in pair, the error path (re-raise unchanged), paw-lens being
 # down / slow / 500 (job unaffected, bounded), disabled (zero requests), the
-# token header, baggage reaching a child span, and that every OSS APScheduler
+# token header, run attributes reaching a child span but never a ``baggage``
+# header, cancellation posting no final check-in, the stateless claude_sdk span
+# surviving finalization in another task, and that every OSS APScheduler
 # site hands add_job a monitored function.
 """Tests for pocketpaw.lens_checkins."""
 
@@ -140,18 +142,60 @@ async def test_workspace_falls_back_to_current_workspace(lens):
     assert {s["body"]["workspace_id"] for s in seen} == {"ws-7"}
 
 
-async def test_baggage_lands_on_child_spans(lens, capfire, monkeypatch):
+@pytest.fixture
+def run_attrs(capfire):
+    """capfire reconfigures logfire, so add the processor configure_observability adds."""
+    from opentelemetry import trace
+
+    from pocketpaw.observability import run_attributes_processor
+
+    trace.get_tracer_provider().add_span_processor(run_attributes_processor())
+    return capfire
+
+
+async def test_baggage_lands_on_child_spans(lens, run_attrs):
     import logfire
 
     async with automation_run("mandate", "m1", workspace_id="ws-1"):
         with logfire.span("child"):
             pass
     await flush()
-    child = next(s for s in capfire.exporter.exported_spans_as_dict() if s["name"] == "child")
+    child = next(s for s in run_attrs.exporter.exported_spans_as_dict() if s["name"] == "child")
     attrs = child["attributes"]
     assert attrs["paw.workspace_id"] == "ws-1"
     assert attrs["paw.automation.kind"] == "mandate"
     assert attrs["paw.automation.id"] == "m1"
+
+
+def test_run_attributes_never_leave_in_a_baggage_header(run_attrs):
+    """OTel baggage is injected into every outbound request; ours must not be."""
+    import logfire
+    from opentelemetry.propagate import inject
+
+    from pocketpaw.observability import baggage
+
+    control: dict[str, str] = {}
+    with logfire.set_baggage(probe="x"):
+        inject(control)
+    assert "baggage" in control, "the global propagator does carry OTel baggage"
+
+    carrier: dict[str, str] = {}
+    with baggage(**{"paw.workspace_id": "ws-1"}), baggage(**{"paw.automation.id": "a1"}):
+        with logfire.span("outbound"):
+            inject(carrier)
+    assert "baggage" not in carrier
+    span = next(s for s in run_attrs.exporter.exported_spans_as_dict() if s["name"] == "outbound")
+    assert span["attributes"]["paw.workspace_id"] == "ws-1"
+    assert span["attributes"]["paw.automation.id"] == "a1"
+
+
+async def test_cancelled_run_posts_no_final_checkin(lens):
+    seen, _ = lens
+    with pytest.raises(asyncio.CancelledError):
+        async with automation_run("sweep", "s1"):
+            raise asyncio.CancelledError()
+    await flush()
+    assert [s["body"]["status"] for s in seen] == ["in_progress"]
 
 
 @pytest.mark.parametrize(
@@ -283,6 +327,28 @@ async def test_resilient_query_is_traced(capfire, monkeypatch):
     assert len(spans) == 1
     assert spans[0]["attributes"]["pocketpaw.claude_sdk.mode"] == "stateless"
     assert spans[0]["attributes"]["gen_ai.operation.name"] == "invoke_agent"
+
+
+async def test_resilient_query_finalized_in_another_task(capfire, monkeypatch, caplog):
+    """Break early, close from another task: one ended span, no context detach error."""
+    from opentelemetry import trace
+
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_ENABLED", "1")
+
+    async def fake_query(prompt, options):
+        yield "event-1"
+        yield "event-2"
+
+    fake_self = SimpleNamespace(_query=fake_query, _connect_timeout=lambda: 5.0)
+    gen = ClaudeSDKBackend._resilient_query(fake_self, "hi", None)
+    assert await anext(gen) == "event-1"
+    assert not trace.get_current_span().is_recording(), "span leaked into the consumer"
+    await asyncio.create_task(gen.aclose())
+    assert not any("Failed to detach" in r.getMessage() for r in caplog.records)
+    spans = [s for s in capfire.exporter.exported_spans_as_dict() if s["name"] == "invoke_agent"]
+    assert len(spans) == 1 and spans[0]["end_time"]
 
 
 async def test_flush_delivers_a_pending_ok(lens):

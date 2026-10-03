@@ -6,9 +6,10 @@
 # first check-in for an unknown monitor registers it, schedule included. Slug is
 # ``<kind>:<id>``.
 #
-# ``automation_run`` wraps one run. It also sets ``paw.workspace_id`` /
-# ``paw.automation.kind`` / ``paw.automation.id`` as Logfire baggage so every
-# span the run opens carries them. ``monitored_job`` is the APScheduler form:
+# ``automation_run`` wraps one run. It also stamps ``paw.workspace_id`` /
+# ``paw.automation.kind`` / ``paw.automation.id`` (observability.baggage, a
+# ContextVar, not OTel baggage) on every span the run opens. A cancelled run
+# posts no final check-in. ``monitored_job`` is the APScheduler form:
 # wrap the job function once where it is handed to ``add_job``.
 #
 # Invariants: a check-in NEVER raises into the job and never blocks it (posts
@@ -16,7 +17,7 @@
 # own exception is re-raised unchanged; the token is never logged. Lives in OSS
 # core because reminders, intentions and heartbeats run here; ee wraps it in
 # ``pocketpaw_ee.cloud._core.periodic``.
-"""Fire-and-forget paw-lens check-ins plus run attribution baggage."""
+"""Fire-and-forget paw-lens check-ins plus run span attribution."""
 
 from __future__ import annotations
 
@@ -174,7 +175,7 @@ async def automation_run(
     checkin_margin_s: int | None = None,
     max_runtime_s: int | None = None,
 ) -> AsyncIterator[None]:
-    """Check in around one automation run and stamp its spans with ``paw.*`` baggage."""
+    """Check in around one automation run and stamp its spans with ``paw.*`` attributes."""
     if workspace_id is None:
         from pocketpaw.stores import current_workspace
 
@@ -197,6 +198,7 @@ async def automation_run(
             base[key] = value
 
     started = _spawn(_post(*endpoint, {**base, "status": "in_progress"})) if endpoint else None
+    status: str | None
     status, error = "ok", None
     try:
         with baggage(
@@ -207,11 +209,16 @@ async def automation_run(
             }
         ):
             yield
-    except BaseException as exc:
+    except Exception as exc:
         status, error = "error", _error_text(exc)
         raise
+    except BaseException:
+        # Cancellation (shutdown), KeyboardInterrupt, GeneratorExit: not a failed
+        # run. Post nothing; paw-lens times the run out via max_runtime if set.
+        status = None
+        raise
     finally:
-        if endpoint:
+        if endpoint and status is not None:
             body = {**base, "status": status}
             if error:
                 body["error"] = error
