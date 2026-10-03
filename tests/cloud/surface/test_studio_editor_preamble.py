@@ -374,3 +374,4 @@ async def test_the_procedure_teaches_placement_on_the_render_call() -> None:
     assert "data-duration set to exactly that span" in flat
     assert "start_ms = the Playhead" in flat
     assert "Use the Graphic style for new graphics unless the user names another" in flat
+    assert "focusX/focusY = the centre and atMs = that time" in flat
