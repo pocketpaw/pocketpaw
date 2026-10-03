@@ -8,8 +8,10 @@
 # (client-sent one ignored), token header, mute body, timeout -> 503
 # lens.unavailable, 404 -> 404, 401 -> 503 lens.misconfigured, bad path -> 422,
 # the runs list and span detail routes, the agent_id / automation / status /
-# limit filters (forwarded when valid, 422 with no upstream call when not), and
-# the real lens.manage RBAC guard on mute/resolve (member 403, admin passes).
+# limit filters (forwarded when valid, 422 with no upstream call when not), the
+# real lens.manage RBAC guard on mute/resolve (member 403, admin passes), and
+# Privacy A: a member gets run/span/issue content stripped plus
+# ``content_hidden``, an admin gets the upstream body untouched.
 
 from __future__ import annotations
 
@@ -319,3 +321,86 @@ def test_bad_span_id_rejected(client, monkeypatch, upstream, seen):
     _settings(monkeypatch, "http://lens:8790")
     assert client.get("/api/v1/lens/runs/t1/spans/-x").status_code == 422
     assert seen == []
+
+
+# --- Privacy A -------------------------------------------------------------
+
+_RUN = {
+    "run": {"trace_id": "a" * 32, "summary": "user asked for payroll", "status": "error"},
+    "spans": [{"span_id": "s1", "tool": "search", "args_preview": "q=salary"}],
+    "findings": [{"detector": "tool_error", "message": "search failed"}],
+}
+_SPAN = {
+    "span_id": "s1",
+    "attributes": {
+        "gen_ai.input.messages": "[secret prompt]",
+        "gen_ai.output.messages": "[secret answer]",
+        "gen_ai.system_instructions": "be nice",
+        "gen_ai.tool.call.arguments": '{"q":"salary"}',
+        "gen_ai.tool.call.result": "rows",
+        "pydantic_ai.all_messages": "[...]",
+        "gen_ai.request.model": "claude",
+    },
+    "events": [{"name": "log", "attributes": {"gen_ai.input.messages": "x", "level": "info"}}],
+    "messages": {"input": [{"role": "user"}], "output": [], "system": []},
+    "tool": {"name": "search", "call_id": "c1", "arguments": {"q": "salary"}, "result": "rows"},
+}
+
+
+def _content_routes():
+    return [
+        ("/runs", [{"trace_id": "a" * 32, "summary": "secret"}]),
+        (f"/runs/{'a' * 32}", _RUN),
+        (f"/runs/{'a' * 32}/spans/s1", _SPAN),
+        ("/issues/fp1", {"fingerprint": "fp1", "runs": [{"trace_id": "t", "summary": "secret"}]}),
+    ]
+
+
+@pytest.mark.parametrize(("path", "body"), _content_routes())
+def test_admin_gets_full_content(monkeypatch, upstream, path, body):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(lambda req: httpx.Response(200, json=body))
+    resp = _app("admin").get(f"/api/v1/lens{path}")
+    assert resp.status_code == 200
+    assert resp.json() == body
+
+
+def test_member_run_detail_stripped(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(lambda req: httpx.Response(200, json=_RUN))
+    got = _app("member").get(f"/api/v1/lens/runs/{'a' * 32}").json()
+    assert got["content_hidden"] is True
+    assert got["run"]["summary"] == ""
+    assert got["run"]["status"] == "error"
+    assert got["spans"][0] == {"span_id": "s1", "tool": "search", "args_preview": ""}
+    assert got["findings"] == _RUN["findings"]
+
+
+def test_member_span_detail_stripped(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(lambda req: httpx.Response(200, json=_SPAN))
+    got = _app("member").get(f"/api/v1/lens/runs/{'a' * 32}/spans/s1").json()
+    assert got["content_hidden"] is True
+    assert got["messages"] is None
+    assert got["tool"] == {"name": "search", "call_id": "c1", "arguments": None, "result": None}
+    attrs = got["attributes"]
+    assert attrs["gen_ai.request.model"] == "claude"
+    for key in _SPAN["attributes"]:
+        if key != "gen_ai.request.model":
+            assert attrs[key] == "[hidden]", key
+    assert got["events"][0]["attributes"] == {"gen_ai.input.messages": "[hidden]", "level": "info"}
+
+
+def test_member_runs_list_and_issue_stripped(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
+    upstream(lambda req: httpx.Response(200, json=[{"trace_id": "t", "summary": "secret"}]))
+    member = _app("member")
+    assert member.get("/api/v1/lens/runs").json() == [{"trace_id": "t", "summary": ""}]
+    upstream(lambda req: httpx.Response(200, json={"runs": [{"summary": "secret"}]}))
+    got = member.get("/api/v1/lens/issues/fp1").json()
+    assert got == {"runs": [{"summary": ""}], "content_hidden": True}
+
+
+def test_member_disabled_body_untouched(monkeypatch, upstream):
+    _settings(monkeypatch, "")
+    assert _app("member").get(f"/api/v1/lens/runs/{'a' * 32}").json() == {"enabled": False}
