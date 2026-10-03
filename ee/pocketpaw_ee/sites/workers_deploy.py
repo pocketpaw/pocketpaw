@@ -131,6 +131,12 @@
 # must not rename the database it binds) and the Analytics Engine index the counter
 # stamps. Nothing sets ``worker_name`` yet; a later slice names Workers after a slug.
 #
+# Updated 2026-10-03 (feat/ai-ready-sites, AV-1) — ``deploy_workers`` takes an optional
+# ``ai_ready`` input. When given (and ``POCKETPAW_SITES_AI_READY`` is on) it writes
+# robots.txt, sitemap.xml, llms.txt, per-page markdown copies, ``_headers`` Link rules,
+# JSON-LD and the IndexNow key file into the asset dir of every engine, then pings
+# IndexNow after a successful deploy. None of those names is in either .assetsignore.
+#
 # This is the third deploy target for a Paw Site, beside the LOCAL static server
 # (local_server.deploy_local — dev/smoke) and Workers-for-Platforms
 # (cloudflare_client.put_worker — the multi-tenant dispatch namespace). The
@@ -186,10 +192,12 @@ import logging
 import os
 import re
 import secrets
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
+from pocketpaw_ee.sites import ai_ready as ai_ready_mod
 from pocketpaw_ee.sites import analytics_worker
 from pocketpaw_ee.sites._wrangler import wrangler_argv as _wrangler_argv
 from pocketpaw_ee.sites.engines import (
@@ -550,10 +558,74 @@ def _parse_deploy_url(stdout: str, *, name: str) -> str:
     m = _WORKERS_DEV_URL_RE.search(stdout)
     if m:
         return m.group(0).rstrip(".,)\"'")
+    host = _workers_dev_host(name)
+    return f"https://{host}" if host else ""
+
+
+def _workers_dev_host(name: str) -> str:
+    """``<name>.<PAW_CF_WORKERS_SUBDOMAIN>.workers.dev``, or "" when the account
+    subdomain is not configured."""
     subdomain = os.environ.get("PAW_CF_WORKERS_SUBDOMAIN", "").strip()
-    if subdomain:
-        return f"https://{name}.{subdomain}.workers.dev"
-    return ""
+    return f"{name}.{subdomain}.workers.dev" if subdomain else ""
+
+
+def _read_page(path: Path) -> tuple[str, str]:
+    """A page's text and the codec it decoded with (latin-1 round-trips any bytes,
+    the same fallback ``badge.inject_into_tree`` uses for imported pages)."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return raw.decode("latin-1"), "latin-1"
+
+
+def _write_ai_ready_files(
+    out_dir: Path, inputs: ai_ready_mod.AiReadyInputs, host: str
+) -> list[str]:
+    """Write the AI-ready files (robots.txt, sitemap.xml, llms.txt, markdown copies,
+    ``_headers`` Link rules, JSON-LD, IndexNow key) into the asset dir and return the
+    page URLs to ping IndexNow with.
+
+    Every file lands INSIDE the asset dir and none is named in either
+    ``.assetsignore`` list, so wrangler uploads it. ``_headers`` is the exception by
+    design: wrangler reads it from the asset dir as routing config and never serves
+    it (it is ignored by default and parsed separately), on both branches.
+
+    An author's own robots.txt / sitemap.xml / llms.txt (no PocketPaw marker) is
+    KEPT and logged rather than overwritten: an imported site that ships its own
+    crawler policy made that call on purpose. Our own copy from an earlier publish
+    carries the marker and is replaced. ``_headers`` is merged, never overwritten —
+    adapter-cloudflare writes its own cache rules there."""
+    pages: list[ai_ready_mod.Page] = []
+    codecs: dict[str, str] = {}
+    for path in sorted(out_dir.rglob("*")):
+        if path.suffix.lower() not in (".html", ".htm") or not path.is_file():
+            continue
+        rel = path.relative_to(out_dir).as_posix()
+        if ai_ready_mod.page_route(rel) is None:
+            continue
+        text, codec = _read_page(path)
+        pages.append(ai_ready_mod.Page(rel, text))
+        codecs[rel] = codec
+    lastmod = datetime.now(UTC).date().isoformat()
+    files = ai_ready_mod.build_ai_ready_files(host, pages, inputs, lastmod)
+    for rel, data in files.items():
+        target = out_dir / rel
+        if rel in ("robots.txt", "sitemap.xml", "llms.txt") and target.is_file():
+            if ai_ready_mod.MARKER not in target.read_text(errors="replace"):
+                logger.info("sites.ai_ready: keeping the site's own %s", rel)
+                continue
+        if rel in codecs:
+            data = data.decode("utf-8").encode(codecs[rel])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    routes = sorted(r for r in (ai_ready_mod.page_route(p.rel_path) for p in pages) if r)
+    headers_path = out_dir / "_headers"
+    existing = headers_path.read_text() if headers_path.is_file() else ""
+    headers_path.write_text(
+        ai_ready_mod.merge_headers(existing, ai_ready_mod.build_headers_block(routes))
+    )
+    return ai_ready_mod.page_urls(host, pages)
 
 
 def _write_deploy_files(
@@ -743,8 +815,16 @@ async def deploy_workers(
     d1_database_id: str | None = None,
     analytics_entitled: bool = True,
     worker_name: str | None = None,
+    ai_ready: ai_ready_mod.AiReadyInputs | None = None,
 ) -> str:
     """Deploy a Paw Site as a regular Worker on the free workers.dev tier.
+
+    AV-1 — ``ai_ready`` (None = unchanged legacy behaviour) writes the AI-ready
+    files into the asset dir before the deploy (see ``ai_ready.py``) and pings
+    IndexNow after a SUCCESSFUL deploy only. Skipped when
+    ``POCKETPAW_SITES_AI_READY`` is off, or when no host can be resolved (no live
+    custom domain passed and ``PAW_CF_WORKERS_SUBDOMAIN`` unset) since sitemap and
+    robots need absolute URLs. Neither the files nor the ping can fail a publish.
 
     Writes the recipe files (``.assetsignore`` + ``wrangler.jsonc``) into the
     already-built project, then runs ``wrangler deploy`` (PAW_CF_WRANGLER_CMD, default
@@ -820,6 +900,19 @@ async def deploy_workers(
         # Worker is called. Today the two are the same string.
         d1_database_name=_worker_name(site_id),
     )
+    ai_host, ai_urls = "", []
+    if ai_ready is not None and ai_ready_mod.enabled():
+        ai_host = ai_ready.host or _workers_dev_host(name)
+        if not ai_host:
+            logger.warning(
+                "sites.ai_ready: no public host for %s yet; skipping AI-ready files", name
+            )
+        else:
+            try:
+                out_dir = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+                ai_urls = _write_ai_ready_files(out_dir, ai_ready, ai_host)
+            except Exception:  # noqa: BLE001 — a site going live beats its sitemap
+                logger.warning("sites.ai_ready: could not write AI-ready files", exc_info=True)
 
     # ``--config`` is REQUIRED, not cosmetic: a dynamic project dir also holds the
     # generator's wrangler.toml (whose queue producers reference queues that do not
@@ -859,6 +952,8 @@ async def deploy_workers(
         )
     url = _parse_deploy_url(stdout, name=name)
     logger.info("sites.workers: deployed %s -> %s", name, url or "(url unresolved)")
+    if ai_urls and ai_ready is not None:
+        await ai_ready_mod.ping_indexnow(ai_host, ai_ready.indexnow_key, ai_urls)
     return url
 
 
