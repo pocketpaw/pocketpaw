@@ -1,0 +1,112 @@
+[
+  {
+    "label": "the setting never reaches the CLI env",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        _apply_tool_search(\n            sdk_env,",
+    "replace": "        (lambda *_: None)(\n            sdk_env,",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_documented_values_pass_through",
+      "tests/test_claude_sdk_tool_search.py::test_litellm_env_set_passes_through"
+    ]
+  },
+  {
+    "label": "undocumented values pass through",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if value and not _TOOL_SEARCH_VALUES.fullmatch(value):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_other_values_are_ignored_with_a_warning"
+    ]
+  },
+  {
+    "label": "any auto threshold is accepted",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "auto(?::(?:100|[1-9]?\\d))?\")",
+    "replace": "auto(?::-?\\d+)?\")",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_other_values_are_ignored_with_a_warning"
+    ]
+  },
+  {
+    "label": "a mocked setting is stringified",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    value = setting.strip() if isinstance(setting, str) else \"\"",
+    "replace": "    value = str(setting).strip()",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_mocked_setting_reads_as_unset_without_a_warning"
+    ]
+  },
+  {
+    "label": "the process env loses to the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if operator_value:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_process_env_value_wins_over_the_setting"
+    ]
+  },
+  {
+    "label": "an empty process env value blocks the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    operator_value = os.environ.get(\"ENABLE_TOOL_SEARCH\")\n",
+    "replace": "    operator_value = \"ENABLE_TOOL_SEARCH\" in os.environ\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_an_empty_process_env_value_does_not_block_the_setting"
+    ]
+  },
+  {
+    "label": "the setting overwrites a per-run extra",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        sdk_env.setdefault(\"ENABLE_TOOL_SEARCH\", value)\n",
+    "replace": "        sdk_env[\"ENABLE_TOOL_SEARCH\"] = value\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_per_run_extra_wins_over_the_setting"
+    ]
+  },
+  {
+    "label": "the notice fires after the operator chose",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if sdk_env.get(\"ENABLE_TOOL_SEARCH\"):\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_once_the_operator_chose"
+    ]
+  },
+  {
+    "label": "notices repeat every turn",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if key not in _logged_once:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_gateway_with_no_choice_logs_once_per_process",
+      "tests/test_claude_sdk_tool_search.py::test_the_invalid_value_warning_is_logged_once"
+    ]
+  },
+  {
+    "label": "the notice fires on the first-party API",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if host == \"api.anthropic.com\":\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_on_the_first_party_api"
+    ]
+  },
+  {
+    "label": "the notice ignores a process-env base URL",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "base_url = sdk_env.get(\"ANTHROPIC_BASE_URL\", os.environ.get(\"ANTHROPIC_BASE_URL\"))",
+    "replace": "base_url = sdk_env.get(\"ANTHROPIC_BASE_URL\")",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_process_env_base_url_counts"
+    ]
+  },
+  {
+    "label": "the notice logs the whole base URL",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        host or \"a base URL with no host\",",
+    "replace": "        base_url,",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_notice_names_the_host_not_the_credentials"
+    ]
+  }
+]

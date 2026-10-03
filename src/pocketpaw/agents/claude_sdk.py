@@ -38,8 +38,9 @@ Lifecycle invariants:
 
 Options: permissions are always bypassed (headless), ``cli_path`` comes from
 ``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
-image-returning tools, and the subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
-(unless already set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``.
+image-returning tools. The subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
+(unless already set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``; ``ENABLE_TOOL_SEARCH``
+is an operator opt-in (``_apply_tool_search``).
 Tool scope: under bypass ``allowed_tools`` only auto-approves, so the turn's final
 allowed set (ToolPolicy + surface allow/deny/exclusive) is enforced by a PreToolUse
 gate on every tool (``_tool_gate_hook``), a pinned ``tools=`` built-in list (always
@@ -56,6 +57,7 @@ import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 from pocketpaw.agents.backend import (
     BackendInfo,
@@ -202,6 +204,81 @@ _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
 # Fallback for ``claude_sdk_max_mcp_output_tokens`` when settings carry no usable
 # int (they are sometimes mocks). Mirrors the config default.
 _DEFAULT_MAX_MCP_OUTPUT_TOKENS = 200_000
+
+# The ENABLE_TOOL_SEARCH values Claude Code documents (N is 0-100):
+# https://code.claude.com/docs/en/mcp#configure-tool-search
+_TOOL_SEARCH_VALUES = re.compile(r"true|false|auto(?::(?:100|[1-9]?\d))?")
+
+# Keys ``_log_once`` has already logged in this process.
+_logged_once: set[str] = set()
+
+
+def _log_once(key: str, level: int, msg: str, *args: object) -> None:
+    """Log ``msg`` the first time ``key`` comes up in this process; drop repeats."""
+    if key not in _logged_once:
+        _logged_once.add(key)
+        logger.log(level, msg, *args)
+
+
+def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) -> None:
+    """Pass ``claude_sdk_tool_search`` to the CLI as ENABLE_TOOL_SEARCH, or say it is off.
+
+    Claude Code turns MCP tool search off when ANTHROPIC_BASE_URL is not
+    api.anthropic.com (most gateways drop ``tool_reference`` blocks) and then sends
+    every MCP tool schema upfront. Precedence: a non-empty ENABLE_TOOL_SEARCH in the
+    process env (the CLI inherits it; nothing is written), then one already in
+    ``sdk_env`` (per-run extras), then the setting. A non-``str`` setting (settings
+    are sometimes mocks) reads as unset. With no choice made anywhere behind a
+    gateway, one INFO line per process names the provider and the cost.
+    """
+    value = setting.strip() if isinstance(setting, str) else ""
+    if value and not _TOOL_SEARCH_VALUES.fullmatch(value):
+        _log_once(
+            f"tool-search-invalid:{value}",
+            logging.WARNING,
+            "Ignoring claude_sdk_tool_search=%r: expected true, false, auto or auto:N (N 0-100)",
+            value,
+        )
+        value = ""
+    operator_value = os.environ.get("ENABLE_TOOL_SEARCH")
+    if operator_value:
+        if value and value != operator_value:
+            _log_once(
+                "tool-search-shadowed",
+                logging.WARNING,
+                "Ignoring claude_sdk_tool_search=%r: ENABLE_TOOL_SEARCH=%r in the process "
+                "environment wins",
+                value,
+                operator_value,
+            )
+        return
+    if value:
+        sdk_env.setdefault("ENABLE_TOOL_SEARCH", value)
+    if sdk_env.get("ENABLE_TOOL_SEARCH"):
+        return
+    # The CLI's own test: an unset or empty base URL is first party, otherwise the
+    # URL's host must be api.anthropic.com. Log the host only, never the URL (userinfo).
+    base_url = sdk_env.get("ANTHROPIC_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL"))
+    if not base_url:
+        return
+    try:
+        host = urlsplit(base_url).hostname
+    except ValueError:
+        host = None
+    if host == "api.anthropic.com":
+        return
+    _log_once(
+        "tool-search-off",
+        logging.INFO,
+        "Claude SDK: provider %s points the Claude Code CLI at %s, not api.anthropic.com, so "
+        "the CLI turns MCP tool search off and sends every MCP tool schema upfront (measured "
+        "with 37 MCP servers: ~105k input tokens per fresh request, ~19k with tool search). "
+        "If the gateway forwards anthropic-beta headers and tool_reference blocks, set "
+        "POCKETPAW_CLAUDE_SDK_TOOL_SEARCH=true; scripts/check_gateway_tool_search.py tests it.",
+        provider,
+        host or "a base URL with no host",
+    )
+
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
@@ -2826,6 +2903,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
                 cap = _DEFAULT_MAX_MCP_OUTPUT_TOKENS
             sdk_env.setdefault("MAX_MCP_OUTPUT_TOKENS", str(cap))
+        _apply_tool_search(
+            sdk_env, getattr(self.settings, "claude_sdk_tool_search", None), provider
+        )
         # On a claude.ai subscription login the CLI fetches the ACCOUNT's claude.ai
         # connectors into every session. They are not PocketPaw tools and must never
         # reach a tenant's agent, so this is a hard set: no parent env or per-run
