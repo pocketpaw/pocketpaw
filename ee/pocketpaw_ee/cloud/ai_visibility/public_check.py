@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 import httpx
 
@@ -36,45 +35,6 @@ logger = logging.getLogger(__name__)
 TURNSTILE_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 RUNS = 2
 MAX_SOURCES = 10
-
-# A word in the business name that tells us what to ask about. Anything else is
-# asked about as a plain "business".
-_TYPE_WORDS = {
-    "pizza": "pizza restaurant",
-    "pizzeria": "pizza restaurant",
-    "cafe": "cafe",
-    "coffee": "coffee shop",
-    "bakery": "bakery",
-    "restaurant": "restaurant",
-    "bistro": "restaurant",
-    "grill": "restaurant",
-    "sushi": "sushi restaurant",
-    "bar": "bar",
-    "pub": "pub",
-    "brewery": "brewery",
-    "dentist": "dentist",
-    "dental": "dentist",
-    "clinic": "clinic",
-    "salon": "hair salon",
-    "barber": "barber",
-    "barbershop": "barber",
-    "spa": "spa",
-    "gym": "gym",
-    "fitness": "gym",
-    "yoga": "yoga studio",
-    "hotel": "hotel",
-    "plumber": "plumber",
-    "plumbing": "plumber",
-    "electrician": "electrician",
-    "florist": "florist",
-    "bookstore": "bookstore",
-    "books": "bookstore",
-    "pharmacy": "pharmacy",
-    "vet": "vet",
-    "veterinary": "vet",
-    "law": "law firm",
-    "realty": "real estate agent",
-}
 
 
 class AiCheckDailyLimit(CloudError):
@@ -95,17 +55,11 @@ class AiCheckEngineFailed(CloudError):
         )
 
 
-def guess_business_type(name: str) -> str:
-    for word in re.findall(r"[a-z]+", name.lower()):
-        if word in _TYPE_WORDS:
-            return _TYPE_WORDS[word]
-    return "business"
-
-
 def questions_for(name: str, city: str) -> tuple[str, list[str]]:
     """``(named_question, all_questions)``: one that names the business, two that don't."""
     named = f"Is {name} in {city} a good choice?"
-    return named, [named, *service.generate_questions(guess_business_type(name), city, n=2)]
+    kind = service.guess_business_type(name)
+    return named, [named, *service.generate_questions(kind, city, n=2)]
 
 
 async def verify_turnstile(
@@ -162,7 +116,7 @@ async def run_public_check(
         raise AiCheckDailyLimit()
 
     business = Business(
-        name=body.name, business_type=guess_business_type(body.name), domain=body.website
+        name=body.name, business_type=service.guess_business_type(body.name), domain=body.website
     )
     named_q, questions = questions_for(body.name, body.city)
     decision, fallback = default_decision_models()
@@ -200,7 +154,6 @@ async def run_public_check(
 __all__ = [
     "AiCheckDailyLimit",
     "AiCheckEngineFailed",
-    "guess_business_type",
     "questions_for",
     "run_public_check",
     "verify_turnstile",
