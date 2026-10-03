@@ -67,6 +67,7 @@ class MentionJudgement:
     sentiment: int
     confidence: float
     judged_by: str
+    cost_usd: float = 0.0
 
 
 __all__ = ["Business", "Competitor", "EngineAnswer", "Location", "MentionJudgement"]
