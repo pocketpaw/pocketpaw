@@ -1,0 +1,29 @@
+{
+  "id": "msg_01AbcDef",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-haiku-4-5",
+  "content": [
+    {"type": "text", "text": "I'll search for pizza places in Austin."},
+    {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {"query": "best pizza Austin Texas"}},
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_01",
+      "content": [
+        {"type": "web_search_result", "url": "https://www.yelp.com/biz/joes-pizza-austin-2", "title": "Joe's Pizza - Austin - Yelp", "encrypted_content": "Eq...", "page_age": "September 2, 2026"},
+        {"type": "web_search_result", "url": "https://www.eater.com/austin/best-pizza", "title": "The Best Pizza in Austin - Eater", "encrypted_content": "Eq...", "page_age": "May 1, 2026"}
+      ]
+    },
+    {"type": "text", "text": "Based on recent reviews, "},
+    {
+      "type": "text",
+      "text": "Joe's Pizza gets mixed reviews, with several customers complaining about slow service",
+      "citations": [
+        {"type": "web_search_result_location", "url": "https://www.yelp.com/biz/joes-pizza-austin-2", "title": "Joe's Pizza - Austin - Yelp", "encrypted_index": "Eo...", "cited_text": "Waited 50 minutes for a pie..."}
+      ]
+    },
+    {"type": "text", "text": ", while Home Slice Pizza is widely loved."}
+  ],
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 6000, "output_tokens": 300, "server_tool_use": {"web_search_requests": 1}}
+}
