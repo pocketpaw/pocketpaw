@@ -137,8 +137,8 @@
   {
     "label": "a tools-off turn still registers every MCP server",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "        mcp_servers = {} if not tools_enabled else self._get_mcp_servers(allow_sdk_tools)",
-    "replace": "        mcp_servers = self._get_mcp_servers(allow_sdk_tools)",
+    "find": "        mcp_servers = {} if not tools_enabled else self._get_mcp_servers(allow_sdk_tools, only=live)",
+    "replace": "        mcp_servers = self._get_mcp_servers(allow_sdk_tools, only=live)",
     "tests": [
       "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_registers_no_mcp_servers"
     ]
