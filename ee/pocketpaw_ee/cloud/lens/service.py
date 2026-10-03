@@ -90,7 +90,8 @@ def _strip(node: Any) -> Any:
     for key, value in node.items():
         if key in ("summary", "args_preview") and isinstance(value, str):
             out[key] = ""
-        elif key == "messages":
+        elif key in ("messages", "overview"):
+            # ``overview`` is an LLM digest of the very content stripped here.
             out[key] = None
         elif key == "tool" and isinstance(value, dict):
             out[key] = {**value, "arguments": None, "result": None}
@@ -105,8 +106,8 @@ def _strip(node: Any) -> Any:
 
 def redact(body: Any, full: bool) -> Any:
     """Privacy A. ``full`` (workspace admin) returns ``body`` untouched; otherwise
-    run summaries, span messages, tool arguments/results and content-bearing
-    attributes are stripped, and a dict body gains ``content_hidden: true``. A
+    run summaries, the AI overview, span messages, tool arguments/results and
+    content-bearing attributes are stripped, and a dict body gains ``content_hidden: true``. A
     list body (the runs list) cannot carry the flag and is only stripped."""
     if full or body == _disabled():
         return body
