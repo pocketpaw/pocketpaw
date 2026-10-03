@@ -30,6 +30,10 @@
 #      suggest and which would delete the console handler — and with it the
 #      handler that install_scrubbing_filters() attaches the scrubbers to.
 #
+#   4. baggage() / span() — the only way the rest of the code opens a Logfire
+#      context, so nothing else imports the optional logfire package. baggage()
+#      sets OTel baggage, which configure() copies onto every child span.
+#
 # ALL OF IT IS INERT UNLESS POCKETPAW_LOGFIRE_ENABLED IS TRUTHY. Turning it on with
 # no LOGFIRE_TOKEN and no OTEL_EXPORTER_OTLP_ENDPOINT is not free and not useful:
 # logfire builds a real TracerProvider with zero span processors, so spans are
@@ -42,6 +46,8 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -404,3 +410,38 @@ def install_logfire_bridge(level: str = "INFO") -> bool:
         logger.warning("Could not install the logfire logging bridge: %s", exc)
         return False
     return True
+
+
+@contextmanager
+def baggage(**values: Any) -> Iterator[None]:
+    """Attach ``values`` as OTel baggage for the block. ``None`` values are skipped.
+
+    Logfire's ``add_baggage_to_attributes`` (on by default) copies baggage onto
+    every span opened inside the block, so this is how a run's workspace and
+    automation ids reach its child spans. Pure context: no config gate needed,
+    and a no-op when logfire is not installed.
+    """
+    clean = {key: str(value) for key, value in values.items() if value is not None}
+    try:
+        import logfire
+    except ImportError:
+        cm: Any = nullcontext()
+    else:
+        cm = logfire.set_baggage(**clean) if clean else nullcontext()
+    with cm:
+        yield
+
+
+def span(name: str, **attributes: Any) -> Any:
+    """A Logfire span when Logfire is switched on, else a no-op context.
+
+    Gated on ``logfire_enabled()`` because an unconfigured ``logfire.span`` warns
+    on every process that never turned Logfire on.
+    """
+    if not logfire_enabled():
+        return nullcontext()
+    try:
+        import logfire
+    except ImportError:
+        return nullcontext()
+    return logfire.span(name, **attributes)
