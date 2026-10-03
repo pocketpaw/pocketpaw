@@ -718,7 +718,8 @@ name = "AiVisibility — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
-    # Only ``ai_visibility.service`` owns the AiVisibilityCheck Beanie writes;
+    # Only ``ai_visibility.service`` / ``service_admin`` own the AiVisibilityCheck
+    # and AiVisibilitySite Beanie writes;
     # engines, judge, fixes, dto and domain stay pure so they can run (and be
     # tested) with no database; public_check and the router go through service.
     "pocketpaw_ee.cloud.ai_visibility.domain",
@@ -728,8 +729,12 @@ source_modules = [
     "pocketpaw_ee.cloud.ai_visibility.fixes",
     "pocketpaw_ee.cloud.ai_visibility.public_check",
     "pocketpaw_ee.cloud.ai_visibility.router",
+    "pocketpaw_ee.cloud.ai_visibility.worker",
 ]
-forbidden_modules = ["pocketpaw_ee.cloud.models.ai_visibility_check"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.ai_visibility_check",
+    "pocketpaw_ee.cloud.models.ai_visibility_site",
+]
 
 [[tool.importlinter.contracts]]
 name = "AutomationsStatus — Beanie writes only from service.py"

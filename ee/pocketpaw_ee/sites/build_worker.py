@@ -40,12 +40,16 @@
 # of site work, and a third ``build:`` service cannot be added to the Coolify compose
 # file anyway (paw-workspace #193/#194).
 #
+# The lane also runs the AI visibility site check and its daily sweep cron
+# (``cloud/ai_visibility/worker.py``): site work, network-bound awaits, no sandbox.
+#
 # THERE IS EXACTLY ONE ``functions = [...]`` ASSIGNMENT IN THIS CLASS, and it must stay
 # that way. A second one silently wins over the first — ``chat/runs/worker.py`` carries
 # a comment about the merge that produced two there and would have registered NEITHER
 # ship job. Adding a lane means editing the existing list, never appending a new
 # assignment.
-"""The site lane's arq WorkerSettings (backend-perf C1): builds, previews, deletes."""
+"""The site lane's arq WorkerSettings (backend-perf C1): builds, previews, deletes,
+html verify, and AI visibility site checks with their monthly sweep."""
 
 from __future__ import annotations
 
@@ -54,6 +58,7 @@ import os
 
 from arq import func
 
+from pocketpaw_ee.cloud.ai_visibility.worker import site_check_fn, sweep_cron
 from pocketpaw_ee.cloud.chat.runs.worker import (
     arq_health_check_interval_seconds,
     arq_redis_settings,
@@ -150,7 +155,16 @@ class WorkerSettings:
     # carries its own timeout and ``max_tries=1``; re-wrapping them here would fork the
     # build timeout, and a build that arq cancels before its in-sandbox timeout fires is
     # recorded as lost infrastructure rather than as the slow-but-healthy build it was.
-    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn, _site_html_verify_fn]
+    functions = [
+        site_build_fn,
+        site_preview_build_fn,
+        _site_delete_fn,
+        _site_html_verify_fn,
+        site_check_fn,
+    ]
+    # The AI visibility monthly sweep (a daily tick, opt-in through
+    # POCKETPAW_CLOUD_SCHEDULER_ENABLED; see ``cloud/ai_visibility/worker.py``).
+    cron_jobs = [sweep_cron]
     on_startup = worker_startup
     on_shutdown = worker_shutdown
     # No auto-retry, matching every other lane: a build is billed per attempt in a

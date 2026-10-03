@@ -284,6 +284,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.agent_activity.router import router as agent_activity_router
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.ai_visibility.router import router as ai_visibility_router
+    from pocketpaw_ee.cloud.ai_visibility.router import site_router as ai_visibility_site_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
@@ -420,9 +421,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Discover (DS-1) — the public index of shareable items (GET /discover,
     # GET /discover/{id}, no sign-in, per-IP limited) plus signed-in use / report.
     app.include_router(discover_router, prefix="/api/v1")
-    # AI visibility (AV-4) — the public free check (POST /tools/ai-check, no sign-in,
-    # per-IP limited, Turnstile, daily spend cap).
+    # AI visibility — the public free check (POST /tools/ai-check, no sign-in,
+    # per-IP limited, Turnstile, daily spend cap) and the Staff site card
+    # (/sites/{id}/ai-visibility GET, /questions, /check, /apply-fix).
     app.include_router(ai_visibility_router, prefix="/api/v1")
+    app.include_router(ai_visibility_site_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
