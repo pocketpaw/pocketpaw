@@ -138,6 +138,17 @@ async def test_anonymous_list_serves_only_public_unhidden_allow_list(client) -> 
     assert set(body["items"][0]) == PUBLIC_KEYS
 
 
+async def test_anonymous_get_one_by_slug(client) -> None:
+    listing_id = await _upsert("t1", title="Café Crème")
+    by_id = await client.get(f"{URL}/{listing_id}")
+    assert by_id.status_code == 200 and by_id.json()["slug"] == "cafe-creme"
+    by_slug = await client.get(f"{URL}/cafe-creme")
+    assert by_slug.status_code == 200 and by_slug.json() == by_id.json()
+    assert (await client.get(f"{URL}/cafe-creme?source=site_template")).status_code == 200
+    assert (await client.get(f"{URL}/cafe-creme?source=studio_template")).status_code == 404
+    assert (await client.get(f"{URL}/no-such-slug")).status_code == 404
+
+
 async def test_anonymous_get_one_and_hidden_is_404(client) -> None:
     shown = await _upsert("a")
     hidden = await _upsert("b")
