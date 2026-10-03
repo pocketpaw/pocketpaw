@@ -27,7 +27,6 @@ from pocketpaw_ee.cloud.models.workspace import Workspace as WorkspaceDoc
 from pocketpaw_ee.cloud.partners import service, service_admin
 from pocketpaw_ee.cloud.partners.domain import PARTNER_SLUG_RESERVED, PLATFORM_SCOPE
 from pocketpaw_ee.cloud.partners.dto import PartnerPublicOut
-from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pydantic import ValidationError as PydanticValidationError
 
 pytestmark = [pytest.mark.usefixtures("mongo_db"), pytest.mark.asyncio]
@@ -230,20 +229,41 @@ async def test_public_needs_slug_and_display_name() -> None:
     assert (await service.update_public_profile(ctx, PROFILE)).public is True
 
 
-async def test_operator_put_keeps_the_public_profile() -> None:
-    ws = await _public_partner("ravi-prints")
-    # The platform route's own body: status/tier/footer only.
-    from pocketpaw_ee.cloud.platform.partners import PartnerWriteIn
+@pytest_asyncio.fixture
+async def platform_http():
+    """The real platform router and guard; only the session user is faked."""
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.models.user import User as UserDoc
+    from pocketpaw_ee.cloud.platform.router import router as platform_router
 
-    data = PartnerWriteIn(status="suspended", footer_name="Ravi", reason="late").model_dump(
-        exclude={"reason"}
+    operator = UserDoc(email="op@paw.test", hashed_password="x", platform_role="operator")
+    await operator.insert()
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(platform_router, prefix="/api/v1")
+    app.dependency_overrides[current_active_user] = lambda: operator
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t", cookies={"paw_auth": "session"}
+    ) as c:
+        yield c
+
+
+async def test_operator_put_keeps_the_public_profile(platform_http) -> None:
+    """A status / tier change by an operator is not a reset of the partner's own fields."""
+    ws = await _public_partner("ravi-prints")
+    r = await platform_http.put(
+        f"/api/v1/platform/workspaces/{ws.id}/partner",
+        json={"status": "suspended", "footer_name": "Ravi", "reason": "late"},
     )
-    current = await service.partner_profile_for_workspace(str(ws.id))
-    data["joined_at"] = current.joined_at
-    data.update(current.model_dump(include=service.PUBLIC_PROFILE_FIELDS))
-    doc = await workspace_service.platform_set_partner_profile(str(ws.id), PartnerProfile(**data))
-    assert doc.partner.status == "suspended" and doc.partner.slug == "ravi-prints"
-    assert doc.partner.public is True
+    assert r.status_code == 200, r.text
+    kept = (await WorkspaceDoc.get(ws.id)).partner
+    assert kept.status == "suspended" and kept.footer_name == "Ravi"
+    assert kept.slug == "ravi-prints" and kept.public is True
+    assert kept.services == ["print", "design"] and kept.contact_url == PROFILE["contact_url"]
+    # Suspended, so no longer public on the wire, but the profile is intact for reactivation.
+    with pytest.raises(NotFound):
+        await service_admin.get_public("ravi-prints")
 
 
 # ---------------------------------------------------------------- directory + slug
