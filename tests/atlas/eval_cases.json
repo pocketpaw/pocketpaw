@@ -546,6 +546,12 @@
       "expected_id": "capability:tools.ai_check",
       "rank_within": 1,
       "note": "The free public AI visibility check."
+    },
+    {
+      "intent": "how often do ai assistants name my site each month",
+      "expected_id": "capability:sites.ai_visibility",
+      "rank_within": 1,
+      "note": "The Staff site's monthly AI visibility card."
     }
   ]
 }

@@ -1691,6 +1691,78 @@ Errors (`{"error": {"code", "message"}}`):
 
 With `POCKETPAW_TURNSTILE_SECRET` unset (dev), Turnstile is skipped with a warning.
 
+## AI visibility — Staff site card
+
+Signed in, gated like the sites router (the `sites` plan feature, `fabric.read` to
+read, `fabric.write` to change). Every route is scoped to the caller's workspace;
+a missing or cross-tenant site is `404`. `PATCH /sites/{id}/ai-visibility` (the
+AI-training opt-in) lives with the sites routes.
+
+### `GET /sites/{site_id}/ai-visibility`
+
+```json
+{
+  "ai_training_allowed": false,
+  "plan_allows_check": true,
+  "questions": ["best pizza in Austin"],
+  "check": {
+    "status": "done",
+    "ran_at": "2026-10-03T07:01:12Z",
+    "next_run_at": "2026-11-02T07:01:12Z",
+    "questions": ["best pizza in Austin"],
+    "engines": [{ "label": "ChatGPT", "named": 2, "of": 3, "failed": 0 }],
+    "competitors": [{ "name": "Home Slice Pizza", "count": 4 }],
+    "sources": [{ "type": "yelp", "count": 3 }],
+    "fix": { "id": "gbp", "text": "...", "we_can_apply": false }
+  }
+}
+```
+
+`plan_allows_check` is true when the site's own plan sells the concierge (Staff)
+and its subscription is active. `questions` is what the next check asks (the
+owner's list); `check.questions` is what the shown check asked. `check` is `null`
+until a check is first requested. While a new check is `pending` or `running`,
+the numbers are the previous finished check's (empty before the first).
+Engine labels: `ChatGPT`, `Perplexity (search)`, `Claude`. `of` counts answers
+received, `failed` calls that errored. `sources` counts unique URLs per type.
+`competitors` is empty until a site carries a competitor list. `fix` is `null`
+before the first finished check. `ai_training_allowed` reads the site's opt-in
+(false when the site has none). `next_run_at` is set only on a plan with checks.
+
+### `PUT /sites/{site_id}/ai-visibility/questions`
+
+```json
+{ "questions": ["best pizza in Austin", "pizza near Zilker park"] }
+```
+
+1 to 10 questions, each 3 to 200 characters after trimming. Returns the card.
+New sites start with no questions: a site carries no business type or city to
+build good ones from, so the owner writes them.
+
+### `POST /sites/{site_id}/ai-visibility/check`
+
+Response `202 {"status": "pending"}`. Asks every configured engine each question
+3 times, on the site worker lane. Errors: `403 ai_visibility.plan_required` (not
+Staff), `422 ai_visibility.questions` (no questions saved), `429
+ai_visibility.too_soon` (a check was requested in the last 24 hours).
+
+A daily arq cron on the site lane queues a check for every Staff site with
+questions whose last check was requested 30 or more days ago. It runs only with
+`POCKETPAW_CLOUD_SCHEDULER_ENABLED=true` on the worker, and queues nothing when no
+engine key is configured.
+
+### `POST /sites/{site_id}/ai-visibility/apply-fix`
+
+```json
+{ "fix_id": "ai_access" }
+```
+
+Response `202 {"republish": "started"}`. Only the fixes Paw Sites applies itself
+(`ai_access`, `site_content`); any other id is `400 ai_visibility.fix_not_applicable`.
+Both start the site's normal republish (the same path as Publish, with no plan
+change), which writes the AI-ready files. For `site_content` that republish is all
+it does for now: changing the page text is still the owner's edit.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in
