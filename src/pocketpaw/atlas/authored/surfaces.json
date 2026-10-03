@@ -623,6 +623,26 @@
       "agent_openable": false
     },
     {
+      "id": "surface:agent-health",
+      "kind": "surface",
+      "name": "Agent Health",
+      "summary": "Where the workspace's agents fail, what their runs cost, and the run timeline behind each issue.",
+      "narrative": "Agent Health at /agent-health is the workspace-scoped view of agent reliability, read from paw-lens traces: runs, failing rate, cost, cache hits, the open issues grouped by cause, and a per-agent table. Each issue opens at /agent-health/issues/<fingerprint> with the runs it hit, and each run opens its span timeline at /agent-health/runs/<traceId>. Point a user here when they ask why an agent failed, which agent is erroring, or what runs cost; for what agents are doing right now use /agents/activity. Muting or resolving an issue needs a workspace admin.",
+      "how": "",
+      "surface": "/agent-health",
+      "requires": [],
+      "keywords": [
+        "agent health",
+        "failing runs",
+        "agent errors",
+        "agent issues",
+        "run timeline"
+      ],
+      "slash": "agent-health",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
       "id": "surface:fabric",
       "kind": "surface",
       "name": "Fabric",
