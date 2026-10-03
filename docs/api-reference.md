@@ -7138,7 +7138,10 @@ findings, tokens, cost and duration), asks the workspace's agent backend for
 3 to 6 bullets (what was asked, what the agent did, what failed and why, cost
 and latency notes, one suggested fix), stores it in paw-lens and returns it.
 That LLM call is stamped `paw.internal=true`, so paw-lens does not record it as
-a run. The call has a 60 s budget; an LLM error, timeout or empty reply is
+a run. The digest holds user input and tool output, so the call runs with no
+tools and no MCP servers (`tools_enabled=False`; a backend that cannot honour
+that is refused with the same `503`) and the digest is fenced in
+`<trace_data>` as untrusted data the model must not follow. The call has a 60 s budget; an LLM error, timeout or empty reply is
 `503 lens.overview_failed`.
 
 - `POCKETPAW_LENS_API_URL` unset: every route returns `200 {"enabled": false}`
