@@ -21,6 +21,8 @@
 #
 # Options are built with the REAL ``ClaudeAgentOptions`` / ``HookMatcher`` so a
 # misspelled option field fails here instead of at spawn time.
+#
+# Mutations: tests/mutations/claude_sdk_tool_scoping.json.
 
 from __future__ import annotations
 
