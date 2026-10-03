@@ -44,8 +44,8 @@ router = APIRouter(
 
 _MANAGE = [Depends(require_action_any_workspace("lens.manage"))]
 
-_SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
-_AGENT_ID = r"^[A-Za-z0-9_-]{1,64}$"
+_SAFE_ID = service.SAFE_ID
+_AGENT_ID = service.AGENT_ID
 
 WorkspaceId = Annotated[str, Depends(current_workspace_id)]
 # True for a workspace admin: sees message / tool content. Others get it redacted.

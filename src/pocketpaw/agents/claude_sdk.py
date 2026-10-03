@@ -67,7 +67,7 @@ from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.observability import detached_span
 from pocketpaw.security.rails import is_substring_blocked
-from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
+from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy, ungranted_surface_servers
 
 logger = logging.getLogger(__name__)
 
@@ -1307,8 +1307,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         }
     )
 
-    def _get_mcp_servers(self) -> dict[str, dict]:
+    def _get_mcp_servers(self, surface_grants: frozenset[str] = frozenset()) -> dict[str, dict]:
         """Load enabled MCP server configs, filtered by tool policy.
+
+        ``surface_grants`` is the run's ``allow_sdk_tools``: a server in
+        ``SURFACE_SCOPED_MCP_SERVERS`` registers only when it names one of that
+        server's tool ids.
 
         Returns a dict keyed by server name.  The SDK supports three
         transport types: stdio, sse, and http — each with its own
@@ -1480,6 +1484,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # bare token ``pocketpaw_planner`` there. Deny still wins.
         from pocketpaw._registry import providers as _ext_providers
 
+        scoped_off = ungranted_surface_servers(surface_grants)
         for provider in _ext_providers("pocketpaw.mcp_servers"):
             provider_name = type(provider).__name__
             try:
@@ -1502,6 +1507,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if built is None:
                 continue
             name, cfg_entry = built
+            if name in scoped_off:
+                continue
             if name in OPT_IN_MCP_SERVERS:
                 if not self._policy.is_mcp_server_explicitly_allowed(name):
                     logger.debug(
@@ -2488,6 +2495,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     existing.add(tool_id)
             logger.info("Surface tool-allow: unioned %s into allowlist", sorted(allow_sdk_tools))
 
+        # Surface-scoped servers (``SURFACE_SCOPED_MCP_SERVERS``) exist only on
+        # a surface that granted them through ``allow_sdk_tools``. Anywhere else
+        # their tool ids leave the allowlist here and ``_get_mcp_servers`` does not
+        # register the server, so a one-page toolset costs other chats nothing.
+        scoped_off = ungranted_surface_servers(allow_sdk_tools)
+        if scoped_off:
+            allowed_tools = [t for t in allowed_tools if _mcp_server_of(t) not in scoped_off]
+
         # Per-surface MCP-tool deny set (threaded from the chat loop's
         # resolved ``SurfaceProfile``). Any denied id is subtracted from the
         # allowlist BEFORE the SDK launches, so the agent is physically
@@ -2794,7 +2809,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Wire in MCP servers (policy-filtered). Skipped entirely on a
         # tools-off turn: an MCP server is a tool source, and registering one
         # whose ids are not on the allowlist still pays its startup.
-        mcp_servers = {} if not tools_enabled else self._get_mcp_servers()
+        mcp_servers = {} if not tools_enabled else self._get_mcp_servers(allow_sdk_tools)
         if mcp_servers:
             options_kwargs["mcp_servers"] = mcp_servers
             logger.info("MCP: passing %d servers to Claude SDK", len(mcp_servers))

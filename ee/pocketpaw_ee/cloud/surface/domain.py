@@ -172,6 +172,10 @@ class SurfaceKind(StrEnum):
     # prompt-injected anonymous caller can't run code, exfiltrate, or mutate the
     # tenant. The run rides ``ScopeKind.CONCIERGE`` (KB locked to pocket:<id>).
     CONCIERGE = "concierge"  # /paw-bar — public, origin-bound concierge widget
+    # /agent-health (and /agent-health-lab) — agent run health from paw-lens.
+    # The ONLY surface whose profile grants the surface-scoped ``pocketpaw_lens``
+    # read tools; ``meta.run_id`` is the run the user has open, if any.
+    AGENT_HEALTH = "agent_health"
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
