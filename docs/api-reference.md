@@ -2,6 +2,8 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-10-03 (fix/paw-key-scopes) — "Workspace API key scopes": which
+  route families each `paw_` key scope unlocks; everything else is a 403.
 Updated: 2026-10-02 (feat/studio-templates) — "Studio templates" (publish a
   Studio generation as a template: POST / GET /studio-templates, PATCH / DELETE
   /studio-templates/{id}). Discover gains a second source, `studio_template`,
@@ -6868,3 +6870,33 @@ endpoints return the cursor in the body.
 ```json
 { "sessions": { "agent-a": [ { "id": "…", "sessionId": "…", "agent": "agent-a" } ], "agent-b": [] } }
 ```
+
+## Workspace API key scopes
+
+A workspace API key (`Authorization: Bearer paw_…`, minted at
+`POST /api/v1/workspaces/{workspace_id}/api-keys`) only works on routes built
+on `request_context`. Routes that need a signed-in session reject it with 401.
+
+On those routes the key must hold the scope for the route family (the first
+path segment after `/api/v1`) and method. `GET` and `HEAD` need the read scope.
+Any other method needs the write scope. `POST /files/search` and
+`POST /kb/search` only read, so they need the read scope.
+
+| Family | Read (`GET`, `HEAD`) | Write (other methods) |
+|---|---|---|
+| `/chat/…` | `chat.read` | `chat.send` |
+| `/files/…` | `files.read` | `files.write` |
+| `/knowledge/…`, `/kb/…` | `knowledge.read` | `knowledge.write` |
+| `/agents/…` | `agents.read` | `agents.write` |
+| `/workspaces/…` | `workspace.read` | none: always 403 |
+| `/audit/…` | `audit.read` | none: always 403 |
+
+Any other family (tasks, cycles, projects, websandbox, sites, …) returns `403`
+for every key. A missing scope returns `403` with code `api_key.missing_scope`
+and names the scope. An unmapped route returns `403` with code
+`api_key.route_not_allowed`. JWT and cookie sessions are not affected.
+
+Today the only `request_context` routes in a mapped family are the file
+version routes (`/files/{file_id}/versions…`, `/files/write`,
+`PUT /files/{file_id}`). The other rows apply as routes move onto
+`request_context`.

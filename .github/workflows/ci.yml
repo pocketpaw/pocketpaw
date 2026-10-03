@@ -1,6 +1,9 @@
 # CI — runs tests and lint on every PR targeting dev/main or an
 # RFC integration branch (pattern: feat/*-integration).
 # Created: 2026-02-26
+# Updated: 2026-10-03 (fix/paw-key-scopes) — the EE test job runs
+# tests/cloud/auth/test_api_keys.py (workspace paw_ key scope enforcement),
+# which otherwise sits in the tests/cloud blind spot.
 # Updated: 2026-10-03 (fix/paw-bar-frame-headers) — the EE test job runs
 # tests/cloud/test_paw_bar_frame.py (frame CSP + dashboard header middleware),
 # which otherwise sits in the tests/cloud blind spot.
@@ -270,6 +273,15 @@ jobs:
         # spot: a dropped filter would be a silent leak between tenants that no
         # other lane runs a test for.
         run: uv run pytest tests/cloud/test_agent_activity.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run workspace API key tests
+        # Same addopts escape. The only end-to-end proof that request_context
+        # enforces a paw_ key's scopes: a key with the scope passes, a key
+        # without it or on an unmapped route gets 403, JWT sessions unchanged.
+        run: uv run pytest tests/cloud/auth/test_api_keys.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

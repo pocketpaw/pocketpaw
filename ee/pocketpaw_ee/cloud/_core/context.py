@@ -27,6 +27,15 @@ Updates:
   - 2026-10-01 (CN-2): deleted the ee ``require_scope``. It let every JWT
     caller through (``ctx.scopes is None``) and had no production importers;
     the fail-closed ``pocketpaw.api.deps.require_scope`` is the one scope gate.
+  - 2026-10-03 (fix/paw-key-scopes): ``request_context`` now enforces a
+    workspace ``paw_`` key's scopes. ``_API_KEY_SCOPES`` maps the route family
+    (first path segment after ``/api/v1``) plus method to one scope from
+    ``auth.scopes.AVAILABLE_SCOPES``: GET/HEAD (and the POST reads in
+    ``_API_KEY_POST_READS``) need ``<resource>.read``, anything else needs the
+    write scope. An unmapped family, or a write on a resource with no write
+    scope, is a 403 for every key. JWT/cookie and the loopback variant are not
+    gated. Until now a ``chat.read`` key could call any route built on this
+    dependency (tasks, cycles, websandbox credentials, ...).
 """
 
 from __future__ import annotations
@@ -85,9 +94,9 @@ class RequestContext:
             resolution time. Used by the timing middleware and downstream
             log correlation.
         scopes: ``None`` for JWT/cookie auth. A concrete list when the caller
-            authed with a workspace API key (``paw_``). Informational: no
-            dependency enforces it today (route scope checks go through
-            ``pocketpaw.api.deps.require_scope``, which does not read it).
+            authed with a workspace API key (``paw_``). ``request_context``
+            has already checked the route against it (see
+            ``_API_KEY_SCOPES``) before the context is returned.
         pocket_id: The pocket a scope is bound to, when the scope carries one.
             ``None`` for the workspace/user-axis scopes (WORKSPACE, SESSION,
             NONE, …). Set by ``site_keys.resolve_site_key`` for a CONCIERGE
@@ -112,6 +121,40 @@ def _bearer_token(request: Request) -> str | None:
     return None
 
 
+# paw_ key scope gate. Route family -> (read scope, write scope or None).
+# Families not listed here are refused to every API key.
+_API_KEY_SCOPES: dict[str, tuple[str, str | None]] = {
+    "chat": ("chat.read", "chat.send"),
+    "files": ("files.read", "files.write"),
+    "knowledge": ("knowledge.read", "knowledge.write"),
+    "kb": ("knowledge.read", "knowledge.write"),
+    "agents": ("agents.read", "agents.write"),
+    "workspaces": ("workspace.read", None),
+    "audit": ("audit.read", None),
+}
+# POST routes that only read (search bodies too big for a query string).
+_API_KEY_POST_READS = frozenset({"/files/search", "/kb/search"})
+_READ_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _check_api_key_scope(request: Request, scopes: list[str]) -> None:
+    """Raise ``Forbidden`` unless the key's scopes cover this route."""
+    path = request.url.path.removeprefix("/api/v1")
+    family = path.lstrip("/").split("/", 1)[0]
+    mapped = _API_KEY_SCOPES.get(family)
+    is_read = request.method in _READ_METHODS or (
+        request.method == "POST" and path.rstrip("/") in _API_KEY_POST_READS
+    )
+    needed = None if mapped is None else mapped[0] if is_read else mapped[1]
+    if needed is None:
+        raise Forbidden(
+            "api_key.route_not_allowed",
+            f"No API key scope allows {request.method} {request.url.path}",
+        )
+    if needed not in scopes:
+        raise Forbidden("api_key.missing_scope", f"API key missing required scope: {needed}")
+
+
 async def request_context(
     request: Request,
     user: Annotated[User | None, Depends(current_optional_user)] = None,
@@ -119,7 +162,8 @@ async def request_context(
     """Build a `RequestContext` from the authenticated user or API key.
 
     Branches:
-      - ``Authorization: Bearer paw_<...>`` → resolve via API-key service.
+      - ``Authorization: Bearer paw_<...>`` → resolve via API-key service,
+        then check the route against the key's scopes (403 if not covered).
       - Otherwise → resolve via the existing fastapi-users JWT/cookie dep.
     """
     request_id = request.headers.get("x-request-id") or uuid4().hex
@@ -131,6 +175,7 @@ async def request_context(
         if resolved is None:
             raise HTTPException(status_code=401, detail="invalid_api_key")
         user_id, workspace_id, scopes = resolved
+        _check_api_key_scope(request, scopes)
         await _maybe_emit_api_key_use(bearer, workspace_id, user_id)
         return RequestContext(
             user_id=user_id,
