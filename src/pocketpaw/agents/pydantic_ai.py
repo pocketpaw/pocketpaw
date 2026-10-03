@@ -510,7 +510,7 @@ from pocketpaw.agents.backend import (
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
-from pocketpaw.tools.policy import ToolPolicy
+from pocketpaw.tools.policy import ToolPolicy, surface_scoped_tool_deny
 
 logger = logging.getLogger(__name__)
 
@@ -2693,14 +2693,14 @@ class PydanticAIBackend:
         exclusive_tools: bool = False,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
-        #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
-        #                         SDK built-ins on this backend, so there is
-        #                         nothing to grant; ignoring it removes tools,
-        #                         never adds them.
         #   ``session_handle`` /  native CLI-session resume and warm-client
         #   ``warm_client`` /     reuse — this backend has no subprocess to
         #   ``on_client_built``   resume or lease.
-        allow_sdk_tools: frozenset[str] = frozenset(),  # noqa: ARG002
+        # ADDITIVE grant. There are no SDK built-ins here, so it grants nothing
+        # directly; it is read only as the surface's grant of a surface-scoped
+        # MCP server (``SURFACE_SCOPED_MCP_SERVERS``). Ungranted scoped servers'
+        # tools join the deny set, which is in the agent cache key.
+        allow_sdk_tools: frozenset[str] = frozenset(),
         # The per-send model choice. HONOURED here since 2026-09-10: it is the
         # spec ``_build_model`` parses, so a bare name keeps the configured
         # provider (and, on a BYOK gateway, its base URL and key) and only the
@@ -2834,7 +2834,9 @@ class PydanticAIBackend:
                 instructions,
                 mcp_toolsets,
                 skill_names,
-                deny_mcp_tool_ids=deny_mcp_tool_ids,
+                # After the agentapi gate on purpose: a scoped-server deny on a
+                # plain chat is not a gated surface.
+                deny_mcp_tool_ids=deny_mcp_tool_ids | surface_scoped_tool_deny(allow_sdk_tools),
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 system_prompt_digest=system_prompt_digest,

@@ -216,6 +216,9 @@ from pocketpaw_ee.cloud.surface.handlers import (
     agent as agent_handler,
 )
 from pocketpaw_ee.cloud.surface.handlers import (
+    agent_health as agent_health_handler,
+)
+from pocketpaw_ee.cloud.surface.handlers import (
     agents as agents_handler,
 )
 from pocketpaw_ee.cloud.surface.handlers import (
@@ -819,6 +822,22 @@ def _belt_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     )
 
 
+def _agent_health_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+    # Agent health: ripple stays ON (a cost or failure chart is a fair answer).
+    # ``allowed_sdk_tools`` carries the lens tool ids, which is what GRANTS the
+    # surface-scoped ``pocketpaw_lens`` server: core registers it only on a run
+    # whose allow set names its tools, so no other surface loads it. Lazy import,
+    # degrading to no grant (lens tools absent) rather than breaking chat.
+    try:
+        from pocketpaw_ee.agent.mcp_servers.lens import LENS_TOOL_IDS
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning("surface: could not load lens tool ids", exc_info=True)
+        return SurfaceProfile(ripple_mode="on")
+    return SurfaceProfile(ripple_mode="on", allowed_sdk_tools=frozenset(LENS_TOOL_IDS))
+
+
 def _ship_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     # Ship: the managed-deploy control plane. Ripple OFF so the agent drives
     # managed deploys through the ship verb tools instead of building a
@@ -1220,6 +1239,12 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.BROWSER),
         browser.build_preamble,
         profile_resolver=_browser_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.AGENT_HEALTH,
+        _route_for(SurfaceKind.AGENT_HEALTH),
+        agent_health_handler.build_preamble,
+        profile_resolver=_agent_health_profile,
     ),
     SurfaceSpec(SurfaceKind.GENERIC, _route_for(SurfaceKind.GENERIC), generic.build_preamble),
 ]
