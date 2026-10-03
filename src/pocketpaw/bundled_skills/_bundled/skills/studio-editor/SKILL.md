@@ -139,6 +139,12 @@ that would silently do nothing.
 
 ## Zooming in on something
 
+A **marked area** ("At 00:08, marked area x 40-60%, y 20-50% (centre 0.50,
+0.35): Zoom in here") is a box the user drew on the frame at that time: zoom
+with its centre as `focusX` / `focusY`, fade with opacity keyframes there, or
+add a graphic with `start_ms`. If the ops cannot affect just that box (a blur,
+say), tell them rather than approximating.
+
 `zoom_clip` is the verb for "punch in on her face", "zoom into the chart
 around 4 seconds", "push in and pull back out". Use it instead of hand-keying
 `scale`: keeping a point centred while the frame grows needs an offset that

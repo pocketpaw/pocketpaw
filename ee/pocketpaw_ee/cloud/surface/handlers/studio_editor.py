@@ -287,6 +287,7 @@ Operations (this list is closed — an invented verb is rejected):
 - set_transform {clipId, x?, y?, scale?, rotation?, opacity?}
 - add_keyframe  {clipId, prop, atMs, value?, ease?}
 - clear_keyframes {clipId, prop, atMs?}
+- zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -379,6 +380,15 @@ Rules that matter:
   end time, and the property moves between them. atMs is TIMELINE time and must
   fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume —
   nothing else (font size and colour cannot be animated).
+- A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
+  marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
+  clip under that time on the main video track. "Zoom in here" is zoom_clip with
+  focusX/focusY = the centre and atMs = that time. "Fade in" / "Fade out" are
+  opacity keyframes pinned at that time and half a second after (animIn / animOut
+  on a text clip). "Add a graphic here" is add_motion_graphic with start_ms =
+  that time, or replace_range if they ask to replace the footage. Anything the
+  ops cannot do to just that box, such as blurring it, say so plainly instead of
+  approximating it.
 
 Honesty (this surface has burned people before):
 - edit_timeline returns when the batch is VALIDATED AND DISPATCHED — not when
