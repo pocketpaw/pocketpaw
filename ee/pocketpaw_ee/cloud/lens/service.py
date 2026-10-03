@@ -6,12 +6,12 @@
 # alike. Optional filters (``since``, ``status``, ``agent_id``, ``automation``,
 # ``limit``) are forwarded only when set.
 #
-# Privacy A: the reads that can carry message or tool content (runs list, run
-# detail, span detail, issue detail) take a REQUIRED keyword ``full``. When it is
-# False (caller is not a workspace admin), ``redact`` strips the content and
-# marks dict bodies ``content_hidden: true``. ``redact`` is the one stripping
-# function: the HTTP proxy and the ``pocketpaw_lens`` MCP tools both go through
-# these functions, so neither can drift from the other.
+# Privacy A: EVERY read takes a REQUIRED keyword ``full`` and returns through
+# ``redact``, so a new read cannot forget it (TypeError at the caller). When
+# ``full`` is False (caller is not a workspace admin) ``redact`` blanks free
+# text, cuts span attributes to an allowlist and marks dict bodies
+# ``content_hidden: true``. The HTTP proxy and the ``pocketpaw_lens`` MCP tools
+# both go through these functions, so neither can drift from the other.
 #
 # ``run_overview`` (admin-only at the router) returns the run's cached AI
 # overview, or builds a compact digest of the run (prompt, assistant turns, tool
@@ -69,16 +69,49 @@ def _disabled() -> dict[str, bool]:
     return {"enabled": False}
 
 
-# Span attribute keys whose values are prompt / completion / tool payloads.
-_HIDDEN_ATTR_PREFIXES = (
-    "gen_ai.input.",
-    "gen_ai.output.",
-    "gen_ai.system_instructions",
-    "gen_ai.tool.call.arguments",
-    "gen_ai.tool.call.result",
-    "pydantic_ai.all_messages",
+# Privacy A allowlists: what a non-admin may see. Anything not named here is
+# dropped (attributes) or rebuilt (tool, findings), so a new paw-lens field or
+# instrumentation key is hidden by default instead of leaking by default.
+_MEMBER_ATTR_KEYS = frozenset(
+    {
+        "gen_ai.request.model",
+        "gen_ai.response.model",
+        "gen_ai.operation.name",
+        "gen_ai.tool.name",
+        "gen_ai.agent.name",
+        "operation.cost",
+        "http.method",
+        "http.route",
+        "http.status_code",
+        "http.request.method",
+        "http.response.status_code",
+        "db.system",
+    }
 )
-HIDDEN = "[hidden]"
+_MEMBER_ATTR_PREFIXES = ("gen_ai.usage.", "paw.")
+_FINDING_KEYS = ("fingerprint", "detector", "severity", "span_id", "tool", "seen_at")
+
+
+def _member_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
+    keep = _MEMBER_ATTR_KEYS
+    return {k: v for k, v in attrs.items() if k in keep or k.startswith(_MEMBER_ATTR_PREFIXES)}
+
+
+def _log_name(span: dict[str, Any]) -> str:
+    """A log span's name is its formatted message; show the template instead,
+    and only when logfire really extracted one (else it IS the message)."""
+    attrs = span.get("attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    template = attrs.get("logfire.msg_template")
+    if isinstance(template, str) and template and template != attrs.get("logfire.msg"):
+        return template
+    return "log"
+
+
+def _finding(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return None
+    return {k: item[k] for k in _FINDING_KEYS if k in item} | {"message": "", "evidence": None}
 
 
 def _strip(node: Any) -> Any:
@@ -88,27 +121,42 @@ def _strip(node: Any) -> Any:
         return node
     out: dict[str, Any] = {}
     for key, value in node.items():
-        if key in ("summary", "args_preview") and isinstance(value, str):
-            out[key] = ""
+        if key in ("summary", "args_preview", "error") and isinstance(value, str):
+            out[key] = ""  # ``status`` beside every ``error`` still says it failed
         elif key in ("messages", "overview"):
             # ``overview`` is an LLM digest of the very content stripped here.
             out[key] = None
-        elif key == "tool" and isinstance(value, dict):
-            out[key] = {**value, "arguments": None, "result": None}
+        elif key == "events":
+            out[key] = []  # exception messages, stack traces, log payloads
         elif key == "attributes" and isinstance(value, dict):
+            out[key] = _member_attrs(value)
+        elif key == "tool" and isinstance(value, dict):
             out[key] = {
-                k: HIDDEN if k.startswith(_HIDDEN_ATTR_PREFIXES) else v for k, v in value.items()
+                "name": value.get("name"),
+                "call_id": value.get("call_id"),
+                "arguments": None,
+                "result": None,
             }
+        elif key == "findings" and isinstance(value, list):
+            out[key] = [_finding(item) for item in value]
         else:
             out[key] = _strip(value)
+    if "span_id" in node and node.get("kind") == "log":
+        out["name"] = _log_name(node)
+    if isinstance(node.get("title"), str) and "detector" in node:
+        # paw-lens builds titles from error text or user feedback.
+        out["title"] = " · ".join(str(p) for p in (node["detector"], node.get("tool")) if p)
     return out
 
 
 def redact(body: Any, full: bool) -> Any:
-    """Privacy A. ``full`` (workspace admin) returns ``body`` untouched; otherwise
-    run summaries, the AI overview, span messages, tool arguments/results and
-    content-bearing attributes are stripped, and a dict body gains ``content_hidden: true``. A
-    list body (the runs list) cannot carry the flag and is only stripped."""
+    """Privacy A, the one redaction every lens read goes through. ``full``
+    (workspace admin) returns ``body`` untouched; otherwise free text is blanked
+    (run summaries, args previews, span / check-in errors, finding messages and
+    evidence, AI overview, span messages, tool arguments / results, span events),
+    span attributes are cut to ``_MEMBER_ATTR_KEYS``, issue titles become
+    ``"<detector> · <tool>"`` and log span names their template (or "log"). A
+    dict body gains ``content_hidden: true``; a list body is only stripped."""
     if full or body == _disabled():
         return body
     out = _strip(body)
@@ -140,8 +188,11 @@ async def _call(
     )
 
 
-async def overview(workspace_id: str, since: str | None = None, agent_id: str | None = None) -> Any:
-    return await _call("GET", "/v1/overview", workspace_id, {"since": since, "agent_id": agent_id})
+async def overview(
+    workspace_id: str, since: str | None = None, agent_id: str | None = None, *, full: bool
+) -> Any:
+    body = await _call("GET", "/v1/overview", workspace_id, {"since": since, "agent_id": agent_id})
+    return redact(body, full)
 
 
 async def list_issues(
@@ -149,13 +200,11 @@ async def list_issues(
     status: str | None = None,
     since: str | None = None,
     agent_id: str | None = None,
+    *,
+    full: bool,
 ) -> Any:
-    return await _call(
-        "GET",
-        "/v1/issues",
-        workspace_id,
-        {"status": status, "since": since, "agent_id": agent_id},
-    )
+    params = {"status": status, "since": since, "agent_id": agent_id}
+    return redact(await _call("GET", "/v1/issues", workspace_id, params), full)
 
 
 async def get_issue(
@@ -206,17 +255,19 @@ async def get_span(workspace_id: str, trace_id: str, span_id: str, *, full: bool
 
 
 async def list_agents(
-    workspace_id: str, since: str | None = None, agent_id: str | None = None
+    workspace_id: str, since: str | None = None, agent_id: str | None = None, *, full: bool
 ) -> Any:
-    return await _call("GET", "/v1/agents", workspace_id, {"since": since, "agent_id": agent_id})
+    body = await _call("GET", "/v1/agents", workspace_id, {"since": since, "agent_id": agent_id})
+    return redact(body, full)
 
 
-async def list_monitors(workspace_id: str, since: str | None = None) -> Any:
-    return await _call("GET", "/v1/monitors", workspace_id, {"since": since})
+async def list_monitors(workspace_id: str, since: str | None = None, *, full: bool) -> Any:
+    return redact(await _call("GET", "/v1/monitors", workspace_id, {"since": since}), full)
 
 
-async def get_monitor(workspace_id: str, slug: str, since: str | None = None) -> Any:
-    return await _call("GET", f"/v1/monitors/{slug}", workspace_id, {"since": since})
+async def get_monitor(workspace_id: str, slug: str, since: str | None = None, *, full: bool) -> Any:
+    body = await _call("GET", f"/v1/monitors/{slug}", workspace_id, {"since": since})
+    return redact(body, full)
 
 
 def _clip(value: Any, limit: int = _FIELD_MAX_CHARS) -> str:

@@ -6,7 +6,8 @@
 # patched. Covers: the caller's workspace is sent upstream, a member's run /
 # span content is stripped (same ``redact`` as the proxy), an admin's is not, a
 # missing user fails closed, bad ids are rejected with no upstream call, and no
-# workspace is an error.
+# workspace is an error. Issue titles and monitor check-in errors are stripped
+# for a member too, so every read tool goes through ``redact``.
 # Gating: ``surface_scoped_tool_deny`` names the lens ids unless granted;
 # claude_sdk ``_build_options`` drops the server and its ids from a normal chat
 # and keeps both when the agent_health profile's grant is passed; pydantic_ai
@@ -26,7 +27,14 @@ from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta
 from pocketpaw_ee.cloud.surface.service import resolve_profile
 
 from pocketpaw.tools.policy import surface_scoped_tool_deny
-from tests.cloud.lens.test_router import _RUN, _SPAN, _settings
+from tests.cloud.lens.test_router import (
+    _ALLOWED_ATTRS,
+    _ISSUES,
+    _MONITOR,
+    _RUN,
+    _SPAN,
+    _settings,
+)
 
 TRACE = "a" * 32
 
@@ -78,7 +86,8 @@ async def test_span_stripped_for_member_or_unknown_user(monkeypatch, upstream, r
     got = _body(await lens_mcp._run_handler({"trace_id": TRACE, "span_id": "s1"}))
     assert got["messages"] is None
     assert got["tool"]["arguments"] is None
-    assert got["attributes"]["gen_ai.input.messages"] == "[hidden]"
+    assert got["attributes"] == _ALLOWED_ATTRS
+    assert got["events"] == []
 
 
 async def test_runs_and_issue_detail_strip_for_member(monkeypatch, upstream, seen):
@@ -92,13 +101,37 @@ async def test_runs_and_issue_detail_strip_for_member(monkeypatch, upstream, see
     assert got["runs"] == [{"summary": ""}]
 
 
-async def test_overview_and_monitors_pass_through(monkeypatch, upstream, seen):
+async def test_issues_and_monitors_strip_for_member(monkeypatch, upstream, seen):
+    _settings(monkeypatch, "http://lens:8790")
+    _as_user(monkeypatch, "member")
+    upstream(lambda req: httpx.Response(200, json=_ISSUES))
+    got = _body(await lens_mcp._issues_handler({"status": "open"}))
+    assert [i["title"] for i in got] == ["tool_error · search", "user_feedback"]
+    upstream(lambda req: httpx.Response(200, json=_MONITOR))
+    one = _body(await lens_mcp._monitors_handler({"slug": "reminder:r1"}))
+    assert one["recent"][0]["error"] == ""
+    upstream(lambda req: httpx.Response(200, json=[_MONITOR]))
+    listed = _body(await lens_mcp._monitors_handler({}))
+    assert listed[0]["recent"][0]["error"] == ""
+    assert "alice" not in json.dumps([got, one, listed])
+
+
+async def test_issues_and_monitors_full_for_admin(monkeypatch, upstream):
+    _settings(monkeypatch, "http://lens:8790")
+    _as_user(monkeypatch, "admin")
+    upstream(lambda req: httpx.Response(200, json=_ISSUES))
+    assert _body(await lens_mcp._issues_handler({})) == _ISSUES
+    upstream(lambda req: httpx.Response(200, json=_MONITOR))
+    assert _body(await lens_mcp._monitors_handler({"slug": "reminder:r1"})) == _MONITOR
+
+
+async def test_overview_numbers_survive_for_member(monkeypatch, upstream, seen):
     _settings(monkeypatch, "http://lens:8790")
     _as_user(monkeypatch, "member")
     upstream(lambda req: httpx.Response(200, json={"runs": 3}))
-    assert _body(await lens_mcp._overview_handler({"agent_id": "ag1"})) == {"runs": 3}
-    assert _body(await lens_mcp._monitors_handler({"slug": "reminder:r1"})) == {"runs": 3}
-    assert [r.url.path for r in seen] == ["/v1/overview", "/v1/monitors/reminder:r1"]
+    got = _body(await lens_mcp._overview_handler({"agent_id": "ag1"}))
+    assert got["runs"] == 3
+    assert [r.url.path for r in seen] == ["/v1/overview"]
 
 
 @pytest.mark.parametrize(

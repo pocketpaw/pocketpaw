@@ -3,10 +3,11 @@
 #
 # Five read tools (overview, runs, one run, issues, monitors), each a thin shim
 # over ``pocketpaw_ee.cloud.lens.service`` so the MCP surface and the HTTP proxy
-# share one wire contract and ONE privacy rule: the service's ``redact`` strips
-# message/tool content unless the CALLER (the human whose chat this is, read
-# from the per-stream identity ContextVars) holds ``lens.manage`` in the
-# workspace. Any failure resolving that role fails closed (content stripped).
+# share one wire contract and ONE privacy rule: every read returns through the
+# service's ``redact``, which strips message/tool/error content unless the
+# CALLER (the human whose chat this is, read from the per-stream identity
+# ContextVars) holds ``lens.manage`` in the workspace. Any failure resolving
+# that role fails closed (content stripped).
 # The workspace always comes from the stream, never from a tool argument, and
 # every id argument is checked against the proxy's own patterns before it can
 # reach an upstream path.
@@ -124,7 +125,7 @@ async def _overview_handler(args: dict) -> dict:
     return await _run(
         args,
         {"agent_id": service.AGENT_ID},
-        lambda ws, _full: service.overview(ws, args.get("since"), args.get("agent_id")),
+        lambda ws, full: service.overview(ws, args.get("since"), args.get("agent_id"), full=full),
     )
 
 
@@ -180,7 +181,9 @@ async def _issues_handler(args: dict) -> dict:
     async def _call(ws: str, full: bool) -> Any:
         if fingerprint:
             return await service.get_issue(ws, fingerprint, args.get("since"), full=full)
-        return await service.list_issues(ws, status, args.get("since"), args.get("agent_id"))
+        return await service.list_issues(
+            ws, status, args.get("since"), args.get("agent_id"), full=full
+        )
 
     return await _run(args, {"fingerprint": service.SAFE_ID, "agent_id": service.AGENT_ID}, _call)
 
@@ -192,10 +195,10 @@ async def _monitors_handler(args: dict) -> dict:
         return _error_response(problem)
     slug = args.get("slug")
 
-    async def _call(ws: str, _full: bool) -> Any:
+    async def _call(ws: str, full: bool) -> Any:
         if slug:
-            return await service.get_monitor(ws, slug, args.get("since"))
-        return await service.list_monitors(ws, args.get("since"))
+            return await service.get_monitor(ws, slug, args.get("since"), full=full)
+        return await service.list_monitors(ws, args.get("since"), full=full)
 
     return await _run(args, {"slug": service.SAFE_ID}, _call)
 
