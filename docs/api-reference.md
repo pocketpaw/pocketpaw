@@ -1639,6 +1639,58 @@ featuring and `use` each write an audit row. Errors: `404` for a missing or
 hidden listing; `403` (`discover.own_listing`) for the owner reporting their
 own; `429` past the report limit.
 
+## AI visibility — Free check
+
+### `POST /tools/ai-check` (public)
+
+No sign-in. Asks ChatGPT (OpenAI Responses API with web search) three local
+questions, twice each, and says whether it names the business.
+
+```json
+{
+  "name": "Joe's Pizza",
+  "city": "Austin",
+  "website": "joespizzaatx.com",
+  "turnstile_token": "<Cloudflare Turnstile token>"
+}
+```
+
+`name` and `city` are 2 to 100 characters; `website` is optional and is reduced to
+its host (a non-web scheme is a `422`). Unknown fields are a `422`.
+
+Response `200`:
+
+```json
+{
+  "mentioned": false,
+  "engine": "ChatGPT",
+  "answers_checked": 4,
+  "competitors": [],
+  "sources": [{ "type": "yelp", "url": "https://www.yelp.com/biz/joes-pizza-austin" }],
+  "fix": { "id": "site_content", "text": "AI assistants aren't using your website..." }
+}
+```
+
+One of the three questions names the business ("Is Joe's Pizza in Austin a good
+choice?"). Its answers nearly always repeat the name, so `mentioned`,
+`answers_checked` and `fix` come only from the other two questions; the named
+one adds to `sources`. `sources` holds up to 10 unique https URLs the engine read,
+typed `own_site | gbp | yelp | tripadvisor | reddit | directory | other`.
+`competitors` is always `[]` for now: an anonymous check has no competitor list
+to match against. The check is stored without a workspace or site; the caller's
+IP is not stored.
+
+Errors (`{"error": {"code", "message"}}`):
+
+| Status | Code | When |
+|--------|------|------|
+| `400` | `tools.ai_check.turnstile_failed` | Turnstile rejected the token, or Cloudflare could not be reached |
+| `429` | `tools.ai_check.rate_limited` | More than 5 checks in an hour from one IP |
+| `503` | `tools.ai_check.daily_limit` | Today's anonymous checks spent `POCKETPAW_AI_CHECK_DAILY_USD` (default `5.0`) |
+| `502` | `tools.ai_check.engine_failed` | No OpenAI key configured, or every engine call failed |
+
+With `POCKETPAW_TURNSTILE_SECRET` unset (dev), Turnstile is skipped with a warning.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in
