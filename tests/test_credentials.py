@@ -554,6 +554,7 @@ class TestSecretFieldsList:
             "ai_visibility_perplexity_api_key",
             "ai_visibility_anthropic_api_key",
             "ai_visibility_cf_api_token",
+            "turnstile_secret",
         }
         assert SECRET_FIELDS == expected
 
