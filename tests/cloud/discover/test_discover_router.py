@@ -1,22 +1,15 @@
-# tests/cloud/discover/test_discover_router.py — the /discover HTTP surface (DS-1 part 2).
+# tests/cloud/discover/test_discover_router.py — the /discover HTTP surface.
 #
-# Created 2026-10-01 (feat/discover-index). Pins: anonymous GET /discover and
-# GET /discover/{id} serve exactly the public allow-list, never a hidden listing;
-# the query params filter and page (a bad cursor is a CloudError 4xx, not a 500);
-# the per-IP 60/min limit; POST /use and /report need sign-in, use counts a remix,
-# and three distinct reporters drop the listing from the anonymous index.
+# Pins: anonymous GET /discover and GET /discover/{id} serve exactly the public
+# allow-list, never a hidden listing; the query params filter and page (a bad
+# cursor is a CloudError 4xx, not a 500); the per-IP 60/min limit; POST /use and
+# /report need sign-in, use counts a remix, three distinct reporters drop the
+# listing from the anonymous index, and the 11th report in an hour is 429
+# ``discover.report_rate_limited``. Slug lookups are in test_discover_slug.py.
 #
 # Auth runs through the real ``current_user_id`` / ``current_workspace_id``; only
 # ``current_active_user`` is swapped for a toggle (the meetings router-test shape).
-#
-# Updated 2026-10-02 (feat/discover-index, hardening): POST /report is limited to
-# 10 an hour per user (the 11th is 429 ``discover.report_rate_limited``).
-#
-# Updated 2026-10-02 (feat/discover-source-contract): seeds through
-# ``sync_source("site_template", id)`` (was ``sync_site_template``).
-#
-# Updated 2026-10-02 (feat/studio-templates): the public allow-list gains
-# ``media_kind`` / ``media_url``.
+# Listings are seeded through ``sync_source("site_template", id)``.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -37,6 +30,7 @@ WS, OTHER_WS, OWNER = "w1", "w2", "u1"
 URL = "/api/v1/discover"
 PUBLIC_KEYS = {
     "id",
+    "slug",
     "source",
     "kind",
     "title",
