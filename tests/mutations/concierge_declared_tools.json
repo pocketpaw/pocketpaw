@@ -26,5 +26,23 @@
     "tests": [
       "tests/cloud/test_paw_bar_declared_tools.py::test_page_tools_appear_only_when_on_and_a_tool_is_valid"
     ]
+  },
+  {
+    "label": "knowledge items lose their page path — a retrieved page cannot be linked or navigated to",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        where = f' path=\"{html.escape(path, quote=True)}\"' if path else \"\"",
+    "replace": "        where = \"\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_page_actions.py::test_a_knowledge_item_for_a_crawled_page_shows_its_path_on_or_off"
+    ]
+  },
+  {
+    "label": "a knowledge item's page path is not percent-encoded — the model is shown a path the url form never had",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        (item.id, item.source): \"/\" + quote(pages[item.id][0], safe=_PATH_SAFE)",
+    "replace": "        (item.id, item.source): \"/\" + pages[item.id][0]",
+    "tests": [
+      "tests/cloud/test_paw_bar_page_actions.py::test_a_page_path_cannot_break_out_of_the_item_tag"
+    ]
   }
 ]
