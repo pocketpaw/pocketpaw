@@ -4,55 +4,161 @@
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
     "find": "skill_names=frozenset({\"studio-editor\", \"hyperframes-core\", \"studio-motion\"}),",
     "replace": "skill_names=frozenset({\"studio-editor\", \"hyperframes-core\"}),",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
   },
   {
     "label": "the procedure stops naming studio-motion",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
     "find": "load the `hyperframes-core` and `studio-motion` skills and",
     "replace": "load the `hyperframes-core` skill and",
-    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py"]
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
   },
   {
     "label": "the skill's frontmatter name drifts from its directory",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/SKILL.md",
     "find": "name: studio-motion\n",
     "replace": "name: studio-motions\n",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
   },
   {
     "label": "SKILL.md links a reference file that does not exist",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/SKILL.md",
     "find": "Full working examples for every preset: [references/presets.md](references/presets.md).",
     "replace": "Full working examples for every preset: [references/presets.md](references/preset.md).",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
   },
   {
     "label": "the logo example loses its root duration and the validator would refuse it",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
     "find": "data-duration=\"4\" data-preset=\"logo\"",
     "replace": "data-preset=\"logo\"",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
   },
   {
     "label": "the chart example's timeline is no longer paused",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
     "find": "gsap.timeline({paused:true,defaults:{ease:\"sine.out\"",
     "replace": "gsap.timeline({defaults:{ease:\"sine.out\"",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
   },
   {
     "label": "the statement example names a style the house does not have",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
     "find": "data-style=\"velvet\"",
     "replace": "data-style=\"plush\"",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
   },
   {
     "label": "the stat example's clip stops spanning the root duration",
     "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion/references/presets.md",
     "find": "<section class=\"clip\" data-start=\"0\" data-duration=\"4\">\n<div class=\"mg-stage\">\n<p class=\"mg-display mg-num\">",
     "replace": "<section class=\"clip\" data-start=\"0\" data-duration=\"3\">\n<div class=\"mg-stage\">\n<p class=\"mg-display mg-num\">",
-    "tests": ["tests/ee/agent/test_studio_motion_skill.py"]
+    "tests": [
+      "tests/ee/agent/test_studio_motion_skill.py"
+    ]
+  },
+  {
+    "label": "the cut tolerance loosens back to 50 ms, leaving a black gap",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    if abs(duration_s - want) > 0.001:\n",
+    "replace": "    if abs(duration_s - want) > 0.05:\n",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "placements stop being exclusive",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    if len(given) > 1:\n",
+    "replace": "    if len(given) > 3:\n",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "a zero-length cut is accepted",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    if lo >= hi:\n",
+    "replace": "    if lo > hi:\n",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "a graphic that does not fill the cut is dispatched anyway",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    if abs(duration_s - want) > 0.001:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "fractional or boolean milliseconds slip through",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None",
+    "replace": "    return value",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "placement keys never reach the SSE frame",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "        **placement,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "the replace_range note claims more than a dispatch",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "there. That is dispatched, not done: say it is rendering. If the editor \"\n            \"refuses the cut, it says so next turn.\"",
+    "replace": "there.\"",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
+    "label": "the playhead is not rendered",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "    if timeline.get(\"playhead_ms\") is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
+  },
+  {
+    "label": "the graphic style is not rendered",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "    if timeline.get(\"graphic_style\"):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
+  },
+  {
+    "label": "the procedure drops the replace_range guidance",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "  stat card\" is replace_range {from_ms: 10000, to_ms: 14000}, with data-duration",
+    "replace": "  stat card\" is a new graphic, with data-duration",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
   }
 ]

@@ -190,6 +190,13 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
         f"Project: {name} — {timeline.get('aspect_ratio') or '?'}, "
         f"{timeline.get('fps') or '?'}fps, {_fmt_ms(timeline.get('duration_ms'))} long."
     )
+    if timeline.get("playhead_ms") is not None:
+        playhead = timeline["playhead_ms"]
+        lines.append(f"Playhead: {_fmt_ms(playhead)} ({playhead} ms) — what 'here' means.")
+    if timeline.get("graphic_style"):
+        lines.append(
+            f"Graphic style: {timeline['graphic_style']} — use it for new motion graphics."
+        )
 
     tracks = [t for t in (timeline.get("tracks") or []) if isinstance(t, dict)]
     if tracks:
@@ -340,6 +347,13 @@ Rules that matter:
   animated stat, logo sting), authored with
   `mcp__pocketpaw_timeline__add_motion_graphic`. Motion graphics render full
   frame and opaque, so overlays like lower thirds are not possible yet.
+- PLACE A MOTION GRAPHIC IN THE CALL. The rendered asset only exists next turn,
+  so placement rides on add_motion_graphic itself. "Replace 0:10-0:14 with a
+  stat card" is replace_range {from_ms: 10000, to_ms: 14000}, with data-duration
+  set to exactly that span (4 seconds): the span is cut from the main video and
+  the graphic takes its place. "Put a title here" is start_ms = the Playhead.
+  The Playhead is what "here" and "from here" mean. Use the Graphic style for new
+  graphics unless the user names another.
 - EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
   edit its source from that block and call add_motion_graphic with
   replace_asset_id set to its id — never add a second one alongside it.

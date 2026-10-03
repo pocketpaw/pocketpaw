@@ -188,6 +188,24 @@ one tween at 0.3s; swap the tween to swap the effect.
   of the largest, and the largest row has `is-max`, which gives its bar the
   accent. Bars grow from the left and values count up together, row by row.
 
+## Placing a new graphic
+
+The timeline block names a **Graphic style** and a **Playhead**. Use the
+graphic style for new graphics unless the user names another, and read
+"here" or "from here" as the playhead. Placement goes on the
+`add_motion_graphic` call itself, because the rendered asset only appears
+on the next turn:
+
+- `start_ms`: put the graphic at that time, with nothing cut.
+- `replace_range: {from_ms, to_ms}`: cut that span out of the main video and
+  put the graphic in its place, so the total length stays the same. Set
+  `data-duration` (root, clip and `D`) to exactly `(to_ms - from_ms) / 1000`;
+  "replace 0:10 to 0:14" means a 4-second graphic.
+
+Pass at most one of `start_ms`, `replace_range` and `replace_asset_id`. The
+call only dispatches. If the editor refuses the placement (no clip there, a
+transition in the range), that refusal appears next turn.
+
 ## Restyle and edit
 
 The MOTION GRAPHICS block lists every motion graphic on the timeline, with
