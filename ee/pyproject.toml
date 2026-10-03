@@ -718,14 +718,16 @@ name = "AiVisibility — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
-    # feat/ai-visibility-core (AV-3, 2026-10-03). Only ``ai_visibility.service``
-    # owns the AiVisibilityCheck Beanie writes; engines, judge, fixes, dto and
-    # domain stay pure so they can run (and be tested) with no database.
+    # Only ``ai_visibility.service`` owns the AiVisibilityCheck Beanie writes;
+    # engines, judge, fixes, dto and domain stay pure so they can run (and be
+    # tested) with no database; public_check and the router go through service.
     "pocketpaw_ee.cloud.ai_visibility.domain",
     "pocketpaw_ee.cloud.ai_visibility.dto",
     "pocketpaw_ee.cloud.ai_visibility.engines",
     "pocketpaw_ee.cloud.ai_visibility.judge",
     "pocketpaw_ee.cloud.ai_visibility.fixes",
+    "pocketpaw_ee.cloud.ai_visibility.public_check",
+    "pocketpaw_ee.cloud.ai_visibility.router",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.ai_visibility_check"]
 

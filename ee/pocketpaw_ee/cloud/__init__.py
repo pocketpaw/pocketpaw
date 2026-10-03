@@ -304,6 +304,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.daytona.router import router as daytona_router
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
+    from pocketpaw_ee.cloud.ai_visibility.router import router as ai_visibility_router
     from pocketpaw_ee.cloud.discover.router import router as discover_router
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
@@ -419,6 +420,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Discover (DS-1) — the public index of shareable items (GET /discover,
     # GET /discover/{id}, no sign-in, per-IP limited) plus signed-in use / report.
     app.include_router(discover_router, prefix="/api/v1")
+    # AI visibility (AV-4) — the public free check (POST /tools/ai-check, no sign-in,
+    # per-IP limited, Turnstile, daily spend cap).
+    app.include_router(ai_visibility_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
