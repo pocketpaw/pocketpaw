@@ -66,7 +66,7 @@ def test_owner_sees_security(users):
     users["owner1"] = [("w1", "owner")]
     ids = _surfaces("owner1")
     assert "surface:security" in ids
-    assert len(ids) == 30
+    assert len(ids) == 31
 
 
 @pytest.mark.parametrize("role", ["admin", "member"])
@@ -74,7 +74,7 @@ def test_admin_and_member_do_not(users, role):
     users["u1"] = [("w1", role)]
     ids = _surfaces("u1")
     assert "surface:security" not in ids
-    assert len(ids) == 29
+    assert len(ids) == 30
 
 
 def test_owner_elsewhere_is_not_owner_here(users):
