@@ -88,5 +88,33 @@
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_nothing_switches_claude_ai_connectors_back_on"
     ]
+  },
+  {
+    "label": "a scoped turn starts every ambient server again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        live = (frozenset(_mcp_server_of(t) for t in allowed_tools) - {\"\"}) if scoped else None",
+    "replace": "        live = None",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on",
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_mode_turn_keeps_its_servers_the_grant_and_the_always_allowed"
+    ]
+  },
+  {
+    "label": "an out-of-scope provider is still built (composio fetches on a /code turn)",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                if not owns & only:\n                    continue",
+    "replace": "                if False:\n                    continue",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on"
+    ]
+  },
+  {
+    "label": "an external server is matched by its raw config name, not the CLI spelling",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            servers = {n: c for n, c in servers.items() if _cli_server_name(n) in only}",
+    "replace": "            servers = {n: c for n, c in servers.items() if n in only}",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_bare_external_entry_starts_the_server_under_its_config_name"
+    ]
   }
 ]

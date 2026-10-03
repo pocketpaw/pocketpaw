@@ -43,7 +43,8 @@ image-returning tools, and the subprocess env always carries ``MAX_MCP_OUTPUT_TO
 Tool scope: under bypass ``allowed_tools`` only auto-approves, so the turn's final
 allowed set (ToolPolicy + surface allow/deny/exclusive) is enforced by a PreToolUse
 gate on every tool (``_tool_gate_hook``), a pinned ``tools=`` built-in list (always
-with ``ToolSearch``) and ``disallowed_tools`` for the surface deny set.
+with ``ToolSearch``) and ``disallowed_tools`` for the surface deny set. A scoped turn
+(deny, mode list or exclusive cap) starts only the MCP servers owning an allowed id.
 Images ride every persistent send; the stateless ``query()`` cannot carry them.
 """
 
@@ -249,6 +250,12 @@ def _mcp_server_of(tool_id: str) -> str:
     """Extract ``<server>`` from an ``mcp__<server>__<tool>`` id (else "")."""
     parts = tool_id.split("__")
     return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
+
+def _cli_server_name(name: str) -> str:
+    """A server name as Claude Code spells it in tool ids: every character
+    outside ``[A-Za-z0-9_-]`` becomes ``_`` (``My Notes.v2`` -> ``My_Notes_v2``)."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
 
 # Tools the CLI calls on its own behalf (loading deferred MCP schemas, waiting for
@@ -1366,7 +1373,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         }
     )
 
-    def _get_mcp_servers(self) -> dict[str, dict]:
+    def _get_mcp_servers(self, only: frozenset[str] | None = None) -> dict[str, dict]:
         """Load enabled MCP server configs, filtered by tool policy.
 
         Returns a dict keyed by server name.  The SDK supports three
@@ -1376,6 +1383,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         Web search MCP servers (Tavily, Brave, Exa) are excluded because
         Claude Code already provides a built-in WebSearch tool.
+
+        ``only`` is a scoped turn's set of server names (spelled as in tool ids)
+        that own a tool the turn may call; every other server is dropped, and a
+        provider none of whose ``tool_ids()`` fall in it is never built. ``None``
+        (a broad turn) registers everything.
         """
         try:
             from pocketpaw.mcp.config import load_mcp_config
@@ -1541,6 +1553,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         for provider in _ext_providers("pocketpaw.mcp_servers"):
             provider_name = type(provider).__name__
+            if only is not None:
+                try:
+                    owns = {_mcp_server_of(t) for t in provider.tool_ids()}
+                except Exception:  # noqa: BLE001 — no ids means none it could serve
+                    owns = set()
+                if not owns & only:
+                    continue
             try:
                 built = provider.build_server()
             except Exception as exc:  # noqa: BLE001
@@ -1574,6 +1593,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 logger.info("MCP server '%s' blocked by tool policy", name)
                 continue
             servers[name] = cfg_entry
+
+        if only is not None:
+            servers = {n: c for n, c in servers.items() if _cli_server_name(n) in only}
 
         # Startup summary — operators check this on dashboard restart to confirm
         # their install picked up the expected entry-point set.
@@ -1640,7 +1662,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     continue
                 if not self._policy.is_mcp_server_allowed(cfg.name):
                     continue
-                ids.append(f"mcp__{re.sub(r'[^a-zA-Z0-9_-]', '_', cfg.name)}")
+                ids.append(f"mcp__{_cli_server_name(cfg.name)}")
         except Exception as exc:  # noqa: BLE001
             logger.debug("External MCP server allowlist not added: %s", exc)
 
@@ -2490,7 +2512,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Detect via the <pocket-scope> marker every pocket prompt
         # carries; the built-ins shrink to delegation + web. The pinned
         # ``tools=`` list and the tool gate below enforce that (the
-        # allowlist alone never did, under bypassPermissions).
+        # allowlist alone never did, under bypassPermissions). A caller whose
+        # pocket run needs more declares it through ``allow_sdk_tools`` (the
+        # pocket specialist's skill path adds Bash + Skill); a pocket CHAT
+        # turn has no such caller, so a skill kit handed to it cannot run.
         #
         # Without this lock, the agent has been observed reaching for
         # shell introspection (e.g. `env | grep pocket; curl localhost`)
@@ -2862,8 +2887,18 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         # Wire in MCP servers (policy-filtered). Skipped entirely on a
         # tools-off turn: an MCP server is a tool source, and registering one
-        # whose ids are not on the allowlist still pays its startup.
-        mcp_servers = {} if not tools_enabled else self._get_mcp_servers()
+        # whose ids are not on the allowlist still pays its startup. For the
+        # same reason a scoped turn (a deny set, a mode list or an exclusive
+        # cap) starts only the servers that own an id in its final allowed set;
+        # the rest would still be found through ToolSearch, only for the gate to
+        # refuse every call. A broad turn starts every server, as before.
+        # Prewarm and dispatch each build the set and that is deliberate: steady
+        # state it costs ~2 ms (composio's fetch is cached per user), and its
+        # in-process servers carry per-user state (composio tools are bound to
+        # the user at build), so handing one set to two clients is not free.
+        scoped = bool(deny_mcp_tool_ids) or exclusive_mcp_tools or allow_mcp_tool_ids is not None
+        live = (frozenset(_mcp_server_of(t) for t in allowed_tools) - {""}) if scoped else None
+        mcp_servers = {} if not tools_enabled else self._get_mcp_servers(only=live)
         if mcp_servers:
             options_kwargs["mcp_servers"] = mcp_servers
             logger.info("MCP: passing %d servers to Claude SDK", len(mcp_servers))
