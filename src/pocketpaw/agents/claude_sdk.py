@@ -38,10 +38,12 @@ Lifecycle invariants:
 
 Options: permissions are always bypassed (headless), ``cli_path`` comes from
 ``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
-image-returning tools, the subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
-(``claude_sdk_max_mcp_output_tokens`` unless already set in the environment), and
-the in-process MCP servers (pocketpaw, planner, atlas, ...) are gated by the
-ToolPolicy and the per-surface allow/deny sets.
+image-returning tools, and the subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
+(unless already set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``.
+Tool scope: under bypass ``allowed_tools`` only auto-approves, so the turn's final
+allowed set (ToolPolicy + surface allow/deny/exclusive) is enforced by a PreToolUse
+gate on every tool (``_tool_gate_hook``), a pinned ``tools=`` built-in list (always
+with ``ToolSearch``) and ``disallowed_tools`` for the surface deny set.
 Images ride every persistent send; the stateless ``query()`` cannot carry them.
 """
 
@@ -247,6 +249,63 @@ def _mcp_server_of(tool_id: str) -> str:
     """Extract ``<server>`` from an ``mcp__<server>__<tool>`` id (else "")."""
     parts = tool_id.split("__")
     return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
+
+# Tools the CLI calls on its own behalf (loading deferred MCP schemas, waiting for
+# servers to connect). Plumbing, not capabilities, so the tool gate always passes them.
+_INFRA_TOOLS: frozenset[str] = frozenset({"ToolSearch", "WaitForMcpServers"})
+
+
+def _tool_gate_allows(name: object, allowed: frozenset[str]) -> bool:
+    """The tool gate's rule: may a call to ``name`` run under ``allowed``?
+
+    Yes when ``name`` is in ``allowed``, is an infrastructure tool, or belongs to a
+    server allowlisted wholesale by a bare ``mcp__<server>`` entry (external config
+    servers, composio). Anything else is refused, including a name that is not a
+    non-empty string.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if name in allowed or name in _INFRA_TOOLS:
+        return True
+    return any(
+        name.startswith(f"{entry}__")
+        for entry in allowed
+        if _mcp_server_of(entry) and entry.count("__") == 1
+    )
+
+
+def _tool_gate_hook(allowed_tools: list[str]) -> Callable[..., Any]:
+    """Build the PreToolUse hook that holds a turn to ``allowed_tools``.
+
+    The CLI runs under ``bypassPermissions``, where ``allowed_tools`` only
+    auto-approves: a tool missing from it is still offered and still runs. This
+    hook is the enforcement. It is registered with ``matcher=None`` so it sees
+    every call, MCP tools included, and snapshots the list so a later edit to it
+    cannot widen the gate. It never raises (that tears down the CLI stream); an
+    error denies the call.
+    """
+    allowed = frozenset(allowed_tools)
+
+    async def gate(input_data: Any, tool_use_id: str | None, context: Any) -> dict:
+        try:
+            name = input_data.get("tool_name")
+            if _tool_gate_allows(name, allowed):
+                return {}
+            logger.warning("Tool gate denied %r: not in this turn's allowed tools", name)
+            reason = f"PocketPaw: the tool '{name}' is not enabled for this agent here."
+        except Exception:  # noqa: BLE001 — a raising hook kills the CLI stream
+            logger.exception("Tool gate failed; denying the call")
+            reason = "PocketPaw tool gate error: the call was blocked as a precaution."
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+
+    return gate
 
 
 # ── the Windows prompt spill ────────────────────────────────────────────────
@@ -2427,9 +2486,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # MCP pocket tools (get_pocket / list_pockets / set_state /
         # set_node_prop / add_node / etc.) are the complete interface.
         # Detect via the <pocket-scope> marker every pocket prompt
-        # carries; lock tools down to delegation + web + pocket MCP.
+        # carries; the built-ins shrink to delegation + web. The pinned
+        # ``tools=`` list and the tool gate below enforce that (the
+        # allowlist alone never did, under bypassPermissions).
         #
-        # Without this gate, the agent has been observed reaching for
+        # Without this lock, the agent has been observed reaching for
         # shell introspection (e.g. `env | grep pocket; curl localhost`)
         # to "figure out" pocket state, which trips the security rails
         # AND is the wrong path — the MCP tools already expose
@@ -2488,18 +2549,16 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     existing.add(tool_id)
             logger.info("Surface tool-allow: unioned %s into allowlist", sorted(allow_sdk_tools))
 
-        # Per-surface MCP-tool deny set (threaded from the chat loop's
-        # resolved ``SurfaceProfile``). Any denied id is subtracted from the
-        # allowlist BEFORE the SDK launches, so the agent is physically
-        # unable to call it. On the /sites svelte-create surface this forbids
-        # the two ripple-create tools (``create_landing_site`` +
-        # ``pocket_specialist__create``) so the agent CANNOT fall back to
-        # building a rippleSpec landing page — prose-only "do not call the
-        # ripple tool" routing was proven to fail. Empty for every other
-        # surface (a no-op), so ``create_svelte_site`` / ``publish`` /
-        # ``pocket_specialist__edit`` and the ripple-engine / refine /
-        # non-sites flows are untouched. This is the typed replacement for
-        # the old prompt-sniffing ``engine="svelte"`` marker gate.
+        # Per-surface deny set (threaded from the chat loop's resolved
+        # ``SurfaceProfile``): ``mcp__`` ids and bare built-in names like
+        # ``Bash``. The subtraction feeds the tool gate and the pinned
+        # ``tools=`` list below, and the set is also passed as
+        # ``disallowed_tools``; under bypassPermissions the subtraction alone
+        # blocks nothing. Examples: the browser tools everywhere but /browser,
+        # the two ripple-create tools on /sites svelte-create (prose-only "do
+        # not call the ripple tool" routing was proven to fail), Bash / Read /
+        # ... on /sites and /code. Deny is the hard cap: applied after the
+        # ``allow_sdk_tools`` union and before the mode/exclusive filters.
         if deny_mcp_tool_ids:
             before_count = len(allowed_tools)
             allowed_tools = [t for t in allowed_tools if t not in deny_mcp_tool_ids]
@@ -2566,16 +2625,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     sorted(allow_mcp_tool_ids),
                 )
 
-        # Build hooks for security
-        hooks = {
-            "PreToolUse": [
-                self._HookMatcher(
-                    matcher="Bash",  # Only hook Bash commands
-                    hooks=[self._block_dangerous_hook],
-                )
-            ]
-        }
-
         # Build options
         #
         # Windows note: an oversized prompt is spilled to a file and passed as a
@@ -2604,21 +2653,26 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # all passed explicitly below, so none of them depend on
         # setting sources. See
         # https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts
-        # Per-send tool switch (2026-09-11). ``tools`` is the BASE SET and
-        # ``allowed_tools`` only filters it, so emptying the allowlist is NOT
-        # how you turn tools off here — measured in the SDK's own CLI
-        # transport, which extends the command with ``--allowed-tools`` only
-        # ``if effective_allowed_tools:``. An empty list is therefore not
-        # "allow nothing", it is "say nothing", and the CLI falls back to its
-        # DEFAULT tool set. A switch built that way would read Off and change
-        # nothing, which is the exact defect this switch already shipped once.
         #
-        # ``tools=[]`` is the lever: the transport turns it into ``--tools ""``.
-        # The allowlist is emptied too, because it is what the warm-client cache
-        # key is built from — without that a tools-off turn would be served the
-        # client built WITH tools, the one-slot problem again.
+        # Tool scope. ``tools`` is the base set of built-ins the model is offered
+        # (unset = every built-in the installed CLI ships: cron, messaging,
+        # workflows, ...). ``allowed_tools`` is only the auto-approve list, and
+        # under bypassPermissions it constrains nothing. So the final
+        # ``allowed_tools`` is enforced three ways: the tool gate (a PreToolUse
+        # hook on every tool), ``tools`` pinned to this turn's built-ins, and
+        # ``disallowed_tools`` for the surface deny set. A per-send tools-off
+        # turn sets ``tools=[]`` (the transport sends ``--tools ""``; an empty
+        # allowlist alone just omits the flag). It empties the allowlist too,
+        # which the warm-client cache key is built from, so it is never served
+        # the client built WITH tools.
         if not tools_enabled:
             allowed_tools = []
+        hooks = {
+            "PreToolUse": [
+                self._HookMatcher(matcher=None, hooks=[_tool_gate_hook(allowed_tools)]),
+                self._HookMatcher(matcher="Bash", hooks=[self._block_dangerous_hook]),
+            ]
+        }
         options_kwargs = {
             "system_prompt": system_prompt_arg,
             "allowed_tools": allowed_tools,
@@ -2630,6 +2684,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         }
         if not tools_enabled:
             options_kwargs["tools"] = []
+        else:
+            # Built-ins = every non-``mcp__`` entry left after policy, the
+            # ``allow_sdk_tools`` union and the deny. ``ToolSearch`` is always
+            # pinned: without it the CLI turns tool search off and loads every
+            # MCP schema up front. ``tools`` never filters MCP tools.
+            builtins = [t for t in allowed_tools if not t.startswith("mcp__")]
+            options_kwargs["tools"] = list(dict.fromkeys([*builtins, "ToolSearch"]))
+        if deny_mcp_tool_ids:
+            options_kwargs["disallowed_tools"] = sorted(deny_mcp_tool_ids)
 
         # Load PocketPaw's bundled skills as a Claude Code *local plugin*.
         # ``setting_sources=[]`` above disables the SDK's ~/.claude/skills
@@ -2761,8 +2824,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
                 cap = _DEFAULT_MAX_MCP_OUTPUT_TOKENS
             sdk_env.setdefault("MAX_MCP_OUTPUT_TOKENS", str(cap))
-        if sdk_env:
-            options_kwargs["env"] = sdk_env
+        # On a claude.ai subscription login the CLI fetches the ACCOUNT's claude.ai
+        # connectors into every session. They are not PocketPaw tools and must never
+        # reach a tenant's agent, so this is a hard set: no parent env or per-run
+        # extra can turn them back on.
+        sdk_env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        options_kwargs["env"] = sdk_env
         if is_non_anthropic:
             options_kwargs["model"] = llm.model
 
@@ -2808,7 +2875,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # permission prompts. Without bypassPermissions, tool calls that need
         # approval (like Bash — used by memory save, web search, etc.) hang
         # indefinitely on messaging channels.
-        # Dangerous Bash commands are still caught by the PreToolUse hook.
+        # Bypass approves EVERY tool call, so the tool gate (PreToolUse, all
+        # tools) is what holds the turn to its allowed set; dangerous Bash
+        # commands are caught by the Bash PreToolUse hook.
         options_kwargs["permission_mode"] = "bypassPermissions"
 
         # Model selection for Anthropic providers:
@@ -3250,12 +3319,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         ``deny_mcp_tool_ids`` is a per-surface MCP-tool deny set threaded down
         from the chat loop (resolved from the request's ``SurfaceProfile``).
-        Any id in it is subtracted from ``allowed_tools`` before the SDK
-        launches, so the agent is physically unable to call those tools. Empty
-        by default (a no-op for legacy / non-/sites runs); non-empty only on the
-        /sites svelte-create surface, where it forbids the two ripple-create
-        tools so the agent cannot fall back to a rippleSpec landing page. This
-        is the typed replacement for the deleted prompt-sniffing gate.
+        Any id in it is subtracted from ``allowed_tools`` and passed as
+        ``disallowed_tools``, and the tool gate refuses it at call time (see
+        ``_build_options``). Empty by default (a no-op for legacy runs).
 
         ``allow_sdk_tools`` is the per-entity ADDITIVE SDK-tool allowlist
         (entity-rooms chunk ①), resolved from the entity pocket's
