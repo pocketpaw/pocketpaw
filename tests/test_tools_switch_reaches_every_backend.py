@@ -235,5 +235,7 @@ def test_tools_on_is_unchanged() -> None:
     """
     on = _built(True)
 
-    assert getattr(on.options, "tools", None) is None, "the base set must stay unset"
+    # The base set is pinned to the turn's built-ins (see
+    # test_claude_sdk_tool_scoping), never emptied.
+    assert "ToolSearch" in (getattr(on.options, "tools", None) or []), "the base set was emptied"
     assert list(getattr(on.options, "allowed_tools", []) or []), "the allowlist vanished"
