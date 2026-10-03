@@ -345,7 +345,7 @@ def validate_placement(args: dict, duration_s: float) -> tuple[dict | None, str 
     if lo >= hi:
         return None, f"`replace_range` from_ms ({lo}) must be less than to_ms ({hi})."
     want = (hi - lo) / 1000
-    if abs(duration_s - want) > 0.05:
+    if abs(duration_s - want) > 0.001:
         return None, (
             f"data-duration is {duration_s:g}s but replace_range spans {want:g}s, so the "
             f'graphic would not fill the gap. Set data-duration="{want:g}" on the root and '

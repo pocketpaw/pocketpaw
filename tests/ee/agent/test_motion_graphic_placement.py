@@ -1,6 +1,6 @@
 # tests/ee/agent/test_motion_graphic_placement.py — add_motion_graphic placement.
 # start_ms and replace_range are validated (exclusivity, from < to, whole ms, a
-# data-duration that fills the cut) and reach the SSE frame as startMs and
+# data-duration that fills the cut to the millisecond) and reach the SSE frame as startMs and
 # replaceRange {fromMs, toMs}; the reply still says dispatched, never done.
 
 from __future__ import annotations
@@ -102,9 +102,15 @@ def test_a_duration_that_does_not_fill_the_cut_names_the_exact_value() -> None:
     assert "4s" in error
 
 
-def test_a_duration_within_tolerance_is_accepted() -> None:
-    keys, error = validate_placement({"replace_range": {"from_ms": 0, "to_ms": 4040}}, 4.0)
-    assert error is None and keys["replaceRange"]["toMs"] == 4040
+def test_a_render_even_a_few_ms_short_is_refused() -> None:
+    keys, error = validate_placement({"replace_range": {"from_ms": 0, "to_ms": 4020}}, 4.0)
+    assert keys is None
+    assert 'data-duration="4.02"' in error
+
+
+def test_an_exact_millisecond_span_is_accepted() -> None:
+    keys, error = validate_placement({"replace_range": {"from_ms": 1000, "to_ms": 4333}}, 3.333)
+    assert error is None and keys["replaceRange"] == {"fromMs": 1000, "toMs": 4333}
 
 
 async def test_replace_range_reaches_the_sse_frame(open_timeline) -> None:
