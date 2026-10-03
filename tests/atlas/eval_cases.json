@@ -540,6 +540,12 @@
       "expected_id": "capability:studio.publish_template",
       "rank_within": 1,
       "note": "Added 2026-10-02 (feat/studio-templates): publishing a Studio generation."
+    },
+    {
+      "intent": "does chatgpt mention my business",
+      "expected_id": "capability:tools.ai_check",
+      "rank_within": 1,
+      "note": "The free public AI visibility check."
     }
   ]
 }
