@@ -7131,7 +7131,9 @@ server is in `SURFACE_SCOPED_MCP_SERVERS`, so no other chat registers it.
 
 **AI overview.** `POST /runs/{trace_id}/overview` (admin only, else `403`)
 returns `{text, model, created_at}`. When the run detail already carries an
-`overview` it is returned as is, with no LLM call, unless `?refresh=1`.
+`overview` it is returned as is, with no LLM call, unless `?refresh=1`; even
+then a cached overview less than 60 s old is returned as is. Concurrent
+requests for the same run on one server share a single generation.
 Otherwise the proxy builds a capped digest of the run (the user prompt,
 assistant turns, each tool call with its arguments and result or error, the
 findings, tokens, cost and duration), asks the workspace's agent backend for

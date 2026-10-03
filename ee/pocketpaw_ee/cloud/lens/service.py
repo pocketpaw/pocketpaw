@@ -20,9 +20,12 @@
 # so paw-lens never counts that housekeeping call as a run. The digest is
 # attacker-reachable text (user input, tool output), so the call runs tool-less
 # (``tools_enabled=False``: no tools, no MCP servers) and the digest is fenced
-# in ``<trace_data>`` as untrusted data. The result is PUT to
-# paw-lens, which owns the cache. LLM failure or timeout is 503
-# ``lens.overview_failed``; paw-lens errors keep their own CloudError.
+# in ``<trace_data>`` as untrusted data. The result is PUT to paw-lens, which
+# owns the cache. Spend guards: concurrent calls for one (workspace, trace)
+# share one in-process generation, and ``refresh`` within
+# ``OVERVIEW_REFRESH_COOLDOWN_SECONDS`` of the cached overview returns it. LLM
+# failure or timeout is 503 ``lens.overview_failed``; paw-lens errors keep
+# their own CloudError.
 #
 # Settings are read at call time, not import, so test overrides apply (the
 # cached ``get_settings`` still needs a restart in prod). An empty URL short-circuits to
@@ -49,12 +52,18 @@ logger = logging.getLogger(__name__)
 
 _client = LensClient()
 
+# In-flight overview generations, keyed (workspace_id, trace_id).
+# ponytail: per-process, so N workers can still run N generations for one run;
+# move to a Redis lock if that ever shows up in spend.
+_overview_inflight: dict[tuple[str, str], asyncio.Future[Any]] = {}
+
 # Id patterns shared by the HTTP router and the MCP tools. A leading
 # alphanumeric blocks ``.``/``..``, so nothing can path-inject upstream.
 SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
 AGENT_ID = r"^[A-Za-z0-9_-]{1,64}$"
 
 OVERVIEW_TIMEOUT_SECONDS = 60.0
+OVERVIEW_REFRESH_COOLDOWN_SECONDS = 60.0  # a refresh this soon returns the cached overview
 OVERVIEW_MAX_BYTES = 8 * 1024  # paw-lens rejects a longer overview text
 DIGEST_MAX_CHARS = 24_000
 _FIELD_MAX_CHARS = 600
@@ -340,15 +349,50 @@ def _overview_model(settings: Any) -> str:
     return getattr(settings, field, "") or backend or "unknown"
 
 
+def _recent(overview: Any) -> bool:
+    """Was this cached overview created inside the refresh cooldown?"""
+    try:
+        created = datetime.fromisoformat(str(overview.get("created_at")))
+    except (AttributeError, ValueError):
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    age = (datetime.now(UTC) - created).total_seconds()
+    return age < OVERVIEW_REFRESH_COOLDOWN_SECONDS
+
+
 async def run_overview(
     workspace_id: str, trace_id: str, *, refresh: bool, generated_by: str
 ) -> Any:
-    """The run's AI overview ``{text, model, created_at}``; cached unless ``refresh``."""
+    """The run's AI overview ``{text, model, created_at}``; cached unless ``refresh``
+    (and even then, cached while younger than the cooldown). Concurrent calls for
+    one run await a single generation; ``shield`` keeps a caller's cancelled
+    request from killing the generation the others are waiting on."""
+    key = (workspace_id, trace_id)
+    task = _overview_inflight.get(key)
+    if task is None or task.done():
+        task = asyncio.ensure_future(
+            _generate_overview(workspace_id, trace_id, refresh=refresh, generated_by=generated_by)
+        )
+        _overview_inflight[key] = task
+
+        def _forget(done: asyncio.Future[Any]) -> None:
+            if _overview_inflight.get(key) is done:
+                del _overview_inflight[key]
+
+        task.add_done_callback(_forget)
+    return await asyncio.shield(task)
+
+
+async def _generate_overview(
+    workspace_id: str, trace_id: str, *, refresh: bool, generated_by: str
+) -> Any:
     detail = await get_run(workspace_id, trace_id, full=True)
     if detail == _disabled():
         return detail
-    if detail.get("overview") and not refresh:
-        return detail["overview"]
+    cached = detail.get("overview")
+    if cached and (not refresh or _recent(cached)):
+        return cached
 
     wanted = [
         s.get("span_id")
