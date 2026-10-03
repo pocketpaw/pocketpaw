@@ -6916,6 +6916,7 @@ proxy its read API, scoped to the caller's active workspace. Enterprise only.
 | `GET /api/v1/lens/runs?agent_id=&automation=&status=ok\|error&limit=` | `GET /v1/runs` |
 | `GET /api/v1/lens/runs/{trace_id}` | `GET /v1/runs/{trace_id}` |
 | `GET /api/v1/lens/runs/{trace_id}/spans/{span_id}` | `GET /v1/runs/{trace_id}/spans/{span_id}` |
+| `POST /api/v1/lens/runs/{trace_id}/overview?refresh=1` | `GET /v1/runs/{trace_id}` (+ spans), then `PUT /v1/runs/{trace_id}/overview` |
 | `GET /api/v1/lens/agents` | `GET /v1/agents` |
 | `GET /api/v1/lens/monitors` | `GET /v1/monitors` |
 | `GET /api/v1/lens/monitors/{slug}` | `GET /v1/monitors/{slug}` |
@@ -6928,7 +6929,30 @@ defaults to 50); a value outside those rules is a `422` and no upstream call.
 The span route returns one span's attributes, events, gen_ai messages and tool
 call. The proxy adds `workspace_id` from the session to
 every upstream call and drops any `workspace_id` the client sends. Response
-bodies are paw-lens's JSON, unchanged.
+bodies are paw-lens's JSON, unchanged for workspace admins.
+
+**Content privacy.** Only a workspace admin or owner (`lens.manage`) sees message
+and tool content. For anyone else the runs list, run detail, span detail and
+issue detail come back with run `summary` and span-list `args_preview` set to
+`""`, span `messages` set to `null`, `tool.arguments` and `tool.result` set to
+`null`, and every attribute (span or event) whose key starts with
+`gen_ai.input.`, `gen_ai.output.`, `gen_ai.system_instructions`,
+`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` or
+`pydantic_ai.all_messages` replaced by `"[hidden]"`. Object bodies gain
+`"content_hidden": true`; the runs list is an array, so it is stripped without
+the flag. The `pocketpaw_lens` agent tools apply the same rule.
+
+**AI overview.** `POST /runs/{trace_id}/overview` (admin only, else `403`)
+returns `{text, model, created_at}`. When the run detail already carries an
+`overview` it is returned as is, with no LLM call, unless `?refresh=1`.
+Otherwise the proxy builds a capped digest of the run (the user prompt,
+assistant turns, each tool call with its arguments and result or error, the
+findings, tokens, cost and duration), asks the workspace's agent backend for
+3 to 6 bullets (what was asked, what the agent did, what failed and why, cost
+and latency notes, one suggested fix), stores it in paw-lens and returns it.
+That LLM call is stamped `paw.internal=true`, so paw-lens does not record it as
+a run. The call has a 60 s budget; an LLM error, timeout or empty reply is
+`503 lens.overview_failed`.
 
 - `POCKETPAW_LENS_API_URL` unset: every route returns `200 {"enabled": false}`
   and makes no network call.
@@ -6938,8 +6962,9 @@ bodies are paw-lens's JSON, unchanged.
 - paw-lens down, slow (3 s timeout) or erroring: `503 lens.unavailable`.
   paw-lens rejects the token: `503 lens.misconfigured`. paw-lens 404: `404
   lens.not_found`. paw-lens 400: `400 lens.bad_request`.
-- Mute and resolve need a workspace admin or owner (`lens.manage`); a member
-  gets `403 workspace.insufficient_role`. Reads are open to any member.
+- Mute, resolve and the overview need a workspace admin or owner
+  (`lens.manage`); a member gets `403 workspace.insufficient_role`. Reads are
+  open to any member, with content redacted as above.
 
 ### Monitors: check-ins and run attribution
 
