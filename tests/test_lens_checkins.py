@@ -222,3 +222,41 @@ def test_heartbeat_job_is_monitored():
         assert set(_monitors(sched).values()) == {("heartbeat", daemon._job_id)}
     finally:
         daemon.stop()
+
+
+async def test_automation_rule_fire_checks_in(lens, monkeypatch):
+    from pocketpaw.automations.evaluator import AutomationEvaluator
+
+    seen, _ = lens
+    evaluator = AutomationEvaluator()
+    fired = []
+
+    async def dispatch(rule):
+        fired.append(rule.id)
+
+    monkeypatch.setattr(evaluator, "_dispatch_rule", dispatch)
+    await evaluator._fire_rule(SimpleNamespace(id="rule-9"))
+    await flush()
+    assert fired == ["rule-9"]
+    assert [(s["body"]["monitor"], s["body"]["status"]) for s in seen] == [
+        ("automation_rule:rule-9", "in_progress"),
+        ("automation_rule:rule-9", "ok"),
+    ]
+
+
+async def test_resilient_query_is_traced(capfire, monkeypatch):
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_ENABLED", "1")
+
+    async def fake_query(prompt, options):
+        yield "event-1"
+        yield "event-2"
+
+    fake_self = SimpleNamespace(_query=fake_query, _connect_timeout=lambda: 5.0)
+    events = [e async for e in ClaudeSDKBackend._resilient_query(fake_self, "hi", None)]
+    assert events == ["event-1", "event-2"]
+    spans = [s for s in capfire.exporter.exported_spans_as_dict() if s["name"] == "invoke_agent"]
+    assert len(spans) == 1
+    assert spans[0]["attributes"]["pocketpaw.claude_sdk.mode"] == "stateless"
+    assert spans[0]["attributes"]["gen_ai.operation.name"] == "invoke_agent"

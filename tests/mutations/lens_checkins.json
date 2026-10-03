@@ -1,0 +1,92 @@
+[
+  {
+    "label": "lens: a clean run reports error",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "status, error = \"ok\", None",
+    "replace": "status, error = \"error\", None",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: token header dropped",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "headers={\"X-Lens-Token\": token}",
+    "replace": "headers={}",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: job exception swallowed",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "status, error = \"error\", _error_text(exc)\n        raise",
+    "replace": "status, error = \"error\", _error_text(exc)",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: no total timeout on the post",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "TIMEOUT_S = 1.0",
+    "replace": "TIMEOUT_S = 30.0",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: kind baggage not set",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "\"paw.automation.kind\": kind,",
+    "replace": "\"paw.automation.kindx\": kind,",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "lens: no URL still posts",
+    "file": "src/pocketpaw/lens_checkins.py",
+    "find": "return (f\"{base}/v1/checkins\", token) if base else None",
+    "replace": "return (f\"{base or 'http://lens'}/v1/checkins\", token)",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "reminders: job not monitored",
+    "file": "src/pocketpaw/scheduler.py",
+    "find": "            monitored_job(\n                self._trigger_reminder, kind=\"reminder\", id=reminder[\"id\"], trigger=trigger\n            ),",
+    "replace": "            self._trigger_reminder,",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  },
+  {
+    "label": "sweeps: _run_sweeps not monitored",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "async with sweep_tick(fn.__name__, interval):",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/lens/test_checkin_wiring.py"
+    ]
+  },
+  {
+    "label": "arq: chat runs monitored as jobs",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "if f.name in _INTERACTIVE_JOBS",
+    "replace": "if False",
+    "tests": [
+      "tests/cloud/lens/test_checkin_wiring.py"
+    ]
+  },
+  {
+    "label": "claude_sdk: stateless query untraced",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        with span(\n            \"invoke_agent\",",
+    "replace": "        with span(\n            \"invoke_agent_x\",",
+    "tests": [
+      "tests/test_lens_checkins.py"
+    ]
+  }
+]
