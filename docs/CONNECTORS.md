@@ -320,7 +320,10 @@ The Claude SDK backend enforces the resulting set when a tool is CALLED: a
 PreToolUse gate refuses anything outside the turn's allowed tools, the built-in
 list handed to the CLI is pinned to that set, and denied ids are also passed as
 `disallowed_tools`. The CLI runs with `bypassPermissions`, where the SDK's
-`allowed_tools` on its own only auto-approves and blocks nothing.
+`allowed_tools` on its own only auto-approves and blocks nothing. On a turn with
+a deny set, a mode allow-list or an exclusive tool list, the backend also starts
+only the MCP servers that own at least one allowed tool. A server whose every
+tool is out of scope never starts, so tool search cannot surface its tools.
 
 ### How it derives at bind / unbind
 
