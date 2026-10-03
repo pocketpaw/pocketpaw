@@ -1,0 +1,45 @@
+---
+title: "Configure an agent"
+description: "The agent editor holds an agent's identity, knowledge, tools, and limits across six tabs: Profile, Knowledge, Soul, Tools, Reasoning, and Plugins."
+---
+
+# Configure an agent
+
+**What it is.** The agent editor. It holds the agent's identity, knowledge, tools, and limits across six tabs: **Profile**, **Knowledge**, **Soul**, **Tools**, **Reasoning**, and **Plugins**.
+
+**When you'd use it.** Use it whenever you need to change how an agent behaves — its model, what it can do, or what data it can reach.
+
+## Set identity and model (Profile tab)
+1. Open an agent, then stay on the **Profile** tab.
+2. Set the **Name** and **Persona** — the persona is the agent's core identity.
+3. Pick a **Backend** (the AI provider), then a **Model**. Leave Model on **Auto-select** to let Paw OS by PocketPaw choose.
+4. Set **Visibility**: Private, Workspace, or Public.
+5. Drag **Temperature** to control how creative the agent is. Lower is more focused; higher is more varied.
+6. Use **System Prompt** for extra rules — formatting, constraints, tone. It's appended after the persona.
+
+Changes save on their own. Watch the header: it shows "Saving…", then "Saved".
+
+## Turn tools on and off (Tools tab)
+1. Click the **Tools** tab.
+2. Each tool has a switch. Click a row to turn that tool on or off.
+3. Use **Enable all** or **Disable all** to flip everything at once.
+4. The count at the top shows how many tools are on.
+
+Tools are grouped: Search & Research, Productivity, Files & Code, Media, Enterprise, and Other.
+
+## Limit what the agent can reach (Scope)
+1. On the **Profile** tab, scroll to **Scope**.
+2. Add scope tags (for example, `org:sales:*`) to narrow what the agent retrieves.
+3. Leave it empty for no narrowing — the agent can reach everything available to it.
+
+Scope saves on its own. The list re-syncs to whatever the server confirms.
+
+## Tips
+- The **Knowledge** tab lets you feed an agent files, URLs, or pasted text it should know.
+- The **Soul** tab holds personality sliders and a read-only memory list. Memory edits happen elsewhere.
+- To remove an agent, scroll to the bottom and click **Delete Agent**. You'll be asked to confirm — this can't be undone.
+
+## If something's off
+- "Save failed" in the header means a change didn't stick. Check your connection and re-enter the value.
+- A failed scope save resets the picker to the last confirmed list, so you won't be left with a value the server rejected.
+- Two tool groups have their own names: **Fabric** (business automation tools) and **Instinct** (the agent's built-in judgement tools).
