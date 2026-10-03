@@ -72,6 +72,15 @@
     ]
   },
   {
+    "label": "the cut tolerance loosens back to 50 ms, leaving a black gap",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    if abs(duration_s - want) > 0.001:\n",
+    "replace": "    if abs(duration_s - want) > 0.05:\n",
+    "tests": [
+      "tests/ee/agent/test_motion_graphic_placement.py"
+    ]
+  },
+  {
     "label": "placements stop being exclusive",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
     "find": "    if len(given) > 1:\n",
@@ -92,7 +101,7 @@
   {
     "label": "a graphic that does not fill the cut is dispatched anyway",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
-    "find": "    if abs(duration_s - want) > 0.05:\n",
+    "find": "    if abs(duration_s - want) > 0.001:\n",
     "replace": "    if False:\n",
     "tests": [
       "tests/ee/agent/test_motion_graphic_placement.py"
