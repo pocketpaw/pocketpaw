@@ -198,3 +198,93 @@ async def test_parse_error_mid_turn_keeps_one_root_span_and_every_message(instru
     roots = [s for s in _spans(instrumented) if s["name"] == "invoke_agent"]
     assert len(roots) == 1, "a recovered parse error must not split the turn"
     assert roots[0]["attributes"]["gen_ai.usage.output_tokens"] == 10
+
+
+@pytest.mark.parametrize("cancel_after", [None, 5], ids=["completed", "cancelled"])
+async def test_cloud_run_loop_detaches_the_turn_span_in_its_own_context(
+    instrumented, caplog, monkeypatch, cancel_after
+):
+    # The cloud chat run loop (run_core._drive_agent_loop) steps the backend's
+    # generator from a new task per event. logfire's invoke_agent span is attached
+    # across ``yield``, so each step must run in the SAME Context or its detach
+    # fails and logs "Failed to detach context" on every turn. A cancelled run
+    # must close the half-read turn in that Context too, not leave it to GC.
+    import asyncio
+    import gc
+    import logging
+    from types import SimpleNamespace
+
+    pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
+    from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
+    from pocketpaw_ee.cloud.chat.runs import run_core
+
+    sdk = _make_sdk([_TOOL_USE, _TOOL_RESULT, _TEXT, _RESULT])
+
+    class _Pool:
+        async def get(self, _agent_id):
+            return SimpleNamespace(config={}, agent_name="A")
+
+        def run(self, agent_id, content, session_key, **_kw):
+            return sdk.run(content, system_prompt="identity", session_key=session_key)
+
+    async def _empty(*a, **k):
+        return ""
+
+    checks = 0
+
+    async def _is_cancelled():
+        nonlocal checks
+        checks += 1
+        return cancel_after is not None and checks >= cancel_after
+
+    monkeypatch.setattr(run_core, "get_agent_pool", lambda: _Pool())
+    monkeypatch.setattr(run_core, "build_knowledge_context", _empty)
+    monkeypatch.setattr(run_core, "build_behavior_instructions", lambda ctx, backend_name=None: "")
+    monkeypatch.setattr(run_core, "attach_sse_event_sink", lambda q: None)
+    monkeypatch.setattr(run_core, "attach_agent_identity", lambda **k: None)
+    monkeypatch.setattr(run_core, "detach_sse_event_sink", lambda t: None)
+    monkeypatch.setattr(run_core, "detach_agent_identity", lambda t: None)
+    caplog.set_level(logging.ERROR, logger="opentelemetry.context")
+
+    selection = ModelSelection(complexity=TaskComplexity.MODERATE, model=_MODEL, reason="test")
+    ctx = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+    )
+    with patch("pocketpaw.llm.client.resolve_llm_client") as resolve:
+        llm = MagicMock()
+        llm.is_ollama = llm.is_openai_compatible = llm.is_gemini = False
+        llm.is_litellm = llm.is_openrouter = False
+        llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
+        resolve.return_value = llm
+        with patch("pocketpaw.agents.model_router.ModelRouter") as router:
+            router.return_value.classify.return_value = selection
+            with patch.object(type(sdk), "_get_mcp_servers", return_value={}):
+                frames = [
+                    f
+                    async for f in run_core._drive_agent_loop(
+                        ctx,
+                        user_content="read it",
+                        attachments_in=None,
+                        mentions_in=None,
+                        history=None,
+                        is_cancelled=_is_cancelled,
+                        emit_stream_start=False,
+                    )
+                ]
+
+    gc.collect()  # a generator left suspended is finalized here, from another Context
+    await asyncio.sleep(0)
+    detach = [r.getMessage() for r in caplog.records if "detach" in r.getMessage().lower()]
+    assert not detach, detach
+    spans = _spans(instrumented)
+    roots = [s for s in spans if s["name"] == "invoke_agent"]
+    assert len(roots) == 1, [s["name"] for s in spans]
+    chats = [s for s in spans if s["attributes"].get("gen_ai.operation.name") == "chat"]
+    assert chats and all(c["parent"]["span_id"] == roots[0]["context"]["span_id"] for c in chats)
+    if cancel_after is None:
+        assert any(n == "chunk" and "Done." in d["content"] for n, d in frames), frames
