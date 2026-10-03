@@ -160,5 +160,14 @@
     "tests": [
       "tests/cloud/surface/test_studio_editor_preamble.py"
     ]
+  },
+  {
+    "label": "the procedure forgets what a marked area means",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "  clip under that time on the main video track. \"Zoom in here\" is zoom_clip with\n  focusX/focusY = the centre and atMs = that time.",
+    "replace": "  clip under that time on the main video track.",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
   }
 ]
