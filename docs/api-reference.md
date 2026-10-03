@@ -3720,6 +3720,47 @@ Self-hosted and OSS deployments have no billing: the `402` is skipped (`sites_en
 and the flag is stored, but the stamper still badges any site whose plan does not remove
 the badge.
 
+## Sites — AI visibility
+
+Every site published to workers.dev carries files that let search engines and AI
+assistants read it. AI crawlers do not run JavaScript, and workers.dev is Cloudflare's
+domain, so zone features like managed robots.txt can't be switched on for it. The files
+ship inside the site instead. Each publish writes:
+
+| Path | What it is |
+|---|---|
+| `/robots.txt` | `User-agent: *` with `Allow: /` and a `Content-Signal: search=yes, ai-input=yes, ai-train=<yes\|no>` line. Unless the owner allows training, it also has a `Disallow: /` group for each training crawler: GPTBot, ClaudeBot, Google-Extended, Applebot-Extended, CCBot. Search and assistant crawlers (OAI-SearchBot, ChatGPT-User, Claude-SearchBot, Claude-User, PerplexityBot, Perplexity-User) are never blocked. Ends with the `Sitemap:` line. |
+| `/sitemap.xml` | Every built page, as an absolute URL, with the publish date as `lastmod`. |
+| `/llms.txt` | Site name, its description, and a list of pages linking to their markdown copies. |
+| `/<page>.md` | A markdown copy of each built page (`/index.md`, `/about.md`), served as `text/markdown`. Each page answers with `Link: </about.md>; rel="alternate"; type="text/markdown"`. |
+| `/<key>.txt` | The site's IndexNow key. After a successful deploy the site's URLs are sent to IndexNow (Bing, Yandex and others; Google does not take part). |
+| JSON-LD | A `LocalBusiness` block in each page's `<head>` when the page shows a `tel:` link or an `<address>`. Skipped when there is neither, or when the page already has its own JSON-LD. |
+
+Absolute URLs use the site's first live custom domain, else its workers.dev host. Only
+pages that exist as HTML at deploy time are covered, so SSR-only routes on a dynamic site
+get no markdown copy. A `robots.txt`, `sitemap.xml` or `llms.txt` the site ships itself
+(an imported site, say) is kept as it is. The IndexNow ping and the file writes never fail
+a publish. Operators can turn the whole thing off with `POCKETPAW_SITES_AI_READY=0`.
+
+### `PATCH /sites/{site_id}/ai-visibility`
+
+Auth: `fabric.write`, tenant-scoped, same as `PATCH /sites/{site_id}/branding`. A missing
+or cross-tenant site is `404`.
+
+Request:
+
+```json
+{ "ai_training_allowed": true }
+```
+
+`ai_training_allowed` is required; an empty body is `422`. Default for every site is
+`false`: training crawlers are blocked.
+
+Response `200`: the full site response, carrying `ai_training_allowed`.
+
+It only changes the training lines of `robots.txt`. Like the badge switch, the value is
+stored now and **reaches the live site on the next publish**.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and

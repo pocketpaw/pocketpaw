@@ -32,6 +32,8 @@ tags: ["api", "configuration"]
   branch. SA-2's kill-switch row said the off shape has "no main", which was true
   while only assets-only sites counted; a ripple or dynamic svelte site has a main
   either way, because that main is SvelteKit's own worker.
+  Updated 2026-10-03 (feat/ai-ready-sites, AV-1) — added "Paw Sites — AI visibility"
+  with POCKETPAW_SITES_AI_READY.
   Updated 2026-09-02 (feat/sites-analytics-gate, SA-2) — added the "Paw Sites —
   visitor analytics" section with PAW_SITES_ANALYTICS_DISABLED (the operator kill
   switch SA-2 introduces) and PAW_SITES_ANALYTICS_DATASET (which SA-1 shipped
@@ -359,6 +361,12 @@ It remains available for granting *other* external servers to `/sites`.
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `fabric_source_truth_mode` | `POCKETPAW_FABRIC_SOURCE_TRUTH_MODE` | enum | `off` | Rollout mode for Fabric source truth (`off`, `shadow`, `enforce`). `off` = pure last-writer-wins, no statements. `shadow` = provenance statements + divergence log lines recorded alongside the LWW cache. `enforce` = the trust-ladder resolver's winner owns the cache. Gate the flip to `enforce` with `python -m pocketpaw.fabric.divergence_report` — see [Fabric Source Truth](/concepts/architecture#fabric-source-truth). |
+
+## Paw Sites — AI visibility
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| — | `POCKETPAW_SITES_AI_READY` | boolean | unset (on) | Every workers.dev publish writes `robots.txt`, `sitemap.xml`, `llms.txt`, markdown page copies with `Link` headers, LocalBusiness JSON-LD and an IndexNow key file into the site, then pings IndexNow. `0`, `false`, `off` or `no` turns it off for the next publish of every site. Absolute URLs need a host, so a first publish with no live custom domain also needs `PAW_CF_WORKERS_SUBDOMAIN`; without it the files are skipped for that publish. See "Sites — AI visibility" in `docs/api-reference.md`. |
 
 ## Paw Sites — visitor analytics
 
