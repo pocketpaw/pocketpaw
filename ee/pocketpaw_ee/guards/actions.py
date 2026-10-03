@@ -372,6 +372,10 @@ ACTIONS: dict[str, ActionRule] = {
     # action guards every route (reads included) because the decision feed
     # itself carries who-tried-to-egress-what, which is sensitive.
     "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Agent health (ee.cloud.lens.router) — mute / resolve an issue in paw-lens.
+    # ADMIN because muting silences alerting for the whole workspace; the lens
+    # reads stay member-level (any member may view their workspace's health).
+    "lens.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Herdr cockpit — the read-only pane-telemetry surface (ee.cloud.herdr_cockpit
     # .router, HR-10a). ADMIN because herdr panes are NOT paw-workspace-scoped
     # (herdr mints its own workspace ids), so on a shared box a member-visible
