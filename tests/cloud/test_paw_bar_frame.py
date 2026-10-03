@@ -3,7 +3,8 @@
 # Updated 2026-10-03 (fix/paw-bar-frame-headers): Layer 4 runs the real frame
 # endpoint behind the dashboard's ``security_headers_middleware``. The live frame
 # keeps its frame-ancestors allowlist + sandbox, its own mic Permissions-Policy and
-# gets no X-Frame-Options; the dead shell keeps its sandbox CSP and no XFO.
+# gets no X-Frame-Options; the dead shell keeps its ``frame-ancestors *`` + sandbox
+# CSP and no XFO. The dead shell's CSP now names ``frame-ancestors *`` explicitly.
 #
 # Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
 # defaults to a concierge its owner has CREATED and switched on
@@ -646,14 +647,11 @@ class TestDeadFrameShell:
 # --------------------------------------------------------------------------- #
 
 
-def _assert_sandboxed(res, frame_ancestors: str | None) -> None:
+def _assert_sandboxed(res, frame_ancestors: str) -> None:
     csp = res.headers["content-security-policy"]
     directives = _directives(csp)
     assert _SANDBOX_DIRECTIVE in directives
-    if frame_ancestors is None:
-        assert not any(d.startswith("frame-ancestors") for d in directives)
-    else:
-        assert frame_ancestors in directives
+    assert frame_ancestors in directives
     # The one thing the sandbox exists to stop: the frame steering the top page.
     assert "allow-top-navigation" not in csp
 
@@ -674,8 +672,8 @@ async def test_dead_frame_for_disabled_concierge_is_sandboxed(frame_client):
     )
     assert res.status_code == 403
     assert "pawbar:dead" in res.text
-    # The dead shell never had an embedder gate; it gains the sandbox and nothing else.
-    _assert_sandboxed(res, None)
+    # The dead shell never had an embedder gate; it says so (frame-ancestors *).
+    _assert_sandboxed(res, "frame-ancestors *")
 
 
 @pytest.mark.asyncio
@@ -683,14 +681,14 @@ async def test_dead_frame_for_empty_allowlist_is_sandboxed(frame_client):
     await _site(allowed_origins=[])
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert res.status_code == 403
-    _assert_sandboxed(res, None)
+    _assert_sandboxed(res, "frame-ancestors *")
 
 
 def test_dead_frame_shell_is_sandboxed() -> None:
     from pocketpaw_ee.paw_bar.router import _dead_frame_response
 
     res = _dead_frame_response("https://brewco.com", ["brewco.com"])
-    assert res.headers["content-security-policy"] == _SANDBOX_DIRECTIVE
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors *")
 
 
 # --------------------------------------------------------------------------- #
@@ -742,5 +740,5 @@ async def test_dashboard_middleware_keeps_the_dead_frame_headers(dashboard_frame
     )
     assert res.status_code == 403
     assert "pawbar:dead" in res.text
-    assert res.headers["content-security-policy"] == _SANDBOX_DIRECTIVE
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors *")
     assert "x-frame-options" not in {k.lower() for k in res.headers}

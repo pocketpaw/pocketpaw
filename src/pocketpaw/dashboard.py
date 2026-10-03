@@ -4,9 +4,9 @@ Lightweight FastAPI server that serves the frontend and handles WebSocket commun
 
 Changes:
   - 2026-10-03: security_headers_middleware uses setdefault semantics, so a response's
-    own security headers survive; no X-Frame-Options on a response that set its own
-    CSP. Unblocks the paw-bar frame (frame-ancestors allowlist + microphone) on
-    self-hosted deploys.
+    own security headers survive. X-Frame-Options is skipped only when the response's
+    own CSP carries frame-ancestors (fails closed otherwise). Unblocks the paw-bar
+    frame (frame-ancestors allowlist + microphone) on self-hosted deploys.
   - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler,
     broadcasts health_update on status transitions.
   - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check,
@@ -173,12 +173,13 @@ async def security_headers_middleware(request: Request, call_next):
     # + sandbox) and Permissions-Policy (microphone for dictation); assigning over
     # them stopped the bar from embedding on any customer site.
     #
-    # A response that authored a CSP owns its framing policy, so it gets no
-    # X-Frame-Options either: XFO DENY beside a frame-ancestors allowlist blocks the
-    # frame in browsers that honour XFO. Convention: a route that sets a CSP without
-    # frame-ancestors is frameable by anyone. Today that is only the paw-bar dead
-    # shell, on purpose (it must render inside a refused embed to remove itself).
-    if "content-security-policy" not in response.headers:
+    # X-Frame-Options is skipped ONLY when the response's own CSP has a
+    # frame-ancestors directive: that directive owns framing, and XFO DENY beside an
+    # allowlist blocks the frame in browsers that honour XFO. A response CSP without
+    # frame-ancestors (say, a script policy) still gets XFO, so framing fails closed.
+    # A route that means to be frameable says so (the paw-bar dead shell sends
+    # ``frame-ancestors *``).
+    if "frame-ancestors" not in response.headers.get("content-security-policy", ""):
         # The file-content endpoint is embedded in same-origin iframes (the in-app
         # PDF/file viewer modal).
         is_file_content = request.url.path.startswith("/api/v1/files/content")

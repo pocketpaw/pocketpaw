@@ -3,7 +3,8 @@
 # Updated 2026-10-03 (fix/paw-bar-frame-headers): the live frame and the owner
 # preview frame send ``Permissions-Policy`` (``PAWBAR_FRAME_PERMISSIONS``, mic
 # opened to the frame for dictation), so the self-hosted dashboard middleware no
-# longer stamps ``microphone=()`` over them.
+# longer stamps ``microphone=()`` over them. The dead shell's CSP carries an
+# explicit ``frame-ancestors *`` so the middleware leaves it frameable.
 #
 # Updated 2026-10-02 (feat/partners-foundation, PH-1): concierge gates take the
 # site's workspace Paw Partners profile; the frame memo caches it with the Site,
@@ -741,9 +742,14 @@ def _dead_frame_response(po: str, allowed_origins: list[str]) -> HTMLResponse:
             f"</head><body>{script}</body></html>"
         ),
         status_code=403,
-        # No frame-ancestors here (the shell never had an embedder gate), but it
-        # still runs a script inside someone's page, so it is sandboxed like the rest.
-        headers={"Content-Security-Policy": _frame_csp(), "Cache-Control": "no-store"},
+        # No embedder gate: the shell must render inside a REFUSED embed to remove
+        # itself, so it says ``frame-ancestors *`` out loud (the dashboard
+        # middleware adds X-Frame-Options: DENY to any CSP without frame-ancestors).
+        # It still runs a script inside someone's page, so it is sandboxed like the rest.
+        headers={
+            "Content-Security-Policy": _frame_csp("frame-ancestors *"),
+            "Cache-Control": "no-store",
+        },
     )
 
 

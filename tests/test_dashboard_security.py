@@ -5,7 +5,7 @@ Covers:
   - Rate limiting (burst, refill, 429 responses, per-IP isolation)
   - Session tokens (create, verify, expired, tampered, master regen)
   - Security headers (2026-10-03: a response's own CSP / Permissions-Policy survive
-    the middleware, and a response with its own CSP gets no X-Frame-Options)
+    the middleware; X-Frame-Options is skipped only when that CSP has frame-ancestors)
   - CORS rejection of non-matching origins
   - WebSocket tunnel auth
 """
@@ -406,7 +406,8 @@ class TestSecurityHeaders:
 
     def test_response_own_headers_survive(self):
         """A route that authors its own CSP and Permissions-Policy keeps them, and
-        gets no X-Frame-Options (it owns its framing policy). The paw-bar frame
+        gets no X-Frame-Options when that CSP has frame-ancestors. A CSP without it
+        still gets DENY. The paw-bar frame
         relies on this to embed on customer sites with the mic available."""
         from fastapi import FastAPI
         from fastapi.responses import HTMLResponse
@@ -424,6 +425,10 @@ class TestSecurityHeaders:
                 "", headers={"Content-Security-Policy": csp, "Permissions-Policy": perms}
             )
 
+        @app.get("/scripted")
+        def scripted():
+            return HTMLResponse("", headers={"Content-Security-Policy": "script-src 'self'"})
+
         @app.get("/plain")
         def plain():
             return HTMLResponse("")
@@ -436,6 +441,11 @@ class TestSecurityHeaders:
         assert resp.headers["Permissions-Policy"] == perms
         assert "X-Frame-Options" not in resp.headers
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
+
+        # Own CSP without frame-ancestors: CSP kept, framing still fails closed.
+        resp = client.get("/scripted")
+        assert resp.headers["Content-Security-Policy"] == "script-src 'self'"
+        assert resp.headers["X-Frame-Options"] == "DENY"
 
         resp = client.get("/plain")
         assert resp.headers["X-Frame-Options"] == "DENY"
