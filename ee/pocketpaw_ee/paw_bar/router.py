@@ -1,5 +1,10 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
 #
+# Updated 2026-10-03 (fix/paw-bar-frame-headers): the live frame and the owner
+# preview frame send ``Permissions-Policy`` (``PAWBAR_FRAME_PERMISSIONS``, mic
+# opened to the frame for dictation), so the self-hosted dashboard middleware no
+# longer stamps ``microphone=()`` over them.
+#
 # Updated 2026-10-02 (feat/partners-foundation, PH-1): concierge gates take the
 # site's workspace Paw Partners profile; the frame memo caches it with the Site,
 # and the chat turn passes the key gate's profile into the quota check.
@@ -272,6 +277,14 @@ PAWBAR_FRAME_SANDBOX = (
     "allow-scripts allow-same-origin allow-forms allow-popups "
     "allow-popups-to-escape-sandbox allow-downloads"
 )
+
+
+# The ``Permissions-Policy`` the glass app document ships: the dashboard's strict
+# default with the microphone opened to the frame itself, for voice dictation (the
+# loader delegates it with ``<iframe allow="microphone">``). Set on the response so
+# the self-hosted dashboard's security-headers middleware keeps it instead of
+# stamping ``microphone=()``. The dead shell needs no mic and keeps that default.
+PAWBAR_FRAME_PERMISSIONS = "camera=(), microphone=(self), geolocation=()"
 
 
 def _frame_csp(frame_ancestors: str | None = None) -> str:
@@ -1200,6 +1213,7 @@ async def frame(
         content=html,
         headers={
             "Content-Security-Policy": _frame_csp(csp),
+            "Permissions-Policy": PAWBAR_FRAME_PERMISSIONS,
             # Every input that varies this document (key, w, po) is in the URL;
             # the rest is the Site's own state. No cookie, no per-visitor field,
             # no CSP nonce. So a browser may reuse it. ``private``, never
@@ -3740,7 +3754,11 @@ async def get_site_preview_frame(
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, scene_url=scene)
     return HTMLResponse(
         content=html,
-        headers={"Content-Security-Policy": _frame_csp(csp), "Cache-Control": "no-store"},
+        headers={
+            "Content-Security-Policy": _frame_csp(csp),
+            "Permissions-Policy": PAWBAR_FRAME_PERMISSIONS,
+            "Cache-Control": "no-store",
+        },
     )
 
 
