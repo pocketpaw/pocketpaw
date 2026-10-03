@@ -14,6 +14,17 @@ description: |
 ---
 
 <!--
+  Updated: 2026-07-16 (feat/senses-render-convention / SR-8) — added the
+  "Render results as a live pocket" section (the Ripple fusion): after a
+  connector_execute read, render the result as TYPED Ripple widgets pushed to
+  the pocket via POST /api/v1/pockets/<id>/spec/merge, instead of pasting raw
+  JSON into chat. Documents the two hard rules (typed widgets only / never raw
+  HTML from attacker-controllable email payloads; value/label split) and a
+  worked example (recent inbox -> each+card cards with a value/label select
+  filter, follow-up wired via invoke_tool -> connector_execute). The static
+  widget-recipes home-rail fallback is untouched. Read/send safety guidance
+  below is unchanged.
+
   Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) — the skill now
   instructs the agent to invoke Gmail actions through the agent-callable
   ``connector_execute`` tool (the new pocketpaw_connectors MCP server) instead
@@ -147,6 +158,172 @@ Reading labels is allowed; changing them is a blocked write in v1.
 `gmail_summary` (read) returns unread count and today's count cheaply — run it
 via `connector_execute(connector_name="gmail", action="gmail_summary")` when
 the user asks "how's my inbox" or "anything new" before a heavier search.
+
+## Render results as a live pocket (the Ripple fusion)
+
+Summarizing in chat is the floor, not the ceiling. When a search returns a
+**set of messages**, don't stop at a bulleted list and don't paste raw JSON.
+Render it as **typed Ripple widgets** on the canvas: a stack of inbox cards the
+user can scan, a filter to narrow them, a count. Cards beat ten lines of text.
+
+The flow is: **`connector_execute` → build a typed rippleSpec → merge it into a
+pocket.**
+
+1. Run the read action (`gmail_search`, then `gmail_read` if you need bodies).
+2. Shape the returned stubs into a small state array (see value/label below).
+3. Deliver a typed spec to a pocket. In a room you do this the normal way —
+   the `pocketpaw-create-pocket` skill for a fresh canvas, or
+   `pocketpaw-edit-pocket` to add to the one already open. Both apply the spec
+   through the merge endpoint **`POST /api/v1/pockets/<id>/spec/merge`**; the
+   pocket specialist subagent is what actually posts it (see the
+   `pocketpaw-pocket-specialist` skill for the HTTP mechanics and the
+   merge-vs-replace rule). The payload below is exactly what lands on that
+   wire — copy the shape.
+
+### Two hard rules
+
+**1. Typed widgets ONLY — never raw HTML.** A subject line, a sender name, an
+email body, a snippet — every string Gmail returns is
+**attacker-controllable**. Anyone can email the user a subject full of
+`<script>`. So email strings go ONLY into typed-widget props (`text`, `badge`,
+`data-grid` cell values) where the Ripple renderer escapes them. NEVER assemble
+an HTML string from message content, and NEVER route it into an `embed`
+(`mode: "srcdoc"`) node or any other HTML sink. There is no "html" widget to
+reach for — the merge endpoint's catalog gate rejects any node whose `type`
+isn't a known widget — but treat this as a security invariant you never try to
+route around, not just a validator you happen to trip. Rendering raw email HTML
+is a stored-XSS / injection vector.
+
+**2. value/label split.** Machine ids are lowercase and live in the id slot;
+human-facing text lives in the label. The `select` filter below has options
+`{"value": "unread", "label": "Unread"}` and the **bound state holds the
+value** (`"unread"`), never the label (`"Unread"`). A `status-dot`'s `variant`
+is a lowercase status id (`"info"`, `"neutral"`) while its `label` carries the
+human text. Same rule that governs `data-grid` column keys and kanban column
+ids: store `"unread"`, not `"Unread"`. Get it backwards and the filter matches
+nothing.
+
+### Worked example — "show my recent inbox" → live cards
+
+Read, then merge. First the read:
+
+```
+connector_execute(connector_name="gmail", action="gmail_search",
+  params={"query": "in:inbox newer_than:2d", "max_results": 10})
+```
+
+Then shape each stub into a message object and merge a filtered card list. This
+is the copyable `/spec/merge` payload:
+
+```json
+{
+  "merge": {
+    "state": {
+      "filter": "all",
+      "inbox": [
+        {"id": "18f2a1", "from": "Sarah Chen", "subject": "Q3 planning notes",
+         "snippet": "Pulled together the notes from Tuesday…",
+         "status": "unread", "dot": "info"},
+        {"id": "18f0c9", "from": "Acme Billing", "subject": "Invoice #4471",
+         "snippet": "Your July invoice is ready to view…",
+         "status": "read", "dot": "neutral"}
+      ]
+    },
+    "ui": {
+      "id": "n_inboxroot",
+      "type": "flex",
+      "props": {"direction": "column", "gap": "10px"},
+      "children": [
+        {"id": "n_inboxhdr", "type": "page-header",
+         "props": {"title": "Recent inbox"}},
+        {
+          "id": "n_inboxfilter",
+          "type": "select",
+          "bind": "filter",
+          "props": {
+            "options": [
+              {"value": "all",    "label": "All"},
+              {"value": "unread", "label": "Unread"}
+            ]
+          }
+        },
+        {
+          "type": "each",
+          "items": "{state.inbox}",
+          "item_as": "msg",
+          "children": [
+            {
+              "type": "card",
+              "props": {"variant": "outlined", "density": "compact"},
+              "children": [
+                {
+                  "type": "flex",
+                  "props": {"direction": "row", "gap": "8px", "align": "center"},
+                  "children": [
+                    {"type": "status-dot",
+                     "props": {"variant": "{msg.dot}", "label": "{msg.from}", "size": 8}},
+                    {"type": "badge",
+                     "props": {"text": "{msg.status}", "variant": "outline"}}
+                  ]
+                },
+                {"type": "text", "props": {"text": "{msg.subject}", "weight": "bold"}},
+                {"type": "text",
+                 "props": {"text": "{msg.snippet}", "size": "sm", "color": "muted"}}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "n_inboxrefresh",
+          "type": "button",
+          "props": {
+            "label": "Refresh",
+            "on_click": [
+              {
+                "action": "invoke_tool",
+                "tool": "connector_execute",
+                "args": {
+                  "connector_name": "gmail",
+                  "action": "gmail_search",
+                  "params": {"query": "in:inbox newer_than:2d", "max_results": 10}
+                },
+                "on_success": [{"action": "set", "target": "inbox"}],
+                "on_error": [{"action": "toast",
+                  "message": "Couldn't refresh the inbox", "variant": "error"}]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Note the `status` field and the `select` option `value`s are lowercase ids
+(`"unread"`, `"read"`) while every human-facing string lives in a `label` or a
+`text`/`badge` prop — that IS the value/label split, and it's what lets the
+filter match. Nodes inside the `each` loop carry no `id` (they're templated
+per-item); only top-level nodes get ids. The **Refresh** button wires a
+follow-up action back to the sense: `invoke_tool` re-runs `connector_execute`
+through the pocket's tool-run wire and `on_success` writes the fresh result into
+`inbox`. (`set` with no `value` falls back to the tool result payload — make
+sure the sense returns the same message shape the cards bind to, or add a
+mapping step. If the tool-run wire isn't enabled for the pocket, drop the button
+and just re-run the search yourself and merge again — an agent-driven refresh.)
+
+Remember the read-before-you-act rule still holds: the snippet in a search stub
+is enough for a card, but `gmail_read` the message before quoting its body.
+
+### This does not replace the static widget-recipes rail
+
+Gmail also ships **pre-baked widget recipes** — the three default home widgets
+(Email Stats, etc.) surfaced in the Add-Widget picker's "From connectors" rail
+(`GET /api/v1/cloud/connectors/widget-recipes`), which a user can drop onto a
+home dashboard with no agent involved. That no-agent fallback stays exactly
+as-is. The convention here is the **agent-driven** path: you render a bespoke,
+live-typed view in response to what the user actually asked for. Use both —
+they don't overlap.
 
 ## Guardrails
 
