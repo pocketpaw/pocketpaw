@@ -1,0 +1,92 @@
+[
+  {
+    "label": "non-Staff sites can run paid checks",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if not site_plan_allows_check(site):\n        raise Forbidden(",
+    "replace": "    if False:\n        raise Forbidden(",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_check_needs_staff_questions_and_a_day_between"
+    ]
+  },
+  {
+    "label": "plan gate reads the tier without an active subscription",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "        subscription_status=site.subscription_status,\n        concierge_enabled=True,",
+    "replace": "        subscription_status=\"active\",\n        concierge_enabled=True,",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_empty_card"
+    ]
+  },
+  {
+    "label": "24-hour limit never trips",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if requested is not None and requested > now - CHECK_COOLDOWN:",
+    "replace": "    if requested is not None and requested > now + CHECK_COOLDOWN:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_check_needs_staff_questions_and_a_day_between"
+    ]
+  },
+  {
+    "label": "queue_check does not stamp requested_at - the sweep queues a site every tick",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    state.status, state.requested_at, state.error = \"pending\", now, \"\"",
+    "replace": "    state.status, state.error = \"pending\", \"\"",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  },
+  {
+    "label": "sweep ignores the 30-day window",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service_admin.py",
+    "find": "            \"$or\": [{\"requested_at\": None}, {\"requested_at\": {\"$lt\": cutoff}}],",
+    "replace": "            \"$or\": [{\"requested_at\": None}, {\"requested_at\": {\"$ne\": None}}],",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  },
+  {
+    "label": "sweep queues non-Staff sites",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service_admin.py",
+    "find": "        if site is not None and service.site_plan_allows_check(site):",
+    "replace": "        if site is not None:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  },
+  {
+    "label": "cron tick ignores the scheduler opt-in",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/worker.py",
+    "find": "    if os.environ.get(\"POCKETPAW_CLOUD_SCHEDULER_ENABLED\", \"\").lower() != \"true\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_cron_tick_is_opt_in"
+    ]
+  },
+  {
+    "label": "apply-fix republishes for fixes on other sites",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if body.fix_id not in APPLICABLE_FIXES:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix"
+    ]
+  },
+  {
+    "label": "apply-fix republish passes a plan key - could change the site's plan",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id\n",
+    "replace": "            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id, site_plan_key=\"free\"\n",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix"
+    ]
+  },
+  {
+    "label": "site read drops the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    doc = await _SiteDoc.find_one({\"_id\": oid, \"workspace\": workspace_id}) if oid else None",
+    "replace": "    doc = await _SiteDoc.find_one({\"_id\": oid}) if oid else None",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_other_workspace_site_is_404"
+    ]
+  }
+]
