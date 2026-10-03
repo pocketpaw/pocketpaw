@@ -264,6 +264,20 @@ class Settings(BaseSettings):
             "environment wins over this."
         ),
     )
+    claude_sdk_tool_search: str = Field(
+        default="",
+        description=(
+            "ENABLE_TOOL_SEARCH handed to the Claude Code CLI subprocess: true, false, "
+            "auto or auto:N (N = 0-100). Empty (default) keeps the CLI's own choice: MCP "
+            "tool search on for api.anthropic.com, off behind any other ANTHROPIC_BASE_URL "
+            "(the litellm, openrouter, openai_compatible, ollama and gemini providers), "
+            "where every MCP tool schema is sent upfront. Set it only for a gateway that "
+            "forwards anthropic-beta headers and tool_reference blocks, to a Claude 4.5 or "
+            "later model (scripts/check_gateway_tool_search.py tests this); otherwise "
+            "requests fail. Other values are ignored with a warning. A non-empty "
+            "ENABLE_TOOL_SEARCH in the process environment wins over this."
+        ),
+    )
 
     claude_sdk_connect_timeout: float = Field(
         default=90.0,
