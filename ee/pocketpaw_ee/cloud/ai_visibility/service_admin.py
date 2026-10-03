@@ -6,7 +6,8 @@
 # ``worker.py``; a daily tick over a 30-day window means a site is checked about
 # 30 days after its last check, not on a calendar day. Queuing stamps
 # ``requested_at`` first (``service.queue_check``), so a second tick never queues
-# a site twice. With no engine configured it queues nothing.
+# a site twice. With no engine configured it queues nothing. Sites load in one
+# ``$in`` query, matched to each row by id and workspace.
 
 from __future__ import annotations
 
@@ -31,10 +32,13 @@ async def due_site_checks(now: datetime) -> list[AiVisibilitySite]:
             "$or": [{"requested_at": None}, {"requested_at": {"$lt": cutoff}}],
         }
     ).to_list()
+    oids = [oid for st in states if (oid := service._oid(st.site_id))]
+    docs = await _SiteDoc.find({"_id": {"$in": oids}}).to_list() if oids else []
+    # Keyed by id + workspace, so a row only ever matches a site in its own workspace.
+    sites = {(str(d.id), d.workspace): d for d in docs}
     due = []
     for state in states:
-        oid = service._oid(state.site_id)
-        site = await _SiteDoc.find_one({"_id": oid, "workspace": state.workspace}) if oid else None
+        site = sites.get((state.site_id, state.workspace))
         if site is not None and service.site_plan_allows_check(site):
             due.append(state)
     return due

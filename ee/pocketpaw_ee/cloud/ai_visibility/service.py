@@ -10,21 +10,28 @@
 # pick a fix over a subset of rows.
 #
 # Anonymous checks (the free public check, ``public_check.py``) have no
-# workspace or site; ``anonymous_spend_today`` sums them for its spend cap.
+# workspace or site; ``anonymous_spend_today`` sums them (one Mongo $group) for
+# its spend cap.
 #
 # Site checks (the Staff card): an AiVisibilitySite row holds a site's questions
 # and its latest check state. ``request_check`` gates on the site's plan (the
 # tier that sells the concierge, i.e. Staff, via ``resolve_site_entitlements``)
 # and a 24-hour limit, marks the row pending and queues ``run_site_check`` on the
-# site lane; ``service_admin.sweep_due_checks`` queues the monthly ones.
-# ``apply_fix`` starts the site's normal republish (``sites.service.publish_pocket``
-# with no plan key, so the plan never changes). Every read is workspace-scoped;
-# ``run_site_check`` reads by the site id it queued.
+# site lane; ``service_admin.sweep_due_checks`` queues the monthly ones (only with
+# ``scheduler_enabled()``, so the card shows ``next_run_at`` only then). A job that
+# fails, or is cancelled by arq's timeout, leaves the row "failed", never
+# "running". ``apply_fix`` needs the Staff plan and the fix id of the site's latest
+# check, then starts the site's normal republish (``sites.service.publish_pocket``
+# with no plan key, so the plan never changes; note it also pushes any unpublished
+# draft edits live). Every read is workspace-scoped; ``run_site_check`` reads by
+# the site id it queued.
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
@@ -321,15 +328,28 @@ async def anonymous_spend_today(now: datetime | None = None) -> float:
     """USD spent today (UTC) on anonymous checks (no workspace, no site)."""
     now = now or datetime.now(UTC)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    docs = await AiVisibilityCheck.find(
-        {"workspace": None, "site_id": None, "createdAt": {"$gte": start}}
-    ).to_list()
-    return round(sum(d.total_cost_usd for d in docs), 6)
+    cursor = AiVisibilityCheck.get_pymongo_collection().aggregate(
+        [
+            {"$match": {"workspace": None, "site_id": None, "createdAt": {"$gte": start}}},
+            {"$group": {"_id": None, "total": {"$sum": "$total_cost_usd"}}},
+        ]
+    )
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    async for row in cursor:
+        return round(float(row.get("total") or 0), 6)
+    return 0.0
 
 
 # --------------------------------------------------------------------------- #
 # Site checks (the Staff card)
 # --------------------------------------------------------------------------- #
+
+
+def scheduler_enabled() -> bool:
+    """The opt-in for scheduled work (the monthly sweep), same flag as the web
+    process's scheduled loops."""
+    return os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true"
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -396,7 +416,9 @@ def _site_response(
         check = {
             "status": state.status,
             "ran_at": ran_at,
-            "next_run_at": ran_at + CHECK_INTERVAL if allows and ran_at else None,
+            "next_run_at": (
+                ran_at + CHECK_INTERVAL if allows and ran_at and scheduler_enabled() else None
+            ),
             "questions": last.questions if last else state.questions,
             "engines": [
                 {
@@ -422,13 +444,18 @@ def _site_response(
     ).model_dump(mode="json")
 
 
+async def _last_check(
+    workspace_id: str, state: AiVisibilitySite | None
+) -> AiVisibilityCheck | None:
+    if state is not None and state.last_check_id and (oid := _oid(state.last_check_id)):
+        return await AiVisibilityCheck.find_one({"_id": oid, "workspace": workspace_id})
+    return None
+
+
 async def get_site_visibility(workspace_id: str, site_id: str) -> dict:
     site = await _site(workspace_id, site_id)
     state = await _state(workspace_id, site_id)
-    last = None
-    if state is not None and state.last_check_id and (oid := _oid(state.last_check_id)):
-        last = await AiVisibilityCheck.find_one({"_id": oid, "workspace": workspace_id})
-    return _site_response(site, state, last)
+    return _site_response(site, state, await _last_check(workspace_id, state))
 
 
 async def set_questions(workspace_id: str, site_id: str, body: SetQuestionsRequest) -> dict:
@@ -515,6 +542,11 @@ async def run_site_check(site_id: str) -> None:
         await state.set(
             {"status": "done", "ran_at": datetime.now(UTC), "last_check_id": check.id, "error": ""}
         )
+    except asyncio.CancelledError:
+        # arq's job timeout cancels the task; record it or the card polls forever.
+        logger.warning("ai_visibility: site check %s timed out", site_id)
+        await state.set({"status": "failed", "error": "the check timed out"})
+        raise
     except Exception as exc:
         error = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
         logger.warning("ai_visibility: site check %s failed: %s", site_id, error)
@@ -532,15 +564,24 @@ def _republish_done(task: asyncio.Task) -> None:
 
 
 async def apply_fix(workspace_id: str, user_id: str, site_id: str, body: ApplyFixRequest) -> dict:
-    """Start the site's normal republish for a fix Paw Sites applies itself.
-    ``ai_access``: the republish writes the AI-ready robots.txt. ``site_content``:
-    for now the republish only refreshes those files; content edits are the owner's."""
+    """Start the site's normal republish for the fix its latest check picked, when
+    Paw Sites applies that fix itself (``ai_access``: the republish writes the
+    AI-ready robots.txt). Staff only; any other fix id is a 400."""
     body = ApplyFixRequest.model_validate(body)
     if body.fix_id not in APPLICABLE_FIXES:
         raise BadRequest(
             "ai_visibility.fix_not_applicable", "This fix is a step you take on another site."
         )
     site = await _site(workspace_id, site_id)
+    if not site_plan_allows_check(site):
+        raise Forbidden(
+            "ai_visibility.plan_required", "AI visibility fixes come with the Staff plan."
+        )
+    last = await _last_check(workspace_id, await _state(workspace_id, site_id))
+    if last is None or (last.fix or {}).get("id") != body.fix_id:
+        raise BadRequest(
+            "ai_visibility.fix_not_applicable", "This isn't the fix your latest check suggested."
+        )
     from pocketpaw_ee.sites import service as sites_service
 
     # No plan key: a keyless republish keeps the site's plan (a content edit).
@@ -571,6 +612,7 @@ __all__ = [
     "request_check",
     "run_check",
     "run_site_check",
+    "scheduler_enabled",
     "set_questions",
     "signals",
     "site_plan_allows_check",

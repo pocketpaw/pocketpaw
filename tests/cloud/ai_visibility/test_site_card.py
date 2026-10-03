@@ -5,9 +5,10 @@
 # recorded enqueue and a recorded republish: the empty card, question
 # validation, the Staff plan gate, the 24-hour limit, the job writing a check
 # the card maps per contract (engine labels, named/of/failed, competitor and
-# source counts, fix), apply-fix allowed / refused, tenant scoping, and the
-# monthly sweep picking only Staff sites with questions whose last check is 30+
-# days old.
+# source counts, fix; next_run_at only with the scheduler on), a timed-out job
+# marked failed, apply-fix allowed only on Staff for the latest check's own fix,
+# tenant scoping, and the monthly sweep picking only Staff sites with questions
+# whose last check is 30+ days old.
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud.ai_visibility import service, service_admin, worker
 from pocketpaw_ee.cloud.ai_visibility.domain import EngineAnswer, Location
 from pocketpaw_ee.cloud.ai_visibility.engines import EngineError
+from pocketpaw_ee.cloud.models.ai_visibility_check import AiVisibilityCheck
 from pocketpaw_ee.cloud.models.ai_visibility_site import AiVisibilitySite
 from pocketpaw_ee.cloud.models.site import Site
 
@@ -124,6 +126,16 @@ async def client(monkeypatch):
         yield c
 
 
+async def _with_last_fix(site_id: str, fix_id: str, ws: str = WS) -> None:
+    check = AiVisibilityCheck(
+        workspace=ws, site_id=site_id, business={}, location={}, fix={"id": fix_id}
+    )
+    await check.insert()
+    await AiVisibilitySite(
+        workspace=ws, site_id=site_id, questions=["q"], status="done", last_check_id=str(check.id)
+    ).insert()
+
+
 def _url(site_id: str, tail: str = "") -> str:
     return f"/api/v1/sites/{site_id}/ai-visibility{tail}"
 
@@ -205,7 +217,8 @@ async def test_enqueue_failure_marks_the_check_failed(client, monkeypatch) -> No
     assert state.status == "failed"
 
 
-async def test_job_writes_a_check_the_card_maps(client, enqueued, engines) -> None:
+async def test_job_writes_a_check_the_card_maps(client, enqueued, engines, monkeypatch) -> None:
+    monkeypatch.setenv("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "true")
     staff = await _site()
     questions = ["best pizza in Austin", "pizza near Zilker"]
     await client.put(_url(staff, "/questions"), json={"questions": questions})
@@ -228,6 +241,27 @@ async def test_job_writes_a_check_the_card_maps(client, enqueued, engines) -> No
     assert set(check["fix"]) == {"id", "text", "we_can_apply"}
     ran_at = datetime.fromisoformat(check["ran_at"])
     assert datetime.fromisoformat(check["next_run_at"]) - ran_at == timedelta(days=30)
+
+    # No scheduler, no monthly check: the card must not promise one.
+    monkeypatch.delenv("POCKETPAW_CLOUD_SCHEDULER_ENABLED", raising=False)
+    assert (await client.get(_url(staff))).json()["check"]["next_run_at"] is None
+
+
+async def test_timed_out_job_is_marked_failed(client, enqueued, engines, monkeypatch) -> None:
+    staff = await _site()
+    await client.put(_url(staff, "/questions"), json={"questions": ["best pizza in Austin"]})
+    await client.post(_url(staff, "/check"))
+
+    async def _cancelled(*a, **kw):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(service, "run_check", _cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await service.run_site_check(staff)
+    check = (await client.get(_url(staff))).json()["check"]
+    assert check["status"] == "failed"
+    state = await AiVisibilitySite.find_one({"site_id": staff})
+    assert state.error == "the check timed out"
 
 
 async def test_first_check_in_flight_shows_empty_numbers(client, enqueued) -> None:
@@ -259,6 +293,11 @@ async def test_apply_fix(client, monkeypatch) -> None:
 
     monkeypatch.setattr(sites_service, "publish_pocket", _publish)
     staff = await _site()
+    # No check yet: nothing to apply.
+    none_yet = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "ai_access"})
+    assert none_yet.status_code == 400
+    assert none_yet.json()["error"]["code"] == "ai_visibility.fix_not_applicable"
+    await _with_last_fix(staff, "ai_access")
     resp = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "ai_access"})
     assert resp.status_code == 202 and resp.json() == {"republish": "started"}
     await asyncio.sleep(0)
@@ -268,7 +307,56 @@ async def test_apply_fix(client, monkeypatch) -> None:
     refused = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "gbp"})
     assert refused.status_code == 400
     assert refused.json()["error"]["code"] == "ai_visibility.fix_not_applicable"
+    # site_content is owner guidance; a republish changes no words.
+    content = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "site_content"})
+    assert content.status_code == 400
     assert len(calls) == 1
+
+
+async def test_apply_fix_needs_the_latest_checks_fix(client, monkeypatch) -> None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    calls: list[dict] = []
+
+    async def _publish(**kw):
+        calls.append(kw)
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _publish)
+    staff = await _site()
+    await _with_last_fix(staff, "gbp")
+    stale = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "ai_access"})
+    assert stale.status_code == 400
+    # The latest fix, but one the owner takes on another site.
+    theirs = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "gbp"})
+    assert theirs.status_code == 400
+    assert stale.json()["error"]["code"] == "ai_visibility.fix_not_applicable"
+    # A check id from another workspace does not count.
+    foreign = AiVisibilityCheck(
+        workspace="w2", site_id=staff, business={}, location={}, fix={"id": "ai_access"}
+    )
+    await foreign.insert()
+    state = await AiVisibilitySite.find_one({"site_id": staff})
+    await state.set({"last_check_id": str(foreign.id)})
+    crossed = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "ai_access"})
+    assert crossed.status_code == 400
+    assert calls == []
+
+
+async def test_apply_fix_needs_staff(client, monkeypatch) -> None:
+    from pocketpaw_ee.sites import service as sites_service
+
+    calls: list[dict] = []
+
+    async def _publish(**kw):
+        calls.append(kw)
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _publish)
+    lapsed = await _site(status="cancelled")
+    await _with_last_fix(lapsed, "ai_access")
+    denied = await client.post(_url(lapsed, "/apply-fix"), json={"fix_id": "ai_access"})
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "ai_visibility.plan_required"
+    assert calls == []
 
 
 async def test_sweep_queues_only_due_staff_sites(enqueued, engines, monkeypatch) -> None:
@@ -290,6 +378,9 @@ async def test_sweep_queues_only_due_staff_sites(enqueued, engines, monkeypatch)
     await with_state(no_questions, [], None)
     free = await _site(plan_tier="free", status="none")
     await with_state(free, ["best pizza in Austin"], None)
+    # A row naming a site that lives in another workspace is never queued.
+    foreign = await _site(ws="w2")
+    await with_state(foreign, ["best pizza in Austin"], None)
 
     assert await service_admin.sweep_due_checks(now) == 2
     assert sorted(enqueued) == sorted([never, old])

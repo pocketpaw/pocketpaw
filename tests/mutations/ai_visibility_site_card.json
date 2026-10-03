@@ -2,8 +2,8 @@
   {
     "label": "non-Staff sites can run paid checks",
     "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
-    "find": "    if not site_plan_allows_check(site):\n        raise Forbidden(",
-    "replace": "    if False:\n        raise Forbidden(",
+    "find": "    if not site_plan_allows_check(site):\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility checks come",
+    "replace": "    if False:\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility checks come",
     "tests": [
       "tests/cloud/ai_visibility/test_site_card.py::test_check_needs_staff_questions_and_a_day_between"
     ]
@@ -56,7 +56,7 @@
   {
     "label": "cron tick ignores the scheduler opt-in",
     "file": "ee/pocketpaw_ee/cloud/ai_visibility/worker.py",
-    "find": "    if os.environ.get(\"POCKETPAW_CLOUD_SCHEDULER_ENABLED\", \"\").lower() != \"true\":",
+    "find": "    if not service.scheduler_enabled():",
     "replace": "    if False:",
     "tests": [
       "tests/cloud/ai_visibility/test_site_card.py::test_cron_tick_is_opt_in"
@@ -68,7 +68,8 @@
     "find": "    if body.fix_id not in APPLICABLE_FIXES:",
     "replace": "    if False:",
     "tests": [
-      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix"
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix",
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix_needs_the_latest_checks_fix"
     ]
   },
   {
@@ -87,6 +88,52 @@
     "replace": "    doc = await _SiteDoc.find_one({\"_id\": oid}) if oid else None",
     "tests": [
       "tests/cloud/ai_visibility/test_site_card.py::test_other_workspace_site_is_404"
+    ]
+  },
+  {
+    "label": "timed-out job leaves the row running forever",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "        await state.set({\"status\": \"failed\", \"error\": \"the check timed out\"})\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_timed_out_job_is_marked_failed"
+    ]
+  },
+  {
+    "label": "apply-fix republishes for non-Staff sites",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if not site_plan_allows_check(site):\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility fixes come",
+    "replace": "    if False:\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility fixes come",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix_needs_staff"
+    ]
+  },
+  {
+    "label": "apply-fix ignores the latest check's fix",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if last is None or (last.fix or {}).get(\"id\") != body.fix_id:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix",
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix_needs_the_latest_checks_fix"
+    ]
+  },
+  {
+    "label": "card promises a monthly check with the scheduler off",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "ran_at + CHECK_INTERVAL if allows and ran_at and scheduler_enabled() else None",
+    "replace": "ran_at + CHECK_INTERVAL if allows and ran_at else None",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_job_writes_a_check_the_card_maps"
+    ]
+  },
+  {
+    "label": "sweep matches a site from another workspace",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service_admin.py",
+    "find": "        site = sites.get((state.site_id, state.workspace))",
+    "replace": "        site = next((d for d in docs if str(d.id) == state.site_id), None)",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
     ]
   }
 ]

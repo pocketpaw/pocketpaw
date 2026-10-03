@@ -1,7 +1,7 @@
 # AI visibility — fixes: one plain-language next step from a check's signals.
 #
-# Created 2026-10-03 (feat/ai-visibility-core, AV-3). ``RULES`` is ordered and the
-# first match wins; ``none`` is the fallthrough. Order, and why:
+# ``RULES`` is ordered and the first match wins; ``none`` is the fallthrough.
+# Order, and why:
 #   1. ai_access          the site blocks AI search bots: nothing else helps until
 #                         the engines can read it (input flag, AV-1's checker).
 #   2. negative_mentions  an engine already warns people off: fix that first.
@@ -15,8 +15,9 @@
 #                         matching, add when a fix picks wrong in the eval set.
 #   7. reviews            named, but only listed (never recommended) or lukewarm.
 #   8. site_content       not named anywhere and nothing more specific applies.
-# ``we_can_apply`` marks the fixes Paw Sites can make itself (ai_access,
-# site_content); the rest are steps the owner takes on another site.
+# ``we_can_apply`` marks the fixes Paw Sites can make itself: only ai_access (a
+# republish writes the robots.txt). site_content is guidance: the owner edits the
+# words; a republish changes none. The rest are steps on another site.
 
 from __future__ import annotations
 
@@ -44,7 +45,7 @@ FIXES: dict[str, tuple[str, bool]] = {
     "site_content": (
         "AI assistants aren't using your website when they answer. Say clearly on it "
         "what you do, where you are and who you serve, so they can quote you.",
-        True,
+        False,
     ),
     "gbp": (
         "AI assistants read Google Business Profiles for this kind of question, and "

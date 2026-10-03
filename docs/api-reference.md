@@ -1727,7 +1727,9 @@ Engine labels: `ChatGPT`, `Perplexity (search)`, `Claude`. `of` counts answers
 received, `failed` calls that errored. `sources` counts unique URLs per type.
 `competitors` is empty until a site carries a competitor list. `fix` is `null`
 before the first finished check. `ai_training_allowed` reads the site's opt-in
-(false when the site has none). `next_run_at` is set only on a plan with checks.
+(false when the site has none). `next_run_at` is set only on a plan with checks
+and only when the monthly check is on (`POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`).
+A check that errors or hits the worker's 15-minute timeout ends `failed`.
 
 ### `PUT /sites/{site_id}/ai-visibility/questions`
 
@@ -1757,11 +1759,14 @@ engine key is configured.
 { "fix_id": "ai_access" }
 ```
 
-Response `202 {"republish": "started"}`. Only the fixes Paw Sites applies itself
-(`ai_access`, `site_content`); any other id is `400 ai_visibility.fix_not_applicable`.
-Both start the site's normal republish (the same path as Publish, with no plan
-change), which writes the AI-ready files. For `site_content` that republish is all
-it does for now: changing the page text is still the owner's edit.
+Response `202 {"republish": "started"}`. Only `ai_access`, the one fix Paw Sites
+applies itself, and only when it is the fix the site's latest finished check
+picked; any other id is `400 ai_visibility.fix_not_applicable`. Errors also
+include `403 ai_visibility.plan_required` (not Staff). It starts the site's normal
+republish (the same path as Publish, with no plan change), which writes the
+AI-ready robots.txt. That republish also puts any unpublished edits live.
+`site_content` is guidance only (`we_can_apply: false`): the page text is the
+owner's edit.
 
 ## Skills — Per-Backend API Skills
 

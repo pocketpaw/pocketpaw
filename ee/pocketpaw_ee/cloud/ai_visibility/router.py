@@ -106,6 +106,7 @@ async def apply_site_fix(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> dict:
-    """Start the site's republish for a fix Paw Sites applies itself (``ai_access``,
-    ``site_content``). 400 ``ai_visibility.fix_not_applicable`` for any other."""
+    """Start the site's republish for the fix its latest check picked, when Paw
+    Sites applies it itself (``ai_access``). 403 ``ai_visibility.plan_required``
+    off Staff; 400 ``ai_visibility.fix_not_applicable`` for any other fix id."""
     return await service.apply_fix(ctx.workspace_id, ctx.user_id, site_id, body)

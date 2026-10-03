@@ -29,8 +29,8 @@
   {
     "label": "spend cap counts workspace checks too - paying sites starve the free tool",
     "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
-    "find": "        {\"workspace\": None, \"site_id\": None, \"createdAt\": {\"$gte\": start}}",
-    "replace": "        {\"createdAt\": {\"$gte\": start}}",
+    "find": "            {\"$match\": {\"workspace\": None, \"site_id\": None, \"createdAt\": {\"$gte\": start}}},",
+    "replace": "            {\"$match\": {\"createdAt\": {\"$gte\": start}}},",
     "tests": [
       "tests/cloud/ai_visibility/test_public_check.py::test_spend_cap_ignores_workspace_checks"
     ]

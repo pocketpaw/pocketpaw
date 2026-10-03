@@ -152,7 +152,7 @@ async def test_near_miss_confirm_and_anonymous_check() -> None:
 async def test_fix_when_never_named_and_site_unread() -> None:
     engine = FakeEngine("openai", [ABSENT], consulted=("https://www.yelp.com/biz/home-slice",))
     check = await run_check(JOES, AUSTIN, ["q"], [engine], runs=2)
-    assert check.fix["id"] == "site_content" and check.fix["we_can_apply"] is True
+    assert check.fix["id"] == "site_content" and check.fix["we_can_apply"] is False
 
 
 async def test_fix_negative_and_ai_access() -> None:

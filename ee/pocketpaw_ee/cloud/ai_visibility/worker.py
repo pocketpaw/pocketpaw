@@ -3,14 +3,14 @@
 # ``site_check_fn`` runs one queued site check (``service.run_site_check``);
 # ``sweep_cron`` ticks daily at 07:00 UTC and queues every Staff site due its
 # monthly check (``service_admin.sweep_due_checks``). The tick only runs with
-# ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` on the worker, the same opt-in flag
+# ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`` (``service.scheduler_enabled``) on the
+# worker, the same opt-in flag
 # the web process's scheduled loops use, because each check spends platform money
 # on AI engines. ``unique=True`` keeps a scaled worker fleet to one tick.
 
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from arq import cron
@@ -30,7 +30,7 @@ async def site_check_job(ctx: dict[str, Any], site_id: str) -> None:
 
 
 async def monthly_sweep(ctx: dict[str, Any]) -> int:
-    if os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() != "true":
+    if not service.scheduler_enabled():
         logger.info("ai_visibility: monthly sweep off (POCKETPAW_CLOUD_SCHEDULER_ENABLED)")
         return 0
     return await service_admin.sweep_due_checks()
