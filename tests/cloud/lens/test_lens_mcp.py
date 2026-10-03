@@ -11,7 +11,9 @@
 # Gating: ``surface_scoped_tool_deny`` names the lens ids unless granted;
 # claude_sdk ``_build_options`` drops the server and its ids from a normal chat
 # and keeps both when the agent_health profile's grant is passed; pydantic_ai
-# adds the ungranted lens ids to the deny set it builds the agent with.
+# adds the ungranted lens ids to the deny set it builds the agent with; and the
+# warm-client cache key tells a client carrying the lens server apart from one
+# without it, so a client warmed on agent_health is never reused elsewhere.
 
 from __future__ import annotations
 
@@ -208,12 +210,12 @@ def sdk_backend(tmp_path, monkeypatch):
     return backend
 
 
-async def _build(backend, allow_sdk_tools):
+async def _build(backend, allow_sdk_tools, deny=frozenset()):
     return await backend._build_options(
         "hello",
         system_prompt="You are Paw.",
         session_key=None,
-        deny_mcp_tool_ids=frozenset(),
+        deny_mcp_tool_ids=deny,
         allow_sdk_tools=allow_sdk_tools,
         allow_mcp_tool_ids=None,
         skill_names=frozenset(),
@@ -234,6 +236,26 @@ async def test_agent_health_surface_has_lens_server(sdk_backend):
     kwargs = (await _build(sdk_backend, grant)).options_kwargs
     assert {"pocketpaw_ask", "pocketpaw_lens"} <= set(kwargs["mcp_servers"])
     assert set(lens_mcp.LENS_TOOL_IDS) <= set(kwargs["allowed_tools"])
+
+
+async def test_warm_client_key_separates_a_lens_client(sdk_backend):
+    """A client connected on agent_health carries the lens server even when its
+    ids are denied off the allowlist; it must never be reused by another surface."""
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    grant = resolve_profile(SurfaceKind.AGENT_HEALTH, SurfaceMeta()).allowed_sdk_tools
+    lens_on = (await _build(sdk_backend, grant, deny=grant)).options_kwargs
+    plain = (await _build(sdk_backend, frozenset())).options_kwargs
+    assert "pocketpaw_lens" in lens_on["mcp_servers"]
+    assert "pocketpaw_lens" not in plain["mcp_servers"]
+    assert sorted(lens_on["allowed_tools"]) == sorted(plain["allowed_tools"])
+
+    def key(kwargs):
+        return ClaudeSDKBackend._client_cache_key(SimpleNamespace(**kwargs), session_key="s1")
+
+    assert key(lens_on) != key(plain)
+    # A run without a surface-scoped server keeps its pre-existing key shape.
+    assert key(plain).endswith(":")
 
 
 @pytest.mark.parametrize("granted", [False, True])
