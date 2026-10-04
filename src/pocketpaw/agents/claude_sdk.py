@@ -13,8 +13,8 @@ delta; a diverged history (edit/delete) evicts the client and the replacement
 gets the whole conversation. Stateless launches get the full history,
 native-resume launches none. ``prewarm`` therefore takes no history.
 
-Warm-client key (``_client_cache_key``): session key, cwd, model, allowed tools,
-the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
+Warm-client key (``_client_cache_key``): session key, cwd, model, allowed and denied
+tools, the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
 plugin/skills digest, the tenant scope and any surface-scoped MCP servers the
 client carries. Any change forces a fresh subprocess; the same key gates reuse
 of a supervisor-leased client (WH-1).
@@ -44,8 +44,8 @@ image-returning tools, and the subprocess env always carries ``MAX_MCP_OUTPUT_TO
 (unless already set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``.
 Tool scope: under bypass ``allowed_tools`` only auto-approves, so the turn's final
 allowed set (ToolPolicy + surface allow/deny/exclusive) is enforced by a PreToolUse
-gate on every tool (``_tool_gate_hook``), a pinned ``tools=`` built-in list (always
-with ``ToolSearch``) and ``disallowed_tools`` for the surface deny set.
+gate on every tool (``_tool_gate_hook``, deny checked first), a pinned ``tools=``
+built-in list (always with ``ToolSearch``) and ``disallowed_tools`` for the deny set.
 Images ride every persistent send; the stateless ``query()`` cannot carry them.
 Tracing: persistent turns are read through ``receive_response()``, the method
 logfire's SDK instrumentation patches; the stateless path opens its own span.
@@ -265,15 +265,31 @@ def _mcp_server_of(tool_id: str) -> str:
 _INFRA_TOOLS: frozenset[str] = frozenset({"ToolSearch", "WaitForMcpServers"})
 
 
-def _tool_gate_allows(name: object, allowed: frozenset[str]) -> bool:
+def _deny_prefixes(deny: frozenset[str]) -> tuple[str, ...]:
+    """``<entry>__`` for every ``mcp__`` deny entry. A deny covers every name below
+    it, so a bare ``mcp__<server>`` deny refuses that whole server."""
+    return tuple(f"{entry}__" for entry in sorted(deny) if entry.startswith("mcp__"))
+
+
+def _tool_gate_allows(
+    name: object,
+    allowed: frozenset[str],
+    *,
+    deny: frozenset[str] = frozenset(),
+    deny_below: tuple[str, ...] = (),
+) -> bool:
     """The tool gate's rule: may a call to ``name`` run under ``allowed``?
 
-    Yes when ``name`` is in ``allowed``, is an infrastructure tool, or belongs to a
-    server allowlisted wholesale by a bare ``mcp__<server>`` entry (external config
-    servers, composio). Anything else is refused, including a name that is not a
-    non-empty string.
+    A denied name is refused first: one in ``deny``, or below a deny entry
+    (``deny_below``, from ``_deny_prefixes``). That holds even when a bare server
+    entry would admit the name. Otherwise yes when ``name`` is in ``allowed``, is
+    an infrastructure tool, or belongs to a server allowlisted wholesale by a bare
+    ``mcp__<server>`` entry (external config servers, composio). Anything else is
+    refused, including a name that is not a non-empty string.
     """
     if not isinstance(name, str) or not name:
+        return False
+    if name in deny or name.startswith(deny_below):
         return False
     if name in allowed or name in _INFRA_TOOLS:
         return True
@@ -284,22 +300,26 @@ def _tool_gate_allows(name: object, allowed: frozenset[str]) -> bool:
     )
 
 
-def _tool_gate_hook(allowed_tools: list[str]) -> Callable[..., Any]:
-    """Build the PreToolUse hook that holds a turn to ``allowed_tools``.
+def _tool_gate_hook(
+    allowed_tools: list[str], *, deny: frozenset[str] = frozenset()
+) -> Callable[..., Any]:
+    """Build the PreToolUse hook that holds a turn to ``allowed_tools`` minus ``deny``.
 
     The CLI runs under ``bypassPermissions``, where ``allowed_tools`` only
     auto-approves: a tool missing from it is still offered and still runs. This
     hook is the enforcement. It is registered with ``matcher=None`` so it sees
-    every call, MCP tools included, and snapshots the list so a later edit to it
-    cannot widen the gate. It never raises (that tears down the CLI stream); an
-    error denies the call.
+    every call, MCP tools included, and snapshots both sets so a later edit to
+    them cannot widen the gate. It never raises (that tears down the CLI stream);
+    an error denies the call.
     """
     allowed = frozenset(allowed_tools)
+    deny = frozenset(deny)
+    deny_below = _deny_prefixes(deny)
 
     async def gate(input_data: Any, tool_use_id: str | None, context: Any) -> dict:
         try:
             name = input_data.get("tool_name")
-            if _tool_gate_allows(name, allowed):
+            if _tool_gate_allows(name, allowed, deny=deny, deny_below=deny_below):
                 return {}
             logger.warning("Tool gate denied %r: not in this turn's allowed tools", name)
             reason = f"PocketPaw: the tool '{name}' is not enabled for this agent here."
@@ -1991,8 +2011,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
         tenant_scope: str = "",
         system_prompt_digest: str = "",
     ) -> str:
-        """Persistent-client cache key: session + cwd + model + tools + the
-        prompt's identity + the plugin-identity digest.
+        """Persistent-client cache key: session + cwd + model + tools + the deny
+        set + the prompt's identity + the plugin-identity digest.
+
+        The deny set (``disallowed_tools``) is keyed on its own: a deny under a
+        bare server grant (``mcp__composio__X`` with ``mcp__composio`` allowed)
+        leaves ``allowed_tools`` unchanged, and the tool gate that enforces it is
+        frozen into the client at connect().
 
         THE PROMPT SLOT HAS TWO SOURCES AND THEY ARE DIFFERENT CLAIMS (PA-6).
         ``d:`` is the assembler's ``stable_digest`` — a hash over the prompt
@@ -2051,6 +2076,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{getattr(options, 'cwd', '')}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
+            f"{sorted(getattr(options, 'disallowed_tools', None) or [])}:"
             f"{prompt_key}:"
             f"{plugin_digest}:"
             f"{tenant_scope}"
@@ -2616,10 +2642,16 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # the two ripple-create tools on /sites svelte-create (prose-only "do
         # not call the ripple tool" routing was proven to fail), Bash / Read /
         # ... on /sites and /code. Deny is the hard cap: applied after the
-        # ``allow_sdk_tools`` union and before the mode/exclusive filters.
+        # ``allow_sdk_tools`` union and before the mode/exclusive filters. An
+        # ``mcp__`` entry also covers every name below it (``_deny_prefixes``).
         if deny_mcp_tool_ids:
             before_count = len(allowed_tools)
-            allowed_tools = [t for t in allowed_tools if t not in deny_mcp_tool_ids]
+            deny_below = _deny_prefixes(deny_mcp_tool_ids)
+            allowed_tools = [
+                t
+                for t in allowed_tools
+                if t not in deny_mcp_tool_ids and not t.startswith(deny_below)
+            ]
             if len(allowed_tools) < before_count:
                 logger.info(
                     "Surface tool-deny: excluded %s from allowlist",
@@ -2727,7 +2759,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
             allowed_tools = []
         hooks = {
             "PreToolUse": [
-                self._HookMatcher(matcher=None, hooks=[_tool_gate_hook(allowed_tools)]),
+                self._HookMatcher(
+                    matcher=None, hooks=[_tool_gate_hook(allowed_tools, deny=deny_mcp_tool_ids)]
+                ),
                 self._HookMatcher(matcher="Bash", hooks=[self._block_dangerous_hook]),
             ]
         }
