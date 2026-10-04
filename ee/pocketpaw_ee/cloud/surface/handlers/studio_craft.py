@@ -7,7 +7,9 @@
 # (``SurfaceMeta.vector`` / ``.photo`` / ``.design``) because the document lives
 # in the browser (the craft engines as WebAssembly); the projection IS the read
 # path. The procedure block lists the app's exact op names with one valid
-# example each (agents guessed wrong names until they were listed).
+# example each (agents guessed wrong names until they were listed). Design's
+# rules make text colour (set_text_color; set_paint is the frame's box) and
+# overset text (set_text fit, the "overset frame <id>:" failure) explicit.
 #
 # Projection shapes the pages send:
 #   vector: {title?, colorMode, units?, artboard: {width, height} (pt),
@@ -264,7 +266,17 @@ _SPECS: dict[str, dict[str, Any]] = {
   are points. A visiting card is 90 x 54 mm; keep text 4 mm or more inside the
   trim, and run background shapes 3 mm past it (negative x/y) into the bleed.
 - Colour: prefer CMYK paints, {"c":0,"m":0.6,"y":1,"k":0} with 0..1 values;
-  "#rrggbb" also works. Fill, stroke and strokeWidth all go through set_paint.
+  "#rrggbb" also works.
+- TEXT COLOUR is set_text_color (or set_text's color).
+  set_paint paints a frame's BOX (its background fill, border and strokeWidth),
+  never its text: "make the name red" is set_text_color on the name's frame.
+- OVERSET text disappears: a text frame shows only what fits its box, and the rest
+  is cut off, invisible on the page and in print. When you raise a text size or
+  lengthen a text, pass "fit":true on set_text (the frame grows down until the text
+  fits), or keep the size within the frame (a line needs about 1.4 x its size in
+  height; 1 pt = 0.353 mm). A failure "overset frame <id>: ..." means that frame's
+  text is cut off: fix it (set_text {"id":<id>,"fit":true}, or a smaller size) and
+  never tell the user it worked.
 - Ids are the integers in the FRAMES list. Omitting `ids` acts on the selection;
   every new frame becomes the selection, so the next op can omit ids to act on it.""",
     },

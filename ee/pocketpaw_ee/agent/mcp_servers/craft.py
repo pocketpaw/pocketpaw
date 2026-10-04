@@ -54,7 +54,11 @@ _NOTES = {
         'A passport photo is crop {preset: "passport_35x45"} (35x45 mm at 300 ppi). '
         "Layer ops act on the active layer when `layer` is omitted."
     ),
-    "design": "set_paint carries fill, stroke AND strokeWidth. Paint CMYK values are 0..1.",
+    "design": (
+        "set_paint paints a frame's box (fill, stroke AND strokeWidth), never its text; "
+        "text colour is set_text_color. set_text with fit: true grows the frame so larger "
+        "text stays visible (overset text is cut off). Paint CMYK values are 0..1."
+    ),
 }
 _PAINT = 'Paint: {"c","m","y","k"} 0..1 (preferred for print), "#rrggbb", "none".'
 

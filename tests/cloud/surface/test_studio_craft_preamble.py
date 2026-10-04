@@ -2,7 +2,9 @@
 # preambles (/studio/vector, /studio/photo, /studio/design) render the page's
 # document projection and say what they must: print work for India, Indic text,
 # units, the exact op names with one example each, the run_command block list,
-# and failures from the last batch. With no projection each one tells the agent
+# and failures from the last batch. Design says text colour is set_text_color
+# (set_paint is the frame's box) and that overset text disappears, with the
+# browser's "overset frame <id>:" failure. With no projection each one tells the agent
 # there is nothing to edit. The cache key moves with the document.
 
 from __future__ import annotations
@@ -187,6 +189,34 @@ def test_design_orients_for_print_layout_in_mm() -> None:
         "run_command", "file, export", "never claim it is done",
     ):  # fmt: skip
         assert needle in text, needle
+
+
+def test_design_says_text_colour_is_not_the_frame_fill() -> None:
+    # "Make the name red" painted a red box behind the name: set_paint read as text colour.
+    text = _render("design", DESIGN)
+    assert '{"op":"set_text_color"' in text
+    assert "set_paint paints a frame's BOX" in text
+    assert "never its text" in text
+    assert "Fill, stroke and strokeWidth all go through set_paint" not in text
+
+
+def test_design_warns_that_overset_text_disappears() -> None:
+    # "Make the phone bigger": 18 pt in a frame that fits 13 pt, the number vanished, and the
+    # reply claimed success.
+    text = _render("design", DESIGN)
+    for needle in (
+        "OVERSET", "disappears", '"fit":true', "overset frame <id>:",
+        "never tell the user it worked",
+    ):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_design_renders_an_overset_failure_from_the_browser() -> None:
+    failure = (
+        'overset frame 7: text does not fit its 74 x 12 mm box at 18 pt; hidden: "98400 12345"'
+    )
+    text = _render("design", {**DESIGN, "last_edit": {"failures": [failure]}})
+    assert f"! {failure}" in text
 
 
 def test_design_large_documents_are_capped() -> None:

@@ -5,7 +5,9 @@
 # validator is driven by it; good batches pass and come back normalised;
 # unknown ops, unknown params, bad types, invented ids, blocked run_command ids
 # and over-cap batches are refused with a message naming the index; oneOf
-# groups (crop, new_document); every op's preamble example validates; the tool
+# groups (crop, new_document); design's text colour is its own op
+# (set_text_color, set_paint is the frame's box) and set_text can grow its frame
+# to fit (fit); every op's preamble example validates; the tool
 # returns the ``craft_edit`` envelope {app, ops} and run_core promotes it; each
 # tool refuses when its app's projection is not bound; each STUDIO_<APP>
 # profile exposes exactly its own tool; through the real SDK server each tool
@@ -146,7 +148,8 @@ def test_photo_and_design_vocabularies() -> None:
     }  # fmt: skip
     assert contract("design").kinds == {
         "new_document", "add_page", "delete_page", "add_text_frame", "add_shape", "set_text",
-        "set_paint", "transform", "align", "arrange", "delete", "set_bleed", "run_command",
+        "set_text_color", "set_paint", "transform", "align", "arrange", "delete", "set_bleed",
+        "run_command",
     }  # fmt: skip
 
 
@@ -408,6 +411,31 @@ def test_design_new_document_then_build_on_it() -> None:
 )  # fmt: skip
 def test_bad_design_batches_are_refused(ops, needle) -> None:
     assert needle in _app_err("design", ops)
+
+
+def test_design_text_colour_is_its_own_op() -> None:
+    # "Make the name red" painted a red box behind the name (set_paint fill on the text
+    # frame). Text colour has its own verb, and set_paint's engine line says it is the box.
+    red = {"c": 0, "m": 1, "y": 1, "k": 0}
+    clean = _app_ok("design", [{"op": "set_text_color", "ids": ["7"], "color": red}])
+    assert clean[0] == {"op": "set_text_color", "ids": [7], "color": red}
+    _app_ok("design", [{"op": "set_text_color", "color": "#c00000"}])  # the selection
+    assert "missing required param 'color'" in _app_err(
+        "design", [{"op": "set_text_color", "ids": [7]}]
+    )
+    ops = contract("design").ops
+    assert "type.char" in ops["set_text_color"]["engine"]
+    assert "never the text" in ops["set_paint"]["engine"]
+    desc = tool_description("design")
+    assert "never its text" in desc and "set_text_color" in desc
+
+
+def test_design_set_text_can_grow_its_frame_to_fit() -> None:
+    # "Make the phone bigger" set 18 pt in a 13 pt frame and the number vanished (overset).
+    _app_ok("design", [{"op": "set_text", "id": 7, "size": 18, "fit": True}])
+    _app_ok("design", [{"op": "set_text", "id": 7, "fit": True}])  # fix a reported overset
+    assert "true or false" in _app_err("design", [{"op": "set_text", "id": 7, "fit": "yes"}])
+    assert "overset" in contract("design").ops["set_text"]["engine"]
 
 
 def test_design_no_selection_needs_ids_until_a_frame_is_created() -> None:

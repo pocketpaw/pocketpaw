@@ -28,6 +28,17 @@
     "Paint: as vector: {c,m,y,k} 0..1 (preferred), \"#rrggbb\", \"none\", [r,g,b]",
     "0..1, {gray} 0..1 or {swatch: name}.",
     "",
+    "Text colour is set_text_color (or set_text's color): type.char fill on the",
+    "frame's story. set_paint paints the frame's BOX (background fill, border),",
+    "never the text, so \"make the name red\" is set_text_color, not set_paint.",
+    "",
+    "Overset: after each batch the applier checks document.inspect's stories and",
+    "reports every overset text frame (text cut off, so invisible on the page) in",
+    "last_edit.failures as exactly:",
+    "  overset frame <id>: text does not fit its <w> x <h> mm box at <size> pt; hidden: \"<text>\"",
+    "<w>, <h>, <size> rounded to 0.1 with a trailing .0 dropped; <text> is the",
+    "story's first 40 characters. The agent reads it on the next send.",
+    "",
     "runCommand is the escape hatch, with the same stricter block as photo."
   ],
   "version": 1,
@@ -77,16 +88,21 @@
       }
     },
     "set_text": {
-      "engine": "story.setText {story of frame id, text}; selection.set {ids: [id]}, type.char {attrs: {fontFamily: font, size, fill: swatch name of color}}, type.para {attrs: {align (justify -> leftJustified)}}",
+      "engine": "story.setText {story of frame id, text}; selection.set {ids: [id]}, type.char {attrs: {fontFamily: font, size, fill: swatch name of color}}, type.para {attrs: {align (justify -> leftJustified)}}; fit: true -> then, while document.inspect lists the frame's story as overset, transform.set {height: current + 0.15 x size pt, ref: 0, ids: [id]} (at most 120 steps; the frame grows DOWN, its top-left stays; the engine's own autoSize is stored but not applied)",
       "params": {
         "id": "id", "text": "text", "size": "number+", "font": "text", "color": "paint",
-        "align": "enum:left|center|right|justify"
+        "align": "enum:left|center|right|justify", "fit": "bool"
       },
       "required": ["id"],
-      "anyOf": ["text", "size", "font", "color", "align"]
+      "anyOf": ["text", "size", "font", "color", "align", "fit"]
+    },
+    "set_text_color": {
+      "engine": "per id: selection.set {ids: [id]}, type.char {attrs: {fill: swatch name of color}} (the same path as set_text's color: the glyphs of the frame's whole story)",
+      "params": {"ids": "ids", "color": "paint"},
+      "required": ["color"]
     },
     "set_paint": {
-      "engine": "selection.set {ids}; object.color {color (CMYK 0..1 as sent, [r,g,b] x 255, gray g -> K g), target: fill|stroke, ids}; \"none\" -> object.fill|object.stroke {swatch: \"[None]\", ids}; {swatch} -> object.fill|object.stroke {swatch, ids}; strokeWidth -> object.stroke {weight, ids}",
+      "engine": "the frame's BOX (background fill, border), never the text: selection.set {ids}; object.color {color (CMYK 0..1 as sent, [r,g,b] x 255, gray g -> K g), target: fill|stroke, ids}; \"none\" -> object.fill|object.stroke {swatch: \"[None]\", ids}; {swatch} -> object.fill|object.stroke {swatch, ids}; strokeWidth -> object.stroke {weight, ids}",
       "params": {"ids": "ids", "fill": "paint", "stroke": "paint", "strokeWidth": "number0"},
       "anyOf": ["fill", "stroke", "strokeWidth"]
     },
