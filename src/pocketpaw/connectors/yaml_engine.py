@@ -1,62 +1,31 @@
 # DirectREST YAML engine — reads connector YAML definitions and executes REST actions.
-# Created: 2026-03-27 — Primary adapter. One YAML per service.
-# Updated: 2026-03-28 — Real HTTP execution via httpx (was placeholder).
-# Updated: 2026-06-07 (M3 connector→skill auto-authoring) — ConnectorDef grows an
-#   optional ``surface_profile`` block (skill / allow_tools / deny_tools) parsed
-#   from the YAML. It is the per-connector mapping source for deriving a pocket's
-#   PocketSurfaceProfile when the connector is bound to a pocket. Backward-compat:
-#   connectors with no block parse with ``surface_profile=None``.
-# Updated: 2026-06-08 — Added `senses: list[str]` to ConnectorDef + parse-time
-#   validation via senses.validate_sense_id (Sense tier chunk 1). Unknown paw.*
-#   ids fail loudly; missing `senses:` key is backward compatible ([]).
-# Updated: 2026-06-11 — Cookie/session auth + a persistent HTTP client.
-#   _build_auth_headers gains two additive methods: `cookie` (emits a Cookie:
-#   header from a declared credential, name set via auth.credential) and
-#   `header` (emits an arbitrary header named by auth.header from a credential —
-#   the escape hatch for APIs whose key is not a Bearer token, fixing the
-#   api_key-always-Bearer trap without touching api_key). execute() now reuses a
-#   lazily-built httpx.AsyncClient per adapter instance (connection pooling +
-#   cookie jar) instead of opening a fresh client per call; disconnect() closes
-#   it. Existing auth methods, timeouts, and error mapping are unchanged.
-# Updated: 2026-06-28 (AW-1 connector egress guard) — execute() now routes its
-#   outbound HTTP through the SSRF egress guard when the
-#   POCKETPAW_CONNECTOR_EGRESS_GUARD flag is on. Before each request it calls
-#   ``assert_egress_allowed(url, allowed_hosts)`` (https-only, no
-#   userinfo/fragment, host must be on the allow-list, DNS pre-resolve +
-#   internal-range reject) and dials the result through a pinned-IP client
-#   (``PinnedTransport``, ``follow_redirects=False``) so the connection cannot
-#   be re-resolved to an internal address between check and connect (DNS-rebind
-#   TOCTOU). A rejection returns a clean ActionResult error. The flag defaults
-#   OFF (safe rollout) — with it off the pooled client path is byte-for-byte
-#   unchanged. The guard primitive lives in the OSS module
-#   ``security.url_validators`` (the OSS->EE import boundary forbids importing
-#   the EE ``_http_guard``); the EE guard re-exports it to stay canonical.
-# Updated: 2026-06-28 (AW-2 multi-host allow-list + concern fixes) —
-#   * ConnectorDef grows ``allowed_hosts: list[str]`` parsed from a top-level
-#     ``allowed_hosts:`` YAML key (explicit operator additions).
-#   * The effective per-call allow-list is now built from THREE sources, not
-#     just the request host: every action's declared base-URL host (resolved
-#     through the SAME ``{template}`` substitution execute() applies, so
-#     ``{FRESHDESK_DOMAIN}.freshdesk.com`` and ``{CONFLUENCE_BASE_URL}`` resolve
-#     to the real runtime host), the auth-endpoint host (``auth.auth_url`` /
-#     ``auth.token_url`` — some connectors authenticate on a different host),
-#     and the explicit ``allowed_hosts``. Hosts are normalized (lowercase,
-#     IPv6 brackets stripped). The RESOLVED request host is checked against this
-#     set — never a template string — so a templated/dynamic base URL is vetted
-#     by its real host at call time. IP-literal and IPv6 base URLs flow through
-#     unchanged (urlsplit handles the brackets; the resolved-IP internal check
-#     still applies).
-#   * Concern fix 1 (fail-CLOSED on config error): ``_egress_guard_enabled``
-#     no longer swallows a settings-load error into "guard off". A settings
-#     failure now logs at error level and FAILS CLOSED (returns True → the
-#     guard runs) so a malformed settings load cannot silently re-open the
-#     SSRF bypass. The dev escape ``POCKETPAW_ALLOW_INTERNAL_URLS`` still lets
-#     localhost connectors through when the guard runs.
-#   * Concern fix 2 (preserve the cookie jar): pinned clients are now CACHED
-#     per resolved host (``_pinned_clients``) instead of built fresh per
-#     request, so the persistent cookie jar survives across calls — session /
-#     cookie-auth connectors keep working under the guard. The cache is closed
-#     alongside the pooled client in disconnect().
+#
+# One YAML per service. ``parse_connector_yaml`` builds a ``ConnectorDef``: the
+# action manifest, auth, ``senses`` (each id validated at parse time; an unknown
+# ``paw.*`` id fails loudly), explicit ``allowed_hosts`` and the optional
+# ``surface_profile`` block (skill / allow_tools / deny_tools), which the cloud
+# derivation folds into a pocket's PocketSurfaceProfile when the connector is
+# bound to that pocket. A connector without the block parses with
+# ``surface_profile=None``.
+#
+# ``DirectRESTAdapter`` runs actions over httpx with one lazily built, pooled
+# client per adapter instance (connection reuse plus a cookie jar), closed by
+# ``disconnect()``. Auth methods include api_key, bearer, basic, ``cookie`` (a Cookie:
+# header from a declared credential) and ``header`` (any header name, for APIs
+# whose key is not a Bearer token).
+#
+# Egress guard. With the ``connector_egress_guard`` setting on (default off),
+# every request first passes ``assert_egress_allowed(url, allowed_hosts)``
+# (https only, no userinfo/fragment, host on the allow-list, DNS pre-resolved and
+# internal ranges refused) and is dialled through a pinned-IP client
+# (``PinnedTransport``, no redirects), so the host cannot be re-resolved to an
+# internal address between check and connect. Pinned clients are cached per
+# resolved host so the cookie jar survives. The allow-list is every action's
+# base-URL host (resolved through the same ``{template}`` substitution execute()
+# uses), the auth endpoints' hosts and ``allowed_hosts``; the RESOLVED request
+# host is what gets checked. A settings-load error fails CLOSED (the guard runs);
+# ``POCKETPAW_ALLOW_INTERNAL_URLS`` still lets localhost through. The guard lives
+# in the OSS ``security.url_validators`` (the EE guard re-exports it).
 
 from __future__ import annotations
 
@@ -89,8 +58,10 @@ class ConnectorSurfaceProfile:
 
     Fields (all optional):
       * ``skill`` — a single skill name to load for rooms with this connector.
-      * ``allow_tools`` — tool-id glob/patterns to add to the SDK allowlist.
-      * ``deny_tools`` — tool-id glob/patterns to deny.
+      * ``allow_tools`` — tool ids to add to the SDK allowlist: an exact id
+        (``mcp__<server>__<tool>`` or a built-in name) or a whole server as the
+        bare ``mcp__<server>``. Never globs: the tool gate does not expand them.
+      * ``deny_tools`` — tool ids to deny, in the same forms.
     """
 
     skill: str | None = None

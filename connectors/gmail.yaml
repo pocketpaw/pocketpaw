@@ -35,7 +35,9 @@ icon: mail
 # allow_tools is left EMPTY: the resolver treats an empty allow as "no SDK-tool
 # restriction" (the union only ADDS to the allowlist, never narrows it), so an
 # empty list is the safe, correct default until the gmail tools have stable MCP
-# ids to glob against. When they do, set e.g. allow_tools: ["mcp__*gmail*"].
+# ids. When they do, list them by exact id (``mcp__<server>__<tool>``) or the
+# whole server as ``mcp__<server>``. Entries are never globs: the tool gate
+# matches them exactly, so a pattern like ``mcp__*gmail*`` would admit nothing.
 surface_profile:
   skill: gmail
   allow_tools: []
