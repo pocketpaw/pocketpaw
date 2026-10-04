@@ -10,10 +10,16 @@
 # per-mode allow-lists, the pocket-session lock) did nothing on this backend.
 #
 # What these tests pin, all derived from the turn's FINAL allowed set:
-#   * one PreToolUse gate (``matcher=None``) that denies any tool outside it;
-#   * ``tools=`` pinned to the turn's built-ins plus ``ToolSearch`` (without it
-#     the CLI turns tool search off and loads every MCP schema up front);
-#   * ``disallowed_tools`` carrying the surface deny set;
+#   * one PreToolUse gate (``matcher=None``) that checks the deny set first (a
+#     bare ``mcp__<server>`` deny covers the server) and refuses anything else
+#     outside the set; whole-server grants come from external config names
+#     (which may hold ``__``) and bare ids without ``__``, never a ``__`` count;
+#   * raw external server names in allow/deny/mode inputs respelled the CLI way,
+#     and a declared full id kept under a server allowed wholesale;
+#   * ``tools=`` pinned to the turn's built-ins plus the infra tools (policy wins
+#     over ``allow_sdk_tools``; PowerShell rides on Bash on Windows; a pocket
+#     session, detected by its scope block, keeps Skill);
+#   * ``disallowed_tools`` carrying the deny set, and the warm-client key too;
 #   * ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` in the subprocess env, so a
 #     claude.ai login cannot pour the account's connectors into the agent.
 # Plus the regression guard for the fix itself: on a broad surface the gate
