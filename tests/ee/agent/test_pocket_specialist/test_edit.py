@@ -34,10 +34,12 @@ Regression test for edit-ignores-agent-mode bug (#1170):
     unknown ops fold into ``warnings`` like the subagent path.
 
 Skill path on the subagent pipeline (``POCKETPAW_POCKET_SPECIALIST_USE_SKILL``):
-  * The specialist edits with ``Skill`` + ``curl`` through ``Bash``, but its
-    prompt carries ``<pocket-scope>``, which locks the Claude SDK backend to
-    Agent / WebSearch / WebFetch. The pipeline declares Bash + Skill through
-    ``allow_sdk_tools``, and only to a backend whose ``run`` takes that keyword.
+  * The specialist edits with ``curl`` through ``Bash``, but its prompt opens
+    with ``<pocket-scope>``, which locks the Claude SDK backend to Agent /
+    WebSearch / WebFetch / Skill. The pipeline declares exactly the built-ins
+    the pocketpaw-pocket-specialist SKILL.md names (read from the shipped file)
+    through ``allow_sdk_tools``, and only to a backend whose ``run`` takes that
+    keyword.
 """
 
 from __future__ import annotations
@@ -964,9 +966,24 @@ class TestAgentModeEditDispatch:
 
 
 class TestSkillPathDeclaresItsTools:
-    """The skill path needs Bash + Skill past the pocket lock (see the module
-    docstring). The default ``deep_agents`` backend has no ``allow_sdk_tools``
-    keyword, so it must never be handed one."""
+    """The skill path needs its skill's built-ins past the pocket lock (see the
+    module docstring). The default ``deep_agents`` backend has no
+    ``allow_sdk_tools`` keyword, so it must never be handed one."""
+
+    @staticmethod
+    def _skill_built_ins() -> frozenset[str]:
+        """The built-ins the pocketpaw-pocket-specialist SKILL.md tells the agent
+        it has ("You have ``Bash``, ``Read``, ..."), read from the shipped file."""
+        import re
+
+        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+        root = bundled_skills_plugin_dir()
+        assert root is not None, "the bundled skills plugin is missing"
+        text = (root / "skills" / "pocketpaw-pocket-specialist" / "SKILL.md").read_text()
+        sentence = re.search(r"You have (.+?)\.", text, re.S)
+        assert sentence, "SKILL.md no longer says which tools the specialist has"
+        return frozenset(re.findall(r"``(\w+)``", sentence.group(1)))
 
     @staticmethod
     async def _run(monkeypatch: pytest.MonkeyPatch, run, *, use_skill: bool = True):
@@ -995,9 +1012,10 @@ class TestSkillPathDeclaresItsTools:
             )
 
     @pytest.mark.asyncio
-    async def test_bash_and_skill_reach_the_claude_backend_past_the_pocket_lock(
+    async def test_the_skill_built_ins_reach_the_claude_backend_past_the_pocket_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from pocketpaw.agents.claude_sdk import _POCKET_SCOPE_OPENING
         from pocketpaw.agents.protocol import AgentEvent
         from tests.test_claude_sdk_tool_scoping import _build
 
@@ -1009,12 +1027,16 @@ class TestSkillPathDeclaresItsTools:
 
         await self._run(monkeypatch, run)
 
-        assert seen["allow_sdk_tools"] == frozenset({"Bash", "Skill"})
-        assert "<pocket-scope>" in seen["system_prompt"], "the lock this test is about"
+        declared = self._skill_built_ins()
+        assert "Bash" in declared, "the skill curls the merge endpoint"
+        assert seen["allow_sdk_tools"] == declared, "grant exactly what the skill names"
+        assert _POCKET_SCOPE_OPENING.search(seen["system_prompt"]), "the lock this test is about"
         options = await _build(
             system_prompt=seen["system_prompt"], allow_sdk_tools=seen["allow_sdk_tools"]
         )
-        assert {"Bash", "Skill"} <= set(options.tools)
+        # Skill rides on the pocket lock itself; the declared set rides on top.
+        assert declared | {"Skill"} <= set(options.tools)
+        assert "Glob" not in options.tools, "the lock still holds what the skill does not name"
 
     @pytest.mark.asyncio
     async def test_a_backend_without_the_keyword_is_not_handed_it(

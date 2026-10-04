@@ -22,11 +22,12 @@ Instinct gate for human approval: nothing landed, and it is not a failure.
 ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` (default off) moves the subagent edit to
 the skill path: the ``POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL`` prompt, no
 granular-op tools, tenancy and the internal token handed over through
-``attach_subprocess_env`` (never the parent ``os.environ``), and Bash + Skill
-declared through ``allow_sdk_tools``, because the prompt's ``<pocket-scope>``
-locks the Claude SDK backend to Agent / WebSearch / WebFetch. The agent-mode skill
-kits in ``adapters.py`` are acted on inside the chat turn, which declares no such
-tools, so they cannot run in a pocket session.
+``attach_subprocess_env`` (never the parent ``os.environ``), and the built-ins its
+skill names (Bash, Read, Write, Edit, Grep) declared through ``allow_sdk_tools``,
+because the prompt's ``<pocket-scope>`` locks the Claude SDK backend to Agent /
+WebSearch / WebFetch / Skill. The agent-mode skill kits in ``adapters.py`` are
+acted on inside the chat turn, which declares no such tools, so they cannot run
+in a pocket session.
 """
 
 from __future__ import annotations
@@ -982,13 +983,15 @@ async def _run_edit_subagent_pipeline(
                 "POCKETPAW_POCKET_SPECIALIST_USE_SKILL flag.",
                 backend_name,
             )
-        # The skill path edits with ``Skill`` + ``curl`` through ``Bash``, and its
-        # prompt carries ``<pocket-scope>``, which locks the Claude SDK backend to
-        # Agent / WebSearch / WebFetch. Declare the two through the additive
-        # allowlist, and only to a backend whose ``run`` takes it (deep_agents,
-        # the default, does not and would raise TypeError).
+        # The skill path edits with ``curl`` through ``Bash``, and its prompt opens
+        # with ``<pocket-scope>``, which locks the Claude SDK backend to Agent /
+        # WebSearch / WebFetch / Skill. Declare exactly the built-ins the
+        # pocketpaw-pocket-specialist SKILL.md tells the agent it has, through the
+        # additive allowlist, and only to a backend whose ``run`` takes it
+        # (deep_agents, the default, does not and would raise TypeError). The
+        # operator's tool policy still wins: a shell-denying policy drops Bash.
         if "allow_sdk_tools" in inspect.signature(backend.run).parameters:
-            run_kwargs["allow_sdk_tools"] = frozenset({"Bash", "Skill"})
+            run_kwargs["allow_sdk_tools"] = frozenset({"Bash", "Read", "Write", "Edit", "Grep"})
         log.info(
             "[pocket-specialist:edit] skill+merge path engaged "
             "(workspace=%s user=%s token_present=%s)",

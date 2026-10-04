@@ -173,9 +173,9 @@
     ]
   },
   {
-    "label": "the skill path loses Bash + Skill to the pocket lock",
+    "label": "the skill path loses its skill's built-ins to the pocket lock",
     "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
-    "find": "            run_kwargs[\"allow_sdk_tools\"] = frozenset({\"Bash\", \"Skill\"})",
+    "find": "            run_kwargs[\"allow_sdk_tools\"] = frozenset({\"Bash\", \"Read\", \"Write\", \"Edit\", \"Grep\"})",
     "replace": "            pass",
     "tests": [
       "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
