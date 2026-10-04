@@ -57,6 +57,7 @@ import hashlib
 import logging
 import os
 import re
+import sys
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -973,6 +974,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # conservative.
         "Agent": "shell",
         "Bash": "shell",
+        # The CLI's shell on Windows without Git Bash: the same capability.
+        "PowerShell": "shell",
         "Read": "read_file",
         "Write": "write_file",
         "Edit": "edit_file",
@@ -1300,7 +1303,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
     async def _block_dangerous_hook(self, input_data, tool_use_id: str | None, context) -> dict:
         """PreToolUse hook to block dangerous commands.
 
-        This hook is called before any Bash command is executed.
+        This hook is called before any Bash or PowerShell command is executed.
         Returns a deny decision for dangerous commands.
 
         The callback must be resilient — an unhandled exception here
@@ -1319,8 +1322,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
             tool_name = input_data.get("tool_name", "")
             tool_input = input_data.get("tool_input", {})
 
-            # Only check Bash commands
-            if tool_name != "Bash":
+            # Only shell commands: Bash, or PowerShell (the CLI's shell on
+            # Windows without Git Bash). Both carry the command in ``command``.
+            if tool_name not in ("Bash", "PowerShell"):
                 return {}
 
             command = str(tool_input.get("command", ""))
@@ -2736,6 +2740,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     sorted(deny_mcp_tool_ids),
                 )
 
+        # On Windows without Git Bash the CLI's only shell is the ``PowerShell``
+        # tool. It is the shell under another name, so it rides on Bash: pinned
+        # and allowed exactly when Bash survived policy, the allow union and the
+        # deny (/sites and /code deny the shell by the bare name "Bash").
+        if (
+            sys.platform == "win32"
+            and "Bash" in allowed_tools
+            and "PowerShell" not in allowed_tools
+            and "PowerShell" not in deny_mcp_tool_ids
+            and self._policy.is_tool_allowed(self._TOOL_POLICY_MAP["PowerShell"])
+        ):
+            allowed_tools.append("PowerShell")
+
         # Per-MODE restrictive MCP allow-list (distinct from the additive
         # ``allow_sdk_tools`` above). ``None`` keeps every MCP tool (broad
         # surfaces like /chat). When set, keep only MCP tools that are in the
@@ -2865,7 +2882,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         hooks = {
             "PreToolUse": [
                 self._HookMatcher(matcher=None, hooks=[gate]),
-                self._HookMatcher(matcher="Bash", hooks=[self._block_dangerous_hook]),
+                # The CLI reads plain names split on "|" as an exact-name list.
+                self._HookMatcher(matcher="Bash|PowerShell", hooks=[self._block_dangerous_hook]),
             ]
         }
         options_kwargs = {
@@ -3071,8 +3089,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # approval (like Bash — used by memory save, web search, etc.) hang
         # indefinitely on messaging channels.
         # Bypass approves EVERY tool call, so the tool gate (PreToolUse, all
-        # tools) is what holds the turn to its allowed set; dangerous Bash
-        # commands are caught by the Bash PreToolUse hook.
+        # tools) is what holds the turn to its allowed set; dangerous shell
+        # commands are caught by the Bash / PowerShell PreToolUse hook.
         options_kwargs["permission_mode"] = "bypassPermissions"
 
         # Model selection for Anthropic providers:
