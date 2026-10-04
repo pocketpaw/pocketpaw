@@ -2700,14 +2700,30 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ``effective = (agent_tools ∪ allow) − deny``. Dedup-preserve order:
         # only append ids not already present. Empty for legacy / non-entity
         # runs, so this is a no-op there. The deny set (subtracted next) is
-        # the hard cap — an id in BOTH allow and deny stays denied.
+        # the hard cap — an id in BOTH allow and deny stays denied. The
+        # operator's ToolPolicy deny always wins too (policy.py), so a built-in
+        # the policy refuses is not unioned in. MCP ids skip that check: their
+        # servers are policy-gated where they register, and a restrictive
+        # profile names no ``mcp__`` id at all.
         if allow_sdk_tools:
             existing = set(allowed_tools)
-            for tool_id in allow_sdk_tools:
-                if tool_id not in existing:
-                    allowed_tools.append(tool_id)
-                    existing.add(tool_id)
-            logger.info("Surface tool-allow: unioned %s into allowlist", sorted(allow_sdk_tools))
+            refused: list[str] = []
+            for tool_id in sorted(allow_sdk_tools):
+                if tool_id in existing:
+                    continue
+                if not tool_id.startswith("mcp__") and not self._policy.is_tool_allowed(
+                    self._TOOL_POLICY_MAP.get(tool_id, tool_id)
+                ):
+                    refused.append(tool_id)
+                    continue
+                allowed_tools.append(tool_id)
+                existing.add(tool_id)
+            if refused:
+                logger.info("Surface tool-allow: tool policy refused %s", refused)
+            logger.info(
+                "Surface tool-allow: unioned %s into allowlist",
+                sorted(allow_sdk_tools - frozenset(refused)),
+            )
 
         # Surface-scoped servers (``SURFACE_SCOPED_MCP_SERVERS``) exist only on
         # a surface that granted them through ``allow_sdk_tools``. Anywhere else
