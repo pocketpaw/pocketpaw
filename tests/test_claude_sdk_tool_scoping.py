@@ -361,19 +361,32 @@ async def test_a_turn_pins_its_builtins_plus_tool_search() -> None:
         assert not await _allows(options, leaked)
 
 
-async def test_a_pocket_session_pins_only_delegation_and_web() -> None:
+async def test_a_pocket_session_pins_only_delegation_web_and_skills() -> None:
     options = await _build(system_prompt=_POCKET)
 
-    assert options.tools == ["Agent", "WebSearch", "WebFetch", "ToolSearch"]
+    assert options.tools == ["Agent", "WebSearch", "WebFetch", "Skill", "ToolSearch"]
     assert not await _allows(options, "Bash")
     assert await _allows(options, _WIDGET_SPEC), "pocket MCP tools stay reachable"
+
+
+async def test_a_pocket_creation_turn_can_load_the_create_pocket_skill() -> None:
+    """The creation prompt calls the pocketpaw-create-pocket skill the preferred
+    entry point; a lock without Skill refused it on every default creation turn."""
+    from pocketpaw.ripple import POCKET_CREATION_PROMPT_MCP
+
+    assert "pocketpaw-create-pocket" in POCKET_CREATION_PROMPT_MCP
+    options = await _build(system_prompt=POCKET_CREATION_PROMPT_MCP)
+
+    assert "Skill" in options.tools
+    assert await _allows(options, "Skill")
+    assert not await _allows(options, "Bash"), "still a pocket session"
 
 
 async def test_the_pinned_builtins_are_policy_filtered() -> None:
     backend = _backend(policy=ToolPolicy(profile="full", deny=["shell"]))
     options = await _build(backend, system_prompt=_POCKET)
 
-    assert options.tools == ["WebSearch", "WebFetch", "ToolSearch"]
+    assert options.tools == ["WebSearch", "WebFetch", "Skill", "ToolSearch"]
     assert not await _allows(options, "Agent")
 
 
