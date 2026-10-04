@@ -3,9 +3,10 @@
 # document projection and say what they must: print work for India, Indic text,
 # units, the exact op names with one example each, the run_command block list,
 # and failures from the last batch. Design says text colour is set_text_color
-# (set_paint is the frame's box) and that overset text disappears, with the
-# browser's "overset frame <id>:" failure. With no projection each one tells the agent
-# there is nothing to edit. The cache key moves with the document.
+# (set_paint is the frame's box), that overset text disappears, and the browser's
+# layout-check lines ("overset", "shrunk", "overlap", "off page frame <id>:").
+# With no projection each one tells the agent there is nothing to edit. The cache
+# key moves with the document.
 
 from __future__ import annotations
 
@@ -217,6 +218,32 @@ def test_design_renders_an_overset_failure_from_the_browser() -> None:
     )
     text = _render("design", {**DESIGN, "last_edit": {"failures": [failure]}})
     assert f"! {failure}" in text
+
+
+def test_design_names_every_layout_check_line_and_never_claims_a_clean_layout() -> None:
+    # Round 2: "make the phone 30 pt" ran the number over the address and off the card,
+    # and the reply said it did not overlap, twice.
+    text = _render("design", DESIGN)
+    for needle in (
+        "LAYOUT CHECK", "overset frame <id>:", "shrunk frame <id>:", "overlap frame <id>:",
+        "off page frame <id>:", "Never tell the user text\n  fits",
+        "answer from those failure lines only", "make room first",
+    ):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_design_renders_layout_check_lines_from_the_browser() -> None:
+    failures = [
+        "shrunk frame 42: text set at 13.3 pt, not 26 pt, so it fits its 53 x 6.2 mm box;"
+        " make room around the frame for a bigger size",
+        'overlap frame 42: its box now overlaps frame 44 (text "Main Bazaar") by 53 x 2.1 mm;'
+        " move one of them or make the text smaller",
+        "off page frame 44: its box runs 1.4 mm past the bottom trim edge, so that text is"
+        " cut off when the page is trimmed",
+    ]
+    text = _render("design", {**DESIGN, "last_edit": {"failures": failures}})
+    for failure in failures:
+        assert f"! {failure}" in text
 
 
 def test_design_large_documents_are_capped() -> None:

@@ -8,8 +8,10 @@
 # in the browser (the craft engines as WebAssembly); the projection IS the read
 # path. The procedure block lists the app's exact op names with one valid
 # example each (agents guessed wrong names until they were listed). Design's
-# rules make text colour (set_text_color; set_paint is the frame's box) and
-# overset text (set_text fit, the "overset frame <id>:" failure) explicit.
+# rules make text colour (set_text_color; set_paint is the frame's box), overset
+# text (set_text fit) and the browser's layout check explicit: its "overset",
+# "shrunk", "overlap" and "off page frame <id>:" lines, and that the agent never
+# claims text fits or does not overlap, since it replies before the check runs.
 #
 # Projection shapes the pages send:
 #   vector: {title?, colorMode, units?, artboard: {width, height} (pt),
@@ -272,11 +274,25 @@ _SPECS: dict[str, dict[str, Any]] = {
   never its text: "make the name red" is set_text_color on the name's frame.
 - OVERSET text disappears: a text frame shows only what fits its box, and the rest
   is cut off, invisible on the page and in print. When you raise a text size or
-  lengthen a text, pass "fit":true on set_text (the frame grows down until the text
-  fits), or keep the size within the frame (a line needs about 1.4 x its size in
-  height; 1 pt = 0.353 mm). A failure "overset frame <id>: ..." means that frame's
-  text is cut off: fix it (set_text {"id":<id>,"fit":true}, or a smaller size) and
-  never tell the user it worked.
+  lengthen a text, pass "fit":true on set_text, or keep the size within the frame
+  (a line needs about 1.4 x its size in height; 1 pt = 0.353 mm). fit runs after
+  the batch's moves: the frame grows down into free space only (never onto the
+  frame below or past the trim), then the text shrinks, at most to half the size
+  you asked. To make text really bigger, make room first in the same batch
+  (move or shrink the frames under it).
+- LAYOUT CHECK: after your batch the editor checks the page and the next message
+  shows what it found under the failures, one line each:
+  "overset frame <id>: ..." = that text is cut off; "shrunk frame <id>: ..." = fit
+  set it smaller than you asked (tell the user the real size);
+  "overlap frame <id>: ..." = that frame now covers another one;
+  "off page frame <id>: ..." = it runs past the trim and is cut off in print.
+  Fix them next (set_text {"id":<id>,"fit":true}, a smaller size, or a move).
+- You cannot see the result of the batch you are sending. Never tell the user text
+  fits, is fully visible or does not overlap, and never tell the user it worked;
+  say what you changed and that the editor will flag anything cut off or overlapping.
+  Asked "is anything cut off / overlapping?", answer from those failure lines only
+  (none listed after your last batch = the editor found no problem), never from the
+  ops you sent.
 - Ids are the integers in the FRAMES list. Omitting `ids` acts on the selection;
   every new frame becomes the selection, so the next op can omit ids to act on it.""",
     },

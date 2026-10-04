@@ -56,8 +56,10 @@ _NOTES = {
     ),
     "design": (
         "set_paint paints a frame's box (fill, stroke AND strokeWidth), never its text; "
-        "text colour is set_text_color. set_text with fit: true grows the frame so larger "
-        "text stays visible (overset text is cut off). Paint CMYK values are 0..1."
+        "text colour is set_text_color. set_text with fit: true makes the text fit its frame "
+        "(the frame grows into free space, then the text shrinks; overset text is cut off). "
+        "The next message lists what the editor found (overset, shrunk, overlap, off page). "
+        "Paint CMYK values are 0..1."
     ),
 }
 _PAINT = 'Paint: {"c","m","y","k"} 0..1 (preferred for print), "#rrggbb", "none".'
