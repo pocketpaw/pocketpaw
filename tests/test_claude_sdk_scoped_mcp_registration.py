@@ -13,8 +13,8 @@
 # ``allowed_tools``. A bare ``mcp__<server>`` entry counts, spelled the way the CLI
 # names tools, and an external server's name may contain ``__`` (``acme__crm``),
 # so it is matched whole, never cut at the first ``__``. A provider that cannot
-# qualify is never built. A broad turn registers exactly what
-# ``_get_mcp_servers()`` returns.
+# qualify is never built, and one whose ``tool_ids()`` raises is logged like a
+# failed build. A broad turn registers exactly what ``_get_mcp_servers()`` returns.
 #
 # Providers and external config are faked; the widgets / atlas / studio servers
 # are the real ones.
@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -30,6 +31,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 
 from pocketpaw.agents.claude_sdk import _mcp_server_of
@@ -156,6 +158,30 @@ async def test_a_tool_declared_under_a_double_underscore_server_starts_that_serv
     assert set(options.mcp_servers) == {"acme__crm"}
     assert await _allows(options, "mcp__acme__crm__lookup")
     assert not await _allows(options, "mcp__acme__crm__delete")
+
+
+async def test_a_provider_whose_tool_ids_raise_is_logged_on_a_scoped_turn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A provider that fails to build is a WARNING with its traceback (#FU-F: a
+    stale install was invisible at DEBUG). A scoped turn asks for ``tool_ids()``
+    first, and a raise there must be just as loud."""
+
+    class _StaleInstall(_Provider):
+        def tool_ids(self) -> list[str]:
+            raise ImportError("stale editable install")
+
+    with _world() as providers, caplog.at_level(logging.WARNING):
+        providers["stale"] = _StaleInstall("stale", "read")
+        options = await _build(
+            pool=None, external=(_EXTERNAL.name,), deny_mcp_tool_ids=frozenset({_X_WRITE})
+        )
+
+    (record,) = [r for r in caplog.records if "_StaleInstall" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None, "the traceback is the diagnostic"
+    assert providers["stale"].builds == 0
+    assert set(options.mcp_servers) == _EVERYTHING, "the turn still starts the rest"
 
 
 async def test_on_every_scoped_turn_each_started_server_owns_an_allowed_tool() -> None:

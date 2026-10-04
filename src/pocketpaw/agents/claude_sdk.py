@@ -1522,8 +1522,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         ``only`` is a scoped turn's set of server names (spelled as in tool ids)
         that own a tool the turn may call; every other server is dropped, and a
-        provider none of whose ``tool_ids()`` fall in it is never built. ``None``
-        (a broad turn) registers everything.
+        provider none of whose ``tool_ids()`` fall in it is never built (one whose
+        ``tool_ids()`` raises is logged as a failed build). ``None`` (a broad turn)
+        registers everything.
         """
         try:
             from pocketpaw.mcp.config import load_mcp_config
@@ -1690,14 +1691,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
         scoped_off = ungranted_surface_servers(surface_grants)
         for provider in _ext_providers("pocketpaw.mcp_servers"):
             provider_name = type(provider).__name__
-            if only is not None:
-                try:
-                    owns = {_mcp_server_of(t) for t in provider.tool_ids()}
-                except Exception:  # noqa: BLE001 — no ids means none it could serve
-                    owns = set()
-                if not owns & only:
-                    continue
             try:
+                # A scoped turn builds only a provider that owns a server it may
+                # use. Provider ids are code-defined, so the first segment is the
+                # server. A ``tool_ids()`` that raises is the same failure as a
+                # build that raises (none of its ids reached the allowlist either).
+                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:
+                    continue
                 built = provider.build_server()
             except Exception as exc:  # noqa: BLE001
                 # 2026-05-28 (#FU-F): a stale editable install + dashboard

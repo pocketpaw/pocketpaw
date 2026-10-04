@@ -148,10 +148,19 @@
   {
     "label": "an out-of-scope provider is still built (composio fetches on a /code turn)",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "                if not owns & only:\n                    continue",
-    "replace": "                if False:\n                    continue",
+    "find": "                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:",
+    "replace": "                if False:",
     "tests": [
       "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on"
+    ]
+  },
+  {
+    "label": "a provider whose tool_ids() raises is skipped silently on a scoped turn",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:",
+    "replace": "                try:\n                    owns = {_mcp_server_of(t) for t in provider.tool_ids()}\n                except Exception:  # noqa: BLE001\n                    owns = set()\n                if only is not None and not owns & only:",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_provider_whose_tool_ids_raise_is_logged_on_a_scoped_turn"
     ]
   },
   {
