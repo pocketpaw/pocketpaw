@@ -156,7 +156,7 @@ async def directory(
 async def apply(body: PartnerApplyIn, request: Request) -> Response:
     """PUBLIC. Apply to become a partner: one proposal for the platform. 400
     ``partners.turnstile_failed``; 429 ``partners.apply_rate_limited`` past 5 an hour."""
-    await service_admin.apply(body, remote_ip=client_ip(request))
+    await service_admin.apply(body, remote_ip=client_ip(request, trusted_header_ok=True))
     return Response(status_code=204)
 
 

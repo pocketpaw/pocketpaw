@@ -76,6 +76,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "ai_visibility_anthropic_api_key",
         "ai_visibility_cf_api_token",
         "turnstile_secret",
+        "public_web_key",
     }
 )
 

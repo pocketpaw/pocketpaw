@@ -2615,6 +2615,18 @@ class Settings(BaseSettings):
             "verification with a warning. POCKETPAW_TURNSTILE_SECRET."
         ),
     )
+    # Shared secret the paw-web Worker sends as X-Paw-Web-Key so the public
+    # per-IP limits can trust its X-Paw-Client-IP (``cloud/_core/rate_limit``).
+    # Unset means the header is ignored everywhere. Rotate by setting the new
+    # value on both sides and redeploying both; there is no dual-key window.
+    public_web_key: str | None = Field(
+        default=None,
+        description=(
+            "Shared key the paw-web Worker sends as X-Paw-Web-Key; when it matches, "
+            "X-Paw-Client-IP is the address for public per-IP limits. Unset ignores "
+            "the header. POCKETPAW_PUBLIC_WEB_KEY."
+        ),
+    )
     ai_check_daily_usd: float = Field(
         default=5.0,
         description=(
