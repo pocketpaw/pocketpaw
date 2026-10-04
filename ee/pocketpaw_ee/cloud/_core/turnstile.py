@@ -2,9 +2,12 @@
 #
 # One verifier for every unauthenticated POST that would otherwise cost the
 # platform something (an AI check spends engine money, a partner application
-# files an operator proposal). The token is sent to Cloudflare with the caller's
-# IP and never stored. With ``POCKETPAW_TURNSTILE_SECRET`` unset (dev) the check
-# is skipped with a warning; a network error or a bad answer fails closed. The
+# lands in the operator queue). The token is sent to Cloudflare with the caller's
+# IP and never stored. With ``POCKETPAW_TURNSTILE_SECRET`` unset the check is
+# skipped with a warning in dev, but REFUSED in a production posture
+# (``auth.core._is_production``: POCKETPAW_ENV=production or
+# POCKETPAW_AUTH_COOKIE_SECURE=true), so a deploy that forgot the secret does not
+# accept bot submissions. A network error or a bad answer fails closed. The
 # caller names the error code so each route keeps its own ``<module>.turnstile_failed``.
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import logging
 import httpx
 
 from pocketpaw_ee.cloud._core.errors import BadRequest
+from pocketpaw_ee.cloud.auth.core import _is_production
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,9 @@ async def verify_turnstile(
 
     secret = str(get_settings().turnstile_secret or "").strip()
     if not secret:
+        if _is_production():
+            logger.error("turnstile: POCKETPAW_TURNSTILE_SECRET unset in production, refusing")
+            raise BadRequest(code, "This form is not available right now. Try again later.")
         logger.warning("turnstile: POCKETPAW_TURNSTILE_SECRET unset, skipping (dev only)")
         return
     data = {"secret": secret, "response": token}
