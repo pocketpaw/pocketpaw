@@ -10,10 +10,14 @@
 # for a member too, so every read tool goes through ``redact``.
 # Gating: ``surface_scoped_tool_deny`` names the lens ids unless granted;
 # claude_sdk ``_build_options`` drops the server and its ids from a normal chat
-# and keeps both when the agent_health profile's grant is passed; pydantic_ai
-# adds the ungranted lens ids to the deny set it builds the agent with; and the
-# warm-client cache key tells a client carrying the lens server apart from one
-# without it, so a client warmed on agent_health is never reused elsewhere.
+# and keeps both when the agent_health profile's grant is passed; its call-time
+# tool gate (the only enforcement under bypassPermissions) runs the lens tools
+# on agent_health and on no other surface's real profile, refuses them when
+# agent_health denies them, and refuses an id the server never declared;
+# pydantic_ai adds the ungranted lens ids to the deny set it builds the agent
+# with; and the warm-client cache key tells a client carrying the lens server
+# apart from one without it, so a client warmed on agent_health is never reused
+# elsewhere.
 
 from __future__ import annotations
 
@@ -210,16 +214,17 @@ def sdk_backend(tmp_path, monkeypatch):
     return backend
 
 
-async def _build(backend, allow_sdk_tools, deny=frozenset()):
+async def _build(backend, allow_sdk_tools, deny=frozenset(), allow_mcp=None, exclusive=False):
     return await backend._build_options(
         "hello",
         system_prompt="You are Paw.",
         session_key=None,
         deny_mcp_tool_ids=deny,
         allow_sdk_tools=allow_sdk_tools,
-        allow_mcp_tool_ids=None,
+        allow_mcp_tool_ids=allow_mcp,
         skill_names=frozenset(),
         stderr_sink=[],
+        exclusive_mcp_tools=exclusive,
     )
 
 
@@ -256,6 +261,43 @@ async def test_warm_client_key_separates_a_lens_client(sdk_backend):
     assert key(lens_on) != key(plain)
     # A run without a surface-scoped server keeps its pre-existing key shape.
     assert key(plain).endswith(":")
+
+
+@pytest.mark.parametrize("kind", list(SurfaceKind))
+async def test_the_tool_gate_runs_lens_tools_only_on_agent_health(sdk_backend, kind):
+    """Under bypassPermissions ``allowed_tools`` only auto-approves; the PreToolUse
+    gate is what refuses a call. Every surface's real profile (allow set, mode
+    allow-list, deny set, exclusive flag, as the chat loop passes them) goes
+    through it: the lens tools run on agent_health and on no other surface."""
+    from tests.test_claude_sdk_tool_scoping import _allows
+
+    profile = resolve_profile(kind, SurfaceMeta())
+    built = await _build(
+        sdk_backend,
+        profile.allowed_sdk_tools or frozenset(),
+        deny=profile.deny_mcp_tool_ids,
+        allow_mcp=profile.allow_mcp_tool_ids,
+        exclusive=profile.exclusive_tools,
+    )
+    on_agent_health = kind is SurfaceKind.AGENT_HEALTH
+    for tool_id in lens_mcp.LENS_TOOL_IDS:
+        assert await _allows(built.options, tool_id) is on_agent_health, (kind, tool_id)
+
+
+async def test_the_tool_gate_refuses_denied_or_undeclared_lens_tools(sdk_backend):
+    """Deny is checked first: with agent_health's grant denied, the lens server is
+    still registered but the gate refuses every lens id. The grant is per id, not
+    the whole server: an id the server never declared is refused even where the
+    grant holds."""
+    from tests.test_claude_sdk_tool_scoping import _allows
+
+    grant = resolve_profile(SurfaceKind.AGENT_HEALTH, SurfaceMeta()).allowed_sdk_tools
+    denied = await _build(sdk_backend, grant, deny=grant)
+    assert "pocketpaw_lens" in denied.options_kwargs["mcp_servers"]
+    for tool_id in lens_mcp.LENS_TOOL_IDS:
+        assert not await _allows(denied.options, tool_id), tool_id
+    granted = await _build(sdk_backend, grant)
+    assert not await _allows(granted.options, "mcp__pocketpaw_lens__lens_delete")
 
 
 @pytest.mark.parametrize("granted", [False, True])
