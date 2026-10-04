@@ -41,6 +41,8 @@ Invariants a reader must not break:
 - ``platform_*`` helpers take no membership check and are listed in
   test_platform_boundary.py's ``_CROSS_TENANT_HELPERS``.
 - ``get_default_workspace_id`` skips soft-deleted workspaces.
+- ``delete`` releases a partner's public slug (and unlists it) so the partial
+  unique index on ``partner.slug`` never keeps a dead workspace's slug.
 - ``get_delete_preview``'s ``room_count`` leaves out hidden ``type="meeting"``
   rooms (2026-10-01, feat/meetings-instant): users never see them as rooms.
 """
@@ -745,6 +747,12 @@ async def delete(ctx: RequestContext, workspace_id: str) -> None:
         raise NotFound("workspace", workspace_id)
 
     doc.deleted_at = datetime.now(UTC)
+    if doc.partner is not None and doc.partner.slug is not None:
+        # The partial unique index on partner.slug ignores deleted_at, so a
+        # soft-deleted partner would hold its public slug forever: the service
+        # pre-check says free, the write raises, 409 every time. Release it.
+        doc.partner.slug = None
+        doc.partner.public = False
     await doc.save()
 
     # Cascade: strip workspace from every member's User.workspaces

@@ -1348,7 +1348,10 @@ The caller's public partner profile; only the fields sent change. Body
 }
 ```
 
-`slug` is `^[a-z0-9-]{3,60}$`, unique across workspaces, and may not be one of
+`display_name` and `city` are stripped of surrounding whitespace before the 1-80
+length check, so a blank value is `422`. To clear `services` send `[]`; `null`
+is `422` (the other optional fields clear on `null`). `slug` is
+`^[a-z0-9-]{3,60}$`, unique across workspaces, and may not be one of
 `me, clients, offers, sell, pay-link, sites, summary, earnings, rewards,
 directory, apply, profile, find` (route segments on the API and on the public
 site). `services` is a subset of
@@ -1360,7 +1363,8 @@ site). `services` is a subset of
 partner (an applied partner may fill its profile in ahead of activation; it is listed
 only once active). **422** `partners.invalid_profile` (pattern, reserved slug, unknown
 service), `partners.profile_incomplete`; **409** `partners.slug_taken`. An operator
-`PUT /platform/workspaces/{id}/partner` leaves these fields as they are.
+`PUT /platform/workspaces/{id}/partner` leaves these fields as they are. Deleting
+the workspace releases its slug (and unlists it), so another partner can take it.
 
 ### `GET /partners/directory` (public)
 

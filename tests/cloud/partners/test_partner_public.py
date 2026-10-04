@@ -219,6 +219,41 @@ async def test_slug_is_unique_across_workspaces() -> None:
     ).slug == me.slug
 
 
+async def test_blank_names_are_422_and_names_are_stripped(http) -> None:
+    ws = await _workspace("acme", "active")
+    http.act_as(str(ws.id))
+    for field in ("display_name", "city"):
+        assert (await http.patch(f"{URL}/me/profile", json={field: "   "})).status_code == 422
+    r = await http.patch(f"{URL}/me/profile", json={"display_name": "  Ravi ", "city": " Pune "})
+    assert (r.json()["display_name"], r.json()["city"]) == ("Ravi", "Pune")
+    # services: null is a 422; [] clears.
+    assert (await http.patch(f"{URL}/me/profile", json={"services": None})).status_code == 422
+    r = await http.patch(f"{URL}/me/profile", json={"services": ["web"]})
+    assert r.json()["services"] == ["web"]
+    assert (await http.patch(f"{URL}/me/profile", json={"services": []})).json()["services"] == []
+    blank = {**APPLY, "name": "  "}
+    assert (await http.post(f"{URL}/apply", json=blank)).status_code == 422
+
+
+async def test_deleting_the_workspace_releases_its_slug(monkeypatch) -> None:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    monkeypatch.setattr(
+        workspace_service, "get_resolver", lambda: SimpleNamespace(invalidate_workspace=lambda _: 0)
+    )
+    gone = await _public_partner("ravi-prints")
+    await workspace_service.delete(_ctx(str(gone.id)), str(gone.id))
+    kept = (await WorkspaceDoc.get(gone.id)).partner
+    assert kept.slug is None and kept.public is False and kept.status == "active"
+    assert (await service_admin.list_directory()).items == []
+    other = await _workspace("other", "active")
+    taken = await service.update_public_profile(
+        _ctx(str(other.id)), {"slug": "ravi-prints", "display_name": "Other", "public": True}
+    )
+    assert taken.slug == "ravi-prints"
+    assert [p.slug for p in (await service_admin.list_directory()).items] == ["ravi-prints"]
+
+
 async def test_public_needs_slug_and_display_name() -> None:
     ws = await _workspace("acme", "active")
     ctx = _ctx(str(ws.id))
@@ -589,3 +624,14 @@ async def test_service_admin_reads_refuse_hidden_partners_directly() -> None:
     with pytest.raises(NotFound):
         await service_admin.get_public("opted-out")
     assert (await service_admin.list_directory()).items == []
+
+
+async def test_public_without_a_slug_is_not_listed() -> None:
+    """A writer other than update_public_profile flips public with no slug: no card."""
+    ws = await _workspace("acme", "active")
+    await WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": ws.id}, {"$set": {"partner.public": True, "partner.display_name": "Acme"}}
+    )
+    assert (await service_admin.list_directory()).items == []
+    await _public_partner("ravi-prints")
+    assert [p.slug for p in (await service_admin.list_directory()).items] == ["ravi-prints"]
