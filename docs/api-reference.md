@@ -1370,15 +1370,20 @@ Query params, all optional: `city` (case-insensitive exact match), `service`
 minute per IP, shared with `GET /partners/{slug}`; past that `429`
 `partners.rate_limited`. A bad cursor is `422` `partners.bad_cursor`.
 
-**Client IP behind the public site.** Every per-IP public limit (these partner
-reads, `POST /partners/apply`, the Discover reads, `POST /tools/ai-check`) keys
-on the rightmost `X-Forwarded-For` hop. Requests relayed by the paw-web Worker
-all arrive from Cloudflare's egress, so the Worker sends two headers:
-`X-Paw-Client-IP` (the visitor's address) and `X-Paw-Web-Key` (a shared secret).
-When the backend has `POCKETPAW_PUBLIC_WEB_KEY` set and the key header matches
-it, that IP is the bucket; a missing or wrong key, an unset env var or an invalid
-address falls back to the normal rule. `X-Paw-Client-IP` is never read without
-the key.
+**Client IP behind the public site.** Every per-IP limit keys on the rightmost
+`X-Forwarded-For` hop. Requests relayed by the paw-web Worker all arrive from
+Cloudflare's egress, so the Worker sends two headers: `X-Paw-Client-IP` (the
+visitor's address) and `X-Paw-Web-Key` (a shared secret). Only the limits on the
+routes the Worker fronts read them: these partner reads, `POST /partners/apply`
+and the public Discover reads. When the backend has `POCKETPAW_PUBLIC_WEB_KEY`
+set and the key header matches it, that IP is the bucket (and the address sent
+to Turnstile); a missing or wrong key, an unset env var or an invalid address
+falls back to the normal rule. Every other limit (the auth exchange, meeting
+lookups and knocks, `POST /tools/ai-check`) ignores both headers, so a leaked
+key cannot pick their buckets. `X-Paw-Client-IP` is never read without the key.
+Rotation: set the new key on the Worker and in the backend env, redeploy both;
+there is no dual-key window, so expect a short gap where Worker traffic shares
+one bucket.
 
 Response `200`: `{"items": [<partner>, ...], "next_cursor": "..." | null}`. A
 partner on the wire is exactly these fields (never `footer_name`,
