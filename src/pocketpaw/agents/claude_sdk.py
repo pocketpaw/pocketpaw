@@ -239,10 +239,13 @@ def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) 
     api.anthropic.com (most gateways drop ``tool_reference`` blocks) and then sends
     every MCP tool schema upfront. Precedence: a non-empty ENABLE_TOOL_SEARCH in the
     process env (the CLI inherits it; nothing is written), then one already in
-    ``sdk_env`` (per-run extras), then the setting. A non-``str`` setting (settings
+    ``sdk_env`` (per-run extras), then the setting. A bool (a setattr skips the
+    Settings validator) reads as "true"/"false"; any other non-``str`` (settings
     are sometimes mocks) reads as unset. With no choice made anywhere behind a
     gateway, one INFO line per process names the provider and the cost.
     """
+    if isinstance(setting, bool):
+        setting = "true" if setting else "false"
     value = setting.strip() if isinstance(setting, str) else ""
     if value and not _TOOL_SEARCH_VALUES.fullmatch(value):
         _log_once(

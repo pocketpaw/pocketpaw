@@ -7,7 +7,10 @@
 # documented value passes through, anything else is ignored with a warning, and a
 # non-empty ENABLE_TOOL_SEARCH in the process env or the per-run extras wins. With
 # no choice made behind a gateway, one INFO line per process says tool search is off.
-# Reuses the ``_build_options`` harness from test_claude_sdk_model_override.py.
+# A JSON true/false (config.json, PUT /api/v1/settings) means "true"/"false": a value
+# the field rejected used to knock Settings.load() back to defaults, dropping the
+# whole saved config. Reuses the ``_build_options`` harness from
+# test_claude_sdk_model_override.py.
 
 from __future__ import annotations
 
@@ -235,3 +238,88 @@ def test_the_setting_defaults_to_unset_and_reads_from_the_environment(monkeypatc
     assert Settings().claude_sdk_tool_search == ""
     monkeypatch.setenv("POCKETPAW_CLAUDE_SDK_TOOL_SEARCH", "auto:5")
     assert Settings().claude_sdk_tool_search == "auto:5"
+
+
+_JSON_VALUES = [(True, "true"), (False, "false"), (None, "")]
+
+
+@pytest.fixture
+def config_dir(tmp_path, monkeypatch):
+    """A throwaway ~/.pocketpaw: config.json and the credential store live in tmp_path."""
+    import pocketpaw.config as cfg
+    import pocketpaw.credentials as creds
+
+    # Settings.load() drops any config.json key that has a POCKETPAW_ env var.
+    for var in (
+        "POCKETPAW_CLAUDE_SDK_TOOL_SEARCH",
+        "POCKETPAW_CLAUDE_SDK_PROVIDER",
+        "POCKETPAW_ANTHROPIC_API_KEY",
+        "POCKETPAW_IGNORE_CONFIG_JSON",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(cfg, "get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(cfg, "_MIGRATION_DONE_PATH", None)
+    (tmp_path / ".secrets_migrated").write_text("1")
+    store = creds.CredentialStore(config_dir=tmp_path)
+    monkeypatch.setattr(creds, "get_credential_store", lambda: store)
+    return tmp_path
+
+
+@pytest.mark.parametrize(("raw", "stored"), _JSON_VALUES)
+def test_the_setting_accepts_json_true_false_and_null(raw, stored, monkeypatch):
+    from pocketpaw.config import Settings
+
+    monkeypatch.delenv("POCKETPAW_CLAUDE_SDK_TOOL_SEARCH", raising=False)
+    assert Settings(claude_sdk_tool_search=raw).claude_sdk_tool_search == stored
+
+
+@pytest.mark.parametrize(("raw", "stored"), _JSON_VALUES)
+def test_a_config_json_boolean_loads_without_dropping_the_rest(raw, stored, config_dir):
+    """A value the field rejects makes Settings.load() fall back to defaults,
+    which silently drops every config.json value and stored secret."""
+    import json
+
+    import pocketpaw.credentials as creds
+    from pocketpaw.config import Settings
+
+    (config_dir / "config.json").write_text(
+        json.dumps({"claude_sdk_tool_search": raw, "claude_sdk_provider": "litellm"})
+    )
+    creds.get_credential_store().set("anthropic_api_key", "sk-ant-kept")
+    loaded = Settings.load()
+    assert loaded.claude_sdk_tool_search == stored
+    assert loaded.claude_sdk_provider == "litellm"
+    assert loaded.anthropic_api_key == "sk-ant-kept"
+
+
+@pytest.mark.asyncio
+async def test_a_boolean_put_through_the_settings_api_reaches_the_cli(config_dir):
+    """PUT setattrs the raw JSON value (no validate_assignment), save() writes it
+    as-is, and the next Settings.load() is what the backend runs on."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from pocketpaw.api.v1.settings import router
+    from pocketpaw.config import Settings
+
+    Settings(claude_sdk_provider="litellm", anthropic_api_key="sk-ant-kept").save()
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    with patch("pocketpaw.config.get_settings"):
+        resp = TestClient(app).put(
+            "/api/v1/settings", json={"settings": {"claude_sdk_tool_search": True}}
+        )
+    assert resp.status_code == 200
+    loaded = Settings.load()
+    assert loaded.claude_sdk_provider == "litellm"
+    assert loaded.anthropic_api_key == "sk-ant-kept"
+    env = await _env(loaded.claude_sdk_tool_search, _litellm_env(), provider="litellm")
+    assert env["ENABLE_TOOL_SEARCH"] == "true"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw", "value"), [(True, "true"), (False, "false")])
+async def test_a_boolean_on_a_live_settings_object_passes_through(raw, value):
+    """An in-memory setattr skips the field validator."""
+    env = await _env(raw)
+    assert env["ENABLE_TOOL_SEARCH"] == value

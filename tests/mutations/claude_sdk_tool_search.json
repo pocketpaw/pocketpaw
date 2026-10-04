@@ -108,5 +108,35 @@
     "tests": [
       "tests/test_claude_sdk_tool_search.py::test_the_notice_names_the_host_not_the_credentials"
     ]
+  },
+  {
+    "label": "a JSON boolean in config.json drops the whole config",
+    "file": "src/pocketpaw/config.py",
+    "find": "        if isinstance(v, bool):\n            return \"true\" if v else \"false\"\n        return \"\" if v is None else v\n",
+    "replace": "        return v\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_accepts_json_true_false_and_null",
+      "tests/test_claude_sdk_tool_search.py::test_a_config_json_boolean_loads_without_dropping_the_rest",
+      "tests/test_claude_sdk_tool_search.py::test_a_boolean_put_through_the_settings_api_reaches_the_cli"
+    ]
+  },
+  {
+    "label": "a JSON null in config.json drops the whole config",
+    "file": "src/pocketpaw/config.py",
+    "find": "        return \"\" if v is None else v\n",
+    "replace": "        return v\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_accepts_json_true_false_and_null",
+      "tests/test_claude_sdk_tool_search.py::test_a_config_json_boolean_loads_without_dropping_the_rest"
+    ]
+  },
+  {
+    "label": "a live boolean setting reads as unset",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if isinstance(setting, bool):\n        setting = \"true\" if setting else \"false\"\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_boolean_on_a_live_settings_object_passes_through"
+    ]
   }
 ]

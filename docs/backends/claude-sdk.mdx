@@ -128,7 +128,7 @@ The value reaches the CLI as `ENABLE_TOOL_SEARCH`:
 | `auto:N` | Same, with an `N`% threshold (0-100) |
 | `false` | MCP tools always load upfront |
 
-Any other value is ignored and logged as a warning. A non-empty `ENABLE_TOOL_SEARCH` in PocketPaw's own process environment wins over this setting.
+A JSON `true` or `false` (in `config.json` or a `PUT /api/v1/settings` body) works the same as the string. Any other value is ignored and logged as a warning. A non-empty `ENABLE_TOOL_SEARCH` in PocketPaw's own process environment wins over this setting.
 
 <Callout type="warning">
   With `true`, or with `auto` / `auto:N` once the threshold is reached, Claude Code sends the tool-search `anthropic-beta` header, `defer_loading` tool fields and `tool_reference` blocks to the gateway. If the gateway drops any of them, or routes to a non-Claude model or a Claude model older than the 4.5 generation, requests fail with HTTP 400 and the agent stops answering. Check the gateway before you turn this on.
