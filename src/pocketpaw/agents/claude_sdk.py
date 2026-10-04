@@ -2711,9 +2711,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ... on /sites and /code. Deny is the hard cap: applied after the
         # ``allow_sdk_tools`` union and before the mode/exclusive filters. An
         # ``mcp__`` entry also covers every name below it (``_deny_prefixes``).
+        deny_below = _deny_prefixes(deny_mcp_tool_ids)
         if deny_mcp_tool_ids:
             before_count = len(allowed_tools)
-            deny_below = _deny_prefixes(deny_mcp_tool_ids)
             allowed_tools = [
                 t
                 for t in allowed_tools
@@ -2745,9 +2745,28 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # empty permitted set), which is how an exclusive agent wins even over a
         # broad surface. The default (signal off) path below is byte-for-byte
         # the legacy grant-union scoping.
+        #
+        # Composio and external config servers reach ``allowed_tools`` only as a
+        # bare whole-server entry, so a full id declared under one (by the
+        # exclusive set or the mode grant) is never literally there. Both filters
+        # add such an id back, the id and not its server, when a bare entry
+        # before the filter grants its server and the id is not denied.
+        granted = _server_grant_prefixes(allowed_tools, external_grants)
+
+        def declared_under_a_grant(declared: frozenset[str]) -> list[str]:
+            return [
+                t
+                for t in sorted(declared)
+                if t.startswith(granted)
+                and t not in allowed_tools
+                and t not in deny_mcp_tool_ids
+                and not t.startswith(deny_below)
+            ]
+
         if exclusive_mcp_tools:
             permitted = allow_mcp_tool_ids or frozenset()
             before_count = len(allowed_tools)
+            added = declared_under_a_grant(permitted)
             allowed_tools = [
                 t for t in allowed_tools if not t.startswith("mcp__") or t in permitted
             ]
@@ -2756,6 +2775,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "Exclusive MCP-allow: capped to exactly %s (no general grant)",
                     sorted(permitted),
                 )
+            allowed_tools += added
         elif allow_mcp_tool_ids is not None:
             from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
             from pocketpaw.agents.sdk_mcp_studio import STUDIO_TOOL_IDS
@@ -2769,6 +2789,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 | frozenset(STUDIO_TOOL_IDS)
             )
             before_count = len(allowed_tools)
+            added = declared_under_a_grant(grant)
             allowed_tools = [
                 t
                 for t in allowed_tools
@@ -2781,6 +2802,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "Mode MCP-allow: scoped to %s (+ general grant)",
                     sorted(allow_mcp_tool_ids),
                 )
+            allowed_tools += added
 
         # Build options
         #
