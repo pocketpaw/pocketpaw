@@ -388,12 +388,21 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
-      - name: Run public partner profile tests
+      - name: Run Paw Partners and public rate-limit tests
         # Same addopts escape. The partner directory, /partners/{slug} and
-        # /partners/apply answer anonymous callers; this file is the only proof
-        # that a private partner field never reaches the wire, that hidden
-        # partners stay hidden, and that both public buckets return 429.
-        run: uv run pytest tests/cloud/partners/test_partner_public.py -o addopts="" -q --tb=short
+        # /partners/apply answer anonymous callers; these files are the only
+        # proof that a private partner field never reaches the wire, that hidden
+        # partners stay hidden, that applications land in the operator queue
+        # (and the daily cap and both public buckets return 429), that the
+        # paw-web X-Paw-Client-IP header is honoured only with the key AND only
+        # on the limiters that opted in, and that Turnstile refuses when its
+        # secret is unset in production. Mutations: tests/mutations/partner_public.json.
+        run: >-
+          uv run pytest tests/cloud/partners/test_partner_public.py
+          tests/cloud/partners/test_partners.py
+          tests/cloud/partners/test_partner_tiers.py
+          tests/cloud/_core/test_unbounded_maps.py
+          tests/cloud/_core/test_turnstile.py -o addopts="" -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
