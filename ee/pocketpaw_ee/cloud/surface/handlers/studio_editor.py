@@ -244,6 +244,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
                     start=_fmt_ms(c.get("start_ms")),
                     end=_fmt_ms(c.get("end_ms")),
                     kind=c.get("kind"),
+                    chroma=c.get("chroma"),
                 ),
             )
         )
@@ -288,6 +289,7 @@ Operations (this list is closed — an invented verb is rejected):
 - add_keyframe  {clipId, prop, atMs, value?, ease?}
 - clear_keyframes {clipId, prop, atMs?}
 - zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
+- set_chroma    {clipId, color?: '#rrggbb'|'auto', similarity?, smoothness?, spill?, off?}
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -380,6 +382,10 @@ Rules that matter:
   end time, and the property moves between them. atMs is TIMELINE time and must
   fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume —
   nothing else (font size and colour cannot be animated).
+- GREEN SCREEN IS set_chroma. "Remove / key out the green (or blue) background"
+  is set_chroma on that video or image clip, color 'auto' unless they name one;
+  off: true removes it. Whatever sits on a LOWER lane shows through the keyed
+  area.
 - A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
   marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
   clip under that time on the main video track. "Zoom in here" is zoom_clip with

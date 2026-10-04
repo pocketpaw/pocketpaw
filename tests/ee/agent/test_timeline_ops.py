@@ -126,6 +126,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "clear_keyframes": {"clipId": "clip_aaa", "prop": "opacity"},
         "add_lane": {"kind": "audio", "name": "Score"},
         "zoom_clip": {"clipId": "clip_aaa", "focusX": 0.3, "focusY": 0.4, "scale": 1.5},
+        "set_chroma": {"clipId": "clip_aaa"},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -643,3 +644,22 @@ def test_an_unknown_track_name_still_fails(summary: TimelineSummary) -> None:
         [{"op": "place_audio", "assetId": "asset_music", "track": "Scoer"}], summary
     )
     assert error is not None
+
+
+@pytest.mark.parametrize(
+    ("fields", "error"),
+    [
+        ({"color": "auto", "similarity": 0.4, "smoothness": 0.08, "spill": 0.5}, None),
+        ({"color": "#00FF00", "off": False}, None),
+        ({"similarity": 1.2}, "similarity must be between 0 and 1"),
+        ({"spill": -0.1}, "spill must be >= 0"),
+        ({"color": "green"}, 'must be "#rrggbb" or "auto"'),
+        ({"off": "yes"}, "off must be true or false"),
+    ],
+)
+def test_set_chroma_checks_colour_and_ranges(summary, fields, error) -> None:
+    ops, err = validate_ops([{"op": "set_chroma", "clipId": "clip_aaa", **fields}], summary)
+    if error is None:
+        assert err is None and ops[0]["op"] == "set_chroma"
+    else:
+        assert ops is None and error in err

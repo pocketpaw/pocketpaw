@@ -8,6 +8,10 @@
 # frame. The point is a FRACTION of the frame, not pixels, so it means the same
 # thing at any aspect ratio and the browser half owns the offset arithmetic.
 #
+# `set_chroma` keys a solid background out of a video or image clip. The colour
+# is "#rrggbb" or "auto" and the tuning knobs are 0-1 fractions; defaults and the
+# per-pixel work live in the browser.
+#
 # 2026-09-11 (feat/agent-lane-ops): `add_lane`, and `track` resolving by lane
 # NAME as well as id. The name path is load-bearing — track ids are minted when
 # the batch applies in the browser, so a lane this batch creates has no id to
@@ -29,6 +33,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any
 
 # MUST match ``OP_KINDS`` in agent-ops.ts. Both sides check themselves against
@@ -42,6 +47,7 @@ OP_KINDS: frozenset[str] = frozenset(
         "place_audio",
         "place_clip",
         "remove_clip",
+        "set_chroma",
         "set_project",
         "set_transition",
         "set_transform",
@@ -69,8 +75,11 @@ _CLIP_OPS: frozenset[str] = frozenset(
         "add_keyframe",
         "clear_keyframes",
         "zoom_clip",
+        "set_chroma",
     }
 )
+
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
 # Ops that bring an asset onto the timeline.
 _ASSET_OPS: frozenset[str] = frozenset({"place_clip", "place_audio"})
@@ -641,6 +650,23 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
                 f"ops[{i}].ease {ease!r} is not an easing.{hint} "
                 f"Valid easings: {', '.join(sorted(_EASINGS))}."
             )
+
+    elif kind == "set_chroma":
+        color = raw.get("color")
+        if (
+            color is not None
+            and color != "auto"
+            and not (isinstance(color, str) and _HEX_COLOR.fullmatch(color))
+        ):
+            return f'ops[{i}].color {color!r} must be "#rrggbb" or "auto".'
+        for key in ("similarity", "smoothness", "spill"):
+            err = _check_number(raw, key, i)
+            if err:
+                return err
+            if raw.get(key) is not None and raw[key] > 1:
+                return f"ops[{i}].{key} must be between 0 and 1."
+        if raw.get("off") is not None and not isinstance(raw["off"], bool):
+            return f"ops[{i}].off must be true or false."
 
     elif kind in ("add_keyframe", "clear_keyframes"):
         prop = raw.get("prop")
