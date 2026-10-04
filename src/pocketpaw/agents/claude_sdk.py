@@ -232,7 +232,9 @@ def _log_once(key: str, level: int, msg: str, *args: object) -> None:
         logger.log(level, msg, *args)
 
 
-def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) -> None:
+def _apply_tool_search(
+    sdk_env: dict[str, str], setting: object, provider: str, *, claude_route: bool
+) -> None:
     """Pass ``claude_sdk_tool_search`` to the CLI as ENABLE_TOOL_SEARCH, or say it is off.
 
     Claude Code turns MCP tool search off when ANTHROPIC_BASE_URL is not
@@ -244,7 +246,10 @@ def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) 
     nothing is written and the CLI inherits it. A bool (a setattr skips the Settings
     validator) reads as "true"/"false"; any other non-``str`` (settings are
     sometimes mocks) reads as unset. With neither set, behind a gateway, one INFO
-    line per process names the provider and the cost.
+    line per process names the provider and the cost. ``claude_route`` is False for
+    providers that never reach a Claude model (ollama, gemini): tool search cannot
+    work there, so the setting is skipped with one WARNING per provider and there
+    is no notice.
     """
     if isinstance(setting, bool):
         setting = "true" if setting else "false"
@@ -257,6 +262,17 @@ def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) 
             value,
         )
         value = ""
+    if not claude_route:
+        if value:
+            _log_once(
+                f"tool-search-unsupported:{provider}",
+                logging.WARNING,
+                "Ignoring claude_sdk_tool_search=%r: provider %s never reaches a Claude "
+                "model, and MCP tool search needs one",
+                value,
+                provider,
+            )
+        return
     operator_value = os.environ.get("ENABLE_TOOL_SEARCH")
     if value and not operator_value:
         sdk_env["ENABLE_TOOL_SEARCH"] = value
@@ -3176,7 +3192,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 cap = _DEFAULT_MAX_MCP_OUTPUT_TOKENS
             sdk_env.setdefault("MAX_MCP_OUTPUT_TOKENS", str(cap))
         _apply_tool_search(
-            sdk_env, getattr(self.settings, "claude_sdk_tool_search", None), provider
+            sdk_env,
+            getattr(self.settings, "claude_sdk_tool_search", None),
+            provider,
+            claude_route=not (llm.is_ollama or llm.is_gemini),
         )
         # On a claude.ai subscription login the CLI fetches the ACCOUNT's claude.ai
         # connectors into every session. They are not PocketPaw tools and must never

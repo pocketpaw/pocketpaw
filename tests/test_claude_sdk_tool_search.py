@@ -7,7 +7,8 @@
 # documented value passes through, anything else is ignored with a warning, and a
 # non-empty ENABLE_TOOL_SEARCH in the process env wins (nothing is written, so the
 # CLI inherits it). With neither set behind a gateway, one INFO line per process
-# says tool search is off.
+# says tool search is off. Ollama and gemini never reach a Claude model, so there
+# the setting is skipped with one warning and the notice stays quiet.
 # A JSON true/false (config.json, PUT /api/v1/settings) means "true"/"false": a value
 # the field rejected used to knock Settings.load() back to defaults, dropping the
 # whole saved config. Reuses the ``_build_options`` harness from
@@ -22,6 +23,7 @@ import pytest
 
 from pocketpaw.agents import claude_sdk
 from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+from pocketpaw.llm.providers import get_adapter
 from pocketpaw.llm.providers.base import ProviderConfig
 from pocketpaw.llm.providers.litellm import LiteLLMAdapter
 from tests.test_claude_sdk_model_override import _make_sdk, _make_settings
@@ -35,6 +37,14 @@ def _litellm_env(base_url: str = "http://localhost:4000") -> dict[str, str]:
     """The env the real litellm adapter hands the CLI."""
     config = ProviderConfig(provider="litellm", model="m", api_key="sk-gw", base_url=base_url)
     return LiteLLMAdapter().build_env_dict(config)
+
+
+def _adapter_env(provider: str) -> dict[str, str]:
+    """The env the real ``provider`` adapter hands the CLI."""
+    config = ProviderConfig(
+        provider=provider, model="m", api_key="sk-gw", base_url="https://gw.example.com"
+    )
+    return get_adapter(provider).build_env_dict(config)
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +64,9 @@ async def _env(setting=_UNSET, provider_env=_FIRST_PARTY, *, provider="anthropic
     if extras:
         sdk.attach_subprocess_env(extras)
     llm = MagicMock()
-    llm.is_ollama = llm.is_openai_compatible = llm.is_gemini = llm.is_openrouter = False
+    llm.is_openai_compatible = llm.is_openrouter = False
+    llm.is_ollama = provider == "ollama"
+    llm.is_gemini = provider == "gemini"
     llm.is_litellm = provider == "litellm"
     llm.model = "claude-sonnet-4-5"
     llm.to_sdk_env.return_value = dict(provider_env)
@@ -229,6 +241,37 @@ async def test_no_notice_once_the_operator_chose(monkeypatch, caplog):
     monkeypatch.setenv("ENABLE_TOOL_SEARCH", "true")
     await _env(None, _litellm_env(), provider="litellm")
     assert _notices(caplog) == []
+
+
+# -- providers that never reach a Claude model --------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["ollama", "gemini"])
+async def test_the_setting_is_skipped_where_no_claude_model_answers(provider, caplog):
+    """Tool search needs a Claude model behind the endpoint; these never have one."""
+    caplog.set_level(logging.INFO, logger=_LOGGER)
+    await _env("true", _adapter_env(provider), provider=provider)
+    env = await _env("true", _adapter_env(provider), provider=provider)
+    assert "ENABLE_TOOL_SEARCH" not in env
+    warnings = _messages(caplog, logging.WARNING)
+    assert len(warnings) == 1 and provider in warnings[0] and "'true'" in warnings[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["ollama", "gemini"])
+async def test_no_notice_where_the_setting_cannot_help(provider, caplog):
+    """The notice says to set the setting, which these providers skip."""
+    caplog.set_level(logging.INFO, logger=_LOGGER)
+    await _env(None, _adapter_env(provider), provider=provider)
+    assert _notices(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["litellm", "openrouter", "openai_compatible", "anthropic"])
+async def test_the_other_providers_keep_the_opt_in(provider):
+    env = await _env("true", _adapter_env(provider), provider=provider)
+    assert env["ENABLE_TOOL_SEARCH"] == "true"
 
 
 # -- the setting -------------------------------------------------------------

@@ -147,5 +147,54 @@
     "tests": [
       "tests/test_claude_sdk_tool_search.py::test_a_boolean_on_a_live_settings_object_passes_through"
     ]
+  },
+  {
+    "label": "ollama and gemini get the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "claude_route=not (llm.is_ollama or llm.is_gemini)",
+    "replace": "claude_route=True",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  },
+  {
+    "label": "ollama counts as a Claude route",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "claude_route=not (llm.is_ollama or llm.is_gemini)",
+    "replace": "claude_route=not llm.is_gemini",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  },
+  {
+    "label": "gemini counts as a Claude route",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "claude_route=not (llm.is_ollama or llm.is_gemini)",
+    "replace": "claude_route=not llm.is_ollama",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  },
+  {
+    "label": "the provider skip is silent",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                f\"tool-search-unsupported:{provider}\",\n                logging.WARNING,\n",
+    "replace": "                f\"tool-search-unsupported:{provider}\",\n                logging.DEBUG,\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers"
+    ]
+  },
+  {
+    "label": "a skipped provider still gets the setting and the notice",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        return\n    operator_value = os.environ.get(\"ENABLE_TOOL_SEARCH\")\n",
+    "replace": "    operator_value = os.environ.get(\"ENABLE_TOOL_SEARCH\")\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
   }
 ]

@@ -275,8 +275,10 @@ class Settings(BaseSettings):
             "where every MCP tool schema is sent upfront. Set it only for a gateway that "
             "forwards anthropic-beta headers and tool_reference blocks, to a Claude 4.5 or "
             "later model (scripts/check_gateway_tool_search.py tests this); otherwise "
-            "requests fail. Other values are ignored with a warning. A non-empty "
-            "ENABLE_TOOL_SEARCH in the process environment wins over this."
+            "requests fail. Other values are ignored with a warning, and so is the "
+            "setting on the ollama and gemini providers, which never reach a Claude "
+            "model. A non-empty ENABLE_TOOL_SEARCH in the process environment wins "
+            "over this."
         ),
     )
 

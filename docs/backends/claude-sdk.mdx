@@ -57,7 +57,7 @@ These settings apply specifically to the Claude Agent SDK backend:
 |---------|-------------|---------|-------------|
 | `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | `""` (auto) | Model override. Leave empty to let Claude Code auto-select the best model (recommended). |
 | `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | `25` | Maximum tool-use turns per query. Safety net against runaway tool loops. |
-| `claude_sdk_tool_search` | `POCKETPAW_CLAUDE_SDK_TOOL_SEARCH` | `""` (CLI default) | Passed to the Claude Code CLI as `ENABLE_TOOL_SEARCH`: `true`, `false`, `auto` or `auto:N`. See [MCP tool search behind a gateway](#mcp-tool-search-behind-a-gateway). |
+| `claude_sdk_tool_search` | `POCKETPAW_CLAUDE_SDK_TOOL_SEARCH` | `""` (CLI default) | Passed to the Claude Code CLI as `ENABLE_TOOL_SEARCH`: `true`, `false`, `auto` or `auto:N`. Skipped on the `ollama` and `gemini` providers. See [MCP tool search behind a gateway](#mcp-tool-search-behind-a-gateway). |
 
 ```bash
 # Let Claude Code auto-select the model (recommended — no override needed)
@@ -112,7 +112,7 @@ The adapter sets `ANTHROPIC_BASE_URL` to point at the LiteLLM proxy, so the Clau
 
 Claude Code normally defers MCP tool schemas and loads the ones a turn needs through its `ToolSearch` tool. It turns this off when `ANTHROPIC_BASE_URL` points anywhere other than `api.anthropic.com`, because most proxies don't forward `tool_reference` blocks. The LiteLLM, OpenRouter, OpenAI-compatible, Ollama and Gemini providers all set `ANTHROPIC_BASE_URL`, so on those providers every MCP tool schema goes out with every fresh request. With PocketPaw's 37 MCP servers (235 tools) we measured about 19k input tokens per fresh request with tool search and about 105k without it.
 
-PocketPaw logs this once per process at INFO level, naming the provider and the gateway host. To turn tool search back on:
+On the LiteLLM, OpenRouter and OpenAI-compatible providers, PocketPaw logs this once per process at INFO level, naming the provider and the gateway host. To turn tool search back on:
 
 ```bash
 export POCKETPAW_CLAUDE_SDK_TOOL_SEARCH=true
@@ -129,6 +129,8 @@ The value reaches the CLI as `ENABLE_TOOL_SEARCH`:
 | `false` | MCP tools always load upfront |
 
 A JSON `true` or `false` (in `config.json` or a `PUT /api/v1/settings` body) works the same as the string. Any other value is ignored and logged as a warning. A non-empty `ENABLE_TOOL_SEARCH` in PocketPaw's own process environment wins over this setting.
+
+Ollama and Gemini never reach a Claude model, and tool search needs one, so PocketPaw skips the setting on those two providers and logs one warning naming the provider.
 
 <Callout type="warning">
   With `true`, or with `auto` / `auto:N` once the threshold is reached, Claude Code sends the tool-search `anthropic-beta` header, `defer_loading` tool fields and `tool_reference` blocks to the gateway. If the gateway drops any of them, or routes to a non-Claude model or a Claude model older than the 4.5 generation, requests fail with HTTP 400 and the agent stops answering. Check the gateway before you turn this on.
