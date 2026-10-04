@@ -142,11 +142,12 @@ async def get_rewards(ctx: Ctx) -> list[PartnerRewardOut]:
 async def directory(
     city: Annotated[str | None, Query(max_length=80)] = None,
     service_: Annotated[PartnerService | None, Query(alias="service")] = None,
-    cursor: Annotated[str | None, Query(max_length=64)] = None,
+    cursor: Annotated[str | None, Query(max_length=160)] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
 ) -> PartnerDirectoryPage:
-    """PUBLIC. Active partners who opted in, newest first; 429 ``partners.rate_limited``
-    past 60 reads a minute per IP."""
+    """PUBLIC. Active partners who opted in, newest first; ``cursor`` is the opaque
+    ``next_cursor`` of the previous page; 429 ``partners.rate_limited`` past 60
+    reads a minute per IP."""
     return await service_admin.list_directory(
         city=city, service=service_, cursor=cursor, limit=limit
     )

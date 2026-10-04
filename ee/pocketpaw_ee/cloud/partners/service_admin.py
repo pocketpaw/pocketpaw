@@ -24,9 +24,10 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -40,6 +41,7 @@ from pocketpaw_ee.cloud.discover import service_admin as discover_admin
 from pocketpaw_ee.cloud.discover.dto import PublicListingResponse
 from pocketpaw_ee.cloud.models.partner_application import PartnerApplication
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+from pocketpaw_ee.cloud.partners.domain import PARTNER_SLUG_PATTERN
 from pocketpaw_ee.cloud.partners.dto import (
     PartnerApplicationOut,
     PartnerApplicationPage,
@@ -82,6 +84,39 @@ async def _with_sites(rows: list[_WorkspaceDoc]) -> list[PartnerPublicOut]:
     return [_public(r, sites.get(str(r.id), [])) for r in rows]
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# Directory order: newest partner first, slug as the unique tie-break. The cursor
+# is base64url of ``<joined_at microseconds>|<slug>``, both already public on the
+# card, so paging never hands out a workspace id (the operator console takes one).
+_DIRECTORY_SORT = [("partner.joined_at", -1), ("partner.slug", -1)]
+
+
+def _encode_cursor(ws: _WorkspaceDoc) -> str:
+    p = ws.partner
+    assert p is not None and p.slug  # _PUBLIC matched
+    joined = p.joined_at if p.joined_at.tzinfo else p.joined_at.replace(tzinfo=UTC)
+    raw = f"{(joined - _EPOCH) // timedelta(microseconds=1)}|{p.slug}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> dict[str, Any]:
+    """The keyset filter for the rows after ``cursor``; 422 when it is not one of ours."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+        micros, slug = raw.split("|", 1)
+        joined = _EPOCH + timedelta(microseconds=int(micros))
+    except (ValueError, UnicodeDecodeError):
+        raise ValidationError("partners.bad_cursor", "Invalid cursor") from None
+    if not re.fullmatch(PARTNER_SLUG_PATTERN, slug):
+        raise ValidationError("partners.bad_cursor", "Invalid cursor")
+    return {
+        "$or": [
+            {"partner.joined_at": {"$lt": joined}},
+            {"partner.joined_at": joined, "partner.slug": {"$lt": slug}},
+        ]
+    }
+
+
 async def list_directory(
     *,
     city: str | None = None,
@@ -90,7 +125,8 @@ async def list_directory(
     limit: int = 24,
 ) -> PartnerDirectoryPage:
     """A page of public active partners, newest first. ``city`` is a
-    case-insensitive exact match; ``service`` one of the partner's services."""
+    case-insensitive exact match; ``service`` one of the partner's services;
+    ``cursor`` an opaque ``next_cursor`` from the previous page."""
     # admin-cross-tenant: the public directory spans every workspace by design.
     query = dict(_PUBLIC)
     if city:
@@ -98,15 +134,12 @@ async def list_directory(
     if service:
         query["partner.services"] = service
     if cursor:
-        try:
-            query["_id"] = {"$lt": PydanticObjectId(cursor)}
-        except (InvalidId, TypeError, ValueError):
-            raise ValidationError("partners.bad_cursor", "Invalid cursor") from None
+        query.update(_decode_cursor(cursor))
     # ponytail: ``partner.city`` regex and ``partner.public`` are unindexed; the
-    # partner count is small. Add a (partner.public, partner.status, _id) index
-    # when the directory outgrows a collection scan.
-    rows = await _WorkspaceDoc.find(query).sort([("_id", -1)]).limit(limit + 1).to_list()
-    next_cursor = str(rows[limit - 1].id) if len(rows) > limit else None
+    # partner count is small. Add a (partner.public, partner.status, joined_at)
+    # index when the directory outgrows a collection scan.
+    rows = await _WorkspaceDoc.find(query).sort(_DIRECTORY_SORT).limit(limit + 1).to_list()
+    next_cursor = _encode_cursor(rows[limit - 1]) if len(rows) > limit else None
     return PartnerDirectoryPage(items=await _with_sites(rows[:limit]), next_cursor=next_cursor)
 
 
