@@ -10,8 +10,8 @@
 # the KB adapter and refused on a backend without the switch) and the digest is
 # fenced as untrusted data with no raw angle bracket inside. The adapter closes
 # the run generator in-task before stop(). Cost guards: concurrent calls for
-# one run share a single generation, and a refresh within the cooldown returns
-# the cached one.
+# one run share a single generation (a refresh never joins a plain read), and a
+# refresh within the cooldown returns the cached one.
 
 from __future__ import annotations
 
@@ -324,6 +324,35 @@ async def test_concurrent_overviews_share_one_generation(monkeypatch, upstream, 
     assert first == second and first["text"] == "- one"
     assert len(_FakeLLM.calls) == 1
     assert sum(r.method == "PUT" for r in seen) == 1
+    assert lens_service._overview_inflight == {}
+
+
+async def test_refresh_does_not_join_an_inflight_cached_read(monkeypatch, upstream, seen):
+    """A refresh arriving while a plain read is in flight regenerates, not reuses."""
+    _settings(monkeypatch, "http://lens:8790")
+    old = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
+    upstream(_handler({**_DETAIL, "overview": {"text": "- stale", "created_at": old}}))
+    release = asyncio.Event()
+    real_get_run = lens_service.get_run
+
+    async def gated_get_run(*args, **kwargs):
+        await release.wait()
+        return await real_get_run(*args, **kwargs)
+
+    monkeypatch.setattr(lens_service, "get_run", gated_get_run)
+    read = asyncio.create_task(
+        lens_service.run_overview("ws_test", TRACE, refresh=False, generated_by="u1")
+    )
+    await asyncio.sleep(0.01)
+    refresh = asyncio.create_task(
+        lens_service.run_overview("ws_test", TRACE, refresh=True, generated_by="u2")
+    )
+    await asyncio.sleep(0.01)
+    release.set()
+    got_read, got_refresh = await asyncio.gather(read, refresh)
+    assert got_read["text"] == "- stale"
+    assert got_refresh["text"].startswith("- asked")
+    assert len(_FakeLLM.calls) == 1
     assert lens_service._overview_inflight == {}
 
 

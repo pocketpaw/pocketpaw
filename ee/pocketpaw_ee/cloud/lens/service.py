@@ -22,8 +22,8 @@
 # (``tools_enabled=False``: no tools, no MCP servers) and the digest is fenced
 # in ``<trace_data>`` as untrusted data, with every ``<``/``>`` inside it
 # swapped for ``‹``/``›`` so no closing-tag spelling escapes. The result is PUT to paw-lens, which
-# owns the cache. Spend guards: concurrent calls for one (workspace, trace)
-# share one in-process generation, and ``refresh`` within
+# owns the cache. Spend guards: concurrent calls for one (workspace, trace,
+# refresh) share one in-process generation, and ``refresh`` within
 # ``OVERVIEW_REFRESH_COOLDOWN_SECONDS`` of the cached overview returns it. LLM
 # failure or timeout is 503 ``lens.overview_failed``; paw-lens errors keep
 # their own CloudError.
@@ -53,10 +53,10 @@ logger = logging.getLogger(__name__)
 
 _client = LensClient()
 
-# In-flight overview generations, keyed (workspace_id, trace_id).
+# In-flight overview generations, keyed (workspace_id, trace_id, refresh).
 # ponytail: per-process, so N workers can still run N generations for one run;
 # move to a Redis lock if that ever shows up in spend.
-_overview_inflight: dict[tuple[str, str], asyncio.Future[Any]] = {}
+_overview_inflight: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
 
 # Id patterns shared by the HTTP router and the MCP tools. A leading
 # alphanumeric blocks ``.``/``..``, so nothing can path-inject upstream.
@@ -370,9 +370,12 @@ async def run_overview(
 ) -> Any:
     """The run's AI overview ``{text, model, created_at}``; cached unless ``refresh``
     (and even then, cached while younger than the cooldown). Concurrent calls for
-    one run await a single generation; ``shield`` keeps a caller's cancelled
-    request from killing the generation the others are waiting on."""
-    key = (workspace_id, trace_id)
+    one run and one ``refresh`` value await a single generation, so a refresh
+    never joins a plain read and gets its stale cache back; ``shield`` keeps a
+    caller's cancelled request from killing the generation the others await."""
+    # ponytail: a cold-cache read racing a refresh generates twice; await-then-refresh
+    # would dedupe that if the double LLM call ever shows up in spend.
+    key = (workspace_id, trace_id, refresh)
     task = _overview_inflight.get(key)
     if task is None or task.done():
         task = asyncio.ensure_future(
