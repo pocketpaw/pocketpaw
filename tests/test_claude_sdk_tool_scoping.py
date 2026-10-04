@@ -26,7 +26,9 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -70,6 +72,22 @@ _BUILTINS += ["WebSearch", "WebFetch", "Skill"]
 _POCKET = "<pocket-scope>p1</pocket-scope>\nidentity"
 
 
+def _cli_spelling(name: str) -> str:
+    """How Claude Code spells an MCP server name in a tool id (read off the CLI's
+    own normalizer): every char outside ``[A-Za-z0-9_-]`` becomes ``_``, runs kept."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+
+def _config(*names: str) -> list[SimpleNamespace]:
+    """External MCP config rows, shaped like ``load_mcp_config`` returns them."""
+    return [
+        SimpleNamespace(
+            name=name, transport="stdio", command="x", args=[], env={}, url="", enabled=True
+        )
+        for name in names
+    ]
+
+
 def _backend(*, policy: ToolPolicy | None = None) -> ClaudeSDKBackend:
     with patch.object(ClaudeSDKBackend, "_initialize"):
         backend = ClaudeSDKBackend(_make_settings(), policy=policy)
@@ -93,14 +111,16 @@ async def _build(
     backend: ClaudeSDKBackend | None = None,
     *,
     pool: list[str] | None = _POOL,
+    external: tuple[str, ...] = (),
     provider_env: dict[str, str] | None = None,
     **scope: Any,
 ) -> ClaudeAgentOptions:
     """Build one turn's options. ``scope`` overrides the ``_build_options`` kwargs.
 
     ``pool=None`` keeps the backend's real MCP id collection AND real server
-    registration (the parity test); otherwise both are stubbed. The external
-    MCP config is always empty here, never the real ``~/.pocketpaw`` file.
+    registration (the parity test); otherwise both are stubbed. ``external`` is
+    the raw names in the external MCP config, never the real ``~/.pocketpaw``
+    file; a stubbed pool gains the bare entry the backend adds for each.
     """
     backend = backend or _backend()
     kwargs: dict[str, Any] = {
@@ -115,11 +135,12 @@ async def _build(
     }
     with ExitStack() as stack:
         stack.enter_context(patch(_LLM_CLIENT, return_value=_llm(provider_env or {})))
-        stack.enter_context(patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]))
+        stack.enter_context(
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=_config(*external))
+        )
         if pool is not None:
-            stack.enter_context(
-                patch.object(backend, "_collect_mcp_tool_ids", return_value=list(pool))
-            )
+            ids = [*pool, *(f"mcp__{_cli_spelling(name)}" for name in external)]
+            stack.enter_context(patch.object(backend, "_collect_mcp_tool_ids", return_value=ids))
             stack.enter_context(patch.object(backend, "_get_mcp_servers", return_value={}))
         built = await backend._build_options("hello", **kwargs)
     return built.options
@@ -221,20 +242,43 @@ async def test_a_bare_server_entry_admits_that_server_and_no_other() -> None:
 
 def test_an_external_server_entry_is_spelled_the_way_the_cli_names_its_tools() -> None:
     """Claude Code names an MCP tool ``mcp__<server>__<tool>`` with every character
-    of the server name outside ``[A-Za-z0-9_-]`` replaced by ``_``. An entry built
-    from the raw config name would never match, and the gate would refuse every
-    tool on a server called, say, "My Notes.v2"."""
-    from types import SimpleNamespace
+    of the server name outside ``[A-Za-z0-9_-]`` replaced by ``_``, runs kept. An
+    entry built from the raw config name would never match, and the gate would
+    refuse every tool on a server called, say, "My Notes.v2"."""
+    names = ("My Notes.v2", "Google Drive (work)", "acme__crm")
+    with patch("pocketpaw.mcp.config.load_mcp_config", return_value=_config(*names)):
+        ids = _backend()._collect_mcp_tool_ids()
 
-    from pocketpaw.agents.claude_sdk import _tool_gate_allows
+    for entry in ("mcp__My_Notes_v2", "mcp__Google_Drive__work_", "mcp__acme__crm"):
+        assert entry in ids
 
-    cfg = SimpleNamespace(
-        name="My Notes.v2", transport="stdio", command="x", args=[], env={}, url="", enabled=True
-    )
-    with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[cfg]):
-        ids = frozenset(_backend()._collect_mcp_tool_ids())
 
-    assert _tool_gate_allows("mcp__My_Notes_v2__search", ids)
+@pytest.mark.parametrize(
+    ("server", "tool_name"),
+    [
+        ("Google Drive (work)", "mcp__Google_Drive__work___search"),
+        ("acme__crm", "mcp__acme__crm__list_deals"),
+        ("My Notes.v2", "mcp__My_Notes_v2__search"),
+        ("plugin:design:refero", "mcp__plugin_design_refero__search_styles"),
+    ],
+)
+async def test_every_tool_on_an_external_server_passes_the_gate(
+    server: str, tool_name: str
+) -> None:
+    """A spelled server name can carry ``__`` ("Google Drive (work)" becomes
+    ``Google_Drive__work_``). The gate used to tell a bare server entry from a full
+    tool id by counting ``__`` and refused every tool on two of these servers."""
+    options = await _build(external=(server,))
+
+    assert await _allows(options, tool_name)
+
+
+async def test_a_server_name_with_a_double_underscore_grants_that_server_only() -> None:
+    options = await _build(external=("acme__crm",))
+
+    assert await _allows(options, "mcp__acme__crm__list_deals")
+    assert not await _allows(options, "mcp__acme__other")
+    assert not await _allows(options, "mcp__acme__crmx__list")
 
 
 # ── built-ins: pinned, so the CLI's other tools never reach the agent ────────
@@ -366,16 +410,22 @@ async def test_the_gate_denies_malformed_input_instead_of_raising(input_data) ->
 
 
 def test_the_gate_rule() -> None:
-    from pocketpaw.agents.claude_sdk import _tool_gate_allows
+    from pocketpaw.agents.claude_sdk import _server_grant_prefixes, _tool_gate_allows
 
-    allowed = frozenset({"Read", "mcp__srv__tool", "mcp__ext", "mcp__"})
+    allowed = frozenset({"Read", "mcp__srv__tool", "mcp__ext", "mcp__", "mcp__acme__crm"})
+    # Without the config, ``mcp__acme__crm`` reads as a full tool id: no grant.
+    assert _server_grant_prefixes(allowed, frozenset()) == ("mcp__ext__",)
+    grants = _server_grant_prefixes(allowed, frozenset({"mcp__acme__crm"}))
+    assert grants == ("mcp__acme__crm__", "mcp__ext__")
 
-    for name in ("Read", "mcp__srv__tool", "mcp__ext__anything", "ToolSearch", "WaitForMcpServers"):
-        assert _tool_gate_allows(name, allowed), name
-    for name in ("Bash", "mcp__srv__other", "mcp__srv__tool__x", "mcp__extra__x", "mcp____x"):
-        assert not _tool_gate_allows(name, allowed), name
+    allows = ("Read", "mcp__srv__tool", "mcp__ext__anything", "mcp__acme__crm__x")
+    for name in (*allows, "ToolSearch", "WaitForMcpServers"):
+        assert _tool_gate_allows(name, allowed, grants=grants), name
+    refuses = ("Bash", "mcp__srv__other", "mcp__srv__tool__x", "mcp__extra__x", "mcp____x")
+    for name in (*refuses, "mcp__acme__x"):
+        assert not _tool_gate_allows(name, allowed, grants=grants), name
     for junk in (None, "", 42, {"x": 1}, ["Read"]):
-        assert not _tool_gate_allows(junk, allowed), junk
+        assert not _tool_gate_allows(junk, allowed, grants=grants), junk
 
 
 async def test_the_warm_client_key_tells_apart_turns_whose_scope_differs() -> None:
