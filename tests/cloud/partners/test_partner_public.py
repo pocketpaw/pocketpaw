@@ -354,6 +354,23 @@ async def test_public_profile_lists_the_partners_discover_sites(http) -> None:
     assert [s["title"] for s in page["other-one"]] == ["Theirs"]
 
 
+async def test_public_profile_shows_only_the_newest_sites(http) -> None:
+    """One partner with many listings cannot bloat the directory page."""
+    ws = await _public_partner("ravi-prints")
+    cap = service_admin.SITES_PER_PARTNER
+    for i in range(cap + 3):
+        await discover_admin.upsert_from_source(
+            "site_template",
+            f"t{i:02d}",
+            {"workspace": str(ws.id), "owner": "u1", "kind": "site", "title": f"Site {i:02d}"},
+        )
+    for path in (f"{URL}/ravi-prints", f"{URL}/directory"):
+        body = (await http.get(path)).json()
+        sites = body["sites"] if "sites" in body else body["items"][0]["sites"]
+        assert len(sites) == cap == 12
+        assert [s["title"] for s in sites] == [f"Site {i:02d}" for i in range(cap + 2, 2, -1)]
+
+
 async def test_fixed_segments_win_over_the_slug_catch_all(http) -> None:
     await _public_partner("ravi-prints")
     # Anonymous: the fixed routes answer 401 (auth), not 404 from the catch-all.
