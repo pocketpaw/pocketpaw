@@ -13,11 +13,14 @@
 #     ``remix_count`` are ``$setOnInsert``, so a re-save never unhides a listing
 #     Discover reports hid and never resets its counters. ``hide=True`` (the
 #     source item is hidden) forces ``hidden`` on; a sync never unhides.
-#   * ``slug`` is set once, from the title (or the source's proposed ``slug``)
-#     at first sync or at the reindex that backfills a pre-slug row, and made
-#     unique per source with ``-2``, ``-3``... It is never re-derived on a title
-#     change, so a listing's URL survives a rename. The upsert retries when a
-#     concurrent sync wins the insert or takes the slug first.
+#   * ``slug`` is written once and never changes: from the title (or the
+#     source's proposed ``slug``), else the ``source_id``, folded by
+#     ``sites.slug.normalize`` (the one slug dialect in EE) and made unique
+#     across every source with ``-2``, ``-3``... A new row gets it through
+#     ``$setOnInsert``; a pre-slug row gets it through a backfill guarded on
+#     ``slug: None``, so two syncs of the same row that both read "no slug"
+#     cannot re-slug it. The upsert retries when a concurrent sync wins the
+#     insert or takes the slug first.
 #   * Source items are read through their registered ``DiscoverSource``
 #     (``get_public`` / ``iter_public``) only; this module knows no source's
 #     field names. ``sync_source`` lists a public item (a hidden one as a hidden
@@ -36,7 +39,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -65,6 +67,7 @@ from pocketpaw_ee.cloud.discover.dto import (
 )
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
+from pocketpaw_ee.sites.slug import normalize as slugify
 
 SITE_TEMPLATE = "site_template"
 STUDIO_TEMPLATE = "studio_template"
@@ -74,25 +77,27 @@ STUDIO_TEMPLATE = "studio_template"
 # ---------------------------------------------------------------------------
 
 
-def slugify(text: str) -> str:
-    """URL handle: ASCII-folded, lowercase, every run of anything but ``a-z0-9``
-    one ``-``; ``listing`` when nothing survives."""
-    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-") or "listing"
+def _slug_base(source_id: str, *fields: str | None) -> str:
+    """The first of ``fields`` that slugifies to something, else the slugified
+    ``source_id``, else the raw ``source_id``: a CJK or Devanagari title must
+    not collapse every listing onto one constant."""
+    for text in (*fields, source_id):
+        if text and (slug := slugify(text)):
+            return slug
+    return source_id
 
 
-async def _free_slug(source: str, base: str) -> str:
+async def _free_slug(base: str) -> str:
     """``base``, or the first of ``base-2``, ``base-3``... that no listing of
-    ``source`` holds."""
-    # admin-cross-tenant: slugs are unique across every workspace's listings of
-    # one source.
+    any source holds."""
+    # admin-cross-tenant: slugs are unique across every workspace's listings.
     # ponytail: one lookup per taken candidate; a single regex fetch if titles
     # ever collide hundreds deep.
     collection = DiscoverListing.get_pymongo_collection()
     n = 1
     while True:
         slug = base if n == 1 else f"{base}-{n}"
-        if await collection.find_one({"source": source, "slug": slug}, {"_id": 1}) is None:
+        if await collection.find_one({"slug": slug}, {"_id": 1}) is None:
             return slug
         n += 1
 
@@ -250,29 +255,26 @@ async def list_public(body: ListPublicListingsRequest | dict | None = None) -> d
     return PublicListingPage(items=items, next_cursor=next_cursor).model_dump(mode="json")
 
 
-async def public_doc_by_id_or_slug(id_or_slug: str, source: str | None = None) -> DiscoverListing:
+async def public_doc_by_id_or_slug(id_or_slug: str) -> DiscoverListing:
     """The unhidden listing whose id is ``id_or_slug``, else the one whose slug
-    is (within ``source`` when given; otherwise the oldest match, since slugs
-    are unique per source only). NotFound when neither exists or it is hidden."""
+    is (slugs are unique across sources). NotFound when neither exists or it is
+    hidden."""
     # admin-cross-tenant: a public listing is readable by anyone.
     try:
         doc = await DiscoverListing.get(PydanticObjectId(id_or_slug))
     except (InvalidId, TypeError, ValueError):
         doc = None
     if doc is None:
-        query: dict[str, Any] = {"slug": id_or_slug, "hidden": {"$ne": True}}
-        if source:
-            query["source"] = source
-        doc = await DiscoverListing.find(query).sort([("_id", 1)]).first_or_none()
+        doc = await DiscoverListing.find_one({"slug": id_or_slug, "hidden": {"$ne": True}})
     if doc is None or doc.hidden:
         raise NotFound("discover_listing", id_or_slug)
     return doc
 
 
-async def get_public(id_or_slug: str, source: str | None = None) -> dict:
+async def get_public(id_or_slug: str) -> dict:
     """One unhidden listing's public card, by id or slug, else NotFound."""
     # admin-cross-tenant: a public listing is readable by anyone.
-    return _public(await public_doc_by_id_or_slug(id_or_slug, source))
+    return _public(await public_doc_by_id_or_slug(id_or_slug))
 
 
 # ---------------------------------------------------------------------------
@@ -377,10 +379,6 @@ async def upsert_from_source(
     for attempt in range(3):
         now = datetime.now(UTC)
         set_fields: dict[str, Any] = {**body.model_dump(exclude={"slug"}), "updatedAt": now}
-        existing = await collection.find_one(key, {"slug": 1})
-        if not (existing or {}).get("slug"):
-            # Set once; never re-derived, so a rename keeps the listing's URL.
-            set_fields["slug"] = await _free_slug(source, slugify(body.slug or body.title))
         on_insert: dict[str, Any] = {
             **key,
             "featured": False,
@@ -394,6 +392,13 @@ async def upsert_from_source(
             # Mongo refuses one path in both $set and $setOnInsert.
             del on_insert["hidden"]
             set_fields["hidden"] = True
+        existing = await collection.find_one(key, {"slug": 1})
+        slug = None
+        if not (existing or {}).get("slug"):
+            # Written once, never re-derived, so a rename keeps the listing's
+            # URL. Insert-only here; a pre-slug row is backfilled below.
+            slug = await _free_slug(_slug_base(source_id, body.slug, body.title))
+            on_insert["slug"] = slug
         try:
             raw = await collection.find_one_and_update(
                 key,
@@ -401,6 +406,10 @@ async def upsert_from_source(
                 upsert=True,
                 return_document=ReturnDocument.AFTER,
             )
+            if slug and not raw.get("slug"):
+                # Guarded on ``slug: None`` (missing or null): a sibling sync of
+                # this same row that backfilled first wins, and ours is a no-op.
+                await collection.update_one({**key, "slug": None}, {"$set": {"slug": slug}})
             break
         except DuplicateKeyError:
             # A concurrent sync won the (source, source_id) insert, or took our
@@ -462,12 +471,13 @@ async def reindex(source: str) -> dict:
         if not row["public"]:
             continue
         keep.add(row["id"])
-        fields = UpsertListingRequest.model_validate(_row_fields(row)).model_dump(exclude={"slug"})
+        fields = UpsertListingRequest.model_validate(_row_fields(row)).model_dump()
         doc = existing.get(row["id"])
         if doc is None:
             counts["created"] += 1
         elif (
-            any(getattr(doc, k) != v for k, v in fields.items())
+            # A proposed ``slug`` only matters to a row without one (see upsert).
+            any(getattr(doc, k) != v for k, v in fields.items() if k != "slug")
             or (row["hidden"] and not doc.hidden)
             or doc.slug is None  # a pre-slug row: backfill it
         ):

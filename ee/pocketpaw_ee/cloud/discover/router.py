@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Response
 
 from pocketpaw_ee.cloud._core.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud._core.rate_limit import (
@@ -59,13 +59,10 @@ async def list_listings(query: ListPublicListingsRequest = Depends()) -> dict:
     response_model=PublicListingResponse,
     dependencies=[Depends(rate_limit_discover_public)],
 )
-async def get_listing(
-    id_or_slug: str, source: str | None = Query(default=None, max_length=64)
-) -> dict:
-    """PUBLIC — no sign-in. One unhidden listing, by id or by slug; ``source``
-    picks the source when two share a slug (else the oldest listing wins). 404
-    when missing or hidden."""
-    return await service_admin.get_public(id_or_slug, source)
+async def get_listing(id_or_slug: str) -> dict:
+    """PUBLIC — no sign-in. One unhidden listing, by id or by slug (slugs are
+    unique across sources). 404 when missing or hidden."""
+    return await service_admin.get_public(id_or_slug)
 
 
 @router.post("/{listing_id}/use", response_model=UseListingResponse)

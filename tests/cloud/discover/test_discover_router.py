@@ -149,8 +149,6 @@ async def test_anonymous_get_one_by_slug(client) -> None:
     assert by_id.status_code == 200 and by_id.json()["slug"] == "cafe-creme"
     by_slug = await client.get(f"{URL}/cafe-creme")
     assert by_slug.status_code == 200 and by_slug.json() == by_id.json()
-    assert (await client.get(f"{URL}/cafe-creme?source=site_template")).status_code == 200
-    assert (await client.get(f"{URL}/cafe-creme?source=studio_template")).status_code == 404
     assert (await client.get(f"{URL}/no-such-slug")).status_code == 404
 
 
