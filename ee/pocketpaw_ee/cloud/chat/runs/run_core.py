@@ -220,8 +220,27 @@ def _stream_ttl() -> int:
 # cutoff is 10 minutes, so 30s leaves a wide margin for a slow Mongo write or a
 # busy event loop before a healthy run could look dead.
 _DEFAULT_HEARTBEAT_SECONDS = 30.0
-# Upper bound on closing the backend generator in ``_drive_agent_loop``'s teardown.
+# Upper bound on each teardown wait in ``_drive_agent_loop`` (draining the
+# cancelled steps, closing the backend generator).
 _ACLOSE_TIMEOUT_SECONDS = 5.0
+
+
+async def _settle_bounded(task: asyncio.Future[Any], what: str) -> bool:
+    """Wait for teardown ``task`` up to ``_ACLOSE_TIMEOUT_SECONDS``, shielded.
+
+    A timeout or error cancels ``task`` and is logged at debug. Returns True when
+    the caller was cancelled during the wait: the caller holds that cancel, runs
+    the rest of its cleanup, then re-raises it.
+    """
+    try:
+        await asyncio.wait_for(asyncio.shield(task), _ACLOSE_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        logger.debug("cancelled while %s", what, exc_info=True)
+        return True
+    except BaseException:
+        task.cancel()
+        logger.debug("%s failed or timed out", what, exc_info=True)
+    return False
 
 
 def _heartbeat_seconds() -> float:
@@ -2437,23 +2456,20 @@ async def _drive_agent_loop(
         pending = [t for t in (next_event_task, next_queue_task) if t is not None and not t.done()]
         for t in pending:
             t.cancel()
+        # Both waits are bounded and shielded: a step that ignores its cancel, a
+        # wedged close or a second cancel must not skip the bookkeeping below
+        # (busy counter, sinks). A held cancel is re-raised last.
+        close_cancelled = False
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            close_cancelled = await _settle_bounded(
+                asyncio.gather(*pending, return_exceptions=True), "draining the pending steps"
+            )
         # A cancel can land before the pending step ever ran, leaving the backend
         # suspended mid-turn; close it in the steps' Context, not from a GC finalizer.
-        # Bounded and shielded: a wedged close or a second cancel must not skip
-        # the bookkeeping below (busy counter, sinks). A cancel is re-raised last.
-        close_cancelled = False
         if agent_iter is not None:
             close_task = asyncio.create_task(agent_iter.aclose(), context=step_ctx)
-            try:
-                await asyncio.wait_for(asyncio.shield(close_task), _ACLOSE_TIMEOUT_SECONDS)
-            except asyncio.CancelledError:
+            if await _settle_bounded(close_task, "closing the agent generator"):
                 close_cancelled = True
-                logger.debug("cancelled while closing the agent generator", exc_info=True)
-            except BaseException:
-                close_task.cancel()
-                logger.debug("closing the agent generator failed or timed out", exc_info=True)
         try:
             detach_sse_event_sink(sink_token)
         except Exception:
