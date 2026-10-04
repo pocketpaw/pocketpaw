@@ -191,6 +191,11 @@ async def test_slug_pattern(http, slug) -> None:
     assert r.status_code == 422, r.text
 
 
+async def test_route_segments_stay_reserved() -> None:
+    # API fixed segments plus the public site's /partners/find page.
+    assert {"directory", "apply", "find"} <= PARTNER_SLUG_RESERVED
+
+
 @pytest.mark.parametrize("slug", sorted(PARTNER_SLUG_RESERVED))
 async def test_reserved_slugs_are_refused(slug) -> None:
     ws = await _workspace("acme", "active")
