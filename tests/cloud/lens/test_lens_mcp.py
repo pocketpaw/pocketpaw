@@ -13,7 +13,9 @@
 # and keeps both when the agent_health profile's grant is passed; its call-time
 # tool gate (the only enforcement under bypassPermissions) runs the lens tools
 # on agent_health and on no other surface's real profile, refuses them when
-# agent_health denies them, and refuses an id the server never declared;
+# agent_health denies them (a deny covering every lens id also leaves the
+# server unstarted on that scoped turn), and refuses an id the server never
+# declared;
 # pydantic_ai adds the ungranted lens ids to the deny set it builds the agent
 # with; and the warm-client cache key tells a client carrying the lens server
 # apart from one without it, so a client warmed on agent_health is never reused
@@ -244,16 +246,18 @@ async def test_agent_health_surface_has_lens_server(sdk_backend):
 
 
 async def test_warm_client_key_separates_a_lens_client(sdk_backend):
-    """A client connected on agent_health carries the lens server even when its
-    ids are denied off the allowlist; it must never be reused by another surface."""
+    """A client carrying the lens server must never be reused by another surface.
+    A scoped turn no longer starts it once its ids are denied off the allowlist,
+    so the carried case is built by hand: the same allowlist, plus the server."""
     from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
     grant = resolve_profile(SurfaceKind.AGENT_HEALTH, SurfaceMeta()).allowed_sdk_tools
-    lens_on = (await _build(sdk_backend, grant, deny=grant)).options_kwargs
+    denied = (await _build(sdk_backend, grant, deny=grant)).options_kwargs
     plain = (await _build(sdk_backend, frozenset())).options_kwargs
-    assert "pocketpaw_lens" in lens_on["mcp_servers"]
+    assert "pocketpaw_lens" not in denied["mcp_servers"]
     assert "pocketpaw_lens" not in plain["mcp_servers"]
-    assert sorted(lens_on["allowed_tools"]) == sorted(plain["allowed_tools"])
+    name, cfg = lens_mcp.build_lens_server()
+    lens_on = {**plain, "mcp_servers": {**plain["mcp_servers"], name: cfg}}
 
     def key(kwargs):
         return ClaudeSDKBackend._client_cache_key(SimpleNamespace(**kwargs), session_key="s1")
@@ -285,15 +289,15 @@ async def test_the_tool_gate_runs_lens_tools_only_on_agent_health(sdk_backend, k
 
 
 async def test_the_tool_gate_refuses_denied_or_undeclared_lens_tools(sdk_backend):
-    """Deny is checked first: with agent_health's grant denied, the lens server is
-    still registered but the gate refuses every lens id. The grant is per id, not
-    the whole server: an id the server never declared is refused even where the
-    grant holds."""
+    """Deny is checked first: with agent_health's grant denied, the gate refuses
+    every lens id. The grant is per id, not the whole server: an id the server
+    never declared is refused even where the grant holds."""
     from tests.test_claude_sdk_tool_scoping import _allows
 
     grant = resolve_profile(SurfaceKind.AGENT_HEALTH, SurfaceMeta()).allowed_sdk_tools
     denied = await _build(sdk_backend, grant, deny=grant)
-    assert "pocketpaw_lens" in denied.options_kwargs["mcp_servers"]
+    # A deny covering every lens id gives a scoped turn nothing to start.
+    assert "pocketpaw_lens" not in denied.options_kwargs["mcp_servers"]
     for tool_id in lens_mcp.LENS_TOOL_IDS:
         assert not await _allows(denied.options, tool_id), tool_id
     granted = await _build(sdk_backend, grant)

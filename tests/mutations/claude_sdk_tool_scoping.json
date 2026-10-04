@@ -124,5 +124,70 @@
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_nothing_switches_claude_ai_connectors_back_on"
     ]
+  },
+  {
+    "label": "a scoped turn starts every ambient server again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        live = _servers_of(allowed_tools, external_grants) if scoped else None",
+    "replace": "        live = None",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on",
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_mode_turn_keeps_its_servers_the_grant_and_the_always_allowed"
+    ]
+  },
+  {
+    "label": "an external server is cut at its first __ (acme__crm becomes acme) and never starts",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        servers.add(owner[len(\"mcp__\") :] if owner else _mcp_server_of(entry))",
+    "replace": "        servers.add(_mcp_server_of(entry))",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_scoped_turn_starts_external_servers_whose_names_hold_a_double_underscore",
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_tool_declared_under_a_double_underscore_server_starts_that_server"
+    ]
+  },
+  {
+    "label": "an out-of-scope provider is still built (composio fetches on a /code turn)",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on"
+    ]
+  },
+  {
+    "label": "a provider whose tool_ids() raises is skipped silently on a scoped turn",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:",
+    "replace": "                try:\n                    owns = {_mcp_server_of(t) for t in provider.tool_ids()}\n                except Exception:  # noqa: BLE001\n                    owns = set()\n                if only is not None and not owns & only:",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_provider_whose_tool_ids_raise_is_logged_on_a_scoped_turn"
+    ]
+  },
+  {
+    "label": "an external server is matched by its raw config name, not the CLI spelling",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            servers = {n: c for n, c in servers.items() if _cli_server_name(n) in only}",
+    "replace": "            servers = {n: c for n, c in servers.items() if n in only}",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_bare_external_entry_starts_the_server_under_its_config_name"
+    ]
+  },
+  {
+    "label": "the skill path loses its skill's built-ins to the pocket lock",
+    "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
+    "find": "            run_kwargs[\"allow_sdk_tools\"] = frozenset({\"Bash\", \"Read\", \"Write\", \"Edit\", \"Grep\"})",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
+    ]
+  },
+  {
+    "label": "a backend without allow_sdk_tools is handed it anyway (deep_agents raises)",
+    "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
+    "find": "        if \"allow_sdk_tools\" in inspect.signature(backend.run).parameters:",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
+    ]
   }
 ]
