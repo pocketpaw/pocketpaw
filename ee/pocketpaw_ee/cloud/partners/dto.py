@@ -135,7 +135,8 @@ class PartnerPublicOut(BaseModel):
 
 
 class PartnerDirectoryPage(BaseModel):
-    """A page of public partners, newest first; ``next_cursor`` is None on the last page."""
+    """A page of public partners, newest first; ``next_cursor`` is an opaque token
+    (never a workspace id) to pass back as ``cursor``, None on the last page."""
 
     model_config = ConfigDict(extra="forbid")
 

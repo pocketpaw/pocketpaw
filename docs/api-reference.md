@@ -1364,11 +1364,13 @@ service), `partners.profile_incomplete`; **409** `partners.slug_taken`. An opera
 
 ### `GET /partners/directory` (public)
 
-No sign-in. Partners with `status: active` and `public: true`, newest first.
-Query params, all optional: `city` (case-insensitive exact match), `service`
-(one of the five), `cursor`, `limit` (1-50, default 24). Limited to 60 requests a
-minute per IP, shared with `GET /partners/{slug}`; past that `429`
-`partners.rate_limited`. A bad cursor is `422` `partners.bad_cursor`.
+No sign-in. Partners with `status: active` and `public: true`, newest first
+(by `joined_at`, then slug). Query params, all optional: `city` (case-insensitive
+exact match), `service` (one of the five), `cursor` (the opaque `next_cursor` of
+the previous page; it encodes only the card's own `joined_at` and slug, never a
+workspace id), `limit` (1-50, default 24). Limited to 60 requests a minute per
+IP, shared with `GET /partners/{slug}`; past that `429` `partners.rate_limited`.
+A bad cursor is `422` `partners.bad_cursor`.
 
 **Client IP behind the public site.** Every per-IP limit keys on the rightmost
 `X-Forwarded-For` hop. Requests relayed by the paw-web Worker all arrive from

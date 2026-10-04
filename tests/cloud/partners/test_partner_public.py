@@ -319,11 +319,33 @@ async def test_directory_filters_and_pages(http) -> None:
     assert (await http.get(f"{URL}/directory", params={"service": "tattoo"})).status_code == 422
 
     first = await http.get(f"{URL}/directory", params={"limit": 2})
-    assert slugs(first) == ["c-photo", "b-web"] and first.json()["next_cursor"] == str(b.id)
-    second = await http.get(f"{URL}/directory", params={"limit": 2, "cursor": str(b.id)})
+    cursor = first.json()["next_cursor"]
+    assert slugs(first) == ["c-photo", "b-web"] and cursor
+    # Opaque: no workspace id of any partner on the page is in it.
+    for ws in (a, b, c):
+        assert str(ws.id) not in cursor and str(ws.id) not in first.text
+    second = await http.get(f"{URL}/directory", params={"limit": 2, "cursor": cursor})
     assert slugs(second) == ["a-prints"] and second.json()["next_cursor"] is None
-    assert (await http.get(f"{URL}/directory", params={"cursor": "junk"})).status_code == 422
-    assert a.id != c.id
+    for junk in ("junk", str(b.id), "MTIzfA", "MXxub3Qgc2x1Zw"):  # "123|", "1|not slug"
+        r = await http.get(f"{URL}/directory", params={"cursor": junk})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "partners.bad_cursor", junk
+
+
+async def test_directory_pages_through_a_joined_at_tie(http) -> None:
+    """Partners who joined in the same instant are still paged without a skip or repeat."""
+    at = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
+    for slug in ("x-one", "x-two", "x-three"):
+        await _public_partner(slug, joined_at=at)
+    seen: list[str] = []
+    cursor = None
+    while True:
+        params = {"limit": 1, **({"cursor": cursor} if cursor else {})}
+        page = (await http.get(f"{URL}/directory", params=params)).json()
+        seen += [p["slug"] for p in page["items"]]
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == ["x-two", "x-three", "x-one"]  # slug desc within the tie
 
 
 async def test_public_profile_lists_the_partners_discover_sites(http) -> None:
