@@ -90,12 +90,12 @@
     ]
   },
   {
-    "label": "ToolSearch is not pinned — tool search goes off and every MCP schema loads up front",
+    "label": "the infra tools are not pinned — tool search goes off and WaitForMcpServers is refused",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "            options_kwargs[\"tools\"] = list(dict.fromkeys([*builtins, \"ToolSearch\"]))",
+    "find": "            options_kwargs[\"tools\"] = list(dict.fromkeys([*builtins, *_INFRA_TOOLS]))",
     "replace": "            options_kwargs[\"tools\"] = builtins",
     "tests": [
-      "tests/test_claude_sdk_tool_scoping.py::test_a_turn_pins_its_builtins_plus_tool_search"
+      "tests/test_claude_sdk_tool_scoping.py::test_a_turn_pins_its_builtins_plus_the_infra_tools"
     ]
   },
   {
