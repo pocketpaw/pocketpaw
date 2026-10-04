@@ -6,12 +6,13 @@
 # first check-in for an unknown monitor registers it, schedule included. Slug is
 # ``<kind>:<id>``.
 #
-# ``automation_run`` wraps one run. It opens a current span ``automation
-# <kind>:<id>`` so the run's spans form one trace, sends that trace's 32-hex
-# ``trace_id`` in both check-ins (omitted when Logfire is off), and stamps
+# ``automation_run`` wraps one run. When paw-lens is configured it opens a
+# current span ``automation <kind>:<id>`` so the run's spans form one trace and
+# sends that trace's 32-hex ``trace_id`` in both check-ins (omitted when Logfire
+# is off); with no lens URL there is no automation span. Either way it stamps
 # ``paw.workspace_id`` / ``paw.automation.kind`` / ``paw.automation.id``
 # (observability.baggage, a ContextVar, not OTel baggage) on every span the run
-# opens, the automation span included. A cancelled run
+# opens. A cancelled run
 # posts no final check-in. ``monitored_job`` is the APScheduler form:
 # wrap the job function once where it is handed to ``add_job``.
 #
@@ -213,6 +214,8 @@ async def automation_run(
 
     status: str | None
     status, error = "ok", None
+    # The span only serves the lens trace link; without lens it is a wasted root.
+    run_span = span(f"automation {kind}:{id}") if endpoint else nullcontext()
     with (
         baggage(
             **{
@@ -221,7 +224,7 @@ async def automation_run(
                 "paw.automation.id": id,
             }
         ),
-        span(f"automation {kind}:{id}") as tick,
+        run_span as tick,
     ):
         trace_id = _trace_id(tick)
         if trace_id:
