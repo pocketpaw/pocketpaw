@@ -1405,7 +1405,8 @@ partner on the wire is exactly these fields (never `footer_name`,
 ```
 
 `sites` are the partner workspace's public Discover listings, the same card as
-`GET /discover` (see Discover below), newest first.
+`GET /discover` (see Discover below), newest first and capped at the 12 newest;
+a partner with more shows only those 12 here (the full set is on `GET /discover`).
 
 ### `GET /partners/{slug}` (public)
 

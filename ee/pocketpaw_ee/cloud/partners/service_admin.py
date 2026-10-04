@@ -12,8 +12,9 @@
 #   * The wire is ``_public`` -> ``PartnerPublicOut`` (an allow-list). The
 #     ``footer_name``, ``billing_country``, ``founding`` and ``status`` stop here.
 #   * A partner's sites are its public Discover listings, read through
-#     ``discover.service_admin.list_public_for_workspaces`` (one query per page);
-#     this module builds no listing card of its own.
+#     ``discover.service_admin.list_public_for_workspaces`` (the newest
+#     ``SITES_PER_PARTNER`` per partner, one capped query each); this module
+#     builds no listing card of its own.
 #   * ``apply`` stores exactly ONE ``PartnerApplication`` (the platform's review
 #     queue, not a tenant's data) after the global daily cap and Turnstile pass,
 #     and emits ``PartnerApplied``. Nothing is written to any workspace. The
@@ -52,6 +53,8 @@ from pocketpaw_ee.cloud.partners.dto import (
 # far above any real intake. ponytail: counted before the insert, so concurrent
 # submissions can overshoot by the ones in flight; a reservation row fixes that.
 APPLY_DAILY_CAP = 500
+# Public listings shown per partner (directory card and profile), newest first.
+SITES_PER_PARTNER = 12
 
 _PUBLIC: dict[str, Any] = {"deleted_at": None, "partner.status": "active", "partner.public": True}
 
@@ -75,7 +78,7 @@ def _public(ws: _WorkspaceDoc, sites: list[dict]) -> PartnerPublicOut:
 
 async def _with_sites(rows: list[_WorkspaceDoc]) -> list[PartnerPublicOut]:
     ids = [str(r.id) for r in rows]
-    sites = await discover_admin.list_public_for_workspaces(ids)
+    sites = await discover_admin.list_public_for_workspaces(ids, per_workspace=SITES_PER_PARTNER)
     return [_public(r, sites.get(str(r.id), [])) for r in rows]
 
 
@@ -228,6 +231,7 @@ async def review_application(
 
 __all__ = [
     "APPLY_DAILY_CAP",
+    "SITES_PER_PARTNER",
     "apply",
     "get_application",
     "get_public",

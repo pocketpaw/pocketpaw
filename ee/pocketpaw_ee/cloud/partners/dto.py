@@ -129,7 +129,8 @@ class PartnerPublicOut(BaseModel):
     contact_url: str | None
     tier: str
     joined_at: datetime
-    # The partner's public Discover listings (same card as the index).
+    # The partner's newest public Discover listings (same card as the index),
+    # capped at ``service_admin.SITES_PER_PARTNER`` (12); older ones are not listed.
     sites: list[PublicListingResponse]
 
 
