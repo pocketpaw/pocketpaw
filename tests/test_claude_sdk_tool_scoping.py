@@ -233,6 +233,44 @@ async def test_a_mode_allow_list_refuses_other_modes_tools_but_keeps_the_grant()
     assert await _allows(options, _PLAN_POCKET), "the pocket-creation grant survives"
 
 
+async def test_an_exclusive_turn_keeps_a_declared_id_on_a_server_granted_wholesale() -> None:
+    """Composio and external servers reach the allowlist only as a bare entry, so a
+    tool an exclusive agent declares by full id is never literally there. The
+    filter kept literal matches only and dropped the declared tool."""
+    options = await _build(
+        pool=[*_POOL, _COMPOSIO],
+        external=("My Notes",),
+        exclusive_mcp_tools=True,
+        allow_mcp_tool_ids=frozenset({_SEND_EMAIL, "mcp__My Notes__search", _READ_FILE}),
+    )
+
+    assert await _allows(options, _SEND_EMAIL)
+    assert await _allows(options, "mcp__My_Notes__search")
+    assert await _allows(options, _READ_FILE)
+    assert not await _allows(options, "mcp__composio__GMAIL_DELETE_MESSAGE"), "the id only"
+    assert not await _allows(options, "mcp__My_Notes__delete_note")
+    assert _COMPOSIO not in options.allowed_tools
+
+
+async def test_a_mode_allow_list_keeps_a_declared_id_on_a_server_granted_wholesale() -> None:
+    options = await _build(allow_mcp_tool_ids=frozenset({"mcp__foo__lookup"}))
+
+    assert await _allows(options, "mcp__foo__lookup")
+    assert not await _allows(options, "mcp__foo__other"), "foo is not always allowed"
+
+
+async def test_a_declared_id_does_not_bring_back_a_denied_one() -> None:
+    options = await _build(
+        pool=[*_POOL, _COMPOSIO],
+        exclusive_mcp_tools=True,
+        allow_mcp_tool_ids=frozenset({_SEND_EMAIL, "mcp__foo__lookup"}),
+        deny_mcp_tool_ids=frozenset({_SEND_EMAIL, _EXTERNAL}),
+    )
+
+    assert _SEND_EMAIL not in options.allowed_tools
+    assert "mcp__foo__lookup" not in options.allowed_tools, "its server grant was denied"
+
+
 async def test_a_bare_server_entry_admits_that_server_and_no_other() -> None:
     options = await _build()
 
