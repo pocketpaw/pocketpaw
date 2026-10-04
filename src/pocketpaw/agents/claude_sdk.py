@@ -2614,9 +2614,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # MCP pocket tools (get_pocket / list_pockets / set_state /
         # set_node_prop / add_node / etc.) are the complete interface.
         # Detect via the <pocket-scope> marker every pocket prompt
-        # carries; the built-ins shrink to delegation + web. The pinned
-        # ``tools=`` list and the tool gate below enforce that (the
-        # allowlist alone never did, under bypassPermissions).
+        # carries; the built-ins shrink to delegation, web and skills. Skill
+        # stays because the creation prompt (POCKET_CREATION_PROMPT_MCP) names
+        # the pocketpaw-create-pocket skill its preferred entry point, and a
+        # skill is neither shell nor filesystem. The pinned ``tools=`` list and
+        # the tool gate below enforce the lock (the allowlist alone never did,
+        # under bypassPermissions).
         #
         # Without this lock, the agent has been observed reaching for
         # shell introspection (e.g. `env | grep pocket; curl localhost`)
@@ -2626,7 +2629,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         is_pocket_session = "<pocket-scope>" in (final_prompt or "")
 
         if is_pocket_session:
-            all_sdk_tools = ["Agent", "WebSearch", "WebFetch"]
+            all_sdk_tools = ["Agent", "WebSearch", "WebFetch", "Skill"]
             logger.info(
                 "Pocket session detected — tool surface locked to %s",
                 all_sdk_tools,
