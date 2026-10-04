@@ -11,7 +11,7 @@ Composio tools, the per-workspace store bridge (delegating to the OSS
 (including the per-tenant agent cwd jail, which fails closed in cloud), and one
 `pocketpaw.mcp_servers` provider per in-process MCP server the
 claude_agent_sdk cloud backend gets (each class docstring says what it exposes
-and whether it is ambient or opt-in).
+and whether it is ambient, opt-in or surface-scoped).
 
 Heavy `pocketpaw_ee` imports happen lazily inside methods, so loading this
 module (which the registry does on first access) stays cheap and cycle-free.
@@ -1321,6 +1321,30 @@ class CloudAskMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
 
         return list(ASK_TOOL_IDS)
+
+
+class CloudLensMcpProvider:
+    """`pocketpaw.mcp_servers` — the agent-health read server (``pocketpaw_lens``).
+    Hosts lens_overview / lens_runs / lens_run / lens_issues / lens_monitors.
+
+    SURFACE-SCOPED, neither ambient nor ``OPT_IN_MCP_SERVERS``: it is in core's
+    ``SURFACE_SCOPED_MCP_SERVERS``, so a backend registers it only when the run's
+    surface grants its tool ids (the ``agent_health`` surface). Normal chats do
+    not load it.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.lens import build_lens_server
+
+            return build_lens_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.lens import LENS_TOOL_IDS
+
+        return list(LENS_TOOL_IDS)
 
 
 class CloudDeliverMcpProvider:

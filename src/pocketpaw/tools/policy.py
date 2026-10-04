@@ -16,6 +16,8 @@ Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
   policy into allow-list mode, silently disabling every other tool. Also
   added ``OPT_IN_MCP_SERVERS`` — the single source of truth for which
   in-process servers are opt-in, imported by AgentPool and ClaudeSDKBackend.
+  ``SURFACE_SCOPED_MCP_SERVERS`` is the per-surface twin: servers registered
+  only when the run's chat surface grants them.
 
 Updated: 2026-08-15 (HTN-2) — a policy carries the ``ToolRegistry`` built under
   it (``_bridged_registry``), so a caller holding an agent can reach that
@@ -119,6 +121,46 @@ TOOL_PROFILES: dict[str, dict] = {
 # tool gets the policy regime it actually needs. See
 # ``ee/pocketpaw_ee/agent/mcp_servers/planner.py`` for the split.
 OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
+
+# In-process MCP servers registered ONLY on a run whose chat surface grants
+# them: the run's ``allow_sdk_tools`` (``SurfaceProfile.allowed_sdk_tools``)
+# names at least one of the server's tool ids. Per-SURFACE, where
+# ``OPT_IN_MCP_SERVERS`` is per-AGENT. Every other run neither registers the
+# server nor offers its tools, so a single-page toolset costs the other chats
+# nothing. ``pocketpaw_lens`` (agent-health reads) is granted by the
+# ``agent_health`` surface.
+SURFACE_SCOPED_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_lens"})
+
+
+def _mcp_server_name(tool_id: str) -> str:
+    parts = tool_id.split("__")
+    return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
+
+def ungranted_surface_servers(granted_tool_ids: frozenset[str]) -> frozenset[str]:
+    """The surface-scoped servers ``granted_tool_ids`` does not grant."""
+    granted = {_mcp_server_name(t) for t in granted_tool_ids}
+    return SURFACE_SCOPED_MCP_SERVERS - granted
+
+
+def surface_scoped_tool_deny(granted_tool_ids: frozenset[str]) -> frozenset[str]:
+    """Tool ids of every surface-scoped server this run's surface does not grant.
+
+    Read from the ``pocketpaw.mcp_servers`` providers' ``tool_ids()``, so a
+    backend can subtract them through its existing deny path. Empty when every
+    scoped server is granted or none is installed (OSS)."""
+    off = ungranted_surface_servers(granted_tool_ids)
+    if not off:
+        return frozenset()
+    from pocketpaw._registry import providers
+
+    ids: set[str] = set()
+    for provider in providers("pocketpaw.mcp_servers"):
+        try:
+            ids.update(t for t in provider.tool_ids() if _mcp_server_name(t) in off)
+        except Exception:  # noqa: BLE001 — a broken provider is skipped, as in the backends
+            continue
+    return frozenset(ids)
 
 
 class ToolPolicy:

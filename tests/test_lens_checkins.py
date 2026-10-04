@@ -3,7 +3,8 @@
 # Covers the check-in pair, the error path (re-raise unchanged), paw-lens being
 # down / slow / 500 (job unaffected, bounded), disabled (zero requests), the
 # token header, run attributes reaching a child span but never a ``baggage``
-# header, the tick's trace_id in both check-ins (absent with Logfire off),
+# header, the tick's trace_id in both check-ins (absent with Logfire off), no
+# automation span without a lens URL (child spans still stamped),
 # cancellation posting no final check-in, the stateless claude_sdk span
 # surviving finalization in another task, and that every OSS APScheduler site
 # hands add_job a monitored function.
@@ -187,6 +188,27 @@ async def test_trace_id_sent_and_matches_the_ticks_spans(lens, run_attrs, monkey
     assert f"{child['context']['trace_id']:032x}" == trace_id
     assert child["parent"]["span_id"] == tick["context"]["span_id"]
     assert tick["attributes"]["paw.automation.id"] == "m1"
+
+
+async def test_no_automation_span_without_lens_but_baggage_still_set(lens, run_attrs, monkeypatch):
+    """No lens URL: the run opens no root span of its own, child spans keep paw.*."""
+    import logfire
+
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_ENABLED", "1")
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: SimpleNamespace(lens_api_url="", lens_api_token=""),
+    )
+    async with automation_run("mandate", "m1", workspace_id="ws-1"):
+        with logfire.span("child"):
+            pass
+    await flush()
+    spans = {s["name"]: s for s in run_attrs.exporter.exported_spans_as_dict()}
+    assert "automation mandate:m1" not in spans
+    attrs = spans["child"]["attributes"]
+    assert attrs["paw.workspace_id"] == "ws-1"
+    assert attrs["paw.automation.kind"] == "mandate"
+    assert attrs["paw.automation.id"] == "m1"
 
 
 async def test_no_trace_id_when_logfire_off(lens, monkeypatch):

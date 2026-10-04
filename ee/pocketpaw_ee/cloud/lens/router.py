@@ -5,6 +5,7 @@
 #   GET  /lens/issues?status= · /lens/issues/{fingerprint}
 #   GET  /lens/runs?automation=&status=&limit= · /lens/runs/{trace_id}
 #   GET  /lens/runs/{trace_id}/spans/{span_id}
+#   POST /lens/runs/{trace_id}/overview?refresh=  (AI overview, admin only)
 #   POST /lens/issues/{fingerprint}/mute {minutes} · /lens/issues/{fingerprint}/resolve
 # GETs accept ``since``; overview, issues, agents and the runs list also take
 # ``agent_id``. License-gated; the workspace is the caller's active workspace.
@@ -13,9 +14,12 @@
 # match ``_AGENT_ID`` (422 otherwise) so nothing can path-inject into the
 # upstream URL; a leading alphanumeric blocks ``.``/``..``.
 #
-# Reads are member-level. Mute/resolve are writes that silence alerting for the
-# whole workspace, so they require ``lens.manage`` (ADMIN). Responses may be
-# lists, hence ``response_model=None``.
+# Reads are member-level, but every read passes ``full`` = "caller holds
+# ``lens.manage``" so the service redacts message, tool and error content for
+# non-admins (Privacy A, ``service.redact``). Mute/resolve
+# are writes that silence alerting for the whole workspace, so they require
+# ``lens.manage`` (ADMIN), as does the overview POST (it spends LLM tokens and
+# reads full content). Responses may be lists, hence ``response_model=None``.
 
 from __future__ import annotations
 
@@ -23,7 +27,11 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Path, Query
 
-from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action_any_workspace
+from pocketpaw_ee.cloud._core.deps import (
+    action_allowed_any_workspace,
+    current_workspace_id,
+    require_action_any_workspace,
+)
 from pocketpaw_ee.cloud.lens import service
 from pocketpaw_ee.cloud.lens.dto import MuteIssueRequest
 from pocketpaw_ee.cloud.license import require_license
@@ -36,10 +44,12 @@ router = APIRouter(
 
 _MANAGE = [Depends(require_action_any_workspace("lens.manage"))]
 
-_SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
-_AGENT_ID = r"^[A-Za-z0-9_-]{1,64}$"
+_SAFE_ID = service.SAFE_ID
+_AGENT_ID = service.AGENT_ID
 
 WorkspaceId = Annotated[str, Depends(current_workspace_id)]
+# True for a workspace admin: sees message / tool content. Others get it redacted.
+FullContent = Annotated[bool, Depends(action_allowed_any_workspace("lens.manage"))]
 Since = Annotated[str | None, Query(max_length=64)]
 Fingerprint = Annotated[str, Path(pattern=_SAFE_ID)]
 TraceId = Annotated[str, Path(pattern=_SAFE_ID)]
@@ -49,25 +59,28 @@ AgentId = Annotated[str | None, Query(pattern=_AGENT_ID)]
 
 
 @router.get("/overview", response_model=None)
-async def overview(workspace_id: WorkspaceId, since: Since = None, agent_id: AgentId = None) -> Any:
-    return await service.overview(workspace_id, since, agent_id)
+async def overview(
+    workspace_id: WorkspaceId, full: FullContent, since: Since = None, agent_id: AgentId = None
+) -> Any:
+    return await service.overview(workspace_id, since, agent_id, full=full)
 
 
 @router.get("/issues", response_model=None)
 async def list_issues(
     workspace_id: WorkspaceId,
+    full: FullContent,
     status: Literal["open", "muted", "resolved"] | None = None,
     since: Since = None,
     agent_id: AgentId = None,
 ) -> Any:
-    return await service.list_issues(workspace_id, status, since, agent_id)
+    return await service.list_issues(workspace_id, status, since, agent_id, full=full)
 
 
 @router.get("/issues/{fingerprint}", response_model=None)
 async def get_issue(
-    workspace_id: WorkspaceId, fingerprint: Fingerprint, since: Since = None
+    workspace_id: WorkspaceId, full: FullContent, fingerprint: Fingerprint, since: Since = None
 ) -> Any:
-    return await service.get_issue(workspace_id, fingerprint, since)
+    return await service.get_issue(workspace_id, fingerprint, since, full=full)
 
 
 @router.post("/issues/{fingerprint}/mute", response_model=None, dependencies=_MANAGE)
@@ -85,37 +98,58 @@ async def resolve_issue(workspace_id: WorkspaceId, fingerprint: Fingerprint) -> 
 @router.get("/runs", response_model=None)
 async def list_runs(
     workspace_id: WorkspaceId,
+    full: FullContent,
     agent_id: AgentId = None,
     automation: Annotated[str | None, Query(pattern=_SAFE_ID)] = None,
     status: Literal["ok", "error"] | None = None,
     since: Since = None,
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
 ) -> Any:
-    return await service.list_runs(workspace_id, agent_id, automation, status, since, limit)
+    return await service.list_runs(
+        workspace_id, agent_id, automation, status, since, limit, full=full
+    )
 
 
 @router.get("/runs/{trace_id}", response_model=None)
-async def get_run(workspace_id: WorkspaceId, trace_id: TraceId, since: Since = None) -> Any:
-    return await service.get_run(workspace_id, trace_id, since)
+async def get_run(
+    workspace_id: WorkspaceId, full: FullContent, trace_id: TraceId, since: Since = None
+) -> Any:
+    return await service.get_run(workspace_id, trace_id, since, full=full)
+
+
+@router.post("/runs/{trace_id}/overview", response_model=None)
+async def run_overview(
+    workspace_id: WorkspaceId,
+    trace_id: TraceId,
+    user: Annotated[Any, Depends(require_action_any_workspace("lens.manage"))],
+    refresh: bool = False,
+) -> Any:
+    return await service.run_overview(
+        workspace_id, trace_id, refresh=refresh, generated_by=str(user.id)
+    )
 
 
 @router.get("/runs/{trace_id}/spans/{span_id}", response_model=None)
-async def get_span(workspace_id: WorkspaceId, trace_id: TraceId, span_id: SpanId) -> Any:
-    return await service.get_span(workspace_id, trace_id, span_id)
+async def get_span(
+    workspace_id: WorkspaceId, full: FullContent, trace_id: TraceId, span_id: SpanId
+) -> Any:
+    return await service.get_span(workspace_id, trace_id, span_id, full=full)
 
 
 @router.get("/agents", response_model=None)
 async def list_agents(
-    workspace_id: WorkspaceId, since: Since = None, agent_id: AgentId = None
+    workspace_id: WorkspaceId, full: FullContent, since: Since = None, agent_id: AgentId = None
 ) -> Any:
-    return await service.list_agents(workspace_id, since, agent_id)
+    return await service.list_agents(workspace_id, since, agent_id, full=full)
 
 
 @router.get("/monitors", response_model=None)
-async def list_monitors(workspace_id: WorkspaceId, since: Since = None) -> Any:
-    return await service.list_monitors(workspace_id, since)
+async def list_monitors(workspace_id: WorkspaceId, full: FullContent, since: Since = None) -> Any:
+    return await service.list_monitors(workspace_id, since, full=full)
 
 
 @router.get("/monitors/{slug}", response_model=None)
-async def get_monitor(workspace_id: WorkspaceId, slug: Slug, since: Since = None) -> Any:
-    return await service.get_monitor(workspace_id, slug, since)
+async def get_monitor(
+    workspace_id: WorkspaceId, full: FullContent, slug: Slug, since: Since = None
+) -> Any:
+    return await service.get_monitor(workspace_id, slug, since, full=full)

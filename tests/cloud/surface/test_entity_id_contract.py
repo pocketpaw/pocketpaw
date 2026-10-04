@@ -255,6 +255,11 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         "style",
         "task",
         "to",
+        # ``trace`` — ``pocketpaw_lens.lens_run`` takes a required ``trace_id``: a
+        # paw-lens trace (32 hex), not a PocketPaw entity. The agent_health
+        # preamble echoes at most the ONE run the user has open in its surface
+        # tag; every other id comes from ``lens_runs`` / ``lens_issues`` output.
+        "trace",
         "user",
         "widget",
     }

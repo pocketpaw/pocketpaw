@@ -1,17 +1,19 @@
 # backend_adapter.py — Adapter that makes PocketPaw's agent backends
 # usable as a knowledge_base CompilerBackend.
 #
-# Created: 2026-04-06
-# Updated: 2026-08-04 — an unavailable backend now raises RuntimeError instead
-#   of returning "" (which surfaced downstream as a misleading "empty compiler
-#   response"). The ingest-hardening compile path treats any failure as fatal,
-#   so the error must say what actually went wrong.
-# This bridges the standalone knowledge-base package with PocketPaw's
-# agent registry, so KB compilation uses whatever LLM backend is active.
+# Bridges the standalone knowledge-base package (and other one-shot callers,
+# such as the lens run overview) with PocketPaw's agent registry, so the call
+# uses whatever LLM backend is active. An unavailable backend raises
+# RuntimeError rather than returning "", so callers that treat any failure as
+# fatal report what actually went wrong. ``tools_enabled=False`` runs the turn
+# with no tools and no MCP servers; a backend whose ``run`` cannot take that
+# switch is refused (RuntimeError) rather than silently run WITH tools. The
+# run generator is always closed in-task before ``agent.stop()``.
 
 from __future__ import annotations
 
 import logging
+from contextlib import aclosing
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +32,15 @@ class PocketPawCompilerBackend:
         self._backend_name = backend_name
         self._model = model
 
-    async def complete(self, prompt: str, system_prompt: str = "") -> str:
-        """Send a prompt to the active PocketPaw backend and return full response."""
+    async def complete(
+        self, prompt: str, system_prompt: str = "", *, tools_enabled: bool = True
+    ) -> str:
+        """Send a prompt to the active PocketPaw backend and return full response.
+
+        ``tools_enabled=False`` is for prompts carrying untrusted text: the
+        backend gets no tools and no MCP servers, so injected instructions have
+        nothing to act with."""
+        from pocketpaw.agents.backend import _accepts_tools_enabled_kwarg
         from pocketpaw.agents.registry import get_backend_class
         from pocketpaw.config import Settings
 
@@ -52,18 +61,28 @@ class PocketPawCompilerBackend:
                 "(not registered in the agent registry)"
             )
 
+        run_kwargs: dict[str, bool] = {}
+        if not tools_enabled:
+            if not _accepts_tools_enabled_kwarg(backend_cls.run):
+                raise RuntimeError(f"agent backend {backend_name!r} cannot run with tools disabled")
+            run_kwargs["tools_enabled"] = False
+
         agent = backend_cls(settings)
         chunks: list[str] = []
 
         try:
             sys_prompt = system_prompt or "You are a knowledge compiler. Output only valid JSON."
-            async for event in agent.run(prompt, system_prompt=sys_prompt):
-                if getattr(event, "type", "") == "message":
-                    content = getattr(event, "content", "")
-                    if content:
-                        chunks.append(str(content))
-                elif getattr(event, "type", "") == "done":
-                    break
+            # aclosing: breaking on "done" closes the generator here, in this task,
+            # before stop(). Left to GC it is finalised in another context and a
+            # span held across its yields fails to detach and never exports.
+            async with aclosing(agent.run(prompt, system_prompt=sys_prompt, **run_kwargs)) as run:
+                async for event in run:
+                    if getattr(event, "type", "") == "message":
+                        content = getattr(event, "content", "")
+                        if content:
+                            chunks.append(str(content))
+                    elif getattr(event, "type", "") == "done":
+                        break
         finally:
             await agent.stop()
 
