@@ -1828,7 +1828,9 @@ Errors (`{"error": {"code", "message"}}`):
 | `503` | `tools.ai_check.daily_limit` | Today's anonymous checks spent `POCKETPAW_AI_CHECK_DAILY_USD` (default `5.0`) |
 | `502` | `tools.ai_check.engine_failed` | No OpenAI key configured, or every engine call failed |
 
-With `POCKETPAW_TURNSTILE_SECRET` unset (dev), Turnstile is skipped with a warning.
+With `POCKETPAW_TURNSTILE_SECRET` unset, Turnstile is skipped with a warning in dev
+and refused (`400 tools.ai_check.turnstile_failed`) in a production posture
+(`POCKETPAW_ENV=production` or `POCKETPAW_AUTH_COOKIE_SECURE=true`).
 
 ## AI visibility — Staff site card
 
