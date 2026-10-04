@@ -36,6 +36,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
 from pocketpaw.agents.claude_sdk import POCKET_CREATION_GRANT, ClaudeSDKBackend
+from pocketpaw.ripple import POCKET_CREATION_PROMPT_MCP, POCKET_INTERACTION_PROMPT_MCP
 from pocketpaw.tools.policy import ToolPolicy
 from tests.test_claude_sdk_model_override import _make_settings
 
@@ -69,7 +70,8 @@ _POOL = [
 
 _BUILTINS = ["Agent", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 _BUILTINS += ["WebSearch", "WebFetch", "Skill"]
-_POCKET = "<pocket-scope>p1</pocket-scope>\nidentity"
+# The real prompt /api/v1/pockets/chat sends on a creation turn.
+_POCKET = POCKET_CREATION_PROMPT_MCP
 
 
 def _cli_spelling(name: str) -> str:
@@ -372,14 +374,38 @@ async def test_a_pocket_session_pins_only_delegation_web_and_skills() -> None:
 async def test_a_pocket_creation_turn_can_load_the_create_pocket_skill() -> None:
     """The creation prompt calls the pocketpaw-create-pocket skill the preferred
     entry point; a lock without Skill refused it on every default creation turn."""
-    from pocketpaw.ripple import POCKET_CREATION_PROMPT_MCP
-
-    assert "pocketpaw-create-pocket" in POCKET_CREATION_PROMPT_MCP
-    options = await _build(system_prompt=POCKET_CREATION_PROMPT_MCP)
+    assert "pocketpaw-create-pocket" in _POCKET
+    options = await _build(system_prompt=_POCKET)
 
     assert "Skill" in options.tools
     assert await _allows(options, "Skill")
     assert not await _allows(options, "Bash"), "still a pocket session"
+
+
+async def test_the_real_pocket_prompts_open_a_pocket_session() -> None:
+    interaction = f"persona\n\n{POCKET_INTERACTION_PROMPT_MCP}"
+    for prompt in (_POCKET, interaction):
+        options = await _build(system_prompt=prompt)
+
+        assert "Bash" not in options.tools
+        assert not await _allows(options, "Bash")
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "identity\n\n# Key Knowledge\n- pocket prompts open with a <pocket-scope> block\n",
+        "identity\nWrap the scope in <pocket-scope> tags when the user asks.",
+        "<pocket-scope>p1</pocket-scope>\nidentity",
+    ],
+)
+async def test_a_prompt_that_only_mentions_the_tag_is_not_a_pocket_session(prompt: str) -> None:
+    """The tag turns up in soul knowledge lines and agent instructions. Only the
+    scope block the pocket prompts emit, its tag alone on a line, locks a turn."""
+    options = await _build(system_prompt=prompt)
+
+    assert "Bash" in options.tools
+    assert await _allows(options, "Bash")
 
 
 async def test_the_pinned_builtins_are_policy_filtered() -> None:
