@@ -45,10 +45,6 @@ PARTNER_SLUG_RESERVED = frozenset(
         "find",
     }
 )
-# The Instinct scope partner applications are filed under: not a tenant, the
-# platform's own queue.
-PLATFORM_SCOPE = "platform"
-PARTNER_APPLICATION_PARAM_KEY = "_partner_application"
 
 
 def validate_partner_slug(v: str) -> str:

@@ -1418,12 +1418,35 @@ signed-in reads still answer as before (401 without a token).
 
 No sign-in. Body (`extra` forbidden): `name` (1-120), `email`, `city` (1-80),
 `country` (ISO-2), `services` (1-5 of the five), `message` (up to 2000, optional),
-`turnstile_token`. The Cloudflare Turnstile token is checked first (`400`
-`partners.turnstile_failed`; skipped with a warning when
-`POCKETPAW_TURNSTILE_SECRET` is unset). Then exactly one Instinct proposal is
-filed in the platform's own scope (not a tenant's), carrying the application
-under `_partner_application`; nothing is written to any workspace. **204**.
-Limited to 5 applications an hour per IP (`429` `partners.apply_rate_limited`).
+`turnstile_token`. Order of checks: the body, then a global cap of 500
+applications a day across every address (`429` `partners.apply_daily_limit`, so a
+flood from many addresses cannot fill the queue), then the Cloudflare Turnstile
+token (`400` `partners.turnstile_failed`; with `POCKETPAW_TURNSTILE_SECRET` unset
+the check is skipped with a warning in dev and refused in a production posture,
+see the AI check below). Then exactly one application is stored in the platform's
+own `partner_applications` collection (never a workspace), with the submitting
+address kept only as a sha256 hash. **204**. Limited to 5 applications an hour
+per IP (`429` `partners.apply_rate_limited`).
+
+### `GET /platform/partners/applications` · `PATCH /platform/partners/applications/{id}`
+
+Platform operators only (`platform.partners.write`, OPERATOR rung, interactive
+session cookie), the same guard as the partner switch above. The list is newest
+first: `?status=new|contacted|rejected|accepted` filters, `cursor` pages (the
+`next_cursor` of the previous page; `422 partners.bad_cursor` when invalid),
+`limit` 1-200 (default 50). Each row is `{id, name, email, city, country,
+services, message, status, note, reviewed_by, reviewed_at, created_at}`; this is
+the review queue, so the applicant's contact details are included. Every list
+read is recorded as a platform audit read.
+
+PATCH body: `status` (one of the four), optional `note` (up to 2000, kept on the
+application), `reason` (required, non-blank; goes to the platform audit row).
+Returns the updated row with `reviewed_by` (the operator's user id) and
+`reviewed_at`. Marking an application `accepted` records the decision only; the
+applicant's workspace becomes a partner through
+`PUT /platform/workspaces/{workspace_id}/partner`. An unknown id is `404` with
+no audit row. There is no operator UI for this queue yet; it is a paw-enterprise
+follow-up.
 
 ## Site templates
 

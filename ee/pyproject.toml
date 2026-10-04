@@ -581,6 +581,21 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.workspace"]
 
 [[tool.importlinter.contracts]]
+name = "PartnerApplications — Beanie doc only from partners.service_admin"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # The public apply route and the operator review routes both go through
+    # ``partners.service_admin``; nothing else touches the PartnerApplication doc.
+    "pocketpaw_ee.cloud.partners.router",
+    "pocketpaw_ee.cloud.partners.dto",
+    "pocketpaw_ee.cloud.partners.domain",
+    "pocketpaw_ee.cloud.partners.service",
+    "pocketpaw_ee.cloud.platform.partners",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.partner_application"]
+
+[[tool.importlinter.contracts]]
 name = "InstinctApprovals — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

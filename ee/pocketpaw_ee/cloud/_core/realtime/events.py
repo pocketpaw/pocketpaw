@@ -1247,8 +1247,9 @@ class ShipDestroyProposed(Event):
 
 # Paw Partners public profile. ``updated`` carries ``workspace_id``, ``slug`` and
 # ``public`` after a partner edits its directory profile; ``applied`` carries the
-# Instinct ``proposal_id`` of a new partner application (never the applicant's
-# contact details). No audience: in-process listeners and the audit trail only.
+# ``application_id`` and ``country`` of a new partner application (never the
+# applicant's contact details). No audience: in-process listeners and the audit
+# trail only.
 @dataclass
 class PartnerProfileUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "partner.profile.updated"

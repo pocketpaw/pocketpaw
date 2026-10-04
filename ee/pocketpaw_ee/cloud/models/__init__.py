@@ -244,6 +244,7 @@ from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
+from pocketpaw_ee.cloud.models.partner_application import PartnerApplication
 from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
@@ -656,6 +657,9 @@ def get_all_documents():
         # Discover index (DS-1): one public card per source item. Only
         # ``ee.cloud.discover.service`` / ``service_admin`` write it.
         DiscoverListing,
+        # Public partner applications, reviewed by operators. Only
+        # ``ee.cloud.partners.service_admin`` reads or writes it.
+        PartnerApplication,
         # Studio generations published as templates. Only
         # ``ee.cloud.studio_templates.service`` / ``service_admin`` write it.
         StudioTemplate,
