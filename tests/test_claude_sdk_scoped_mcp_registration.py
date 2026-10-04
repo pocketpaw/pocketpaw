@@ -9,10 +9,12 @@
 # refused, and building those servers cost time (the composio provider fetches).
 #
 # The rule pinned here: on a scoped turn (a deny set, a mode allow-list, or an
-# exclusive cap) a server registers only when its name is the server segment of
-# an id in the turn's FINAL ``allowed_tools``. A bare ``mcp__<server>`` entry
-# counts, spelled the way the CLI names tools. A provider that cannot qualify is
-# never built. A broad turn registers exactly what ``_get_mcp_servers()`` returns.
+# exclusive cap) a server registers only when it owns an id in the turn's FINAL
+# ``allowed_tools``. A bare ``mcp__<server>`` entry counts, spelled the way the CLI
+# names tools, and an external server's name may contain ``__`` (``acme__crm``),
+# so it is matched whole, never cut at the first ``__``. A provider that cannot
+# qualify is never built. A broad turn registers exactly what
+# ``_get_mcp_servers()`` returns.
 #
 # Providers and external config are faked; the widgets / atlas / studio servers
 # are the real ones.
@@ -31,7 +33,7 @@ from unittest.mock import patch
 from claude_agent_sdk import ClaudeAgentOptions
 
 from pocketpaw.agents.claude_sdk import _mcp_server_of
-from tests.test_claude_sdk_tool_scoping import _backend, _build
+from tests.test_claude_sdk_tool_scoping import _allows, _backend, _build
 
 _X_READ = "mcp__srv_x__read"
 _X_WRITE = "mcp__srv_x__write"
@@ -124,6 +126,36 @@ async def test_a_bare_external_entry_starts_the_server_under_its_config_name() -
     )
 
     assert set(options.mcp_servers) == {_EXTERNAL.name}
+
+
+async def test_a_scoped_turn_starts_external_servers_whose_names_hold_a_double_underscore() -> None:
+    """The browser deny scopes nearly every cloud turn. An external server's CLI
+    name can contain ``__`` (spelled, or typed by the operator), so its server is
+    the whole name, never the segment before the first ``__``."""
+    with _world():
+        options = await _build(
+            pool=None,
+            external=("Google Drive (work)", "acme__crm"),
+            deny_mcp_tool_ids=frozenset({"mcp__pocketpaw_browser__click"}),
+        )
+
+    assert {"Google Drive (work)", "acme__crm"} <= set(options.mcp_servers)
+    assert await _allows(options, "mcp__Google_Drive__work___list_files")
+    assert await _allows(options, "mcp__acme__crm__lookup")
+
+
+async def test_a_tool_declared_under_a_double_underscore_server_starts_that_server() -> None:
+    with _world():
+        options = await _build(
+            pool=None,
+            external=("acme__crm",),
+            exclusive_mcp_tools=True,
+            allow_mcp_tool_ids=frozenset({"mcp__acme__crm__lookup"}),
+        )
+
+    assert set(options.mcp_servers) == {"acme__crm"}
+    assert await _allows(options, "mcp__acme__crm__lookup")
+    assert not await _allows(options, "mcp__acme__crm__delete")
 
 
 async def test_on_every_scoped_turn_each_started_server_owns_an_allowed_tool() -> None:

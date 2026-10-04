@@ -128,11 +128,21 @@
   {
     "label": "a scoped turn starts every ambient server again",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "        live = (frozenset(_mcp_server_of(t) for t in allowed_tools) - {\"\"}) if scoped else None",
+    "find": "        live = _servers_of(allowed_tools, external_grants) if scoped else None",
     "replace": "        live = None",
     "tests": [
       "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on",
       "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_mode_turn_keeps_its_servers_the_grant_and_the_always_allowed"
+    ]
+  },
+  {
+    "label": "an external server is cut at its first __ (acme__crm becomes acme) and never starts",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        servers.add(owner[len(\"mcp__\") :] if owner else _mcp_server_of(entry))",
+    "replace": "        servers.add(_mcp_server_of(entry))",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_scoped_turn_starts_external_servers_whose_names_hold_a_double_underscore",
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_tool_declared_under_a_double_underscore_server_starts_that_server"
     ]
   },
   {

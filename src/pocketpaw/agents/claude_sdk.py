@@ -325,6 +325,23 @@ def _deny_prefixes(deny: frozenset[str]) -> tuple[str, ...]:
     return tuple(f"{entry}__" for entry in sorted(deny) if entry.startswith("mcp__"))
 
 
+def _servers_of(entries: Iterable[str], external: frozenset[str]) -> frozenset[str]:
+    """The CLI-spelled server of every ``mcp__`` entry in ``entries``.
+
+    An entry that is, or sits below, a configured external server's
+    ``mcp__<cli name>`` (in ``external``) belongs to that whole name, matched
+    longest first: the name may contain ``__``, so splitting would cut it short.
+    Every other server is code-defined, never contains ``__``, and is the entry's
+    first segment (``_mcp_server_of``). Non-``mcp__`` entries contribute nothing.
+    """
+    by_length = sorted(external, key=len, reverse=True)
+    servers: set[str] = set()
+    for entry in entries:
+        owner = next((e for e in by_length if entry == e or entry.startswith(f"{e}__")), "")
+        servers.add(owner[len("mcp__") :] if owner else _mcp_server_of(entry))
+    return frozenset(servers - {""})
+
+
 def _tool_gate_allows(
     name: object,
     allowed: frozenset[str],
@@ -3118,13 +3135,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # same reason a scoped turn (a deny set, a mode list or an exclusive
         # cap) starts only the servers that own an id in its final allowed set;
         # the rest would still be found through ToolSearch, only for the gate to
-        # refuse every call. A broad turn starts every server, as before.
+        # refuse every call. A broad turn starts every server, as before. An
+        # external server's name may contain ``__``, so ``_servers_of`` maps an
+        # entry on one to the whole name (``acme__crm``, not ``acme``).
         # Prewarm and dispatch each build the set and that is deliberate: steady
         # state it costs ~2 ms (composio's fetch is cached per user), and its
         # in-process servers carry per-user state (composio tools are bound to
         # the user at build), so handing one set to two clients is not free.
         scoped = bool(deny_mcp_tool_ids) or exclusive_mcp_tools or allow_mcp_tool_ids is not None
-        live = (frozenset(_mcp_server_of(t) for t in allowed_tools) - {""}) if scoped else None
+        live = _servers_of(allowed_tools, external_grants) if scoped else None
         mcp_servers = {} if not tools_enabled else self._get_mcp_servers(allow_sdk_tools, only=live)
         if mcp_servers:
             options_kwargs["mcp_servers"] = mcp_servers
