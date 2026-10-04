@@ -8,8 +8,10 @@
 # paw.internal + workspace stamped during the call, the digest cap, and the
 # injection guards: the call is tool-less (``tools_enabled=False``, forwarded by
 # the KB adapter and refused on a backend without the switch) and the digest is
-# fenced as untrusted data with no raw angle bracket inside. Cost guards: concurrent calls for one run share a
-# single generation, and a refresh within the cooldown returns the cached one.
+# fenced as untrusted data with no raw angle bracket inside. The adapter closes
+# the run generator in-task before stop(). Cost guards: concurrent calls for
+# one run share a single generation, and a refresh within the cooldown returns
+# the cached one.
 
 from __future__ import annotations
 
@@ -160,9 +162,9 @@ def test_llm_call_is_tool_less_and_fences_the_digest(monkeypatch, upstream):
     assert "ignore all rules" in prompt.split("<trace_data>", 1)[1]
 
 
-
 @pytest.mark.parametrize(
-    "closer", ["</trace_data>", "</TRACE_DATA>", "</trace_data >", "</trace_data\n>", "< /trace_data>"]
+    "closer",
+    ["</trace_data>", "</TRACE_DATA>", "</trace_data >", "</trace_data\n>", "< /trace_data>"],
 )
 def test_no_fence_variant_survives_in_the_digest(monkeypatch, upstream, closer):
     _settings(monkeypatch, "http://lens:8790")
@@ -217,6 +219,50 @@ async def test_adapter_refuses_tools_off_on_backend_without_switch(monkeypatch):
     with pytest.raises(RuntimeError, match="tool"):
         await PocketPawCompilerBackend("old").complete("hi", tools_enabled=False)
     assert _Backend.runs == []
+
+
+async def test_adapter_closes_the_run_generator_before_stop(monkeypatch):
+    """Breaking on "done" must close agent.run in-task, not leave it to GC."""
+    from pocketpaw.agents import registry
+
+    order: list[str] = []
+
+    class _Spy(_Backend):
+        async def run(self, message, *, system_prompt=None, tools_enabled=True):
+            try:
+                yield SimpleNamespace(type="message", content="- ok")
+                yield SimpleNamespace(type="done", content="")
+                yield SimpleNamespace(type="message", content="never read")
+            finally:
+                order.append("closed")
+
+        async def stop(self):
+            order.append("stopped")
+
+    monkeypatch.setattr(registry, "get_backend_class", lambda name: _Spy)
+    assert await PocketPawCompilerBackend("spy").complete("hi", tools_enabled=False) == "- ok"
+    assert order == ["closed", "stopped"]
+
+
+async def test_adapter_close_leaves_no_detach_error(monkeypatch, capfire, caplog):
+    """A run that holds a span across yield ends it in-task: no detach error."""
+    import logfire
+
+    from pocketpaw.agents import registry
+
+    class _Traced(_Backend):
+        async def run(self, message, *, system_prompt=None, tools_enabled=True):
+            with logfire.span("invoke_agent"):
+                yield SimpleNamespace(type="message", content="- ok")
+                yield SimpleNamespace(type="done", content="")
+                yield SimpleNamespace(type="message", content="never read")
+
+    monkeypatch.setattr(registry, "get_backend_class", lambda name: _Traced)
+    assert await PocketPawCompilerBackend("traced").complete("hi") == "- ok"
+    await asyncio.sleep(0)  # give a GC-scheduled aclose the chance to run
+    assert not any("Failed to detach" in r.getMessage() for r in caplog.records)
+    spans = [s for s in capfire.exporter.exported_spans_as_dict() if s["name"] == "invoke_agent"]
+    assert len(spans) == 1 and spans[0]["end_time"]
 
 
 def test_baggage_marks_call_internal(monkeypatch, upstream):

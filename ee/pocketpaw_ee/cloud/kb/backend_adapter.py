@@ -7,11 +7,13 @@
 # RuntimeError rather than returning "", so callers that treat any failure as
 # fatal report what actually went wrong. ``tools_enabled=False`` runs the turn
 # with no tools and no MCP servers; a backend whose ``run`` cannot take that
-# switch is refused (RuntimeError) rather than silently run WITH tools.
+# switch is refused (RuntimeError) rather than silently run WITH tools. The
+# run generator is always closed in-task before ``agent.stop()``.
 
 from __future__ import annotations
 
 import logging
+from contextlib import aclosing
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +72,17 @@ class PocketPawCompilerBackend:
 
         try:
             sys_prompt = system_prompt or "You are a knowledge compiler. Output only valid JSON."
-            async for event in agent.run(prompt, system_prompt=sys_prompt, **run_kwargs):
-                if getattr(event, "type", "") == "message":
-                    content = getattr(event, "content", "")
-                    if content:
-                        chunks.append(str(content))
-                elif getattr(event, "type", "") == "done":
-                    break
+            # aclosing: breaking on "done" closes the generator here, in this task,
+            # before stop(). Left to GC it is finalised in another context and a
+            # span held across its yields fails to detach and never exports.
+            async with aclosing(agent.run(prompt, system_prompt=sys_prompt, **run_kwargs)) as run:
+                async for event in run:
+                    if getattr(event, "type", "") == "message":
+                        content = getattr(event, "content", "")
+                        if content:
+                            chunks.append(str(content))
+                    elif getattr(event, "type", "") == "done":
+                        break
         finally:
             await agent.stop()
 
