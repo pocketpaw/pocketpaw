@@ -442,6 +442,27 @@ async def test_an_allowed_sdk_builtin_is_pinned_and_an_mcp_grant_is_not() -> Non
     assert await _allows(options, "mcp__bar__baz")
 
 
+async def test_an_allow_list_cannot_bring_back_a_builtin_the_policy_denies() -> None:
+    """policy.py: tools_deny always wins. The ``allow_sdk_tools`` union ran after
+    the policy filter, so an entity grant pinned a Bash the operator had denied."""
+    backend = _backend(policy=ToolPolicy(profile="full", deny=["shell"]))
+    options = await _build(backend, allow_sdk_tools=frozenset({"Bash", "Read"}))
+
+    assert "Bash" not in options.tools
+    assert not await _allows(options, "Bash")
+    assert "Read" in options.tools, "a built-in the policy allows still unions in"
+
+
+async def test_the_policy_check_on_an_allow_list_skips_mcp_ids() -> None:
+    """A restrictive profile names no ``mcp__`` id; MCP servers are policy-gated
+    where they register, so an MCP grant is not run through the tool policy."""
+    backend = _backend(policy=ToolPolicy(profile="minimal"))
+    options = await _build(backend, allow_sdk_tools=frozenset({"WebFetch", "mcp__bar__baz"}))
+
+    assert "WebFetch" not in options.tools
+    assert await _allows(options, "mcp__bar__baz")
+
+
 async def test_a_denied_builtin_is_unpinned_disallowed_and_refused() -> None:
     """/sites and /code deny Bash, Read and the rest by bare name."""
     options = await _build(deny_mcp_tool_ids=frozenset({"Bash"}))
