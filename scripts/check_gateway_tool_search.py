@@ -2,21 +2,24 @@
 
 Claude Code turns MCP tool search off behind any ANTHROPIC_BASE_URL that is not
 api.anthropic.com, so PocketPaw on a gateway provider (litellm, openrouter,
-openai_compatible, ollama, gemini) sends every MCP tool schema upfront.
+openai_compatible) sends every MCP tool schema upfront.
 ``POCKETPAW_CLAUDE_SDK_TOOL_SEARCH=true`` turns it back on, but then requests fail
 unless the gateway forwards the ``anthropic-beta`` header, ``defer_loading`` tool
 fields and ``tool_reference`` blocks, to a Claude 4.5 or later model. Run this on
 the box, with the env and config the server uses, before setting it.
 
-It runs one claude_agent_sdk turn the way the Claude SDK backend would: the
-provider env from ``resolve_llm_client(...).to_sdk_env()`` for
-``claude_sdk_provider``, the same CLI (``claude_sdk_cli_path``) and model choice,
-plus ``ENABLE_TOOL_SEARCH=true`` and an in-process MCP server with two tools. The
-model is asked to call one of them.
+It builds the turn's options through the real backend,
+``ClaudeSDKBackend(settings)._build_options(...)``, so the provider env, model
+(smart routing included), CLI and tool gate are the ones a real turn gets. Only
+the probe's pieces replace the backend's: an in-process MCP server with two tools,
+``tools=["ToolSearch"]``, an allowlist of those three, and ``ENABLE_TOOL_SEARCH=true``
+in the env. The model is asked to call one of the tools. With smart routing on,
+the probe's prompt picks one tier; the others need checking the same way.
 
     PASS  the model loaded the deferred tool through ToolSearch and called it
-    FAIL  the turn errored (often the gateway rejecting the tool-search request),
-          the tool ran without ToolSearch (deferral not active), or never ran
+    FAIL  the options could not be built, the turn errored (often the gateway
+          rejecting the tool-search request), the tool ran without ToolSearch
+          (deferral not active), or never ran
 
 Run with:
 
@@ -29,6 +32,8 @@ route bills (an API key, a gateway key, or the CLI's own login).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import os
 import sys
 from urllib.parse import urlsplit
 
@@ -70,36 +75,11 @@ async def _turn(options, called: dict[str, bool]) -> str:
     return ""
 
 
-async def main() -> int:
-    from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+async def _probe_options(settings, called: dict[str, bool], stderr: list[str]):
+    """The backend's options for this turn, with the probe's MCP server and tools."""
+    from claude_agent_sdk import create_sdk_mcp_server, tool
 
-    from pocketpaw.config import Settings
-    from pocketpaw.llm.client import resolve_backend_env, resolve_llm_client
-
-    settings = Settings.load()
-    resolve_backend_env(settings)  # what the server does at startup
-    provider = settings.claude_sdk_provider or "anthropic"
-    llm = resolve_llm_client(settings, force_provider=provider)
-    env = llm.to_sdk_env()
-    env["ENABLE_TOOL_SEARCH"] = "true"
-    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"  # keep a claude.ai login's connectors out
-    non_anthropic = (
-        llm.is_ollama
-        or llm.is_openai_compatible
-        or llm.is_gemini
-        or llm.is_litellm
-        or llm.is_openrouter
-    )  # the backend's is_non_anthropic
-    model = llm.model if non_anthropic else (settings.claude_sdk_model or None)
-    cli_path = (settings.claude_sdk_cli_path or "").strip() or None
-    base_url = env.get("ANTHROPIC_BASE_URL")
-    host = urlsplit(base_url).hostname if base_url else "api.anthropic.com"
-    print(
-        f"provider={provider} host={host} model={model or '<CLI default>'} "
-        f"cli={cli_path or '<bundled>'}"
-    )
-
-    called = {"target": False}
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
     @tool(
         "lookup_order_status", "Look up the shipping status of an order by id.", {"order_id": str}
@@ -112,23 +92,49 @@ async def main() -> int:
     async def get_weather(args):
         return {"content": [{"type": "text", "text": "Sunny."}]}
 
-    stderr: list[str] = []
-    options = ClaudeAgentOptions(
+    backend = ClaudeSDKBackend(settings)
+    if not backend._sdk_available:
+        raise RuntimeError("the Claude SDK backend could not load claude_agent_sdk")
+    built = await backend._build_options(
+        _PROMPT,
         system_prompt="You are a test harness. Use tools when asked.",
+        session_key="check-gateway-tool-search",
+        deny_mcp_tool_ids=frozenset(),
+        # The tool gate is built from the allowlist inside _build_options, so the
+        # probe's tools must be on it there, not only in the override below.
+        allow_sdk_tools=frozenset({_TARGET, _DECOY}),
+        allow_mcp_tool_ids=None,
+        skill_names=frozenset(),
+        stderr_sink=stderr,
+    )
+    return dataclasses.replace(
+        built.options,
         mcp_servers={
             _SERVER: create_sdk_mcp_server(_SERVER, tools=[lookup_order_status, get_weather])
         },
         tools=["ToolSearch"],
         allowed_tools=["ToolSearch", _TARGET, _DECOY],
-        permission_mode="bypassPermissions",
-        setting_sources=[],  # never load ~/.claude settings or hooks
-        max_turns=6,
-        env=env,
-        model=model,
-        cli_path=cli_path,
-        stderr=stderr.append,
+        env={**built.options.env, "ENABLE_TOOL_SEARCH": "true"},
     )
+
+
+async def main() -> int:
+    from pocketpaw.config import Settings
+    from pocketpaw.llm.client import resolve_backend_env
+
+    settings = Settings.load()
+    resolve_backend_env(settings)  # what the server does at startup
+    called = {"target": False}
+    stderr: list[str] = []
     try:
+        options = await _probe_options(settings, called, stderr)
+        # The CLI inherits the process env under options.env, as the backend assumes.
+        base_url = options.env.get("ANTHROPIC_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL"))
+        host = urlsplit(base_url).hostname if base_url else "api.anthropic.com"
+        print(
+            f"provider={settings.claude_sdk_provider or 'anthropic'} host={host} "
+            f"model={options.model or '<CLI default>'} cli={options.cli_path or '<bundled>'}"
+        )
         why = await asyncio.wait_for(_turn(options, called), _TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 - any failure is a FAIL with its reason
         why = f"{type(exc).__name__}: {exc}"
