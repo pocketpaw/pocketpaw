@@ -1592,9 +1592,9 @@ reports or the source item's id):
 ```
 
 `slug` is the listing's URL handle: the title lowercased and folded to
-`a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), set
-when the listing is first indexed and never changed afterwards, so a renamed
-template keeps its link. A title that leaves no ASCII behind (CJK, Devanagari)
+`a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), cut
+to 40 characters, set when the listing is first indexed and never changed
+afterwards, so a renamed template keeps its link. A title that leaves no ASCII behind (CJK, Devanagari)
 falls back to the source item's id. Slugs are unique across every source; a
 second `Bakery`, whichever source lists it, gets `bakery-2`, then `bakery-3`. A
 listing indexed before slugs existed reports its `id` as `slug` until the next
