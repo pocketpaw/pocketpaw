@@ -273,6 +273,23 @@ def _cli_server_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
 
+def _spell_for_cli(token: str, raw_names: list[str]) -> str:
+    """Rewrite ``mcp__<raw>`` or ``mcp__<raw>__<tool>`` to the CLI's spelling when
+    ``<raw>`` is a configured external server in ``raw_names`` (longest first: a
+    raw name may itself contain ``__``). Any other token comes back unchanged.
+
+    The CLI spells the tool segment by the same rule as the server, so spelling the
+    whole remainder char by char yields the exact id the CLI names the tool.
+    """
+    if not token.startswith("mcp__"):
+        return token
+    rest = token[len("mcp__") :]
+    for raw in raw_names:
+        if rest == raw or rest.startswith(f"{raw}__"):
+            return f"mcp__{_cli_server_name(rest)}"
+    return token
+
+
 def _server_grant_prefixes(entries: Iterable[str], external: frozenset[str]) -> tuple[str, ...]:
     """``<entry>__`` for every entry that grants a whole MCP server.
 
@@ -1733,8 +1750,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allows: enabled, not a web-search duplicate, allowed by policy.
 
         One source for the bare allowlist entries above and for ``_build_options``,
-        which needs them to know which bare entries grant a whole server (a name
-        can contain ``__``). ``[]`` when the config cannot be read.
+        which needs the raw names to rewrite incoming tokens to the CLI's spelling
+        and to know which bare entries grant a whole server (a name can contain
+        ``__``). ``[]`` when the config cannot be read.
         """
         try:
             from pocketpaw.mcp.config import load_mcp_config
@@ -2645,9 +2663,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allowed_tools.extend(self._collect_mcp_tool_ids())
         # The bare entries that grant a configured external server wholesale,
         # spelled the way the CLI names its tools (a name may contain ``__``).
-        external_grants = frozenset(
-            f"mcp__{_cli_server_name(name)}" for name in self._external_mcp_server_names()
-        )
+        external_names = self._external_mcp_server_names()
+        external_grants = frozenset(f"mcp__{_cli_server_name(name)}" for name in external_names)
+        # Producers outside this backend name an external server by its RAW
+        # config name: the /sites grants (POCKETPAW_SITES_MCP_SERVERS), plugin
+        # servers (``plugin:<plugin>:<server>``), exclusive agents' tool lists,
+        # saved deny lists. pydantic_ai matches the raw name, so they stay raw;
+        # here every token is rewritten to the CLI's spelling before the
+        # exact-string filters below compare it to ``allowed_tools``.
+        by_length = sorted(external_names, key=len, reverse=True)
+        allow_sdk_tools = frozenset(_spell_for_cli(t, by_length) for t in allow_sdk_tools)
+        deny_mcp_tool_ids = frozenset(_spell_for_cli(t, by_length) for t in deny_mcp_tool_ids)
+        if allow_mcp_tool_ids is not None:
+            allow_mcp_tool_ids = frozenset(_spell_for_cli(t, by_length) for t in allow_mcp_tool_ids)
 
         # Per-entity ADDITIVE allowlist (entity-rooms chunk ①). UNION the
         # entity's ``allowed_sdk_tools`` into the allowlist BEFORE the deny

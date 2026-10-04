@@ -281,6 +281,36 @@ async def test_a_server_name_with_a_double_underscore_grants_that_server_only() 
     assert not await _allows(options, "mcp__acme__crmx__list")
 
 
+async def test_a_mode_grant_naming_an_external_server_by_its_raw_name_keeps_it() -> None:
+    """/sites grants the servers in POCKETPAW_SITES_MCP_SERVERS as ``mcp__<raw
+    name>``, and plugin servers are named ``plugin:<plugin>:<server>``. pydantic_ai
+    matches the raw name, so the producers stay raw and this backend rewrites the
+    token to the CLI's spelling before it filters on it."""
+    options = await _build(
+        external=("plugin:design:refero", "My Notes"),
+        allow_mcp_tool_ids=frozenset({"mcp__plugin:design:refero", "mcp__My Notes", _RUN_SCENARIO}),
+    )
+
+    assert await _allows(options, "mcp__plugin_design_refero__search_styles")
+    assert await _allows(options, "mcp__My_Notes__search")
+    assert not await _allows(options, _CREATE_TASK), "the mode list still scopes the rest"
+
+
+async def test_a_deny_or_allow_naming_an_external_server_by_its_raw_name_applies() -> None:
+    options = await _build(
+        external=("My Notes", "Google Drive (work)"),
+        deny_mcp_tool_ids=frozenset({"mcp__My Notes__delete_note", "mcp__Google Drive (work)"}),
+        allow_sdk_tools=frozenset({"mcp__My Notes__search"}),
+    )
+
+    assert not await _allows(options, "mcp__My_Notes__delete_note")
+    assert await _allows(options, "mcp__My_Notes__search")
+    assert not await _allows(options, "mcp__Google_Drive__work___search"), "a bare deny"
+    assert "mcp__My_Notes__delete_note" in options.disallowed_tools, "the CLI's spelling"
+    assert "mcp__My_Notes__search" in options.allowed_tools
+    assert "mcp__My Notes__search" not in options.allowed_tools
+
+
 # ── built-ins: pinned, so the CLI's other tools never reach the agent ────────
 
 

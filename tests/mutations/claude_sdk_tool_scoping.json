@@ -72,6 +72,15 @@
     ]
   },
   {
+    "label": "a raw external server name is never respelled — the /sites grant strips the server it names",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            return f\"mcp__{_cli_server_name(rest)}\"",
+    "replace": "            return token",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_mode_grant_naming_an_external_server_by_its_raw_name_keeps_it"
+    ]
+  },
+  {
     "label": "the pinned built-ins ignore policy and deny — a denied Bash is offered again",
     "file": "src/pocketpaw/agents/claude_sdk.py",
     "find": "            builtins = [t for t in allowed_tools if not t.startswith(\"mcp__\")]",
