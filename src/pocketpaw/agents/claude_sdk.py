@@ -260,6 +260,13 @@ def _mcp_server_of(tool_id: str) -> str:
     return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
 
 
+# The opening line of the scope block every pocket prompt starts with
+# (``_SCOPE_BLOCK`` in ``pocketpaw.ripple._pockets``): the tag alone on its line.
+# The bare tag also turns up mid-sentence (soul knowledge, agent instructions),
+# and that must not lock a turn down to the pocket tool surface.
+_POCKET_SCOPE_OPENING = re.compile(r"^<pocket-scope>[ \t]*$", re.MULTILINE)
+
+
 # Tools the CLI calls on its own behalf (loading deferred MCP schemas, waiting for
 # servers to connect). Plumbing, not capabilities, so the tool gate always passes them.
 _INFRA_TOOLS: frozenset[str] = frozenset({"ToolSearch", "WaitForMcpServers"})
@@ -2613,8 +2620,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Pocket sessions don't need shell or filesystem access — the
         # MCP pocket tools (get_pocket / list_pockets / set_state /
         # set_node_prop / add_node / etc.) are the complete interface.
-        # Detect via the <pocket-scope> marker every pocket prompt
-        # carries; the built-ins shrink to delegation, web and skills. Skill
+        # Detect via the scope block every pocket prompt opens with
+        # (``_POCKET_SCOPE_OPENING``, not the tag anywhere in the prompt); the
+        # built-ins shrink to delegation, web and skills. Skill
         # stays because the creation prompt (POCKET_CREATION_PROMPT_MCP) names
         # the pocketpaw-create-pocket skill its preferred entry point, and a
         # skill is neither shell nor filesystem. The pinned ``tools=`` list and
@@ -2626,7 +2634,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # to "figure out" pocket state, which trips the security rails
         # AND is the wrong path — the MCP tools already expose
         # everything the agent needs.
-        is_pocket_session = "<pocket-scope>" in (final_prompt or "")
+        is_pocket_session = bool(_POCKET_SCOPE_OPENING.search(final_prompt or ""))
 
         if is_pocket_session:
             all_sdk_tools = ["Agent", "WebSearch", "WebFetch", "Skill"]
