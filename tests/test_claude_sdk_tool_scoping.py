@@ -48,6 +48,9 @@ _PLAN_POCKET = "mcp__pocketpaw_pocket_planner__plan_pocket"
 _WIDGET_SPEC = "mcp__pocketpaw_widgets__get_widget_spec"
 # An external config server is allowlisted as a bare ``mcp__<server>`` entry.
 _EXTERNAL = "mcp__foo"
+# Composio's provider allowlists its whole server with the bare id.
+_COMPOSIO = "mcp__composio"
+_SEND_EMAIL = "mcp__composio__GMAIL_SEND_EMAIL"
 
 # What ``_collect_mcp_tool_ids`` yields in these tests: fixed, so every scoping
 # rule has a real candidate to strip.
@@ -96,7 +99,8 @@ async def _build(
     """Build one turn's options. ``scope`` overrides the ``_build_options`` kwargs.
 
     ``pool=None`` keeps the backend's real MCP id collection AND real server
-    registration (the parity test); otherwise both are stubbed.
+    registration (the parity test); otherwise both are stubbed. The external
+    MCP config is always empty here, never the real ``~/.pocketpaw`` file.
     """
     backend = backend or _backend()
     kwargs: dict[str, Any] = {
@@ -111,6 +115,7 @@ async def _build(
     }
     with ExitStack() as stack:
         stack.enter_context(patch(_LLM_CLIENT, return_value=_llm(provider_env or {})))
+        stack.enter_context(patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]))
         if pool is not None:
             stack.enter_context(
                 patch.object(backend, "_collect_mcp_tool_ids", return_value=list(pool))
@@ -162,6 +167,31 @@ async def test_a_denied_mcp_tool_is_refused_at_call_time() -> None:
 async def test_without_a_deny_the_same_tool_is_allowed() -> None:
     options = await _build()
 
+    assert await _allows(options, _CLICK)
+
+
+async def test_a_denied_id_under_a_bare_server_grant_is_refused() -> None:
+    """A pocket room saves ``deny_mcp_tool_ids=[GMAIL_SEND_EMAIL]``. Composio is
+    allowlisted as the bare ``mcp__composio``, so subtracting the id from
+    ``allowed_tools`` changes nothing: the gate itself must check the deny first."""
+    options = await _build(
+        pool=[*_POOL, _COMPOSIO],
+        deny_mcp_tool_ids=frozenset({_SEND_EMAIL, "mcp__foo__drop"}),
+    )
+
+    assert not await _allows(options, _SEND_EMAIL)
+    assert not await _allows(options, "mcp__foo__drop"), "same for an external server"
+    assert await _allows(options, "mcp__composio__GMAIL_FETCH_EMAILS"), "only the id is denied"
+    assert await _allows(options, "mcp__foo__keep")
+
+
+async def test_a_bare_server_deny_refuses_every_tool_on_that_server() -> None:
+    options = await _build(
+        pool=[*_POOL, _COMPOSIO, _SEND_EMAIL], deny_mcp_tool_ids=frozenset({_COMPOSIO})
+    )
+
+    assert not await _allows(options, _SEND_EMAIL)
+    assert _SEND_EMAIL not in options.allowed_tools, "the subtraction covers it too"
     assert await _allows(options, _CLICK)
 
 
@@ -363,6 +393,24 @@ async def test_the_warm_client_key_tells_apart_turns_whose_scope_differs() -> No
     assert await key(deny_mcp_tool_ids=frozenset({"Bash"})) != base
     assert await key(tools_enabled=False) != base
     assert await key(exclusive_mcp_tools=True, allow_mcp_tool_ids=frozenset({_READ_FILE})) != base
+
+
+async def test_a_deny_the_allowlist_cannot_show_still_changes_the_warm_client_key() -> None:
+    """The deny saved mid-session names an id under the bare ``mcp__composio``
+    grant, so ``allowed_tools`` is identical before and after. A key built from
+    ``allowed_tools`` alone reused the warm client, whose gate never saw the deny."""
+    backend = _backend()
+    pool = [*_POOL, _COMPOSIO]
+
+    async def key(deny: frozenset[str]) -> tuple[list[str], str]:
+        options = await _build(backend, pool=pool, deny_mcp_tool_ids=deny)
+        return options.allowed_tools, ClaudeSDKBackend._client_cache_key(options, session_key="s1")
+
+    tools_before, before = await key(frozenset())
+    tools_after, after = await key(frozenset({_SEND_EMAIL}))
+
+    assert tools_after == tools_before, "precondition: the deny is invisible in allowed_tools"
+    assert after != before
 
 
 # ── the regression guard: a broad surface loses nothing ──────────────────────

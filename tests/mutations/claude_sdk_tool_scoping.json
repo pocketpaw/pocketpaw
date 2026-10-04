@@ -2,7 +2,7 @@
   {
     "label": "the gate waves every call through — every surface restriction is a no-op again",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "            if _tool_gate_allows(name, allowed):\n                return {}",
+    "find": "            if _tool_gate_allows(name, allowed, deny=deny, deny_below=deny_below):\n                return {}",
     "replace": "            if True:\n                return {}",
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
@@ -11,10 +11,28 @@
   {
     "label": "the gate is never registered — allowed_tools is back to auto-approve only",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "                self._HookMatcher(matcher=None, hooks=[_tool_gate_hook(allowed_tools)]),\n",
+    "find": "                self._HookMatcher(\n                    matcher=None, hooks=[_tool_gate_hook(allowed_tools, deny=deny_mcp_tool_ids)]\n                ),\n",
     "replace": "",
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
+    ]
+  },
+  {
+    "label": "the gate never checks the deny set — a denied id under a bare server grant runs",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if name in deny or name.startswith(deny_below):\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_id_under_a_bare_server_grant_is_refused"
+    ]
+  },
+  {
+    "label": "the warm-client key ignores the deny set — a reused client runs a newly denied tool",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            f\"{sorted(getattr(options, 'disallowed_tools', None) or [])}:\"\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_deny_the_allowlist_cannot_show_still_changes_the_warm_client_key"
     ]
   },
   {
