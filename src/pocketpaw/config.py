@@ -264,6 +264,23 @@ class Settings(BaseSettings):
             "environment wins over this."
         ),
     )
+    claude_sdk_tool_search: str = Field(
+        default="",
+        description=(
+            "ENABLE_TOOL_SEARCH handed to the Claude Code CLI subprocess: true, false, "
+            'auto or auto:N (N = 0-100); a JSON true/false is stored as "true"/"false" '
+            "and null as empty. Empty (default) keeps the CLI's own choice: MCP "
+            "tool search on for api.anthropic.com, off behind any other ANTHROPIC_BASE_URL "
+            "(the litellm, openrouter, openai_compatible, ollama and gemini providers), "
+            "where every MCP tool schema is sent upfront. Set it only for a gateway that "
+            "forwards anthropic-beta headers and tool_reference blocks, to a Claude 4.5 or "
+            "later model (scripts/check_gateway_tool_search.py tests this); otherwise "
+            "requests fail. Other values are ignored with a warning, and so is the "
+            "setting on the ollama and gemini providers, which never reach a Claude "
+            "model. A non-empty ENABLE_TOOL_SEARCH in the process environment wins "
+            "over this."
+        ),
+    )
 
     claude_sdk_connect_timeout: float = Field(
         default=90.0,
@@ -3160,6 +3177,19 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
+
+    @field_validator("claude_sdk_tool_search", mode="before")
+    @classmethod
+    def _tool_search_from_json(cls, v: object) -> object:
+        """Store a JSON ``true``/``false`` as ``"true"``/``"false"`` and ``null`` as unset.
+
+        The settings API setattrs the raw JSON value and ``save()`` writes it back
+        as-is. Without this, ``Settings.load()`` rejects that config.json and falls
+        back to defaults, dropping every other saved value and stored secret.
+        """
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return "" if v is None else v
 
     @model_validator(mode="after")
     def _validate_composio_invariants(self) -> Settings:

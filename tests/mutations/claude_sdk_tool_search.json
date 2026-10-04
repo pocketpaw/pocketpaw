@@ -1,0 +1,200 @@
+[
+  {
+    "label": "the setting never reaches the CLI env",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        _apply_tool_search(\n            sdk_env,",
+    "replace": "        (lambda *_: None)(\n            sdk_env,",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_documented_values_pass_through",
+      "tests/test_claude_sdk_tool_search.py::test_litellm_env_set_passes_through"
+    ]
+  },
+  {
+    "label": "undocumented values pass through",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if value and not _TOOL_SEARCH_VALUES.fullmatch(value):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_other_values_are_ignored_with_a_warning"
+    ]
+  },
+  {
+    "label": "any auto threshold is accepted",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "auto(?::(?:100|[1-9]?\\d))?\")",
+    "replace": "auto(?::-?\\d+)?\")",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_other_values_are_ignored_with_a_warning"
+    ]
+  },
+  {
+    "label": "a mocked setting is stringified",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    value = setting.strip() if isinstance(setting, str) else \"\"",
+    "replace": "    value = str(setting).strip()",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_mocked_setting_reads_as_unset_without_a_warning"
+    ]
+  },
+  {
+    "label": "the process env loses to the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if value and not operator_value:\n",
+    "replace": "    if value:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_process_env_value_wins_over_the_setting"
+    ]
+  },
+  {
+    "label": "an empty process env value blocks the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    operator_value = os.environ.get(\"ENABLE_TOOL_SEARCH\")\n",
+    "replace": "    operator_value = \"ENABLE_TOOL_SEARCH\" in os.environ\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_an_empty_process_env_value_does_not_block_the_setting"
+    ]
+  },
+  {
+    "label": "an empty per-run extra swallows the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        sdk_env[\"ENABLE_TOOL_SEARCH\"] = value\n",
+    "replace": "        sdk_env.setdefault(\"ENABLE_TOOL_SEARCH\", value)\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_an_empty_per_run_extra_does_not_drop_the_setting"
+    ]
+  },
+  {
+    "label": "the notice fires after the operator chose",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if value or operator_value:\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_once_the_operator_chose"
+    ]
+  },
+  {
+    "label": "the notice ignores a process-env choice",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if value or operator_value:\n",
+    "replace": "    if value:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_once_the_operator_chose"
+    ]
+  },
+  {
+    "label": "notices repeat every turn",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if key not in _logged_once:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_gateway_with_no_choice_logs_once_per_process",
+      "tests/test_claude_sdk_tool_search.py::test_the_invalid_value_warning_is_logged_once"
+    ]
+  },
+  {
+    "label": "the notice fires on the first-party API",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if host == \"api.anthropic.com\":\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_on_the_first_party_api"
+    ]
+  },
+  {
+    "label": "the notice ignores a process-env base URL",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "base_url = sdk_env.get(\"ANTHROPIC_BASE_URL\", os.environ.get(\"ANTHROPIC_BASE_URL\"))",
+    "replace": "base_url = sdk_env.get(\"ANTHROPIC_BASE_URL\")",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_process_env_base_url_counts"
+    ]
+  },
+  {
+    "label": "the notice logs the whole base URL",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        host or \"a base URL with no host\",",
+    "replace": "        base_url,",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_notice_names_the_host_not_the_credentials"
+    ]
+  },
+  {
+    "label": "a JSON boolean in config.json drops the whole config",
+    "file": "src/pocketpaw/config.py",
+    "find": "        if isinstance(v, bool):\n            return \"true\" if v else \"false\"\n        return \"\" if v is None else v\n",
+    "replace": "        return v\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_accepts_json_true_false_and_null",
+      "tests/test_claude_sdk_tool_search.py::test_a_config_json_boolean_loads_without_dropping_the_rest",
+      "tests/test_claude_sdk_tool_search.py::test_a_boolean_put_through_the_settings_api_reaches_the_cli"
+    ]
+  },
+  {
+    "label": "a JSON null in config.json drops the whole config",
+    "file": "src/pocketpaw/config.py",
+    "find": "        return \"\" if v is None else v\n",
+    "replace": "        return v\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_accepts_json_true_false_and_null",
+      "tests/test_claude_sdk_tool_search.py::test_a_config_json_boolean_loads_without_dropping_the_rest"
+    ]
+  },
+  {
+    "label": "a live boolean setting reads as unset",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if isinstance(setting, bool):\n        setting = \"true\" if setting else \"false\"\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_a_boolean_on_a_live_settings_object_passes_through"
+    ]
+  },
+  {
+    "label": "ollama and gemini get the setting",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "claude_route=not (llm.is_ollama or llm.is_gemini)",
+    "replace": "claude_route=True",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  },
+  {
+    "label": "ollama counts as a Claude route",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "claude_route=not (llm.is_ollama or llm.is_gemini)",
+    "replace": "claude_route=not llm.is_gemini",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  },
+  {
+    "label": "gemini counts as a Claude route",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "claude_route=not (llm.is_ollama or llm.is_gemini)",
+    "replace": "claude_route=not llm.is_ollama",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  },
+  {
+    "label": "the provider skip is silent",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                f\"tool-search-unsupported:{provider}\",\n                logging.WARNING,\n",
+    "replace": "                f\"tool-search-unsupported:{provider}\",\n                logging.DEBUG,\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers"
+    ]
+  },
+  {
+    "label": "a skipped provider still gets the setting and the notice",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        return\n    operator_value = os.environ.get(\"ENABLE_TOOL_SEARCH\")\n",
+    "replace": "    operator_value = os.environ.get(\"ENABLE_TOOL_SEARCH\")\n",
+    "tests": [
+      "tests/test_claude_sdk_tool_search.py::test_the_setting_is_skipped_where_no_claude_model_answers",
+      "tests/test_claude_sdk_tool_search.py::test_no_notice_where_the_setting_cannot_help"
+    ]
+  }
+]
