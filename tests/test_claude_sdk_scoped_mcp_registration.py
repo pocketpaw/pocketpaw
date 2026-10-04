@@ -82,9 +82,10 @@ def _world() -> Iterator[dict[str, _Provider]]:
 
 
 async def _scoped(**scope: Any) -> tuple[ClaudeAgentOptions, dict[str, _Provider]]:
-    """Build one turn with real id collection and real registration."""
+    """Build one turn with real id collection and real registration. ``_build``
+    patches the external config itself, so it is handed the same server."""
     with _world() as providers:
-        options = await _build(pool=None, **scope)
+        options = await _build(pool=None, external=(_EXTERNAL.name,), **scope)
     return options, providers
 
 
@@ -143,7 +144,7 @@ async def test_a_broad_turn_starts_exactly_what_it_did_before() -> None:
     """Parity: no deny, no mode list, not exclusive, so nothing is filtered."""
     backend = _backend()
     with _world():
-        options = await _build(backend, pool=None)
+        options = await _build(backend, pool=None, external=(_EXTERNAL.name,))
         unscoped = backend._get_mcp_servers()
 
     assert set(options.mcp_servers) == set(unscoped) == _EVERYTHING
