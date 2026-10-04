@@ -57,7 +57,7 @@ import hashlib
 import logging
 import os
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -265,6 +265,31 @@ def _mcp_server_of(tool_id: str) -> str:
 _INFRA_TOOLS: frozenset[str] = frozenset({"ToolSearch", "WaitForMcpServers"})
 
 
+def _cli_server_name(name: str) -> str:
+    """Spell an MCP server name the way Claude Code does in a tool id
+    (``mcp__<server>__<tool>``): every character outside ``[A-Za-z0-9_-]`` becomes
+    ``_``. Runs are kept, so "Google Drive (work)" is ``Google_Drive__work_`` and a
+    ``__`` inside a name survives."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+
+def _server_grant_prefixes(entries: Iterable[str], external: frozenset[str]) -> tuple[str, ...]:
+    """``<entry>__`` for every entry that grants a whole MCP server.
+
+    Such an entry is a configured external server's ``mcp__<cli name>`` (in
+    ``external``: the name may contain ``__``, so the entry's shape cannot say),
+    or any other bare ``mcp__<server>`` with no ``__`` in the server. Code-defined
+    server names never contain ``__``, so that covers provider ids like
+    ``mcp__composio`` and the bare allow-list entries the connector docs promise
+    admit a whole server. A full ``mcp__<server>__<tool>`` id grants only itself.
+    """
+    return tuple(
+        f"{entry}__"
+        for entry in sorted(set(entries))
+        if entry in external or (_mcp_server_of(entry) and entry.count("__") == 1)
+    )
+
+
 def _deny_prefixes(deny: frozenset[str]) -> tuple[str, ...]:
     """``<entry>__`` for every ``mcp__`` deny entry. A deny covers every name below
     it, so a bare ``mcp__<server>`` deny refuses that whole server."""
@@ -275,51 +300,51 @@ def _tool_gate_allows(
     name: object,
     allowed: frozenset[str],
     *,
+    grants: tuple[str, ...] = (),
     deny: frozenset[str] = frozenset(),
     deny_below: tuple[str, ...] = (),
 ) -> bool:
     """The tool gate's rule: may a call to ``name`` run under ``allowed``?
 
     A denied name is refused first: one in ``deny``, or below a deny entry
-    (``deny_below``, from ``_deny_prefixes``). That holds even when a bare server
-    entry would admit the name. Otherwise yes when ``name`` is in ``allowed``, is
-    an infrastructure tool, or belongs to a server allowlisted wholesale by a bare
-    ``mcp__<server>`` entry (external config servers, composio). Anything else is
-    refused, including a name that is not a non-empty string.
+    (``deny_below``, from ``_deny_prefixes``). That holds even when a server grant
+    would admit the name. Otherwise yes when ``name`` is in ``allowed``, is an
+    infrastructure tool, or starts with one of ``grants`` (the ``mcp__<server>__``
+    prefixes of the servers allowed wholesale, from ``_server_grant_prefixes``).
+    Anything else is refused, including a name that is not a non-empty string.
     """
     if not isinstance(name, str) or not name:
         return False
     if name in deny or name.startswith(deny_below):
         return False
-    if name in allowed or name in _INFRA_TOOLS:
-        return True
-    return any(
-        name.startswith(f"{entry}__")
-        for entry in allowed
-        if _mcp_server_of(entry) and entry.count("__") == 1
-    )
+    return name in allowed or name in _INFRA_TOOLS or name.startswith(grants)
 
 
 def _tool_gate_hook(
-    allowed_tools: list[str], *, deny: frozenset[str] = frozenset()
+    allowed_tools: list[str],
+    *,
+    grants: tuple[str, ...] = (),
+    deny: frozenset[str] = frozenset(),
 ) -> Callable[..., Any]:
     """Build the PreToolUse hook that holds a turn to ``allowed_tools`` minus ``deny``.
 
     The CLI runs under ``bypassPermissions``, where ``allowed_tools`` only
     auto-approves: a tool missing from it is still offered and still runs. This
     hook is the enforcement. It is registered with ``matcher=None`` so it sees
-    every call, MCP tools included, and snapshots both sets so a later edit to
-    them cannot widen the gate. It never raises (that tears down the CLI stream);
-    an error denies the call.
+    every call, MCP tools included. Every set it reads is snapshotted here, once
+    per turn, so a later edit cannot widen the gate. ``grants`` are the
+    ``mcp__<server>__`` prefixes of the servers ``allowed_tools`` allows wholesale.
+    It never raises (that tears down the CLI stream); an error denies the call.
     """
     allowed = frozenset(allowed_tools)
+    grants = tuple(grants)
     deny = frozenset(deny)
     deny_below = _deny_prefixes(deny)
 
     async def gate(input_data: Any, tool_use_id: str | None, context: Any) -> dict:
         try:
             name = input_data.get("tool_name")
-            if _tool_gate_allows(name, allowed, deny=deny, deny_below=deny_below):
+            if _tool_gate_allows(name, allowed, grants=grants, deny=deny, deny_below=deny_below):
                 return {}
             logger.warning("Tool gate denied %r: not in this turn's allowed tools", name)
             reason = f"PocketPaw: the tool '{name}' is not enabled for this agent here."
@@ -1698,23 +1723,32 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ``mcp__<server>`` entry — the Claude Code permission convention that
         # admits all of a server's tools — gated by the same tool policy that
         # gates registration. The server segment is spelled the way the CLI
-        # names the tools (every char outside [A-Za-z0-9_-] becomes ``_``), or
-        # the tool gate would never match a server called e.g. "My Notes".
+        # names the tools (``_cli_server_name``), or the tool gate would never
+        # match a server called e.g. "My Notes".
+        ids.extend(f"mcp__{_cli_server_name(name)}" for name in self._external_mcp_server_names())
+        return ids
+
+    def _external_mcp_server_names(self) -> list[str]:
+        """Raw names of the external config servers (``load_mcp_config``) a turn
+        allows: enabled, not a web-search duplicate, allowed by policy.
+
+        One source for the bare allowlist entries above and for ``_build_options``,
+        which needs them to know which bare entries grant a whole server (a name
+        can contain ``__``). ``[]`` when the config cannot be read.
+        """
         try:
             from pocketpaw.mcp.config import load_mcp_config
 
-            for cfg in load_mcp_config():
-                if not cfg.enabled:
-                    continue
-                if cfg.name in self._BUILTIN_SEARCH_MCP_NAMES:
-                    continue
-                if not self._policy.is_mcp_server_allowed(cfg.name):
-                    continue
-                ids.append(f"mcp__{re.sub(r'[^a-zA-Z0-9_-]', '_', cfg.name)}")
+            return [
+                cfg.name
+                for cfg in load_mcp_config()
+                if cfg.enabled
+                and cfg.name not in self._BUILTIN_SEARCH_MCP_NAMES
+                and self._policy.is_mcp_server_allowed(cfg.name)
+            ]
         except Exception as exc:  # noqa: BLE001
-            logger.debug("External MCP server allowlist not added: %s", exc)
-
-        return ids
+            logger.debug("External MCP server names not read: %s", exc)
+            return []
 
     # Section markers that ``AgentPool.run`` appends to the system prompt
     # AFTER the authoritative behavioral instructions. Everything from the
@@ -2609,6 +2643,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # both read tools (get_pocket / list_pockets) and the writable
         # ``add_widget`` tool — they all flow through the loop below.
         allowed_tools.extend(self._collect_mcp_tool_ids())
+        # The bare entries that grant a configured external server wholesale,
+        # spelled the way the CLI names its tools (a name may contain ``__``).
+        external_grants = frozenset(
+            f"mcp__{_cli_server_name(name)}" for name in self._external_mcp_server_names()
+        )
 
         # Per-entity ADDITIVE allowlist (entity-rooms chunk ①). UNION the
         # entity's ``allowed_sdk_tools`` into the allowlist BEFORE the deny
@@ -2757,11 +2796,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # the client built WITH tools.
         if not tools_enabled:
             allowed_tools = []
+        gate = _tool_gate_hook(
+            allowed_tools,
+            grants=_server_grant_prefixes(allowed_tools, external_grants),
+            deny=deny_mcp_tool_ids,
+        )
         hooks = {
             "PreToolUse": [
-                self._HookMatcher(
-                    matcher=None, hooks=[_tool_gate_hook(allowed_tools, deny=deny_mcp_tool_ids)]
-                ),
+                self._HookMatcher(matcher=None, hooks=[gate]),
                 self._HookMatcher(matcher="Bash", hooks=[self._block_dangerous_hook]),
             ]
         }

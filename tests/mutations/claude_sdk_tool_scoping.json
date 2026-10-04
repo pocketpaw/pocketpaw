@@ -2,7 +2,7 @@
   {
     "label": "the gate waves every call through — every surface restriction is a no-op again",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "            if _tool_gate_allows(name, allowed, deny=deny, deny_below=deny_below):\n                return {}",
+    "find": "            if _tool_gate_allows(name, allowed, grants=grants, deny=deny, deny_below=deny_below):\n                return {}",
     "replace": "            if True:\n                return {}",
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
@@ -11,7 +11,7 @@
   {
     "label": "the gate is never registered — allowed_tools is back to auto-approve only",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "                self._HookMatcher(\n                    matcher=None, hooks=[_tool_gate_hook(allowed_tools, deny=deny_mcp_tool_ids)]\n                ),\n",
+    "find": "                self._HookMatcher(matcher=None, hooks=[gate]),\n",
     "replace": "",
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
@@ -47,7 +47,7 @@
   {
     "label": "a full tool id admits every name below it",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "        if _mcp_server_of(entry) and entry.count(\"__\") == 1",
+    "find": "        if entry in external or (_mcp_server_of(entry) and entry.count(\"__\") == 1)",
     "replace": "        if _mcp_server_of(entry)",
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_the_gate_rule"
@@ -56,10 +56,19 @@
   {
     "label": "a bare server entry admits every server whose name starts the same",
     "file": "src/pocketpaw/agents/claude_sdk.py",
-    "find": "        name.startswith(f\"{entry}__\")",
-    "replace": "        name.startswith(entry)",
+    "find": "        f\"{entry}__\"\n        for entry in sorted(set(entries))",
+    "replace": "        entry\n        for entry in sorted(set(entries))",
     "tests": [
       "tests/test_claude_sdk_tool_scoping.py::test_a_bare_server_entry_admits_that_server_and_no_other"
+    ]
+  },
+  {
+    "label": "only a bare entry with no __ grants a server — a configured server named acme__crm is unreachable",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if entry in external or (_mcp_server_of(entry) and entry.count(\"__\") == 1)",
+    "replace": "        if _mcp_server_of(entry) and entry.count(\"__\") == 1",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_server_name_with_a_double_underscore_grants_that_server_only"
     ]
   },
   {
