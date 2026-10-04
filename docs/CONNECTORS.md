@@ -313,14 +313,27 @@ surface_profile:
 All three keys are optional; a block with none of them is treated as no block.
 Connectors with no block contribute nothing.
 
-Tool entries are matched exactly, never as globs. An entry is a full
-`mcp__<server>__<tool>` id or a built-in name (`Bash`, `Read`, ...); an allow
-entry may also be a bare `mcp__<server>`, which admits every tool on that server.
+Tool entries are exact ids, never globs. An entry is a full
+`mcp__<server>__<tool>` id, a built-in name (`Bash`, `Read`, ...), or a bare
+`mcp__<server>`, which covers every tool on that server, in an allow list or a
+deny list. The server is spelled the way Claude Code names its tools: every
+character outside `[A-Za-z0-9_-]` becomes `_`, runs kept, so a server called
+`Google Drive (work)` is `mcp__Google_Drive__work_`. The Claude SDK backend also
+accepts an external server's raw config name (`mcp__Google Drive (work)`) and
+respells it.
+
+Precedence: a deny wins over every allow, including a bare server allow that
+would otherwise admit the denied tool. The operator's tool policy wins over
+`allow_tools` too, so a built-in the policy denies is not added back.
+
 The Claude SDK backend enforces the resulting set when a tool is CALLED: a
-PreToolUse gate refuses anything outside the turn's allowed tools, the built-in
-list handed to the CLI is pinned to that set, and denied ids are also passed as
-`disallowed_tools`. The CLI runs with `bypassPermissions`, where the SDK's
-`allowed_tools` on its own only auto-approves and blocks nothing.
+PreToolUse gate checks the deny set first, then refuses anything outside the
+turn's allowed tools; the built-in list handed to the CLI is pinned to that set;
+and denied ids are also passed as `disallowed_tools`. The CLI runs with
+`bypassPermissions`, where the SDK's `allowed_tools` on its own only
+auto-approves and blocks nothing. The CLI glob-matches `disallowed_tools` rules
+when it spawns, but the gate does not expand globs, so a pattern in
+`allow_tools` admits nothing and one in `deny_tools` is left to the CLI alone.
 
 ### How it derives at bind / unbind
 
