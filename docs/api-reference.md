@@ -1370,6 +1370,16 @@ Query params, all optional: `city` (case-insensitive exact match), `service`
 minute per IP, shared with `GET /partners/{slug}`; past that `429`
 `partners.rate_limited`. A bad cursor is `422` `partners.bad_cursor`.
 
+**Client IP behind the public site.** Every per-IP public limit (these partner
+reads, `POST /partners/apply`, the Discover reads, `POST /tools/ai-check`) keys
+on the rightmost `X-Forwarded-For` hop. Requests relayed by the paw-web Worker
+all arrive from Cloudflare's egress, so the Worker sends two headers:
+`X-Paw-Client-IP` (the visitor's address) and `X-Paw-Web-Key` (a shared secret).
+When the backend has `POCKETPAW_PUBLIC_WEB_KEY` set and the key header matches
+it, that IP is the bucket; a missing or wrong key, an unset env var or an invalid
+address falls back to the normal rule. `X-Paw-Client-IP` is never read without
+the key.
+
 Response `200`: `{"items": [<partner>, ...], "next_cursor": "..." | null}`. A
 partner on the wire is exactly these fields (never `footer_name`,
 `billing_country`, `founding` or `status`):
@@ -1664,7 +1674,8 @@ public site templates (`source: "site_template"`) and public studio templates
 (`source: "studio_template"`); a public template has one listing, hidden when
 the template is hidden. The two reads need no sign-in and
 are limited to 60 requests a minute per IP (shared between them); past that they
-return `429` with `discover.rate_limited`. `use` and `report` need a signed-in
+return `429` with `discover.rate_limited`. Behind the paw-web Worker the IP comes
+from `X-Paw-Client-IP` when `X-Paw-Web-Key` matches (see `GET /partners/directory`). `use` and `report` need a signed-in
 user and act in the caller's active workspace.
 
 A listing on the wire is exactly these fields (never the owner, workspace,

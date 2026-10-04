@@ -214,3 +214,46 @@ class TestForwardedForTrust:
 
     def test_missing_client_is_survivable(self):
         assert _client_ip(_Req(None, {})) == "unknown"
+
+
+class TestPublicWebKeyTrust:
+    """X-Paw-Client-IP is only honoured when POCKETPAW_PUBLIC_WEB_KEY is set and
+    X-Paw-Web-Key matches it. Without the key the header is caller-chosen, which
+    is the same bypass as a leftmost X-Forwarded-For."""
+
+    ENV = "POCKETPAW_PUBLIC_WEB_KEY"
+    EDGE = {"x-forwarded-for": "1.2.3.4, 203.0.113.9"}
+
+    def test_matching_key_and_valid_ip_win_over_xff(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret")
+        req = _Req(
+            "10.0.0.1", {**self.EDGE, "x-paw-web-key": "s3cret", "x-paw-client-ip": "198.51.100.7"}
+        )
+        assert _client_ip(req) == "198.51.100.7"
+
+    def test_ipv6_is_normalised(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret")
+        req = _Req("10.0.0.1", {"x-paw-web-key": "s3cret", "x-paw-client-ip": "2001:DB8:0:0::1"})
+        assert _client_ip(req) == "2001:db8::1"
+
+    def test_wrong_key_is_ignored(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret")
+        req = _Req(
+            "10.0.0.1", {**self.EDGE, "x-paw-web-key": "nope", "x-paw-client-ip": "198.51.100.7"}
+        )
+        assert _client_ip(req) == "203.0.113.9"
+
+    def test_unset_key_ignores_the_header_even_when_empty_matches(self, monkeypatch):
+        monkeypatch.delenv(self.ENV, raising=False)
+        for sent in ("", "s3cret"):
+            req = _Req(
+                "10.0.0.1", {**self.EDGE, "x-paw-web-key": sent, "x-paw-client-ip": "198.51.100.7"}
+            )
+            assert _client_ip(req) == "203.0.113.9"
+
+    def test_invalid_ip_falls_back_to_xff(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret")
+        req = _Req(
+            "10.0.0.1", {**self.EDGE, "x-paw-web-key": "s3cret", "x-paw-client-ip": "not-an-ip"}
+        )
+        assert _client_ip(req) == "203.0.113.9"
