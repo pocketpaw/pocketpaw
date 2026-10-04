@@ -453,7 +453,55 @@ async def test_no_deny_means_no_disallowed_tools() -> None:
 async def test_the_dangerous_command_hook_is_still_registered() -> None:
     options = await _build()
 
-    assert len([m for m in options.hooks["PreToolUse"] if m.matcher == "Bash"]) == 1
+    matchers = [m.matcher for m in options.hooks["PreToolUse"] if m.matcher is not None]
+    # The CLI reads a matcher of plain names split on "|" as an exact-name list.
+    assert matchers == ["Bash|PowerShell"]
+
+
+# ── Windows: the shell can be PowerShell ─────────────────────────────────────
+
+
+async def test_on_windows_powershell_is_pinned_and_allowed_with_bash() -> None:
+    """Without Git Bash the CLI's only shell on Windows is the ``PowerShell`` tool.
+    A pinned list naming only "Bash" withheld it, and the gate refused it."""
+    with patch("sys.platform", "win32"):
+        options = await _build()
+
+    assert "Bash" in options.tools
+    assert "PowerShell" in options.tools
+    assert await _allows(options, "PowerShell")
+
+
+async def test_on_windows_a_shell_deny_holds_powershell_too() -> None:
+    """/sites and /code deny the shell by the bare name "Bash"."""
+    with patch("sys.platform", "win32"):
+        denied = await _build(deny_mcp_tool_ids=frozenset({"Bash"}))
+        no_shell = await _build(_backend(policy=ToolPolicy(profile="full", deny=["shell"])))
+        pocket = await _build(system_prompt=_POCKET)
+
+    for options in (denied, no_shell, pocket):
+        assert "PowerShell" not in options.tools
+        assert not await _allows(options, "PowerShell")
+
+
+async def test_powershell_stays_off_other_platforms() -> None:
+    with patch("sys.platform", "darwin"):
+        options = await _build()
+
+    assert "PowerShell" not in options.tools
+    assert not await _allows(options, "PowerShell")
+
+
+def test_powershell_is_in_the_shell_policy_group() -> None:
+    assert ClaudeSDKBackend._TOOL_POLICY_MAP["PowerShell"] == "shell"
+
+
+async def test_the_dangerous_command_hook_checks_powershell_commands() -> None:
+    call = {"tool_name": "PowerShell", "tool_input": {"command": "rm -rf /"}}
+
+    out = await _backend()._block_dangerous_hook(call, None, None)
+
+    assert out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
 
 
 # ── claude.ai connectors stay out of the subprocess ───────────────────────────
