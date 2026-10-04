@@ -1332,7 +1332,8 @@ The caller's public partner profile; only the fields sent change. Body
 
 `slug` is `^[a-z0-9-]{3,60}$`, unique across workspaces, and may not be one of
 `me, clients, offers, sell, pay-link, sites, summary, earnings, rewards,
-directory, apply, profile` (those are route segments). `services` is a subset of
+directory, apply, profile, find` (route segments on the API and on the public
+site). `services` is a subset of
 `print, design, web, marketing, photo` (up to 5). `bio` is at most 600 chars,
 `contact_url` must start with `https://`, `country` is ISO-3166 alpha-2 (upper-cased).
 `public: true` needs a `slug` and a `display_name`. Returns the same shape as
