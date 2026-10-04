@@ -143,8 +143,8 @@ class PartnerDirectoryPage(BaseModel):
 
 
 class PartnerApplyIn(BaseModel):
-    """POST /partners/apply (public). Filed as one Instinct proposal for the
-    platform; ``turnstile_token`` is checked first (``_core.turnstile``)."""
+    """POST /partners/apply (public). Stored as one ``PartnerApplication`` for
+    operators to review; ``turnstile_token`` is checked first (``_core.turnstile``)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -155,6 +155,49 @@ class PartnerApplyIn(BaseModel):
     services: list[PartnerService] = Field(min_length=1, max_length=5)
     message: str = Field(default="", max_length=2000)
     turnstile_token: str = Field(min_length=1, max_length=4096)
+
+
+PartnerApplicationStatus = Literal["new", "contacted", "rejected", "accepted"]
+
+
+class PartnerApplicationOut(BaseModel):
+    """One application as an operator sees it (GET /platform/partners/applications).
+    The applicant's contact details are here on purpose: this is the review queue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    email: str
+    city: str
+    country: str
+    services: list[str]
+    message: str
+    status: PartnerApplicationStatus
+    note: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+
+
+class PartnerApplicationPage(BaseModel):
+    """A page of applications, newest first; ``next_cursor`` is None on the last page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[PartnerApplicationOut]
+    next_cursor: str | None = None
+
+
+class PartnerApplicationReviewIn(BaseModel):
+    """PATCH /platform/partners/applications/{id}: the operator's decision.
+    ``reason`` goes to the platform audit row, ``note`` stays on the application."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: PartnerApplicationStatus
+    note: str = Field(default="", max_length=2000)
+    reason: str = ""
 
 
 class PartnerRewardOut(BaseModel):
