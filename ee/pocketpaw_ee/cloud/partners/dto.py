@@ -52,6 +52,9 @@ Slug = Annotated[
     str, StringConstraints(pattern=PARTNER_SLUG_PATTERN), AfterValidator(validate_partner_slug)
 ]
 HttpsUrl = Annotated[str, StringConstraints(pattern=r"^https://", max_length=300)]
+# Free-text names, stripped first so "  " cannot pass min_length and make a blank card.
+Name80 = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+Name120 = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 
 
 class PartnerProfileOut(BaseModel):
@@ -105,9 +108,10 @@ class PartnerPublicProfileIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: Slug | None = None
-    display_name: str | None = Field(default=None, min_length=1, max_length=80)
-    city: str | None = Field(default=None, min_length=1, max_length=80)
+    display_name: Name80 | None = None
+    city: Name80 | None = None
     country: Country | None = None
+    # ``null`` is a 422 here (the stored list is never null); send ``[]`` to clear.
     services: list[PartnerService] | None = Field(default=None, max_length=5)
     bio: str | None = Field(default=None, max_length=600)
     contact_url: HttpsUrl | None = None
@@ -150,9 +154,9 @@ class PartnerApplyIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=120)
+    name: Name120
     email: EmailStr
-    city: str = Field(min_length=1, max_length=80)
+    city: Name80
     country: Country
     services: list[PartnerService] = Field(min_length=1, max_length=5)
     message: str = Field(default="", max_length=2000)

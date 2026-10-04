@@ -7,8 +7,9 @@
 # function carries ``# admin-cross-tenant: <reason>``.
 #
 # Invariants a reader must not break:
-#   * Every read filters ``partner.status == "active" AND partner.public is True``
-#     (``_PUBLIC``). An applied, suspended or opted-out partner is NotFound.
+#   * Every read filters ``partner.status == "active" AND partner.public is True
+#     AND partner.slug is a string`` (``_PUBLIC``). An applied, suspended,
+#     opted-out or slug-less partner is NotFound.
 #   * The wire is ``_public`` -> ``PartnerPublicOut`` (an allow-list). The
 #     ``footer_name``, ``billing_country``, ``founding`` and ``status`` stop here.
 #   * A partner's sites are its public Discover listings, read through
@@ -58,7 +59,14 @@ APPLY_DAILY_CAP = 500
 # Public listings shown per partner (directory card and profile), newest first.
 SITES_PER_PARTNER = 12
 
-_PUBLIC: dict[str, Any] = {"deleted_at": None, "partner.status": "active", "partner.public": True}
+# A card needs a slug to be addressable; any writer that flips ``public`` without
+# one (only ``update_public_profile`` enforces the pair) stays out of the directory.
+_PUBLIC: dict[str, Any] = {
+    "deleted_at": None,
+    "partner.status": "active",
+    "partner.public": True,
+    "partner.slug": {"$type": "string"},
+}
 
 
 def _public(ws: _WorkspaceDoc, sites: list[dict]) -> PartnerPublicOut:
