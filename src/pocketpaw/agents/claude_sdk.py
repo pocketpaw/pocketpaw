@@ -45,7 +45,7 @@ image-returning tools, and the subprocess env always carries ``MAX_MCP_OUTPUT_TO
 Tool scope: under bypass ``allowed_tools`` only auto-approves, so the turn's final
 allowed set (ToolPolicy + surface allow/deny/exclusive) is enforced by a PreToolUse
 gate on every tool (``_tool_gate_hook``, deny checked first), a pinned ``tools=``
-built-in list (always with ``ToolSearch``) and ``disallowed_tools`` for the deny set.
+built-in list (plus ``_INFRA_TOOLS``) and ``disallowed_tools`` for the deny set.
 Images ride every persistent send; the stateless ``query()`` cannot carry them.
 Tracing: persistent turns are read through ``receive_response()``, the method
 logfire's SDK instrumentation patches; the stateless path opens its own span.
@@ -269,8 +269,10 @@ _POCKET_SCOPE_OPENING = re.compile(r"^<pocket-scope>[ \t]*$", re.MULTILINE)
 
 
 # Tools the CLI calls on its own behalf (loading deferred MCP schemas, waiting for
-# servers to connect). Plumbing, not capabilities, so the tool gate always passes them.
-_INFRA_TOOLS: frozenset[str] = frozenset({"ToolSearch", "WaitForMcpServers"})
+# servers to connect). Plumbing, not capabilities: the tool gate always passes them
+# and every turn with tools pins them, in this order, after its built-ins. One
+# constant for both, since the CLI refuses any base tool ``tools=`` does not name.
+_INFRA_TOOLS: tuple[str, ...] = ("ToolSearch", "WaitForMcpServers")
 
 
 def _cli_server_name(name: str) -> str:
@@ -2899,11 +2901,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
             options_kwargs["tools"] = []
         else:
             # Built-ins = every non-``mcp__`` entry left after policy, the
-            # ``allow_sdk_tools`` union and the deny. ``ToolSearch`` is always
-            # pinned: without it the CLI turns tool search off and loads every
-            # MCP schema up front. ``tools`` never filters MCP tools.
+            # ``allow_sdk_tools`` union and the deny. ``_INFRA_TOOLS`` are always
+            # pinned: without ``ToolSearch`` the CLI turns tool search off and
+            # loads every MCP schema up front, and an unnamed
+            # ``WaitForMcpServers`` is refused. ``tools`` never filters MCP tools.
             builtins = [t for t in allowed_tools if not t.startswith("mcp__")]
-            options_kwargs["tools"] = list(dict.fromkeys([*builtins, "ToolSearch"]))
+            options_kwargs["tools"] = list(dict.fromkeys([*builtins, *_INFRA_TOOLS]))
         if deny_mcp_tool_ids:
             options_kwargs["disallowed_tools"] = sorted(deny_mcp_tool_ids)
 

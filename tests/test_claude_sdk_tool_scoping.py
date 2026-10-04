@@ -70,6 +70,8 @@ _POOL = [
 
 _BUILTINS = ["Agent", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 _BUILTINS += ["WebSearch", "WebFetch", "Skill"]
+# Pinned after the built-ins on every turn with tools: the CLI's own plumbing.
+_INFRA = ["ToolSearch", "WaitForMcpServers"]
 # The real prompt /api/v1/pockets/chat sends on a creation turn.
 _POCKET = POCKET_CREATION_PROMPT_MCP
 
@@ -354,19 +356,32 @@ async def test_a_deny_or_allow_naming_an_external_server_by_its_raw_name_applies
 # ── built-ins: pinned, so the CLI's other tools never reach the agent ────────
 
 
-async def test_a_turn_pins_its_builtins_plus_tool_search() -> None:
+async def test_a_turn_pins_its_builtins_plus_the_infra_tools() -> None:
     options = await _build()
 
-    assert options.tools == [*_BUILTINS, "ToolSearch"]
+    assert options.tools == [*_BUILTINS, *_INFRA]
     for leaked in ("CronCreate", "SendMessage", "Workflow", "RemoteTrigger", "PushNotification"):
         assert leaked not in options.tools
         assert not await _allows(options, leaked)
 
 
+async def test_every_infra_tool_the_gate_admits_is_pinned() -> None:
+    """The CLI refuses a base tool that ``tools=`` does not name, so an infra tool
+    the gate waves through but the pinned list omits can never run."""
+    from pocketpaw.agents.claude_sdk import _INFRA_TOOLS
+
+    options = await _build()
+
+    assert list(_INFRA_TOOLS) == _INFRA
+    for name in _INFRA_TOOLS:
+        assert name in options.tools
+        assert await _allows(options, name)
+
+
 async def test_a_pocket_session_pins_only_delegation_web_and_skills() -> None:
     options = await _build(system_prompt=_POCKET)
 
-    assert options.tools == ["Agent", "WebSearch", "WebFetch", "Skill", "ToolSearch"]
+    assert options.tools == ["Agent", "WebSearch", "WebFetch", "Skill", *_INFRA]
     assert not await _allows(options, "Bash")
     assert await _allows(options, _WIDGET_SPEC), "pocket MCP tools stay reachable"
 
@@ -412,7 +427,7 @@ async def test_the_pinned_builtins_are_policy_filtered() -> None:
     backend = _backend(policy=ToolPolicy(profile="full", deny=["shell"]))
     options = await _build(backend, system_prompt=_POCKET)
 
-    assert options.tools == ["WebSearch", "WebFetch", "Skill", "ToolSearch"]
+    assert options.tools == ["WebSearch", "WebFetch", "Skill", *_INFRA]
     assert not await _allows(options, "Agent")
 
 
