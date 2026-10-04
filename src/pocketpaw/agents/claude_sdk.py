@@ -237,12 +237,14 @@ def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) 
 
     Claude Code turns MCP tool search off when ANTHROPIC_BASE_URL is not
     api.anthropic.com (most gateways drop ``tool_reference`` blocks) and then sends
-    every MCP tool schema upfront. Precedence: a non-empty ENABLE_TOOL_SEARCH in the
-    process env (the CLI inherits it; nothing is written), then one already in
-    ``sdk_env`` (per-run extras), then the setting. A bool (a setattr skips the
-    Settings validator) reads as "true"/"false"; any other non-``str`` (settings
-    are sometimes mocks) reads as unset. With no choice made anywhere behind a
-    gateway, one INFO line per process names the provider and the cost.
+    every MCP tool schema upfront. The SDK layers ``options.env`` over ``os.environ``,
+    so a value written here would beat the operator's own. Like
+    ``MAX_MCP_OUTPUT_TOKENS``, the setting is written only when the process env has
+    no non-empty ENABLE_TOOL_SEARCH (the CLI reads an empty one as unset); with one,
+    nothing is written and the CLI inherits it. A bool (a setattr skips the Settings
+    validator) reads as "true"/"false"; any other non-``str`` (settings are
+    sometimes mocks) reads as unset. With neither set, behind a gateway, one INFO
+    line per process names the provider and the cost.
     """
     if isinstance(setting, bool):
         setting = "true" if setting else "false"
@@ -256,20 +258,18 @@ def _apply_tool_search(sdk_env: dict[str, str], setting: object, provider: str) 
         )
         value = ""
     operator_value = os.environ.get("ENABLE_TOOL_SEARCH")
-    if operator_value:
-        if value and value != operator_value:
-            _log_once(
-                "tool-search-shadowed",
-                logging.WARNING,
-                "Ignoring claude_sdk_tool_search=%r: ENABLE_TOOL_SEARCH=%r in the process "
-                "environment wins",
-                value,
-                operator_value,
-            )
-        return
-    if value:
-        sdk_env.setdefault("ENABLE_TOOL_SEARCH", value)
-    if sdk_env.get("ENABLE_TOOL_SEARCH"):
+    if value and not operator_value:
+        sdk_env["ENABLE_TOOL_SEARCH"] = value
+    elif value and value != operator_value:
+        _log_once(
+            "tool-search-shadowed",
+            logging.WARNING,
+            "Ignoring claude_sdk_tool_search=%r: ENABLE_TOOL_SEARCH=%r in the process "
+            "environment wins",
+            value,
+            operator_value,
+        )
+    if value or operator_value:
         return
     # The CLI's own test: an unset or empty base URL is first party, otherwise the
     # URL's host must be api.anthropic.com. Log the host only, never the URL (userinfo).

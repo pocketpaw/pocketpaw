@@ -5,8 +5,9 @@
 # gemini) get every MCP tool schema upfront. ``claude_sdk_tool_search`` is an
 # operator opt-in: unset adds no ENABLE_TOOL_SEARCH key (the CLI default), a
 # documented value passes through, anything else is ignored with a warning, and a
-# non-empty ENABLE_TOOL_SEARCH in the process env or the per-run extras wins. With
-# no choice made behind a gateway, one INFO line per process says tool search is off.
+# non-empty ENABLE_TOOL_SEARCH in the process env wins (nothing is written, so the
+# CLI inherits it). With neither set behind a gateway, one INFO line per process
+# says tool search is off.
 # A JSON true/false (config.json, PUT /api/v1/settings) means "true"/"false": a value
 # the field rejected used to knock Settings.load() back to defaults, dropping the
 # whole saved config. Reuses the ``_build_options`` harness from
@@ -172,9 +173,11 @@ async def test_an_empty_process_env_value_does_not_block_the_setting(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_a_per_run_extra_wins_over_the_setting():
-    env = await _env("true", extras={"ENABLE_TOOL_SEARCH": "false"})
-    assert env["ENABLE_TOOL_SEARCH"] == "false"
+async def test_an_empty_per_run_extra_does_not_drop_the_setting(caplog):
+    caplog.set_level(logging.INFO, logger=_LOGGER)
+    env = await _env("true", _litellm_env(), provider="litellm", extras={"ENABLE_TOOL_SEARCH": ""})
+    assert env["ENABLE_TOOL_SEARCH"] == "true"
+    assert _notices(caplog) == []
 
 
 # -- the "tool search is off" notice ------------------------------------------
