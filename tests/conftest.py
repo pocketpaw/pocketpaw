@@ -1,5 +1,8 @@
 """Pytest configuration.
 
+Autouse ``_refuse_real_livekit_agent`` (bottom of this file) turns a test that
+would spawn the real ``pocketpaw_ee.cloud.livekit.agent`` child into a failure
+naming the patch target; unpatched, that child never exits and the suite hangs.
 Updated: 2026-09-26 (fix/pawbar-public-route-gates) -- autouse
 ``_reset_paw_bar_public_ip_limiter`` empties the paw-bar router's per-IP bucket
 before each test. It is module-level and every in-process test client shares one
@@ -351,3 +354,34 @@ def scheduled_catalog_syncs(monkeypatch):
         return
     monkeypatch.setattr(catalog_sync, "_scheduler", scheduled.append)
     yield scheduled
+
+
+_LIVEKIT_AGENT_MODULE = "pocketpaw_ee.cloud.livekit.agent"
+
+
+@pytest.fixture(autouse=True)
+def _refuse_real_livekit_agent(monkeypatch):
+    """Refuse to spawn the real call-bot subprocess from any test.
+
+    ``pocketpaw_ee.cloud.livekit.service._spawn_agent_process`` runs
+    ``python -m pocketpaw_ee.cloud.livekit.agent``. Under pytest that child
+    never exits (no room to join, nothing reaps it) and the suite hangs on it;
+    on 2026-10-02 one such run held ``scripts/gate`` for 12 hours. The test
+    must patch the spawn (see ``TestSpawnRace`` in
+    ``tests/ee/test_livekit_service.py``); this guard makes forgetting that a
+    failure instead of a hang.
+    """
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _guarded(*argv, **kwargs):
+        if any(_LIVEKIT_AGENT_MODULE in str(a) for a in argv):
+            raise RuntimeError(
+                "test tried to spawn the real livekit call-bot "
+                f"(`python -m {_LIVEKIT_AGENT_MODULE}`), which never exits under pytest "
+                "and hangs the suite. Patch "
+                "`pocketpaw_ee.cloud.livekit.service._spawn_agent_process` "
+                "(and `_reap_agent_process`) in the test, as TestSpawnRace does."
+            )
+        return await real_exec(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _guarded)
