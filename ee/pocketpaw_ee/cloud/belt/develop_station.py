@@ -83,6 +83,9 @@ _GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 # enough for PATH lookups, the CLI's keychain/OAuth under HOME, and locale.
 # Everything else (Mongo URI, tokens, API keys, POCKETPAW_* secrets) is dropped.
 _ENV_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR", "SHELL")
+# Auth the claude CLI itself needs, passed to claude calls only (never to checks,
+# recipes or git): an API-key deploy has no keychain login to fall back on.
+_CLAUDE_AUTH_KEYS = ("ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -101,13 +104,22 @@ class Runner(Protocol):
     ) -> tuple[int, str, str]: ...
 
 
-def scrubbed_env() -> dict[str, str]:
-    """The allow-listed env (``_ENV_KEYS``, only those present).
+def scrubbed_env(*, claude: bool = False) -> dict[str, str]:
+    """The allow-listed env (``_ENV_KEYS``, only those present), plus
+    ``_CLAUDE_AUTH_KEYS`` when the child is the claude CLI.
     ``PYTHONDONTWRITEBYTECODE`` keeps check runs from leaving ``__pycache__``
     files for ``git add -A`` to sweep into the diff."""
-    env = {k: os.environ[k] for k in _ENV_KEYS if k in os.environ}
+    keys = _ENV_KEYS + (_CLAUDE_AUTH_KEYS if claude else ())
+    env = {k: os.environ[k] for k in keys if k in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
+
+
+def _is_claude(program: str) -> bool:
+    """True when ``program`` is the claude binary the factory resolves."""
+    from pocketpaw_ee.cloud.mandates.foreman import claude_cli_argv
+
+    return os.path.realpath(program) == os.path.realpath(claude_cli_argv()[0])
 
 
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
@@ -127,7 +139,7 @@ async def run_subprocess(
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=scrubbed_env(),
+        env=scrubbed_env(claude=_is_claude(argv[0])),
         start_new_session=True,
     )
     try:

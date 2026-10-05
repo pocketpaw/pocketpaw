@@ -440,7 +440,11 @@ What the station scrubs or blocks:
 
 - **Env.** Every subprocess (claude, checks, recipes, git) sees only `PATH`,
   `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `SHELL`. The
-  Mongo URI, tokens, API keys and `POCKETPAW_*` secrets never reach it.
+  Mongo URI, tokens, API keys and `POCKETPAW_*` secrets never reach it. The one
+  exception is the claude CLI itself, which also gets `ANTHROPIC_API_KEY` and
+  `CLAUDE_CONFIG_DIR` when set: a hosted factory serving other users must run
+  claude on an API key (subscription OAuth is for the owner's own use), and
+  checks never see either.
 - **Programs.** Check and recipe argv[0] must be on
   `POCKETPAW_FACTORY_ALLOWED_COMMANDS`, enforced at create (422) and again
   before exec. No shells, `env`, `sudo`, downloaders, `git`, or relative paths.

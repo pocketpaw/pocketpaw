@@ -538,6 +538,21 @@ async def test_scrubbed_env_keeps_only_the_allowlist(tmp_path, monkeypatch):
     assert keys <= set(ds._ENV_KEYS) | extra
 
 
+async def test_claude_auth_env_reaches_claude_calls_only(tmp_path, monkeypatch):
+    """An API-key deploy needs ANTHROPIC_API_KEY on the claude CLI, and on
+    nothing else the station runs (checks execute agent-editable code)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-planted")
+    # Point the factory's claude binary at python so the env dump runs "as claude".
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLAUDE_BIN", PY)
+    dump = "import os, json; print(json.dumps(sorted(os.environ)))"
+    _, as_claude, _ = await ds.run_subprocess([PY, "-c", dump], cwd=tmp_path, timeout=30)
+    assert "ANTHROPIC_API_KEY" in json.loads(as_claude)
+
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLAUDE_BIN", "/nonexistent/claude")
+    _, as_check, _ = await ds.run_subprocess([PY, "-c", dump], cwd=tmp_path, timeout=30)
+    assert "ANTHROPIC_API_KEY" not in json.loads(as_check)
+
+
 _SPAWN_SLEEPER = (
     "import subprocess, sys, time; "
     "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
