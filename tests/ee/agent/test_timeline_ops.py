@@ -127,6 +127,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "add_lane": {"kind": "audio", "name": "Score"},
         "zoom_clip": {"clipId": "clip_aaa", "focusX": 0.3, "focusY": 0.4, "scale": 1.5},
         "set_chroma": {"clipId": "clip_aaa"},
+        "set_effects": {"clipId": "clip_aaa", "preset": "moody"},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -663,3 +664,30 @@ def test_set_chroma_checks_colour_and_ranges(summary, fields, error) -> None:
         assert err is None and ops[0]["op"] == "set_chroma"
     else:
         assert ops is None and error in err
+
+
+@pytest.mark.parametrize(
+    ("fields", "error"),
+    [
+        ({"preset": "golden-hour", "glow": 0.6, "spotlight": {"x": 0.5, "y": 0.35}}, None),
+        ({"sweep": None, "exposure": -2, "leak": {"intensity": 0.4, "hue": 300}}, None),
+        ({"exposure": 2.5}, "exposure must be between -2 and 2"),
+        ({"preset": "sunset"}, "is not an effects preset"),
+        ({"rays": [0.5, 0.5]}, "rays must be null or an object"),
+        ({"spotlight": {"x": 0.5, "size": 0.2}}, "spotlight must be null or an object"),
+        ({"sweep": {"angle": 270}}, "sweep.angle must be between -180 and 180"),
+    ],
+)
+def test_set_effects_checks_presets_ranges_and_groups(summary, fields, error) -> None:
+    ops, err = validate_ops([{"op": "set_effects", "clipId": "clip_aaa", **fields}], summary)
+    if error is None:
+        assert err is None and ops[0]["op"] == "set_effects"
+    else:
+        assert ops is None and error in err
+
+
+@pytest.mark.parametrize(("value", "ok"), [(0.0, True), (1.0, True), (1.5, False)])
+def test_fx_is_a_keyframeable_prop_from_zero_to_one(summary, value, ok) -> None:
+    op = {"op": "add_keyframe", "clipId": "clip_aaa", "prop": "fx", "atMs": 500, "value": value}
+    ops, err = validate_ops([op], summary)
+    assert (err is None) is ok

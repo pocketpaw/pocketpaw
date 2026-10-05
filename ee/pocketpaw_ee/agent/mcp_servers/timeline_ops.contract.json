@@ -34,9 +34,13 @@
     "arithmetic, in the one place it is unit-tested.",
     "",
     "v5 (2026-10-04): set_chroma. Keys a solid background out of a video or image",
-    "clip (green screen); the browser does the per-pixel work in WebGL."
+    "clip (green screen); the browser does the per-pixel work in WebGL.",
+    "",
+    "v6 (2026-10-05): set_effects. Light and colour effects on a video or image",
+    "clip (grade, glow, vignette, spotlight, light rays, sweep, leak, grain,",
+    "aberration, flicker), rendered by the browser's WebGL compositor."
   ],
-  "version": 5,
+  "version": 6,
   "maxOpsPerBatch": 50,
   "ops": [
     "add_caption",
@@ -49,6 +53,7 @@
     "place_clip",
     "remove_clip",
     "set_chroma",
+    "set_effects",
     "set_project",
     "set_transform",
     "set_transition",
