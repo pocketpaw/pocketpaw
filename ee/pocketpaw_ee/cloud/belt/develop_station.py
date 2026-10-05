@@ -24,10 +24,12 @@
 # list (never a shell); charter commands are ``shlex.split``. The default runner
 # passes only an allow-listed env (``_ENV_KEYS``: no tokens, URIs or API keys)
 # and kills the whole process group on timeout or cancellation. Station git
-# calls run with fsmonitor and hooks disabled. ``claude`` runs
-# with an allow-listed tool set (Read/Edit/Write/Glob/Grep + Bash limited to the
-# charter's check prefixes) and gets its prompt on stdin. The binary and model
-# come from ``foreman.claude_cli_argv`` (the system CLI, never the SDK copy).
+# calls run with fsmonitor and hooks disabled. ``claude`` gets its prompt on
+# stdin, a ``--tools`` set limited to Read/Glob/Grep (+ Edit/Write and Bash
+# prefix rules for the charter checks on the edit seats), allow rules scoped to
+# the worktree (``Read(./**)``), WebFetch/WebSearch/Task denied, and no settings
+# files, MCP servers or hooks (``foreman.claude_cli_argv``, which also resolves
+# the system CLI binary and model).
 # Wired at startup by ``wire_from_env`` when ``POCKETPAW_MANDATE_DISPATCHER=
 # headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``; off by default.
 
@@ -56,8 +58,9 @@ _GIT_TIMEOUT = 120.0
 _TAIL_LINES = 80
 _TAIL_CHARS = 2000  # cap on what a failure carries into the blob / a prompt
 _REVIEW_DIFF_CHARS = 60_000
-_DEVELOP_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"]
-_REVIEW_TOOLS = ["Read", "Glob", "Grep"]
+_READ_TOOLS = ["Read", "Glob", "Grep"]
+_EDIT_TOOLS = ["Edit", "Write"]
+_DENIED_TOOLS = ["WebFetch", "WebSearch", "Task"]
 # Every station git call: no fsmonitor command, no hooks (the worktree is agent
 # territory; a planted hook or fsmonitor would run on ``git add``).
 _GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
@@ -199,10 +202,7 @@ class ClaudeCodeDevelop:
                     )
             else:
                 await self._claude(
-                    _develop_prompt(request, charter),
-                    tools=_DEVELOP_TOOLS + [f"Bash({c}:*)" for c in checks],
-                    cwd=worktree,
-                    step="DEVELOP",
+                    _develop_prompt(request, charter), cwd=worktree, step="DEVELOP", checks=checks
                 )
 
             # CHECK → FIX → REVIEW (one attempts counter for both fix reasons)
@@ -221,9 +221,9 @@ class ClaudeCodeDevelop:
                     attempts += 1
                     await self._claude(
                         _fix_prompt(request, checks, _check_failures(failed)),
-                        tools=_DEVELOP_TOOLS + [f"Bash({c}:*)" for c in checks],
                         cwd=worktree,
                         step="FIX",
+                        checks=checks,
                     )
                     continue
                 if request.recipe:
@@ -243,9 +243,9 @@ class ClaudeCodeDevelop:
                 attempts += 1
                 await self._claude(
                     _fix_prompt(request, checks, "Review notes:\n- " + "\n- ".join(review_notes)),
-                    tools=_DEVELOP_TOOLS + [f"Bash({c}:*)" for c in checks],
                     cwd=worktree,
                     step="FIX",
+                    checks=checks,
                 )
 
             # DONE
@@ -318,10 +318,16 @@ class ClaudeCodeDevelop:
         return CheckResult(command=command, code=code, tail=_tail(out + "\n" + err))
 
     async def _claude(
-        self, prompt: str, *, tools: list[str], cwd: Path, step: str, edits: bool = True
+        self,
+        prompt: str,
+        *,
+        cwd: Path,
+        step: str,
+        checks: list[str] | tuple[str, ...] = (),
+        edits: bool = True,
     ) -> str:
         mode = ["--permission-mode", "acceptEdits"] if edits else []
-        argv = claude_cli_argv(*mode, "--allowedTools", *tools)
+        argv = claude_cli_argv(*mode, *_tool_flags(edits=edits, checks=checks))
         code, out, err = await self.run(
             argv,
             cwd=cwd,
@@ -342,11 +348,7 @@ class ClaudeCodeDevelop:
         self, request: DevelopRequest, diff: str, cwd: Path
     ) -> tuple[bool, list[str]]:
         text = await self._claude(
-            _review_prompt(request, diff),
-            tools=_REVIEW_TOOLS,
-            cwd=cwd,
-            step="REVIEW",
-            edits=False,
+            _review_prompt(request, diff), cwd=cwd, step="REVIEW", edits=False
         )
         start, end = text.find("{"), text.rfind("}")
         try:
@@ -357,6 +359,30 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
         return verdict["verdict"] == "pass", notes
+
+
+def _tool_flags(*, edits: bool, checks: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """The claude tool surface for one seat. ``--tools`` limits what exists;
+    the allow rules are path-scoped to the worktree (a bare ``Read`` would
+    allow any path on the host). Edit seats may also run the charter checks
+    through Bash prefix rules; a check with a parenthesis or newline would
+    corrupt the rule syntax, so it gets no rule (the station still runs it)."""
+    tools, rules = list(_READ_TOOLS), ["Read(./**)"]
+    if edits:
+        tools += _EDIT_TOOLS
+        rules += ["Edit(./**)", "Write(./**)"]
+        bash = [f"Bash({c}:*)" for c in checks if not set(c) & set("()\n")]
+        if bash:
+            tools.append("Bash")
+            rules += bash
+    return [
+        "--tools",
+        ",".join(tools),
+        "--allowedTools",
+        *rules,
+        "--disallowedTools",
+        *_DENIED_TOOLS,
+    ]
 
 
 # -- prompts ------------------------------------------------------------------

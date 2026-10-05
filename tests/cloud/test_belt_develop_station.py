@@ -87,7 +87,7 @@ class FakeClaude:
         self.argvs.append(list(argv))
         if argv[0] != FAKE_CLAUDE:
             return await ds.run_subprocess(argv, cwd=cwd, timeout=timeout, stdin=stdin)
-        tools = argv[argv.index("--allowedTools") + 1 : argv.index("--output-format")]
+        tools = argv[argv.index("--tools") + 1].split(",")
         if "Edit" in tools:
             seat = "develop" if not self.claude_calls else "fix"
             self.claude_calls.append((seat, stdin or ""))
@@ -179,10 +179,35 @@ async def test_green_first_try(repo):
     # The develop prompt carries task + charter, and rides stdin, not argv.
     develop_prompt = fake.claude_calls[0][1]
     assert "Add feature.txt" in develop_prompt and "never touch auth" in develop_prompt
-    claude_argv = next(a for a in fake.argvs if a[0] == FAKE_CLAUDE)
-    assert not any("Add feature.txt" in x for x in claude_argv)
-    assert f"Bash({CHECK}:*)" in claude_argv
+    claude_argvs = [a for a in fake.argvs if a[0] == FAKE_CLAUDE]
+    assert not any("Add feature.txt" in x for a in claude_argvs for x in a)
+    develop_argv, review_argv = claude_argvs
+    # Every seat: no settings files, no MCP, no hooks, web + subagents denied.
+    for argv in claude_argvs:
+        assert argv[argv.index("--setting-sources") + 1] == ""
+        assert "--strict-mcp-config" in argv and "--mcp-config" not in argv
+        assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
+        denied = argv[argv.index("--disallowedTools") + 1 : argv.index("--setting-sources")]
+        assert denied == ["WebFetch", "WebSearch", "Task"]
+        assert "Read(./**)" in argv and "Read" not in argv[argv.index("--allowedTools") :]
+        assert "--bare" not in argv
+    # Edit seat: path-scoped edits; CHECK has parens, so no Bash rule and no Bash.
+    assert develop_argv[develop_argv.index("--tools") + 1] == "Read,Glob,Grep,Edit,Write"
+    assert {"Edit(./**)", "Write(./**)"} <= set(develop_argv)
+    assert develop_argv[develop_argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert not any(x.startswith("Bash(") for x in develop_argv)
+    # Review seat: read-only.
+    assert review_argv[review_argv.index("--tools") + 1] == "Read,Glob,Grep"
+    assert "--permission-mode" not in review_argv and "Edit(./**)" not in review_argv
     _assert_clean(repo, fake)
+
+
+def test_tool_flags_give_bash_rules_only_to_parseable_checks():
+    flags = ds._tool_flags(edits=True, checks=["uv run pytest -q", CHECK])
+    assert flags[flags.index("--tools") + 1] == "Read,Glob,Grep,Edit,Write,Bash"
+    assert "Bash(uv run pytest -q:*)" in flags
+    assert not any(CHECK in x for x in flags)
+    assert ds._tool_flags(edits=False, checks=["uv run pytest -q"])[1] == "Read,Glob,Grep"
 
 
 async def test_check_red_then_fix_then_green(repo):

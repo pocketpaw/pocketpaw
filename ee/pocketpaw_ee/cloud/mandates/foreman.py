@@ -13,7 +13,8 @@
 # ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
-# set); the develop station uses them too. Prompts ride argv/stdin, never a shell.
+# set), and they pin every seat to no settings files, no MCP and no hooks; the
+# develop station uses them too. Prompts ride argv/stdin, never a shell.
 #
 # Validation discipline (sim-proven — do not weaken): machine validation runs on
 # ACTION fields (title, expected_outcome) and structural fields (task count vs
@@ -108,15 +109,30 @@ class PlanLlm(Protocol):
     async def plan(self, *, prompt: str, context: ForemanContext) -> str: ...
 
 
+# Every factory seat runs isolated from whatever config sits on disk: no
+# user/project/local settings (so a worktree's ``.claude/settings.json`` can't
+# grant permissions or add hooks), no MCP servers (``.mcp.json`` ignored), no
+# hooks. Auth is the CLI's keychain/OAuth login, which is not a setting source.
+# Never ``--bare``: it forces API-key auth.
+_ISOLATION_FLAGS = (
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--settings",
+    '{"disableAllHooks":true}',
+)
+
+
 def claude_cli_argv(*args: str) -> list[str]:
     """argv for one headless call to the SYSTEM Claude Code CLI.
 
     Every factory LLM seat (foreman, develop, fix, review) builds its command
-    here: ``<bin> -p <args...> --output-format json [--model M]``. The binary is
-    ``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``claude`` on PATH — never the SDK's
-    bundled copy, which goes stale. Resolved per call so env changes apply."""
+    here: ``<bin> -p <args...> <isolation flags> --output-format json
+    [--model M]``. The binary is ``POCKETPAW_FACTORY_CLAUDE_BIN``, else
+    ``claude`` on PATH — never the SDK's bundled copy, which goes stale.
+    Resolved per call so env changes apply."""
     binary = os.environ.get("POCKETPAW_FACTORY_CLAUDE_BIN") or shutil.which("claude") or "claude"
-    argv = [binary, "-p", *args, "--output-format", "json"]
+    argv = [binary, "-p", *args, *_ISOLATION_FLAGS, "--output-format", "json"]
     model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
     if model:
         argv += ["--model", model]
