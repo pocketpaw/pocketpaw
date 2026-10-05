@@ -35,8 +35,10 @@
 # the worktree (``Read(./**)``), WebFetch/WebSearch/Task denied, and no settings
 # files, MCP servers or hooks (``foreman.claude_cli_argv``, which also resolves
 # the system CLI binary and model).
-# Wired at startup by ``wire_from_env`` when ``POCKETPAW_MANDATE_DISPATCHER=
-# headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``; off by default.
+# Wired by a cloud startup hook (``wire_from_env``) when ``POCKETPAW_MANDATE_
+# DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=claude``; off by default,
+# and refused in a multi-tenant process unless ``POCKETPAW_FACTORY_DEDICATED_
+# HOST=1`` (dedicated single-tenant hosts only — there is no OS sandbox yet).
 
 from __future__ import annotations
 
@@ -501,12 +503,27 @@ def _review_prompt(request: DevelopRequest, diff: str) -> str:
 def wire_from_env() -> bool:
     """Wire ``ClaudeCodeDevelop`` as the production develop loop when
     ``POCKETPAW_MANDATE_DISPATCHER=headless`` and ``POCKETPAW_FACTORY_DEVELOP=
-    claude``. Returns whether it wired. Called once at app startup."""
+    claude``. Returns whether it wired. Called once from a cloud startup hook
+    (after the cloud DB is open, so the tenancy signal below is real).
+
+    The station runs agent-written code (checks, recipes) on this host, so it
+    refuses to wire in a process serving cloud tenants unless the operator
+    vouches for a dedicated single-tenant host with
+    ``POCKETPAW_FACTORY_DEDICATED_HOST=1``."""
     from pocketpaw_ee.cloud.belt.headless import set_production_develop_fn
+    from pocketpaw_ee.cloud.shared import db as cloud_db
 
     dispatcher = (os.environ.get("POCKETPAW_MANDATE_DISPATCHER") or "").strip().lower()
     develop = (os.environ.get("POCKETPAW_FACTORY_DEVELOP") or "").strip().lower()
     if dispatcher != "headless" or develop != "claude":
+        return False
+    dedicated = (os.environ.get("POCKETPAW_FACTORY_DEDICATED_HOST") or "").strip().lower()
+    if cloud_db.is_multi_tenant_cloud() and dedicated not in ("1", "true"):
+        logger.error(
+            "belt: NOT wiring the headless develop station: this process serves cloud "
+            "tenants and the station runs agent-written code on the host. Set "
+            "POCKETPAW_FACTORY_DEDICATED_HOST=1 only on a dedicated single-tenant host."
+        )
         return False
     set_production_develop_fn(ClaudeCodeDevelop())
     logger.info("belt: headless develop station wired (system claude CLI)")

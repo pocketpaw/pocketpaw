@@ -28,9 +28,11 @@ socket broadcast and presence registry (``_core/realtime/``), whose start/stop
 hooks are registered here too. Hook names follow ``_start_<x>`` / ``_stop_<x>``:
 the lifespan derives the automations-status running mark from them. With the
 scheduler flag off, one fire-and-forget Discover reindex runs at startup
-instead. The craft factory's headless develop station is wired when
-``POCKETPAW_MANDATE_DISPATCHER=headless`` and
-``POCKETPAW_FACTORY_DEVELOP=claude`` (``belt/develop_station.wire_from_env``).
+instead. The craft factory's headless develop station is wired by a startup
+hook when ``POCKETPAW_MANDATE_DISPATCHER=headless`` and
+``POCKETPAW_FACTORY_DEVELOP=claude`` (``belt/develop_station.wire_from_env``,
+which refuses a multi-tenant process without
+``POCKETPAW_FACTORY_DEDICATED_HOST=1``).
 
 Domains: auth, workspace, chat, pockets, sessions, agents, kb, knowledge,
 mission_control, cycles, tasks.
@@ -1415,9 +1417,13 @@ def mount_cloud(app: FastAPI) -> None:
     # Craft factory: the headless develop station (system claude CLI). Off unless
     # POCKETPAW_MANDATE_DISPATCHER=headless and POCKETPAW_FACTORY_DEVELOP=claude;
     # NOT behind the scheduler gate, because plan approvals dispatch on any host.
+    # A startup hook, not a mount-time call: it must run after Mongo is open so
+    # its multi-tenant refusal (is_multi_tenant_cloud) sees the real signal.
     from pocketpaw_ee.cloud.belt.develop_station import wire_from_env as _wire_factory_develop
 
-    _wire_factory_develop()
+    @on_startup
+    async def _start_factory_develop() -> None:
+        _wire_factory_develop()
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

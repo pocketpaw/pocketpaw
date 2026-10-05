@@ -466,6 +466,9 @@ async def test_production_dispatcher_develops_in_background(repo, tmp_path, monk
 
 
 def test_wire_from_env(monkeypatch):
+    from pocketpaw_ee.cloud.shared import db as cloud_db
+
+    monkeypatch.setattr(cloud_db, "is_multi_tenant_cloud", lambda: False)
     monkeypatch.delenv("POCKETPAW_FACTORY_DEVELOP", raising=False)
     monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "headless")
     try:
@@ -622,3 +625,27 @@ async def test_station_refuses_disallowed_programs_before_exec(
         assert fake.argvs == []
     else:
         _assert_clean(repo, fake)
+
+
+def test_wire_from_env_refuses_a_multi_tenant_process(monkeypatch, caplog):
+    import logging
+
+    from pocketpaw_ee.cloud.shared import db as cloud_db
+
+    monkeypatch.setattr(cloud_db, "is_multi_tenant_cloud", lambda: True)
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "headless")
+    monkeypatch.setenv("POCKETPAW_FACTORY_DEVELOP", "claude")
+    monkeypatch.delenv("POCKETPAW_FACTORY_DEDICATED_HOST", raising=False)
+    try:
+        with caplog.at_level(logging.ERROR, logger=ds.__name__):
+            assert ds.wire_from_env() is False
+        assert resolve_headless_dispatcher() is None
+        assert any(
+            r.levelno == logging.ERROR and "POCKETPAW_FACTORY_DEDICATED_HOST" in r.getMessage()
+            for r in caplog.records
+        )
+        monkeypatch.setenv("POCKETPAW_FACTORY_DEDICATED_HOST", "1")
+        assert ds.wire_from_env() is True
+        assert resolve_headless_dispatcher() is not None
+    finally:
+        set_production_develop_fn(None)
