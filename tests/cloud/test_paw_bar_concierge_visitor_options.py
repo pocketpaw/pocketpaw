@@ -265,7 +265,8 @@ async def test_hiding_branding_without_entitlement_is_402_and_writes_nothing(cli
     assert stored is not None
     assert stored.concierge_greeting == "Kept"
     assert stored.concierge_appearance.show_branding is True
-    assert stored.concierge_appearance.accent == "#3b6fe0"
+    # Untouched: still following the site, not the refused body's accent.
+    assert stored.concierge_appearance.accent == ""
 
 
 @pytest.mark.asyncio

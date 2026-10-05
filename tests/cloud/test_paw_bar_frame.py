@@ -1,56 +1,29 @@
-# tests/cloud/test_paw_bar_frame.py — Paw Bar glass FRAME endpoint + CSP origin
+# tests/cloud/test_paw_bar_frame.py — the Paw Bar glass FRAME endpoint and its CSP.
 #
-# Updated 2026-10-03 (fix/paw-bar-frame-headers): Layer 4 runs the real frame
-# endpoint behind the dashboard's ``security_headers_middleware``. The live frame
-# keeps its frame-ancestors allowlist + sandbox, its own mic Permissions-Policy and
-# gets no X-Frame-Options; the dead shell keeps its ``frame-ancestors *`` + sandbox
-# CSP and no XFO. The dead shell's CSP now names ``frame-ancestors *`` explicitly.
-#
-# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
-# defaults to a concierge its owner has CREATED and switched on
-# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
-# marker a requirement at every public seam and flips the switch's default to
-# False, so a bare Site is now "no concierge"; overrides still win.
-#
-# model (A1).
-# Updated 2026-09-26 (fix/pawbar-frame-sandbox-header): every frame document now
-#   carries a CSP ``sandbox`` directive after frame-ancestors, so the exact-header
-#   assertions compare against ``_csp(...)``. New coverage: the live frame, both
-#   dead-frame paths (disabled concierge, no usable allowlist) and the dead shell
-#   itself carry the exact sandbox directive, keep frame-ancestors unchanged, and
-#   never grant top navigation.
-# Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
-#   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
-#   route (fix/pawbar-public-route-gates, 2026-09-26).
-# Created 2026-07-15: covers GET /paw-bar/frame (the iframe document + the CSP
-# frame-ancestors embedder gate) and the CSP/parent-origin helper functions.
-# Three layers:
-# Updated 2026-08-21 (dashboard preview ancestor): the builder frames a site's real
-#   published page, so the bar's iframe sits TWO deep — dashboard → site page → bar —
-#   and frame-ancestors is matched against EVERY ancestor. No Site allowlist named the
-#   dashboard, so the bar was refused in every preview with
-#   "Framing '<backend>' violates ... frame-ancestors". New coverage: the dashboard
-#   origin is admitted alongside the allowlist, sourced from PAWBAR_DASHBOARD_ORIGIN or
-#   (unset — the shipped state) the declared CORS origins; it is sanitized like any
-#   allowlist entry; it never revives an empty allowlist; and with neither source set
-#   the header is byte-identical to before. An autouse fixture clears both vars so the
-#   exact-header assertions stay hermetic.
-# Updated 2026-07-30 (frame-ancestors port fix): the expected header now carries a
-#   ``:*`` port on every portless entry. A CSP host-source with no port matches only
-#   the scheme's DEFAULT port, so a site served on any other port could not be framed
-#   and the bar rendered as an empty grey box. These assertions pinned that. The
-#   header-injection guard is unchanged and still covered.
-#   * Pure-function proofs (no I/O): the frame-ancestors builder emits EXACTLY the
-#     Site's allowed_origins, fails closed (None) on an empty/unusable allowlist,
-#     sanitizes header-injection attempts, and the parent-origin validator only
-#     echoes an allowlisted origin.
-#   * Endpoint (httpx): valid key → 200 + CSP frame-ancestors header + a body that
-#     seeds window.__PAWBAR__; empty allowed_origins → 403 (fail-closed refuse); a
-#     blank / unknown / revoked key → 401; NO X-Frame-Options; and the world-visible
-#     key + attacker-influenceable params can't break out of the inline <script>.
-#   * Dual-mode chat: an iframe-mode request (Origin == our frame origin) passes the
-#     origin gate that would reject it inline; a non-frame disallowed origin is still
-#     403; the frozen inline path (Origin in allowed_origins) still works.
+# Covers GET /paw-bar/frame (the iframe document plus its embedder gate) and the
+# CSP / parent-origin helpers, in four layers:
+#   * Pure functions: the frame-ancestors builder emits exactly the Site's
+#     allowed_origins with a ``:*`` port on every portless entry (a portless
+#     host-source matches only the default port), fails closed (None) on an
+#     empty or unusable allowlist, and refuses header injection. The dashboard
+#     origin (PAWBAR_DASHBOARD_ORIGIN, else the declared CORS origins) is admitted
+#     beside the allowlist, because the builder preview frames the site's page and
+#     every ancestor is matched; it never revives an empty allowlist. The
+#     parent-origin validator only echoes an allowlisted origin.
+#   * Endpoint (httpx): a valid key is 200 with the full frame CSP (frame-ancestors,
+#     style-src / font-src for the host site's Google Fonts, then the ``sandbox``
+#     directive the loader's <iframe sandbox> must equal; no top navigation) and a
+#     body that seeds window.__PAWBAR__; an empty allowlist or a switched-off
+#     concierge is the sandboxed dead shell (``frame-ancestors *``); a blank,
+#     unknown or revoked key is 401; no X-Frame-Options; the world-visible key and
+#     attacker-influenceable params cannot break out of the inline <script>. The
+#     Site fixture is a concierge its owner created and switched on (CR-12).
+#   * Dual-mode chat: an iframe request (Origin == our frame origin) passes the
+#     origin gate that would reject it inline; customer_ref is 8-128 chars.
+#   * Behind the dashboard's ``security_headers_middleware``: both the live frame
+#     and the dead shell keep their own CSP and Permissions-Policy and get no XFO.
+# An autouse fixture clears the dashboard-origin env so exact-header assertions
+# stay hermetic.
 
 from __future__ import annotations
 
@@ -74,9 +47,17 @@ _SANDBOX_DIRECTIVE = (
 )
 
 
+# Written out literally too: the bar loads the host site's Google Fonts sheet, and
+# nothing broader than these two hosts may be added.
+_STYLE_FONT_DIRECTIVES = (
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com"
+)
+
+
 def _csp(frame_ancestors: str) -> str:
-    """The full frame CSP: the embedder gate, then the sandbox."""
-    return f"{frame_ancestors}; {_SANDBOX_DIRECTIVE}"
+    """The full frame CSP: the embedder gate, styles and fonts, then the sandbox."""
+    return f"{frame_ancestors}; {_STYLE_FONT_DIRECTIVES}; {_SANDBOX_DIRECTIVE}"
 
 
 def _directives(csp: str) -> list[str]:
