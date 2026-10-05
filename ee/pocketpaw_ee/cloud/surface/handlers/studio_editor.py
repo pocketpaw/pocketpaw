@@ -181,6 +181,29 @@ def _motion_graphics_block(timeline: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _draft_graphic_block(timeline: dict[str, Any]) -> list[str]:
+    """DRAFT GRAPHIC: a gallery preset the user asked to have customised this turn."""
+    draft = timeline.get("draft_graphic")
+    html = draft.get("html") if isinstance(draft, dict) else None
+    if not isinstance(html, str) or not html or len(html) > _MAX_MOTION_SOURCE_CHARS:
+        return []
+
+    span = draft.get("replace_range")
+    if isinstance(span, dict):
+        placement = f"replace_range from_ms={span.get('from_ms')} to_ms={span.get('to_ms')}"
+    elif isinstance(draft.get("start_ms"), int):
+        placement = f"start_ms={draft['start_ms']}"
+    else:
+        placement = "the end of the timeline (no placement argument)"
+    return [
+        "",
+        f'DRAFT GRAPHIC "{draft.get("name") or "Graphic"}" (customise, then add at {placement}):',
+        "```html",
+        html,
+        "```",
+    ]
+
+
 def _timeline_block(timeline: dict[str, Any]) -> str:
     """Render the open timeline as ids + times, plus motion-graphic source."""
     lines: list[str] = []
@@ -229,6 +252,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
 
     lines.extend(_attached_block(timeline, assets))
     lines.extend(_motion_graphics_block(timeline))
+    lines.extend(_draft_graphic_block(timeline))
 
     clips = [c for c in (timeline.get("clips") or []) if isinstance(c, dict)]
     lines.append("")
@@ -360,6 +384,12 @@ Rules that matter:
 - EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
   edit its source from that block and call add_motion_graphic with
   replace_asset_id set to its id — never add a second one alongside it.
+- A DRAFT GRAPHIC IS A STARTING POINT. When DRAFT GRAPHIC appears above, the
+  user picked that gallery preset and wants it changed as their message says.
+  Edit that HTML (keep the root, the --mg-* variables and the timeline
+  registration), then call add_motion_graphic ONCE with the placement shown.
+  Never add it unedited or twice. With replace_range, keep data-duration equal
+  to the span; if they ask for a different length, move to_ms to match.
 - WHAT THEY JUST ATTACHED IS WHAT THEY MEAN. When ATTACHED THIS TURN appears
   above and the user says "add these", "put this on the timeline" or "use it",
   those assets are the ones — place them in the ORDER LISTED, and place all of
