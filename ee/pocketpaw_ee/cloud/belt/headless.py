@@ -14,7 +14,8 @@
 #   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued blob (task,
 #     expected outcome, repo, base, mandate provenance, ``recipe``), calls the
 #     DevelopFn,
-#     then back-writes diff + base_branch onto the SAME action, clears
+#     then back-writes diff + base_branch + ``files_changed`` (the DevelopFn's
+#     count, else the diff's ``+++`` headers) onto the SAME action, clears
 #     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
 #     raises: a DevelopFn error (or empty diff / no base) leaves the run queued
 #     and records the reason (secrets redacted) as ``headless_error`` on the
@@ -206,7 +207,7 @@ class HeadlessDevelopRunner:
             diff=diff,
             base_branch=base_branch,
             summary=result.summary or request.summary,
-            files_changed=result.files_changed,
+            files_changed=result.files_changed or _diff_file_count(diff),
         )
         logger.info(
             "headless: produced a diff for action %s (base %s) — now a real "
@@ -359,6 +360,14 @@ class HeadlessDevelopRunner:
             await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — never crash on the failure-note path
             logger.debug("headless: failed to record headless_error note", exc_info=True)
+
+
+def _diff_file_count(diff: str) -> int:
+    """Files a unified diff writes: its ``+++`` headers, minus a deletion's
+    ``+++ /dev/null``. The fallback when a DevelopFn reports no count."""
+    return sum(
+        1 for line in diff.splitlines() if line.startswith("+++ ") and line[4:] != "/dev/null"
+    )
 
 
 @dataclass

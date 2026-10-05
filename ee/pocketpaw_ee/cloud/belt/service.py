@@ -15,10 +15,11 @@
 #   * ``list_runs`` / ``get_run`` — the runs read model over ``code_change``
 #     Instinct Actions, newest-first. Status/stage derive from the Action
 #     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``);
-#     landing fields (``pr_url`` / ``branch`` / ``commit_sha``) and mandate
-#     provenance (``mandate_id`` / ``shift_no`` / ``headless_error`` /
-#     ``headless_state``) are read STRUCTURALLY off the blob. The mandates
-#     digest reads this same list.
+#     ``title``, ``files_changed``, landing fields (``pr_url`` / ``branch`` /
+#     ``commit_sha``) and mandate provenance (``mandate_id`` / ``shift_no`` /
+#     ``headless_error`` / ``headless_state``) are read STRUCTURALLY off the
+#     blob; ``error`` is the failure reason (``Action.error``, else
+#     ``headless_error``). The mandates digest reads this same list.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -675,6 +676,11 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "branch": blob.get("branch") or None,
         "pr_url": blob.get("pr_url") or None,
         "commit_sha": blob.get("commit_sha") or None,
+        # Counted from the diff when the station attaches it; the real staged
+        # count replaces it on landing.
+        "files_changed": blob.get("files_changed"),
+        # Why the run failed: the executor's reason, else a failed develop's.
+        "error": str(getattr(action, "error", None) or blob.get("headless_error") or "") or None,
         "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
         "correlation_id": str(blob.get("correlation_id") or "") or None,
         # Mandate provenance (None on a hand-driven run).

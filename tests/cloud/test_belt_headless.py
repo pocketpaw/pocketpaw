@@ -142,6 +142,12 @@ async def test_headless_runner_produces_pending_diff(store: InstinctStore):
     assert cc.get("correlation_id")
     # CRITICAL — still PENDING. Not auto-approved, not executed.
     assert after.status == ActionStatus.PENDING
+    # The fake reported no count, so it is counted from the diff's headers, and
+    # the run detail shows it before anything lands.
+    assert cc["files_changed"] == 1
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    assert (await belt_service.get_run(WS, action_id))["files_changed"] == 1
 
     # An operator trail entry was written — the first place LLM-produced content
     # enters the store without a human typing it.
@@ -202,6 +208,10 @@ async def test_headless_runner_handles_develop_failure(store: InstinctStore):
     # The action is NOT auto-approved / executed; it carries a failure note.
     assert after.status in (ActionStatus.PENDING, ActionStatus.FAILED)
     assert "headless" in (cc.get("headless_error") or "").lower() or after.error
+    # The runs read model exposes the reason as ``error``.
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    assert "model unavailable" in (await belt_service.get_run(WS, action_id))["error"]
 
 
 async def test_headless_runner_rejects_empty_diff(store: InstinctStore):

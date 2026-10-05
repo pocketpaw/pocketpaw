@@ -1406,6 +1406,7 @@ def _run_digest_row(run: dict[str, Any]) -> dict[str, Any]:
         "commit_sha": run.get("commit_sha"),
         "headless_error": run.get("headless_error"),
         "headless_state": run.get("headless_state"),
+        "error": run.get("error"),
     }
 
 

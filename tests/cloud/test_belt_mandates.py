@@ -884,6 +884,9 @@ async def test_digest_reports_activity_and_waiting_gates(
     landed = await _seed_run(store, busy, "bump deps", pr_url="https://x/pull/7", branch="b/7")
     await store.approve(landed.id)
     await store.mark_executed(landed.id, "PR opened")
+    broken = await _seed_run(store, busy, "count refunds")
+    await store.approve(broken.id)
+    await store.mark_failed(broken.id, "diff did not apply cleanly (conflict or stale base)")
     await _seed_run(store, None, "a hand-driven run")  # no mandate: not in any row
 
     res = client.get("/belt/mandates/digest")
@@ -913,13 +916,15 @@ async def test_digest_reports_activity_and_waiting_gates(
     ]
     assert [g["title"] for g in row["gates"]["diffs"]] == ["speed up checkout"]
     runs = {r["title"]: r for r in row["runs"]}
-    assert set(runs) == {"fix the sso login", "speed up checkout", "bump deps"}
+    assert set(runs) == {"fix the sso login", "speed up checkout", "bump deps", "count refunds"}
     assert runs["fix the sso login"]["status"] == "queued"
     assert "pytest exited 1" in runs["fix the sso login"]["headless_error"]
     assert runs["bump deps"]["status"] == "landed"
     assert runs["bump deps"]["pr_url"] == "https://x/pull/7"
     assert runs["bump deps"]["branch"] == "b/7"
     assert [r["title"] for r in row["stuck"]] == ["fix the sso login"]
+    assert runs["count refunds"]["status"] == "failed"
+    assert runs["count refunds"]["error"].startswith("diff did not apply cleanly")
 
     assert rows[quiet]["sightings"]["count"] == 0
     assert rows[quiet]["runs"] == [] and rows[quiet]["shifts"] == []
@@ -927,9 +932,9 @@ async def test_digest_reports_activity_and_waiting_gates(
         "mandates": 2,
         "new_sightings": 2,
         "shifts": 1,
-        "runs": 3,
+        "runs": 4,
         "landed": 1,
-        "failed": 1,
+        "failed": 2,
         "gates_waiting": 2,
     }
 
@@ -946,6 +951,7 @@ async def test_digest_reports_activity_and_waiting_gates(
     assert "diff gate, speed up checkout" in report
     assert "fix the sso login: headless develop failed: CHECK: pytest exited 1" in report
     assert "bump deps (https://x/pull/7)" in report
+    assert "count refunds: diff did not apply cleanly (conflict or stale base)" in report
 
     # A window that starts after everything: activity drops out, but gates
     # still waiting on a human are reported whatever their age.
