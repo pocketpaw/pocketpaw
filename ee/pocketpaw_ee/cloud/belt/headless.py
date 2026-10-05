@@ -21,13 +21,18 @@
 #     ensured — stripping corrupts it for ``git apply``). A best-effort
 #     ``headless_diff_attached`` audit entry marks LLM content entering the store.
 #   * ``HeadlessTaskDispatcher`` — the mandates ``TaskDispatcher`` that files the
-#     queued run via ``StationTaskDispatcher`` then runs the runner on it.
+#     queued run via ``StationTaskDispatcher`` then runs the runner on it. The
+#     production dispatcher (``resolve_headless_dispatcher``) runs the develop in
+#     the BACKGROUND, one at a time (``_DEVELOP_LOCK``), because plan approval
+#     dispatches inside the approve request and a develop takes minutes; tests
+#     construct it inline (``background=False``).
 #
 # Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
 # ``belt/executor.py::_persist_run_result``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -340,6 +345,10 @@ class HeadlessTaskDispatcher:
     still drive the station), so a headless miss never loses the task."""
 
     runner: HeadlessDevelopRunner
+    # True = return as soon as the queued run is filed and develop it in a
+    # background task (serialized by ``_DEVELOP_LOCK``). The production
+    # dispatcher sets it; the inline default keeps tests deterministic.
+    background: bool = False
 
     async def dispatch(
         self,
@@ -367,8 +376,26 @@ class HeadlessTaskDispatcher:
         #    pending diff). Never raises — a miss leaves the queued run for a
         #    human to drive. Thread the workspace so the runner's store is scoped
         #    to the tenant (no ContextVar on this background path — ISO).
-        await self.runner.run(run_ref, workspace_id=workspace_id)
+        if not self.background:
+            await self.runner.run(run_ref, workspace_id=workspace_id)
+            return run_ref
+
+        async def _develop() -> None:
+            # ponytail: one develop at a time per process (16 GB box, heavy
+            # checks); per-repo locks if factory throughput ever matters.
+            async with _DEVELOP_LOCK:
+                await self.runner.run(run_ref, workspace_id=workspace_id)
+
+        task = asyncio.create_task(_develop(), name=f"belt-headless-develop-{run_ref}")
+        _BACKGROUND_DEVELOPS.add(task)
+        task.add_done_callback(_BACKGROUND_DEVELOPS.discard)
         return run_ref
+
+
+# Background develops (strong refs so the loop can't drop them) and the lock
+# that serializes them.
+_BACKGROUND_DEVELOPS: set[asyncio.Task[None]] = set()
+_DEVELOP_LOCK = asyncio.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +433,9 @@ def resolve_headless_dispatcher() -> HeadlessTaskDispatcher | None:
     files runs that nothing can develop."""
     if _PRODUCTION_DEVELOP_FN is None:
         return None
-    return HeadlessTaskDispatcher(runner=HeadlessDevelopRunner(develop_fn=_PRODUCTION_DEVELOP_FN))
+    return HeadlessTaskDispatcher(
+        runner=HeadlessDevelopRunner(develop_fn=_PRODUCTION_DEVELOP_FN), background=True
+    )
 
 
 __all__ = [

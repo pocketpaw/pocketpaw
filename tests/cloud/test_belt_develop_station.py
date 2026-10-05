@@ -5,8 +5,8 @@
 # ``claude`` binary is faked, by intercepting its argv in the injected runner.
 # Also covers the plumbing it rides on: ``daily`` cadence due-ness, charter
 # checks/recipes round-tripping through the mandates service, recipe validation
-# in the foreman, the recipe surviving dispatch into ``DevelopRequest``, and the
-# env-gated startup wiring.
+# in the foreman, the recipe surviving dispatch into ``DevelopRequest``, the
+# production dispatcher developing in the background, and the env-gated wiring.
 
 from __future__ import annotations
 
@@ -381,6 +381,51 @@ async def test_charter_checks_and_recipes_round_trip(mongo_db):
     assert await service.charter_for_mandate("other-ws", mid) is None
     with pytest.raises((CloudError, ValueError)):
         await _make_mandate("manual", checks=["'unbalanced"])
+
+
+async def test_production_dispatcher_develops_in_background(repo, tmp_path, monkeypatch):
+    """The production headless dispatcher returns once the queued run is filed
+    (approval must not block on a develop) and attaches the diff afterwards."""
+    import asyncio
+
+    import pocketpaw_ee.cloud.belt.headless as headless
+    import pocketpaw_ee.cloud.mandates.executor as ex
+
+    from pocketpaw.instinct.store import InstinctStore
+
+    store = InstinctStore(tmp_path / "instinct.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+
+    async def _fake_repo(workspace_id: str, mandate_id: str) -> str:
+        return str(repo)
+
+    monkeypatch.setattr(ex, "_repo_for_mandate", _fake_repo)
+    release = asyncio.Event()
+
+    async def slow_develop(req: DevelopRequest) -> DevelopResult:
+        await release.wait()
+        return DevelopResult(diff="diff --git a/x b/x\n", base_branch="main")
+
+    set_production_develop_fn(slow_develop)
+    try:
+        dispatcher = resolve_headless_dispatcher()
+        assert dispatcher is not None and dispatcher.background is True
+        run_ref = await dispatcher.dispatch(
+            workspace_id="w1",
+            mandate_id="m1",
+            shift_no=1,
+            plan_action_id="plan-1",
+            index=1,
+            task={"title": "t"},
+        )
+        blob = (await store.get_action(run_ref)).parameters["_code_change"]
+        assert blob["station_pending"] is True, "dispatch returned before the develop ran"
+        release.set()
+        await asyncio.gather(*headless._BACKGROUND_DEVELOPS)
+        blob = (await store.get_action(run_ref)).parameters["_code_change"]
+        assert blob["station_pending"] is False and blob["diff"].startswith("diff --git")
+    finally:
+        set_production_develop_fn(None)
 
 
 def test_wire_from_env(monkeypatch):
