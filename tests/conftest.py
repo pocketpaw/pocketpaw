@@ -64,6 +64,7 @@ import importlib.util  # noqa: E402
 import statistics  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 import pytest  # noqa: E402
@@ -529,16 +530,16 @@ def _clear_journal_cache() -> None:
         fn.cache_clear()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_soul_data_dir(tmp_path, monkeypatch):
-    """Keep every test out of the developer's real ``~/.soul``.
+@contextmanager
+def soul_data_dir_isolated(tmp_path, monkeypatch):
+    """Keep a test out of the developer's real ``~/.soul`` (the autouse fixture below).
 
     The org journal (``pocketpaw.journal_dep``) lives under ``SOUL_DATA_DIR`` or
     ``~/.soul``, and the decisions store's ``_DB_PATH`` global defaults to
     ``~/.soul/decisions.db``; tests that ``set_db_path(tmp_path)`` never restored it.
     The next ``mount_cloud`` then replayed the whole real journal (~137k events)
-    into a fresh temp store: 1182 s in one census run. Both now point at this
-    test's tmp dir and are restored afterwards.
+    into a fresh temp store: 1182 s in one census run. Both point at this test's
+    tmp dir; ``monkeypatch`` puts them back when it is undone.
     """
     soul_dir = tmp_path / "soul"
     monkeypatch.setenv("SOUL_DATA_DIR", str(soul_dir))
@@ -549,8 +550,16 @@ def _isolate_soul_data_dir(tmp_path, monkeypatch):
         from pocketpaw_ee.cloud.decisions import store
 
         monkeypatch.setattr(store, "_DB_PATH", soul_dir / "decisions.db")
-    yield
-    _clear_journal_cache()
+    try:
+        yield
+    finally:
+        _clear_journal_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_soul_data_dir(tmp_path, monkeypatch):
+    with soul_data_dir_isolated(tmp_path, monkeypatch):
+        yield
 
 
 # ---------------------------------------------------------------------------
