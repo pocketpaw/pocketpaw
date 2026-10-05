@@ -6583,35 +6583,52 @@ async def update_site_metadata(
     return _to_response(site)
 
 
+def _badge_entitlements(site: Any) -> Any:
+    """``site`` resolved through the per-site plan rules (``badge_required`` et al.)."""
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    return entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=getattr(site, "plan_tier", None),
+        subscription_status=getattr(site, "subscription_status", None),
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+
+
+async def badge_removal_entitled(site: Any, *, partner: Any = ...) -> bool:
+    """May this site hide its branding? The one rule behind ``badge_hidden`` and the
+    concierge's "Powered by" line (``paw_bar.router``).
+
+    True when per-site billing is off for its workspace (OSS / self-host), else when
+    the site's own plan resolves to ``badge_required=False``. ``partner`` is the
+    workspace's Paw Partners profile when the caller already holds it (the frame's
+    memo), so this costs no extra read there; omitted, it is loaded.
+    """
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
+
+    if not await sites_enforced_for(getattr(site, "workspace", None), partner=partner):
+        return True
+    return not _badge_entitlements(site).badge_required
+
+
 async def _assert_entitled_to_badge_removal(site: Any) -> None:
     """Refuse ``badge_hidden=True`` unless this site's own plan removes the badge.
 
     Written to look like ``_assert_entitled_to_custom_domain``: same resolver, same
     ``sites_enforced()`` gate, same per-site 402 shape. Reading ``plan_tier`` alone
-    would let a lapsed or never-charged paid tier flip the switch.
+    would let a lapsed or never-charged paid tier flip the switch. The rule itself is
+    ``badge_removal_entitled``.
 
     This is a courtesy check, not the enforcement. ``_stamp_free_badge`` badges a
     free site whatever the stored flag says; refusing here only keeps the switch
     from claiming "hidden" on a page that will keep its badge. On OSS / self-host
     (``sites_enforced()`` off) the write is accepted and the stamper still decides.
     """
-    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced_for
-
-    if not await sites_enforced_for(getattr(site, "workspace", None)):
+    if await badge_removal_entitled(site):
         return
 
-    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
-
-    ent = entitlements_service.resolve_site_entitlements(
-        site_id=str(site.id),
-        workspace_id=site.workspace,
-        plan_tier=site.plan_tier,
-        subscription_status=site.subscription_status,
-        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
-    )
-    if not ent.badge_required:
-        return
-
+    ent = _badge_entitlements(site)
     logger.info(
         "sites: refused hiding the badge on site %s — tier %s, subscription active: %s",
         site.id,

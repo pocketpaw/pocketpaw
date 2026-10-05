@@ -1,25 +1,16 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
 #
-# Updated 2026-10-03 (fix/paw-bar-frame-headers): the live frame and the owner
-# preview frame send ``Permissions-Policy`` (``PAWBAR_FRAME_PERMISSIONS``, mic
-# opened to the frame for dictation), so the self-hosted dashboard middleware no
-# longer stamps ``microphone=()`` over them. The dead shell's CSP carries an
-# explicit ``frame-ancestors *`` so the middleware leaves it frameable.
-#
-# Updated 2026-10-02 (feat/partners-foundation, PH-1): concierge gates take the
-# site's workspace Paw Partners profile; the frame memo caches it with the Site,
-# and the chat turn passes the key gate's profile into the quota check.
-#
 # PUBLIC (anonymous visitors; the Site's ``signed_key`` is the only credential):
 #   GET /paw-bar/frame (the glass app document: CSP frame-ancestors from the Site's
 #   ``allowed_origins`` plus the dashboard origin, CSP ``sandbox`` from
-#   ``PAWBAR_FRAME_SANDBOX``, no flag grants top navigation; 403 on an empty
-#   allowlist or a switched-off concierge), GET /paw-bar/widget.js (the
-#   tenant-blind loader) and GET /paw-bar/actions.js (the opt-in page-actions host
-#   script, same caching), POST /paw-bar/chat (SSE), POST /paw-bar/action and
-#   GET /paw-bar/cart, POST /paw-bar/request-human, POST /paw-bar/decision-contact,
-#   the decision and messages polls, articles, the visitor's own conversations,
-#   and the legacy spec + event ingest.
+#   ``PAWBAR_FRAME_SANDBOX``, no flag grants top navigation; 403 on an empty allowlist
+#   or a switched-off concierge; both frames send ``PAWBAR_FRAME_PERMISSIONS``; the
+#   frame memo caches the Site with its workspace's Paw Partners profile, which the
+#   concierge gates take), GET /paw-bar/widget.js (the tenant-blind loader) and GET
+#   /paw-bar/actions.js (the opt-in page-actions host script, same caching), POST
+#   /paw-bar/chat (SSE), POST /paw-bar/action and GET /paw-bar/cart, POST
+#   /paw-bar/request-human, POST /paw-bar/decision-contact, the decision and messages
+#   polls, articles, the visitor's own conversations, and the legacy spec + event ingest.
 #   ``_front_gate_for_key`` is the shared gate, cheapest first: per-IP bucket ->
 #   customer_ref charset/length (400) -> widget exists (404) -> rate limit (429)
 #   -> key + dual-mode origin (401/403; an iframe request from our frame origin was
@@ -36,17 +27,18 @@
 #   outcome's structured detail when it has one, else its error code.
 #
 # OWNER (session-authed; reads gate on ``paw_bar.read``, mutations on
-# ``paw_bar.manage``, both bound to the session workspace; another workspace's id
-# is a 404): /paw-bar/admin/site/{id}/ settings (partial PATCH of the concierge_*
-# switches and guided fields; ``embed_snippet`` only to a caller who can read the
-# site's pocket), concierge create/delete (the only path that creates one),
-# overview, stats (runs priced at the time they ran, via metering), conversations
-# (list, transcript, PATCH, reply = type-to-takeover), decisions, handoffs,
-# knowledge read/sync, preview-frame and widget spec; plus the bulk
-# POST /paw-bar/admin/sites/conversations. Tenancy runs at two gates: the Site is
-# loaded workspace-scoped, then its widget is resolved from ``Site.pocket_id`` (an
-# empty pocket_id resolves none). Widget CRUD (/paw-bar/widgets...) takes the same
-# role gates or the widget's owner token; list/read return ``PawBarWidgetPublic``.
+# ``paw_bar.manage``, both bound to the session workspace; another workspace's id is a
+# 404): /paw-bar/admin/site/{id}/ settings (partial PATCH of the concierge_* switches,
+# guided fields and visitor options; hiding the "Powered by" line is a 402 unless the
+# site is entitled to remove branding; ``embed_snippet`` and ``actions_snippet`` only to
+# a caller who can read the site's pocket), concierge create/delete (the only path that
+# creates one), overview, stats (runs priced at the time they ran, via metering),
+# conversations (list, transcript, PATCH, reply = type-to-takeover), decisions,
+# handoffs, knowledge read/sync, preview-frame and widget spec; plus the bulk POST
+# /paw-bar/admin/sites/conversations. Tenancy runs at two gates: the Site is loaded
+# workspace-scoped, then its widget is resolved from ``Site.pocket_id`` (an empty
+# pocket_id resolves none). Widget CRUD (/paw-bar/widgets...) takes the same role gates
+# or the widget's owner token; list/read return ``PawBarWidgetPublic``.
 #
 # Invariants: one definition of "this visitor's turns" (``_concierge_runs_for_visitor``)
 # and of which conversation a run belongs to (``_conversation_of_run`` /
@@ -54,11 +46,8 @@
 # concierge's memory; times are compared as aware UTC with an ObjectId tie-break.
 # ``concierge_store_transcripts`` governs storing visitor text (and so the memory),
 # never the answer. Ledger beats and owner notifications are fail-soft and never
-# cost a visitor an answer.
-#
-# Changes (2026-10-01, CN-7): the legacy event ingest interpolates mappings with
-# sites_capture.ingest.interpolate; the private _interpolate/_lookup copy and
-# _PLACEHOLDER_RE are gone. The origin policy here is unchanged (fails open).
+# cost a visitor an answer. The legacy event ingest interpolates mappings with
+# ``sites_capture.ingest.interpolate``; its origin policy fails open.
 from __future__ import annotations
 
 import asyncio
@@ -93,10 +82,14 @@ from pocketpaw.paw_bar.catalog_store import CatalogFull
 from pocketpaw.paw_bar.concierge_fields import (
     ConciergeAbout,
     ConciergeAvoidTopics,
+    ConciergeDisclosure,
     ConciergeEscalation,
     ConciergeLanguages,
     ConciergeName,
+    ConciergePrivacyUrl,
     ConciergeTone,
+    clean_disclosure,
+    clean_privacy_url,
 )
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
@@ -894,6 +887,12 @@ def _pawbar_frame_config(
     appearance: ConciergeAppearance | None = None,
     concierge_name: str = "",
     preview: bool = False,
+    disclosure: str = "",
+    privacy_href: str = "",
+    consent_required: bool = False,
+    voice: bool = True,
+    expandable: bool = True,
+    branding_removable: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
     and the owner preview frame (D5).
@@ -919,6 +918,12 @@ def _pawbar_frame_config(
     ``concierge_name`` is the owner's guided name (``Site.concierge_name``). The
     header shows the look editor's own ``agent_name`` when set, else this name,
     so a concierge named in setup is not headed "Concierge" by the widget.
+
+    The visitor options (``disclosure`` through ``expandable``) are the Site's,
+    read by both callers through ``_site_visitor_options``. ``branding_removable``
+    is the site's entitlement to hide branding (``_branding_removable``); its
+    default False is the fail-closed one, so a caller that forgets it shows the
+    "Powered by" line rather than hiding it unpaid.
     """
     look = appearance or ConciergeAppearance()
     return {
@@ -980,7 +985,61 @@ def _pawbar_frame_config(
         # pinned dark). The widget applies it over ``tokens``; unset dark fields
         # fall back to the light ones, so an untouched dark set equals ``tokens``.
         "tokensDark": look.tokens_dark(),
+        # 'sm' | 'md' | 'lg'.
+        "barSize": look.size,
+        # The AI line under the composer; "" keeps the widget's own wording.
+        "disclosure": disclosure or "",
+        "privacyHref": privacy_href or "",
+        "consentRequired": bool(consent_required),
+        # The widget turns dictation off only on an explicit false.
+        "voice": voice is not False,
+        "expandable": expandable is not False,
+        # The owner may hide "Powered by Paw Sites" only on an entitled site; a
+        # stored False on a site that lost the entitlement shows it again.
+        "poweredBy": bool(look.show_branding) or not branding_removable,
     }
+
+
+def _site_visitor_options(site: Any) -> dict[str, Any]:
+    """The Site's visitor options as ``_pawbar_frame_config`` keyword arguments.
+
+    getattr with each field's default, so a row older than the fields boots
+    today's bar. The two texts were validated on the settings PATCH; they are
+    re-cleaned here because they land in the visitor's frame, and a value that no
+    longer validates is dropped rather than shown.
+    """
+    try:
+        disclosure = clean_disclosure(getattr(site, "concierge_disclosure", "") or "")
+    except ValueError:
+        disclosure = ""
+    try:
+        privacy_href = clean_privacy_url(getattr(site, "concierge_privacy_url", "") or "")
+    except ValueError:
+        privacy_href = ""
+    return {
+        "disclosure": disclosure,
+        "privacy_href": privacy_href,
+        "consent_required": getattr(site, "concierge_consent_required", False) is True,
+        "voice": getattr(site, "concierge_voice", True) is not False,
+        "expandable": getattr(site, "concierge_expandable", True) is not False,
+    }
+
+
+async def _branding_removable(site: Any, *, partner: Any = ...) -> bool:
+    """Whether ``site`` may hide its "Powered by" line: the site badge's own rule
+    (``sites.service.badge_removal_entitled``). ``partner`` skips the profile read
+    when the caller holds it. Any failure is False, which only shows the line."""
+    try:
+        from pocketpaw_ee.sites.service import badge_removal_entitled
+
+        return await badge_removal_entitled(site, partner=partner)
+    except Exception:  # noqa: BLE001 — never break a frame or the settings page
+        logger.warning(
+            "paw-bar: could not resolve the branding entitlement for site %s",
+            str(getattr(site, "id", "?")),
+            exc_info=True,
+        )
+        return False
 
 
 async def _bound_agent_starters(agent_id: str, *, workspace_id: str) -> list[str]:
@@ -1213,6 +1272,9 @@ async def frame(
         # it within ``_FRAME_SITE_TTL_S`` + ``_FRAME_MAX_AGE_S``, not after a redeploy.
         appearance=getattr(site, "concierge_appearance", None),
         concierge_name=getattr(site, "concierge_name", "") or "",
+        **_site_visitor_options(site),
+        # ``partner`` came with the memoised Site, so this reads nothing more.
+        branding_removable=await _branding_removable(site, partner=partner),
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
@@ -1658,6 +1720,14 @@ class ConciergeSettingsUpdate(BaseModel):
     concierge_about: ConciergeAbout | None = None
     concierge_avoid_topics: ConciergeAvoidTopics | None = None
     concierge_escalation: ConciergeEscalation | None = None
+    # Visitor options the frame passes to the bar. The disclosure is one line of
+    # at most 140 characters ("" = the bar's own wording); the privacy URL is ""
+    # or an https link of at most 500. Either past its rule is a 422.
+    concierge_disclosure: ConciergeDisclosure | None = None
+    concierge_privacy_url: ConciergePrivacyUrl | None = None
+    concierge_consent_required: bool | None = None
+    concierge_voice: bool | None = None
+    concierge_expandable: bool | None = None
 
 
 class ConciergePreviewTokensRequest(BaseModel):
@@ -1701,6 +1771,17 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_about: str = ""
     concierge_avoid_topics: list[str] = Field(default_factory=list)
     concierge_escalation: ConciergeEscalation | None = None
+    # Visitor options (see ``ConciergeSettingsUpdate``).
+    concierge_disclosure: str = ""
+    concierge_privacy_url: str = ""
+    concierge_consent_required: bool = False
+    concierge_voice: bool = True
+    concierge_expandable: bool = True
+    # Whether this site may hide the "Powered by" line
+    # (``concierge_appearance.show_branding=false``): the same entitlement as the
+    # site badge. The editor disables the switch when False; a PATCH that hides
+    # it anyway is a 402.
+    branding_removable: bool = False
     # CR-12: whether the owner has created this site's concierge
     # (``Site.concierge_created_at``). False means "none": the dashboard shows the
     # create empty state, and every public seam treats the site as off.
@@ -1710,6 +1791,9 @@ class ConciergeSettingsResponse(BaseModel):
     # site has not earned a bar: no concierge created, no widget, no embed key,
     # the concierge switched off, or a plan that does not sell it.
     embed_snippet: str = ""
+    # The opt-in page-actions tag (``embed.build_actions_snippet``) on the same
+    # API base. "" exactly when ``embed_snippet`` is.
+    actions_snippet: str = ""
 
 
 class ConciergeCreateRequest(BaseModel):
@@ -1795,6 +1879,14 @@ async def _site_embed_snippet(site: Any, workspace_id: str, user_id: str) -> str
         return ""
 
 
+def _actions_snippet() -> str:
+    """The page-actions tag on the public API base ``_site_embed_snippet`` uses."""
+    from pocketpaw_ee.paw_bar.embed import build_actions_snippet
+    from pocketpaw_ee.sites.service import _capture_base
+
+    return build_actions_snippet(api_base=_capture_base())
+
+
 def _site_concierge_runtime(site: Any) -> str:
     """The site's concierge runtime: "v2" only when explicitly set, else "legacy".
 
@@ -1809,6 +1901,8 @@ async def _concierge_settings_response(
 ) -> ConciergeSettingsResponse:
     """The settings view GET and PATCH both return. ``user_id`` is the caller, for
     the snippet's pocket read gate."""
+    embed_snippet = await _site_embed_snippet(site, workspace_id, user_id)
+    visitor = _site_visitor_options(site)
     return ConciergeSettingsResponse(
         site_id=str(site.id),
         concierge_enabled=site.concierge_enabled,
@@ -1832,8 +1926,17 @@ async def _concierge_settings_response(
         concierge_about=getattr(site, "concierge_about", "") or "",
         concierge_avoid_topics=list(getattr(site, "concierge_avoid_topics", None) or []),
         concierge_escalation=getattr(site, "concierge_escalation", None),
+        # Same getattr defaults the frame reads, so the editor shows what boots.
+        concierge_disclosure=visitor["disclosure"],
+        concierge_privacy_url=visitor["privacy_href"],
+        concierge_consent_required=visitor["consent_required"],
+        concierge_voice=visitor["voice"],
+        concierge_expandable=visitor["expandable"],
+        branding_removable=await _branding_removable(site),
         concierge_exists=getattr(site, "concierge_created_at", None) is not None,
-        embed_snippet=await _site_embed_snippet(site, workspace_id, user_id),
+        embed_snippet=embed_snippet,
+        # Same gates as the embed tag: no bar on the page, nothing to act through.
+        actions_snippet=_actions_snippet() if embed_snippet else "",
     )
 
 
@@ -1895,8 +1998,25 @@ async def update_site_concierge_settings(
     and workspace-scoped, so a cross-tenant site id 404s before anything is written.
     The change is read on the NEXT public request (the gates re-``find_one`` the Site
     every time), so toggling ``concierge_enabled`` off silences the bar immediately.
+
+    Hiding the "Powered by" line (``concierge_appearance.show_branding`` turning
+    False) is 402 ``branding_not_entitled`` on a site that is not entitled to
+    remove branding, and nothing in the PATCH is written. Keeping it shown, or
+    re-sending an already stored False, is always accepted.
     """
     site = await _load_site_scoped(site_id, workspace_id)
+    stored_look = getattr(site, "concierge_appearance", None) or ConciergeAppearance()
+    if (
+        req.concierge_appearance is not None
+        and not req.concierge_appearance.show_branding
+        and stored_look.show_branding
+    ):
+        # Not ``_branding_removable``: that one fails to "not entitled" for
+        # display; a refusal must come from the real answer, an error is a 500.
+        from pocketpaw_ee.sites.service import badge_removal_entitled
+
+        if not await badge_removal_entitled(site):
+            raise HTTPException(status_code=402, detail="branding_not_entitled")
     # Writes the switch and nothing else (CR-12). This PATCH used to provision an
     # agent whenever it set concierge_enabled=true; turning a switch on is not
     # creating a concierge, and on a site with none the switch stays inert
@@ -3744,6 +3864,8 @@ async def get_site_preview_frame(
         appearance=getattr(site, "concierge_appearance", None),
         concierge_name=getattr(site, "concierge_name", "") or "",
         preview=True,
+        **_site_visitor_options(site),
+        branding_removable=await _branding_removable(site),
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
     # TRANSPARENT, exactly like the public embed. The dashboard composes the
