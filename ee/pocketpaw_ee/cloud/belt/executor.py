@@ -924,7 +924,13 @@ async def _requeue_for_redevelop(store: Any, action_id: str) -> str | None:
     action = await store.get_action(action_id)
     params = dict(getattr(action, "parameters", None) or {})
     blob = dict(params.get(_CODE_CHANGE_PARAM_KEY) or {})
-    blob.update(station_pending=True, diff="", redevelop=int(blob.get("redevelop") or 0) + 1)
+    blob.update(
+        station_pending=True,
+        diff="",
+        redevelop=int(blob.get("redevelop") or 0) + 1,
+        # The last attempt's check/review report no longer describes anything.
+        summary=str(blob.get("expected_outcome") or blob.get("title") or blob.get("summary") or ""),
+    )
     for key in ("headless_error", "files_changed"):
         blob.pop(key, None)
     params[_CODE_CHANGE_PARAM_KEY] = blob

@@ -349,7 +349,8 @@ merged, the second's patch may no longer apply. For a headless run (blob
 `--3way` apply; when both fail it does not fail the run. It **re-develops** it:
 
 ```
-approved ──apply conflict──▶ blob: diff cleared, station_pending, redevelop=1
+approved ──apply conflict──▶ blob: diff cleared, station_pending, redevelop=1,
+                                   summary back to the expected outcome
                              status: approved → pending  (event action_redevelop)
                              belt_run_updated(queued, station)
          ──after cleanup──▶  headless dispatcher develop(run_ref): the station
@@ -371,7 +372,8 @@ fails. The status flip uses the store's `_update_status` with
 `GET /api/v1/belt/runs` and `GET /api/v1/belt/runs/{id}` rows carry, besides
 status, stage and the landing fields: `title` (the task title, `null` on a
 hand-driven run), `files_changed` (from the attached diff, replaced by the
-staged count on landing), and `error`: why the run failed, which is the
+staged count on landing), `redevelop` (how many times the run went back to the
+develop station on a moved base: 0 or 1), and `error`: why the run failed, which is the
 executor's reason (`Action.error`) or, for a develop that failed, the
 `headless_error`. `null` when nothing failed.
 

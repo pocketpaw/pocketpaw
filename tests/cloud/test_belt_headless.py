@@ -542,8 +542,19 @@ async def test_moved_base_redevelops_and_returns_to_the_gate(
         calls.append(req)
         return DevelopResult(diff=fresh, base_branch="main", summary="report 2")
 
-    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", redevelop)
+    seen_queued: list[dict] = []
+
+    async def peek_then_redevelop(req: DevelopRequest) -> DevelopResult:
+        seen_queued.append(await belt_service.get_run(WS, second))
+        return await redevelop(req)
+
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", peek_then_redevelop)
     await _approve_and_drain(store, second)
+    # While it re-develops, the run reads as a queued re-develop with no stale
+    # diff or report on it.
+    queued = seen_queued[0]
+    assert (queued["status"], queued["redevelop"], queued["diff"]) == ("queued", 1, "")
+    assert queued["summary"] == "hello.txt exists"
 
     # Back through the develop station once, aimed at the task's expected outcome.
     assert len(calls) == 1 and calls[0].summary == "hello.txt exists"
