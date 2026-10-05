@@ -13,7 +13,9 @@
 # (components, code dropped) and ripple (the rippleSpec walked for copy). A FOREIGN
 # site (``mint_foreign_site``: a concierge on a page we never rendered) has an
 # empty pocket, so ``sites.foreign_grounding`` crawls its verified, fresh origin
-# into a source map the html extractor reads. Its failures each get a status code,
+# into a source map the html extractor reads. An html page is read as Markdown
+# (``html_to_markdown``, also used by concierge links and URL ingest) so tables
+# and headings reach the compile intact. Its failures each get a status code,
 # a failed crawl ingests nothing, and a partial one ingests but never prunes. A
 # crawl that reached the origin also schedules the site's first card screenshot
 # when it has none. Crawls run at bind and on the owner's re-sync, never on a
@@ -40,6 +42,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -65,6 +68,17 @@ _MIN_DOCUMENT_CHARS = 40
 
 # Tags whose CONTENT is never page copy.
 _NON_CONTENT_TAGS = {"script", "style", "noscript", "template", "svg", "head"}
+
+# What ``html_to_markdown`` also drops: Markdown keeps link targets, so a <nav>
+# becomes a list of links repeated on every page (noise for BM25 and the compile).
+# A footer stays: it is where a store keeps its phone, address and hours.
+_MARKDOWN_DROP_TAGS = _NON_CONTENT_TAGS | {"nav"}
+
+# Void elements never get an end tag, so ``_ContentFilter`` must not wait for one.
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+    "param", "source", "track", "wbr",
+}  # fmt: skip
 
 # rippleSpec keys that carry structure rather than copy. Everything else is treated
 # as potential copy: over-collecting costs a few noise tokens in a BM25 index,
@@ -224,6 +238,108 @@ def html_to_text(html: str) -> str:
     return harvester.text()
 
 
+class _ContentFilter(HTMLParser):
+    """Re-serialize an HTML document without its non-content elements.
+
+    The pre-pass ``html_to_markdown`` runs before the converter: it drops
+    ``_MARKDOWN_DROP_TAGS`` (contents included), comments and the doctype, reads
+    the <title> out of the dropped <head>, and turns each <img> into its alt text
+    (the old ``html_to_text`` behaviour: an alt is content, an image url is not).
+    Everything else is written back as markup, escaped, for the converter to parse.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._out: list[str] = []
+        self._suppress_depth = 0
+        self._in_title = False
+        self.title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "title":
+            self._in_title = True
+            return
+        if tag in _MARKDOWN_DROP_TAGS:
+            if tag not in _VOID_TAGS:
+                self._suppress_depth += 1
+            return
+        if self._suppress_depth:
+            return
+        if tag == "img":
+            alt = next((v for k, v in attrs or [] if k == "alt" and v), "")
+            if alt.strip():
+                self._out.append(f" {html_lib.escape(alt.strip())} ")
+            return
+        rendered = "".join(
+            f' {k}="{html_lib.escape(v, quote=True)}"' if v is not None else f" {k}"
+            for k, v in attrs or []
+        )
+        self._out.append(f"<{tag}{rendered}>")
+
+    def handle_startendtag(self, tag: str, attrs: Any) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in _VOID_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+            return
+        if tag in _MARKDOWN_DROP_TAGS:
+            self._suppress_depth = max(0, self._suppress_depth - 1)
+            return
+        if not self._suppress_depth and tag not in _VOID_TAGS:
+            self._out.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title_parts.append(data)
+        elif not self._suppress_depth:
+            self._out.append(html_lib.escape(data, quote=False))
+
+    def markup(self) -> str:
+        return "".join(self._out)
+
+
+def _convert_markdown(html: str) -> str:
+    """The conversion itself, without the safety net (``html_to_markdown``)."""
+    from html_to_markdown import ConversionOptions, convert
+
+    content_filter = _ContentFilter()
+    content_filter.feed(html)
+    content_filter.close()
+    # tier1 is the converter's full DOM parse: it keeps implicitly closed cells
+    # (``<td>a<td>b``), which its default fast path drops. Its one quirk, an
+    # inline <svg> written out as a data-URI image, cannot happen here: the
+    # filter has already removed every <svg>.
+    options = ConversionOptions(
+        heading_style="atx",
+        extract_metadata=False,
+        tier_strategy="tier1",
+    )
+    body = convert(content_filter.markup(), options).content or ""
+    title = _WS_RE.sub(" ", "".join(content_filter.title_parts)).strip()
+    text = f"{title}\n\n{body}" if title else body
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+    return _BLANKS_RE.sub("\n\n", "\n".join(lines)).strip()
+
+
+def html_to_markdown(html: str) -> str:
+    """An HTML document as Markdown: headings as ``#``, tables as Markdown tables,
+    lists, links and emphasis kept; script, style, nav and the other
+    ``_MARKDOWN_DROP_TAGS`` dropped; the <title> leads and image alt text is kept.
+
+    Never raises: this runs over customer-authored and crawled pages, so a parse
+    or converter failure (or an empty result) falls back to ``html_to_text``.
+    """
+    try:
+        markdown = _convert_markdown(html)
+    except Exception:  # noqa: BLE001 — plain text beats no text
+        logger.debug("sites.kb: Markdown conversion failed; using plain text", exc_info=True)
+        return html_to_text(html)
+    return markdown or html_to_text(html)
+
+
 def svelte_to_text(source: str) -> str:
     """Prose from a Svelte component: script and style blocks removed first (their
     contents are code, not copy), then template expressions like ``{item.name}``,
@@ -313,7 +429,7 @@ def _path_slug(path: str) -> str:
 
 def _page_text(path: str, body: str, engine: str) -> str:
     if engine == "html":
-        return html_to_text(body)
+        return html_to_markdown(body)
     if engine == "svelte":
         return svelte_to_text(body)
     return _tidy(body)
@@ -804,6 +920,7 @@ __all__ = [
     "SiteDocument",
     "SiteKnowledgeReport",
     "extract_site_documents",
+    "html_to_markdown",
     "html_to_text",
     "kb_scope_for_pocket",
     "safe_sync_site_knowledge",

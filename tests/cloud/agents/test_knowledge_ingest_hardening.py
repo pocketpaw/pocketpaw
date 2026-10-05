@@ -12,7 +12,11 @@
 #   * compiled_with == "none (fallback)" in any ingest result → rejected
 #     loudly, warning names the scope and article id;
 #   * chat-turn search (search_context_for_scope) fails soft: timeout or
-#     subprocess failure → "" plus a warning naming the scope.
+#     subprocess failure → "" plus a warning naming the scope;
+#   * context search reads kb-go's ``--context --json`` entries (a body holding
+#     a Markdown rule stays whole), falls back to an old binary's text output,
+#     and passes ``--context-chars`` after the query;
+#   * URL ingest extracts a page as Markdown (tables and headings kept).
 """Ingest hardening: agent-backend compile, fallback rejection, search guard."""
 
 from __future__ import annotations
@@ -450,3 +454,111 @@ async def test_search_context_subprocess_failure_returns_empty(monkeypatch, capl
     assert result == ""
     warning = "\n".join(r.getMessage() for r in caplog.records)
     assert "pocket:p1" in warning
+
+
+# --------------------------------------------------------------------------- #
+# Context search output: kb-go's JSON entries, with the old text as fallback
+# --------------------------------------------------------------------------- #
+
+# A body holding a Markdown horizontal rule: the old text output joins articles
+# with exactly this separator, so splitting on it cut such a body in half.
+_RULED_BODY = "Measure over a base layer.\n\n---\n\n| US men's | EU |\n| --- | --- |\n| 10 | 44 |"
+
+
+@pytest.mark.asyncio
+async def test_context_entries_read_kb_json_and_pass_the_char_budget(monkeypatch):
+    entries = [{"id": "size-guide", "title": "Size guide", "text": _RULED_BODY, "truncated": False}]
+    spy = _install_spy(monkeypatch, [(0, json.dumps(entries), "")])
+
+    result = await KnowledgeService.search_context_entries_for_scope(
+        "pocket:p1", "shoe sizes", limit=3, context_chars=2000
+    )
+
+    assert result == entries
+    # The query stays the first argument: an old kb-go reads it from there and
+    # skips the flags it does not know.
+    assert spy.calls[0]["cmd"][1:] == [
+        "search",
+        "shoe sizes",
+        "--scope",
+        "pocket:p1",
+        "--limit",
+        "3",
+        "--context",
+        "--context-chars",
+        "2000",
+        "--json",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_entries_fall_back_to_old_kb_text_output(monkeypatch):
+    """An old kb-go ignores --json on --context and prints ``## Title`` blocks."""
+    text = "## Size guide\nShoe chart.\n\n---\n\n## Returns\n60-day returns.\n"
+    _install_spy(monkeypatch, [(0, text, "")])
+
+    result = await KnowledgeService.search_context_entries_for_scope("pocket:p1", "q")
+
+    assert [(e["id"], e["title"], e["text"]) for e in result] == [
+        ("", "Size guide", "Shoe chart."),
+        ("", "Returns", "60-day returns."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_entries_fail_soft(monkeypatch, caplog):
+    _install_spy(monkeypatch, [(2, "", "index corrupt")])
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.cloud.agents.knowledge"):
+        result = await KnowledgeService.search_context_entries_for_scope("pocket:p1", "q")
+
+    assert result == []
+    assert "pocket:p1" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_chat_context_reads_a_new_kb_json_answer_as_text(monkeypatch):
+    """The chat path always passed --json; a kb-go that honours it on --context
+    answers with entries, which must still reach the prompt as context text."""
+    entries = [
+        {"id": "a", "title": "Size guide", "text": _RULED_BODY, "truncated": False},
+        {"id": "b", "title": "Returns", "text": "60-day returns.", "truncated": False},
+    ]
+    spy = _install_spy(monkeypatch, [(0, json.dumps(entries), "")])
+
+    result = await KnowledgeService.search_context_for_scope("workspace:w1", "query")
+
+    assert result == f"## Size guide\n{_RULED_BODY}\n\n---\n\n## Returns\n60-day returns."
+    assert "--context-chars" not in spy.calls[0]["cmd"]
+
+
+# --------------------------------------------------------------------------- #
+# URL ingest extraction
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_url_extraction_keeps_tables_and_headings_as_markdown(monkeypatch):
+    import re
+    from pathlib import Path
+
+    import httpx
+
+    html = (Path(__file__).resolve().parents[2] / "fixtures" / "size_guide.html").read_text(
+        encoding="utf-8"
+    )
+    real_client = httpx.AsyncClient
+
+    def _client(**kw):
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        )
+        return real_client(transport=transport, **kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client)
+
+    text = await knowledge._extract_url("https://paw-demo-store.vercel.app/size-guide/")
+
+    assert re.search(r"\|\s*10\s*\|\s*11\.5\s*\|\s*9\s*\|\s*44\s*\|\s*28\.0\s*\|", text), text
+    assert re.search(r"^#{1,6} Footwear\s*$", text, re.MULTILINE)
+    assert "__sveltekit" not in text and "<table" not in text

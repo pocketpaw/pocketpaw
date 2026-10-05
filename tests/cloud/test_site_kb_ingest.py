@@ -2,7 +2,9 @@
 # reads (ee.pocketpaw_ee.sites.kb_ingest). A dedicated concierge reads exactly ONE
 # scope, pocket:<pocket_id>, and this module is what fills it. Layers:
 #   * Extraction (pure, no I/O): HTML strips script/style but keeps the title and
-#     image alt text; Svelte drops script/style blocks and template expressions;
+#     image alt text; a crawled/hosted HTML page reaches the KB as Markdown, so a
+#     table stays a table and headings stay headings (the size-guide fixture is
+#     our own demo store's page); Svelte drops script/style blocks and template expressions;
 #     ripple walks the spec for copy while skipping structural keys, and renders
 #     price-ish numbers with their key so they are retrievable.
 #   * Article sources: deterministic and kb-safe, so a re-sync UPDATES rather than
@@ -17,7 +19,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -50,6 +54,70 @@ def test_html_survives_malformed_markup():
     text = kb_ingest.html_to_text("<p>Open daily<p>Closed Sunday</div></span>")
     assert "Open daily" in text
     assert "Closed Sunday" in text
+
+
+_SIZE_GUIDE = Path(__file__).resolve().parents[1] / "fixtures" / "size_guide.html"
+# The US men's 10 row of the demo store's footwear chart, as a Markdown table row.
+SHOE_ROW = re.compile(r"\|\s*10\s*\|\s*11\.5\s*\|\s*9\s*\|\s*44\s*\|\s*28\.0\s*\|")
+
+
+def test_a_site_page_keeps_its_tables_and_headings_as_markdown():
+    """A size chart flattened to one cell per line made the compile model rebuild
+    the table, and the concierge then said the chart "isn't available". The page
+    reaches the KB as Markdown instead: rows stay rows, headings stay headings."""
+    html = _SIZE_GUIDE.read_text(encoding="utf-8")
+
+    [doc] = kb_ingest.extract_site_documents(engine="html", source={"size-guide.html": html})
+
+    assert SHOE_ROW.search(doc.text), doc.text
+    assert re.search(r"^#{1,6} Footwear\s*$", doc.text, re.MULTILINE)
+    assert re.search(r"^# Size guide\s*$", doc.text, re.MULTILINE)
+    assert "Size guide | Cairn & Co." in doc.text  # the <title> is still read
+    assert "(541) 555-0142" in doc.text  # the footer's contact details are copy
+    assert "__sveltekit" not in doc.text  # script content stays out
+    assert "Tents & Sleep" not in doc.text  # navigation link lists stay out
+    assert "\n\n\n" not in doc.text
+
+
+def test_html_to_markdown_keeps_title_and_alt_text_and_drops_code():
+    html = (
+        "<html><head><title>Brew &amp; Co | Hours</title>"
+        "<style>body{color:red}</style></head>"
+        "<body><nav><a href='/'>Home</a></nav><h1>Brew &amp; Co</h1><p>We open at 8am.</p>"
+        "<script>var tracker = 1;</script>"
+        '<img src="latte.jpg" alt="Latte art"></body></html>'
+    )
+    text = kb_ingest.html_to_markdown(html)
+    assert "Brew & Co | Hours" in text
+    assert re.search(r"^# Brew & Co\s*$", text, re.MULTILINE)
+    assert "We open at 8am." in text
+    assert "Latte art" in text
+    assert "color:red" not in text
+    assert "tracker" not in text
+    assert "Home" not in text
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>Open daily<p>Closed Sunday</div></span>",
+        "<table><tr><td>Open daily<td>Closed Sunday",
+        "<<<>>>Open daily</p></p></table> Closed Sunday",
+    ],
+)
+def test_html_to_markdown_survives_malformed_markup(html):
+    text = kb_ingest.html_to_markdown(html)
+    assert "Open daily" in text
+    assert "Closed Sunday" in text
+
+
+def test_html_to_markdown_falls_back_to_plain_text_when_conversion_fails(monkeypatch):
+    def _boom(*_a: Any, **_kw: Any) -> str:
+        raise RuntimeError("converter crashed")
+
+    monkeypatch.setattr(kb_ingest, "_convert_markdown", _boom)
+    text = kb_ingest.html_to_markdown("<h1>Menu</h1><p>Flat white</p>")
+    assert "Menu" in text and "Flat white" in text
 
 
 def test_svelte_drops_code_blocks_and_expressions():

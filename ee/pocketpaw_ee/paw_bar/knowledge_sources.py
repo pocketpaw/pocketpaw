@@ -16,8 +16,9 @@
 #     fault) from a file the parser cannot read.
 #   * ``fetch_link_text`` fetches through ``pocketpaw.security.safe_fetch`` — DNS
 #     pinned, every redirect hop re-checked for a public address, body capped — and
-#     turns HTML into text with ``sites.kb_ingest.html_to_text``, the same helper
-#     the page sync feeds the concierge with. No second fetcher is written here.
+#     turns HTML into Markdown with ``sites.kb_ingest.html_to_markdown`` (tables
+#     and headings kept), the same helper the page sync feeds the concierge with.
+#     No second fetcher is written here.
 #
 # Every refusal is a ``SourceRefused`` carrying the status code the row (or the
 # HTTP detail) reports: ``too_large``, ``unsupported``, ``blocked``, or ``failed``
@@ -197,7 +198,7 @@ async def fetch_link_text(url: str, *, max_bytes: int) -> tuple[str, str]:
         safe_get_streamed,
     )
     from pocketpaw_ee.sites.foreign_grounding import GROUNDING_USER_AGENT
-    from pocketpaw_ee.sites.kb_ingest import html_to_text
+    from pocketpaw_ee.sites.kb_ingest import html_to_markdown
 
     try:
         result = await safe_get_streamed(
@@ -222,7 +223,7 @@ async def fetch_link_text(url: str, *, max_bytes: int) -> tuple[str, str]:
         raise SourceRefused("too_large")
     mime = result.content_type.split(";", 1)[0].strip().lower()
     if mime in ("text/html", "application/xhtml+xml"):
-        return html_to_text(result.text), mime
+        return html_to_markdown(result.text), mime
     return result.text, mime
 
 

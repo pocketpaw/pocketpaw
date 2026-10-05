@@ -212,6 +212,9 @@ dependencies = [
 extraction = [
     "pypdf",
     "trafilatura",
+    # HTML pages -> Markdown for the KB (sites.kb_ingest.html_to_markdown):
+    # tables and headings survive. Also in the root `knowledge` extra.
+    "html-to-markdown>=3.10",
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
     # Office formats beyond docx (2026-08-29, files-intelligence Track 1).

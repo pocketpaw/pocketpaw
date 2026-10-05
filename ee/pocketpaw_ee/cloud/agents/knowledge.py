@@ -4,8 +4,9 @@
 # document, one article) or ``ingest_document_to_scope`` (a long document, one
 # article per section); the caller decides the scope string (``agent:{id}``,
 # ``workspace:{id}``, ``pocket:{id}``). File extraction runs through
-# ``ee.cloud.extraction`` and URL extraction through trafilatura; kb-go does
-# compile, search, index and storage.
+# ``ee.cloud.extraction`` and URL extraction through
+# ``sites.kb_ingest.html_to_markdown`` (a page's tables and headings kept); kb-go
+# does compile, search, index and storage.
 #
 # kb-go searches compiled articles only, so a fact a compile drops cannot be
 # found. Without an API key, ``ingest_document_to_scope`` splits a document over
@@ -38,12 +39,15 @@
 #     one file name, may share one.
 #   * Chat-turn search (``search_context_for_scope``) fails soft: a 5s timeout
 #     or a kb error returns "" with a warning, so the KB never stalls a turn.
+#     ``search_context_entries_for_scope`` (the concierge) reads kb-go's
+#     ``--context --json`` entries, so a body holding a ``---`` rule stays whole,
+#     and falls back to parsing an old binary's text output.
 #   * ``extract_ingest_article_id`` is the one place that knows the receipt's
 #     key order (id, article_id, article).
 """Agent knowledge service — thin wrapper over the `kb` Go binary.
 
 The kb binary (github.com/qbtrix/kb-go) handles compilation, search, indexing,
-and storage. URL extraction stays inline (trafilatura). File extraction is
+and storage. URL extraction stays inline (HTML to Markdown). File extraction is
 routed through `ee.cloud.extraction.build_chain` so cloud captioning can be
 configured without touching this file.
 """
@@ -870,7 +874,7 @@ class KnowledgeService:
 
     @staticmethod
     async def ingest_url(agent_id: str, url: str) -> dict:
-        """Fetch URL with trafilatura (Python), pipe text to kb."""
+        """Fetch a URL, extract it (HTML as Markdown), pipe the text to kb."""
         try:
             text = await _extract_url(url)
             return await KnowledgeService.ingest_document_to_scope(f"agent:{agent_id}", text, url)
@@ -1001,6 +1005,7 @@ class KnowledgeService:
         limit: int = 3,
         *,
         timeout: int = SEARCH_CONTEXT_TIMEOUT_S,
+        context_chars: int | None = None,
     ) -> str:
         """Get formatted knowledge context for any kb-go scope.
 
@@ -1012,31 +1017,41 @@ class KnowledgeService:
         any subprocess failure it logs a warning and returns ``""`` — the
         caller simply skips the KB block. A slow or broken KB must never
         stall a chat turn.
+
+        The result is ``## Title\\nbody`` blocks joined by ``---`` whichever
+        output kb-go gives: ``_kb`` always passes ``--json``, which an old
+        binary ignores on ``--context`` (text) and a newer one honours
+        (entries, re-joined here). ``context_chars`` passes kb-go's
+        per-article budget (``--context-chars``).
         """
-        start = time.monotonic()
-        try:
-            result = await asyncio.to_thread(
-                _kb,
-                "search",
-                query,
-                "--scope",
-                scope,
-                "--limit",
-                str(limit),
-                "--context",
-                timeout=timeout,
-            )
-        except Exception:
-            logger.warning(
-                "kb search for chat context failed (scope=%s, elapsed=%.1fs, "
-                "timeout=%ds); returning empty context",
-                scope,
-                time.monotonic() - start,
-                timeout,
-                exc_info=True,
-            )
-            return ""
+        result = await _search_context(scope, query, limit, timeout, context_chars)
+        if isinstance(result, list):
+            return format_context_entries(_context_entries(result))
         return result if isinstance(result, str) else ""
+
+    @staticmethod
+    async def search_context_entries_for_scope(
+        scope: str,
+        query: str,
+        limit: int = 3,
+        *,
+        timeout: int = SEARCH_CONTEXT_TIMEOUT_S,
+        context_chars: int | None = None,
+    ) -> list[dict]:
+        """Context search as entries: ``[{"id", "title", "text", "truncated"}]``.
+
+        Each body arrives whole (a body holding a Markdown ``---`` rule is not
+        split) when kb-go answers ``--context --json``. An old binary prints
+        text instead, which is parsed as before (``parse_context_text``: ids
+        empty, bodies split on the separator). ``context_chars`` is kb-go's
+        per-article budget: past it a newer binary returns an excerpt focused on
+        the query rather than the summary. Same fail-soft contract as
+        :meth:`search_context_for_scope`: any failure returns ``[]``.
+        """
+        result = await _search_context(scope, query, limit, timeout, context_chars)
+        if isinstance(result, list):
+            return _context_entries(result)
+        return parse_context_text(result) if isinstance(result, str) else []
 
     @staticmethod
     async def clear(agent_id: str) -> dict:
@@ -1053,25 +1068,98 @@ class KnowledgeService:
         return result if isinstance(result, list) else []
 
 
+# --- Context search output ---
+
+# kb-go's text ``--context`` output joins ``## Title\nbody`` blocks with this.
+_CONTEXT_SEPARATOR = "\n\n---\n\n"
+
+
+async def _search_context(
+    scope: str, query: str, limit: int, timeout: int, context_chars: int | None
+) -> dict | list | str | None:
+    """``kb search --context`` for one scope, or None on any failure (logged).
+
+    The query stays the first argument: an old kb-go reads it from there and
+    skips flags it does not know (``--context-chars``)."""
+    args = ["search", query, "--scope", scope, "--limit", str(limit), "--context"]
+    if context_chars:
+        args += ["--context-chars", str(int(context_chars))]
+    start = time.monotonic()
+    try:
+        return await asyncio.to_thread(_kb, *args, timeout=timeout)
+    except Exception:
+        logger.warning(
+            "kb search for chat context failed (scope=%s, elapsed=%.1fs, "
+            "timeout=%ds); returning empty context",
+            scope,
+            time.monotonic() - start,
+            timeout,
+            exc_info=True,
+        )
+        return None
+
+
+def _context_entries(raw: list) -> list[dict]:
+    """kb-go's ``--context --json`` entries, normalized; malformed rows dropped."""
+    entries: list[dict] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        text = str(row.get("text") or "").strip()
+        if not title and not text:
+            continue
+        entries.append(
+            {
+                "id": str(row.get("id") or ""),
+                "title": title,
+                "text": text,
+                "truncated": bool(row.get("truncated", False)),
+            }
+        )
+    return entries
+
+
+def parse_context_text(context: str) -> list[dict]:
+    """Entries from an old kb-go's text ``--context`` output (``## Title\\nbody``
+    blocks joined by ``---``). The text carries no ids, and a body holding the
+    separator itself is cut there: the reason newer callers ask for JSON."""
+    entries: list[dict] = []
+    for block in context.split(_CONTEXT_SEPARATOR):
+        block = block.strip()
+        if not block.startswith("## "):
+            continue
+        head, _, body = block.partition("\n")
+        title = head[3:].strip()
+        if title:
+            entries.append({"id": "", "title": title, "text": body.strip(), "truncated": False})
+    return entries
+
+
+def format_context_entries(entries: list[dict]) -> str:
+    """Entries back to the text ``--context`` form the chat prompt expects."""
+    return _CONTEXT_SEPARATOR.join(
+        f"## {e['title']}\n{e['text']}".strip() for e in entries if e["title"] or e["text"]
+    )
+
+
 # --- Heavy extraction (stays in Python) ---
 
 
 async def _extract_url(url: str) -> str:
-    """Extract article text from URL using trafilatura."""
-    try:
-        import httpx
-        import trafilatura
+    """A web page's content for ingest: HTML as Markdown (tables and headings
+    kept, see ``sites.kb_ingest.html_to_markdown``), any other text as is."""
+    import httpx
 
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-            resp = await client.get(url)
-        return trafilatura.extract(resp.text) or resp.text[:5000]
-    except ImportError:
-        # Fallback: just fetch raw HTML
-        import httpx
+    from pocketpaw_ee.sites.kb_ingest import html_to_markdown
 
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-            resp = await client.get(url)
-        return resp.text[:10000]
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        resp = await client.get(url)
+    content_type = resp.headers.get("content-type", "").lower()
+    body = resp.text
+    if "html" in content_type or (not content_type and body.lstrip().startswith("<")):
+        return html_to_markdown(body)
+    return body
 
 
 async def _extract_file(file_path: str) -> str:
