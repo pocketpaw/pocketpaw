@@ -1,4 +1,4 @@
-# tests/cloud/test_belt_develop_station.py — the craft factory's T1 slice.
+# tests/cloud/test_belt_develop_station.py — the craft factory's develop station.
 #
 # Covers the headless develop station (``belt/develop_station.ClaudeCodeDevelop``)
 # end to end against a REAL tmp git repo with REAL tiny check commands; only the
@@ -7,6 +7,11 @@
 # checks/recipes round-tripping through the mandates service, recipe validation
 # in the foreman, the recipe surviving dispatch into ``DevelopRequest``, the
 # production dispatcher developing in the background, and the env-gated wiring.
+# The hardening sections pin the security posture: claude isolation and tool
+# flags (station and foreman), the scrubbed env, refused programs, the
+# multi-tenant wiring refusal, ``.git`` tampering, protected paths, secret
+# diffs and redaction, untrusted fencing, the injection screen, repo
+# containment, process-group kills, and logged background crashes.
 
 from __future__ import annotations
 

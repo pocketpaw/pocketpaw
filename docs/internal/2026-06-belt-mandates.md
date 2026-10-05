@@ -423,7 +423,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
 | `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
 | `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
-| `POCKETPAW_FACTORY_CLAUDE_MODEL` | CLI default | Passed as `--model` when set |
+| `POCKETPAW_FACTORY_CLAUDE_MODEL` | the CLI's built-in default | Passed as `--model` when set (user settings don't load, so a model set there is ignored) |
 | `POCKETPAW_FACTORY_DEVELOP_TIMEOUT` | `900` | Seconds per `claude -p` call (develop, fix, review) |
 | `POCKETPAW_FACTORY_CHECK_TIMEOUT` | `600` | Seconds per check or recipe command |
 | `POCKETPAW_MANDATE_LLM` | `claude` | Foreman / autopilot transport: `claude` or `mock` |
@@ -435,7 +435,11 @@ A local unattended factory runs with `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
 `POCKETPAW_MANDATE_DISPATCHER=headless`, `POCKETPAW_FACTORY_DEVELOP=claude`,
 `POCKETPAW_FACTORY_DEDICATED_HOST=1` and a `POCKETPAW_BELT_REPO_ALLOWLIST`
 covering the bound repos, on a dedicated box where those repos are checked out
-and `claude` and `gh` are authenticated.
+and `claude` and `gh` are authenticated. Station subprocesses get the scrubbed
+env, so the station's own `git fetch` has no `SSH_AUTH_SOCK`, `GH_TOKEN`,
+`GIT_SSH_COMMAND` or `GIT_ASKPASS`: SSH keys must work without an agent (key
+files under `~/.ssh`, or the macOS keychain via `UseKeychain`), and `gh`/HTTPS
+auth must live in its config files, not in env vars.
 
 ## Demo-bar concessions (each marked in code)
 
