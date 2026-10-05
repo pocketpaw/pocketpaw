@@ -28,7 +28,9 @@
 # with BOUNDARIES first; ≤ budget tasks; every task cites sighting ids + names an
 # expected KPI direction; an EMPTY plan with a reason is correct when signals are
 # quiet; boundaries override KPI opportunities; never repeat a failed approach
-# without saying what changed; strict JSON only.
+# without saying what changed; tasks in one shift are independent of each other
+# (they develop from the same base and land separately; dependent follow-up
+# waits for a later shift, which validation cannot detect); strict JSON only.
 
 from __future__ import annotations
 
@@ -319,6 +321,10 @@ healthy, set "no_action": true with a short "no_action_reason" and an empty "tas
 Do not invent work.
 4. Boundaries override KPI opportunities — a boundary-crossing task is never worth it.
 5. This is shift number {context.shift_no}; set "shift_no" to exactly {context.shift_no}.
+6. Tasks in one shift must be INDEPENDENT of each other. Each is developed from the same \
+starting code and lands on its own, so a task never sees another task's change from this \
+shift. Never plan a task that builds on, extends, or needs another task in this shift; \
+plan the first step now and leave the dependent follow-up for a later shift.
 
 == OUTPUT (STRICT) ==
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:

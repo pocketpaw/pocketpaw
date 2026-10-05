@@ -392,6 +392,9 @@ def test_foreman_validates_recipe_names_and_lists_them():
     )
     prompt = foreman.build_prompt(foreman.ForemanContext(shift_no=1, charter=charter))
     assert "== RECIPES" in prompt and "- bump-photo" in prompt and '"recipe": null' in prompt
+    # Same-shift tasks develop from one base, so dependent work waits a shift.
+    assert "Tasks in one shift must be INDEPENDENT" in prompt
+    assert "dependent follow-up for a later shift" in prompt
 
 
 async def _make_mandate(cadence: str, **charter_extra) -> str:
