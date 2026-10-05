@@ -133,7 +133,8 @@ property moves between them.
 is refused rather than snapped to an edge, because a keyframe pinned
 somewhere nobody asked for is worse than none.
 
-Animatable: `x`, `y`, `scale`, `rotation`, `opacity`, `volume`. Font size,
+Animatable: `x`, `y`, `scale`, `rotation`, `opacity`, `volume`, and `fx` (the
+overall strength of a clip's light effects, 0 to 1). Font size,
 colour and the preset are not — say so rather than reaching for a keyframe
 that would silently do nothing.
 

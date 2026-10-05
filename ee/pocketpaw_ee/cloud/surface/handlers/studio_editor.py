@@ -245,6 +245,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
                     end=_fmt_ms(c.get("end_ms")),
                     kind=c.get("kind"),
                     chroma=c.get("chroma"),
+                    effects=c.get("effects"),
                 ),
             )
         )
@@ -290,6 +291,9 @@ Operations (this list is closed — an invented verb is rejected):
 - clear_keyframes {clipId, prop, atMs?}
 - zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
 - set_chroma    {clipId, color?: '#rrggbb'|'auto', similarity?, smoothness?, spill?, off?}
+- set_effects   {clipId, preset?, exposure?, contrast?, temperature?, tint?, saturation?,
+                 glow?, vignette?, spotlight?, rays?, sweep?, leak?, grain?, aberration?,
+                 flicker?, off?}
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -380,19 +384,28 @@ Rules that matter:
   CENTRE, so negative is left and up; scale 1 is original size; opacity 0-1.
 - TO ANIMATE, PIN TWO VALUES. add_keyframe at the start time and again at the
   end time, and the property moves between them. atMs is TIMELINE time and must
-  fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume —
+  fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume, fx —
   nothing else (font size and colour cannot be animated).
 - GREEN SCREEN IS set_chroma. "Remove / key out the green (or blue) background"
   is set_chroma on that video or image clip, color 'auto' unless they name one;
   off: true removes it. Whatever sits on a LOWER lane shows through the keyed
   area.
+- LIGHT AND LOOK ARE set_effects. "Golden hour", "make it moody", "add a glow",
+  "spotlight on her", "light rays" are set_effects on that clip, with a preset
+  (golden-hour | moody | neon-glow | spotlight | dreamy) when one fits; fields
+  passed with it override the preset, null removes one effect, off: true clears
+  them all. To ramp the strength, add_keyframe prop fx (0-1). These change
+  brightness and colour on the frame; they cannot move the real light on a
+  subject, so say so if that is what they want.
 - A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
   marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
   clip under that time on the main video track. "Zoom in here" is zoom_clip with
   focusX/focusY = the centre and atMs = that time. "Fade in" / "Fade out" are
   opacity keyframes pinned at that time and half a second after (animIn / animOut
   on a text clip). "Add a graphic here" is add_motion_graphic with start_ms =
-  that time, or replace_range if they ask to replace the footage. Anything the
+  that time, or replace_range if they ask to replace the footage. "Spotlight
+  here" / "Light rays from here" are set_effects with spotlight / rays x, y = the
+  centre (spotlight radius about half the box's larger side). Anything the
   ops cannot do to just that box, such as blurring it, say so plainly instead of
   approximating it.
 
