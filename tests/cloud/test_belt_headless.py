@@ -21,6 +21,9 @@
 #     stands (the runner never approves or executes).
 #   * FAILURE — a ``DevelopFn`` that raises leaves the action SAFE (still queued,
 #     no diff, station_pending intact) and never crashes.
+#   * LANDING — after a human approves, the real executor applies the diff; the
+#     commit subject is ``feat: <task title>`` and the body carries the why and
+#     the develop report (never the report as the subject).
 #   * The ``DevelopFn`` is injectable: the test passes a deterministic fake — the
 #     runner NEVER calls a real LLM or spawns a real agent.
 
@@ -422,3 +425,42 @@ async def test_headless_diff_applies_after_human_approval(
     # A real belt branch was created carrying the headless-produced change.
     branches = _git(local_repo, "branch", "--list", "feat/belt-*")
     assert branches.strip(), "expected a feat/belt-* branch from the applied diff"
+
+    # The commit subject is the task TITLE, not the develop report; the body
+    # carries the why and the report.
+    branch = landed.parameters["_code_change"]["branch"]
+    assert _git(local_repo, "log", "-1", "--format=%s", branch).strip() == "feat: Add a hello file"
+    body = _git(local_repo, "log", "-1", "--format=%b", branch)
+    assert "demonstrate the headless runner" in body and "flip the greeting" in body
+
+
+def test_commit_subject_keeps_a_typed_title_and_stays_short():
+    from pocketpaw_ee.cloud.belt.executor import _commit_title
+
+    report = "features shipped up\ncheck `uv run pytest`: pass\nreview: pass"
+    assert _commit_title("t", report, title="fix(ledger): count refunds") == (
+        "fix(ledger): count refunds"
+    )
+    long = _commit_title("t", report, title="Record every shipped feature " * 6)
+    assert long.startswith("feat: Record every shipped feature") and len(long) <= 72
+    assert "check" not in long
+    # A hand-proposed change (no title) keeps the summary-based subject.
+    assert _commit_title("task", "Friendlier greeting. More.") == (
+        "feat(belt): Friendlier greeting"
+    )
+
+
+async def test_develop_request_aims_at_the_expected_outcome(store: InstinctStore):
+    """The develop report overwrites ``summary``; the develop request still aims
+    at the task's expected outcome."""
+    action_id = await _queue_station_run(store)
+    seen: list[DevelopRequest] = []
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        seen.append(req)
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="REPORT")
+
+    await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id)
+    blob = (await store.get_action(action_id)).parameters["_code_change"]
+    assert blob["summary"] == "REPORT" and blob["title"] == "Add a hello file"
+    assert seen[0].summary == "hello.txt exists"

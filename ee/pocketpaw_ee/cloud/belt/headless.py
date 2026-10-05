@@ -12,7 +12,8 @@
 #     at app startup (``POCKETPAW_MANDATE_DISPATCHER=headless`` +
 #     ``POCKETPAW_FACTORY_DEVELOP=claude``); tests inject a canned-diff fake.
 #   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued blob (task,
-#     summary, repo, base, mandate provenance, ``recipe``), calls the DevelopFn,
+#     expected outcome, repo, base, mandate provenance, ``recipe``), calls the
+#     DevelopFn,
 #     then back-writes diff + base_branch onto the SAME action, clears
 #     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
 #     raises: a DevelopFn error (or empty diff / no base) leaves the run queued
@@ -142,7 +143,9 @@ class HeadlessDevelopRunner:
 
         request = DevelopRequest(
             task=str(blob.get("task") or ""),
-            summary=str(blob.get("summary") or ""),
+            # ``summary`` becomes the develop report once a diff is attached; the
+            # expected outcome is what the develop should aim at.
+            summary=str(blob.get("expected_outcome") or blob.get("summary") or ""),
             repo=str(blob.get("repo") or ""),
             base_branch=str(blob.get("base_branch") or ""),
             workspace_id=str(blob.get("workspace_id") or ""),

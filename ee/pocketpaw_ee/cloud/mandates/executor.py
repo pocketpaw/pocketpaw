@@ -11,8 +11,10 @@
 #      env ``POCKETPAW_MANDATE_DISPATCHER``):
 #        * ``station`` (default) — ``StationTaskDispatcher`` files a QUEUED
 #          ``code_change`` Action (``station_pending=True``, no diff) carrying
-#          the task text, its ``recipe`` (if any) and the mandate provenance, and
-#          fires ``belt_run_updated``. A human drives ``/belt`` to a diff.
+#          the task text, its ``title`` (the commit subject when it lands) and
+#          ``expected_outcome``, its ``recipe`` (if any) and the mandate
+#          provenance, and fires ``belt_run_updated``. A human drives ``/belt``
+#          to a diff.
 #        * ``headless`` — ``belt/headless.HeadlessTaskDispatcher`` files the same
 #          queued run, then a production ``DevelopFn`` (the develop station)
 #          produces and attaches the diff; the run stays PENDING the per-diff
@@ -168,6 +170,11 @@ class StationTaskDispatcher:
             "diff": "",
             "task": f"{title}\n\n{why}".strip(),
             "summary": expected or title,
+            # The short task title is the commit subject / PR title; the
+            # develop station overwrites ``summary`` with its report, so the
+            # expected outcome keeps its own key for a re-develop.
+            "title": title,
+            "expected_outcome": expected,
             "workspace_id": workspace_id,
             "requested_by": str(task.get("requested_by") or ""),
             # Provenance — tie the queued run back to the mandate shift + plan.

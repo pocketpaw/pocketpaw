@@ -1398,7 +1398,9 @@ def _run_digest_row(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "action_id": run.get("action_id"),
         "status": run.get("status"),
-        "title": str(run.get("task") or run.get("summary") or "").split("\n", 1)[0][:200],
+        "title": str(run.get("title") or run.get("task") or run.get("summary") or "").split(
+            "\n", 1
+        )[0][:200],
         "pr_url": run.get("pr_url"),
         "branch": run.get("branch"),
         "commit_sha": run.get("commit_sha"),

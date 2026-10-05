@@ -9,8 +9,10 @@
 #   2. adds a throwaway worktree DETACHED at ``origin/<base>`` (after a fetch)
 #      or, with no ``origin`` remote, at the local ``<base>`` commit;
 #   3. applies the diff from a temp file (``git apply --3way``), branches
-#      ``feat/belt-<id>`` and commits it (Conventional Commits, no AI
-#      attribution);
+#      ``feat/belt-<id>`` and commits it: the subject is ``feat: <task title>``
+#      when the blob carries a ``title`` (mandate tasks), else
+#      ``feat(belt): <summary>``; the body is the task's why plus the summary
+#      (the develop station's check/review report). No AI attribution;
 #   4. with a remote: pushes and opens a PR through an injectable ``PrOpener``;
 #      local-only: keeps the branch in the repo (``_promote_branch``) and records
 #      branch + commit sha instead of a PR url;
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -463,6 +466,7 @@ async def execute_approved_change(
     diff = blob.get("diff")
     summary = str(blob.get("summary") or "")
     task = str(blob.get("task") or "")
+    title = str(blob.get("title") or "")
 
     if not base_branch or not isinstance(diff, str) or not diff.strip():
         await _fail(
@@ -591,8 +595,8 @@ async def execute_approved_change(
             )
             return
 
-        commit_title = _commit_title(task, summary)
-        commit_body = summary or task
+        commit_title = _commit_title(task, summary, title=title)
+        commit_body = _commit_body(task, summary, title=title)
         code, _out, err = await _run(
             ["git", "commit", "-m", commit_title, "-m", commit_body], cwd=worktree_dir
         )
@@ -882,17 +886,42 @@ async def _force_remove_worktree(repo_path: Path, worktree_dir: Path) -> None:
             shutil.rmtree(worktree_dir, ignore_errors=True)
 
 
-def _commit_title(task: str, summary: str) -> str:
-    """Build a Conventional-Commits title from the task / summary.
+# A subject that already names its Conventional-Commits type (``fix: x``,
+# ``feat(ui)!: y``) is kept as written.
+_CONVENTIONAL_SUBJECT = re.compile(r"^[a-z]+(\([^)\n]*\))?!?: \S")
+_SUBJECT_MAX = 72
 
-    Keeps it under ~72 chars and prefixes ``feat(belt):`` so the commit reads as
-    a Belt-applied change. The first sentence of the summary (falling back to
-    the task) becomes the subject. NO AI attribution anywhere."""
+
+def _commit_title(task: str, summary: str, *, title: str = "") -> str:
+    """The commit subject (and PR title), at most ~72 chars, no AI attribution.
+
+    A mandate task carries a short ``title``: ``feat: <title>``. Its summary is
+    a multi-line develop report, never a subject. A hand-proposed change has no
+    title, and its summary is the agent's one-line description:
+    ``feat(belt): <first sentence of the summary, else the task>``."""
+    first_line = title.strip().splitlines()[0].strip() if title.strip() else ""
+    if first_line:
+        subject = first_line if _CONVENTIONAL_SUBJECT.match(first_line) else f"feat: {first_line}"
+        if len(subject) > _SUBJECT_MAX:
+            subject = subject[:_SUBJECT_MAX].rsplit(" ", 1)[0].rstrip(" .,;:")
+        return subject
     source = (summary or task or "apply code change").strip()
     # First sentence / first line only.
     first = source.replace("\n", " ").split(". ", 1)[0].strip().rstrip(".")
     subject = first[:60].strip() or "apply code change"
     return f"feat(belt): {subject}"
+
+
+def _commit_body(task: str, summary: str, *, title: str = "") -> str:
+    """The commit (and PR) body. With a ``title`` the task text is
+    ``<title>\n\n<why>``: the body is the why, then the summary (the develop
+    station's check/review report). Without one, the summary, else the task."""
+    if not title.strip():
+        return summary or task
+    why = task.strip()
+    if why.startswith(title.strip()):
+        why = why[len(title.strip()) :].strip()
+    return "\n\n".join(part for part in (why, summary.strip()) if part) or title.strip()
 
 
 class _suppress:

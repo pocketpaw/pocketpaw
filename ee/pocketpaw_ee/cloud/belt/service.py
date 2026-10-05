@@ -663,6 +663,8 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
     repo_path = str(blob.get("repo") or "")
     return {
         "action_id": str(getattr(action, "id", "")),
+        # The short label: a mandate task's title (None on a hand-driven run).
+        "title": str(blob.get("title") or "") or None,
         "task": str(blob.get("task") or ""),
         "summary": str(blob.get("summary") or ""),
         "status": status,
