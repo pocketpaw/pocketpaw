@@ -14,7 +14,8 @@
 # Token names are the ones the bar reads: ``colors.surface`` becomes
 # ``--pawbar-bg`` + ``--pawbar-frame-bg`` at the bar's own glass alpha,
 # ``colors.ink`` ``--pawbar-fg`` + ``--pawbar-frame-fg``, the bubbles
-# ``--pawbar-bubble-bg`` / ``--pawbar-owner-bubble-bg``. Fields the bar has no
+# ``--pawbar-bubble-bg`` / ``--pawbar-owner-bubble-bg``, each with a legible
+# ``-fg`` text colour chosen for it. Fields the bar has no
 # surface for (hero, motion, unread, line/wash strength, surface opacity) are
 # still accepted and stored, because paw-enterprise still writes them, but they
 # render nothing.
@@ -386,11 +387,16 @@ class ColorAppearance(BaseModel):
             # The bar's own bubble text flips with the scheme, so an owner colour
             # needs text chosen for it or it is unreadable in one of the two.
             out["--pawbar-bubble-fg"] = _rgba(_legible_ink(bubble), 100)
+        if self.owner_bubble:
+            # Team replies inherit the thread ink, so a team colour needs its
+            # own text the same way.
+            team = _hex_to_rgb(self.owner_bubble)
+            out["--pawbar-owner-bubble-bg"] = _rgba(team, 100)
+            out["--pawbar-owner-bubble-fg"] = _rgba(_legible_ink(team), 100)
 
         for token, value in (
             ("--pawbar-accent-fg", self.accent_fg),
             ("--pawbar-assistant-bubble", self.assistant_bubble),
-            ("--pawbar-owner-bubble-bg", self.owner_bubble),
             ("--pawbar-ring", self.ring),
             ("--pawbar-danger", self.danger),
         ):
