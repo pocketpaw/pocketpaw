@@ -960,6 +960,29 @@ async def test_knowledge_item_text_is_still_capped(monkeypatch):
     assert len(item.text) == concierge_runtime._ITEM_CHARS
 
 
+@pytest.mark.asyncio
+async def test_a_typical_compiled_article_reaches_the_model_whole(monkeypatch):
+    # A compiled store page is ~400-800 words. At a 2,000-char cap a size guide
+    # (2,695 chars) came back as an excerpt chosen by query words, and "shoe sizes"
+    # plus the page title ("Cairn & Co.") picked the store-facts section over
+    # "Footwear": the visitor got generic advice instead of the chart.
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    sections = [
+        "## Jackets\n" + "j" * 900,
+        "## Footwear\n| US 10 | EU 44 |\n" + "f" * 600,
+        "## Store facts\n" + "s" * 900,
+    ]
+    body = "\n\n".join(sections)
+    assert 2_000 < len(body) < 3_500
+    _fake_kb_binary(monkeypatch, [{"id": "size-guide", "title": "Size guide", "text": body}])
+
+    [item] = await concierge_runtime._search_scope("pocket:p1", "shoe sizes", 3, 5.0)
+
+    assert "| US 10 | EU 44 |" in item.text
+    assert item.text.endswith("s" * 900)
+
+
 # --------------------------------------------------------------------------- #
 # 7. The switch on the owner settings surface
 # --------------------------------------------------------------------------- #

@@ -197,8 +197,11 @@ _PAGE_TITLE_CHARS = 120
 _PAGE_SUMMARY_CHARS = 400
 # Characters a path keeps unescaped when the page url is rebuilt (RFC 3986 pchar).
 _PATH_SAFE = "/-._~!$&'()*+,;=:@"
-# Per-item and total text budgets for the <knowledge> block (~3,000 tokens).
-_ITEM_CHARS = 2_000
+# Per-item and total text budgets for the <knowledge> block (~3,000 tokens). A
+# compiled page is ~400-800 words, so an item budget of 4,000 lets a typical
+# article arrive whole; kb-go only excerpts by query words past that, and query
+# words can miss ("shoe" vs a "Footwear" section).
+_ITEM_CHARS = 4_000
 _KNOWLEDGE_CHARS = 12_000
 # History: the most recent messages of THIS conversation, clipped newest-first.
 _HISTORY_MESSAGES = 8
