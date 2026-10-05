@@ -31,6 +31,12 @@ import pytest  # noqa: E402
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from tests.conftest import require_enterprise_install  # noqa: E402
+
+# Missing ``pocketpaw_ee`` fails collection here instead of letting every file's
+# ``importorskip`` turn the suite into a silent green skip.
+require_enterprise_install("tests/ee")
+
 
 def _require_enterprise() -> None:
     """Skip the calling fixture if the ee/cloud dependencies are missing.

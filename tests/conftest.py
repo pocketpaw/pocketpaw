@@ -60,6 +60,29 @@ from pocketpaw.security.audit import AuditLogger  # noqa: E402
 if os.environ["PYTHON_DOTENV_DISABLED"].casefold() in {"1", "true", "t", "yes", "y"}:
     Settings.model_config["env_file"] = None
 
+
+def require_enterprise_install(suite: str) -> None:
+    """Fail collection, never skip, when the enterprise package is missing.
+
+    ``tests/cloud`` and ``tests/ee`` are the enterprise surface. A venv built with
+    ``uv sync --dev --all-extras`` has beanie but not ``pocketpaw_ee``, and the
+    old ``importorskip`` turned that into a wholesale silent skip: a run read
+    green with hundreds of tests never collected (2026-08-06, 2026-08-17,
+    2026-10-01). The OSS-only CI job never loads these conftests (it passes
+    ``--ignore=tests/ee`` and ``tests/cloud`` is hidden by the pyproject addopts).
+    """
+    import importlib.util
+
+    needed = ("pocketpaw_ee", "beanie", "mongomock_motor")
+    missing = [m for m in needed if importlib.util.find_spec(m) is None]
+    if missing:
+        raise pytest.UsageError(
+            f"{suite} needs the enterprise install but {', '.join(missing)} is not importable. "
+            "Run `uv sync --group ee --group dev --extra knowledge` (`--all-extras` alone does not "
+            "install pocketpaw_ee). Refusing to skip: a skipped enterprise suite reads green."
+        )
+
+
 # Tests run with loopback / RFC1918 URLs in many places (`http://localhost:*`
 # ollama defaults, mock HTTP servers, etc). In production that's the exact
 # SSRF shape blocked by security.url_validators.validate_external_url — here

@@ -253,6 +253,18 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Collect every tests/cloud test
+        # The pyproject addopts hide tests/cloud from "Run tests" above, and the
+        # hand-listed steps below reach a fraction of its ~900 files. Collecting
+        # the whole tree catches what rots unseen: a missing enterprise install
+        # (tests/cloud/conftest.py now fails instead of skipping), a dropped extra
+        # (pypdf, 2026-10-01), or an import left behind by a move. Collection
+        # only, not a run: tests/cloud is not green on dev today.
+        run: uv run pytest tests/cloud -o addopts="" --co -q
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run herdr cockpit tests
         # tests/cloud is excluded by the addopts in pyproject.toml, so the step
         # above never reaches this file — which would leave the cockpit's ADMIN
