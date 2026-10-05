@@ -11,8 +11,10 @@
 #     frame on the next request. The transcript-retention toggle defaults on and
 #     is independent of the kill switch.
 #   * The owner preview: preview-frame frames the site's own page as a sandboxed
-#     ``?pawbar=sniff`` scene; preview-tokens and preview-config render a draft
-#     and write nothing. preview-config returns the frame config subset built by
+#     ``?pawbar=sniff`` scene (hosted: its url; connected: the verified origin,
+#     else the first allowed origin; never markup or a scheme from stored
+#     data); preview-tokens and preview-config render a draft and write
+#     nothing. preview-config returns the frame config subset built by
 #     the frame's own code path (equal to the preview frame's boot config for an
 #     empty draft), applies the branding entitlement to ``poweredBy`` and refuses
 #     a draft the settings PATCH would refuse (422).
@@ -356,6 +358,129 @@ async def test_an_undeployed_site_previews_without_a_scene(client):
     assert "pawbar-scene" not in res.text
     # The bar is still previewable; that is the point of the pane.
     assert 'id="pawbar-root"' in res.text
+
+
+async def _verify(host: str, *, age_days: int = 0, workspace: str = "ws-1") -> None:
+    """Seed a VERIFIED ownership claim, ``age_days`` old, the way ``verify_origin``
+    leaves one."""
+    from datetime import UTC, datetime, timedelta
+
+    from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
+
+    stamp = datetime.now(UTC) - timedelta(days=age_days)
+    await SiteOriginClaim(
+        workspace=workspace,
+        host=host,
+        token="pawverify-seeded-for-the-preview-suite",
+        status="verified",
+        issued_at=stamp,
+        expires_at=stamp + timedelta(days=7),
+        verified_at=stamp,
+        method="well-known",
+    ).insert()
+
+
+def _scene_src(html: str) -> str | None:
+    """The scene iframe's ``src`` as served (still HTML-escaped), or None."""
+    import re
+
+    m = re.search(r'<iframe class="pawbar-scene" src="([^"]*)"', html)
+    return m.group(1) if m else None
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_site_scene_is_its_own_url(client):
+    """Hosted sites keep framing the url we composed, never an allowed origin."""
+    c, store = client
+    site = await _site(url="https://s1.paw-sites.test", allowed_origins=["brewco.com"])
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert _scene_src(res.text) == "https://s1.paw-sites.test?pawbar=sniff"
+
+
+@pytest.mark.asyncio
+async def test_a_connected_site_frames_its_verified_origin(client):
+    """A connected site (a concierge on the customer's own website) has no url.
+    Its scene is the one verified, fresh host — the host the screenshot and the
+    knowledge crawl use — even when it is not the first allowed origin."""
+    c, store = client
+    site = await _site(foreign_origin=True, allowed_origins=["shop.brewco.com", "brewco.com"])
+    await _verify("brewco.com")
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert _scene_src(res.text) == "https://brewco.com/?pawbar=sniff"
+    assert 'sandbox="allow-scripts allow-popups allow-forms"' in res.text
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connected_site_frames_its_first_allowed_origin(client):
+    """No fresh proof (none at all, or a stale one): the owner still needs to see
+    their look, so the scene falls back to the first origin they entered."""
+    c, store = client
+    site = await _site(foreign_origin=True, allowed_origins=["brewco.com", "www.brewco.com"])
+    await _verify("www.brewco.com", age_days=400)  # stale: not a fresh proof
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert _scene_src(res.text) == "https://brewco.com/?pawbar=sniff"
+
+
+@pytest.mark.asyncio
+async def test_a_connected_site_with_no_origins_has_no_scene(client):
+    c, store = client
+    site = await _site(foreign_origin=True, allowed_origins=[])
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert "pawbar-scene" not in res.text
+    assert 'id="pawbar-root"' in res.text
+
+
+@pytest.mark.asyncio
+async def test_a_hostile_stored_origin_cannot_inject_into_the_scene(client):
+    """``allowed_origins`` is stored data. Whatever it holds, the scene is
+    ``https://<bare host[:port]>/?pawbar=sniff`` or nothing: no other scheme, no
+    stored path or query, no markup."""
+    c, store = client
+    hostile = [
+        'javascript:alert(1)//"><script>alert(2)</script>',
+        "data:text/html,<b>x</b>",
+        "brew co.com\r\nSet-Cookie: x",
+    ]
+    site = await _site(foreign_origin=True, allowed_origins=hostile)
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert "pawbar-scene" not in res.text
+    assert "<script>alert(2)" not in res.text
+    assert "javascript:" not in res.text
+    assert "data:text/html" not in res.text
+
+    # A usable host behind a path / query keeps only the host.
+    site2 = await _site(
+        foreign_origin=True,
+        allowed_origins=['http://evil.example/"><img src=x onerror=alert(1)>?a=b'],
+        signed_key="site_key_" + "b" * 24,
+        pocket_id="pocket-2",
+    )
+    await store.create_widget(_widget(pocket_id="pocket-2", spec=_spec("pocket-2")))
+
+    res2 = await c.get(f"/paw-bar/admin/site/{site2.id}/preview-frame")
+
+    assert res2.status_code == 200, res2.text
+    assert _scene_src(res2.text) == "https://evil.example/?pawbar=sniff"
+    assert "onerror" not in res2.text
 
 
 @pytest.mark.asyncio

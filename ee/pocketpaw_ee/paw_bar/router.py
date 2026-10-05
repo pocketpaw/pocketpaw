@@ -3920,6 +3920,70 @@ async def get_site_handoffs(
     return HandoffsResponse(items=items)
 
 
+def _scene_host(raw: Any) -> str:
+    """Reduce one stored ``allowed_origins`` entry to a bare ``host[:port]``, or "".
+
+    The same reduction ``_sanitize_ancestor`` applies (lowercase, scheme and path
+    dropped, then the strict host[:port] pattern), minus its ``:*`` port wildcard:
+    this lands in a URL, not a CSP. Whatever the entry held, the result has no
+    scheme of its own, no path, query, credentials, whitespace or markup.
+    """
+    if not isinstance(raw, str):
+        return ""
+    v = raw.strip().lower()
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.split("/", 1)[0]
+    # Strip BEFORE matching: ``$`` also matches ahead of a trailing newline.
+    return v if v and _SAFE_ANCESTOR_RE.match(v) else ""
+
+
+async def _preview_scene_url(site: Any) -> str:
+    """The page the owner preview frames behind the bar, with ``?pawbar=sniff``.
+
+    Resolution order:
+      1. A HOSTED site: its own ``url`` (we composed it at deploy). "" when it
+         never deployed. Its ``allowed_origins`` are never used.
+      2. A CONNECTED site (``foreign_origin``: a concierge on the customer's own
+         website, which never gets a ``url``): ``https://<host>/`` for the one
+         verified, fresh host ``foreign_grounding.crawlable_origin`` picks, the
+         same host the live screenshot (``screenshot.capture_target``) and the
+         knowledge crawl use.
+      3. Still connected, but no fresh proof: the FIRST ``allowed_origins``
+         entry. The screenshot refuses an unproved host because there OUR server
+         fetches it; here nothing server-side touches it. The owner's own browser
+         loads a host the owner typed in, inside a scene iframe sandboxed without
+         allow-same-origin, in a frame only the owner (``paw_bar.read``) is
+         served. Refusing it would only leave a just-connected site, the one
+         most in need of a theme, stuck on "can't read your site's look".
+      4. No usable origin: "" (no scene).
+
+    Cost: this route runs on every editor open. ``crawlable_origin`` is pure apart
+    from one indexed ``SiteOriginClaim`` lookup per allowed origin, stopping at
+    the first fresh one, so a connected site costs a handful of point reads and a
+    hosted site costs nothing. No network.
+
+    The customer's site may refuse to be framed (X-Frame-Options or CSP
+    ``frame-ancestors``). The scene then stays blank and the editor falls back to
+    "not detected" after its timeout. Nothing to do about that server-side.
+    """
+    if not getattr(site, "foreign_origin", False):
+        url = (getattr(site, "url", "") or "").strip()
+        if not url:
+            return ""
+        return url + ("&" if "?" in url else "?") + "pawbar=sniff"
+
+    from pocketpaw_ee.sites.foreign_grounding import crawlable_origin
+
+    verified, _reason = await crawlable_origin(site)
+    host = _scene_host(verified)
+    if not host:
+        host = next(
+            (h for h in map(_scene_host, getattr(site, "allowed_origins", None) or []) if h), ""
+        )
+    return f"https://{host}/?pawbar=sniff" if host else ""
+
+
 @router.get(
     "/paw-bar/admin/site/{site_id}/preview-frame",
     response_class=HTMLResponse,
@@ -3983,15 +4047,12 @@ async def get_site_preview_frame(
         branding_removable=await _branding_removable(site),
     )
     # The document stays transparent like the public embed, and the site's own
-    # published page is framed behind the bar as the scene (see
-    # ``_pawbar_bootstrap_html``). ``?pawbar=sniff`` keeps that page's own bar down
+    # page is framed behind the bar as the scene (see ``_pawbar_bootstrap_html``
+    # and ``_preview_scene_url``). ``?pawbar=sniff`` keeps that page's own bar down
     # and has its loader post the site theme up, so the preview follows the site
-    # the way the public bar does. "" when the site has never deployed, or deployed
-    # with no dispatch domain configured: there is nothing to frame, and the bar
+    # the way the public bar does. "" when there is nothing to frame: the bar
     # previews on a plain surface with its defaults.
-    scene = getattr(site, "url", "") or ""
-    if scene:
-        scene += ("&" if "?" in scene else "?") + "pawbar=sniff"
+    scene = await _preview_scene_url(site)
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, scene_url=scene)
     return HTMLResponse(
         content=html,
