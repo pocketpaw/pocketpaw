@@ -330,6 +330,18 @@ async def test_a_motion_graphic_lists_its_id_and_source() -> None:
     assert html in block
 
 
+async def test_a_draft_graphic_carries_its_source_and_placement() -> None:
+    html = '<div data-composition-id="mg">Stat</div>'
+    draft = {"name": "Stat", "html": html, "replace_range": {"from_ms": 2000, "to_ms": 6000}}
+    preamble = await _render(_timeline(draft_graphic=draft))
+
+    block = preamble.split("DRAFT GRAPHIC", 1)[1]
+    assert html in block
+    assert "replace_range from_ms=2000 to_ms=6000" in block
+    assert "A DRAFT GRAPHIC IS A STARTING POINT" in preamble
+    assert 'DRAFT GRAPHIC "' not in await _render(_timeline())
+
+
 async def test_the_procedure_loads_both_motion_skills_and_covers_gallery_graphics() -> None:
     """Graphics made from the editor's Graphics button arrive under MOTION
     GRAPHICS like the agent's own, so the procedure must say they are edited the
