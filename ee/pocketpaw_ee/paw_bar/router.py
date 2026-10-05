@@ -64,8 +64,8 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
-from typing import Annotated, Any, Literal
 from types import SimpleNamespace
+from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -1981,8 +1981,8 @@ def _stored_knowledge_chars(site: Any) -> int | None:
     if not CONCIERGE_KNOWLEDGE_CHARS_MIN <= value <= CONCIERGE_KNOWLEDGE_CHARS_MAX:
         return None
     return value
-  
-  
+
+
 def _actions_snippet() -> str:
     """The page-actions tag on the public API base ``_site_embed_snippet`` uses."""
     from pocketpaw_ee.paw_bar.embed import build_actions_snippet
