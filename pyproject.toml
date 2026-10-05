@@ -481,9 +481,8 @@ dev = [
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
-    # parallel + random-order runs; scripts/flake_census.sh uses both (randomly is off by default in addopts)
+    # parallel runs; scripts/flake_census.sh adds pytest-randomly per run with `uv run --with`
     "pytest-xdist>=3.5,<4",
-    "pytest-randomly",
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
@@ -606,9 +605,8 @@ dev = [
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
-    # parallel + random-order runs; scripts/flake_census.sh uses both (randomly is off by default in addopts)
+    # parallel runs; scripts/flake_census.sh adds pytest-randomly per run with `uv run --with`
     "pytest-xdist>=3.5,<4",
-    "pytest-randomly",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",
@@ -692,9 +690,7 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# `-p no:randomly` keeps collection order for normal runs; scripts/flake_census.sh
-# rebuilds addopts without it to shuffle.
-addopts = "--ignore=tests/cloud --ignore=tests/e2e -p no:randomly"
+addopts = "--ignore=tests/cloud --ignore=tests/e2e"
 markers = [
     "serial: test must run alone, outside the parallel phase; give the reason in a comment",
     "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",

@@ -18,14 +18,15 @@
 # Reports, never gates: exits 0 when it finishes, non-zero only on a crash or a
 # pytest usage/internal error.
 #
-# Invariant: pyproject addopts carries `-p no:randomly` so normal runs keep
-# collection order. This script rebuilds addopts from pyproject without it
-# (`-o addopts=...`) and adds `-p randomly`, so the ignores stay in sync.
+# Invariant: pytest-randomly is NOT a project dependency, so normal runs and CI keep
+# collection order. This script reuses pyproject's addopts (`-o addopts=...`, so
+# the ignores stay in sync) and adds `-p randomly` from the per-run install.
 #
 # Env knobs: CENSUS_RUN_TIMEOUT (seconds per pytest run, default 1800; a hung
 # subprocess otherwise holds the gate forever), CENSUS_BUDGET_MIN (stop starting
 # new parallel runs after this many minutes, default 0 = no budget).
-# Deps: uv and the dev dependency group (pytest-xdist, pytest-randomly), perl.
+# Deps: uv, the dev dependency group (pytest-xdist), perl. pytest-randomly is
+# pulled per run with `uv run --with`, never installed, so it cannot reorder CI.
 set -euo pipefail
 
 RUNS=10
@@ -77,7 +78,7 @@ run_pytest() {
 	start=$(date +%s)
 	set +e
 	perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$RUN_TIMEOUT" \
-		uv run pytest "${BASE[@]}" --randomly-seed="$seed" --junitxml="$WORK/$label.xml" "$@" "${EXTRA[@]}" \
+		uv run --with "pytest-randomly>=3.15,<5" pytest "${BASE[@]}" --randomly-seed="$seed" --junitxml="$WORK/$label.xml" "$@" "${EXTRA[@]}" \
 		>"$WORK/$label.log" 2>&1
 	rc=$?
 	set -e
