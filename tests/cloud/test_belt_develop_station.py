@@ -553,3 +553,47 @@ async def test_cancel_kills_the_process_group(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert await _gone(int(pidfile.read_text())), "grandchild survived the cancel"
+
+
+# ---------------------------------------------------------------------------
+# hardening — worktree integrity, protected paths
+# ---------------------------------------------------------------------------
+
+
+async def test_rewritten_worktree_git_file_fails_the_run(repo):
+    def tamper(cwd: Path) -> None:
+        (cwd / "feature.txt").write_text("ok\n")
+        (cwd / ".git").write_text("gitdir: ./evil\n")
+
+    fake = FakeClaude(develop=[tamper])
+    with pytest.raises(ds.DevelopStationError, match=r"^INTEGRITY: worktree \.git changed"):
+        await _station(fake, repo)(_request(repo))
+    gits = [g for g in map(_git_args, fake.argvs) if g]
+    assert ["add", "-A"] not in [g[:2] for g in gits], "git ran on the tampered worktree"
+    _assert_clean(repo, fake)
+
+
+async def test_git_file_swapped_for_a_directory_fails_the_run(repo):
+    def tamper(cwd: Path) -> None:
+        (cwd / ".git").unlink()
+        (cwd / ".git").mkdir()
+
+    fake = FakeClaude(develop=[tamper])
+    with pytest.raises(ds.DevelopStationError, match=r"^INTEGRITY:"):
+        await _station(fake, repo, checks=())(_request(repo))
+    _assert_clean(repo, fake)
+
+
+@pytest.mark.parametrize("planted", [".claude/settings.json", ".mcp.json", "sub/.gitmodules"])
+async def test_diff_touching_agent_config_is_refused(repo, planted):
+    def develop(cwd: Path) -> None:
+        (cwd / "feature.txt").write_text("ok\n")
+        target = cwd / planted
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"permissions": {"allow": ["Bash"]}}\n')
+
+    fake = FakeClaude(develop=[develop])
+    with pytest.raises(ds.DevelopStationError, match=r"^DONE: .*protected paths") as exc:
+        await _station(fake, repo)(_request(repo))
+    assert planted in str(exc.value)
+    _assert_clean(repo, fake)

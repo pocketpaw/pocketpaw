@@ -15,7 +15,9 @@
 #            with the failure, then CHECK again. Recipes get no LLM fix.
 #   REVIEW   checks green → an independent read-only ``claude -p`` judges the
 #            task against ``git diff``: strict ``{"verdict", "notes"}`` JSON.
-#   DONE     ``git add -A`` + ``git diff --cached --binary <base sha>``.
+#   DONE     ``git add -A`` + ``git diff --cached --binary <base sha>``; refused
+#            when it touches ``.claude/``, ``.mcp.json``, ``.git`` or
+#            ``.gitmodules``.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune`` (finally).
 # Any dead end raises ``DevelopStationError`` naming the step; the runner records
 # it as ``headless_error`` on the queued run's blob.
@@ -24,7 +26,9 @@
 # list (never a shell); charter commands are ``shlex.split``. The default runner
 # passes only an allow-listed env (``_ENV_KEYS``: no tokens, URIs or API keys)
 # and kills the whole process group on timeout or cancellation. Station git
-# calls run with fsmonitor and hooks disabled. ``claude`` gets its prompt on
+# calls run with fsmonitor and hooks disabled, and the worktree's ``.git`` file
+# is snapshotted after PREPARE and re-checked after every agent step
+# (INTEGRITY). ``claude`` gets its prompt on
 # stdin, a ``--tools`` set limited to Read/Glob/Grep (+ Edit/Write and Bash
 # prefix rules for the charter checks on the edit seats), allow rules scoped to
 # the worktree (``Read(./**)``), WebFetch/WebSearch/Task denied, and no settings
@@ -182,6 +186,10 @@ class ClaudeCodeDevelop:
             # PREPARE
             await self._git(repo, "worktree", "add", "--detach", str(worktree), start_ref)
             base_sha = (await self._git(worktree, "rev-parse", "HEAD")).strip()
+            # The linked worktree's ``.git`` file points git at its admin dir;
+            # an agent that rewrites it could aim station git at a config of
+            # its own. Snapshot it now, re-check after every agent step.
+            git_snapshot = (worktree / ".git").read_bytes()
 
             # WORK
             if request.recipe:
@@ -204,6 +212,7 @@ class ClaudeCodeDevelop:
                 await self._claude(
                     _develop_prompt(request, charter), cwd=worktree, step="DEVELOP", checks=checks
                 )
+                _assert_intact(worktree, git_snapshot)
 
             # CHECK → FIX → REVIEW (one attempts counter for both fix reasons)
             attempts = 0
@@ -225,10 +234,12 @@ class ClaudeCodeDevelop:
                         step="FIX",
                         checks=checks,
                     )
+                    _assert_intact(worktree, git_snapshot)
                     continue
                 if request.recipe:
                     verdict = "skipped (recipe)"
                     break
+                _assert_intact(worktree, git_snapshot)
                 await self._git(worktree, "add", "-A")
                 diff = await self._git(worktree, "diff", "--cached", base_sha)
                 passed, review_notes = await self._review(request, diff, worktree)
@@ -247,14 +258,23 @@ class ClaudeCodeDevelop:
                     step="FIX",
                     checks=checks,
                 )
+                _assert_intact(worktree, git_snapshot)
 
             # DONE
+            _assert_intact(worktree, git_snapshot)
             await self._git(worktree, "add", "-A")
             diff = await self._git(worktree, "diff", "--cached", "--binary", base_sha)
             if not diff.strip():
                 raise DevelopStationError("DONE: the change produced an empty diff")
             names = await self._git(worktree, "diff", "--cached", "--name-only", base_sha)
-            files_changed = len([n for n in names.splitlines() if n.strip()])
+            changed = [n for n in names.splitlines() if n.strip()]
+            protected = [n for n in changed if _is_protected(n)]
+            if protected:
+                raise DevelopStationError(
+                    f"DONE: the change touches protected paths ({', '.join(protected[:5])}); "
+                    "refusing to attach"
+                )
+            files_changed = len(changed)
 
             lines = [request.summary or request.task.splitlines()[0][:120]]
             if request.recipe:
@@ -359,6 +379,27 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
         return verdict["verdict"] == "pass", notes
+
+
+_PROTECTED_DIRS = {".claude", ".git"}
+_PROTECTED_FILES = {".mcp.json", ".gitmodules"}
+
+
+def _is_protected(path: str) -> bool:
+    """A path a produced diff may never carry: agent config the next CLI run
+    would load (``.claude/``, ``.mcp.json``) or git plumbing (``.git``,
+    ``.gitmodules``), at any depth."""
+    parts = path.strip().strip('"').split("/")
+    return bool(_PROTECTED_DIRS.intersection(parts)) or parts[-1] in _PROTECTED_FILES
+
+
+def _assert_intact(worktree: Path, snapshot: bytes) -> None:
+    try:
+        same = (worktree / ".git").read_bytes() == snapshot
+    except OSError:  # deleted, or swapped for a directory
+        same = False
+    if not same:
+        raise DevelopStationError("INTEGRITY: worktree .git changed")
 
 
 def _tool_flags(*, edits: bool, checks: list[str] | tuple[str, ...] = ()) -> list[str]:
