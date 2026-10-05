@@ -1,64 +1,31 @@
-# ee/pocketpaw_ee/cloud/belt/service.py
-# Updated: 2026-06-11 (feat/belt-autopilot) — the runs read model now renders a
-#   QUEUED STATION RUN. A pending ``code_change`` Action whose blob carries
-#   ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
-#   the task text but no diff yet) derives status ``queued`` / stage ``station``
-#   instead of ``proposed`` / ``gate``, so the console shows it as waiting for a
-#   human to open the develop station (one click) rather than sitting at the
-#   approve gate.
-# Created: 2026-06-10 (feat/belt-console-backend, SC-1 + SC-2) — the Belt &
-# Pulley console read/write service. Powers the /belt page's three needs the
-# first live runs exposed: (1) DISCOVER repos so the user can bind one up front
-# instead of the agent asking, (2) ADD a new repo root durably (admin-gated),
-# (3) read STATION RUNS + a run's diff so the page can show status/output.
+# ee/pocketpaw_ee/cloud/belt/service.py — the Belt console read/write service.
 #
-# Updated: 2026-06-11 (feat/belt-repo-init) — added ``init_repo``: create a
-# brand-new git REPOSITORY under an allowlisted root (admin-gated, same RBAC +
-# realpath discipline as add_repo), seed a README + initial commit so it has a
-# HEAD and a default branch, register it via the same persistence add_repo uses,
-# and (optionally) create the GitHub remote via the injectable ``RepoCreator``
-# (default ``GhCliRepoCreator`` shells ``gh repo create --private --source --push``,
-# mirroring the executor's ``GhCliPrOpener`` injectable). A remote-creation
-# failure KEEPS the local repo and returns a ``remote_error`` message — the local
-# init is never rolled back. The runs read model (_run_summary) now also surfaces
-# ``commit_sha`` for local-only (no-origin) landings, where ``pr_url`` is None.
+# Powers the /belt page: discover repos under the allowlist roots, add a repo
+# root or init a brand-new repo (admin-gated), and read station RUNS + a run's
+# diff. It also owns ``emit_belt_run_updated``, the run feed's realtime event.
 #
-# What lives here:
-#   * ``resolve_allowlist_roots(workspace_id)`` — the union of
-#     ``settings.belt_repo_allowlist`` and the per-workspace persisted extension
-#     (``BeltWorkspaceConfig.allowlist_roots``), each realpath-resolved. This is
-#     the single source of truth the discovery + add paths share; the MCP
-#     resolver keeps its own settings-only view (defense in depth at propose /
-#     execute time — the console extension is additive, never a replacement).
-#   * ``discover_repos(workspace_id)`` — one-level-deep scan of every allowlist
-#     root for git repos (a root that IS a git repo counts too). Returns the
-#     wire shape {path, name, current_branch, branches[]}.
-#   * ``add_repo(workspace_id, path)`` — validate the path is an existing git
-#     repo, realpath-resolve it, and APPEND it to the workspace's persisted
-#     allowlist extension. Returns the same repo shape or a typed error.
-#   * ``list_runs(workspace_id)`` / ``get_run(workspace_id, action_id)`` — the
-#     runs read model over the belt code-change Instinct Actions (kind=
-#     code_change), newest-first, with status/stage derived from the Action
-#     lifecycle and pr_url/branch read STRUCTURALLY off the blob (the executor
-#     back-writes them on success — no free-text parsing).
+#   * ``resolve_allowlist_roots`` — ``settings.belt_repo_allowlist`` plus the
+#     workspace's persisted extension, realpath-resolved; the one source the
+#     discover / add / init paths share (the MCP resolver keeps its own
+#     settings-only view as defense in depth).
+#   * ``discover_repos`` / ``add_repo`` / ``init_repo`` — one-level repo scan,
+#     validate-then-persist a root, and git-init a new repo with a seed commit
+#     (optionally a GitHub remote via the injectable ``RepoCreator``; a remote
+#     failure keeps the local repo and returns ``remote_error``).
+#   * ``list_runs`` / ``get_run`` — the runs read model over ``code_change``
+#     Instinct Actions, newest-first. Status/stage derive from the Action
+#     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``);
+#     landing fields (``pr_url`` / ``branch`` / ``commit_sha``) and mandate
+#     provenance (``mandate_id`` / ``shift_no`` / ``headless_error``) are read
+#     STRUCTURALLY off the blob. The mandates digest reads this same list.
 #
-# Security:
-#   * git introspection runs through ``asyncio.create_subprocess_exec`` with an
-#     ARG LIST — never ``shell=True``, never string-interpolated input. Reuses
-#     the executor's ``_run`` chokepoint.
-#   * a submitted add-repo path is realpath-resolved and confirmed to be a git
-#     repo BEFORE it is persisted; a non-existent / non-git / unresolvable path
-#     is refused. The path itself is NOT echoed into logs (only the workspace id
-#     + a generic reason) so a path probe can't leak via logs.
-#   * the diff text on a run detail is capped (~200 KB) so a giant blob can't be
-#     pulled whole through the read API.
+# Security: git runs through ``create_subprocess_exec`` with argv lists; a
+# submitted path is realpath-resolved and confirmed to be a git repo before it
+# is persisted and is never echoed into logs; a run's diff is capped at ~200 KB.
 #
-# SSE / realtime (SC-2): ``emit_belt_run_updated`` publishes on the WORKSPACE
-# REALTIME BUS (``_core.realtime.emit`` → the ``belt_run_updated`` audience
-# branch fans out to every workspace member), with an additional best-effort
-# per-stream ``push_sse_event`` for in-turn freshness. The bus is the required
-# path because approve / executed / failed fire after the chat turn's SSE drain
-# is gone — the per-session push alone would never reach the page.
+# Realtime: ``emit_belt_run_updated`` publishes on the workspace bus (the
+# required path — approve/executed/failed fire after the chat turn's SSE drain
+# is gone) plus a best-effort per-stream ``push_sse_event``.
 
 from __future__ import annotations
 
@@ -707,6 +674,10 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "commit_sha": blob.get("commit_sha") or None,
         "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
         "correlation_id": str(blob.get("correlation_id") or "") or None,
+        # Mandate provenance (None on a hand-driven run).
+        "mandate_id": str(blob.get("mandate_id") or "") or None,
+        "shift_no": blob.get("shift_no"),
+        "headless_error": str(blob.get("headless_error") or "") or None,
     }
 
 

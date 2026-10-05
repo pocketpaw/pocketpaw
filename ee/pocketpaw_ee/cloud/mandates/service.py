@@ -8,7 +8,8 @@
 # that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
 # signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
 # (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
-# set_autopilot.
+# set_autopilot; digest (the morning report, composed only from the read
+# functions above plus the belt runs list).
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate (the develop station's checks/recipes/goal read),
@@ -1347,6 +1348,139 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
 
 
 # ---------------------------------------------------------------------------
+# Digest — the workspace's morning report over the existing read models
+# ---------------------------------------------------------------------------
+
+_DIGEST_TOP_SIGHTINGS = 5
+
+
+def _ts_utc(value: Any) -> datetime | None:
+    """A read-model timestamp (datetime or ISO string, naive = UTC) as an aware
+    UTC datetime; ``None`` when it can't be read."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return _aware(value).astimezone(UTC) if isinstance(value, datetime) else None
+
+
+def _since(value: Any, since: datetime) -> bool:
+    ts = _ts_utc(value)
+    return ts is not None and ts >= since
+
+
+def _run_digest_row(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_id": run.get("action_id"),
+        "status": run.get("status"),
+        "title": str(run.get("task") or run.get("summary") or "").split("\n", 1)[0][:200],
+        "pr_url": run.get("pr_url"),
+        "branch": run.get("branch"),
+        "commit_sha": run.get("commit_sha"),
+        "headless_error": run.get("headless_error"),
+    }
+
+
+async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str, Any]:
+    """The workspace's mandate digest since ``since`` (default 24 hours ago).
+
+    Per mandate: new sightings (count + top 5 by severity), shifts and runs
+    created since, and the gates still waiting on a human (in-gate plans and
+    per-diff runs at ``proposed``, whatever their age). Built only from the
+    existing read models — ``list_mandates``, ``get_mandate``, ``shift_wire``,
+    ``list_sightings`` and the belt runs list — so the digest can never disagree
+    with the console. ``totals`` sums the workspace."""
+    # no-event: read-only path; emit only on writes.
+    from pydantic import ValidationError as PydanticValidationError
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.mandates.dto import DigestRequest
+
+    try:
+        req = DigestRequest.model_validate(body or {})
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.digest_invalid", _first_pydantic_msg(exc)) from exc
+    now = _utcnow()
+    since = _aware(req.since).astimezone(UTC) if req.since else now - timedelta(days=1)
+
+    mandates = (await list_mandates(workspace_id, user_id))["mandates"]
+    runs = (await belt_service.list_runs(workspace_id))["runs"]
+
+    out: list[dict[str, Any]] = []
+    totals = {
+        "mandates": len(mandates),
+        "new_sightings": 0,
+        "shifts": 0,
+        "runs": 0,
+        "landed": 0,
+        "failed": 0,
+        "gates_waiting": 0,
+    }
+    for m in mandates:
+        mandate_id = m["id"]
+        detail = await get_mandate(workspace_id, user_id, mandate_id)
+        sightings = (await list_sightings(workspace_id, user_id, mandate_id))["sightings"]
+        fresh = [s for s in sightings if _since(s["ts"], since)]
+        top = sorted(fresh, key=lambda s: -int(s["severity"]))[:_DIGEST_TOP_SIGHTINGS]
+
+        shifts: list[dict[str, Any]] = []
+        plan_gates: list[dict[str, Any]] = []
+        for row in detail["recent_shifts"]:
+            is_new = _since(row["created_at"], since)
+            if not is_new and row["state"] != "in_gate":
+                continue
+            wire = await shift_wire(workspace_id, row["id"])
+            if is_new:
+                shifts.append({k: wire[k] for k in ("no", "state", "outcome", "task_count")})
+            if wire["state"] == "in_gate":
+                plan_gates.append(
+                    {
+                        "shift_no": wire["no"],
+                        "plan_action_id": wire["plan_action_id"],
+                        "task_count": wire["task_count"],
+                    }
+                )
+
+        mine = [r for r in runs if r.get("mandate_id") == mandate_id]
+        new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
+        diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
+
+        totals["new_sightings"] += len(fresh)
+        totals["shifts"] += len(shifts)
+        totals["runs"] += len(new_runs)
+        totals["landed"] += sum(1 for r in new_runs if r["status"] == "landed")
+        totals["failed"] += sum(
+            1 for r in new_runs if r["status"] == "failed" or r["headless_error"]
+        )
+        totals["gates_waiting"] += len(plan_gates) + len(diff_gates)
+        out.append(
+            {
+                "id": mandate_id,
+                "name": m["name"],
+                "status": m["status"],
+                "cadence": m["cadence"],
+                "sightings": {
+                    "count": len(fresh),
+                    "top": [
+                        {"title": s["summary"], "severity": s["severity"], "patrol": s["patrol"]}
+                        for s in top
+                    ],
+                },
+                "shifts": shifts,
+                "runs": new_runs,
+                "gates": {"plans": plan_gates, "diffs": diff_gates},
+            }
+        )
+    return {
+        "since": since.isoformat(),
+        "generated_at": now.isoformat(),
+        "mandates": out,
+        "totals": totals,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Executor-facing helpers (the executor never imports Beanie models)
 # ---------------------------------------------------------------------------
 
@@ -1538,6 +1672,7 @@ def _utcnow() -> datetime:
 __all__ = [
     "charter_for_mandate",
     "create_mandate",
+    "digest",
     "executor_revalidate",
     "file_feedback",
     "get_mandate",

@@ -1,6 +1,4 @@
-# tests/cloud/test_belt_mandates.py — the Belt MANDATE primitive (feat/belt-mandates).
-#
-# Created: 2026-06-11.
+# tests/cloud/test_belt_mandates.py — the Belt MANDATE primitive.
 #
 # THE HARD GATE — ``test_full_shift_gate_one_clean_chain`` drives the REAL
 # production path with NO stubs at the propose/execute seam (the documented
@@ -25,7 +23,8 @@
 # Also pinned: budget cap enforced (422, nothing reaches the gate); the
 # boundary check reads ACTION fields only (a ``why`` that names the forbidden
 # thing passes — that's a refusal, not a violation); patrol intake → sighting;
-# deps patrol against a real manifest; tenant isolation on every read.
+# deps patrol against a real manifest; tenant isolation on every read; the
+# digest route (sightings, shifts, runs and waiting gates per mandate).
 
 from __future__ import annotations
 
@@ -818,3 +817,156 @@ async def test_resolve_requires_complete_decisions(
     assert "missing indices" in res.json()["error"]["message"]
     final = await store.get_action(shift["plan_action_id"])
     assert final.status == ActionStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# digest — the morning report over the existing read models
+# ---------------------------------------------------------------------------
+
+
+async def _seed_run(store: InstinctStore, mandate_id: str | None, task: str, **blob_extra):
+    """File a belt ``code_change`` run the way the station dispatcher does,
+    with mandate provenance on the blob."""
+    from pocketpaw.instinct.models import ActionTrigger
+
+    blob = {
+        "kind": "code_change",
+        "schema": 2,
+        "repo": "/srv/surface",
+        "base_branch": "main",
+        "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+        "task": f"{task}\n\nwhy it matters",
+        "summary": task,
+        "workspace_id": WS,
+        "mandate_id": mandate_id or "",
+        "shift_no": 1,
+        **blob_extra,
+    }
+    trigger = ActionTrigger(type="agent", source="belt:mandate-dispatch", reason="test")
+    return await store.propose(
+        WS, f"Station task — {task}", "", "", trigger, parameters={"_code_change": blob}
+    )
+
+
+async def test_digest_reports_activity_and_waiting_gates(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch
+):
+    """GET /belt/mandates/digest (the static path must not be captured as a
+    mandate id): per mandate the new sightings (top by severity), the shift,
+    the runs with their landing / headless_error fields, and the gates waiting
+    on a human — plan gates and per-diff gates — plus workspace totals."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    busy = _create_mandate(client, repo)
+    quiet = _create_mandate(client, repo)
+    for text, sev in (("checkout is slow", 2), ("login 500s for SSO users", 5)):
+        res = client.post(
+            f"/belt/mandates/{busy}/feedback",
+            json={"text": text, "severity": sev, "source": "support"},
+        )
+        assert res.status_code == 200, res.text
+    shift = client.post(f"/belt/mandates/{busy}/shift").json()["shift"]
+    assert shift["state"] == "in_gate"
+
+    await _seed_run(
+        store,
+        busy,
+        "fix the sso login",
+        station_pending=True,
+        diff="",
+        headless_error="headless develop failed: CHECK: pytest exited 1",
+    )
+    await _seed_run(store, busy, "speed up checkout")  # pending diff = a per-diff gate
+    landed = await _seed_run(store, busy, "bump deps", pr_url="https://x/pull/7", branch="b/7")
+    await store.approve(landed.id)
+    await store.mark_executed(landed.id, "PR opened")
+    await _seed_run(store, None, "a hand-driven run")  # no mandate: not in any row
+
+    res = client.get("/belt/mandates/digest")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    rows = {m["id"]: m for m in body["mandates"]}
+    assert set(rows) == {busy, quiet}
+
+    row = rows[busy]
+    assert row["cadence"] == "manual"
+    assert row["sightings"]["count"] == 2
+    assert [t["severity"] for t in row["sightings"]["top"]] == [5, 2]
+    assert row["sightings"]["top"][0] == {
+        "title": "login 500s for SSO users",
+        "severity": 5,
+        "patrol": "feedback",
+    }
+    assert row["shifts"] == [
+        {"no": 1, "state": "in_gate", "outcome": None, "task_count": shift["task_count"]}
+    ]
+    assert row["gates"]["plans"] == [
+        {
+            "shift_no": 1,
+            "plan_action_id": shift["plan_action_id"],
+            "task_count": shift["task_count"],
+        }
+    ]
+    assert [g["title"] for g in row["gates"]["diffs"]] == ["speed up checkout"]
+    runs = {r["title"]: r for r in row["runs"]}
+    assert set(runs) == {"fix the sso login", "speed up checkout", "bump deps"}
+    assert runs["fix the sso login"]["status"] == "queued"
+    assert "pytest exited 1" in runs["fix the sso login"]["headless_error"]
+    assert runs["bump deps"]["status"] == "landed"
+    assert runs["bump deps"]["pr_url"] == "https://x/pull/7"
+    assert runs["bump deps"]["branch"] == "b/7"
+
+    assert rows[quiet]["sightings"]["count"] == 0
+    assert rows[quiet]["runs"] == [] and rows[quiet]["shifts"] == []
+    assert body["totals"] == {
+        "mandates": 2,
+        "new_sightings": 2,
+        "shifts": 1,
+        "runs": 3,
+        "landed": 1,
+        "failed": 1,
+        "gates_waiting": 2,
+    }
+
+    # scripts/factory_digest.py renders this exact wire shape.
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "factory_digest.py"
+    spec = importlib.util.spec_from_file_location("factory_digest", script)
+    factory_digest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(factory_digest)
+    report = factory_digest.render(body)
+    assert "| deps freshness | manual | 2 · sev 5 login 500s for SSO users |" in report
+    assert "plan gate, shift 1" in report
+    assert "diff gate, speed up checkout" in report
+    assert "fix the sso login: headless develop failed: CHECK: pytest exited 1" in report
+    assert "bump deps (https://x/pull/7)" in report
+
+    # A window that starts after everything: activity drops out, but gates
+    # still waiting on a human are reported whatever their age.
+    later = client.get("/belt/mandates/digest", params={"since": "2999-01-01T00:00:00+00:00"})
+    assert later.status_code == 200, later.text
+    late = {m["id"]: m for m in later.json()["mandates"]}[busy]
+    assert late["sightings"]["count"] == 0
+    assert late["shifts"] == [] and late["runs"] == []
+    assert len(late["gates"]["plans"]) == 1 and len(late["gates"]["diffs"]) == 1
+    assert later.json()["totals"]["gates_waiting"] == 2
+
+    assert client.get("/belt/mandates/digest", params={"since": "yesterday"}).status_code == 422
+
+    # Tenant scoped: another workspace sees none of it.
+    other = _make_client(monkeypatch, workspace_id="w2", user_id="u2")
+    assert other.get("/belt/mandates/digest").json()["mandates"] == []
+
+
+async def test_digest_default_window_is_24h(tmp_path, mongo_db, store, monkeypatch):
+    """No ``since`` → the window opens 24 hours before now."""
+    from datetime import UTC, datetime, timedelta
+
+    out = await mandate_service.digest(WS, USER)
+    since = datetime.fromisoformat(out["since"])
+    generated = datetime.fromisoformat(out["generated_at"])
+    assert generated - since == timedelta(days=1)
+    assert abs(generated - datetime.now(UTC)) < timedelta(minutes=1)
+    assert out["mandates"] == [] and out["totals"]["mandates"] == 0

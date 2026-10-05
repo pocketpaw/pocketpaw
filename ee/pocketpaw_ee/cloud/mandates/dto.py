@@ -5,8 +5,8 @@
 # ``model_validate``s at entry; Response models are the wire dicts the service
 # returns. Covers mandate create/read (charter incl. checks + recipes, and the
 # ``upstream`` patrol's pinned-dependency watch list), feedback
-# intake + sightings, the shift trigger, plan resolution, pawprints, and the
-# autopilot toggle.
+# intake + sightings, the shift trigger, plan resolution, pawprints, the
+# autopilot toggle, and the digest query.
 
 from __future__ import annotations
 
@@ -299,6 +299,18 @@ class ResolvePlanRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Digest — the workspace's morning report
+# ---------------------------------------------------------------------------
+
+
+class DigestRequest(BaseModel):
+    """Query for ``GET /belt/mandates/digest``. ``since`` is an ISO-8601
+    instant (a naive value reads as UTC); omitted means 24 hours ago."""
+
+    since: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
 # Pawprints (slice 5) — past-tense event feed
 # ---------------------------------------------------------------------------
 
@@ -332,6 +344,7 @@ __all__ = [
     "BudgetRequest",
     "CharterRequest",
     "CreateMandateRequest",
+    "DigestRequest",
     "FeedbackRequest",
     "KpiRequest",
     "MandateDetailResponse",
