@@ -26,7 +26,7 @@
 # (default True → on-box Ollama only, ``api_key is None``; False → the
 # workspace's configured provider, a cloud model allowed — the tenant's explicit
 # opt-in). The resolution lives once in ``_refine``; this digester just consumes
-# it. The kb ingest/build TRIPWIRE below is INDEPENDENT of that posture and stays
+# it. The kb compile-command TRIPWIRE below is INDEPENDENT of that posture and stays
 # UNCONDITIONAL.
 #
 # Contract: ``digest(records, connector_meta=None) -> OntologyDraft`` — the same
@@ -48,9 +48,10 @@
 # ``graph``), and the F2 categorization model call resolves through
 # ``resolve_on_box_client`` — Ollama-only by default, or the configured provider
 # under the explicit opt-in posture. INDEPENDENT of that posture, the digester
-# must NEVER call ``kb ingest`` / ``kb build`` (which POST raw tenant text to the
-# Anthropic KB API, kb.go:1349) — the ``_kb`` seam asserts this on EVERY call,
-# unconditionally; sovereign or opt-in, that path is never correct. The seam
+# must NEVER call ``kb ingest`` / ``build`` / ``recompile`` / ``watch`` (which
+# POST raw tenant text to the Anthropic KB API, kb.go:1349) — the ``_kb`` seam
+# asserts this on EVERY call, unconditionally; sovereign or opt-in, that path
+# is never correct. The seam
 # clones ``cloud/agents/knowledge.py`` (binary resolution + subprocess +
 # timeout) and is the seam the unit tests mock.
 #
@@ -147,7 +148,7 @@ KB_BIN = _resolve_kb_bin()
 
 # The off-box LLM-compile commands the digester must NEVER invoke — they POST
 # raw tenant text to the Anthropic API (kb.go:1349). The sovereignty tripwire.
-_FORBIDDEN_KB_COMMANDS = frozenset({"ingest", "build"})
+_FORBIDDEN_KB_COMMANDS = frozenset({"ingest", "build", "recompile", "watch"})
 
 
 def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict | list | str:
@@ -157,10 +158,11 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
     with a timeout. Callers keep it synchronous (the Digester Protocol is sync);
     the orchestrator already drives the whole digest under ``asyncio.to_thread``.
 
-    SOVEREIGNTY TRIPWIRE (mechanical, not just a comment): refuses ``kb ingest``
-    / ``kb build`` before the subprocess ever runs. Those POST raw tenant text to
-    Anthropic (kb.go:1349); the digest path is keyless on-box only. A bug that
-    routes a compile through them raises here instead of leaking.
+    SOVEREIGNTY TRIPWIRE (mechanical, not just a comment): refuses ``kb ingest``,
+    ``build``, ``recompile`` and ``watch`` before the subprocess ever runs.
+    Those POST raw tenant text to Anthropic (kb.go:1349); the digest path is
+    keyless on-box only. A bug that routes a compile through them raises here
+    instead of leaking.
     """
     if args and args[0] in _FORBIDDEN_KB_COMMANDS:
         raise RuntimeError(

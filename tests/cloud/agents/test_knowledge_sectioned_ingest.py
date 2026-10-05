@@ -14,7 +14,8 @@
 #   * partial failure returns the landed ids with counts, total failure raises;
 #   * at most three compiles run at once, kb writes never overlap, and the
 #     deadline fails the sections it did not reach;
-#   * the short-document path and the API-key path are unchanged.
+#   * the short-document path is unchanged, and an API key in the environment
+#     does not skip sectioning.
 # The LLM (``PocketPawCompilerBackend.complete``) and the kb binary (``_kb``)
 # are faked at their boundaries; everything between runs for real.
 """Sectioned ingest: splitter, per-section compile, partial failure, bounds."""
@@ -468,23 +469,17 @@ async def test_a_short_document_keeps_the_whole_document_compile(monkeypatch, kb
     assert kb.payloads[0]["article"]["title"] == "Hours"
 
 
-async def test_the_api_key_path_is_plain_kb_ingest_even_for_a_long_document(monkeypatch):
+async def test_an_api_key_in_the_environment_does_not_skip_sectioning(monkeypatch, kb):
+    """kb-go never compiles, so a key in the environment changes nothing: a
+    long document is still compiled and ingested section by section."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     compiler = _install(monkeypatch, _Compiler())
-    calls: list[tuple] = []
 
-    def fake_kb(*args, input_text=None, timeout=120):
-        calls.append((args, input_text))
-        return {"article": "whole-doc", "compiled_with": "claude"}
+    result = await KnowledgeService.ingest_document_to_scope("pocket:p1", _long_doc(6), "prices.md")
 
-    monkeypatch.setattr(knowledge, "_kb", fake_kb)
-    doc = _long_doc(6)
-
-    result = await KnowledgeService.ingest_document_to_scope("pocket:p1", doc, "prices.md")
-
-    assert compiler.prompts == []
-    assert calls == [(("ingest", "--scope", "pocket:p1", "--source", "prices.md"), doc)]
-    assert result["articles"] == ["whole-doc"]
+    assert result["sections_total"] > 1
+    assert len(compiler.prompts) == result["sections_total"]
+    assert len(kb.payloads) == result["sections_total"]
 
 
 # --------------------------------------------------------------------------- #

@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud.agents import knowledge
 from pocketpaw_ee.cloud.auth import current_active_user
+from pocketpaw_ee.cloud.kb import backend_adapter
 from pocketpaw_ee.cloud.license import require_license
 
 WORKSPACE = "ws-alpha"
@@ -57,6 +58,18 @@ class _SubprocessSpy:
         subcommand = cmd[1]
         returncode, stdout, stderr = self.responses.get(subcommand, (1, "", "no fake response"))
         return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+
+def _install_compiler(monkeypatch) -> None:
+    """Fake only the LLM boundary: PocketPaw's agent backend compiles every
+    article, so a reingest compiles here and pipes ``--article-json`` to kb."""
+
+    async def fake_complete(self, prompt: str, system_prompt: str = "") -> str:
+        return json.dumps(
+            {"title": "Notes", "summary": "S.", "content": "# Notes\n\n- fact", "concepts": []}
+        )
+
+    monkeypatch.setattr(backend_adapter.PocketPawCompilerBackend, "complete", fake_complete)
 
 
 def _write_article(kb_home: str, scope_dir: str, article_id: str, fm: dict, content: str) -> None:
@@ -376,8 +389,8 @@ def test_stats_rolls_up_workspace_and_agent_scopes(client, kb_home, spy) -> None
 
 
 def test_reingest_routes_raw_doc_through_funnel(client, kb_home, spy, monkeypatch) -> None:
-    """The reingest argv is pinned to the funnel's plain-ingest shape."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    """The reingest argv is pinned to the funnel's --article-json shape."""
+    _install_compiler(monkeypatch)
     _write_article(
         kb_home,
         WS_DIR,
@@ -391,7 +404,7 @@ def test_reingest_routes_raw_doc_through_funnel(client, kb_home, spy, monkeypatc
         "raw-1",
         {"source": "notes.txt", "raw_text": "the raw text", "word_count": 3},
     )
-    spy.responses["ingest"] = (0, json.dumps({"id": "art-1", "compiled_with": "llm"}), "")
+    spy.responses["ingest"] = (0, json.dumps({"id": "art-1", "compiled_with": "agent"}), "")
 
     response = client.post(
         "/api/v1/knowledge/reingest", json={"article_id": "art-1", "scope": WS_SCOPE}
@@ -404,15 +417,10 @@ def test_reingest_routes_raw_doc_through_funnel(client, kb_home, spy, monkeypatc
     assert body["result"]["id"] == "art-1"
 
     assert len(spy.calls) == 1
-    assert spy.calls[0]["cmd"][1:] == [
-        "ingest",
-        "--scope",
-        WS_SCOPE,
-        "--source",
-        "notes.txt",
-        "--json",
-    ]
-    assert spy.calls[0]["input"] == "the raw text"
+    assert spy.calls[0]["cmd"][1:] == ["ingest", "--article-json", "--scope", WS_SCOPE, "--json"]
+    payload = json.loads(spy.calls[0]["input"])
+    assert payload["raw_text"] == "the raw text"
+    assert payload["article"]["source"] == "notes.txt"
 
 
 def test_reingest_orphan_raw_id_directly(client, kb_home, spy, fake_store, monkeypatch) -> None:
@@ -422,7 +430,7 @@ def test_reingest_orphan_raw_id_directly(client, kb_home, spy, fake_store, monke
     landed under a new id, the FL-11b tracking reassign must be attempted so
     upload rows pointing at the old id keep purging the live copy.
     """
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    _install_compiler(monkeypatch)
     _write_raw_doc(
         kb_home,
         WS_DIR,
@@ -431,7 +439,7 @@ def test_reingest_orphan_raw_id_directly(client, kb_home, spy, fake_store, monke
     )
     spy.responses["ingest"] = (
         0,
-        json.dumps({"article": "art-new", "title": "Orphan", "words": 2, "compiled_with": "llm"}),
+        json.dumps({"article": "art-new", "title": "Orphan", "words": 2, "compiled_with": "agent"}),
         "",
     )
 
@@ -440,7 +448,7 @@ def test_reingest_orphan_raw_id_directly(client, kb_home, spy, fake_store, monke
     body = response.json()
     assert body["raw_doc_id"] == "raw-orphan"
     assert body["new_article_id"] == "art-new"  # extracted from the "article" key
-    assert spy.calls[0]["input"] == "orphan text"
+    assert json.loads(spy.calls[0]["input"])["raw_text"] == "orphan text"
     assert fake_store.reassign_calls == [
         {
             "workspace": WORKSPACE,
@@ -516,7 +524,7 @@ def _install_upload_pipeline(monkeypatch, tmp_path, *, text: str) -> None:
 def test_reingest_upload_extracts_and_funnels(
     client, kb_home, spy, fake_store, monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    _install_compiler(monkeypatch)
     fake_store.doc = SimpleNamespace(
         file_id="up-1",
         storage_key="ws/up-1",
@@ -530,7 +538,7 @@ def test_reingest_upload_extracts_and_funnels(
     # tracking dead — this receipt shape is what pins the fix.
     spy.responses["ingest"] = (
         0,
-        json.dumps({"article": "art-up", "title": "Report", "words": 3, "compiled_with": "llm"}),
+        json.dumps({"article": "art-up", "title": "Report", "words": 3, "compiled_with": "agent"}),
         "",
     )
 
@@ -543,16 +551,11 @@ def test_reingest_upload_extracts_and_funnels(
     assert body["article_id"] == "art-up"  # extracted from the "article" key
     assert body["result"]["article"] == "art-up"
 
-    # The funnel argv carries the ORIGINAL filename as source.
-    assert spy.calls[0]["cmd"][1:] == [
-        "ingest",
-        "--scope",
-        WS_SCOPE,
-        "--source",
-        "report.pdf",
-        "--json",
-    ]
-    assert spy.calls[0]["input"] == "extracted report text"
+    # The funnel's compiled article carries the ORIGINAL filename as source.
+    assert spy.calls[0]["cmd"][1:] == ["ingest", "--article-json", "--scope", WS_SCOPE, "--json"]
+    payload = json.loads(spy.calls[0]["input"])
+    assert payload["raw_text"] == "extracted report text"
+    assert payload["article"]["source"] == "report.pdf"
 
     # FL-11b tracking recorded for the later hide-from-AI purge.
     assert fake_store.kb_article_calls == [

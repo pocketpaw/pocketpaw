@@ -1,11 +1,11 @@
 # test_knowledge_ingest_hardening.py — ingest compile hardening tests.
-# Created: 2026-08-04 — silent-poisoning fix. On boxes without an
-# ANTHROPIC_API_KEY, kb's own LLM compile failed and kb silently stored docs
-# VERBATIM, poisoning the scope. These tests pin the new contract:
-#   * no key → article compiled via PocketPaw's agent backend and piped to
+#
+# A kb ingest must never store a document verbatim. These tests pin:
+#   * the article is compiled via PocketPaw's agent backend and piped to
 #     `kb ingest --article-json` (spied at the subprocess boundary: exact
-#     argv + stdin payload — the seam under test is NOT mocked away);
-#   * key present → the original plain `kb ingest` path, byte-identical argv;
+#     argv + stdin payload — the seam under test is NOT mocked away). That an
+#     ANTHROPIC_API_KEY changes nothing is pinned in
+#     test_knowledge_never_kb_compile.py;
 #   * compile failure / garbage / verbatim echo → raises, NO kb call at all.
 #     An echo is judged by 8-word runs copied from the input, not length
 #     alone, so a fact-dense doc's honest compile is accepted;
@@ -136,21 +136,6 @@ async def test_no_key_tolerates_fenced_json(monkeypatch):
     assert result["id"] == "art-2"
     payload = json.loads(spy.calls[0]["input"])
     assert payload["article"]["title"] == _ARTICLE["title"]
-
-
-@pytest.mark.asyncio
-async def test_api_key_keeps_plain_ingest_path(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    compiler_calls = _install_compiler(monkeypatch, json.dumps(_ARTICLE))
-    spy = _install_spy(monkeypatch, [(0, json.dumps({"id": "art-3", "compiled_with": "llm"}), "")])
-
-    result = await KnowledgeService.ingest_text_to_scope("workspace:w1", "doc text", source="a.md")
-
-    assert result["id"] == "art-3"
-    assert compiler_calls == []  # no agent-backend compile when kb can do it itself
-    cmd = spy.calls[0]["cmd"]
-    assert cmd[1:] == ["ingest", "--scope", "workspace:w1", "--source", "a.md", "--json"]
-    assert spy.calls[0]["input"] == "doc text"
 
 
 # --------------------------------------------------------------------------- #
@@ -356,7 +341,8 @@ async def test_old_binary_silently_ignoring_article_json_fails_loudly(monkeypatc
 
 @pytest.mark.asyncio
 async def test_fallback_marker_rejected_and_warned(monkeypatch, caplog):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _install_compiler(monkeypatch, json.dumps(_ARTICLE))
     _install_spy(
         monkeypatch,
         [(0, json.dumps({"id": "art-9", "compiled_with": "none (fallback)"}), "")],
@@ -381,8 +367,12 @@ async def test_ingest_file_text_path_routes_through_ingest_funnel(monkeypatch, t
     """Text/code files no longer hand kb a file path — they are read in Python
     and piped through ingest_text_to_scope, so they get the same compile
     guarantees as every other doc."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    spy = _install_spy(monkeypatch, [(0, json.dumps({"id": "art-f1", "compiled_with": "llm"}), "")])
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    compiler_calls = _install_compiler(monkeypatch, json.dumps(_ARTICLE))
+    spy = _install_spy(
+        monkeypatch,
+        [(0, json.dumps({"id": "art-f1", "compiled_with": "pocketpaw-agent:x"}), "")],
+    )
 
     notes = tmp_path / "notes.md"
     notes.write_text("# Notes\n\nremember the thing", encoding="utf-8")
@@ -391,20 +381,28 @@ async def test_ingest_file_text_path_routes_through_ingest_funnel(monkeypatch, t
 
     assert result["id"] == "art-f1"
     cmd = spy.calls[0]["cmd"]
-    # Funnel argv (stdin ingest), NOT the old direct file-path form
-    # ["ingest", "<path>", "--scope", ...]. Non-code file → no --lang hint.
-    assert cmd[1:] == ["ingest", "--scope", "agent:a1", "--source", "notes.md", "--json"]
+    # Funnel argv (pre-compiled stdin ingest), NOT the old direct file-path
+    # form ["ingest", "<path>", "--scope", ...].
+    assert cmd[1:] == ["ingest", "--article-json", "--scope", "agent:a1", "--json"]
     assert str(notes) not in cmd
-    assert spy.calls[0]["input"] == "# Notes\n\nremember the thing"
+    payload = json.loads(spy.calls[0]["input"])
+    assert payload["raw_text"] == "# Notes\n\nremember the thing"
+    assert payload["article"]["source"] == "notes.md"
+    # Non-code file → no code rule in the compile prompt.
+    assert "source code" not in compiler_calls[0]["prompt"]
 
 
 @pytest.mark.asyncio
-async def test_ingest_file_code_path_passes_lang_hint(monkeypatch, tmp_path):
-    """Stdin carries no file path, so kb-go can't detect the language itself.
-    Code files must carry --lang so kb-go still runs its AST parse — the
-    structure awareness the old file-path form provided."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    spy = _install_spy(monkeypatch, [(0, json.dumps({"id": "art-f2", "compiled_with": "llm"}), "")])
+async def test_ingest_file_code_path_steers_the_compile_to_code_structure(monkeypatch, tmp_path):
+    """Stdin carries no file path, so the language comes from the file name:
+    a code file's compile prompt asks for its structure (functions, classes,
+    exports) rather than a prose summary."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    compiler_calls = _install_compiler(monkeypatch, json.dumps(_ARTICLE))
+    spy = _install_spy(
+        monkeypatch,
+        [(0, json.dumps({"id": "art-f2", "compiled_with": "pocketpaw-agent:x"}), "")],
+    )
 
     module = tmp_path / "utils.py"
     module.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
@@ -412,18 +410,11 @@ async def test_ingest_file_code_path_passes_lang_hint(monkeypatch, tmp_path):
     result = await KnowledgeService.ingest_file("a1", str(module))
 
     assert result["id"] == "art-f2"
+    assert "The document is python source code" in compiler_calls[0]["prompt"]
     cmd = spy.calls[0]["cmd"]
-    assert cmd[1:] == [
-        "ingest",
-        "--scope",
-        "agent:a1",
-        "--source",
-        "utils.py",
-        "--lang",
-        "python",
-        "--json",
-    ]
-    assert spy.calls[0]["input"] == "def add(a, b):\n    return a + b\n"
+    assert cmd[1:] == ["ingest", "--article-json", "--scope", "agent:a1", "--json"]
+    payload = json.loads(spy.calls[0]["input"])
+    assert payload["raw_text"] == "def add(a, b):\n    return a + b\n"
 
 
 # --------------------------------------------------------------------------- #
