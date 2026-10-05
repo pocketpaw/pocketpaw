@@ -4,7 +4,8 @@
 # that imports those Beanie classes, per the 4-file entity rule).
 #
 # Public API (module-level ``async def op(workspace_id, user_id, body) -> dict``):
-# create/list/get mandates; file_feedback, list_sightings, run_patrols (patrols
+# create (the repo must sit inside the workspace's belt allowlist roots)/list/get
+# mandates; file_feedback, list_sightings, run_patrols (patrols
 # that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
 # signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
 # (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
@@ -140,9 +141,32 @@ def _first_pydantic_msg(exc: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _require_allowed_repo(workspace_id: str, repo_id: str) -> None:
+    """A mandate may only bind a repo inside the workspace's belt allowlist
+    roots (settings ∪ the workspace's persisted roots, the console's view),
+    judged on the resolved path so ``..`` or a symlink can't widen it. The
+    develop station re-resolves against the settings allowlist at run time."""
+    from pathlib import Path
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    roots = await belt_service.resolve_allowlist_roots(workspace_id)
+    try:
+        resolved = Path(repo_id).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        resolved = None
+    if resolved is None or not any(resolved.is_relative_to(root) for root in roots):
+        raise ValidationError(
+            "mandate.repo_not_allowed",
+            f"surface.repo_id: {repo_id!r} is outside the workspace's allowed repo roots",
+        )
+
+
 async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str, Any]:
-    """Create a new standing mandate. Charter body validated at entry."""
+    """Create a new standing mandate. Charter body validated at entry; the
+    bound repo must sit inside the workspace's allowed roots (422 otherwise)."""
     body = CreateMandateRequest.model_validate(body)
+    await _require_allowed_repo(workspace_id, body.surface.repo_id)
 
     doc = MandateDoc(
         workspace=workspace_id,

@@ -38,6 +38,9 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
+# Mandates here bind tmp repos outside the default allowlist roots.
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from pocketpaw_ee.cloud._core.deps import current_workspace_id  # noqa: E402
@@ -1025,3 +1028,38 @@ async def test_create_with_disallowed_check_is_422(tmp_path, mongo_db, store, mo
     )
     assert res.status_code == 422, res.text
     assert "'bash' is not allowed" in res.text
+
+
+# ---------------------------------------------------------------------------
+# Repo containment at create — the bound repo must sit inside the allowed roots
+# ---------------------------------------------------------------------------
+
+
+async def test_create_refuses_repo_outside_the_workspace_roots(
+    tmp_path, mongo_db, store, monkeypatch
+):
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    allowed = (tmp_path / "allowed").resolve()
+    (allowed / "repo").mkdir(parents=True)
+    seen: list[str] = []
+
+    async def _roots(workspace_id: str) -> list[Path]:
+        seen.append(workspace_id)
+        return [allowed]
+
+    monkeypatch.setattr(belt_service, "resolve_allowlist_roots", _roots)
+    client = _make_client(monkeypatch)
+
+    def create(repo_id: str):
+        return client.post(
+            "/belt/mandates",
+            json={"name": "m", "surface": {"repo_id": repo_id}, "charter": _charter()},
+        )
+
+    assert create(str(allowed / "repo")).status_code == 200
+    assert seen == [WS], "roots are the creating workspace's"
+    for outside in ("/", "/etc", str(allowed / ".." / "escape"), str(tmp_path)):
+        res = create(outside)
+        assert res.status_code == 422, (outside, res.text)
+        assert "allowed repo roots" in res.text

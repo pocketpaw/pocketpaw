@@ -7,8 +7,10 @@
 # merges anything outside a throwaway worktree).
 #
 # A small explicit state machine, written as sequential steps:
-#   PREPARE  ``git worktree add --detach`` of the bound repo at ``origin/<base>``
-#            (after a fetch) when an origin exists, else the local ``<base>``.
+#   PREPARE  resolve the bound repo inside ``POCKETPAW_BELT_REPO_ALLOWLIST``
+#            (empty allowlist = refuse), then ``git worktree add --detach`` at
+#            ``origin/<base>`` (after a fetch) when an origin exists, else the
+#            local ``<base>``.
 #   WORK     a charter recipe → run that command; else DEVELOP → ``claude -p``.
 #   CHECK    run every charter check; keep exit code + output tail.
 #   FIX      a red check (or a failed review) with attempts left → ``claude -p``
@@ -325,9 +327,18 @@ class ClaudeCodeDevelop:
 
     @staticmethod
     def _resolve_repo(repo: str) -> Path:
-        from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo
+        """The bound repo, inside the settings allowlist. Fails closed: an
+        empty allowlist (which elsewhere defaults to the cwd's parent) refuses
+        the run instead of guessing a root."""
+        from pocketpaw.config import get_settings
+        from pocketpaw_ee.agent.mcp_servers.belt import _resolve_repo
 
-        path, err = _re_resolve_repo(repo)
+        if not get_settings().belt_repo_allowlist:
+            raise DevelopStationError(
+                "PREPARE: POCKETPAW_BELT_REPO_ALLOWLIST is empty; the develop station "
+                "only runs against an explicit repo allowlist"
+            )
+        path, err = _resolve_repo(repo)
         if path is None:
             raise DevelopStationError(f"PREPARE: {err}")
         return path

@@ -21,6 +21,9 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
+# Mandates here bind tmp repos outside the default allowlist roots.
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
 from pocketpaw_ee.cloud.belt import develop_station as ds  # noqa: E402
 from pocketpaw_ee.cloud.belt.headless import (  # noqa: E402
     DevelopRequest,
@@ -46,6 +49,21 @@ CHECK = (
 # ---------------------------------------------------------------------------
 
 
+def _allowlist(monkeypatch, roots: list[str]) -> None:
+    """Patch ``settings.belt_repo_allowlist`` (everything else stays real)."""
+    from pocketpaw.config import get_settings
+
+    real = get_settings()
+
+    class _S:
+        belt_repo_allowlist = roots
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch) -> Path:
     """A local-only (no origin) git repo on ``main`` with one commit, inside an
@@ -65,9 +83,7 @@ def repo(tmp_path: Path, monkeypatch) -> Path:
     (root / "README.md").write_text("toy\n")
     git("add", "-A")
     git("commit", "-q", "-m", "init")
-    monkeypatch.setattr(
-        "pocketpaw_ee.agent.mcp_servers.belt._resolve_allowlist", lambda: [tmp_path.resolve()]
-    )
+    _allowlist(monkeypatch, [str(tmp_path)])
     monkeypatch.setenv("POCKETPAW_FACTORY_CLAUDE_BIN", FAKE_CLAUDE)
     monkeypatch.delenv("POCKETPAW_FACTORY_CLAUDE_MODEL", raising=False)
     return root
@@ -766,4 +782,25 @@ async def test_injection_flagged_task_is_refused_before_prepare(repo):
     )
     with pytest.raises(ds.DevelopStationError, match=r"^PREPARE: task text flagged"):
         await _station(fake, repo)(request)
+    assert fake.argvs == []
+
+
+# ---------------------------------------------------------------------------
+# hardening — repo containment
+# ---------------------------------------------------------------------------
+
+
+async def test_empty_repo_allowlist_fails_closed(repo, monkeypatch):
+    _allowlist(monkeypatch, [])
+    fake = FakeClaude(develop=[_write("ok")])
+    with pytest.raises(ds.DevelopStationError, match=r"^PREPARE: .*ALLOWLIST is empty"):
+        await _station(fake, repo)(_request(repo))
+    assert fake.argvs == []
+
+
+async def test_repo_outside_the_allowlist_is_refused(repo, tmp_path, monkeypatch):
+    _allowlist(monkeypatch, [str(tmp_path / "elsewhere")])
+    fake = FakeClaude(develop=[_write("ok")])
+    with pytest.raises(ds.DevelopStationError, match=r"^PREPARE: .*outside the allowed roots"):
+        await _station(fake, repo)(_request(repo))
     assert fake.argvs == []

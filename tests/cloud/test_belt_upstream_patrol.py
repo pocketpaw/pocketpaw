@@ -16,6 +16,9 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
+# Mandates here bind tmp repos outside the default allowlist roots.
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
 from pocketpaw_ee.cloud.mandates import patrols  # noqa: E402
 from pocketpaw_ee.cloud.mandates.dto import CreateMandateRequest  # noqa: E402
 from pocketpaw_ee.cloud.mandates.patrols import upstream_patrol  # noqa: E402

@@ -40,6 +40,9 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
+# Mandates here bind tmp repos outside the default allowlist roots.
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from pocketpaw_ee.cloud._core.deps import current_workspace_id  # noqa: E402
