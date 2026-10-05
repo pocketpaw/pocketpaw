@@ -31,6 +31,7 @@ YAMLs on a dev machine can't leak into test registries.
 """
 
 import asyncio
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -273,6 +274,38 @@ def _isolate_audit_log(tmp_path):
         patch("pocketpaw.tools.registry.get_audit_logger", return_value=temp_logger),
     ):
         yield temp_logger
+
+
+def _clear_journal_cache() -> None:
+    # sys.modules lookup, not an import; getattr because some tests swap the
+    # lru_cache'd factory for a plain stub while they run.
+    fn = getattr(sys.modules.get("pocketpaw.journal_dep"), "_cached_journal", None)
+    if hasattr(fn, "cache_clear"):
+        fn.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_soul_data_dir(tmp_path, monkeypatch):
+    """Keep every test out of the developer's real ``~/.soul``.
+
+    The org journal (``pocketpaw.journal_dep``) lives under ``SOUL_DATA_DIR`` or
+    ``~/.soul``, and the decisions store's ``_DB_PATH`` global defaults to
+    ``~/.soul/decisions.db``; tests that ``set_db_path(tmp_path)`` never restored it.
+    The next ``mount_cloud`` then replayed the whole real journal (~137k events)
+    into a fresh temp store: 1182 s in one census run. Both now point at this
+    test's tmp dir and are restored afterwards.
+    """
+    soul_dir = tmp_path / "soul"
+    monkeypatch.setenv("SOUL_DATA_DIR", str(soul_dir))
+    _clear_journal_cache()
+    if importlib.util.find_spec("pocketpaw_ee") is not None:
+        # Imported here (lazy package, ~1 s once per process) so a store first
+        # imported mid-test can't resolve the real default path.
+        from pocketpaw_ee.cloud.decisions import store
+
+        monkeypatch.setattr(store, "_DB_PATH", soul_dir / "decisions.db")
+    yield
+    _clear_journal_cache()
 
 
 # ---------------------------------------------------------------------------
