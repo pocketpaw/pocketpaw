@@ -356,7 +356,7 @@
   {
     "label": "CR-3: the indexed page's own article no longer joins the knowledge",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "    ordered = faqs + ([chunk] if chunk is not None else [])",
+    "find": "    ordered = faqs + page_items",
     "replace": "    ordered = faqs",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_page.py::test_an_indexed_page_brings_its_title_summary_and_article",

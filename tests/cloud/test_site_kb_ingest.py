@@ -280,6 +280,37 @@ class _FakeSite:
             setattr(self, key, value)
 
 
+def patch_page_ingest(monkeypatch, fake):
+    """Fake the sync's one ingest call, ``ingest_sections_to_scope``, with a
+    per-article ``fake(scope, text, source)`` returning a kb receipt. A raise
+    fails that section; a page whose every section failed raises, as the real
+    one does."""
+    from pocketpaw_ee.cloud.agents.knowledge import (
+        KnowledgeEngineUnavailable,
+        KnowledgeService,
+        extract_ingest_article_id,
+    )
+
+    async def _sections(scope, sections):
+        ids = []
+        for section in sections:
+            try:
+                ids.append(
+                    extract_ingest_article_id(await fake(scope, section.text, section.source))
+                )
+            except KnowledgeEngineUnavailable:
+                raise
+            except Exception:
+                if len(sections) == 1:
+                    raise
+                ids.append("")
+        if not any(ids):
+            raise RuntimeError("no section landed")
+        return {"article": next(i for i in ids if i), "section_articles": ids}
+
+    monkeypatch.setattr(KnowledgeService, "ingest_sections_to_scope", staticmethod(_sections))
+
+
 def _patch_kb(monkeypatch, *, ingested: list[str], removed: list[str]):
     """Capture what the sync asks kb-go to do, without a subprocess."""
     calls: dict[str, list] = {"ingest": [], "remove": []}
@@ -293,9 +324,7 @@ def _patch_kb(monkeypatch, *, ingested: list[str], removed: list[str]):
         removed.append(article_id)
         return True
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _ingest
-    )
+    patch_page_ingest(monkeypatch, _ingest)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.remove_article", _remove
     )
@@ -401,9 +430,7 @@ async def test_one_failed_page_does_not_lose_the_others(monkeypatch):
             raise RuntimeError("kb exploded")
         return {"article": source}
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _ingest
-    )
+    patch_page_ingest(monkeypatch, _ingest)
     _patch_pocket(
         monkeypatch,
         {
@@ -517,9 +544,7 @@ async def test_total_ingest_failure_is_reported_not_called_clean(monkeypatch):
     async def _broken(scope, text, source):
         raise RuntimeError("kb binary not found")
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _broken
-    )
+    patch_page_ingest(monkeypatch, _broken)
     _patch_pocket(
         monkeypatch,
         {"engine": "html", "source": {"index.html": f"<p>{_long('We open at 8am.')}</p>"}},
@@ -548,9 +573,7 @@ async def test_a_failed_ingest_never_purges_the_existing_knowledge(monkeypatch):
         removed.append(article_id)
         return True
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _broken
-    )
+    patch_page_ingest(monkeypatch, _broken)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.remove_article", _remove
     )
@@ -581,15 +604,16 @@ _THREE_PAGES = {
 
 
 def _patch_real_ingest(monkeypatch, kb_result):
-    """Run the REAL ingest_text_to_scope down the no-API-key lane, faking only the
-    agent compile and the kb subprocess. Returns the call counters."""
+    """Run the REAL section ingest, faking only the agent's section compile and
+    the kb subprocess. Returns the call counters."""
     from pocketpaw_ee.cloud.agents import knowledge
 
     calls = {"compile": 0, "kb": 0}
 
-    async def _compile(text, source, lang=None):
+    async def _compile(section, source, index, total, lang=None, **_kw):
         calls["compile"] += 1
-        return {"title": source, "summary": "s", "content": text, "concepts": [], "tags": []}
+        return {"title": source, "summary": "s", "content": section.text, "source": source,
+                "concepts": [], "categories": [], "compiled_with": "test"}  # fmt: skip
 
     def _kb(*args, input_text=None, timeout=120):
         calls["kb"] += 1
@@ -598,7 +622,7 @@ def _patch_real_ingest(monkeypatch, kb_result):
         return kb_result
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr(knowledge, "_compile_article_with_agent", _compile)
+    monkeypatch.setattr(knowledge, "_compile_section_with_agent", _compile)
     monkeypatch.setattr(knowledge, "_kb", _kb)
     return calls
 
@@ -631,10 +655,11 @@ async def test_a_missing_kb_binary_reports_the_engine(monkeypatch):
     monkeypatch.setattr(knowledge, "KB_BIN", "Z:/definitely/not/here/kb-go-missing")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    async def _compile(text, source, lang=None):
-        return {"title": source, "summary": "s", "content": text, "concepts": [], "tags": []}
+    async def _compile(section, source, index, total, lang=None, **_kw):
+        return {"title": source, "summary": "s", "content": section.text, "source": source,
+                "concepts": [], "categories": [], "compiled_with": "test"}  # fmt: skip
 
-    monkeypatch.setattr(knowledge, "_compile_article_with_agent", _compile)
+    monkeypatch.setattr(knowledge, "_compile_section_with_agent", _compile)
     _patch_pocket(monkeypatch, _THREE_PAGES)
     site = _FakeSite()
 

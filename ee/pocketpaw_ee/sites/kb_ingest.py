@@ -21,18 +21,30 @@
 # when it has none. Crawls run at bind and on the owner's re-sync, never on a
 # visitor's turn.
 #
-# IDEMPOTENCE. Page sources are deterministic (``site-<path-slug>``), so kb-go
-# versions an article instead of duplicating it, and ids this site produced before
-# but not now are pruned (only after a trustworthy, complete sync). Pages go
-# through ``KnowledgeService.ingest_document_to_scope``: a long page lands as one
-# article per section, every id is recorded, and the first stands for the page.
+# SECTIONS. ``page_sections.split_page`` cuts a long page at its headings; each
+# section is its own article with the source "<page source>#<heading slug>" and
+# the title "Page › Heading". A short page stays one article under the page
+# source and the page's title. Every one goes through
+# ``KnowledgeService.ingest_sections_to_scope``: PocketPaw's fact-preserving
+# (restructure, never compress) compile, written with ``kb ingest
+# --article-json``, with or without an API key; kb-go never compiles a page.
+#
+# IDEMPOTENCE. Sources are deterministic (``site-<path-slug>``, plus the section
+# slug), so kb-go replaces an article in place instead of duplicating it. A
+# section whose hash matches the last sync's index entry is not recompiled; one
+# whose compile fails keeps its previous article (and old hash, so the next sync
+# retries). Ids this site produced before but not now (a removed page or
+# section) are pruned, only after a trustworthy, complete sync.
 #
 # BOOKKEEPING on the Site (``_record_sync``, a targeted ``$set``): article ids,
-# ``kb_page_index`` (``{page_key: {"id", "title"}}``, the only page-to-article link;
-# ``concierge_runtime.resolve_page`` looks the visitor's page up by the same
-# ``page_key``), ``kb_synced_at`` and ``kb_sync_error``. A full sync replaces ids
-# and index, a partial crawl merges, a failure (a crash too: ``sync_failed``) keeps
-# them. A missing or outdated kb binary stops at the first page: ``kb_unavailable``.
+# ``kb_page_index`` (``{page_key: {"id", "title", "sections": [{id, title,
+# source, hash, anchor}]}}``, the only page-to-article link; ``id`` is the first
+# section so an old reader still works, and ``page_sections.index_sections``
+# also reads an entry written before sections; ``concierge_runtime.resolve_page``
+# looks the visitor's page up by the same ``page_key``), ``kb_synced_at`` and
+# ``kb_sync_error``. A full sync replaces ids and index, a partial crawl merges, a
+# failure (a crash too: ``sync_failed``) keeps them. A missing or outdated kb
+# binary stops at the first page: ``kb_unavailable``.
 #
 # THE CATALOG FOLLOWS. A sync that reached the site's content (hosted: the pocket
 # was read; foreign: the crawl reached the origin) schedules the fire-and-forget
@@ -51,6 +63,13 @@ from html.parser import HTMLParser
 from typing import Any
 
 from pocketpaw.paw_bar.pages import page_key
+from pocketpaw_ee.sites.page_sections import (
+    PageSection,
+    heading_anchors,
+    index_sections,
+    page_title,
+    split_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +154,16 @@ _SVELTE_EXPR_RE = re.compile(r"\{[^{}]*\}")
 
 @dataclass(frozen=True)
 class SiteDocument:
-    """One ingestable unit of a site: a page, or the whole spec for a ripple site."""
+    """One ingestable unit of a site: a page, or the whole spec for a ripple site.
+
+    ``anchors`` pairs each heading of an html page that carries an ``id`` with
+    that id (``page_sections.heading_anchors``), so a section can be cited at
+    ``page#id``."""
 
     path: str
     source: str
     text: str
+    anchors: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -150,8 +174,9 @@ class SiteKnowledgeReport:
     removed: int = 0
     skipped: int = 0
     article_ids: list[str] = field(default_factory=list)
-    # ``{page_key: {"id": article id, "title": article title}}`` for this run's pages.
-    page_index: dict[str, dict[str, str]] = field(default_factory=dict)
+    # ``{page_key: {"id", "title", "sections": [...]}}`` for this run's pages
+    # (``page_sections.index_sections`` reads an entry).
+    page_index: dict[str, dict[str, Any]] = field(default_factory=dict)
     error: str = ""
 
 
@@ -472,7 +497,10 @@ def extract_site_documents(
             text = _page_text(path, body, engine)[:_MAX_DOCUMENT_CHARS]
             if len(text) < _MIN_DOCUMENT_CHARS:
                 continue
-            docs.append(SiteDocument(path=path, source=_path_slug(path), text=text))
+            anchors = heading_anchors(body) if engine == "html" else ()
+            docs.append(
+                SiteDocument(path=path, source=_path_slug(path), text=text, anchors=anchors)
+            )
         return docs
 
     # ripple (and anything unrecognised that still carries a spec): the spec is the
@@ -523,57 +551,114 @@ async def _load_pocket_content(site: Any) -> dict[str, Any] | None:
 async def _ingest_documents(
     site: Any, scope: str, docs: list[SiteDocument], report: SiteKnowledgeReport
 ) -> None:
-    """Ingest each document, counting what landed and what did not.
+    """Ingest each page section by section, counting what landed and what did not.
 
-    One bad page must not lose the rest, so a per-page failure increments
-    ``skipped`` and the loop continues. Shared by every lane.
+    A page is cut by ``page_sections.split_page`` (a short page is one section).
+    A section whose source and hash match the previous sync's index entry, and
+    whose article this site still records, is reused without a compile. A
+    section that fails keeps its previous article (and old hash, so the next
+    sync retries it) rather than leaving it to the prune. A page where nothing
+    landed counts as ``skipped`` and the loop continues: one bad page must not
+    lose the rest. A missing or outdated kb binary stops the whole sync.
     """
-    from pocketpaw_ee.cloud.agents.knowledge import (
-        KnowledgeEngineUnavailable,
-        KnowledgeService,
-        extract_ingest_article_ids,
-    )
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeEngineUnavailable
 
+    previous_ids = set(getattr(site, "kb_article_ids", None) or [])
+    previous_index = getattr(site, "kb_page_index", None) or {}
     for doc in docs:
-        try:
-            result = await KnowledgeService.ingest_document_to_scope(
-                scope,
-                doc.text,
-                doc.source,
-                doc_key=f"site:{getattr(site, 'id', '')}:{page_key(doc.path)}",
-            )
-        except KnowledgeEngineUnavailable as exc:
-            # The engine, not this page: every remaining page would fail the same
-            # way, each after a paid compile. Stop here and name the engine.
-            report.error = "kb_unavailable"
-            logger.error(
-                "sites.kb: kb engine unavailable, stopping the sync for site %s: %s",
-                getattr(site, "id", "?"),
-                exc,
-            )
-            return
-        except Exception:  # noqa: BLE001 — one bad page must not lose the rest
+        key = page_key(doc.path)
+        sections = split_page(doc)
+        old_entry = previous_index.get(key) if isinstance(previous_index, dict) else None
+        known = {
+            s["source"]: s
+            for s in index_sections(old_entry)
+            if s["source"] and s["id"] in previous_ids
+        }
+        ids = [""] * len(sections)
+        hashes = [""] * len(sections)
+        todo: list[int] = []
+        for i, section in enumerate(sections):
+            old = known.get(section.source)
+            if old is not None and old["hash"] == section.hash:
+                ids[i], hashes[i] = old["id"], section.hash
+            else:
+                todo.append(i)
+        if todo:
+            try:
+                fresh = await _ingest_sections(scope, doc, sections, todo)
+            except KnowledgeEngineUnavailable as exc:
+                # The engine, not this page: every remaining page would fail the
+                # same way, each after a paid compile. Stop here and name it.
+                report.error = "kb_unavailable"
+                logger.error(
+                    "sites.kb: kb engine unavailable, stopping the sync for site %s: %s",
+                    getattr(site, "id", "?"),
+                    exc,
+                )
+                return
+            except Exception:  # noqa: BLE001 — one bad page must not lose the rest
+                logger.warning(
+                    "sites.kb: ingest failed for %s on site %s",
+                    doc.path,
+                    getattr(site, "id", "?"),
+                    exc_info=True,
+                )
+                fresh = {}
+            for i, article_id in fresh.items():
+                ids[i], hashes[i] = article_id, sections[i].hash
+        landed = any(ids)
+        for i, section in enumerate(sections):
+            old = known.get(section.source)
+            if not ids[i] and old is not None:
+                ids[i], hashes[i] = old["id"], old["hash"]  # kept, retried next sync
+        kept = [i for i in range(len(sections)) if ids[i]]
+        report.article_ids.extend(ids[i] for i in kept)
+        if not landed:
             report.skipped += 1
-            logger.warning(
-                "sites.kb: ingest failed for %s on site %s",
-                doc.path,
-                getattr(site, "id", "?"),
-                exc_info=True,
-            )
-            continue
-        article_ids = extract_ingest_article_ids(result)
-        if not article_ids:
-            report.skipped += 1
+            if kept and isinstance(old_entry, dict):
+                report.page_index.setdefault(key, old_entry)
             continue
         report.ingested += 1
-        # A long page is several section articles; all of them are this site's.
-        report.article_ids.extend(article_ids)
-        # Two spellings of one page (about.html and about/index.html): the first wins.
-        # The page's first article stands for the page.
+        single = len(sections) == 1 and sections[0].source == doc.source
+        title = page_title(doc.text, doc.path)
+        # Two spellings of one page (about.html and about/index.html): the first
+        # wins. The page's first section stands for the page (``id``), so a
+        # reader of the old ``{id, title}`` shape still finds it.
         report.page_index.setdefault(
-            page_key(doc.path),
-            {"id": article_ids[0], "title": str((result or {}).get("title") or "").strip()},
+            key,
+            {
+                "id": ids[kept[0]],
+                "title": title.strip(),
+                "sections": [
+                    {
+                        "id": ids[i],
+                        "title": title.strip() if single else sections[i].title,
+                        "source": sections[i].source,
+                        "hash": hashes[i],
+                        "anchor": sections[i].anchor,
+                    }
+                    for i in kept
+                ],
+            },
         )
+
+
+async def _ingest_sections(
+    scope: str, doc: SiteDocument, sections: list[PageSection], todo: list[int]
+) -> dict[int, str]:
+    """Compile and ingest ``sections[i]`` for each ``i`` in ``todo`` (a short
+    page is one section). Returns ``{i: article id}`` for the ones that landed.
+    Raises when nothing landed."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService, NamedSection
+
+    receipt = await KnowledgeService.ingest_sections_to_scope(
+        scope, [NamedSection(sections[i].source, sections[i].title, sections[i].text) for i in todo]
+    )
+    by_section = list((receipt or {}).get("section_articles") or [])
+    for failure in (receipt or {}).get("failures") or []:
+        logger.warning("sites.kb: a section of %s did not ingest: %s", doc.path, failure)
+    landed = {i: by_section[n] for n, i in enumerate(todo) if n < len(by_section)}
+    return {i: article_id for i, article_id in landed.items() if article_id}
 
 
 async def _prune_stale(scope: str, previous: list[str], report: SiteKnowledgeReport) -> None:

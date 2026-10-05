@@ -156,7 +156,12 @@ async def test_sync_records_the_page_index(monkeypatch):
     kb-go gave it, and a full sync replaces the previous index."""
     from pocketpaw_ee.sites import kb_ingest
 
-    from tests.cloud.test_site_kb_ingest import _FakeSite, _long, _patch_pocket
+    from tests.cloud.test_site_kb_ingest import (
+        _FakeSite,
+        _long,
+        _patch_pocket,
+        patch_page_ingest,
+    )
 
     receipts = {
         "site-home": {"article": "welcome-to-brew-co", "title": "Welcome to Brew & Co"},
@@ -166,9 +171,7 @@ async def test_sync_records_the_page_index(monkeypatch):
     async def _ingest(scope, text, source):
         return receipts[source]
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _ingest
-    )
+    patch_page_ingest(monkeypatch, _ingest)
 
     async def _remove(scope, article_id):
         return True
@@ -191,10 +194,17 @@ async def test_sync_records_the_page_index(monkeypatch):
     report = await kb_ingest.sync_site_knowledge(site)
 
     assert report.ingested == 2
-    assert site.kb_page_index == {
-        "": {"id": "welcome-to-brew-co", "title": "Welcome to Brew & Co"},
-        "menu": {"id": "our-menu", "title": "Our menu"},
+    # The {id, title} an old reader expects, plus the page's sections (one each).
+    # The page's title is its own (here its first line), not one a compile chose.
+    assert {k: v["id"] for k, v in site.kb_page_index.items()} == {
+        "": "welcome-to-brew-co",
+        "menu": "our-menu",
     }
+    assert site.kb_page_index["menu"]["title"].startswith("Oat latte 4.50.")
+    assert [(s["id"], s["source"]) for v in site.kb_page_index.values() for s in v["sections"]] == [
+        ("welcome-to-brew-co", "site-home"),
+        ("our-menu", "site-menu"),
+    ]
 
 
 def test_a_new_site_has_an_empty_page_index():
