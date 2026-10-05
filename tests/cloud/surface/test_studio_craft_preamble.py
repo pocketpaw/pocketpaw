@@ -246,6 +246,24 @@ def test_design_renders_layout_check_lines_from_the_browser() -> None:
         assert f"! {failure}" in text
 
 
+def test_design_marks_template_field_frames_and_never_deletes_them() -> None:
+    # Round 3 (R3-m7): to make room the agent deleted the address field's frame and re-made it as
+    # free text, which cut the user's fill-in box loose from the page.
+    frame = {"id": 44, "kind": "text", "bounds_mm": {}, "text": "Main Bazaar", "field": "Address"}
+    frames = [frame]
+    text = _render("design", {**DESIGN, "pages": [{"index": 0, "frames": frames}]})
+    assert "field='Address'" in text
+    for needle in ("TEMPLATE FIELDS", "never delete or re-make", "move or resize it instead"):
+        assert needle in text, needle
+
+
+def test_design_reports_sizes_only_from_the_check_lines() -> None:
+    # Round 3 (R3-m2): "I did not reduce the size" while fit had shrunk the heading 69 -> 46.5 pt.
+    text = _render("design", DESIGN)
+    for needle in ("Never state a text size", "shrunk line"):
+        assert needle in text, needle
+
+
 def test_design_large_documents_are_capped() -> None:
     frames = [{"id": i, "kind": "text", "bounds_mm": {}} for i in range(10, 200)]
     text = _render("design", {**DESIGN, "pages": [{"index": 0, "frames": frames}]})
