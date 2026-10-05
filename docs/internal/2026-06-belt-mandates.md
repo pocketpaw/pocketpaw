@@ -1,9 +1,7 @@
-<!-- docs/internal/2026-06-belt-mandates.md
-     Created: 2026-06-11 (feat/belt-mandates) — anatomy, endpoints, and
-     demo-bar concessions for the MANDATE primitive.
-     Updated: 2026-06-11 (UI contract sync) — response envelopes, dual-shape
-     feedback, pawprint item shape, `patrols` toggles, POST .../plan/resolve,
-     and the `belt_plan` realtime topic. -->
+<!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
+     craft factory built on it: anatomy, charter (cadence, checks, recipes),
+     patrols (incl. upstream), the headless develop station, endpoints (incl.
+     the digest), env vars, and the remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -13,21 +11,27 @@ handing the station a task, the mandate **senses** its surface, **judges** what
 (if anything) is worth doing, routes that judgment through a **human gate**,
 and only then dispatches work.
 
-Validated in simulation (5/5 scenarios) before this implementation;
-productionized here at **demo bar** (manual shift trigger, stubbed advisory
-data, synthetic dispatch).
+The **craft factory** is mandates running unattended: a cadence scheduler fires
+shifts, patrols (including `upstream`, which watches pinned GitHub engines)
+feed the foreman, and the headless develop station turns each approved task into
+a checked, reviewed diff that still waits at the per-diff Instinct gate. A
+digest route reports the day. Nothing lands on its own: every plan and every
+diff passes a human gate, and nothing merges.
 
 ## Anatomy
 
 ```
-MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence; surface: repo)
+MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
+          recipes; surface: repo; upstream: pinned GitHub deps)
    │
    ├── PATROLS sense the surface (scoped by the
-   │   mandate's `patrols` toggles) ───────────► SIGHTINGS
+   │   mandate's `patrols` toggles) ───────────► SIGHTINGS (deduped)
    │     • deps      — manifest scan (pyproject/package.json) vs advisory table
+   │     • issues    — open issues on the repo's GitLab project (connector)
+   │     • upstream  — commits on each pinned GitHub dep since its pin
    │     • feedback  — human intake (POST .../feedback)
    │
-   └── SHIFT (manual trigger, one per cycle)
+   └── SHIFT (manual trigger, or the cadence scheduler: daily / weekly)
          1. sense   — run patrols, persist new sightings (deduped)
          2. judge   — the FOREMAN makes ONE LLM call over:
                       charter (verbatim, BOUNDARIES first) + sighting digest
@@ -45,7 +49,31 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence; surface: re
                       (mandate active, budget unchanged) and dispatches each
                       task as a Belt run; on REJECT the router closes the
                       chain and the shift records the reason
+         6. develop — with the headless dispatcher, the develop station
+                      produces each run's diff (see below); the diff waits
+                      at the per-diff Instinct gate
 ```
+
+### The charter: cadence, checks, recipes
+
+- **`cadence`** is `daily`, `weekly` or `manual`. The cadence scheduler
+  (`mandates/scheduler.py`, one sweeper loop, every
+  `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` seconds, default 3600) fires a shift
+  for each ACTIVE mandate whose last shift is older than 1 day (`daily`) or 7
+  days (`weekly`); a mandate that never shifted is due at once, and `manual`
+  is never fired. It starts under `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
+  through the lease, like the other background loops.
+- **`checks`** are commands that must pass before a headless diff is attached,
+  e.g. `["uv run pytest -q", "uv run ruff check ."]`.
+- **`recipes`** map a name to a deterministic command, e.g.
+  `{"bump-photo": "node scripts/bump-craft-engine.mjs photo"}`. The foreman may
+  name a recipe on a plan task (the validator rejects an unknown name); the
+  station then runs that command instead of an LLM develop, and the checks
+  still gate it.
+
+Checks and recipes are argv strings split with `shlex` (the create DTO rejects
+one that does not split) and never run through a shell. Only `belt.manage`
+(admin) can write a charter.
 
 ### Decision chains (RFC 09)
 
@@ -67,8 +95,11 @@ best-effort and never break the approve response.
 `ee/pocketpaw_ee/cloud/mandates/foreman.py`. One judgment call per shift
 through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
 
-- `claude` (default) — shells `claude -p <prompt> --output-format json`,
-  parses the envelope's `result`, tolerates fenced JSON.
+- `claude` (default) — shells the **system** Claude Code CLI
+  (`claude -p <prompt> --output-format json`, an argv list), parses the envelope's
+  `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
+  else `claude` on PATH (never the SDK's bundled copy, which goes stale); the
+  model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default.
 - `mock` — deterministic (one task per sighting, severity-ranked, budget-capped;
   `no_action` on a quiet digest). Tests script it via `foreman.set_mock_plan`.
 
@@ -82,12 +113,13 @@ a failed approach without stating what changed; strict JSON only.
 
 | Method | Path | Gate | What |
 |--------|------|------|------|
-| POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles) → `{mandate}` |
+| POST | `/belt/mandates` | `belt.manage` | Create (charter body + `patrols` senses toggles + optional `upstream` watch list) → `{mandate}` |
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
-| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, recent shifts, sightings-by-patrol |
+| GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
+| GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, recent shifts, sightings-by-patrol |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
-| POST | `/belt/mandates/{id}/shift` | `belt.manage` | Run a shift (manual trigger) → `{shift: {shift_id, no, state, plan_action_id, task_count, no_action_reason}}` |
+| POST | `/belt/mandates/{id}/shift` | `belt.manage` | Run a shift now → `{shift: {shift_id, no, state, plan_action_id, task_count, no_action_reason}}` |
 | POST | `/belt/mandates/{id}/plan/resolve` | `belt.manage` | The console's gate action: `{shift_no, decisions: [{index (0-based), decision: approve\|reject\|edit, edited_title?, reason?}]}` → `{shift}`. Every task needs exactly one decision. |
 | POST | `/belt/mandates/{id}/autopilot` | `belt.manage` | Start/stop Foresight-seeded simulated users feeding the feedback patrol: `{action: start\|stop, users?: int (default 3, max 10)}` → `{mandate}`. START persists `autopilot={on, users}`, runs ONE cycle immediately, spawns the background loop; STOP cancels it. |
 | GET | `/belt/mandates/{id}/pawprints` | `belt.read` | `{pawprints}` past-tense feed; item shape `{id, mandate_id, shift_no, kind, summary, evidence_refs, ts}` |
@@ -111,6 +143,41 @@ still closes exactly once.
 `belt_plan` event on the workspace bus (payload `{workspace_id, mandate_id,
 proposal}`), mirroring `belt_run_updated`'s audience fan-out; the mandates page
 subscribes to that topic.
+
+## The `upstream` patrol
+
+Watches pinned GitHub dependencies, such as the craft engines a Cargo.toml pins
+by `rev`. Configure it on create with a top-level `upstream` list and enable it
+by including `"upstream"` in `patrols`:
+
+```json
+{
+  "patrols": ["upstream", "feedback"],
+  "upstream": [
+    {"repo": "storytold/photocraft", "pin_file": "crates/craft-engines/photo/Cargo.toml"}
+  ]
+}
+```
+
+`repo` must be `owner/name`; `pin_file` is relative to the mandate's bound repo
+and may not leave it. Per watch, the patrol:
+
+1. Parses `pin_file` as TOML and takes the `rev` of the first dependency whose
+   `git` URL is `https://github.com/<repo>` (several crates from one repo, or a
+   `[patch]` block, share one rev). The rev must be a hex sha.
+2. Runs `gh api repos/<repo>/compare/<pin>...HEAD` (argv list, 60s timeout) and
+   reads `ahead_by` and the first page of commits only.
+3. Files one summary sighting, `<repo>: N commits since pin <short>`, with
+   severity 2 for 1-20 commits, 3 for 21-100 and 4 above 100 (none when the pin
+   is current), plus up to 5 area sightings (severity 2) that group commit
+   titles by conventional scope (`fix(render): …` → `render`) or prefix
+   (`photocraft-text: …`), each citing up to 8 short shas and titles.
+
+Sightings dedupe on `evidence.dedup_key` = repo + pin + upstream head, so a
+quiet day files nothing and a new upstream head files a fresh set. A broken
+watch (gh not installed, a 404, an unreadable pin file) files one severity-1
+sighting naming the problem instead of raising. The backend's `gh` must be
+authenticated (`gh auth status`) for private repos and for rate limits.
 
 ## Plan-feature gating posture
 
@@ -193,61 +260,114 @@ registered in `cloud/__init__.mount_cloud` under the same
 `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true` gate as the decisions reconciler / run
 sweeper, so pytest runs never spawn background loops that outlive the test.
 
-## Dispatcher reality — REAL station runs vs. announce-only (feat/belt-autopilot)
+## Dispatchers and the headless develop station
 
-`POCKETPAW_MANDATE_DISPATCHER=station|bus` selects the `TaskDispatcher`
-(default `station` when the belt plumbing imports, else a clean fall-back to
-`bus`):
+`POCKETPAW_MANDATE_DISPATCHER` selects what an approved plan task becomes:
 
-- **`station` (`StationTaskDispatcher`, the real one).** Each approved plan task
-  becomes a **real Belt run** in the console Runs tab.
-- **`bus` (`BusTaskDispatcher`, the prior default).** Announce-only —
-  `belt_run_updated(status="dispatched", stage="station")` under a synthetic run
-  id (`<plan_action_id>:t<n>`); no run record is created.
+- **`station`** (default) — `StationTaskDispatcher` files a real queued
+  `code_change` run (`station_pending=True`, no diff, repo pre-bound). The
+  console shows it as `queued / station`; a human drives the interactive
+  `/belt` station to a diff. The belt executor refuses a `station_pending` blob
+  if it is ever approved (`error_class="StationPending"`).
+- **`headless`** — `HeadlessTaskDispatcher` files the same queued run, then
+  produces the diff with no human in the loop and attaches it; the run becomes
+  a pending `code_change` at the per-diff gate. In production the develop runs
+  in a background task, one at a time, so plan approval returns at once. With
+  no develop loop wired it degrades to `station`.
+- **`bus`** — announce-only (`belt_run_updated(status="dispatched")` under a
+  synthetic run id); no run record.
 
-**HONESTY — is a genuinely headless station run reachable? NO.** The Belt
-*develop station* is an **interactive chat-agent loop**: the `/belt` surface
-preamble (`cloud/surface/handlers/belt.py`) drives a Claude chat session that
-ORIENTs, DEVELOPs, and produces a unified diff, which the
-`mcp__pocketpaw_belt__belt_propose_change` tool then files as a `code_change`
-Instinct Action. There is **no programmatic "task → diff" runner** to call from
-a dispatcher — the diff is the *output* of an LLM chat session, not a function.
+The develop loop for `headless` is `belt/develop_station.ClaudeCodeDevelop`,
+wired at startup when `POCKETPAW_MANDATE_DISPATCHER=headless` **and**
+`POCKETPAW_FACTORY_DEVELOP=claude`. One run walks a fixed sequence:
 
-So `StationTaskDispatcher` does the **closest real thing**: it files a real
-`code_change` Instinct Action per task (the SAME row type the console Runs tab
-reads and the belt gate executes) carrying the task text, in a **queued** state
-(`station_pending=True`, no diff yet, repo pre-bound to the mandate's surface).
-The runs read model surfaces it as `status=queued / stage=station`; a human opens
-the `/belt` station for that queued run (one click) and drives it to a diff,
-which rides the existing belt gate as normal. This is a genuine run record, not a
-bus echo — the tests assert the persisted `code_change` Action + its
-`station_pending` queued state, not a bus message. Because a queued run carries
-no diff it is **not auto-applyable**: the belt executor refuses a
-`station_pending` blob loud (`error_class="StationPending"`) if it is ever
-(mistakenly) approved. When a real headless station runner lands, swap its call
-into `StationTaskDispatcher` behind the same `TaskDispatcher` protocol — no
-caller change.
+```
+PREPARE  git worktree add --detach of the bound repo at origin/<base> (after a
+         fetch) when an origin exists, else the local <base>
+WORK     a recipe task runs the charter's recipe command; otherwise
+         `claude -p` develops (Read/Edit/Write/Glob/Grep + Bash limited to the
+         charter's check commands, --permission-mode acceptEdits)
+CHECK    run every charter check
+FIX ≤2   a red check, or a failed review, sends the failure back to
+         `claude -p`, then CHECK again; at most 2 attempts (recipes get none)
+REVIEW   an independent read-only `claude -p` judges the diff against the task:
+         strict {"verdict": "pass"|"fail", "notes": [...]}
+DONE     git add -A; git diff --cached --binary against the base sha
+CLEANUP  git worktree remove --force, always
+```
+
+Every subprocess is an argv list (never a shell) and prompts go on stdin. A
+dead end raises with the failing step's name; the runner leaves the run queued
+and records the reason as `headless_error` on the blob, where the console and
+the digest show it. The station never commits to a branch, pushes or merges.
+Background develops are process-local: a restart mid-develop leaves the run
+queued with no error note, and nothing re-drives it yet.
+
+## Digest — the morning report
+
+`GET /belt/mandates/digest?since=<iso>` (default: 24 hours ago; a naive value
+reads as UTC) returns:
+
+```
+{since, generated_at,
+ mandates: [{id, name, status, cadence,
+             sightings: {count, top: [{title, severity, patrol}]},   # top 5
+             shifts: [{no, state, outcome, task_count}],             # since
+             runs:   [{action_id, status, title, pr_url, branch,
+                       commit_sha, headless_error}],                 # since
+             gates:  {plans: [{shift_no, plan_action_id, task_count}],
+                      diffs: [<run row>]}}],                         # any age
+ totals: {mandates, new_sightings, shifts, runs, landed, failed, gates_waiting}}
+```
+
+Gates are listed whatever their age: an in-gate plan or a diff at `proposed`
+from last week still needs a human. The digest is composed from the existing
+reads (`list_mandates`, `get_mandate`, `shift_wire`, `list_sightings`, the belt
+runs list), so it cannot disagree with the console; shifts come from the
+detail's 10 most recent.
+
+`scripts/factory_digest.py` prints it as markdown (a mandates table, then
+*Needs you*, *Failures*, *Landed*). Stdlib only; the token comes from
+`--token-file` or `PAW_TOKEN` and is never printed:
+
+```bash
+uv run python scripts/factory_digest.py --base http://localhost:8893 \
+    --token-file ~/.paw/token [--since 2026-10-05T06:00:00+00:00]
+```
+
+## Environment
+
+| Variable | Default | What |
+|---|---|---|
+| `POCKETPAW_MANDATE_DISPATCHER` | `station` | `station` / `headless` / `bus` (above) |
+| `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`) |
+| `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
+| `POCKETPAW_FACTORY_CLAUDE_MODEL` | CLI default | Passed as `--model` when set |
+| `POCKETPAW_FACTORY_DEVELOP_TIMEOUT` | `900` | Seconds per `claude -p` call (develop, fix, review) |
+| `POCKETPAW_FACTORY_CHECK_TIMEOUT` | `600` | Seconds per check or recipe command |
+| `POCKETPAW_MANDATE_LLM` | `claude` | Foreman / autopilot transport: `claude` or `mock` |
+| `POCKETPAW_MANDATE_SCHEDULER_INTERVAL` | `3600` | Cadence sweep interval, seconds |
+| `POCKETPAW_MANDATE_AUTOPILOT_INTERVAL` | `300` | Autopilot cycle interval, seconds |
+| `POCKETPAW_CLOUD_SCHEDULER_ENABLED` | off | Starts the cadence scheduler and autopilot loops |
+
+A local unattended factory runs with `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
+`POCKETPAW_MANDATE_DISPATCHER=headless` and `POCKETPAW_FACTORY_DEVELOP=claude`,
+on a box where the bound repos are checked out and `claude` and `gh` are
+authenticated.
 
 ## Demo-bar concessions (each marked in code)
 
-1. **Manual shift trigger only.** `cadence: "weekly"` is stored but not
-   scheduled (autopilot seeds *sightings*, not shift triggers — wiring the
-   cadence scheduler is still a later PR).
-2. **Deps patrol advisory data is a hardcoded table** (`patrols.KNOWN_STALE`).
-   The manifest parsing + sighting plumbing are production-shaped; only the
+1. **Deps patrol advisory data is a hardcoded table** (`patrols.KNOWN_STALE`).
+   The manifest parsing and sighting plumbing are production-shaped; only the
    data source is stubbed.
-3. **Station dispatch QUEUES a real run; it does not auto-produce the diff.**
-   `StationTaskDispatcher` (default) files a real queued `code_change` run a
-   human starts in the console — see *Dispatcher reality* above for why a fully
-   headless diff-producing run is not reachable. `bus` mode keeps the prior
-   announce-only behaviour. The `TaskDispatcher` protocol is the swap point for a
-   future headless runner.
-4. **LLM transport is the `claude` CLI shell-out** behind the `PlanLlm` (foreman)
-   and `UserSim` (autopilot) protocols; an SDK transport can replace either
-   without touching the caller.
-5. **Pawprints read the store, not the journal.** The feed derives from
-   ShiftDoc states + the plan Action's status/blob — the same facts the chain
+2. **LLM transport is the `claude` CLI shell-out** behind the `PlanLlm`
+   (foreman) and `UserSim` (autopilot) protocols, and the develop station shells
+   the same CLI; another transport can replace either without touching callers.
+3. **Pawprints read the store, not the journal.** The feed derives from
+   ShiftDoc states and the plan Action's status/blob, the same facts the chain
    folded from; a journal-walking narrator can replace it later.
+4. **Headless develops are process-local** (see above): a restart mid-develop
+   leaves a queued run nothing re-drives.
 
 ## Tests
 
@@ -256,7 +376,19 @@ caller change.
 real-instinct-router approve → dispatch and asserts EXACTLY ONE
 `decision.completed` (this repo's documented chain-doubling seam). Also pinned:
 stood_down, budget cap, boundary-check-ignores-`why`, patrol intake, deps
-patrol + dedup, tenant isolation, reject-closes-once.
+patrol + dedup, tenant isolation, reject-closes-once, and the digest route
+(sightings, shifts, runs, waiting gates, totals, the `since` window, tenant
+scope; it also renders `scripts/factory_digest.py` against the real wire shape).
+
+`tests/cloud/test_belt_upstream_patrol.py` runs the upstream patrol against a
+tmp repo's Cargo.toml with a fake `gh`: summary and area sightings, the
+severity scale, every failure path as one severity-1 sighting, DTO validation,
+and dedup on the upstream head through `run_patrols`.
+`tests/cloud/test_belt_develop_station.py` drives the develop station against a
+real tmp git repo with real check commands and a faked `claude`;
+`test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
+cadence scheduler. CI runs these in the "Belt mandates and the craft factory
+develop station" step (`tests/cloud` is outside the default addopts).
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:
 autopilot start persists state + runs an immediate cycle whose sightings carry
