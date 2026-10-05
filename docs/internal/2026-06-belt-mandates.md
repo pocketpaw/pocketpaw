@@ -1,8 +1,8 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes),
      patrols (incl. upstream), the headless develop station and its security
-     posture, endpoints (incl. the digest), env vars, and the remaining
-     demo-bar concessions. -->
+     posture, landing and re-develop, endpoints (incl. the digest), env vars,
+     and the remaining demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -105,7 +105,8 @@ through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
 - `claude` (default) — runs the **system** Claude Code CLI
   (`claude -p --tools "" --output-format json`, prompt on stdin) in a fresh
   empty temp dir with the scrubbed env, since the prompt carries third-party
-  sighting text; parses the envelope's `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
+  sighting text (`foreman.run_claude_no_tools`, which the autopilot personas
+  share); parses the envelope's `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
   else `claude` on PATH (never the SDK's bundled copy, which goes stale); the
   model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default.
 - `mock` — deterministic (one task per sighting, severity-ranked, budget-capped;
@@ -115,7 +116,11 @@ The prompt encodes every sim-validated rule: charter verbatim with BOUNDARIES
 prominent; at most `budget.max_tasks_per_shift` tasks; every task cites
 sighting ids and names an expected KPI direction; an empty plan with a reason
 is correct and respected; boundaries override KPI opportunities; never repeat
-a failed approach without stating what changed; strict JSON only.
+a failed approach without stating what changed; tasks in one shift are
+independent of each other (they develop from the same base and land
+separately, so dependent follow-up work waits for a later shift; plan
+validation cannot detect a dependency, so only the prompt says it); strict
+JSON only.
 
 ## Endpoints (`/api/v1/belt/mandates`, RBAC mirrors the belt console)
 
@@ -244,7 +249,9 @@ and a multi-tick loop, and its action vocabulary (`action/rationale/put`) is the
 wrong shape. Instead the persona transport reuses the **foreman's proven
 pluggable pattern** (`POCKETPAW_MANDATE_LLM=claude|mock` — the SAME env) behind
 the `UserSim` interface, and bridges foresight's `OceanDrift` value object for
-the persona seed. Mock mode is deterministic + seeded (a per-persona RNG seeded
+the persona seed. The `claude` persona call goes through the foreman's
+sandboxed `run_claude_no_tools` (no tools, empty temp cwd, scrubbed env, prompt
+on stdin), since its prompt carries the repo's README and commit titles. Mock mode is deterministic + seeded (a per-persona RNG seeded
 on the persona name) so tests get stable sightings. A later PR can swap the full
 scenario runner in behind `UserSim` with no caller change.
 
@@ -273,7 +280,8 @@ sweeper, so pytest runs never spawn background loops that outlive the test.
 `POCKETPAW_MANDATE_DISPATCHER` selects what an approved plan task becomes:
 
 - **`station`** (default) — `StationTaskDispatcher` files a real queued
-  `code_change` run (`station_pending=True`, no diff, repo pre-bound). The
+  `code_change` run (`station_pending=True`, no diff, repo pre-bound; the blob
+  carries the task's `title` and `expected_outcome`). The
   console shows it as `queued / station`; a human drives the interactive
   `/belt` station to a diff. The belt executor refuses a `station_pending` blob
   if it is ever approved (`error_class="StationPending"`).
@@ -318,7 +326,54 @@ and the digest show it. The station never commits to a branch, pushes or
 merges. Background develops are process-local: the dispatcher marks each run
 `headless_state: "queued"` until it attaches or fails, so a run a restart
 dropped stays visible as stuck in the digest (nothing re-drives it yet), and a
-background task that crashes is logged at ERROR.
+background task that crashes is logged at ERROR. The develop request aims at
+the blob's `expected_outcome`; the attached run's `summary` becomes the
+station's report (checks, review verdict and notes, fix attempts), and its
+`files_changed` is the station's count (else the diff's `+++` headers).
+
+### Landing and re-develop
+
+When a human approves a run at the per-diff gate, `belt/executor.py` applies it
+in a throwaway worktree and commits it on `feat/belt-<id>`. A run that carries
+a `title` (every mandate task) commits as `feat: <title>` (kept as written when
+the title already has a Conventional-Commits type), trimmed to 72 chars; the
+body is the task's why followed by the station report. The PR title and body on
+the remote path are the same. A hand-proposed change (no title) keeps
+`feat(belt): <summary>`. A local-only landing keeps the branch the worktree
+created (linked worktrees share `refs/heads`); a run that does not land deletes
+its branch, so a retry of the same action can branch again.
+
+Two runs of one shift develop from the same base. Once the first lands and is
+merged, the second's patch may no longer apply. For a headless run (blob
+`headless`) the executor checks the patch with `git apply --check` before the
+`--3way` apply; when both fail it does not fail the run. It **re-develops** it:
+
+```
+approved ──apply conflict──▶ blob: diff cleared, station_pending, redevelop=1
+                             status: approved → pending  (event action_redevelop)
+                             belt_run_updated(queued, station)
+         ──after cleanup──▶  headless dispatcher develop(run_ref): the station
+                             regenerates the diff against the current base
+                             ──▶ pending at the per-diff gate (fresh approval)
+second apply conflict on the same run ──▶ failed: "base moved twice: …"
+no develop loop wired              ──▶ failed: "… not wired to re-develop it"
+```
+
+The re-develop is not a terminal, so the Decision-Graph chain stays open and
+the run keeps its `correlation_id`; it closes once, when the run lands or
+fails. The status flip uses the store's `_update_status` with
+`require_status=approved`, so a concurrent decision makes the flip a no-op
+(the run then fails with that reason). The reopened row keeps its first
+`approved_by` / `approved_at` until the next approval overwrites them.
+
+### Runs read model
+
+`GET /api/v1/belt/runs` and `GET /api/v1/belt/runs/{id}` rows carry, besides
+status, stage and the landing fields: `title` (the task title, `null` on a
+hand-driven run), `files_changed` (from the attached diff, replaced by the
+staged count on landing), and `error`: why the run failed, which is the
+executor's reason (`Action.error`) or, for a develop that failed, the
+`headless_error`. `null` when nothing failed.
 
 ## Security posture
 
@@ -344,8 +399,8 @@ What the station scrubs or blocks:
   keychain/OAuth login; never `--bare`, which forces API-key auth. Tools are
   limited with `--tools` and the allow rules are scoped to the worktree
   (`Read(./**)`, `Edit(./**)`, `Write(./**)`, plus `Bash(<check>:*)` on the
-  edit seats); WebFetch, WebSearch and Task are denied. The foreman gets no
-  tools at all and an empty temp dir as its cwd.
+  edit seats); WebFetch, WebSearch and Task are denied. The foreman and the
+  autopilot personas get no tools at all and an empty temp dir as their cwd.
 - **Git.** Station git calls run with `core.fsmonitor=false` and
   `core.hooksPath=/dev/null`; the worktree `.git` file is snapshotted and
   re-checked after every agent step.
@@ -389,7 +444,8 @@ reads as UTC) returns:
              sightings: {count, top: [{title, severity, patrol}]},   # top 5
              shifts: [{no, state, outcome, task_count}],             # since
              runs:   [{action_id, status, title, pr_url, branch,
-                       commit_sha, headless_error, headless_state}], # since
+                       commit_sha, headless_error, headless_state,
+                       error}],                                      # since
              gates:  {plans: [{shift_no, plan_action_id, task_count}],
                       diffs: [<run row>]},                           # any age
              stuck:  [<run row>]}],      # queued with headless_error or a
@@ -405,7 +461,7 @@ runs list), so it cannot disagree with the console; shifts come from the
 detail's 10 most recent.
 
 `scripts/factory_digest.py` prints it as markdown (a mandates table, then
-*Needs you*, *Failures*, *Landed*). Stdlib only; the token comes from
+*Needs you*, *Failures* with each run's `error` or `headless_error`, *Landed*). Stdlib only; the token comes from
 `--token-file` or `PAW_TOKEN` and is never printed:
 
 ```bash
@@ -477,7 +533,12 @@ multi-tenant wiring refusal, `.git` tampering, protected paths, secret diffs,
 redaction, untrusted fencing, the injection screen, process-group kills and
 logged background crashes;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
-cadence scheduler. CI runs these in the "Belt mandates and the craft factory
+cadence scheduler; the headless file also lands a run (commit subject from the
+title) and drives the re-develop against a real tmp repo: two diffs from one
+base, the first landed and merged, the second re-developed once and back at the
+gate, a second conflict failing with "base moved twice", and no develop loop
+failing with its reason. `tests/mutations/belt_factory_runs.json` breaks each
+of these on purpose. CI runs these in the "Belt mandates and the craft factory
 develop station" step (`tests/cloud` is outside the default addopts).
 
 `tests/cloud/test_belt_autopilot.py` (feat/belt-autopilot) pins both new pieces:
