@@ -21,6 +21,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+# Both mutate test files share one xdist worker: the sweeps rewrite
+# ee/pocketpaw_ee/sites/build_state.py in place and own the repo-root
+# .mutation-sweep-active marker, which --validate reads.
+pytestmark = pytest.mark.xdist_group("mutate")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MUTATE = REPO_ROOT / "scripts" / "mutate.py"
 MARKER = REPO_ROOT / ".mutation-sweep-active"
