@@ -19,6 +19,8 @@
 # into ``init_beanie`` via a lazy import in ``cloud/models/__init__``. Every doc
 # carries the ``workspace`` tenancy key, indexed. ``Autopilot`` is persisted
 # ``{on, users}``; its background task is process-local (``autopilot`` module).
+# ``MandateDoc.upstream`` is the ``upstream`` patrol's config: pinned GitHub
+# dependencies (``{repo, pin_file}``) whose new commits the patrol reports.
 
 from __future__ import annotations
 
@@ -105,6 +107,17 @@ class Surface(BaseModel):
     repo_id: str
 
 
+class UpstreamPin(BaseModel):
+    """One pinned GitHub dependency the ``upstream`` patrol watches.
+
+    ``repo`` is ``owner/name``; ``pin_file`` is a TOML file (e.g. a
+    ``Cargo.toml``) relative to the mandate's bound repo whose
+    ``git = "https://github.com/<repo>"`` dependency carries the pinned ``rev``."""
+
+    repo: str
+    pin_file: str
+
+
 class Autopilot(BaseModel):
     """Autopilot state on a mandate — Foresight-seeded simulated users.
 
@@ -146,6 +159,8 @@ class MandateDoc(TimestampedDocument):
     # Autopilot — Foresight-seeded simulated users feeding the feedback patrol.
     # Persisted so a restart re-derives the running task; default off.
     autopilot: Autopilot = Field(default_factory=Autopilot)
+    # The ``upstream`` patrol's watch list; empty on mandates that predate it.
+    upstream: list[UpstreamPin] = Field(default_factory=list)
 
     class Settings:
         name = "mandates"
@@ -260,4 +275,5 @@ __all__ = [
     "SightingDoc",
     "SightingView",
     "Surface",
+    "UpstreamPin",
 ]

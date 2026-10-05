@@ -3,12 +3,14 @@
 # Separate Request and Response models per the cloud entity rule (never reuse one
 # model for both directions). Request models are the ``body`` the service
 # ``model_validate``s at entry; Response models are the wire dicts the service
-# returns. Covers mandate create/read (charter incl. checks + recipes), feedback
+# returns. Covers mandate create/read (charter incl. checks + recipes, and the
+# ``upstream`` patrol's pinned-dependency watch list), feedback
 # intake + sightings, the shift trigger, plan resolution, pawprints, and the
 # autopilot toggle.
 
 from __future__ import annotations
 
+import re
 import shlex
 from datetime import datetime
 
@@ -39,6 +41,32 @@ class BudgetRequest(BaseModel):
 
 class SurfaceRequest(BaseModel):
     repo_id: str = Field(min_length=1)
+
+
+_GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+class UpstreamPinRequest(BaseModel):
+    """One ``upstream`` patrol watch: a GitHub ``owner/name`` and the TOML file
+    (relative to the bound repo) that pins its ``rev``. ``repo`` lands in a
+    ``gh api`` URL path, so it is held to the owner/name charset."""
+
+    repo: str
+    pin_file: str = Field(min_length=1)
+
+    @field_validator("repo")
+    @classmethod
+    def _repo_shape(cls, v: str) -> str:
+        if not _GITHUB_REPO.match(v) or ".." in v:
+            raise ValueError("repo must be a GitHub owner/name")
+        return v
+
+    @field_validator("pin_file")
+    @classmethod
+    def _pin_file_relative(cls, v: str) -> str:
+        if v.startswith(("/", "\\")) or ".." in v.replace("\\", "/").split("/"):
+            raise ValueError("pin_file must be a path inside the bound repo")
+        return v
 
 
 class CharterRequest(BaseModel):
@@ -96,6 +124,8 @@ class CreateMandateRequest(BaseModel):
     charter: CharterRequest
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
+    # The ``upstream`` patrol's watch list (enable it with "upstream" in patrols).
+    upstream: list[UpstreamPinRequest] = Field(default_factory=list)
 
 
 class AutopilotState(BaseModel):
@@ -166,6 +196,7 @@ class MandateDetailResponse(BaseModel):
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
     autopilot: AutopilotState = Field(default_factory=AutopilotState)
+    upstream: list[UpstreamPinRequest] = Field(default_factory=list)
     recent_shifts: list[ShiftSummaryResponse] = Field(default_factory=list)
     sightings_by_patrol: dict[str, int] = Field(default_factory=dict)
     created_at: datetime
@@ -317,4 +348,5 @@ __all__ = [
     "SightingsListResponse",
     "SurfaceRequest",
     "TeachingFeedbackRequest",
+    "UpstreamPinRequest",
 ]

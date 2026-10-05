@@ -1,45 +1,33 @@
-# ee/pocketpaw_ee/cloud/mandates/patrols.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 2 — patrols).
+# ee/pocketpaw_ee/cloud/mandates/patrols.py — the mandate PATROLS.
 #
-# Updated: 2026-06-13 (feat/patrol-engine) — added ``issues_patrol``, the FIRST
-#   LIVE patrol: it reads a REAL signal (open issues on the bound repo's GitLab
-#   project) through the existing ``connectors_service.execute`` cloud path and
-#   emits a populated SightingDraft per open issue — not the hardcoded stub the
-#   ``deps`` patrol uses. The external call is injectable so tests mock the
-#   payload instead of hitting the network. The ``deps`` / ``feedback`` patrols
-#   are unchanged.
-# Updated: 2026-06-13 (PR #1463 review) — ``issues_patrol`` + ``_default_execute``
-#   now thread ``user_id`` through to the connector so a scheduler-fired patrol is
-#   attributed to its system actor (not ``None``); and the dir-name project
-#   fallback now logs a warning (a namespaced GitLab project returns zero
-#   sightings silently — bind ``project='group/name'``).
+# A patrol is an async callable that senses a mandate's surface and returns
+# Sighting DRAFTS (plain dicts). ``service.run_patrols`` persists them, deduped
+# on ``service._dedup_signal``; patrols never touch the store, which keeps
+# service.py the sole Beanie importer. ``run_patrols`` passes ``workspace_id`` /
+# ``user_id`` / ``upstream`` only to patrols whose signature names them.
 #
-# The PATROL framework — a patrol is an async callable that senses a mandate's
-# surface and produces Sighting DRAFTS (plain dicts; the service persists them
-# as SightingDoc rows — patrols never touch the store, keeping service.py the
-# sole Beanie importer).
+#   * ``deps``     — the bound repo's manifest (pyproject.toml / package.json)
+#                    against ``KNOWN_STALE``, a hardcoded demo table (the parse
+#                    and sighting plumbing are real; the advisory data is not).
+#   * ``issues``   — OPEN issues on the bound repo's GitLab project through
+#                    ``connectors_service.execute``, one sighting per issue.
+#   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
+#                    ``rev`` comes from a TOML pin file in the bound repo, the
+#                    delta from ``gh api repos/<repo>/compare/<pin>...HEAD``.
+#                    One summary sighting per repo plus up to 5 per-area ones,
+#                    keyed on repo + pin + upstream head so a quiet day files
+#                    nothing new.
+#   * ``feedback`` — intake only (``service.file_feedback``); no callable here.
 #
-# Patrols that ship:
-#   * ``deps``    — parses the bound repo's manifest (pyproject.toml /
-#                   package.json) and flags entries found in a DETERMINISTIC
-#                   STUB TABLE of known-stale / CVE-carrying packages.
-#                   >>> DEMO-BAR CONCESSION: the stale/CVE data is a hardcoded
-#                   table, not a live advisory feed. The patrol's parse +
-#                   sighting plumbing is production-shaped; only the data
-#                   source is stubbed. <<<
-#   * ``issues``  — the FIRST LIVE patrol. Reads OPEN issues on the bound repo's
-#                   GitLab project via ``connectors_service.execute`` (a real
-#                   httpx call in CLOUD mode) and emits one SightingDraft per
-#                   open issue. No hardcoded table — this is a genuine live feed.
-#   * ``feedback`` — intake-only (no sense loop); humans file sightings via
-#                   ``POST /belt/mandates/{id}/feedback`` (service.file_feedback).
-#                   It has no callable here on purpose.
+# Failure posture: a patrol never raises into the shift trigger. ``deps`` and
+# ``issues`` degrade to zero sightings; ``upstream`` files one severity-1
+# sighting naming the problem (gh missing, bad pin file, API error), since a
+# silent watch on a pinned engine is worse than a noisy one.
 #
-# Security: the repo manifest is DATA — parsed with tomllib/json, never
-# executed or shell-interpolated. A repo path that doesn't resolve or parse
-# yields zero sightings (the patrol never raises into the shift trigger). The
-# issues patrol's connector call is wrapped the same way — a failure (unbound
-# connector, network error, malformed payload) yields zero sightings.
+# Security: manifests and pin files are DATA, parsed with tomllib/json, never
+# executed. External calls go through injectable seams (``execute``, ``gh``) with
+# argv lists, never a shell; the upstream repo is validated as owner/name at the
+# DTO and the pin as hex before either reaches a ``gh api`` path.
 
 from __future__ import annotations
 
@@ -47,6 +35,7 @@ import json
 import logging
 import re
 import tomllib
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -331,6 +320,228 @@ async def _default_execute(
     )
 
 
+# ---------------------------------------------------------------------------
+# ``upstream`` — commits on a pinned GitHub dependency since the pin. The pin is
+# the ``rev`` of the ``git = "https://github.com/<repo>"`` dependency in a TOML
+# pin file (a Cargo.toml) inside the bound repo; the delta is one ``gh api``
+# compare call (first page only, up to 250 commits). ``gh`` is injected so
+# tests never hit the network.
+# ---------------------------------------------------------------------------
+
+# A gh executor: async (argv) -> (returncode, stdout, stderr).
+GhFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
+
+_GH_TIMEOUT = 60.0
+_HEX_REV = re.compile(r"^[0-9a-f]{7,40}$")
+_MAX_AREAS = 5
+_MAX_AREA_COMMITS = 8
+# ``fix(render): ...`` → "render"; ``feat: ...`` → "feat".
+_CONVENTIONAL = re.compile(r"^(\w+)(?:\(([^)]+)\))?!?:\s")
+# ``photocraft-text: ...`` / ``GPU: ...`` / ``Never crash: ...`` → that prefix.
+_AREA_PREFIX = re.compile(r"^([A-Za-z0-9][\w.\-/ ]{0,30}?):\s")
+
+
+async def _default_gh(argv: list[str]) -> tuple[int, str, str]:
+    """The live gh seam — the develop station's argv-only subprocess runner.
+    Imported lazily (the station module imports the foreman)."""
+    from pocketpaw_ee.cloud.belt.develop_station import run_subprocess
+
+    return await run_subprocess(argv, cwd=Path.home(), timeout=_GH_TIMEOUT)
+
+
+def _upstream_severity(ahead: int) -> int:
+    if ahead > 100:
+        return 4
+    if ahead > 20:
+        return 3
+    return 2
+
+
+def _git_url_repo(url: str) -> str:
+    """``https://github.com/Owner/Name.git/`` → ``owner/name`` (else "")."""
+    url = url.strip().lower().rstrip("/").removesuffix(".git")
+    prefix = "https://github.com/"
+    return url[len(prefix) :] if url.startswith(prefix) else ""
+
+
+def _find_rev(node: Any, repo: str) -> str | None:
+    """Walk a parsed TOML tree for a dependency table whose ``git`` URL is
+    ``repo`` and return its ``rev``. Crates from one repo share a rev (and a
+    ``[patch]`` block repeats it), so the first match wins."""
+    if isinstance(node, dict):
+        git = node.get("git")
+        if isinstance(git, str) and _git_url_repo(git) == repo.lower():
+            rev = node.get("rev")
+            if isinstance(rev, str):
+                return rev.strip()
+        for child in node.values():
+            found = _find_rev(child, repo)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for child in node:
+            found = _find_rev(child, repo)
+            if found:
+                return found
+    return None
+
+
+def _read_pin(repo_root: Path, pin_file: str, repo: str) -> str:
+    """The pinned rev for ``repo`` in ``pin_file`` (relative to the bound repo).
+    Raises ``ValueError`` with an operator-facing reason on any problem."""
+    root = repo_root.resolve()
+    path = (root / pin_file).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"pin file {pin_file} is outside the bound repo")
+    if not path.is_file():
+        raise ValueError(f"pin file {pin_file} not found in the bound repo")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise ValueError(f"pin file {pin_file} is not readable TOML") from None
+    rev = _find_rev(data, repo)
+    if not rev:
+        raise ValueError(f"no git dependency on github.com/{repo} with a rev in {pin_file}")
+    if not _HEX_REV.match(rev):
+        raise ValueError(f"the rev for {repo} in {pin_file} is not a commit sha")
+    return rev
+
+
+def _commit_area(title: str) -> str:
+    m = _CONVENTIONAL.match(title)
+    if m:
+        return (m.group(2) or m.group(1)).strip().lower()
+    m = _AREA_PREFIX.match(title)
+    if m:
+        return m.group(1).strip().lower()
+    return "other"
+
+
+def _upstream_error(repo: str, code: str, problem: str) -> SightingDraft:
+    """The single severity-1 sighting a broken watch files. ``code`` is a stable
+    reason so a persistent failure dedupes instead of re-filing every shift."""
+    return {
+        "patrol": "upstream",
+        "severity": 1,
+        "summary": f"{repo}: upstream watch failed: {problem}"[:280],
+        "evidence": {"repo": repo, "error": problem, "dedup_key": f"{repo}!{code}"},
+    }
+
+
+async def _watch_upstream(
+    repo_root: Path, repo: str, pin_file: str, gh: GhFn
+) -> list[SightingDraft]:
+    try:
+        pin = _read_pin(repo_root, pin_file, repo)
+    except ValueError as exc:
+        return [_upstream_error(repo, "pin-file", str(exc))]
+
+    argv = ["gh", "api", f"repos/{repo}/compare/{pin}...HEAD"]
+    try:
+        code, out, err = await gh(argv)
+    except FileNotFoundError:
+        return [_upstream_error(repo, "gh-missing", "the gh CLI is not installed")]
+    except Exception as exc:  # noqa: BLE001 — a seam failure must not wedge the shift
+        return [
+            _upstream_error(repo, f"gh-failed@{pin[:7]}", f"gh api raised {type(exc).__name__}")
+        ]
+    if code != 0:
+        first = (err or out or "").strip().splitlines()
+        reason = first[0][:160] if first else f"exit {code}"
+        return [_upstream_error(repo, f"gh-failed@{pin[:7]}", f"gh api failed: {reason}")]
+    try:
+        data = json.loads(out)
+        ahead = int(data.get("ahead_by") or 0)
+        commits = [c for c in (data.get("commits") or []) if isinstance(c, dict)]
+    except (ValueError, TypeError, AttributeError):
+        return [
+            _upstream_error(repo, f"bad-json@{pin[:7]}", "gh api returned an unexpected payload")
+        ]
+    if ahead <= 0:
+        return []
+
+    # Upstream head: the last commit when the first page holds them all, else
+    # the (short) head sha at the end of ``permalink_url``.
+    if commits and len(commits) >= int(data.get("total_commits") or ahead):
+        head = str(commits[-1].get("sha") or "")
+    else:
+        head = str(data.get("permalink_url") or "").rsplit(":", 1)[-1]
+    head = head or f"+{ahead}"
+    short = pin[:7]
+    key = f"{repo}@{pin}..{head}"
+
+    drafts: list[SightingDraft] = [
+        {
+            "patrol": "upstream",
+            "severity": _upstream_severity(ahead),
+            "summary": f"{repo}: {ahead} commits since pin {short}",
+            "evidence": {
+                "repo": repo,
+                "pin_file": pin_file,
+                "pin": pin,
+                "head": head,
+                "ahead_by": ahead,
+                "compare_url": data.get("html_url"),
+                "source": "github:compare",
+                "dedup_key": key,
+            },
+        }
+    ]
+
+    areas: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for c in commits:
+        title = str((c.get("commit") or {}).get("message") or "").strip().split("\n", 1)[0]
+        if title:
+            areas[_commit_area(title)].append({"sha": str(c.get("sha") or "")[:7], "title": title})
+    # Biggest areas first; the catch-all "other" goes last.
+    ranked = sorted(areas.items(), key=lambda kv: (kv[0] == "other", -len(kv[1]), kv[0]))
+    for area, items in ranked[:_MAX_AREAS]:
+        drafts.append(
+            {
+                "patrol": "upstream",
+                "severity": 2,
+                "summary": f"{repo} [{area}]: {len(items)} commit(s) since pin {short}"[:280],
+                "evidence": {
+                    "repo": repo,
+                    "area": area,
+                    "head": head,
+                    "commits": items[:_MAX_AREA_COMMITS],
+                    "source": "github:compare",
+                    "dedup_key": f"{key}#{area}",
+                },
+            }
+        )
+    return drafts
+
+
+async def upstream_patrol(
+    repo_id: str,
+    *,
+    upstream: list[dict[str, Any]] | None = None,
+    gh: GhFn | None = None,
+) -> list[SightingDraft]:
+    """The ``upstream`` patrol — report new commits on each pinned GitHub
+    dependency in ``upstream`` (``[{repo, pin_file}]``, the mandate's watch list).
+
+    Per watch: no new commits → nothing; new commits → one summary sighting
+    (severity 2 / 3 / 4 at 1-20 / 21-100 / >100 commits) plus up to 5 area
+    sightings citing up to 8 commits each; any failure → one severity-1 sighting.
+    Never raises."""
+    root = Path(repo_id).expanduser()
+    runner = gh or _default_gh
+    drafts: list[SightingDraft] = []
+    for watch in upstream or []:
+        repo = str(watch.get("repo") or "").strip()
+        pin_file = str(watch.get("pin_file") or "").strip()
+        if not repo or not pin_file:
+            continue
+        if not root.is_dir():
+            drafts.append(_upstream_error(repo, "repo-missing", "the bound repo path is missing"))
+            continue
+        drafts.extend(await _watch_upstream(root, repo, pin_file, runner))
+    return drafts
+
+
 # Patrol registry — the service iterates this on a shift trigger. ``feedback``
 # is intake-only (service.file_feedback), so it doesn't appear here. The
 # ``issues`` patrol needs the workspace + project context the ``deps`` patrol
@@ -339,6 +550,7 @@ async def _default_execute(
 PATROLS: dict[str, PatrolFn] = {
     "deps": deps_patrol,
     "issues": issues_patrol,  # type: ignore[dict-item] — wider signature, called via kwargs
+    "upstream": upstream_patrol,  # type: ignore[dict-item] — wider signature, called via kwargs
 }
 
 
@@ -346,8 +558,10 @@ __all__ = [
     "KNOWN_STALE",
     "PATROLS",
     "ConnectorExecuteFn",
+    "GhFn",
     "PatrolFn",
     "SightingDraft",
     "deps_patrol",
     "issues_patrol",
+    "upstream_patrol",
 ]

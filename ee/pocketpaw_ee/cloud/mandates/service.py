@@ -5,9 +5,10 @@
 #
 # Public API (module-level ``async def op(workspace_id, user_id, body) -> dict``):
 # create/list/get mandates; file_feedback, list_sightings, run_patrols (patrols
-# that accept ``workspace_id`` / ``user_id`` get them via signature inspection;
-# sightings dedup on ``_dedup_signal``); trigger_shift (sense → foreman → plan
-# gate); prepare_plan_resolution; get_pawprints; set_autopilot.
+# that accept ``workspace_id`` / ``user_id`` / ``upstream`` get them via
+# signature inspection; sightings dedup on ``_dedup_signal``); trigger_shift
+# (sense → foreman → plan gate); prepare_plan_resolution; get_pawprints;
+# set_autopilot.
 #
 # System/executor reads (no Beanie leaks out): repo_for_mandate,
 # charter_for_mandate (the develop station's checks/recipes/goal read),
@@ -43,6 +44,7 @@ from pocketpaw_ee.cloud.mandates.domain import (
     ShiftDoc,
     SightingDoc,
     Surface,
+    UpstreamPin,
 )
 from pocketpaw_ee.cloud.mandates.dto import (
     CreateMandateRequest,
@@ -149,6 +151,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
         status="active",
         soul_path=body.soul_path,
         patrols=list(body.patrols),
+        upstream=[UpstreamPin(repo=u.repo, pin_file=u.pin_file) for u in body.upstream],
     )
     await doc.insert()
 
@@ -283,6 +286,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         "soul_path": doc.soul_path,
         "patrols": list(doc.patrols),
         "autopilot": _autopilot_to_wire(doc),
+        "upstream": [u.model_dump() for u in doc.upstream],
         "recent_shifts": [
             {
                 "id": str(s.id),
@@ -400,12 +404,14 @@ async def list_sightings(workspace_id: str, user_id: str, mandate_id: str) -> di
 def _dedup_signal(evidence: dict[str, Any] | None, summary: str | None) -> str:
     """The stable per-patrol dedup signal for a sighting / draft.
 
-    Generalized across patrols: ``issues`` carry ``evidence.iid`` (stable across a
-    retitle), ``deps`` carry ``evidence.package``; anything else falls back to the
-    summary. Without the ``iid`` branch an issue retitle would change the summary
-    and double-persist the same issue."""
+    Generalized across patrols: a patrol that knows its own identity sets
+    ``evidence.dedup_key`` (``upstream`` keys on repo + pin + upstream head, so a
+    quiet day files nothing new); ``issues`` carry ``evidence.iid`` (stable across
+    a retitle), ``deps`` carry ``evidence.package``; anything else falls back to
+    the summary. Without the ``iid`` branch an issue retitle would change the
+    summary and double-persist the same issue."""
     ev = evidence or {}
-    signal = ev.get("iid") or ev.get("package") or summary or ""
+    signal = ev.get("dedup_key") or ev.get("iid") or ev.get("package") or summary or ""
     return str(signal)
 
 
@@ -446,6 +452,8 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
                 kwargs["workspace_id"] = workspace_id
             if "user_id" in params:
                 kwargs["user_id"] = user_id
+            if "upstream" in params:
+                kwargs["upstream"] = [u.model_dump() for u in doc.upstream]
             drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
