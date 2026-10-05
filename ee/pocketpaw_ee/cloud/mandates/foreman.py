@@ -7,14 +7,16 @@
 # name a charter ``recipe`` (a deterministic command) instead of LLM develop work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
-# shells the SYSTEM Claude Code CLI (``claude -p <prompt> --output-format json``)
-# and reads the envelope's ``result``; ``mock`` is deterministic (one task per
-# sighting, highest severity first; ``set_mock_plan()`` overrides it in tests).
+# runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
+# prompt on stdin, in an empty temp dir with the factory's scrubbed env — the
+# prompt carries third-party sighting text) and reads the envelope's
+# ``result``; ``mock`` is deterministic (one task per sighting, highest severity
+# first; ``set_mock_plan()`` overrides it in tests).
 # ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
 # set), and they pin every seat to no settings files, no MCP and no hooks; the
-# develop station uses them too. Prompts ride argv/stdin, never a shell.
+# develop station uses them too. Prompts ride stdin, never argv or a shell.
 #
 # Validation discipline (sim-proven — do not weaken): machine validation runs on
 # ACTION fields (title, expected_outcome) and structural fields (task count vs
@@ -30,13 +32,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -151,28 +154,32 @@ def claude_result_text(stdout: str) -> str:
     return stdout
 
 
+@dataclass
 class ClaudeCliLlm:
-    """Default transport — one ``claude -p <prompt> --output-format json`` call.
+    """Default transport — one ``claude -p --tools "" --output-format json``
+    call with the prompt on stdin.
 
-    The prompt is a single argv element (the CLI does its own auth); nothing is
-    shell-interpolated."""
+    The foreman reads third-party text (sightings), so it gets no tools at all,
+    runs in a fresh empty temp dir (nothing on disk to read even if a tool
+    slipped through) and sees only the factory's scrubbed env. ``run`` is the
+    develop station's subprocess runner (injectable for tests)."""
+
+    run: Any = None
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
-        proc = await asyncio.create_subprocess_exec(
-            *claude_cli_argv(prompt),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=_CLI_TIMEOUT)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeError(f"claude CLI timed out after {_CLI_TIMEOUT}s") from None
-        out = out_b.decode("utf-8", "replace")
-        if proc.returncode != 0:
-            err = err_b.decode("utf-8", "replace")
-            raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err.strip()[:300]}")
+        from pocketpaw.security.redact import redact_output
+        from pocketpaw_ee.cloud.belt.develop_station import run_subprocess
+
+        with tempfile.TemporaryDirectory(prefix="belt-foreman-") as cwd:
+            code, out, err = await (self.run or run_subprocess)(
+                claude_cli_argv("--tools", ""),
+                cwd=Path(cwd),
+                timeout=_CLI_TIMEOUT,
+                stdin=prompt,
+            )
+        if code != 0:
+            detail = redact_output((err or out).strip())[:300]
+            raise RuntimeError(f"claude CLI failed (exit {code}): {detail}")
         return claude_result_text(out)
 
 

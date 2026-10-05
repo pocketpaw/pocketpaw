@@ -693,3 +693,34 @@ async def test_headless_error_on_the_blob_is_redacted(repo, tmp_path, monkeypatc
     await HeadlessDevelopRunner(develop_fn=leaky).run(action_id)
     blob = (await store.get_action(action_id)).parameters["_code_change"]
     assert GH_TOKEN not in blob["headless_error"] and "[REDACTED]" in blob["headless_error"]
+
+
+async def test_foreman_claude_call_has_no_tools_and_an_empty_cwd(monkeypatch):
+    seen: dict = {}
+
+    async def fake_run(argv, *, cwd, timeout, stdin=None):
+        seen.update(argv=list(argv), cwd=Path(cwd), listing=list(Path(cwd).iterdir()), stdin=stdin)
+        return 0, json.dumps({"type": "result", "result": '{"shift_no": 1}'}), ""
+
+    monkeypatch.setenv("POCKETPAW_FACTORY_CLAUDE_BIN", FAKE_CLAUDE)
+    ctx = foreman.ForemanContext(shift_no=1, charter={"goal": "g"})
+    text = await foreman.ClaudeCliLlm(run=fake_run).plan(prompt="PLAN THIS", context=ctx)
+
+    argv = seen["argv"]
+    assert text == '{"shift_no": 1}'
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--setting-sources") + 1] == "" and "--strict-mcp-config" in argv
+    assert seen["stdin"] == "PLAN THIS" and "PLAN THIS" not in argv
+    assert seen["listing"] == [] and seen["cwd"].name.startswith("belt-foreman-")
+    assert not seen["cwd"].exists(), "the temp cwd outlived the call"
+    assert Path.cwd() != seen["cwd"]
+
+
+async def test_foreman_cli_failure_is_redacted(monkeypatch):
+    async def fake_run(argv, *, cwd, timeout, stdin=None):
+        return 1, "", f"auth blew up with {GH_TOKEN}"
+
+    ctx = foreman.ForemanContext(shift_no=1, charter={"goal": "g"})
+    with pytest.raises(RuntimeError, match="exit 1") as exc:
+        await foreman.ClaudeCliLlm(run=fake_run).plan(prompt="p", context=ctx)
+    assert GH_TOKEN not in str(exc.value)
