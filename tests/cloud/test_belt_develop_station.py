@@ -597,3 +597,28 @@ async def test_diff_touching_agent_config_is_refused(repo, planted):
         await _station(fake, repo)(_request(repo))
     assert planted in str(exc.value)
     _assert_clean(repo, fake)
+
+
+@pytest.mark.parametrize(
+    ("checks", "recipes", "recipe", "match"),
+    [
+        (("bash -c 'echo pwned > /tmp/x'",), None, "", r"^CHECK: command 'bash' is not allowed"),
+        (("./node_modules/.bin/x",), None, "", r"^CHECK: .*relative path"),
+        ((), {"r": "git commit -am x"}, "r", r"^WORK: command 'git' is not allowed"),
+    ],
+)
+async def test_station_refuses_disallowed_programs_before_exec(
+    repo, monkeypatch, checks, recipes, recipe, match
+):
+    """A charter stored before the DTO rule (or an allowlist narrowed since) is
+    still refused by the station, and the program never runs."""
+    monkeypatch.delenv("POCKETPAW_FACTORY_ALLOWED_COMMANDS", raising=False)
+    fake = FakeClaude(develop=[_write("ok")])
+    with pytest.raises(ds.DevelopStationError, match=match):
+        await _station(fake, repo, checks=checks, recipes=recipes)(_request(repo, recipe=recipe))
+    ran = {Path(a[0]).name for a in fake.argvs}
+    assert not ran & {"bash", "x"} and ["git", "commit"] not in [a[:2] for a in fake.argvs]
+    if checks:  # refused up front: no worktree, no LLM spend
+        assert fake.argvs == []
+    else:
+        _assert_clean(repo, fake)

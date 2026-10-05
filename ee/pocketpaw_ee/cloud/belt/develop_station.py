@@ -23,7 +23,8 @@
 # it as ``headless_error`` on the queued run's blob.
 #
 # Safety: every subprocess goes through ONE injectable ``Runner`` with an argv
-# list (never a shell); charter commands are ``shlex.split``. The default runner
+# list (never a shell); charter commands are ``shlex.split`` and refused unless
+# argv[0] is on the operator allowlist (``dto.command_refusal``). The default runner
 # passes only an allow-listed env (``_ENV_KEYS``: no tokens, URIs or API keys)
 # and kills the whole process group on timeout or cancellation. Station git
 # calls run with fsmonitor and hooks disabled, and the worktree's ``.git`` file
@@ -54,6 +55,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
+from pocketpaw_ee.cloud.mandates.dto import command_refusal
 from pocketpaw_ee.cloud.mandates.foreman import claude_cli_argv, claude_result_text
 
 logger = logging.getLogger(__name__)
@@ -176,6 +178,8 @@ class ClaudeCodeDevelop:
         charter: dict[str, Any] = found.get("charter") or {}
         checks = [str(c) for c in charter.get("checks") or []]
         recipes: dict[str, str] = dict(charter.get("recipes") or {})
+        for command in checks:  # a refused check fails before any LLM spend
+            _charter_argv(command, "CHECK")
 
         repo = self._resolve_repo(request.repo or str(found.get("repo") or ""))
         base_branch, start_ref = await self._resolve_base(repo, request.base_branch)
@@ -199,7 +203,7 @@ class ClaudeCodeDevelop:
                         f"WORK: recipe {request.recipe!r} is not declared in the charter"
                     )
                 code, out, err = await self.run(
-                    shlex.split(command),
+                    _charter_argv(command, "WORK"),
                     cwd=worktree,
                     timeout=_env_seconds("POCKETPAW_FACTORY_CHECK_TIMEOUT", 600),
                 )
@@ -331,7 +335,7 @@ class ClaudeCodeDevelop:
 
     async def _check(self, cwd: Path, command: str) -> CheckResult:
         code, out, err = await self.run(
-            shlex.split(command),
+            _charter_argv(command, "CHECK"),
             cwd=cwd,
             timeout=_env_seconds("POCKETPAW_FACTORY_CHECK_TIMEOUT", 600),
         )
@@ -379,6 +383,20 @@ class ClaudeCodeDevelop:
             raise DevelopStationError(f"REVIEW: unparseable verdict: {text[:300]!r}")
         notes = [str(n) for n in verdict.get("notes") or []]
         return verdict["verdict"] == "pass", notes
+
+
+def _charter_argv(command: str, step: str) -> list[str]:
+    """A charter command as argv, refused unless its program is allowed — the
+    create DTO checks the same rule; this catches charters stored before it or
+    an allowlist narrowed since."""
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise DevelopStationError(f"{step}: command {command!r} does not parse: {exc}") from None
+    refusal = command_refusal(argv[0]) if argv else "empty command"
+    if refusal:
+        raise DevelopStationError(f"{step}: {refusal}")
+    return argv
 
 
 _PROTECTED_DIRS = {".claude", ".git"}

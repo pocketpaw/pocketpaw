@@ -3,13 +3,16 @@
 # Separate Request and Response models per the cloud entity rule (never reuse one
 # model for both directions). Request models are the ``body`` the service
 # ``model_validate``s at entry; Response models are the wire dicts the service
-# returns. Covers mandate create/read (charter incl. checks + recipes, and the
+# returns. ``command_refusal`` is the factory's argv[0] allowlist for charter
+# checks/recipes (the develop station re-checks it before exec). Covers mandate
+# create/read (charter incl. checks + recipes, and the
 # ``upstream`` patrol's pinned-dependency watch list), feedback
 # intake + sightings, the shift trigger, plan resolution, pawprints, the
 # autopilot toggle, and the digest query.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from datetime import datetime
@@ -79,6 +82,7 @@ class CharterRequest(BaseModel):
     # Factory hooks — argv strings (shlex-split, never a shell). ``checks`` must
     # pass before a headless diff is attached; ``recipes`` are named
     # deterministic commands a plan task can run instead of an LLM develop.
+    # Each argv[0] must be an operator-allowed command (``command_refusal``).
     checks: list[str] = Field(default_factory=list)
     recipes: dict[str, str] = Field(default_factory=dict)
 
@@ -100,13 +104,44 @@ class CharterRequest(BaseModel):
 
 
 def _require_argv(cmd: str) -> None:
-    """A check/recipe command must split into a non-empty argv."""
+    """A check/recipe command must split into a non-empty argv whose program
+    the operator allows."""
     try:
         argv = shlex.split(cmd)
     except ValueError as exc:
         raise ValueError(f"command {cmd!r} does not parse: {exc}") from None
     if not argv:
         raise ValueError("commands must be non-empty")
+    refusal = command_refusal(argv[0])
+    if refusal:
+        raise ValueError(refusal)
+
+
+# Programs a charter check/recipe may start, by basename. No shells, ``env``,
+# ``sudo``, downloaders, or ``git`` (a check-run git would honour hooks and
+# config the agent can plant). Operators override the whole list with
+# ``POCKETPAW_FACTORY_ALLOWED_COMMANDS`` (comma-separated basenames).
+_DEFAULT_ALLOWED_COMMANDS = "uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go"
+
+
+def command_refusal(program: str) -> str | None:
+    """Why ``program`` (a charter command's argv[0]) may not run, or ``None``.
+
+    Read per call so an operator's env change applies. A bare name or an
+    absolute path is judged by its basename; a relative path (``./x``,
+    ``node_modules/.bin/x``) is always refused — it resolves inside the
+    agent-editable worktree. The develop station re-checks right before exec."""
+    raw = os.environ.get("POCKETPAW_FACTORY_ALLOWED_COMMANDS") or _DEFAULT_ALLOWED_COMMANDS
+    allowed = {c.strip() for c in raw.split(",") if c.strip()}
+    if "/" in program and not program.startswith("/"):
+        return f"command {program!r} is a relative path; use an allowed command name"
+    name = program.rsplit("/", 1)[-1]
+    if name not in allowed:
+        return (
+            f"command {name!r} is not allowed (allowed: {', '.join(sorted(allowed))}; "
+            "operators set POCKETPAW_FACTORY_ALLOWED_COMMANDS)"
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +378,7 @@ __all__ = [
     "AutopilotState",
     "BudgetRequest",
     "CharterRequest",
+    "command_refusal",
     "CreateMandateRequest",
     "DigestRequest",
     "FeedbackRequest",
