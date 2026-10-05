@@ -113,6 +113,14 @@ uv run pocketpaw update                     # Update to latest version via uv
 uv run pytest --ignore=tests/e2e
 uv run pytest tests/cloud -o addopts=""
 
+# Flake census: run the default suite N times under pytest-xdist in random order
+# and rank the tests that fail (writes .flake-census/<stamp>.tsv + -summary.txt).
+# Parallel runs are NOT the default yet: the suite leaks global state between
+# tests, and addopts carries `-p no:randomly` so plain runs keep collection order.
+# A test that must stay out of the parallel phase gets @pytest.mark.serial plus a
+# comment giving the reason.
+scripts/flake_census.sh -r 10 -n 4
+
 # Run only the OSS-core test scope (passes on an OSS-only `uv sync --dev`)
 uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee
 
