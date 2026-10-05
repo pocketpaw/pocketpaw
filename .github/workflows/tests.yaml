@@ -67,9 +67,18 @@ jobs:
             tests/cloud/test_executor_workspace_iso.py \
             tests/cloud/test_instinct_empty_workspace_failclosed.py \
             tests/cloud/test_ga_two_tenant_pentest.py \
+            tests/cloud/test_agent_ledger_endpoint.py \
+            tests/cloud/test_paw_bar_decision_loop_tenancy.py \
+            tests/cloud/people/test_person_read_model.py \
+            tests/ee/test_action_sweeper.py \
             tests/test_instinct_workspace_isolation.py \
             tests/test_fabric_workspace_isolation.py \
             tests/test_store_isolation_lint.py \
+            tests/test_workspace_ctxvar_bridge.py \
+            tests/test_workspace_store_migration.py \
+            tests/test_audit_lock_survives_eviction.py \
+            tests/test_agent_ledger.py \
+            tests/test_herdr_runtime.py \
             --ignore=tests/e2e \
             -q --tb=short
         env:
