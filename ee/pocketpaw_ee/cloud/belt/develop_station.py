@@ -16,12 +16,15 @@
 #   REVIEW   checks green → an independent read-only ``claude -p`` judges the
 #            task against ``git diff``: strict ``{"verdict", "notes"}`` JSON.
 #   DONE     ``git add -A`` + ``git diff --cached --binary <base sha>``.
-#   CLEANUP  always ``git worktree remove --force`` (finally).
+#   CLEANUP  always: remove the temp dir, then ``git worktree prune`` (finally).
 # Any dead end raises ``DevelopStationError`` naming the step; the runner records
 # it as ``headless_error`` on the queued run's blob.
 #
 # Safety: every subprocess goes through ONE injectable ``Runner`` with an argv
-# list (never a shell); charter commands are ``shlex.split``. ``claude`` runs
+# list (never a shell); charter commands are ``shlex.split``. The default runner
+# passes only an allow-listed env (``_ENV_KEYS``: no tokens, URIs or API keys)
+# and kills the whole process group on timeout or cancellation. Station git
+# calls run with fsmonitor and hooks disabled. ``claude`` runs
 # with an allow-listed tool set (Read/Edit/Write/Glob/Grep + Bash limited to the
 # charter's check prefixes) and gets its prompt on stdin. The binary and model
 # come from ``foreman.claude_cli_argv`` (the system CLI, never the SDK copy).
@@ -31,11 +34,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shlex
 import shutil
+import signal
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -53,6 +58,13 @@ _TAIL_CHARS = 2000  # cap on what a failure carries into the blob / a prompt
 _REVIEW_DIFF_CHARS = 60_000
 _DEVELOP_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"]
 _REVIEW_TOOLS = ["Read", "Glob", "Grep"]
+# Every station git call: no fsmonitor command, no hooks (the worktree is agent
+# territory; a planted hook or fsmonitor would run on ``git add``).
+_GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+# The only env every factory subprocess (claude, checks, recipes, git) sees:
+# enough for PATH lookups, the CLI's keychain/OAuth under HOME, and locale.
+# Everything else (Mongo URI, tokens, API keys, POCKETPAW_* secrets) is dropped.
+_ENV_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR", "SHELL")
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -71,28 +83,46 @@ class Runner(Protocol):
     ) -> tuple[int, str, str]: ...
 
 
+def scrubbed_env() -> dict[str, str]:
+    """The allow-listed env (``_ENV_KEYS``, only those present).
+    ``PYTHONDONTWRITEBYTECODE`` keeps check runs from leaving ``__pycache__``
+    files for ``git add -A`` to sweep into the diff."""
+    env = {k: os.environ[k] for k in _ENV_KEYS if k in os.environ}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _kill_group(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
 async def run_subprocess(
     argv: list[str], *, cwd: Path, timeout: float, stdin: str | None = None
 ) -> tuple[int, str, str]:
-    """Default ``Runner`` — ``create_subprocess_exec`` (never a shell).
-    ``PYTHONDONTWRITEBYTECODE`` keeps check runs from leaving ``__pycache__``
-    files for ``git add -A`` to sweep into the diff."""
+    """Default ``Runner`` — ``create_subprocess_exec`` (never a shell) with the
+    scrubbed env, in its own session so a timeout or a cancelled run kills the
+    whole process group (a check's grandchildren too), not just the child."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env=scrubbed_env(),
+        start_new_session=True,
     )
     try:
         out_b, err_b = await asyncio.wait_for(
             proc.communicate(stdin.encode() if stdin is not None else None), timeout=timeout
         )
     except TimeoutError:
-        proc.kill()
+        _kill_group(proc)
         await proc.wait()
         return -1, "", f"timed out after {timeout:.0f}s"
+    except BaseException:
+        _kill_group(proc)
+        raise
     return proc.returncode or 0, out_b.decode("utf-8", "replace"), err_b.decode("utf-8", "replace")
 
 
@@ -240,14 +270,10 @@ class ClaudeCodeDevelop:
                 files_changed=files_changed,
             )
         finally:
-            # CLEANUP — never leave a worktree registered or a temp dir behind.
-            await self.run(
-                ["git", "worktree", "remove", "--force", str(worktree)],
-                cwd=repo,
-                timeout=_GIT_TIMEOUT,
-            )
+            # CLEANUP — the temp dir goes first (synchronous, so a cancelled run
+            # still drops it), then prune unregisters the vanished worktree.
             shutil.rmtree(tmp, ignore_errors=True)
-            await self.run(["git", "worktree", "prune"], cwd=repo, timeout=_GIT_TIMEOUT)
+            await self.run([*_GIT, "worktree", "prune"], cwd=repo, timeout=_GIT_TIMEOUT)
 
     # -- steps ---------------------------------------------------------------
 
@@ -270,7 +296,7 @@ class ClaudeCodeDevelop:
             if base == "HEAD":
                 raise DevelopStationError("PREPARE: repo is on a detached HEAD; no base branch")
         code, _out, _err = await self.run(
-            ["git", "remote", "get-url", "origin"], cwd=repo, timeout=_GIT_TIMEOUT
+            [*_GIT, "remote", "get-url", "origin"], cwd=repo, timeout=_GIT_TIMEOUT
         )
         if code == 0:
             await self._git(repo, "fetch", "origin", base)
@@ -278,7 +304,7 @@ class ClaudeCodeDevelop:
         return base, base
 
     async def _git(self, cwd: Path, *args: str) -> str:
-        code, out, err = await self.run(["git", *args], cwd=cwd, timeout=_GIT_TIMEOUT)
+        code, out, err = await self.run([*_GIT, *args], cwd=cwd, timeout=_GIT_TIMEOUT)
         if code != 0:
             raise DevelopStationError(f"git {args[0]} failed (exit {code}): {_tail(err or out)}")
         return out

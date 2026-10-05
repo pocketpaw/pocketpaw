@@ -131,6 +131,16 @@ def _request(repo: Path, recipe: str = "") -> DevelopRequest:
     )
 
 
+def _git_args(argv: list[str]) -> list[str] | None:
+    """A station git argv with its hardening prefix stripped (``None`` when the
+    argv is not git). Asserts the prefix is there: no station git call may run
+    with fsmonitor or hooks live."""
+    if argv[0] != "git":
+        return None
+    assert tuple(argv[: len(ds._GIT)]) == ds._GIT, argv
+    return argv[len(ds._GIT) :]
+
+
 def _assert_clean(repo: Path, fake: FakeClaude) -> None:
     """CLEANUP ran: only the main worktree is registered and the temp dir is gone,
     and no subprocess ever went through a shell."""
@@ -138,13 +148,15 @@ def _assert_clean(repo: Path, fake: FakeClaude) -> None:
         ["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True, text=True
     ).stdout
     assert out.count("worktree ") == 1, out
-    adds = [a for a in fake.argvs if a[:3] == ["git", "worktree", "add"]]
-    for a in adds:
-        assert not Path(a[4]).parent.exists(), "temp dir left behind"
+    gits = [g for g in map(_git_args, fake.argvs) if g is not None]
+    adds = [g for g in gits if g[:2] == ["worktree", "add"]]
+    assert adds, "PREPARE never added a worktree"
+    for g in adds:
+        assert not Path(g[3]).parent.exists(), "temp dir left behind"
     for a in fake.argvs:
         assert all(isinstance(x, str) for x in a)
         assert Path(a[0]).name not in {"sh", "bash", "zsh"}, a
-        assert "-c" not in a[:2] or a[0] == PY, a
+        assert "-c" not in a[:2] or a[0] in (PY, "git"), a
 
 
 # ---------------------------------------------------------------------------
@@ -439,3 +451,80 @@ def test_wire_from_env(monkeypatch):
         assert resolve_headless_dispatcher() is not None
     finally:
         set_production_develop_fn(None)
+
+
+# ---------------------------------------------------------------------------
+# hardening — env scrub, process-group kill
+# ---------------------------------------------------------------------------
+
+NO_SECRET_CHECK = f"{PY} -c \"import os,sys; sys.exit(1 if 'SECRET_TOKEN' in os.environ else 0)\""
+
+
+async def test_checks_run_without_secret_env(repo, monkeypatch):
+    monkeypatch.setenv("SECRET_TOKEN", "planted-secret-value")
+    fake = FakeClaude(develop=[_write("ok")])
+    result = await _station(fake, repo, checks=(CHECK, NO_SECRET_CHECK))(_request(repo))
+    assert f"check `{NO_SECRET_CHECK}`: pass" in result.summary
+
+
+async def test_scrubbed_env_keeps_only_the_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRET_TOKEN", "planted")
+    monkeypatch.setenv("POCKETPAW_CLOUD_MONGODB_URI", "mongodb://u:p@h")
+    code, out, _ = await ds.run_subprocess(
+        [PY, "-c", "import os, json; print(json.dumps(sorted(os.environ)))"],
+        cwd=tmp_path,
+        timeout=30,
+    )
+    keys = set(json.loads(out))
+    assert code == 0
+    assert "SECRET_TOKEN" not in keys and "POCKETPAW_CLOUD_MONGODB_URI" not in keys
+    assert {"PATH", "HOME"} <= keys
+    # The child python / macOS add LC_CTYPE and __CF_USER_TEXT_ENCODING themselves.
+    extra = {"PYTHONDONTWRITEBYTECODE", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
+    assert keys <= set(ds._ENV_KEYS) | extra
+
+
+_SPAWN_SLEEPER = (
+    "import subprocess, sys, time; "
+    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+    "open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(60)"
+)
+
+
+async def _gone(pid: int) -> bool:
+    import asyncio
+    import os
+
+    for _ in range(40):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def test_timeout_kills_the_process_group(tmp_path):
+    pidfile = tmp_path / "pid"
+    code, _, err = await ds.run_subprocess(
+        [PY, "-c", _SPAWN_SLEEPER, str(pidfile)], cwd=tmp_path, timeout=2
+    )
+    assert code == -1 and "timed out" in err
+    assert await _gone(int(pidfile.read_text())), "grandchild survived the timeout"
+
+
+async def test_cancel_kills_the_process_group(tmp_path):
+    import asyncio
+
+    pidfile = tmp_path / "pid"
+    task = asyncio.create_task(
+        ds.run_subprocess([PY, "-c", _SPAWN_SLEEPER, str(pidfile)], cwd=tmp_path, timeout=60)
+    )
+    for _ in range(100):
+        if pidfile.exists() and pidfile.read_text():
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await _gone(int(pidfile.read_text())), "grandchild survived the cancel"
