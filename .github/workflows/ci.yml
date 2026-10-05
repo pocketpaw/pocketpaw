@@ -240,6 +240,15 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Craft studio preambles (tests/cloud blind spot)
+        # The /studio/vector, /studio/photo and /studio/design preambles render
+        # the page's document projection; tests/cloud is excluded by the
+        # pyproject addopts.
+        run: uv run pytest tests/cloud/surface/test_studio_craft_preamble.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Run agent activity tests
         # Same addopts escape as the cockpit step above. This one guards a
         # CROSS-TENANT property — the board is filtered to the caller's

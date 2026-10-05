@@ -7,8 +7,7 @@
 # owner sees surface:security, admin and member don't, a non-member and an
 # unknown user see no role-gated entry, and the provider resolves the user it
 # was handed (not whatever chat identity is bound).
-# Updated 2026-10-02 (feat/discover-index): surface counts include surface:discover
-# (30 for the owner, 29 for others).
+# Surface counts are pinned: 34 for the owner, 33 for others.
 
 from __future__ import annotations
 
@@ -66,7 +65,7 @@ def test_owner_sees_security(users):
     users["owner1"] = [("w1", "owner")]
     ids = _surfaces("owner1")
     assert "surface:security" in ids
-    assert len(ids) == 31
+    assert len(ids) == 34
 
 
 @pytest.mark.parametrize("role", ["admin", "member"])
@@ -74,7 +73,7 @@ def test_admin_and_member_do_not(users, role):
     users["u1"] = [("w1", role)]
     ids = _surfaces("u1")
     assert "surface:security" not in ids
-    assert len(ids) == 30
+    assert len(ids) == 33
 
 
 def test_owner_elsewhere_is_not_owner_here(users):

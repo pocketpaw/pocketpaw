@@ -308,6 +308,39 @@
       "note": "Added 2026-09-30 (feat/open-surface-tool): capability:surface.open wins 'open this page for me' intents, and the reverse direction: the editor surface keeps its own intent. The first draft of the entry (keywords 'upload a file', 'edit this video') stole 'let users upload a file in the form' from widget:file-upload and 'make a video from this description' from skill:studio; the entry was narrowed rather than those cases repointed."
     },
     {
+      "intent": "design a visiting card for my print shop",
+      "expected_id": "surface:studio_vector",
+      "rank_within": 1,
+      "note": "Added 2026-10-04 (feat/vector-studio): the vector design editor wins print-artwork intents."
+    },
+    {
+      "intent": "make a wedding card in cmyk",
+      "expected_id": "surface:studio_vector",
+      "rank_within": 3
+    },
+    {
+      "intent": "make a passport photo for my customer",
+      "expected_id": "surface:studio_photo",
+      "rank_within": 1,
+      "note": "Added 2026-10-04 (feat/vector-studio): the photo editor wins passport and retouch intents."
+    },
+    {
+      "intent": "retouch this photo and sharpen it",
+      "expected_id": "surface:studio_photo",
+      "rank_within": 3
+    },
+    {
+      "intent": "lay out a letterhead with bleed",
+      "expected_id": "surface:studio_design",
+      "rank_within": 1,
+      "note": "Added 2026-10-04 (feat/vector-studio): the page layout editor wins page-layout intents."
+    },
+    {
+      "intent": "design a two page flyer for print",
+      "expected_id": "surface:studio_design",
+      "rank_within": 3
+    },
+    {
       "intent": "open the editor with this clip",
       "expected_id": "surface:studio_editor",
       "rank_within": 1,

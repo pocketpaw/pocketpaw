@@ -32,7 +32,16 @@ _SURFACES_PATH = next(p for p in AUTHORED_FILES if p.name == "surfaces.json")
 _VERBS_PATH = next(p for p in AUTHORED_FILES if p.name == "verbs.json")
 
 INLINE_ROUTES = {"/chat", "/files", "/deep-work", "/pockets", "/sites", "/knowledge", "/studio"}
-AGENT_OPENABLE_ROUTES = {"/files", "/studio/editor", "/chat", "/pockets", "/knowledge"}
+AGENT_OPENABLE_ROUTES = {
+    "/files",
+    "/studio/editor",
+    "/studio/vector",
+    "/studio/photo",
+    "/studio/design",
+    "/chat",
+    "/pockets",
+    "/knowledge",
+}
 # Lab composer commands that are not surfaces or verbs; a slash must not shadow them.
 RESERVED_SLASHES = {"clear", "help", "history", "tray", "new-task"}
 _SLASH_RE = re.compile(r"[a-z][a-z0-9-]*(/[a-z][a-z0-9-]*)*")

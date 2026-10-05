@@ -1,0 +1,134 @@
+{
+  "_comment": [
+    "The /studio/photo op vocabulary: the wire contract between the edit_photo MCP",
+    "tool (pocketpaw, server pocketpaw_craft) and the photo editor's op applier",
+    "(paw-enterprise). Retouching customer photos and making passport photos.",
+    "",
+    "Committed BYTE-IDENTICAL in both repos:",
+    "  pocketpaw/ee/pocketpaw_ee/agent/mcp_servers/photo_ops.contract.json",
+    "  paw-enterprise/src/lib/core/studio/craft/contracts/photo_ops.contract.json",
+    "",
+    "Shape and rules are the vector contract's (see vector_ops.contract.json),",
+    "plus: hex (\"#rrggbb\"), range:lo..hi (a number within the inclusive bounds),",
+    "curve (2..16 [in,out] pairs, each 0..255), and `oneOf`: a list of param",
+    "groups; exactly one group must be complete and no param of another group may",
+    "appear. `layer` (type id) names a layer from the page's projection; omitted,",
+    "the op acts on the active layer. `engine` names the photocraft command the",
+    "applier runs, with its exact params.",
+    "",
+    "Units: pixels, origin at the canvas top-left, y down. Opacity is 0..1.",
+    "Photo has no engine-side tools, so there are no pointer ops here; brush,",
+    "lasso and heal strokes stay with the hand UI (or run_command with points).",
+    "",
+    "runCommand is the escape hatch, stricter than vector's: same pattern and",
+    "namespaces plus book and links, and segments that start with save, export,",
+    "import, open, load, relink or quickExport, preferences, keyboardShortcuts",
+    "and batch are refused."
+  ],
+  "version": 1,
+  "maxOpsPerBatch": 50,
+  "ops": {
+    "adjust_levels": {
+      "engine": "image.adjustments.levels {inBlack, inWhite, gamma}",
+      "params": {"inBlack": "range:0..255", "inWhite": "range:0..255", "gamma": "range:0.1..10"},
+      "anyOf": ["inBlack", "inWhite", "gamma"]
+    },
+    "adjust_curves": {
+      "engine": "image.adjustments.curves {points}",
+      "params": {"points": "curve"},
+      "required": ["points"]
+    },
+    "brightness_contrast": {
+      "engine": "image.adjustments.brightnessContrast {brightness, contrast}",
+      "params": {"brightness": "range:-150..150", "contrast": "range:-50..100"},
+      "anyOf": ["brightness", "contrast"]
+    },
+    "hue_saturation": {
+      "engine": "image.adjustments.hueSaturation {hue, saturation, lightness, colorize}",
+      "params": {
+        "hue": "range:-180..180", "saturation": "range:-100..100",
+        "lightness": "range:-100..100", "colorize": "bool"
+      },
+      "anyOf": ["hue", "saturation", "lightness", "colorize"]
+    },
+    "sharpen": {
+      "engine": "filter.sharpen.unsharpMask {amount, radius, threshold} (engine defaults 50, 1, 0)",
+      "params": {"amount": "range:1..500", "radius": "range:0.1..1000", "threshold": "range:0..255"}
+    },
+    "auto_tone": {"engine": "image.autoTone {}", "params": {}},
+    "crop": {
+      "engine": "image.crop {x, y, width, height}; preset passport_35x45: the largest centred 35:45 box, image.crop, then image.imageSize {width: 413, height: 531, resolution: 300}",
+      "params": {
+        "x": "number0", "y": "number0", "width": "number+", "height": "number+",
+        "preset": "enum:passport_35x45"
+      },
+      "oneOf": [["x", "y", "width", "height"], ["preset"]]
+    },
+    "resize": {
+      "engine": "image.imageSize {width, height, resolution, resample}",
+      "params": {
+        "width": "number+", "height": "number+", "resolution": "number+",
+        "resample": "enum:bicubic|bilinear|nearest|lanczos|preserveDetails|none"
+      },
+      "anyOf": ["width", "height", "resolution"]
+    },
+    "rotate": {
+      "engine": "image.imageRotation.90cw|90ccw|180 {}",
+      "params": {"by": "enum:90cw|90ccw|180"},
+      "required": ["by"]
+    },
+    "flip": {
+      "engine": "image.imageRotation.flipCanvasHorizontal|flipCanvasVertical {}",
+      "params": {"axis": "enum:horizontal|vertical"},
+      "required": ["axis"]
+    },
+    "select_subject": {
+      "engine": "select.subject {mode}",
+      "params": {"mode": "enum:replace|add|subtract|intersect"}
+    },
+    "select_all": {"engine": "select.all {}", "params": {}},
+    "deselect": {"engine": "select.deselect {} (skipped when nothing is selected: the engine refuses it then)", "params": {}},
+    "fill_selection": {
+      "engine": "edit.fill {contents: \"color\", color, opacity: opacity x 100}",
+      "params": {"color": "hex", "opacity": "range:0..1"},
+      "required": ["color"]
+    },
+    "add_text": {
+      "engine": "type.create {x, y (baseline of point text), text, font, size, color, align}",
+      "params": {
+        "text": "text", "x": "number", "y": "number", "size": "number+", "font": "text",
+        "color": "hex", "align": "enum:left|center|right|justify"
+      },
+      "required": ["text", "x", "y"]
+    },
+    "new_layer": {"engine": "layer.new.layer {name}", "params": {"name": "text"}},
+    "delete_layer": {"engine": "layer.delete {layer}", "params": {"layer": "id"}},
+    "set_layer_opacity": {
+      "engine": "layer.setProps {layer, opacity}",
+      "params": {"layer": "id", "opacity": "range:0..1"},
+      "required": ["opacity"]
+    },
+    "set_layer_visibility": {
+      "engine": "layer.setProps {layer, visible}",
+      "params": {"layer": "id", "visible": "bool"},
+      "required": ["visible"]
+    },
+    "rename_layer": {
+      "engine": "layer.setProps {layer, name}",
+      "params": {"layer": "id", "name": "text"},
+      "required": ["name"]
+    },
+    "run_command": {
+      "engine": "Session::execute(command, params)",
+      "params": {"command": "command", "params": "object"},
+      "required": ["command"]
+    }
+  },
+  "runCommand": {
+    "pattern": "^[a-z][A-Za-z0-9]*(\\.[A-Za-z][A-Za-z0-9]*){1,3}$",
+    "deniedNamespaces": [
+      "app", "book", "clipboard", "color", "command", "document", "file", "help", "links", "prefs", "tool", "view", "window"
+    ],
+    "deniedSegmentPattern": "^(open|save|saveAs|saveAsTemplate|export|exportSelection|exportForScreens|serialize|load|loadProfile|import|importSvg|close|closeAll|quit|preferences|keyboardShortcuts|batch)$|^(save|export|import|open|load|relink|quickExport)[A-Z]"
+  }
+}

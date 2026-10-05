@@ -1,177 +1,30 @@
-# surface_registry.py — The declarative surface registry (SR-1 + SR-2).
-# Updated: 2026-09-30 (feat/open-surface-tool) — /studio/editor's allow-list also
-# carries ``open_surface`` so the agent can send the user to /files to pick or
-# upload another clip. No other allow-listed surface gets it.
-# Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the concierge profile sets
-# ``exclusive_tools=True``: it is offered only its allow-listed pawbar tools. This
-# closes the RESIDUAL GAP recorded above ``_CONCIERGE_DENY`` for both backends.
-# Updated: 2026-09-27 (feat/sites-lean-prompt) — /sites html create drops inline ripple;
-# it asks through ask_user like svelte/react and stops carrying the widget catalog.
-# Updated: 2026-09-06 (feat/fx-mcp-server) — FX_TOOL_IDS joined the /sites toolbelt allow-list.
+# surface_registry.py — the declarative surface registry: one source of truth for
+# what surfaces exist, how each dispatches, and what policy each runs under.
 #
-# Created: 2026-06-22 (feat/surface-registry-backend, SR-1) — the single
-# declarative source of truth for "what surfaces exist and how each one
-# dispatches." Each surface is one frozen ``SurfaceSpec`` row carrying its
-# ``SurfaceKind``, its canonical ``route`` (the cross-repo contract — the
-# ``SurfaceKind`` value with a leading slash, e.g. STUDIO -> "/studio"), and
-# its ``build_preamble`` handler callable. ``service._load_handlers`` builds
-# its ``dict[SurfaceKind, callable]`` dispatch table by LOOPING over
-# ``SURFACES`` instead of hand-maintaining a parallel literal dict, so adding a
-# surface means adding ONE row here.
+# Each surface is one frozen ``SurfaceSpec`` row: its ``SurfaceKind``, canonical
+# ``route`` (``"/" + kind.value``, the cross-repo contract), ``build_preamble``
+# handler, and either a static ``profile`` or a ``profile_resolver`` (rows that
+# need lazily loaded MCP tool ids, or fork on meta like /sites). Adding a surface
+# is ONE row; ``_assert_registry_complete`` (run at import) fails if a
+# ``SurfaceKind`` has no row. Imported lazily from service.py, so a broken
+# handler import cannot take dispatch down at package import.
 #
-# This module is imported LAZILY (from inside ``service._load_handlers`` and
-# ``service._registry``, not at package import) so a broken handler-module
-# import still can't take the whole surface dispatch table down at import time
-# — the same deferral the old hand-written ``_load_handlers`` body had. The
-# handler imports below run when ``surface_registry`` is first imported, which
-# is the first call to ``_load_handlers`` / ``resolve_profile``.
+# MCP tool ids load lazily and memoized (``_mcp_tool_ids``); a failed import
+# degrades to no MCP restriction, so tool scoping never breaks chat. The craft
+# studios (vector / photo / design) share ``_studio_craft_profile(app)``: ripple
+# off, allow-list = that app's one ``edit_<app>`` tool.
 #
-# Changes: 2026-06-22 (feat/surface-registry-backend-profiles, SR-2) — PROFILES
-# now DERIVE from these rows too, with ZERO behavior change. Every surface whose
-# policy differs from the ripple-on default carries either a static ``profile``
-# (CODE — needs no lazily-loaded MCP tool ids and is not meta-aware) or a
-# ``profile_resolver`` (FORESIGHT / FILES / STUDIO / BELT / SITES — they need the
-# lazily-imported per-mode MCP tool-id sets, and SITES additionally forks on
-# ``meta``). ``service.resolve_profile`` reads ``spec.profile_resolver(meta)`` if
-# present, else ``spec.profile`` if set, else the shared ripple-on default —
-# producing IDENTICAL results to the pre-SR-2 ``_build_profiles`` table for every
-# ``(kind, meta)``. The lazy + memoized MCP-tool-id load lives here now
-# (``_mcp_tool_ids`` / ``_MCP_TOOL_IDS_CACHE``); a failed import degrades to no
-# MCP restriction exactly as before, so tool-scoping can never break chat. A
-# startup assertion (``_assert_registry_complete``, run at module import)
-# guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
-# kind — resolving the design's open question (keep the enum + assert).
-#
-# Changes: 2026-09-15 (fix/surface-external-mcp-grant) — /sites can be granted
-# an EXTERNAL MCP server, scoped to that surface alone, via
-# ``POCKETPAW_SITES_MCP_SERVERS`` (comma-separated, empty by default). The grant
-# is a BARE ``mcp__<server>`` token because an external server's tool names are
-# not known until the client connects, so ``_collect_mcp_tool_ids`` allow-lists
-# such a server wholesale with that token and the allow set is compared to it by
-# exact string. The alternative — ``claude_sdk.ALWAYS_ALLOWED_MCP_SERVERS`` —
-# would hand the server to EVERY surface, which is not what "let /sites do design
-# research" should mean. ``_external_sites_mcp_grants`` deliberately does not
-# validate names against ``load_mcp_config()``: an unmatched grant is already
-# inert, and validating would let an optional integration break profile
-# resolution.
-# Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — registered the SHIP
-# surface (/ship — the managed-deploy control plane). Its handler
-# (``ship.build_preamble``) joins the handler-import list + the ``SURFACES`` row,
-# and a new ``_ship_profile`` resolver gives it a ripple-OFF ``SurfaceProfile``
-# scoped to the ship verb tools: ``_McpToolIds`` grows a ``ship_allow`` field,
-# loaded from ``SHIP_TOOL_IDS`` (importable on this branch, so it rides the same
-# try/except None-degrade path as the loom/media ids) and surfaced via the
-# ``ship`` skill. Ripple OFF so the agent drives managed deploys instead of
-# building a dashboard.
-# Changes: 2026-07-14 (Paw Bar concierge seam, T2) — registered the CONCIERGE
-# surface (/paw-bar — the public concierge widget). Its handler
-# (``concierge.build_preamble``) joins the row list and ``_concierge_profile``
-# gives it a ripple-OFF, PUBLIC-SAFE policy: ``_CONCIERGE_DENY`` hard-strips the
-# web + code/write/subagent + pocket-write tools (the real lockdown lever for a
-# public surface — ``allow_mcp_tool_ids`` alone can't, since the universal grant
-# + always-allowed servers survive it), and ``_concierge_allow_mcp`` is the
-# site-kind-parameterized MCP allow-list (foreign = site-scoped KB only; a hook
-# for dynamic sites' D1-read). The completeness assertion forced this row the
-# moment ``SurfaceKind.CONCIERGE`` was added.
-#
-# Changes: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — added the
-# OTHER_HAND row (/other-hand — the notebook page the agent writes back on). A
-# STATIC ripple-OFF profile carrying ``_OTHER_HAND_POCKET_DENY`` (the two
-# pocket-creation tool ids, the only ids an allow-list provably cannot strip) and
-# ``OTHER_HAND_SYSTEM_PROMPT`` (the page-ops output contract: op vocabulary,
-# 1240x1754 coordinate space, margins, the free_y rule). Both halves are
-# required — /code proved a closed deny plus a forbidding preamble still loses to
-# a trained-in default when nothing positive replaces it.
-#
-# Changes: 2026-07-22 (feat/code-surface-profile, CD-3) — the CODE row stopped
-# addressing the wrong machine. It used to carry
-# ``allowed_sdk_tools={"Bash","Read","Write","Edit","Glob","Grep"}``, which read
-# like "scope the agent to the coding built-ins" but is ADDITIVE — those six are
-# in the SDK's default set already, so it granted nothing and restricted nothing.
-# Meanwhile the /code agent runs on the BACKEND SERVER: the user's project lives
-# in a sandbox behind the ``code_mode`` tool, so every one of those built-ins
-# would have read and written the server's own disk and reported success. The row
-# now DENIES them (``_CODE_BUILTIN_DENY`` — deny is the only lever that removes a
-# built-in) and scopes the MCP surface to the tools that reach the project
-# (``_CODE_FILE_TOOL_IDS`` — originally the single ``code_mode`` tool, now the
-# four per-call file verbs the main agent drives). ``Agent`` joins the deny set
-# too: a spawned subagent
-# is a second, unsupervised path to tools. ``skill_names`` drops to empty — the
-# `code` skill teaches nothing BUT those built-ins, so keeping it would inject an
-# instruction to call what the agent no longer has. Still a static ``profile``:
-# both sets are module-level literals, nothing lazily loaded, not meta-aware. The
-# matching preamble rewrite is in ``handlers/code.py``.
-#
-# Changes: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — CD-3's deny set
-# turned out to cover only HALF the surface's wrong turns. It removed the
-# file/shell built-ins (the wrong MACHINE) but left every pocket-authoring tool
-# reachable (the wrong DELIVERABLE), because ``allow_mcp_tool_ids`` cannot touch
-# them: ``claude_sdk`` unions ``POCKET_CREATION_GRANT``, ``WIDGET_TOOL_IDS`` and
-# every ``ALWAYS_ALLOWED_MCP_SERVERS`` tool back in AFTER a mode's allow-list is
-# applied, on purpose, so "create a pocket" works from every chat mode. On /code
-# that guarantee is the bug: a user with a React project open asked for "an
-# employee management app, with components, nice design" and got a pocket and a
-# ripple ui-spec. ``_CODE_POCKET_DENY`` closes it — deny runs BEFORE the grant is
-# unioned in and is the only lever that reaches those families.
-#
-# The row then went further, on the reading that /code should not reach a pocket
-# AT ALL. The pocket READ verbs join the deny set (a pocket the agent can inspect
-# is a pocket it can propose), and so does ``Skill`` (``_CODE_SKILL_DENY``) —
-# the bundled ``pocketpaw-create-pocket`` skill loads as a local PLUGIN, so
-# ``skill_names`` never withheld it and denying the invoking tool is the only
-# lever that does.
-#
-# And the row gained a ``system_message_override``: ``CODE_SYSTEM_PROMPT``. The
-# deny set alone would have left the agent with a pocket-shaped behavioral stack
-# it could no longer act on — the ripple LAW, the delegation rule and the
-# artifact rule all name tools that are now gone. Worse, a prohibition does not
-# create a DEFAULT: told only what not to build, the trained-in dashboard remains
-# the sole concrete plan in context. The override states the surface's own
-# deliverable instead. Both halves were needed; neither alone held.
-#
-# The CODE row stays STATIC — the prompt is a module constant like the tool ids.
-#
-# Changes: 2026-07-24 (feat/code-surface-cleanup, CX-4) — removed the
-# ``_CODE_POCKET_DENY`` MCP deny-list from the CODE profile. Since CX-3, /code
-# routes to a dedicated ``code`` agent whose ``tool_mode="exclusive"`` policy caps
-# the run's ``mcp__*`` tools to exactly the four file ids at run time; every id
-# ``_CODE_POCKET_DENY`` named was an ``mcp__*`` id that cap already strips, so the
-# surface deny-list was dead weight. The division of labor is now explicit: the
-# code AGENT enforces MCP tool restriction (structurally, via exclusivity), and the
-# SURFACE profile denies only the BUILT-IN tools the MCP cap cannot reach —
-# ``_CODE_BUILTIN_DENY`` (backend-disk tools + ``Agent``) and ``_CODE_SKILL_DENY``
-# (``Skill``), both KEPT unchanged.
-#
-# Changes: 2026-09-06 (BR-2, feat/browser-surface-preamble) — the BROWSER row
-# points at its own ``handlers/browser.build_preamble`` instead of the GENERIC
-# placeholder BR-1 parked there. The profile (``_browser_profile``, ripple
-# "trim" + the browser tool allow-list) is unchanged.
-
-# Changes: 2026-09-08 (feat/sites-design-skills) — ``_sites_profile``'s
-# svelte/react-create branch now names the four create-scoped design skills
-# alongside the engine's authoring brain, via ``_SITES_CREATE_DESIGN_SKILLS``.
-#
-# This branch is the ONLY /sites mode where the addition was needed, and the
-# reason is the one property of ``skill_names`` that is easy to read backwards:
-# it is an exact ALLOWLIST, not an addition. ``_should_load_bundled_plugin``
-# returns ``enabled and not skill_names``, so a non-empty set SUPPRESSES the
-# wholesale bundled plugin and the run gets exactly what is named here (each
-# resolved by ``materialize_run_skills``, whose packaged fallback finds bundled
-# names even with the ``~/.claude/skills`` mirror off). Ripple-create and refine
-# leave ``skill_names`` unset, so they already reach every bundled skill and
-# needed no change — there, the create/refine preamble's ``<design-skills>`` block
-# is what makes the agent USE them, not what makes them available.
-#
-# The suppression is deliberately NOT relaxed. It is what keeps
-# ``pocketpaw-create-pocket`` — whose description matches "build an app with
-# components and nice design" almost word for word — from firing in the middle of
-# a site build. Widening this branch back to the full bundled set to pick up four
-# skills would re-open that, so the four are named instead.
-#
-# Sourced from ``handlers/sites.py::create_design_skill_names`` rather than
-# re-listed, because the create preamble ADVERTISES the same names and a name
-# advertised but not allowed is an instruction the agent cannot follow. Pinned by
-# ``test_sites_create_skill_names_cover_the_advertised_skills``.
+# Levers, and which one reaches what: ``allow_mcp_tool_ids`` scopes MCP tools but
+# the pocket-creation grant and always-allowed servers are unioned back after it;
+# ``deny_mcp_tool_ids`` runs BEFORE that union and is the only way to remove a
+# built-in or a granted id (/code denies the backend-disk built-ins, ``Agent`` and
+# ``Skill``; /other-hand denies the two pocket-creation ids); ``exclusive_tools``
+# (the public concierge) offers only the allow-listed tools. ``skill_names`` is an
+# exact ALLOWLIST that suppresses the bundled plugin, so /sites create names its
+# design skills explicitly (sourced from handlers/sites.py so advertised ==
+# allowed). A deny-only profile still needs a ``system_message_override`` that
+# states the surface's own deliverable, or the trained-in default wins.
+# ``POCKETPAW_SITES_MCP_SERVERS`` grants external MCP servers to /sites alone.
 
 from __future__ import annotations
 
@@ -210,6 +63,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     sidepanel,
     sites,
     studio,
+    studio_craft,
     studio_editor,
 )
 from pocketpaw_ee.cloud.surface.handlers import (
@@ -524,6 +378,8 @@ class _McpToolIds(NamedTuple):
     browser_allow: frozenset[str] | None = None
     # /studio/editor — the timeline edit + export verbs, plus open_surface.
     timeline_allow: frozenset[str] | None = None
+    # /studio/vector|photo|design — that app's edit_<app> verb, keyed by app.
+    craft_allow: dict[str, frozenset[str]] | None = None
 
 
 # Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
@@ -577,6 +433,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
     try:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.craft import TOOL_IDS as CRAFT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS
@@ -666,6 +523,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # and this list is a hard whitelist, so the ambient server alone
             # would be filtered out here.
             timeline_allow=frozenset(TIMELINE_TOOL_IDS) | frozenset(SURFACES_TOOL_IDS),
+            craft_allow={app: frozenset({tid}) for app, tid in CRAFT_TOOL_IDS.items()},
         )
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
@@ -784,6 +642,20 @@ def _studio_editor_profile(_meta: SurfaceMeta) -> SurfaceProfile:
         allow_mcp_tool_ids=_mcp_tool_ids().timeline_allow,
         skill_names=frozenset({"studio-editor", "hyperframes-core", "studio-motion"}),
     )
+
+
+def _studio_craft_profile(app: str) -> ProfileResolver:
+    # Craft studios (vector / photo / design): edit print work. Ripple OFF (the
+    # deliverable is a design, not a dashboard) and scoped to that app's
+    # edit_<app> verb alone.
+    def resolve(_meta: SurfaceMeta) -> SurfaceProfile:
+        allow = _mcp_tool_ids().craft_allow
+        return SurfaceProfile(
+            ripple_mode="off",
+            allow_mcp_tool_ids=allow.get(app) if allow is not None else None,
+        )
+
+    return resolve
 
 
 def _browser_profile(_meta: SurfaceMeta) -> SurfaceProfile:
@@ -1130,6 +1002,24 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.STUDIO_EDITOR),
         studio_editor.build_preamble,
         profile_resolver=_studio_editor_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.STUDIO_VECTOR,
+        _route_for(SurfaceKind.STUDIO_VECTOR),
+        studio_craft.build_vector_preamble,
+        profile_resolver=_studio_craft_profile("vector"),
+    ),
+    SurfaceSpec(
+        SurfaceKind.STUDIO_PHOTO,
+        _route_for(SurfaceKind.STUDIO_PHOTO),
+        studio_craft.build_photo_preamble,
+        profile_resolver=_studio_craft_profile("photo"),
+    ),
+    SurfaceSpec(
+        SurfaceKind.STUDIO_DESIGN,
+        _route_for(SurfaceKind.STUDIO_DESIGN),
+        studio_craft.build_design_preamble,
+        profile_resolver=_studio_craft_profile("design"),
     ),
     SurfaceSpec(
         SurfaceKind.CODE,

@@ -1,46 +1,18 @@
-# tests/atlas/test_compile.py — atlas compiler + drift check (AT-4).
-# Updated 2026-10-02 (feat/discover-index, review): 30 authored surfaces (surface:discover).
-# Created: 2026-07-02 (feat/atlas-compiler). Proves:
-#   * byte-determinism: compile twice → identical bytes;
-#   * the authored files validate and their entries survive the compile
-#     unchanged (authored ⊂ compiled, field-for-field);
-#   * connector extraction: a real repo connector (stripe) gets an entry
-#     whose narrative carries its actions, and intent search reaches
-#     connectors ("read my invoices" → a connector that lists invoices,
-#     "stripe invoices" → connector:stripe);
-#   * sense extraction: sense entries cross-link declaring connectors;
-#   * `atlas build --check` passes on a fresh artifact, fails with a diff
-#     summary on a tampered one, and the checked-in artifact is fresh;
-#   * the startup drift check warns on mismatch (caplog), stays silent on
-#     match, and never raises.
-# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — the compiled artifact now
-# also carries ``widget`` and ``skill`` entries; the "read my invoices"
-# connector-knowledge pin checks limit=10 because the ripple invoice widgets
-# legitimately occupy top name-weight slots (see the test docstring).
-# Widget/skill extraction itself is pinned in test_widgets_skills.py.
-# Updated: 2026-08-17 (AST-5a — review fix V7) — pins the hedged ``how`` on
-# ``primitive:source-truth`` ("where an EE fabric MCP server is bound", the
-# same hedge ``primitive:fabric`` carries) so the card can't imply the OSS
-# builtin has ``include_provenance``.
-# Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — new
-# ``TestFactualClaimGuard``: the fidelity check only proves the artifact was
-# recompiled, not that a narrative is TRUE. Two false narratives had shipped
-# and misdirected users (a "no dedicated billing route" claim and a "~190
-# widgets" count); this guard flags negative route-existence claims and
-# hedged numeric counts in authored prose so they can't silently pass a
-# fidelity-only drift check. Surface count assertion bumped 21 → 23 for the
-# new /settings/billing and /security authored surfaces.
-# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — primitive count
-# assertion bumped 10 → 12 for the new authored primitive:source-truth and
-# primitive:verify-loop entries.
-# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — TestFactualClaimGuard
-# gains a LIVENESS guard: the two rollout-flagged primitives default OFF, so a
-# describe payload must never read as live source-truth / verification when the
-# mode is off — the rendered text has to carry ``mode: off`` + the enable
-# pointer, and the ``available``/``mode`` overlay hints must be present.
-# Updated: 2026-10-01 (feat/atlas-canonical) — verbs.json is the fourth authored
-# file and carries only kind="verb" entries; 29 authored surfaces after the review
-# pass added the five the composer's slash menu offers.
+# tests/atlas/test_compile.py — atlas compiler + drift check.
+# Proves:
+#   * byte-determinism: compile twice gives identical bytes;
+#   * the four authored files (primitives, surfaces, capabilities, verbs) validate
+#     and survive the compile field-for-field; the per-kind counts are pinned
+#     (12 primitives, 34 surfaces) so an added or dropped entry is a decision;
+#   * connector, sense, widget and skill extraction reach intent search ("read
+#     my invoices" at limit=10, since ripple invoice widgets take name slots);
+#   * `atlas build --check` passes on a fresh artifact, fails with a diff on a
+#     tampered one, and the checked-in artifact is fresh;
+#   * the startup drift check warns on mismatch and never raises;
+#   * TestFactualClaimGuard: authored prose may not make negative route claims or
+#     hedged numeric counts, and the flag-gated primitives must render
+#     ``mode: off`` with the enable pointer when off (the drift check only proves
+#     fidelity, not truth).
 
 import json
 import logging
@@ -102,7 +74,7 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 12
-        assert len(surfs.entries) == 31
+        assert len(surfs.entries) == 34
         verbs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[3].read_text(encoding="utf-8")))
         assert {e.kind for e in verbs.entries} == {"verb"}
 

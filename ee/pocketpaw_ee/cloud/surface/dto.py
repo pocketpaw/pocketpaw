@@ -1,34 +1,15 @@
 # dto.py — Wire schemas the client attaches to chat requests.
 #
-# Created: 2026-05-24 — The chat agent's per-turn context grows a
-# {surface, surface_meta} hint. ``SurfaceMetaRequest`` mirrors
-# ``SurfaceMeta`` for inbound validation; ``SurfaceRequest`` is the
-# composite the client stamps. ``resolve_surface_context`` validates
-# arbitrary inbound dicts through ``SurfaceRequest.model_validate``
-# rather than trusting whatever the wire produced.
+# ``SurfaceMetaRequest`` mirrors ``SurfaceMeta`` field for field for inbound
+# validation, and ``SurfaceRequest`` is the {surface, surface_meta} composite the
+# client stamps. ``resolve_surface_context`` validates inbound dicts through
+# ``SurfaceRequest.model_validate`` rather than trusting the wire. A hint added
+# to ``SurfaceMeta`` must be mirrored here (and passed through in
+# service._meta_from_request), or it validates away silently and the handler
+# always sees ``None``.
 #
-# Per the entity rules — DTOs separate input (Request) from any future
-# response shape. There is no response DTO here because the surface
-# context is consumed in-process by ``chat/agent_service`` (no HTTP
-# round-trip).
-#
-# Updated: 2026-06-04 (feat/sites-refine-surface) — mirror ``SurfaceMeta``'s
-# new ``site_id`` hint so the /sites/[siteId] refine chat can stamp the
-# published site id on the wire and the sites handler can branch to refine.
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — mirror ``SurfaceMeta``'s new
-# ``engine`` hint so the /sites create UI's "Use Svelte pages" toggle can stamp
-# ``engine="svelte"`` on the wire and the sites handler routes the create
-# preamble to the svelte-track skill instead of the ripple/default one.
-# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — mirror ``SurfaceMeta``'s
-# new ``repo`` + ``base_branch`` Belt console hints so the /belt page can stamp
-# the bound repo + branch on the wire and the belt handler injects them into the
-# preamble (agent stops asking for the repo).
-# Updated: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — mirror
-# ``SurfaceMeta``'s new ``snapshot_path`` + ``free_y`` Otherhand hints so the
-# /other-hand page can stamp the page snapshot's path and the empty-below-y line
-# on the wire, and the other_hand handler can point the agent at the image and
-# tell it where it may draw. Without the mirror the fields validate away
-# silently and the handler always sees ``None``.
+# Request-only by design: the surface context is consumed in-process by
+# chat/agent_service, so there is no response DTO.
 
 from __future__ import annotations
 
@@ -97,6 +78,10 @@ class SurfaceMetaRequest(BaseModel):
     # ids + times. Carries state rather than an identifier because the document
     # lives in the browser and there is no server copy to fetch.
     timeline: dict[str, Any] | None = None
+    # Craft studio hints — mirror SurfaceMeta.vector / .photo / .design.
+    vector: dict[str, Any] | None = None
+    photo: dict[str, Any] | None = None
+    design: dict[str, Any] | None = None
     # Otherhand hints — mirror SurfaceMeta. Stamped by the /other-hand page on
     # every turn. ``snapshot_path`` is the absolute path the snapshot endpoint
     # returned for this page's PNG (the client echoes it back, it never invents
