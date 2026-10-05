@@ -366,6 +366,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -396,6 +397,7 @@ from pocketpaw.fabric.models import (
 # intra-package reuse is deliberate.
 from pocketpaw.fabric.resolver import Resolution, _materially_different, resolve
 from pocketpaw.fabric.trust import default_trust_rules
+from pocketpaw.sqlite_migrations import checkpoint_wal
 
 logger = logging.getLogger(__name__)
 
@@ -1252,8 +1254,7 @@ class FabricStore:
         """
         self._initialized = False
         try:
-            async with aiosqlite.connect(self._db_path) as db:
-                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await asyncio.to_thread(checkpoint_wal, self._db_path)
         except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
             logger.debug("FabricStore.aclose checkpoint skipped", exc_info=True)
 

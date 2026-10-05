@@ -21,6 +21,8 @@ the tests that ran before it in the same process.
   decisions DB go to ``tmp_path``; the paw-bar per-IP limiter is emptied; catalog
   syncs are recorded, not run; spawning the real livekit call-bot is refused (it
   never exits under pytest and hangs the suite).
+* Exit-hang guard. At session end any live aiosqlite worker thread (an unclosed
+  connection; non-daemon, so it blocks interpreter exit) is named on stderr.
 * mongomock's ``create_indexes`` is shimmed to keep ``partialFilterExpression``
   so partial unique indexes behave as in MongoDB.
 """
@@ -60,6 +62,7 @@ import functools  # noqa: E402
 import importlib.metadata  # noqa: E402
 import importlib.util  # noqa: E402
 import statistics  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
@@ -446,6 +449,24 @@ def pytest_sessionfinish(session, exitstatus):
         sys.stderr.write(
             f"\n_reset_process_globals: {len(ms)} tests, median {statistics.median(ms):.4f} ms, "
             f"p99 {p99:.4f} ms, max {ms[-1]:.3f} ms\n"
+        )
+
+    # An aiosqlite connection that is never closed keeps a NON-daemon worker
+    # thread alive, and the interpreter waits on it forever at exit: the run
+    # passes, then hangs. Name the leak so the hang is not a mystery.
+    workers = [
+        t
+        for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and "_connection_worker_thread" in t.name
+    ]
+    if workers:
+        names = ", ".join(
+            f"{t.name} (target={getattr(getattr(t, '_target', None), '__qualname__', '?')})"
+            for t in workers
+        )
+        sys.stderr.write(
+            f"\nWARNING: {len(workers)} unclosed aiosqlite connection(s) leaked by this run; "
+            f"their non-daemon worker threads will block interpreter exit: {names}\n"
         )
 
 
