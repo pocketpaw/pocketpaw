@@ -5689,7 +5689,7 @@ The bar follows the website it is embedded in. Its loader reads the host page's 
 | `colors.surface` | `""` | hex | `--pawbar-bg` (alpha 0.78) and `--pawbar-frame-bg` (0.82 in `tokens`, 0.55 in `tokensDark`), the bar's own glass alpha; without `colors.ink` it also sets a legible `--pawbar-fg` / `--pawbar-frame-fg` |
 | `colors.ink` | `""` | hex | `--pawbar-fg` and `--pawbar-frame-fg` |
 | `colors.user_bubble` | `""` | hex | `--pawbar-bubble-bg`, plus a legible `--pawbar-bubble-fg` |
-| `colors.owner_bubble` | `""` | hex | `--pawbar-owner-bubble-bg` |
+| `colors.owner_bubble` | `""` | hex | `--pawbar-owner-bubble-bg` + a legible `--pawbar-owner-bubble-fg` |
 | `colors.assistant_bubble`, `accent_fg`, `ring`, `danger` | `""` | hex | `--pawbar-assistant-bubble`, `--pawbar-accent-fg`, `--pawbar-ring`, `--pawbar-danger` |
 | `blur` | always emitted (default 28) | 0–48 | `--pawbar-blur` |
 
