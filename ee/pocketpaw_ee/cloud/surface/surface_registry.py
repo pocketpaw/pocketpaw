@@ -777,11 +777,12 @@ def _studio_editor_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     # the timeline verbs, which deliberately EXCLUDES the media-generation tools:
     # this surface arranges what exists, and generating here would answer
     # "arrange these clips" with a new clip. The one thing it creates is a
-    # HyperFrames motion graphic (add_motion_graphic), hence hyperframes-core.
+    # HyperFrames motion graphic (add_motion_graphic): hyperframes-core is the
+    # composition contract, studio-motion the house styles and presets.
     return SurfaceProfile(
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().timeline_allow,
-        skill_names=frozenset({"studio-editor", "hyperframes-core"}),
+        skill_names=frozenset({"studio-editor", "hyperframes-core", "studio-motion"}),
     )
 
 

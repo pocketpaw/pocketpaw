@@ -31,9 +31,12 @@
     "the frame scales is an offset that depends on the scale, and getting it",
     "wrong zooms somewhere else while looking like the feature worked. The verb",
     "carries the point as a fraction of the frame and the applier does the",
-    "arithmetic, in the one place it is unit-tested."
+    "arithmetic, in the one place it is unit-tested.",
+    "",
+    "v5 (2026-10-04): set_chroma. Keys a solid background out of a video or image",
+    "clip (green screen); the browser does the per-pixel work in WebGL."
   ],
-  "version": 4,
+  "version": 5,
   "maxOpsPerBatch": 50,
   "ops": [
     "add_caption",
@@ -45,6 +48,7 @@
     "place_audio",
     "place_clip",
     "remove_clip",
+    "set_chroma",
     "set_project",
     "set_transform",
     "set_transition",

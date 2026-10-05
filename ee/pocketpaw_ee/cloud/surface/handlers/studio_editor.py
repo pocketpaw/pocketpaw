@@ -15,8 +15,9 @@
 # required clipId / assetId, and tests/cloud/surface/test_entity_id_contract.py
 # derives addressable kinds from the MCP tool schemas). Ids therefore render as
 # ``…tail``, and the tool's validator resolves tails back through
-# ``pockets.id_resolve``. A MOTION GRAPHICS block carries each authored motion
-# graphic's id and HTML source (capped), so an edit rewrites it in place via
+# ``pockets.id_resolve``. A MOTION GRAPHICS block carries each motion graphic's
+# id and HTML source (capped), whether the agent wrote it or the user made it
+# from the Graphics gallery, so an edit rewrites it in place via
 # ``add_motion_graphic``'s ``replace_asset_id`` instead of adding a second one.
 #
 # Changes: 2026-09-30 (feat/open-surface-tool) — ONLY PLACE WHAT EXISTS now also
@@ -189,6 +190,13 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
         f"Project: {name} — {timeline.get('aspect_ratio') or '?'}, "
         f"{timeline.get('fps') or '?'}fps, {_fmt_ms(timeline.get('duration_ms'))} long."
     )
+    if timeline.get("playhead_ms") is not None:
+        playhead = timeline["playhead_ms"]
+        lines.append(f"Playhead: {_fmt_ms(playhead)} ({playhead} ms) — what 'here' means.")
+    if timeline.get("graphic_style"):
+        lines.append(
+            f"Graphic style: {timeline['graphic_style']} — use it for new motion graphics."
+        )
 
     tracks = [t for t in (timeline.get("tracks") or []) if isinstance(t, dict)]
     if tracks:
@@ -236,6 +244,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
                     start=_fmt_ms(c.get("start_ms")),
                     end=_fmt_ms(c.get("end_ms")),
                     kind=c.get("kind"),
+                    chroma=c.get("chroma"),
                 ),
             )
         )
@@ -279,6 +288,8 @@ Operations (this list is closed — an invented verb is rejected):
 - set_transform {clipId, x?, y?, scale?, rotation?, opacity?}
 - add_keyframe  {clipId, prop, atMs, value?, ease?}
 - clear_keyframes {clipId, prop, atMs?}
+- zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
+- set_chroma    {clipId, color?: '#rrggbb'|'auto', similarity?, smoothness?, spill?, off?}
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -336,8 +347,16 @@ Rules that matter:
   gallery at all yet, call `mcp__pocketpaw_surfaces__open_surface` with route
   /files so they can upload or pick it, then have them attach it here. The one
   thing you make yourself is a motion graphic (title card, kinetic type,
-  animated stat, lower third), authored with
-  `mcp__pocketpaw_timeline__add_motion_graphic`.
+  animated stat, logo sting), authored with
+  `mcp__pocketpaw_timeline__add_motion_graphic`. Motion graphics render full
+  frame and opaque, so overlays like lower thirds are not possible yet.
+- PLACE A MOTION GRAPHIC IN THE CALL. The rendered asset only exists next turn,
+  so placement rides on add_motion_graphic itself. "Replace 0:10-0:14 with a
+  stat card" is replace_range {from_ms: 10000, to_ms: 14000}, with data-duration
+  set to exactly that span (4 seconds): the span is cut from the main video and
+  the graphic takes its place. "Put a title here" is start_ms = the Playhead.
+  The Playhead is what "here" and "from here" mean. Use the Graphic style for new
+  graphics unless the user names another.
 - EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
   edit its source from that block and call add_motion_graphic with
   replace_asset_id set to its id — never add a second one alongside it.
@@ -363,6 +382,19 @@ Rules that matter:
   end time, and the property moves between them. atMs is TIMELINE time and must
   fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume —
   nothing else (font size and colour cannot be animated).
+- GREEN SCREEN IS set_chroma. "Remove / key out the green (or blue) background"
+  is set_chroma on that video or image clip, color 'auto' unless they name one;
+  off: true removes it. Whatever sits on a LOWER lane shows through the keyed
+  area.
+- A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
+  marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
+  clip under that time on the main video track. "Zoom in here" is zoom_clip with
+  focusX/focusY = the centre and atMs = that time. "Fade in" / "Fade out" are
+  opacity keyframes pinned at that time and half a second after (animIn / animOut
+  on a text clip). "Add a graphic here" is add_motion_graphic with start_ms =
+  that time, or replace_range if they ask to replace the footage. Anything the
+  ops cannot do to just that box, such as blurring it, say so plainly instead of
+  approximating it.
 
 Honesty (this surface has burned people before):
 - edit_timeline returns when the batch is VALIDATED AND DISPATCHED — not when
@@ -378,10 +410,13 @@ Honesty (this surface has burned people before):
 To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
 Never batch an export with edits — it would render a half-built timeline.
 
-For a motion graphic, load the `hyperframes-core` skill and call
-`mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
-composition (plus `replace_asset_id` when editing one that exists). It renders
-in the browser after the call returns: say it is rendering, never that it is done.
+For a motion graphic, load the `hyperframes-core` and `studio-motion` skills and
+call `mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
+composition (plus `replace_asset_id` when editing one that exists). Graphics the
+user makes with the editor's Graphics button are listed under MOTION GRAPHICS
+too (data-preset and data-style on the root); edit them the same way, with
+replace_asset_id. It renders in the browser after the call returns: say it is
+rendering, never that it is done.
 </studio-editor-procedure>"""
 
 _NO_TIMELINE = """\

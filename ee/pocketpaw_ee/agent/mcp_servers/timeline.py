@@ -11,8 +11,10 @@
 # a BATCH instead, applied atomically as one undo step. `add_motion_graphic` is
 # the one way to CREATE footage here: the agent writes a HyperFrames composition
 # (one self-contained HTML file), this validates it, and the browser renders it
-# to an MP4 and places it — or, given ``replace_asset_id``, swaps it in for an
-# earlier render in place. Same one-call dispatch shape as the other two.
+# to an MP4 and places it: at ``start_ms``, into a ``replace_range`` cut out of
+# the main video, or, given ``replace_asset_id``, in place of an earlier render.
+# Placement rides on this call because the rendered asset only exists next turn.
+# Same one-call dispatch shape as the other two.
 #
 # There is deliberately no read tool. The document lives in the browser, so the
 # server has nothing to read; the /studio/editor preamble carries the timeline
@@ -289,6 +291,69 @@ def _resolve_replace_asset(raw: str, known: set[str]) -> tuple[str | None, str |
         )
 
 
+def _int_ms(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def validate_placement(args: dict, duration_s: float) -> tuple[dict | None, str | None]:
+    """Check ``start_ms`` / ``replace_range``; return the camelCase payload keys.
+
+    Returns ``({}, None)`` when neither is given, ``(keys, None)`` when valid, or
+    ``(None, error)`` where the error says what to change.
+    """
+    start = args.get("start_ms")
+    span = args.get("replace_range")
+    if isinstance(span, str) and span.strip():
+        try:
+            span = json.loads(span)
+        except json.JSONDecodeError:
+            return None, '`replace_range` is not valid JSON. Pass {"from_ms": int, "to_ms": int}.'
+    given = [
+        k
+        for k, v in (
+            ("start_ms", start),
+            ("replace_range", span),
+            ("replace_asset_id", str(args.get("replace_asset_id") or "").strip()),
+        )
+        if v not in (None, "", {})
+    ]
+    if len(given) > 1:
+        return None, (
+            "Pass only one of start_ms, replace_range and replace_asset_id; "
+            f"got {', '.join(given)}. replace_asset_id re-renders a graphic where it "
+            "already sits."
+        )
+
+    if start is not None and start != "":
+        if _int_ms(start) is None:
+            return (
+                None,
+                f"`start_ms` must be a whole number of milliseconds, 0 or more; got {start!r}.",
+            )
+        return {"startMs": start}, None
+
+    if span in (None, "", {}):
+        return {}, None
+    if not isinstance(span, dict):
+        return None, '`replace_range` must be an object: {"from_ms": int, "to_ms": int}.'
+    lo, hi = _int_ms(span.get("from_ms")), _int_ms(span.get("to_ms"))
+    if lo is None or hi is None:
+        return None, (
+            "`replace_range` needs whole-millisecond `from_ms` and `to_ms`, both 0 or more; "
+            f"got {span!r}."
+        )
+    if lo >= hi:
+        return None, f"`replace_range` from_ms ({lo}) must be less than to_ms ({hi})."
+    want = (hi - lo) / 1000
+    if abs(duration_s - want) > 0.001:
+        return None, (
+            f"data-duration is {duration_s:g}s but replace_range spans {want:g}s, so the "
+            f'graphic would not fill the gap. Set data-duration="{want:g}" on the root and '
+            "the clip (and D in the script), then call again."
+        )
+    return {"replaceRange": {"fromMs": lo, "toMs": hi}}, None
+
+
 async def _add_motion_graphic_handler(args: dict) -> dict:
     """Validate a HyperFrames composition and hand it to the editor tab to render."""
     summary = _current_summary()
@@ -303,6 +368,11 @@ async def _add_motion_graphic_handler(args: dict) -> dict:
     if error is not None:
         return _error_response(error)
     assert shape is not None
+
+    placement, error = validate_placement(args, shape["durationS"])
+    if error is not None:
+        return _error_response(error)
+    assert placement is not None
 
     replace_raw = str(args.get("replace_asset_id") or "").strip()
     replace_id = None
@@ -319,12 +389,21 @@ async def _add_motion_graphic_handler(args: dict) -> dict:
         "durationS": shape["durationS"],
         "width": shape["width"],
         "height": shape["height"],
+        **placement,
     }
     if replace_id:
         motion_graphic["replaceAssetId"] = replace_id
         note = (
             "Re-rendering in the user's browser; the new render replaces the old one "
             "in place on the timeline. Do not claim it is finished; say it is rendering."
+        )
+    elif "replaceRange" in placement:
+        span = placement["replaceRange"]
+        note = (
+            "Rendering in the user's browser; when it finishes the editor cuts "
+            f"{span['fromMs']}-{span['toMs']} ms out of the main video and puts the graphic "
+            "there. That is dispatched, not done: say it is rendering. If the editor "
+            "refuses the cut, it says so next turn."
         )
     else:
         note = (
@@ -352,8 +431,9 @@ Runs in the user's browser and can take minutes. Never call this in the same
 turn as an edit — it would render a half-built timeline."""
 
 ADD_MOTION_GRAPHIC_DESCRIPTION = """\
-Create a motion graphic — title card, kinetic type, animated stat, logo sting,
-lower third — and put it on the open /studio/editor timeline.
+Create a motion graphic — title card, kinetic type, animated stat, logo sting
+— and put it on the open /studio/editor timeline. It renders full frame and
+opaque, so overlays like lower thirds are not possible yet.
 
 Author it as a HyperFrames composition per the `hyperframes-core` skill: ONE
 self-contained HTML file whose root element carries data-composition-id,
@@ -370,6 +450,13 @@ It renders with no base URL, so every asset is inline or absolute:
 
 To EDIT an existing motion graphic, rewrite its source from the MOTION GRAPHICS
 block and pass its id as replace_asset_id; never add a second one.
+
+To PLACE a new one, pass at most one of:
+- start_ms: put it at that timeline time, with nothing cut.
+- replace_range {from_ms, to_ms}: cut that span out of the main video and put
+  the graphic in its place, so the total length is unchanged. data-duration must
+  equal (to_ms - from_ms) / 1000.
+Neither combines with replace_asset_id.
 
 Returns once the composition is validated and dispatched, NOT once it has
 rendered. Tell the user it is rendering, never that it is done."""
@@ -412,6 +499,10 @@ def _edit_timeline_parameters() -> dict[str, Any]:
                 "0,0 = top-left) and the whole in+hold+out window must fit inside "
                 "the clip. Use it rather than hand-keying scale — it keeps the point "
                 "centred as the frame grows. "
+                "set_chroma {clipId, color?, similarity?, smoothness?, spill?, off?} "
+                "keys a solid background out of a video or image clip (green screen): "
+                "color is #rrggbb or 'auto' (detected from the frame's edges), the "
+                "rest are 0-1, off:true removes it. A lower lane shows through. "
                 "To arrange NEW clips end to end, omit both atMs and after — each "
                 "appends after the last on its lane. `after` anchors to a clip "
                 "ALREADY on the timeline; a clip created in this same batch has no "
@@ -464,6 +555,25 @@ def _add_motion_graphic_parameters() -> dict[str, Any]:
                     "To EDIT an existing motion graphic, pass its asset id from the "
                     "MOTION GRAPHICS block; the new render replaces it in place on the "
                     "timeline. Omit to add a new one."
+                ),
+            },
+            "start_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Optional timeline time in ms to place a new graphic at, with nothing cut."
+                ),
+            },
+            "replace_range": {
+                "type": "object",
+                "properties": {
+                    "from_ms": {"type": "integer", "minimum": 0},
+                    "to_ms": {"type": "integer", "minimum": 0},
+                },
+                "required": ["from_ms", "to_ms"],
+                "description": (
+                    "Optional span of the main video to cut out and replace with this "
+                    "graphic. data-duration must equal (to_ms - from_ms) / 1000."
                 ),
             },
         },
@@ -522,4 +632,5 @@ __all__ = [
     "TIMELINE_TOOL_IDS",
     "build_timeline_server",
     "validate_motion_graphic",
+    "validate_placement",
 ]

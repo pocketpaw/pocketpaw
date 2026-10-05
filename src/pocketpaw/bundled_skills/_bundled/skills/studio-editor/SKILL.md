@@ -8,7 +8,7 @@ description: |
   seconds", "trim the intro", "drop the music underneath", "cut this in
   half", "cross-dissolve between these two", "make this a Reel". Also invoke
   for "make a title card", "add an intro animation", "make a motion graphic",
-  "animate this stat", "add a lower third" — authored as HyperFrames HTML. You
+  "animate this stat", "add a logo sting" — authored as HyperFrames HTML. You
   do NOT generate footage or AI media here and you do NOT build a dashboard or
   a ui-spec — you call one deterministic tool with a BATCH of typed operations
   against clips that already exist. This is the timeline-editing brain: read
@@ -22,8 +22,8 @@ The user is looking at a video timeline: tracks, clips, captions,
 transitions. Your job is to **arrange what is already there**.
 
 You cannot create footage on this surface, with one exception: motion
-graphics (title cards, kinetic type, animated stats, logo stings, lower
-thirds) authored as HyperFrames HTML — see Motion graphics below. For
+graphics (title cards, kinetic type, animated stats, logo stings) authored
+as HyperFrames HTML — see Motion graphics below. For
 anything else the media rail lacks, say so and ask them to add it — do not
 offer to generate it here, and never invent a clip.
 
@@ -139,6 +139,12 @@ that would silently do nothing.
 
 ## Zooming in on something
 
+A **marked area** ("At 00:08, marked area x 40-60%, y 20-50% (centre 0.50,
+0.35): Zoom in here") is a box the user drew on the frame at that time: zoom
+with its centre as `focusX` / `focusY`, fade with opacity keyframes there, or
+add a graphic with `start_ms`. If the ops cannot affect just that box (a blur,
+say), tell them rather than approximating.
+
 `zoom_clip` is the verb for "punch in on her face", "zoom into the chart
 around 4 seconds", "push in and pull back out". Use it instead of hand-keying
 `scale`: keeping a point centred while the frame grows needs an offset that
@@ -198,10 +204,13 @@ conflated constantly.
 
 ## Motion graphics
 
-For a title card, kinetic type, an animated stat, a logo sting or a lower
-third, write a HyperFrames composition and call
+For a title card, kinetic type, an animated stat or a logo sting, write a
+HyperFrames composition and call
 `mcp__pocketpaw_timeline__add_motion_graphic` with `html` (plus an optional
 `name` and `fps`). The user's browser renders it to video and places it.
+
+Motion graphics render full frame and opaque, so overlays like lower thirds
+are not possible yet. Design each one with its own background.
 
 - **Load the `hyperframes-core` skill first** — it is the authoring
   contract: root `data-composition-id` / `data-duration` / `data-width` /

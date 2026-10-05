@@ -262,8 +262,8 @@
   {
     "label": "zoom_clip drops out of the clip-id set, so it can name a clip that is gone",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
-    "find": "        \"clear_keyframes\",\n        \"zoom_clip\",\n    }\n)\n\n# Ops that bring an asset onto the timeline.",
-    "replace": "        \"clear_keyframes\",\n    }\n)\n\n# Ops that bring an asset onto the timeline.",
+    "find": "        \"zoom_clip\",\n        \"set_chroma\",\n    }\n)\n\n_HEX_COLOR",
+    "replace": "        \"set_chroma\",\n    }\n)\n\n_HEX_COLOR",
     "tests": [
       "tests/ee/agent/test_timeline_ops.py::test_zoom_clip_id_must_resolve"
     ]
