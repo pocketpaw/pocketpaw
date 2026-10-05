@@ -798,7 +798,7 @@ async def test_preview_frame_csp_is_dashboard_origin(client, monkeypatch):
     # origin carries one (localhost:5173) and is emitted as written; this
     # fixture omits it, so it picks up the any-port form.
     assert res.headers["content-security-policy"] == (
-        "frame-ancestors dash.example.com:*; " + _SANDBOX_DIRECTIVE
+        "frame-ancestors dash.example.com:*; " + _STYLE_FONT + _SANDBOX_DIRECTIVE
     )
     # The Site's public allowlist must NOT be the framer here.
     assert "brewco.com" not in res.headers["content-security-policy"]
@@ -812,10 +812,16 @@ async def test_preview_frame_default_dashboard_origin(client):
     await store.create_widget(_widget())
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
     assert res.headers["content-security-policy"] == (
-        "frame-ancestors localhost:5173; " + _SANDBOX_DIRECTIVE
+        "frame-ancestors localhost:5173; " + _STYLE_FONT + _SANDBOX_DIRECTIVE
     )
 
 
+# Literal on purpose: the bar loads the host site's Google Fonts sheet, and nothing
+# broader than these two hosts may be added.
+_STYLE_FONT = (
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+)
 # Literal on purpose: the paw-bar loader sets the same flags on its <iframe sandbox>.
 _SANDBOX_DIRECTIVE = (
     "sandbox allow-scripts allow-same-origin allow-forms allow-popups "

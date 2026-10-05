@@ -1,30 +1,34 @@
 # src/pocketpaw/paw_bar/appearance.py — the owner's Paw Bar appearance.
 #
-# Created 2026-08-19. The widget has read ``window.__PAWBAR__.tokens`` and
-# injected them as CSS custom properties since the glass bar shipped
-# (app/src/main.ts), and the backend has answered ``"tokens": {}`` the whole
-# time — a fully built white-label path with nothing on the other end. This is
-# the missing half: a persisted appearance the owner edits in paw-enterprise,
-# rendered into that token map.
+# The owner edits this in paw-enterprise; the frame renders it into the
+# ``--pawbar-*`` maps the widget layers as ``tokens`` and ``tokensDark``.
 #
-# THE SECURITY POSTURE, because it is not obvious from the field list: every
-# value here ends up as the right-hand side of a CSS custom property inside a
-# document the widget serves. An unvalidated value is therefore a style
-# injection, and a URL field is an exfiltration channel (``background-image:
-# url(...)`` fires a request carrying the referrer). So nothing is passed
-# through. Colors are re-emitted from parsed components rather than echoed,
-# lengths are clamped integers formatted by us, fonts are chosen from a fixed
-# roster rather than accepting a family string, and URLs must be https (or a
-# small base64 raster data: image; SVG is refused because it can carry script).
-# A field that cannot be validated into a safe literal does not get to exist.
+# FOLLOW THE SITE BY DEFAULT. The bar reads the host website's own look (accent,
+# page background and text, font, button radius; paw-bar lib/site-theme.ts) and
+# layers: bar defaults < site theme < ``tokens`` < ``tokensDark``. So every token
+# emitted here OVERRIDES the site. A facet the owner has not set therefore emits
+# nothing: ``accent`` "" , ``font`` "site", ``radius`` None and every ``colors``
+# field "" all mean "follow the site". ``sites.migrate_appearance_follow_site``
+# moved rows still on the old defaults (#3b6fe0 / system / 20) to these.
+#
+# Token names are the ones the bar reads: ``colors.surface`` becomes
+# ``--pawbar-bg`` + ``--pawbar-frame-bg`` at the bar's own glass alpha,
+# ``colors.ink`` ``--pawbar-fg`` + ``--pawbar-frame-fg``, the bubbles
+# ``--pawbar-bubble-bg`` / ``--pawbar-owner-bubble-bg``. Fields the bar has no
+# surface for (hero, motion, unread, line/wash strength, surface opacity) are
+# still accepted and stored, because paw-enterprise still writes them, but they
+# render nothing.
+#
+# SECURITY: every value ends up as the right-hand side of a CSS custom property
+# in a document the widget serves, so an unvalidated value is a style injection
+# and a URL is an exfiltration channel. Nothing is passed through: colours are
+# re-emitted from parsed components, lengths are clamped ints formatted here,
+# fonts come from a fixed roster, URLs must be https or a small base64 raster
+# data: image (SVG is refused because it can carry script).
 #
 # Two colour sets: ``accent`` + ``colors`` are the light (or pinned) palette,
-# ``accent_dark`` + ``colors_dark`` are used when the bar resolves dark. A dark
-# field left "" falls back to its light value, so ``tokens_dark()`` of an
-# appearance that never touched the dark set equals ``tokens()``.
-#
-# Everything is optional with a working default, so a Site that has never been
-# styled serializes exactly as it does today and needs no migration.
+# ``accent_dark`` + ``colors_dark`` apply when the bar resolves dark. A dark field
+# left "" falls back to its light value (so with light following, dark follows).
 
 from __future__ import annotations
 
@@ -54,9 +58,10 @@ _SURFACE_OPACITY_RANGE = (55, 100)
 _LINE_STRENGTH_RANGE = (0, 30)
 _WASH_STRENGTH_RANGE = (0, 20)
 
-# The widget ships no webfonts (an 80KB budget and a third-party origin per
-# font), so a family is chosen from stacks the bundle already declares rather
-# than typed. This is why `font` is an enum and not a string.
+# An owner font is chosen from fixed stacks rather than typed, which is why
+# ``font`` is an enum and not a string. ``FONT_SITE`` ("site", the default) emits
+# no font token, so the bar wears the host page's own font.
+FONT_SITE = "site"
 FONT_STACKS: dict[str, str] = {
     "system": ("system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"),
     "geometric": "Avenir, 'Avenir Next', Montserrat, Corbel, 'URW Gothic', sans-serif",
@@ -89,30 +94,15 @@ BAR_RESTING = frozenset({"full", "compact"})
 # what each step measures.
 BAR_SIZES = frozenset({"sm", "md", "lg"})
 HERO_STYLES = frozenset({"gradient", "solid", "image"})
-# Motion presets. "none" is not the same as the visitor's reduced-motion
-# setting: this is the OWNER choosing a calmer bar for everyone, while the
-# visitor's OS preference always wins on top of it (see tokens.css).
+# Motion presets. Stored for the editor; the bar owns its own motion and always
+# honours the visitor's reduced-motion setting, so nothing renders from these.
 MOTION_PRESETS = frozenset({"none", "subtle", "lively", "expressive"})
 
-# Per-preset (duration_ms, easing, travel_scale). Authored here rather than in
-# CSS so the owner's choice is one stored word instead of five stored numbers,
-# and so a preset can be retuned for every existing site at once.
-# Every curve is a pure DECELERATION. An overshoot ("ease-out-back",
-# cubic-bezier(0.34, 1.56, …)) sat here first and was wrong for this surface:
-# real objects decelerate, this widget renders on somebody else's website where
-# a bouncing panel reads as a toy, and the visitor came to ask a question rather
-# than watch the chrome arrive. The presets differ in duration and travel, which
-# is what "more motion" should mean, not in how much they wobble.
-#
-# The preset was called "spring" and is now "lively" — a name that promised
-# overshoot while the curve no longer delivers it is a worse lie than a plain
-# label. Renamed before anything shipped, so no stored value has to migrate.
-_MOTION: dict[str, tuple[int, str, str]] = {
-    "none": (0, "linear", "0"),
-    "subtle": (160, "cubic-bezier(0.16, 1, 0.3, 1)", "1"),
-    "lively": (240, "cubic-bezier(0.22, 1, 0.36, 1)", "1"),
-    "expressive": (360, "cubic-bezier(0.22, 1, 0.36, 1)", "1.35"),
-}
+# The bar's own glass alpha for a solid page colour (paw-bar lib/site-theme.ts
+# PILL_ALPHA / FRAME_ALPHA). An owner ``colors.surface`` is applied the same way
+# a detected site background is, so the two look alike.
+_PILL_ALPHA_PCT = 78
+_FRAME_ALPHA_PCT = {"light": 82, "dark": 55}
 
 
 def _clamp(value: int, low: int, high: int) -> int:
@@ -199,34 +189,15 @@ def _rgba(rgb: tuple[int, int, int], opacity_pct: int) -> str:
     return f"rgba({r}, {g}, {b}, {alpha:g})"
 
 
-def _surface_scale(base_hex: str, opacity: int) -> dict[str, str]:
-    """The four surface steps plus a legible ink, from ONE owner colour.
+def _legible_ink(base: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Type that reads on ``base``: near-black on a light ground, near-white on a
+    dark one. Not pure black or white, which read harsher than the ground deserves.
 
-    This exists because of a footgun documented in the widget's own tokens.css:
-    a light `--pawbar-surface` with everything else left alone is white type on
-    a white panel. The scale needs five values that agree with each other, and
-    an owner picking a brand colour out of a swatch has no way to know that.
-
-    So they pick the panel, and the direction is derived. "Raised" means lighter
-    than the panel on a dark widget and whiter-still on a light one; "sunken" is
-    the opposite; and the ink flips to whichever end of the range stays readable
-    on the ground they chose. One decision in, a coherent widget out.
+    Used for a surface the owner set without an ink (a light surface with the bar's
+    own light type left alone is white on white) and for the visitor bubble's text.
     """
-    base = _hex_to_rgb(base_hex)
     dark = _luminance(base) < 0.5
-    lift, drop = (_WHITE, _BLACK) if dark else (_BLACK, _WHITE)
-    return {
-        "--pawbar-surface": _rgba(base, opacity),
-        # Popovers must OCCLUDE what is behind them, so this one is deliberately
-        # close to opaque whatever the owner chose for the panel.
-        "--pawbar-surface-strong": _rgba(_mix(base, lift, 0.06), max(opacity, 94)),
-        "--pawbar-surface-raised": _rgba(_mix(base, lift, 0.12), min(100, opacity + 6)),
-        "--pawbar-surface-sunken": _rgba(_mix(base, drop, 0.10), max(40, opacity - 30)),
-        # Not pure white or pure black: both read as a harsher widget than the
-        # surface underneath them deserves, and the near-values still clear
-        # contrast comfortably at the opacities above.
-        "--pawbar-ink": _rgba(_mix(_WHITE if dark else _BLACK, base, 0.06), 100),
-    }
+    return _mix(_WHITE if dark else _BLACK, base, 0.06)
 
 
 # ---------------------------------------------------------------------------
@@ -316,28 +287,20 @@ class MotionAppearance(BaseModel):
 class ColorAppearance(BaseModel):
     """Every colour in the widget the owner may name, beyond the accent.
 
-    ALL OF THE HEX FIELDS DEFAULT TO "", AND "" MEANS "THE WIDGET DECIDES". That
-    is the same rule the whole token map follows: a token we do not emit is a
-    token the widget's own stylesheet still owns, so a later retune of the base
-    scale reaches every site that never overrode it. Emitting defaults here
-    would freeze every site to whatever the values were on the day they saved.
-
-    Why this exists at all: the accent was the ONLY colour an owner could set,
-    and the bubbles, the ring and the hero did not follow it — three literals in
-    tokens.css that happened to spell the same blue. So "change my brand colour"
-    produced a widget that disagreed with itself. The widget side of that is
-    fixed (they derive from the accent now); this is the other half, for an
-    owner who wants to name them individually.
+    ALL OF THE HEX FIELDS DEFAULT TO "", AND "" MEANS "FOLLOW THE SITE". A token
+    we do not emit is left to the site theme the loader detected, and under that
+    to the bar's own defaults; an emitted one overrides both.
     """
 
-    # The panel ground. Setting THIS is the big one — see `_surface_scale`,
-    # which derives the other three surface steps and a legible ink from it,
-    # because a light surface with everything else left alone is white type on
-    # a white panel and no colour picker can warn you about that.
+    # The page ground: ``--pawbar-bg`` (the pill) and ``--pawbar-frame-bg`` (the
+    # thread) at the bar's own glass alpha. With no ``ink`` it also sets a legible
+    # type colour, since a light ground under the bar's light dark-mode type is
+    # unreadable and no colour picker can warn about that.
     surface: str = ""
+    # Stored, renders nothing: the bar's glass alpha is fixed.
     surface_opacity: int = 86
-    # Type and hairlines. Left "" it follows the surface; set explicitly it
-    # wins, for an owner who wants warm-grey type on a near-black panel.
+    # Type: ``--pawbar-fg`` and ``--pawbar-frame-fg``. Set explicitly it wins over
+    # the one derived from ``surface``.
     ink: str = ""
     accent_fg: str = ""
     # The three speakers. "" leaves each deriving from the accent.
@@ -345,12 +308,10 @@ class ColorAppearance(BaseModel):
     assistant_bubble: str = ""
     owner_bubble: str = ""
     ring: str = ""
-    # Deliberately separate from the accent, and this is the one place that
-    # matters most: an unread count re-skinned to a calm brand colour stops
-    # reading as "something needs you".
+    # Stored, renders nothing: the bar has no unread badge.
     unread: str = ""
     danger: str = ""
-    # How present the hairlines and hover washes are, as a percentage of ink.
+    # Stored, render nothing: the bar derives its hairlines and washes itself.
     line_strength: int = 11
     wash_strength: int = 5
 
@@ -399,50 +360,62 @@ class ColorAppearance(BaseModel):
             merged[name] = getattr(light, name) if unset else value
         return type(self)(**merged)
 
-    def tokens(self) -> dict[str, str]:
-        """Render to ``--pawbar-*``. Only what the owner actually named."""
+    def tokens(self, scheme: str = "light") -> dict[str, str]:
+        """Render to ``--pawbar-*``. Only what the owner actually named.
+
+        ``scheme`` picks the frame's glass alpha for ``surface`` ("light" for the
+        ``tokens`` map, "dark" for ``tokensDark``), as the bar does for a site bg.
+        """
         out: dict[str, str] = {}
 
         if self.surface:
-            # One colour in, a coherent five-token palette out.
-            out.update(_surface_scale(self.surface, self.surface_opacity))
+            base = _hex_to_rgb(self.surface)
+            out["--pawbar-bg"] = _rgba(base, _PILL_ALPHA_PCT)
+            out["--pawbar-frame-bg"] = _rgba(base, _FRAME_ALPHA_PCT.get(scheme, 82))
+            ink = _rgba(_legible_ink(base), 100)
+            out["--pawbar-fg"] = ink
+            out["--pawbar-frame-fg"] = ink
         if self.ink:
-            # An explicit ink beats the one derived above, which is why this
-            # runs second rather than inside the branch.
-            out["--pawbar-ink"] = _rgba(_hex_to_rgb(self.ink), 100)
+            # An explicit ink beats the one derived above.
+            ink = _rgba(_hex_to_rgb(self.ink), 100)
+            out["--pawbar-fg"] = ink
+            out["--pawbar-frame-fg"] = ink
+        if self.user_bubble:
+            bubble = _hex_to_rgb(self.user_bubble)
+            out["--pawbar-bubble-bg"] = _rgba(bubble, 100)
+            # The bar's own bubble text flips with the scheme, so an owner colour
+            # needs text chosen for it or it is unreadable in one of the two.
+            out["--pawbar-bubble-fg"] = _rgba(_legible_ink(bubble), 100)
 
         for token, value in (
             ("--pawbar-accent-fg", self.accent_fg),
-            ("--pawbar-user-bubble", self.user_bubble),
             ("--pawbar-assistant-bubble", self.assistant_bubble),
-            ("--pawbar-owner-bubble", self.owner_bubble),
+            ("--pawbar-owner-bubble-bg", self.owner_bubble),
             ("--pawbar-ring", self.ring),
-            ("--pawbar-unread", self.unread),
             ("--pawbar-danger", self.danger),
         ):
             if value:
                 out[token] = _rgba(_hex_to_rgb(value), 100)
-
-        # Always emitted: these are numbers with a working default rather than
-        # overrides, and the widget multiplies both to reach its second step.
-        out["--pawbar-line-strength"] = f"{self.line_strength}%"
-        out["--pawbar-wash-strength"] = f"{self.wash_strength}%"
         return out
 
 
 class ConciergeAppearance(BaseModel):
-    """The owner's full Paw Bar appearance. Every field defaults to today's look."""
+    """The owner's full Paw Bar appearance. Every look field defaults to
+    following the website (no token), so a fresh concierge wears the site's look."""
 
-    accent: str = "#3b6fe0"
+    # "" = follow the site's accent. A #rgb / #rrggbb overrides it.
+    accent: str = ""
     surface_mode: str = "auto"
     # How the docked bar rests: a narrow pill that widens on hover, or the full
     # composer at all times. See BAR_RESTING.
     bar_resting: str = "compact"
     # Small, medium or large. See BAR_SIZES.
     size: str = "sm"
-    radius: int = 20
+    # None = follow the site's button radius. A number (clamped 0-32) overrides it.
+    radius: int | None = None
     blur: int = 28
-    font: str = "system"
+    # "site" = follow the site's font. A FONT_STACKS key overrides it.
+    font: str = FONT_SITE
     # "Powered by Paw Sites" under the bar. Hiding it is plan-gated like the site
     # badge: the settings PATCH refuses False with a 402 on a site that is not
     # entitled, and the frame emits ``poweredBy`` as this OR not entitled.
@@ -491,12 +464,12 @@ class ConciergeAppearance(BaseModel):
     @field_validator("font")
     @classmethod
     def _known_font(cls, v: str) -> str:
-        return v if v in FONT_STACKS else "system"
+        return v if v in FONT_STACKS else FONT_SITE
 
     @field_validator("radius")
     @classmethod
-    def _bounded_radius(cls, v: int) -> int:
-        return _clamp(v, *_RADIUS_RANGE)
+    def _bounded_radius(cls, v: int | None) -> int | None:
+        return None if v is None else _clamp(v, *_RADIUS_RANGE)
 
     @field_validator("blur")
     @classmethod
@@ -521,59 +494,38 @@ class ConciergeAppearance(BaseModel):
     # -- rendering ---------------------------------------------------------
 
     def tokens(self) -> dict[str, str]:
-        """Render to the ``--pawbar-*`` map the widget injects.
+        """Render to the ``--pawbar-*`` map the widget layers over the site theme.
 
-        Only keys the owner actually set are emitted. A token the appearance
-        does not carry is ABSENT rather than restated at its default, so the
-        widget's own stylesheet stays the single source of the base look and a
-        retune there reaches every site that never overrode it.
+        Only facets the owner set are emitted. An absent token is left to the
+        site's detected look, and under that to the bar's own defaults.
 
         Nothing here interpolates a stored string into a value. Colors are
         re-emitted from the validated hex, lengths are formatted from clamped
         ints, and the font is looked up in a fixed table by key.
         """
-        return self._render(self.accent, self.colors)
+        return self._render(self.accent, self.colors, "light")
 
     def tokens_dark(self) -> dict[str, str]:
         """The same map as ``tokens()``, rendered with the dark palette.
 
         The widget applies it over ``tokens`` whenever the bar resolves dark. Any
-        dark field left unset falls back to its light value, so an appearance
-        that never touched the dark set renders exactly ``tokens()``.
+        dark field left unset falls back to its light value; the one difference
+        from ``tokens()`` for an untouched dark set is the frame's glass alpha
+        under an owner ``surface`` (the bar uses a lighter glass in dark).
         """
-        return self._render(self.accent_dark or self.accent, self.colors_dark.over(self.colors))
+        return self._render(
+            self.accent_dark or self.accent, self.colors_dark.over(self.colors), "dark"
+        )
 
-    def _render(self, accent: str, colors: ColorAppearance) -> dict[str, str]:
+    def _render(self, accent: str, colors: ColorAppearance, scheme: str) -> dict[str, str]:
         out: dict[str, str] = {}
         if accent:
             out["--pawbar-accent"] = accent
-        out["--pawbar-radius"] = f"{self.radius}px"
+        if self.radius is not None:
+            out["--pawbar-radius"] = f"{self.radius}px"
         out["--pawbar-blur"] = f"{self.blur}px"
-        out["--pawbar-font"] = FONT_STACKS.get(self.font, FONT_STACKS["system"])
-
-        hero = self.hero
-        out["--pawbar-hero-height"] = f"{hero.height}px"
-        if hero.style == "image" and hero.image_url:
-            # The quotes are ours and the url cannot contain one (validated), so
-            # this literal cannot be escaped out of.
-            out["--pawbar-hero-image"] = f'url("{hero.image_url}")'
-        if hero.from_color:
-            out["--pawbar-hero-from"] = hero.from_color
-        if hero.to_color:
-            # A solid hero is a gradient whose stops match — one code path in the
-            # widget rather than a second background rule to keep in sync.
-            out["--pawbar-hero-to"] = (
-                hero.from_color if hero.style == "solid" and hero.from_color else hero.to_color
-            )
-
-        # The owner's named colours. Last, so an explicitly-named token wins over
-        # anything derived above it.
-        out.update(colors.tokens())
-
-        duration, easing, travel = _MOTION.get(self.motion.preset, _MOTION["lively"])
-        out["--pawbar-duration"] = f"{duration}ms"
-        out["--pawbar-duration-fast"] = f"{max(0, duration // 2)}ms"
-        out["--pawbar-duration-slow"] = f"{int(duration * 1.75)}ms"
-        out["--pawbar-ease-emphasis"] = easing
-        out["--pawbar-motion-scale"] = travel
+        if self.font in FONT_STACKS:
+            out["--pawbar-font"] = FONT_STACKS[self.font]
+        # The owner's named colours. Last, so an explicitly-named token wins.
+        out.update(colors.tokens(scheme))
         return out

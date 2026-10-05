@@ -38,22 +38,22 @@
     ]
   },
   {
-    "label": "the font is echoed instead of looked up — the family becomes a CSS grammar",
+    "label": "the font is echoed instead of looked up — the family becomes a CSS grammar, and \"site\" emits a token",
     "file": "src/pocketpaw/paw_bar/appearance.py",
-    "find": "        out[\"--pawbar-font\"] = FONT_STACKS.get(self.font, FONT_STACKS[\"system\"])",
-    "replace": "        out[\"--pawbar-font\"] = self.font",
+    "find": "        if self.font in FONT_STACKS:\n            out[\"--pawbar-font\"] = FONT_STACKS[self.font]",
+    "replace": "        if self.font:\n            out[\"--pawbar-font\"] = FONT_STACKS.get(self.font, self.font)",
     "tests": [
-      "tests/cloud/test_paw_bar_appearance.py::test_an_unknown_font_falls_back_rather_than_being_stored",
-      "tests/cloud/test_paw_bar_appearance.py::test_defaults_reproduce_todays_look"
+      "tests/cloud/test_paw_bar_appearance.py::test_defaults_follow_the_site",
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unknown_font_falls_back_to_following_the_site"
     ]
   },
   {
     "label": "an unknown font is stored rather than falling back",
     "file": "src/pocketpaw/paw_bar/appearance.py",
-    "find": "        return v if v in FONT_STACKS else \"system\"",
+    "find": "        return v if v in FONT_STACKS else FONT_SITE",
     "replace": "        return v",
     "tests": [
-      "tests/cloud/test_paw_bar_appearance.py::test_an_unknown_font_falls_back_rather_than_being_stored"
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unknown_font_falls_back_to_following_the_site"
     ]
   },
   {
@@ -71,8 +71,7 @@
     "find": "        \"tokens\": look.tokens(),",
     "replace": "        \"tokens\": {},",
     "tests": [
-      "tests/cloud/test_paw_bar_appearance.py::test_the_frame_finally_emits_real_tokens",
-      "tests/cloud/test_paw_bar_appearance.py::test_a_site_with_no_appearance_still_frames"
+      "tests/cloud/test_paw_bar_appearance.py::test_the_frame_finally_emits_real_tokens"
     ]
   },
   {
@@ -155,14 +154,14 @@
     "find": "    dark = _luminance(base) < 0.5",
     "replace": "    dark = True",
     "tests": [
-      "tests/cloud/test_paw_bar_appearance.py::test_one_surface_colour_produces_a_legible_widget"
+      "tests/cloud/test_paw_bar_appearance.py::test_one_surface_colour_produces_legible_type"
     ]
   },
   {
     "label": "an explicitly named ink is discarded in favour of the derived one",
     "file": "src/pocketpaw/paw_bar/appearance.py",
-    "find": "            out[\"--pawbar-ink\"] = _rgba(_hex_to_rgb(self.ink), 100)",
-    "replace": "            pass",
+    "find": "            # An explicit ink beats the one derived above.\n            ink = _rgba(_hex_to_rgb(self.ink), 100)",
+    "replace": "            # An explicit ink beats the one derived above.\n            ink = out.get(\"--pawbar-fg\", \"\")",
     "tests": [
       "tests/cloud/test_paw_bar_appearance.py::test_an_explicit_ink_beats_the_derived_one"
     ]
@@ -170,19 +169,19 @@
   {
     "label": "the owner's colours never reach the appearance the frame renders",
     "file": "src/pocketpaw/paw_bar/appearance.py",
-    "find": "        out.update(colors.tokens())",
+    "find": "        out.update(colors.tokens(scheme))",
     "replace": "        pass",
     "tests": [
       "tests/cloud/test_paw_bar_appearance.py::test_colours_ride_through_the_full_appearance"
     ]
   },
   {
-    "label": "unset colours are restated at their defaults, freezing every site to today's base",
+    "label": "unset colours are restated at a default, overriding the site's own colours",
     "file": "src/pocketpaw/paw_bar/appearance.py",
     "find": "            if value:\n                out[token] = _rgba(_hex_to_rgb(value), 100)",
     "replace": "            out[token] = _rgba(_hex_to_rgb(value or \"#3b6fe0\"), 100)",
     "tests": [
-      "tests/cloud/test_paw_bar_appearance.py::test_unset_colours_are_absent_so_the_stylesheet_still_owns_them"
+      "tests/cloud/test_paw_bar_appearance.py::test_unset_colours_are_absent_so_the_site_shows_through"
     ]
   },
   {
@@ -206,8 +205,8 @@
   {
     "label": "the dark palette ignores its own colours — a dark bar is the light one",
     "file": "src/pocketpaw/paw_bar/appearance.py",
-    "find": "        return self._render(self.accent_dark or self.accent, self.colors_dark.over(self.colors))",
-    "replace": "        return self._render(self.accent, self.colors)",
+    "find": "            self.accent_dark or self.accent, self.colors_dark.over(self.colors), \"dark\"",
+    "replace": "            self.accent, self.colors, \"dark\"",
     "tests": [
       "tests/cloud/test_paw_bar_appearance.py::test_dark_fields_that_are_set_reach_tokens_dark"
     ]
@@ -228,6 +227,33 @@
     "replace": "\"launcher\": \"bar\",",
     "tests": [
       "tests/cloud/test_paw_bar_appearance.py::test_the_launcher_style_side_and_logo_reach_the_frame"
+    ]
+  },
+  {
+    "label": "a radius that follows the site is emitted anyway — the site's corners never show",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        if self.radius is not None:\n            out[\"--pawbar-radius\"]",
+    "replace": "        if True:\n            out[\"--pawbar-radius\"]",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_defaults_follow_the_site"
+    ]
+  },
+  {
+    "label": "an owner surface ignores the scheme — the dark frame gets the light glass",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "_FRAME_ALPHA_PCT.get(scheme, 82)",
+    "replace": "_FRAME_ALPHA_PCT[\"light\"]",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_a_surface_paints_the_pill_and_the_frame_at_the_bar_glass_alpha"
+    ]
+  },
+  {
+    "label": "the surface lands on the old token name — the bar never reads it",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "            out[\"--pawbar-bg\"] = _rgba(base, _PILL_ALPHA_PCT)",
+    "replace": "            out[\"--pawbar-surface\"] = _rgba(base, _PILL_ALPHA_PCT)",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_a_surface_paints_the_pill_and_the_frame_at_the_bar_glass_alpha"
     ]
   }
 ]
