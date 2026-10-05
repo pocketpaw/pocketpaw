@@ -965,6 +965,23 @@ async def test_digest_reports_activity_and_waiting_gates(
     assert other.get("/belt/mandates/digest").json()["mandates"] == []
 
 
+async def test_digest_reports_orphaned_background_develops_as_stuck(
+    tmp_path, mongo_db, store, monkeypatch
+):
+    """A run still marked ``headless_state`` (its background develop never
+    finished: a restart dropped the queue) is stuck, like a failed one."""
+    client = _make_client(monkeypatch)
+    mandate = _create_mandate(client, tmp_path / "repo")
+    await _seed_run(
+        store, mandate, "orphaned develop", station_pending=True, diff="", headless_state="queued"
+    )
+    row = client.get("/belt/mandates/digest").json()["mandates"][0]
+    assert [(r["title"], r["headless_state"]) for r in row["stuck"]] == [
+        ("orphaned develop", "queued")
+    ]
+    assert row["stuck"][0]["headless_error"] is None
+
+
 async def test_digest_default_window_is_24h(tmp_path, mongo_db, store, monkeypatch):
     """No ``since`` → the window opens 24 hours before now."""
     from datetime import UTC, datetime, timedelta

@@ -473,10 +473,12 @@ async def test_production_dispatcher_develops_in_background(repo, tmp_path, monk
         )
         blob = (await store.get_action(run_ref)).parameters["_code_change"]
         assert blob["station_pending"] is True, "dispatch returned before the develop ran"
+        assert blob["headless_state"] == "queued", "an orphan must stay visible"
         release.set()
         await asyncio.gather(*headless._BACKGROUND_DEVELOPS)
         blob = (await store.get_action(run_ref)).parameters["_code_change"]
         assert blob["station_pending"] is False and blob["diff"].startswith("diff --git")
+        assert "headless_state" not in blob
     finally:
         set_production_develop_fn(None)
 
@@ -804,3 +806,68 @@ async def test_repo_outside_the_allowlist_is_refused(repo, tmp_path, monkeypatch
     with pytest.raises(ds.DevelopStationError, match=r"^PREPARE: .*outside the allowed roots"):
         await _station(fake, repo)(_request(repo))
     assert fake.argvs == []
+
+
+# ---------------------------------------------------------------------------
+# hardening — background dispatch
+# ---------------------------------------------------------------------------
+
+
+async def test_background_develop_crash_is_logged(repo, tmp_path, monkeypatch, caplog):
+    import asyncio
+    import logging
+
+    import pocketpaw_ee.cloud.belt.headless as headless
+    import pocketpaw_ee.cloud.mandates.executor as ex
+
+    from pocketpaw.instinct.store import InstinctStore
+
+    store = InstinctStore(tmp_path / "instinct.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+
+    async def _fake_repo(workspace_id: str, mandate_id: str) -> str:
+        return str(repo)
+
+    monkeypatch.setattr(ex, "_repo_for_mandate", _fake_repo)
+
+    class CrashingRunner(HeadlessDevelopRunner):
+        async def run(self, action_id: str, *, workspace_id: str | None = None) -> str:
+            raise RuntimeError("store unreachable")
+
+    dispatcher = headless.HeadlessTaskDispatcher(
+        runner=CrashingRunner(develop_fn=None), background=True
+    )
+    with caplog.at_level(logging.ERROR, logger=headless.__name__):
+        run_ref = await dispatcher.dispatch(
+            workspace_id="w1",
+            mandate_id="m1",
+            shift_no=1,
+            plan_action_id="plan-1",
+            index=1,
+            task={"title": "t"},
+        )
+        await asyncio.gather(*headless._BACKGROUND_DEVELOPS, return_exceptions=True)
+        await asyncio.sleep(0)  # let the done callbacks run
+
+    crash = [r for r in caplog.records if r.levelno == logging.ERROR and "crashed" in r.message]
+    assert crash and run_ref in crash[0].getMessage()
+    assert "store unreachable" in str(crash[0].exc_info[1])
+    blob = (await store.get_action(run_ref)).parameters["_code_change"]
+    assert blob["headless_state"] == "queued" and blob["station_pending"] is True
+
+
+async def test_failed_develop_clears_the_queued_marker(repo, tmp_path, monkeypatch):
+    from pocketpaw.instinct.store import InstinctStore
+
+    store = InstinctStore(tmp_path / "instinct.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    action_id = await _queue_run(monkeypatch, repo, recipe="")
+
+    async def boom(req: DevelopRequest) -> DevelopResult:
+        raise RuntimeError("CHECK: red")
+
+    runner = HeadlessDevelopRunner(develop_fn=boom)
+    await runner.mark_queued(action_id)
+    await runner.run(action_id)
+    blob = (await store.get_action(action_id)).parameters["_code_change"]
+    assert "headless_state" not in blob and blob["headless_error"].endswith("CHECK: red")

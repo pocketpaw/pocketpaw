@@ -26,7 +26,9 @@
 #     production dispatcher (``resolve_headless_dispatcher``) runs the develop in
 #     the BACKGROUND, one at a time (``_DEVELOP_LOCK``), because plan approval
 #     dispatches inside the approve request and a develop takes minutes; tests
-#     construct it inline (``background=False``).
+#     construct it inline (``background=False``). A background run is marked
+#     ``headless_state="queued"`` until it attaches or fails, so one orphaned
+#     by a restart shows in the digest; a crashed task is logged at ERROR.
 #
 # Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
 # ``belt/executor.py::_persist_run_result``).
@@ -257,6 +259,7 @@ class HeadlessDevelopRunner:
             # Provenance — record that this diff was produced headlessly.
             blob["headless"] = True
             blob.pop("headless_error", None)
+            blob.pop("headless_state", None)
             params[_CODE_CHANGE_PARAM_KEY] = blob
 
             await store.update_parameters(action_id, params)
@@ -307,6 +310,25 @@ class HeadlessDevelopRunner:
                 exc_info=True,
             )
 
+    async def mark_queued(self, action_id: str, *, workspace_id: str | None = None) -> None:
+        """Mark a run handed to a background develop (``headless_state=
+        "queued"``). Attach and failure both clear it, so a run that still
+        carries it was orphaned (a restart dropped the in-memory queue, or the
+        task crashed) and the digest reports it as stuck. Best-effort."""
+        from pocketpaw.stores import get_instinct_store
+
+        try:
+            store = get_instinct_store(workspace_id=workspace_id or None)
+            action = await store.get_action(action_id)
+            params = dict(getattr(action, "parameters", None) or {})
+            blob = params.get(_CODE_CHANGE_PARAM_KEY)
+            if not isinstance(blob, dict):
+                return
+            params[_CODE_CHANGE_PARAM_KEY] = {**blob, "headless_state": "queued"}
+            await store.update_parameters(action_id, params)
+        except Exception:  # noqa: BLE001 — the marker must not block dispatch
+            logger.warning("headless: could not mark %s queued", action_id, exc_info=True)
+
     async def _note_failure(self, store: Any, action_id: str, reason: str) -> None:
         """Record a headless-develop failure ON the blob WITHOUT making the run
         applyable. The run STAYS queued (``station_pending=True``, no diff) so a
@@ -329,6 +351,7 @@ class HeadlessDevelopRunner:
             blob["station_pending"] = True
             blob["diff"] = ""
             blob["headless_error"] = redact_output(reason)
+            blob.pop("headless_state", None)
             params[_CODE_CHANGE_PARAM_KEY] = blob
             await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — never crash on the failure-note path
@@ -386,14 +409,31 @@ class HeadlessTaskDispatcher:
 
         async def _develop() -> None:
             # ponytail: one develop at a time per process (16 GB box, heavy
-            # checks); per-repo locks if factory throughput ever matters.
+            # checks), unbounded in-memory queue; per-repo locks and a durable
+            # queue if factory throughput ever matters.
             async with _DEVELOP_LOCK:
                 await self.runner.run(run_ref, workspace_id=workspace_id)
 
+        await self.runner.mark_queued(run_ref, workspace_id=workspace_id)
         task = asyncio.create_task(_develop(), name=f"belt-headless-develop-{run_ref}")
         _BACKGROUND_DEVELOPS.add(task)
         task.add_done_callback(_BACKGROUND_DEVELOPS.discard)
+        task.add_done_callback(_log_develop_crash)
         return run_ref
+
+
+def _log_develop_crash(task: asyncio.Task[None]) -> None:
+    """Surface a background develop that raised (``runner.run`` never raises
+    on its own; anything here crashed before its guard, e.g. opening the
+    store). Without this it would only show as "Task exception was never
+    retrieved" at garbage collection. The run keeps ``headless_state``."""
+    if task.cancelled() or task.exception() is None:
+        return
+    logger.error(
+        "headless: background develop %s crashed; its run stays queued",
+        task.get_name(),
+        exc_info=task.exception(),
+    )
 
 
 # Background develops (strong refs so the loop can't drop them) and the lock

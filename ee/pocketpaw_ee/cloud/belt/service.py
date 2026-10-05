@@ -16,8 +16,9 @@
 #     Instinct Actions, newest-first. Status/stage derive from the Action
 #     lifecycle (a pending ``station_pending`` blob reads ``queued``/``station``);
 #     landing fields (``pr_url`` / ``branch`` / ``commit_sha``) and mandate
-#     provenance (``mandate_id`` / ``shift_no`` / ``headless_error``) are read
-#     STRUCTURALLY off the blob. The mandates digest reads this same list.
+#     provenance (``mandate_id`` / ``shift_no`` / ``headless_error`` /
+#     ``headless_state``) are read STRUCTURALLY off the blob. The mandates
+#     digest reads this same list.
 #
 # Security: git runs through ``create_subprocess_exec`` with argv lists; a
 # submitted path is realpath-resolved and confirmed to be a git repo before it
@@ -678,6 +679,8 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "mandate_id": str(blob.get("mandate_id") or "") or None,
         "shift_no": blob.get("shift_no"),
         "headless_error": str(blob.get("headless_error") or "") or None,
+        # "queued" while a background develop owns the run; left behind = orphan.
+        "headless_state": str(blob.get("headless_state") or "") or None,
     }
 
 

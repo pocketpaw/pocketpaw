@@ -87,7 +87,8 @@ def render(digest: dict[str, Any]) -> str:
             if s["state"] == "planning" and s.get("outcome"):
                 failures.append(f"- {name}: shift {s['no']} never reached the gate: {s['outcome']}")
         for r in m.get("stuck") or []:
-            failures.append(f"- {name}: {r['title']}: {r['headless_error']}")
+            why = r.get("headless_error") or "develop never finished (restart or crash)"
+            failures.append(f"- {name}: {r['title']}: {why}")
         for r in m["runs"]:
             if r["status"] == "failed":
                 failures.append(f"- {name}: {r['title']}: run failed")
