@@ -28,6 +28,26 @@
     "Paint: as vector: {c,m,y,k} 0..1 (preferred), \"#rrggbb\", \"none\", [r,g,b]",
     "0..1, {gray} 0..1 or {swatch: name}.",
     "",
+    "Text colour is set_text_color (or set_text's color): type.char fill on the",
+    "frame's story. set_paint paints the frame's BOX (background fill, border),",
+    "never the text, so \"make the name red\" is set_text_color, not set_paint.",
+    "",
+    "Layout check: after each batch the applier adds these lines to",
+    "last_edit.failures (the agent reads them on the next send), exactly:",
+    "  overset frame <id>: text does not fit its <w> x <h> mm box at <size> pt; hidden: \"<text>\"",
+    "    every overset story (text cut off, so invisible on the page and in print);",
+    "    <text> is the story's first 40 characters.",
+    "  shrunk frame <id>: text set at <size> pt, not <asked> pt, so it fits its <w> x <h> mm box; make room around the frame for a bigger size",
+    "    set_text fit had to set the text smaller than asked.",
+    "  overlap frame <id>: its box now overlaps frame <other> (<what>) by <w> x <h> mm; move one of them or make the text smaller",
+    "    a text frame the batch touched or created now overlaps another item;",
+    "    <what> is text \"<first 30 characters>\" or the item's kind. Only overlaps",
+    "    the batch caused count, and never an item that contains the frame (its",
+    "    background or panel).",
+    "  off page frame <id>: its box runs <d> mm past the <left|top|right|bottom> trim edge, so that text is cut off when the page is trimmed",
+    "    a text frame the batch touched or created now runs (further) past the trim.",
+    "Numbers are rounded to 0.1 with a trailing .0 dropped; sizes in mm unless pt.",
+    "",
     "runCommand is the escape hatch, with the same stricter block as photo."
   ],
   "version": 1,
@@ -77,16 +97,21 @@
       }
     },
     "set_text": {
-      "engine": "story.setText {story of frame id, text}; selection.set {ids: [id]}, type.char {attrs: {fontFamily: font, size, fill: swatch name of color}}, type.para {attrs: {align (justify -> leftJustified)}}",
+      "engine": "story.setText {story of frame id, text}; selection.set {ids: [id]}, type.char {attrs: {fontFamily: font, size, fill: swatch name of color}}, type.para {attrs: {align (justify -> leftJustified)}}; fit: true -> at the END of the batch (after its moves), while document.inspect lists the frame's story as overset: transform.set {height: current + 0.15 x size pt, ref: 0, ids: [id]} into free space only (the frame grows DOWN, its top-left stays, never past the page's trim bottom or onto an item below it that it did not already overlap; the engine's own autoSize is stored but not applied), then type.char {attrs: {size}} down to the largest size that fits, never under half the asked size or 6 pt; still overset there = reported overset",
       "params": {
         "id": "id", "text": "text", "size": "number+", "font": "text", "color": "paint",
-        "align": "enum:left|center|right|justify"
+        "align": "enum:left|center|right|justify", "fit": "bool"
       },
       "required": ["id"],
-      "anyOf": ["text", "size", "font", "color", "align"]
+      "anyOf": ["text", "size", "font", "color", "align", "fit"]
+    },
+    "set_text_color": {
+      "engine": "per id: selection.set {ids: [id]}, type.char {attrs: {fill: swatch name of color}} (the same path as set_text's color: the glyphs of the frame's whole story)",
+      "params": {"ids": "ids", "color": "paint"},
+      "required": ["color"]
     },
     "set_paint": {
-      "engine": "selection.set {ids}; object.color {color (CMYK 0..1 as sent, [r,g,b] x 255, gray g -> K g), target: fill|stroke, ids}; \"none\" -> object.fill|object.stroke {swatch: \"[None]\", ids}; {swatch} -> object.fill|object.stroke {swatch, ids}; strokeWidth -> object.stroke {weight, ids}",
+      "engine": "the frame's BOX (background fill, border), never the text: selection.set {ids}; object.color {color (CMYK 0..1 as sent, [r,g,b] x 255, gray g -> K g), target: fill|stroke, ids}; \"none\" -> object.fill|object.stroke {swatch: \"[None]\", ids}; {swatch} -> object.fill|object.stroke {swatch, ids}; strokeWidth -> object.stroke {weight, ids}",
       "params": {"ids": "ids", "fill": "paint", "stroke": "paint", "strokeWidth": "number0"},
       "anyOf": ["fill", "stroke", "strokeWidth"]
     },

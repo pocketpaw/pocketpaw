@@ -7,7 +7,11 @@
 # (``SurfaceMeta.vector`` / ``.photo`` / ``.design``) because the document lives
 # in the browser (the craft engines as WebAssembly); the projection IS the read
 # path. The procedure block lists the app's exact op names with one valid
-# example each (agents guessed wrong names until they were listed).
+# example each (agents guessed wrong names until they were listed). Design's
+# rules make text colour (set_text_color; set_paint is the frame's box), overset
+# text (set_text fit) and the browser's layout check explicit: its "overset",
+# "shrunk", "overlap" and "off page frame <id>:" lines, and that the agent never
+# claims text fits or does not overlap, since it replies before the check runs.
 #
 # Projection shapes the pages send:
 #   vector: {title?, colorMode, units?, artboard: {width, height} (pt),
@@ -19,7 +23,8 @@
 #            last_edit?}
 #   design: {title?, size_mm: {width, height}, bleed_mm, current_page,
 #            pages: [{index, frames: [{id, kind, bounds_mm: {x,y,width,height},
-#                     text?, fill?}]}], selection: [id], last_edit?}
+#                     text?, fill?, field?}]}], selection: [id], last_edit?}
+#            (field = the template field a Quick mode frame carries: never deleted)
 #   last_edit = {failures: [str]} from the last applied batch.
 # Bounds in design are mm from the page's trim top-left.
 #
@@ -194,7 +199,8 @@ def _design_block(doc: dict[str, Any]) -> list[str]:
         f"page size: {_num(size.get('width'))} x {_num(size.get('height'))} mm (trim), "
         f"bleed {_num(doc.get('bleed_mm'))} mm",
         f"pages: {len(pages)}; page in view: {doc.get('current_page', 0)}",
-        "FRAMES per page (id, kind, bounds x,y wxh in mm from the trim top-left, text, fill):",
+        "FRAMES per page (id, kind, bounds x,y wxh in mm from the trim top-left, text, fill,"
+        " field = the template field it carries):",
     ]
     rows: list[str] = []
     total = 0
@@ -213,6 +219,8 @@ def _design_block(doc: dict[str, Any]) -> list[str]:
                 facts["text"] = text
             if frame.get("fill") is not None:
                 facts["fill"] = _paint(frame.get("fill"))
+            if field := _clip(frame.get("field")):
+                facts["field"] = field
             rows.append("  " + entity_line(frame.get("kind"), frame.get("id"), **facts))
     lines += _capped(rows, total, "frames") or ["  (no pages)"]
     return lines + _tail(doc, _id_list(doc))
@@ -264,7 +272,37 @@ _SPECS: dict[str, dict[str, Any]] = {
   are points. A visiting card is 90 x 54 mm; keep text 4 mm or more inside the
   trim, and run background shapes 3 mm past it (negative x/y) into the bleed.
 - Colour: prefer CMYK paints, {"c":0,"m":0.6,"y":1,"k":0} with 0..1 values;
-  "#rrggbb" also works. Fill, stroke and strokeWidth all go through set_paint.
+  "#rrggbb" also works.
+- TEXT COLOUR is set_text_color (or set_text's color).
+  set_paint paints a frame's BOX (its background fill, border and strokeWidth),
+  never its text: "make the name red" is set_text_color on the name's frame.
+- OVERSET text disappears: a text frame shows only what fits its box, and the rest
+  is cut off, invisible on the page and in print. When you raise a text size or
+  lengthen a text, pass "fit":true on set_text, or keep the size within the frame
+  (a line needs about 1.4 x its size in height; 1 pt = 0.353 mm). fit runs after
+  the batch's moves: the frame grows down into free space only (never onto the
+  frame below or past the trim), then the text shrinks, at most to half the size
+  you asked. To make text really bigger, make room first in the same batch
+  (move or shrink the frames under it).
+- LAYOUT CHECK: after your batch the editor checks the page and the next message
+  shows what it found under the failures, one line each:
+  "overset frame <id>: ..." = that text is cut off; "shrunk frame <id>: ..." = fit
+  set it smaller than you asked (tell the user the real size);
+  "overlap frame <id>: ..." = that frame now covers another one;
+  "off page frame <id>: ..." = it runs past the trim and is cut off in print.
+  Fix them next (set_text {"id":<id>,"fit":true}, a smaller size, or a move).
+- Never state a text size before the editor reports it: fit can set it smaller.
+  Say the size you asked for; the real size comes from the shrunk line (or none)
+  in the next message, and only then may you tell the user a size.
+- TEMPLATE FIELDS: a frame listed with field=... is wired to the user's fill-in
+  box. never delete or re-make it, even to make room: move or resize it instead
+  (transform), or change its text size. A delete that names one is refused.
+- You cannot see the result of the batch you are sending. Never tell the user text
+  fits, is fully visible or does not overlap, and never tell the user it worked;
+  say what you changed and that the editor will flag anything cut off or overlapping.
+  Asked "is anything cut off / overlapping?", answer from those failure lines only
+  (none listed after your last batch = the editor found no problem), never from the
+  ops you sent.
 - Ids are the integers in the FRAMES list. Omitting `ids` acts on the selection;
   every new frame becomes the selection, so the next op can omit ids to act on it.""",
     },

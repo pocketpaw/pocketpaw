@@ -2,8 +2,11 @@
 # preambles (/studio/vector, /studio/photo, /studio/design) render the page's
 # document projection and say what they must: print work for India, Indic text,
 # units, the exact op names with one example each, the run_command block list,
-# and failures from the last batch. With no projection each one tells the agent
-# there is nothing to edit. The cache key moves with the document.
+# and failures from the last batch. Design says text colour is set_text_color
+# (set_paint is the frame's box), that overset text disappears, and the browser's
+# layout-check lines ("overset", "shrunk", "overlap", "off page frame <id>:").
+# With no projection each one tells the agent there is nothing to edit. The cache
+# key moves with the document.
 
 from __future__ import annotations
 
@@ -186,6 +189,78 @@ def test_design_orients_for_print_layout_in_mm() -> None:
         "TRIM top-left", "bleed", "0-based", "mcp__pocketpaw_craft__edit_design",
         "run_command", "file, export", "never claim it is done",
     ):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_design_says_text_colour_is_not_the_frame_fill() -> None:
+    # "Make the name red" painted a red box behind the name: set_paint read as text colour.
+    text = _render("design", DESIGN)
+    assert '{"op":"set_text_color"' in text
+    assert "set_paint paints a frame's BOX" in text
+    assert "never its text" in text
+    assert "Fill, stroke and strokeWidth all go through set_paint" not in text
+
+
+def test_design_warns_that_overset_text_disappears() -> None:
+    # "Make the phone bigger": 18 pt in a frame that fits 13 pt, the number vanished, and the
+    # reply claimed success.
+    text = _render("design", DESIGN)
+    for needle in (
+        "OVERSET", "disappears", '"fit":true', "overset frame <id>:",
+        "never tell the user it worked",
+    ):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_design_renders_an_overset_failure_from_the_browser() -> None:
+    failure = (
+        'overset frame 7: text does not fit its 74 x 12 mm box at 18 pt; hidden: "98400 12345"'
+    )
+    text = _render("design", {**DESIGN, "last_edit": {"failures": [failure]}})
+    assert f"! {failure}" in text
+
+
+def test_design_names_every_layout_check_line_and_never_claims_a_clean_layout() -> None:
+    # Round 2: "make the phone 30 pt" ran the number over the address and off the card,
+    # and the reply said it did not overlap, twice.
+    text = _render("design", DESIGN)
+    for needle in (
+        "LAYOUT CHECK", "overset frame <id>:", "shrunk frame <id>:", "overlap frame <id>:",
+        "off page frame <id>:", "Never tell the user text\n  fits",
+        "answer from those failure lines only", "make room first",
+    ):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_design_renders_layout_check_lines_from_the_browser() -> None:
+    failures = [
+        "shrunk frame 42: text set at 13.3 pt, not 26 pt, so it fits its 53 x 6.2 mm box;"
+        " make room around the frame for a bigger size",
+        'overlap frame 42: its box now overlaps frame 44 (text "Main Bazaar") by 53 x 2.1 mm;'
+        " move one of them or make the text smaller",
+        "off page frame 44: its box runs 1.4 mm past the bottom trim edge, so that text is"
+        " cut off when the page is trimmed",
+    ]
+    text = _render("design", {**DESIGN, "last_edit": {"failures": failures}})
+    for failure in failures:
+        assert f"! {failure}" in text
+
+
+def test_design_marks_template_field_frames_and_never_deletes_them() -> None:
+    # Round 3 (R3-m7): to make room the agent deleted the address field's frame and re-made it as
+    # free text, which cut the user's fill-in box loose from the page.
+    frame = {"id": 44, "kind": "text", "bounds_mm": {}, "text": "Main Bazaar", "field": "Address"}
+    frames = [frame]
+    text = _render("design", {**DESIGN, "pages": [{"index": 0, "frames": frames}]})
+    assert "field='Address'" in text
+    for needle in ("TEMPLATE FIELDS", "never delete or re-make", "move or resize it instead"):
+        assert needle in text, needle
+
+
+def test_design_reports_sizes_only_from_the_check_lines() -> None:
+    # Round 3 (R3-m2): "I did not reduce the size" while fit had shrunk the heading 69 -> 46.5 pt.
+    text = _render("design", DESIGN)
+    for needle in ("Never state a text size", "shrunk line"):
         assert needle in text, needle
 
 
