@@ -39,8 +39,9 @@
 # never persisted. ``provision_status`` advances to provisioned only after
 # migrate + deploy, with ``d1_database_id`` saved as soon as the D1 exists.
 # Every field added after launch defaults so that old rows need no migration;
-# the one exception, ``concierge_enabled`` (default False), is backfilled by
-# ``sites.migrate_concierge_marker`` at boot.
+# the exceptions are backfilled at boot: ``concierge_enabled`` (default False) by
+# ``sites.migrate_concierge_marker``, and appearances stored under the old look
+# defaults by ``sites.migrate_appearance_follow_site``.
 
 from __future__ import annotations
 
@@ -702,13 +703,17 @@ class Site(TimestampedDocument):
     # NOT retroactively purge lines already stored. Defaults True (the transcript
     # the dashboard promises), so no migration.
     concierge_store_transcripts: bool = True
-    # Paw Bar appearance (2026-08-19). The owner's white-label settings, rendered
-    # into the frame's ``window.__PAWBAR__.tokens`` as ``--pawbar-*`` custom
-    # properties. The widget has read that map since it shipped and the backend
-    # answered ``{}`` the whole time; this is the other end of that wire.
-    # Defaults reproduce today's look exactly, so an unstyled Site is unchanged
-    # and there is no migration.
+    # Paw Bar appearance: the owner's overrides of the host site's look, rendered
+    # into the frame's ``window.__PAWBAR__.tokens`` / ``tokensDark`` as
+    # ``--pawbar-*`` custom properties. Every look default follows the site.
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+    # Which appearance semantics the stored ``concierge_appearance`` was written
+    # under. 2 = follow-site ("" accent, "site" font, None radius follow the site).
+    # A row without the field predates them and still holds the old defaults
+    # (#3b6fe0 / system / 20) as literal values; ``sites.migrate_appearance_follow_site``
+    # rewrites those at boot and stamps 2, so a value an owner sets later is never
+    # mistaken for an old default.
+    concierge_appearance_version: int = 2
     # Paw Bar concierge runtime (CR-1, 2026-09-27). "legacy" dispatches the
     # concierge as a full agent run (RunSpec -> executor); "v2" answers in one
     # streamed model call with NO tools, grounded in the site KB. Read per chat
@@ -751,6 +756,20 @@ class Site(TimestampedDocument):
     # ``CONCIERGE_KNOWLEDGE_CHARS_DEFAULT``. The settings PATCH accepts
     # ``CONCIERGE_KNOWLEDGE_CHARS_MIN``..``_MAX``; the runtime clamps to the same.
     concierge_knowledge_chars: int | None = None
+    # Visitor options the frame passes to the bar (``router._pawbar_frame_config``).
+    # The two texts are validated on the settings PATCH
+    # (``pocketpaw.paw_bar.concierge_fields``). The disclosure is the bar's AI
+    # line ("" = the widget's own wording; it can be reworded, never removed);
+    # the privacy URL is "" or an https link. Every default is today's bar, so
+    # rows older than the fields need no migration.
+    concierge_disclosure: str = ""
+    concierge_privacy_url: str = ""
+    # Ask the visitor to agree before the first message.
+    concierge_consent_required: bool = False
+    # Voice dictation in the composer.
+    concierge_voice: bool = True
+    # The bar's full-screen button.
+    concierge_expandable: bool = True
     # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
     # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
     # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted

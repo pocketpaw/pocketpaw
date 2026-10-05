@@ -7,13 +7,6 @@
 // everything below this header live in ../paw-bar-loader.pin.json, and
 // tests/cloud/test_paw_bar_widget_js.py fails when the body stops matching it.
 //
-// It used to be hand-transcribed TypeScript with the annotations stripped by
-// hand. That drifts silently: this copy predated a whole session of loader
-// fixes and still called goFullscreen() on `pawbar:open`, so a real site opened
-// the messenger FULLSCREEN while the source it claimed to mirror had docked it
-// to a 400px column for days. Nothing in the build or the tests could see it,
-// because the vendored file is not what the paw-bar tests load.
-//
 // It is vendored rather than fetched because `GET /paw-bar/widget.js` must
 // resolve to a real file on ANY machine that runs the backend (a sibling
 // checkout is not a deployable dependency), and because a published Paw Site
@@ -21,23 +14,20 @@
 // shipping a script tag pointing at a 404. `PAW_BAR_WIDGET_JS` overrides the
 // path when an operator wants to serve a freshly built bundle instead.
 //
-// 2026-09-26: refreshed for the frame sandbox. The iframe now carries
-// sandbox="<PAWBAR_FRAME_SANDBOX>", matching the CSP sandbox header the router
-// sends on every frame document; test_paw_bar_widget_js.py pins the two equal.
+// What the loader does that the backend relies on: the iframe carries
+// sandbox="<PAWBAR_FRAME_SANDBOX>", equal to the CSP sandbox header the router
+// sends (test_paw_bar_widget_js.py pins the two), and allow="clipboard-write;
+// microphone" for dictation. It reads the host site's look (accent, page colours,
+// font and Google Fonts sheet, button radius) and hands it to the frame in the
+// `#t=` URL fragment and as {pawbar:site-theme}; the bar layers the owner's
+// tokens over it. `?pawbar=off` on the host page mounts nothing; `?pawbar=sniff`
+// (the owner preview's scene) mounts nothing and posts the site theme to its
+// parent instead.
 //
-// 2026-09-27: refreshed for the rebuilt Paw Bar (paw-bar #19). Two additions,
-// both ignored by an older app: {pawbar:resize} may carry side 'left'|'right'
-// to dock the icon launcher in its corner, and the frame is sent
-// {pawbar:viewport,w,h} on load and on every host resize.
-//
-// 2026-10-02 (fix/canon-cross-repo-pins, CN-8): re-vendored from paw-bar main
-// 25cd5ce. The only body change is the iframe's allow attribute, which now reads
-// "clipboard-write; microphone" (paw-bar e50b593, voice dictation). The copy had
-// drifted because nothing pinned it; it is now hash-pinned.
-//
-// To update: run scripts/vendor-paw-bar-loader.sh. It builds paw-bar origin/main in
-// a throwaway worktree, replaces everything below this header with
-// loader/dist/loader.readable.js, and rewrites the pin file.
+// To update: run scripts/vendor-paw-bar-loader.sh (PAW_BAR_REF picks the ref,
+// default origin/main). It builds paw-bar in a throwaway worktree, replaces
+// everything below this header with loader/dist/loader.readable.js, and rewrites
+// the pin file.
 "use strict";
 (() => {
   // loader/src/loader.ts
@@ -61,17 +51,37 @@
   var SCRIM_DIM_NO_BLUR = "rgba(9,11,15,0.58)";
   var BOX_MS = 260;
   var BOX_EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
-  function suppressed(win) {
+  function pawbarParam(win) {
     try {
-      return new URLSearchParams(win.location.search).get("pawbar") === "off";
+      return new URLSearchParams(win.location.search).get("pawbar");
     } catch {
-      return false;
+      return null;
     }
   }
   (function bootstrap(win) {
     if (win[LOADED_FLAG]) return;
-    if (suppressed(win)) return;
+    const param = pawbarParam(win);
+    if (param === "off") return;
     const doc = win.document;
+    const schemeQuery = win.matchMedia && win.matchMedia("(prefers-color-scheme: dark)");
+    const onScheme = (fn) => {
+      if (schemeQuery && schemeQuery.addEventListener) schemeQuery.addEventListener("change", fn);
+    };
+    if (param === "sniff") {
+      const sniff = () => {
+        try {
+          win.parent.postMessage({ type: "pawbar:site-theme", theme: detectSiteTheme(win) }, "*");
+        } catch {
+        }
+      };
+      sniff();
+      win.addEventListener("load", sniff);
+      onScheme(sniff);
+      win.addEventListener("message", (ev) => {
+        if (ev.source === win.parent && ev.data && ev.data.type === "pawbar:sniff") sniff();
+      });
+      return;
+    }
     const script = doc.currentScript ?? lastScriptWith("data-site-key", doc);
     if (!script) return;
     const siteKey = attr(script, "data-site-key");
@@ -92,7 +102,8 @@
     }
     win[LOADED_FLAG] = true;
     const parentOrigin = resolveParentOrigin(win);
-    const src = endpoint + FRAME_PATH + "?key=" + encodeURIComponent(siteKey) + "&w=" + encodeURIComponent(widgetId) + "&po=" + encodeURIComponent(parentOrigin) + "&s=" + hostScheme(win);
+    let theme = JSON.stringify(detectSiteTheme(win));
+    const src = endpoint + FRAME_PATH + "?key=" + encodeURIComponent(siteKey) + "&w=" + encodeURIComponent(widgetId) + "&po=" + encodeURIComponent(parentOrigin) + "&s=" + hostScheme(win) + (theme === "{}" ? "" : "#t=" + b64url(theme));
     const iframe = doc.createElement("iframe");
     iframe.title = "Site concierge";
     iframe.setAttribute("allow", "clipboard-write; microphone");
@@ -205,12 +216,17 @@
       const target = iframe.contentWindow;
       if (target) target.postMessage(msg, frameOrigin);
     }
-    const schemeQuery = win.matchMedia && win.matchMedia("(prefers-color-scheme: dark)");
-    if (schemeQuery && schemeQuery.addEventListener) {
-      schemeQuery.addEventListener("change", () => {
-        postToFrame({ type: "pawbar:scheme", s: hostScheme(win) });
-      });
+    function postTheme() {
+      const next = JSON.stringify(detectSiteTheme(win));
+      if (next === theme) return;
+      theme = next;
+      postToFrame({ type: "pawbar:site-theme", theme: JSON.parse(next) });
     }
+    onScheme(() => {
+      postToFrame({ type: "pawbar:scheme", s: hostScheme(win) });
+      postTheme();
+    });
+    win.addEventListener("load", postTheme);
     win.addEventListener("message", (ev) => {
       if (ev.origin !== frameOrigin) return;
       if (ev.source !== iframe.contentWindow) return;
@@ -380,6 +396,69 @@
     } catch {
     }
     return win.matchMedia && win.matchMedia("(prefers-color-scheme: dark)").matches ? "d" : "l";
+  }
+  function detectSiteTheme(win) {
+    const doc = win.document;
+    const t = {};
+    try {
+      const cs = (el) => win.getComputedStyle(el);
+      const probe = doc.createElement("i").style;
+      const hex = (v) => {
+        probe.color = "";
+        probe.color = (v || "").trim();
+        if (!probe.color && v) probe.color = "hsl(" + v + ")";
+        const p = probe.color.match(/[\d.]+/g);
+        if (!p || p.length < 3 || p.length > 3 && +p[3] < 0.5) return "";
+        return "#" + p.slice(0, 3).map((n) => (256 | +n).toString(16).slice(1)).join("");
+      };
+      const brand = (c) => {
+        const n = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+        return c && Math.max(...n) - Math.min(...n) > 32 ? c : "";
+      };
+      const meta = doc.querySelector("meta[name=theme-color]");
+      let accent = brand(hex(meta && meta.getAttribute("content")));
+      const root = cs(doc.documentElement);
+      "primary,accent,brand,color-primary,primary-color,brand-color,color-accent,accent-color,color-brand".split(",").forEach((n) => accent = accent || brand(hex(root.getPropertyValue("--" + n))));
+      let btn = null;
+      let filled = null;
+      const list = doc.querySelectorAll("button,.btn,[class*=button],a[class*=btn]");
+      for (let i = 0; i < list.length && i < 60 && !btn; i++) {
+        const s = cs(list[i]);
+        const bg = s.display !== "none" && s.visibility !== "hidden" ? hex(s.backgroundColor) : "";
+        filled = filled || (bg ? s : null);
+        if (brand(bg)) {
+          btn = s;
+          accent = accent || bg;
+        }
+      }
+      const a = doc.querySelector("a[href]");
+      const link = a ? brand(hex(cs(a).color)) : "";
+      accent = accent || (link === "#0000ee" ? "" : link);
+      if (accent) t.accent = accent;
+      for (const el of [doc.body, doc.documentElement]) {
+        const bg = el && hex(cs(el).backgroundColor);
+        if (bg) {
+          t.bg = bg;
+          break;
+        }
+      }
+      const body = cs(doc.body || doc.documentElement);
+      const fg = hex(body.color);
+      if (fg) t.fg = fg;
+      if (body.fontFamily) t.font = body.fontFamily.slice(0, 200);
+      const gf = doc.querySelector(
+        'link[rel=stylesheet][href^="https://fonts.googleapis.com/css"]'
+      );
+      if (gf) t.fontHref = gf.href;
+      const b = btn || filled;
+      const r = b ? b.borderTopLeftRadius || b.borderRadius : "";
+      if (r && r.indexOf("%") < 0 && isFinite(parseFloat(r))) t.radius = clamp(Math.round(parseFloat(r)), 0, 32);
+    } catch {
+    }
+    return t;
+  }
+  function b64url(s) {
+    return btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
   function originOf(url) {
     try {

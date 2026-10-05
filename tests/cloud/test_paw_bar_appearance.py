@@ -1,19 +1,18 @@
 # tests/cloud/test_paw_bar_appearance.py — the owner's Paw Bar appearance.
 #
-# Created 2026-08-19. Two things are being pinned, and the second matters more
-# than the first.
+# Three things are pinned here:
 #
-# (1) The wire finally carries something. ``_pawbar_frame_config`` answered
-#     ``"tokens": {}`` from the day the glass bar shipped — the widget read the
-#     map and injected it as ``--pawbar-*`` custom properties, and nothing ever
-#     filled it — and never emitted ``theme`` at all, which is why every bar was
-#     dark regardless of what an owner wanted.
-#
-# (2) Every value in this model becomes the RIGHT-HAND SIDE of a CSS custom
-#     property inside a document the widget serves. So an unvalidated value is a
-#     style injection, and a URL field is an exfiltration channel — ``url(...)``
-#     fires a request that carries a referrer. The validators are the boundary,
-#     which makes them worth attacking in a test rather than trusting.
+# (1) Follow the site. The bar layers bar defaults < the host site's detected
+#     theme < owner ``tokens`` < ``tokensDark``, so any emitted token overrides
+#     the site. An untouched appearance (accent "", font "site", radius None,
+#     every colour "") must therefore emit no look token at all.
+# (2) The token names are the ones the bar reads (paw-bar lib/bar-themes.ts,
+#     lib/site-theme.ts), and tokens the bar never reads (hero, motion, unread,
+#     line/wash strength, the old surface scale) are no longer emitted.
+# (3) Every value becomes the RIGHT-HAND SIDE of a CSS custom property inside a
+#     document the widget serves. An unvalidated value is a style injection and
+#     a URL field is an exfiltration channel, so the validators are attacked here
+#     rather than trusted.
 
 from __future__ import annotations
 
@@ -33,26 +32,31 @@ from pocketpaw.paw_bar.appearance import (
 # --------------------------------------------------------------------------- #
 
 
-def test_defaults_reproduce_todays_look():
-    """A Site nobody has styled renders the bar it always rendered. This is what
-    makes the field additive and the migration unnecessary."""
+def test_defaults_follow_the_site():
+    """A fresh appearance follows the website: no accent, font or radius token,
+    so the site theme the loader detected is what the bar wears. Only blur, a
+    bar-only facet the site has no say in, is emitted."""
     look = ConciergeAppearance()
 
-    # "auto" — follow the customer's own site. It reads like a changed default
-    # and is actually the SHIPPED behaviour finally being stated honestly: the
-    # frame emitted this as ``theme``, the widget has read ``scheme`` since the
-    # one-theme change, so no bar has ever received this field and every one of
-    # them resolved light-or-dark off the host page. Defaulting to "auto" is
-    # what keeps that true now that the frame really sends it.
     assert look.surface_mode == "auto"
-    assert look.bar_resting == "compact"
-    assert look.radius == 20
-    assert look.blur == 28
-    assert look.motion.preset == "lively"
-    tokens = look.tokens()
-    assert tokens["--pawbar-radius"] == "20px"
-    assert tokens["--pawbar-blur"] == "28px"
-    assert tokens["--pawbar-font"] == FONT_STACKS["system"]
+    assert look.accent == ""
+    assert look.font == "site"
+    assert look.radius is None
+    assert look.tokens() == {"--pawbar-blur": "28px"}
+    assert look.tokens_dark() == {"--pawbar-blur": "28px"}
+
+
+def test_every_font_stack_is_still_settable():
+    for key, stack in FONT_STACKS.items():
+        look = ConciergeAppearance(font=key)
+        assert look.font == key
+        assert look.tokens()["--pawbar-font"] == stack
+
+
+def test_a_radius_of_zero_is_an_override_not_follow_the_site():
+    """None follows the site; 0 is square corners the owner asked for."""
+    assert ConciergeAppearance(radius=0).tokens()["--pawbar-radius"] == "0px"
+    assert "--pawbar-radius" not in ConciergeAppearance(radius=None).tokens()
 
 
 def test_unset_optional_tokens_are_absent_rather_than_restated():
@@ -113,11 +117,13 @@ def test_an_unsafe_image_url_is_dropped(hostile: str):
     assert ConciergeAppearance(team_avatar_urls=[hostile]).team_avatar_urls == []
 
 
-def test_a_safe_image_url_survives_and_is_quoted_by_us():
+def test_a_safe_hero_image_is_stored_but_renders_nothing():
+    """The bar has no hero, so the field is kept for the editor and emits no token."""
     url = "https://cdn.example.test/hero.jpg"
     look = ConciergeAppearance(hero=HeroAppearance(style="image", image_url=url))
 
-    assert look.tokens()["--pawbar-hero-image"] == f'url("{url}")'
+    assert look.hero.image_url == url
+    assert not any(k.startswith("--pawbar-hero") for k in look.tokens())
 
 
 @pytest.mark.parametrize(
@@ -137,12 +143,12 @@ def test_lengths_are_clamped_not_echoed(field: str, value: int, expected: int):
     assert look.tokens()[f"--pawbar-{field}"] == f"{expected}px"
 
 
-def test_an_unknown_font_falls_back_rather_than_being_stored():
+def test_an_unknown_font_falls_back_to_following_the_site():
     """The family is looked up in a fixed table by key, never accepted as a
     string — which is what stops a font field from being a CSS grammar."""
     look = ConciergeAppearance(font="'; background: red; font-family: 'x")
-    assert look.font == "system"
-    assert look.tokens()["--pawbar-font"] == FONT_STACKS["system"]
+    assert look.font == "site"
+    assert "--pawbar-font" not in look.tokens()
 
 
 @pytest.mark.parametrize(
@@ -183,36 +189,39 @@ def test_team_avatars_are_capped_and_filtered():
 
 
 # --------------------------------------------------------------------------- #
-# Motion presets
+# Tokens the bar never reads are not emitted
 # --------------------------------------------------------------------------- #
 
 
-def test_motion_presets_render_distinct_token_sets():
-    calm = ConciergeAppearance(motion=MotionAppearance(preset="subtle")).tokens()
-    loud = ConciergeAppearance(motion=MotionAppearance(preset="expressive")).tokens()
-
-    assert calm["--pawbar-duration"] != loud["--pawbar-duration"]
-    assert loud["--pawbar-motion-scale"] == "1.35"
-
-
-def test_the_none_preset_stops_travel_without_stopping_state_changes():
-    """``none`` zeroes duration and travel. Opacity transitions still resolve at
-    0ms, so a state change is instant rather than invisible."""
-    tokens = ConciergeAppearance(motion=MotionAppearance(preset="none")).tokens()
-
-    assert tokens["--pawbar-duration"] == "0ms"
-    assert tokens["--pawbar-motion-scale"] == "0"
-
-
-def test_a_solid_hero_collapses_both_stops_to_one_colour():
-    """One code path in the widget (a gradient) rather than a second background
-    rule that has to be kept in sync with the first."""
-    tokens = ConciergeAppearance(
-        hero=HeroAppearance(style="solid", from_color="#123456", to_color="#abcdef")
-    ).tokens()
-
-    assert tokens["--pawbar-hero-from"] == "#123456"
-    assert tokens["--pawbar-hero-to"] == "#123456"
+def test_dead_tokens_are_not_emitted_even_when_their_fields_are_set():
+    """Hero, motion, unread, line/wash strength and the surface scale have no
+    surface in the bar. The fields still validate (paw-enterprise writes them)
+    but nothing renders from them."""
+    look = ConciergeAppearance(
+        hero=HeroAppearance(style="solid", from_color="#123456", to_color="#abcdef"),
+        motion=MotionAppearance(preset="expressive"),
+        colors=ColorAppearance(
+            surface="#f7f7fb", ink="#111111", user_bubble="#e2662a", unread="#ff0044"
+        ),
+    )
+    for tokens in (look.tokens(), look.tokens_dark()):
+        for dead in (
+            "--pawbar-hero-from",
+            "--pawbar-hero-to",
+            "--pawbar-hero-height",
+            "--pawbar-duration",
+            "--pawbar-ease-emphasis",
+            "--pawbar-motion-scale",
+            "--pawbar-unread",
+            "--pawbar-line-strength",
+            "--pawbar-wash-strength",
+            "--pawbar-surface",
+            "--pawbar-surface-strong",
+            "--pawbar-ink",
+            "--pawbar-user-bubble",
+            "--pawbar-owner-bubble",
+        ):
+            assert dead not in tokens, dead
 
 
 # --------------------------------------------------------------------------- #
@@ -257,7 +266,8 @@ def test_a_site_with_no_appearance_still_frames():
     # effectively been getting all along.
     assert config["theme"] == "auto"
     assert config["scheme"] == "auto"
-    assert config["tokens"]["--pawbar-radius"] == "20px"
+    assert "--pawbar-radius" not in config["tokens"]
+    assert "--pawbar-accent" not in config["tokens"]
     assert config["agentName"] == ""
 
 
@@ -348,61 +358,48 @@ def test_the_resting_mode_reaches_the_widget():
 # --------------------------------------------------------------------------- #
 
 
-def test_unset_colours_are_absent_so_the_stylesheet_still_owns_them():
-    """The rule the whole token map follows. A colour we restate at its default
-    freezes every site to the value current at save time, and a later retune of
-    the base scale reaches nobody."""
-    tokens = ColorAppearance().tokens()
-
-    for absent in (
-        "--pawbar-surface",
-        "--pawbar-ink",
-        "--pawbar-user-bubble",
-        "--pawbar-ring",
-        "--pawbar-unread",
-    ):
-        assert absent not in tokens
-
-    # The two that ARE always emitted: numbers with a working default rather
-    # than overrides, and the widget derives a second step from each.
-    assert tokens["--pawbar-line-strength"] == "11%"
-    assert tokens["--pawbar-wash-strength"] == "5%"
+def test_unset_colours_are_absent_so_the_site_shows_through():
+    """An emitted colour overrides the site's detected one, so a colour the owner
+    did not set must not be emitted at all."""
+    assert ColorAppearance().tokens() == {}
+    assert ColorAppearance().tokens("dark") == {}
 
 
-def test_one_surface_colour_produces_a_legible_widget():
-    """Setting a light panel and nothing else used to be white type on a white
-    panel — tokens.css documents that footgun, and a colour picker cannot warn
-    anyone about it. So the ink is derived from the ground rather than left to
-    the owner to work out."""
+def _channels(value: str) -> tuple[int, int, int]:
+    inner = value[value.index("(") + 1 : value.index(")")]
+    r, g, b = (int(p.strip()) for p in inner.split(",")[:3])
+    return r, g, b
+
+
+def test_a_surface_paints_the_pill_and_the_frame_at_the_bar_glass_alpha():
+    """``colors.surface`` lands on the names the bar reads, at the alpha the bar
+    gives a detected site background (paw-bar lib/site-theme.ts): the pill at
+    0.78, the frame at 0.82 light and 0.55 dark."""
+    light = ColorAppearance(surface="#f7f7fb").tokens("light")
+    dark = ColorAppearance(surface="#f7f7fb").tokens("dark")
+
+    assert light["--pawbar-bg"] == "rgba(247, 247, 251, 0.78)"
+    assert light["--pawbar-frame-bg"] == "rgba(247, 247, 251, 0.82)"
+    assert dark["--pawbar-bg"] == "rgba(247, 247, 251, 0.78)"
+    assert dark["--pawbar-frame-bg"] == "rgba(247, 247, 251, 0.55)"
+
+
+def test_one_surface_colour_produces_legible_type():
+    """A light surface under the bar's own light type is white on white, so a
+    surface with no ink derives one that reads on it."""
     light = ColorAppearance(surface="#f7f7fb").tokens()
     dark = ColorAppearance(surface="#101018").tokens()
 
-    # Four surface steps and an ink, every time, from the one input.
-    for token in (
-        "--pawbar-surface",
-        "--pawbar-surface-strong",
-        "--pawbar-surface-raised",
-        "--pawbar-surface-sunken",
-        "--pawbar-ink",
-    ):
-        assert token in light and token in dark
-
-    def _channels(value: str) -> tuple[int, int, int]:
-        inner = value[value.index("(") + 1 : value.index(")")]
-        r, g, b = (int(p.strip()) for p in inner.split(",")[:3])
-        return r, g, b
-
-    # The ink flips with the ground. This is the assertion that actually
-    # prevents the bug: a light panel must not get light type.
-    assert sum(_channels(light["--pawbar-ink"])) < 200, "dark ink on a light panel"
-    assert sum(_channels(dark["--pawbar-ink"])) > 550, "light ink on a dark panel"
+    for tokens in (light, dark):
+        assert tokens["--pawbar-fg"] == tokens["--pawbar-frame-fg"]
+    assert sum(_channels(light["--pawbar-fg"])) < 200, "dark type on a light ground"
+    assert sum(_channels(dark["--pawbar-fg"])) > 550, "light type on a dark ground"
 
 
 def test_an_explicit_ink_beats_the_derived_one():
-    """Derivation is a floor, not a ceiling — an owner who wants warm-grey type
-    on a near-black panel says so and wins."""
     tokens = ColorAppearance(surface="#101018", ink="#c8b8a0").tokens()
-    assert tokens["--pawbar-ink"] == "rgba(200, 184, 160, 1)"
+    assert tokens["--pawbar-fg"] == "rgba(200, 184, 160, 1)"
+    assert tokens["--pawbar-frame-fg"] == "rgba(200, 184, 160, 1)"
 
 
 def test_every_colour_field_refuses_a_value_that_is_not_hex():
@@ -432,17 +429,32 @@ def test_every_colour_field_refuses_a_value_that_is_not_hex():
     assert not any("url(" in v or ";" in v for v in tokens.values())
 
 
-def test_named_colours_reach_the_token_map():
+def test_named_colours_reach_the_names_the_bar_reads():
     tokens = ColorAppearance(
         user_bubble="#e2662a",
         owner_bubble="#123",
-        unread="#ff0044",
+        assistant_bubble="#eeeeee",
+        accent_fg="#ffffff",
+        ring="#00ff00",
+        danger="#ff0000",
     ).tokens()
 
-    assert tokens["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"
+    assert tokens["--pawbar-bubble-bg"] == "rgba(226, 102, 42, 1)"
     # Three-digit hex expands rather than being echoed.
-    assert tokens["--pawbar-owner-bubble"] == "rgba(17, 34, 51, 1)"
-    assert tokens["--pawbar-unread"] == "rgba(255, 0, 68, 1)"
+    assert tokens["--pawbar-owner-bubble-bg"] == "rgba(17, 34, 51, 1)"
+    assert tokens["--pawbar-assistant-bubble"] == "rgba(238, 238, 238, 1)"
+    assert tokens["--pawbar-accent-fg"] == "rgba(255, 255, 255, 1)"
+    assert tokens["--pawbar-ring"] == "rgba(0, 255, 0, 1)"
+    assert tokens["--pawbar-danger"] == "rgba(255, 0, 0, 1)"
+
+
+def test_a_visitor_bubble_colour_brings_its_own_legible_text():
+    """The bar's bubble text flips with the scheme, so an owner bubble colour
+    gets text chosen for it rather than one that vanishes in light or dark."""
+    pale = ColorAppearance(user_bubble="#fafafa").tokens()
+    deep = ColorAppearance(user_bubble="#1c1c21").tokens()
+    assert sum(_channels(pale["--pawbar-bubble-fg"])) < 200
+    assert sum(_channels(deep["--pawbar-bubble-fg"])) > 550
 
 
 @pytest.mark.parametrize(
@@ -463,7 +475,7 @@ def test_colours_ride_through_the_full_appearance():
     """The sub-model is wired into the appearance the frame actually renders,
     not merely present on the class."""
     look = ConciergeAppearance(colors=ColorAppearance(user_bubble="#e2662a"))
-    assert look.tokens()["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"
+    assert look.tokens()["--pawbar-bubble-bg"] == "rgba(226, 102, 42, 1)"
 
 
 # --------------------------------------------------------------------------- #
@@ -479,7 +491,7 @@ _PNG_DATA = (
 def test_a_doc_that_never_set_the_new_fields_is_unchanged():
     """A Site saved before these fields existed loads without them and renders
     the same bar: docked, no logo, and a dark palette identical to the light."""
-    stored = {"accent": "#ff0055", "colors": {"surface": "#f7f7fb", "line_strength": 14}}
+    stored = {"accent": "#ff0055", "colors": {"ink": "#222222", "line_strength": 14}}
     look = ConciergeAppearance.model_validate(stored)
 
     assert look.launcher.style == "bar"
@@ -548,19 +560,18 @@ def test_dark_fields_that_are_set_reach_tokens_dark():
     look = ConciergeAppearance(
         accent="#3b6fe0",
         accent_dark="#88aaff",
+        radius=12,
         colors=ColorAppearance(surface="#f7f7fb"),
-        colors_dark=ColorAppearance(surface="#101018", line_strength=20),
+        colors_dark=ColorAppearance(surface="#101018"),
     )
     light, dark = look.tokens(), look.tokens_dark()
 
     assert light["--pawbar-accent"] == "#3b6fe0"
     assert dark["--pawbar-accent"] == "#88aaff"
-    expected_surface = ColorAppearance(surface="#101018").tokens()["--pawbar-surface"]
-    assert dark["--pawbar-surface"] == expected_surface != light["--pawbar-surface"]
-    assert dark["--pawbar-line-strength"] == "20%"
+    assert dark["--pawbar-bg"] == "rgba(16, 16, 24, 0.78)" != light["--pawbar-bg"]
+    assert dark["--pawbar-frame-bg"] == "rgba(16, 16, 24, 0.55)"
     # Everything that is not a colour is the same map.
-    assert dark["--pawbar-radius"] == light["--pawbar-radius"]
-    assert dark["--pawbar-duration"] == light["--pawbar-duration"]
+    assert dark["--pawbar-radius"] == light["--pawbar-radius"] == "12px"
 
 
 def test_tokens_dark_falls_back_to_the_light_value():
@@ -568,15 +579,22 @@ def test_tokens_dark_falls_back_to_the_light_value():
     one set does not get a half-default bar on a dark page."""
     look = ConciergeAppearance(
         accent="#ff0055",
-        colors=ColorAppearance(user_bubble="#e2662a", ring="#123456", wash_strength=9),
+        colors=ColorAppearance(user_bubble="#e2662a", ring="#123456"),
         colors_dark=ColorAppearance(ring="#654321"),
     )
     dark = look.tokens_dark()
 
     assert dark["--pawbar-accent"] == "#ff0055"
-    assert dark["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"
+    assert dark["--pawbar-bubble-bg"] == "rgba(226, 102, 42, 1)"
     assert dark["--pawbar-ring"] == "rgba(101, 67, 33, 1)"
-    assert dark["--pawbar-wash-strength"] == "9%"
+
+
+def test_a_following_light_accent_keeps_dark_following_too():
+    """``accent_dark`` "" means "same as light", so a light accent that follows
+    the site leaves the dark one following too."""
+    assert "--pawbar-accent" not in ConciergeAppearance(accent="").tokens_dark()
+    dark = ConciergeAppearance(accent_dark="#88aaff").tokens_dark()
+    assert dark["--pawbar-accent"] == "#88aaff"
 
 
 def test_the_launcher_style_side_and_logo_reach_the_frame():
@@ -591,8 +609,9 @@ def test_the_launcher_style_side_and_logo_reach_the_frame():
     assert config["side"] == "left"
     assert config["logo"] == "https://cdn.example.test/logo.png"
     assert config["tokensDark"]["--pawbar-accent"] == "#88aaff"
-    # ``tokens`` keeps its meaning: the light (or pinned) palette.
-    assert config["tokens"]["--pawbar-accent"] == "#3b6fe0"
+    # ``tokens`` keeps its meaning: the light (or pinned) palette, which here
+    # follows the site.
+    assert "--pawbar-accent" not in config["tokens"]
 
 
 def test_a_site_with_no_appearance_boots_docked_on_the_right():

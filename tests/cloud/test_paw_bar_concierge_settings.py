@@ -1,48 +1,30 @@
-# tests/cloud/test_paw_bar_concierge_settings.py — Paw Bar concierge settings +
+# tests/cloud/test_paw_bar_concierge_settings.py — the Paw Bar concierge kill switch
+# and the owner settings surface.
 #
-# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
-# defaults to a concierge its owner has CREATED and switched on
-# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
-# marker a requirement at every public seam and flips the switch's default to
-# False, so a bare Site is now "no concierge"; overrides still win.
-#
-# kill switch (D1 / SS-6).
-# Created 2026-07-16: covers the owner's on/off toggle + greeting. Layers:
-#   * The shared resolver (resolve_site_key) — a disabled Site raises 403
-#     ``concierge_disabled`` before the origin gate; an enabled Site resolves a ctx.
-#   * The three public entry points fail closed on the kill switch: GET
-#     /paw-bar/frame, POST /paw-bar/chat, POST /paw-bar/action each 403 when
-#     ``concierge_enabled=False``, while a default (enabled=True) Site renders.
-#   * The greeting rides into the frame's ``window.__PAWBAR__`` config payload.
-#   * The admin settings surface: GET + PATCH /paw-bar/admin/site/{id}/settings
-#     round-trips the two fields, rejects a cross-tenant id (404), and a PATCH that
-#     flips the switch off silences the frame on the NEXT request (immediate effect).
-# Updated 2026-07-26 (concierge transcripts): a fifth layer covers the
-#   transcript-retention toggle — exposed on GET, writable via PATCH, defaults on,
-#   and fully independent of the kill switch in both directions.
-# Updated 2026-08-16 (fix/paw-bar-role-gates): the two admin settings routes moved
-#   off ``require_scope("admin")`` onto the ``paw_bar.read`` / ``paw_bar.manage``
-#   ROLE gate, so the app fixture now pins the caller's workspace ROLE (admin) and
-#   a sixth layer covers the gate itself: admin/owner can PATCH the kill switch
-#   (the reported bug — a cloud workspace admin used to get 403 "Missing required
-#   scope: admin", because the scope gate only accepts a full-access dashboard
-#   session / pp_ API key / ppat_ token and a workspace admin holds none of them),
-#   a member is refused on both the PATCH and the GET with nothing written, and a
-#   widget DELETE shows the same split even when the caller holds the per-widget
-#   owner token.
-# Updated 2026-09-26 (feat/pawbar-admin-widget-spec-route): a seventh layer covers
-#   PATCH /paw-bar/admin/site/{id}/widget/spec, the session-authed save for the
-#   owner's Catalog & Actions editor (no X-Paw-Bar-Token, revision archived, 404
-#   cross-tenant / no widget, 422 invalid spec, 403 for a member), and the
-#   ``embed_snippet`` the settings GET/PATCH now return: the publish-time snippet,
-#   built on PAW_CAPTURE_API_BASE rather than the request host.
-#   Also pinned: the admin route overwrites spec.widget_id / spec.pocket_id with
-#   the resolved widget's own values, whatever the body sends.
-# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): an eighth layer
-#   pins the snippet's own gates: concierge off, plan without the concierge, a
-#   raising concierge_snippet (200, ""), enabling an unbound widget (snippet after
-#   provisioning), and a private pocket the caller cannot read ("", checked with
-#   the real pockets_service.can_read against a real Pocket doc).
+# The Site builder defaults to a concierge its owner CREATED and switched on (CR-12:
+# a bare Site is "no concierge"); overrides still win. Layers:
+#   * The shared resolver (resolve_site_key) and the three public entry points
+#     (frame, chat, action) fail closed on ``concierge_enabled=False``.
+#   * The greeting rides into the frame's ``window.__PAWBAR__`` config.
+#   * GET + PATCH /paw-bar/admin/site/{id}/settings round-trip the fields, a
+#     cross-tenant id is 404, and a PATCH that switches the bar off silences the
+#     frame on the next request. The transcript-retention toggle defaults on and
+#     is independent of the kill switch.
+#   * The owner preview: preview-frame frames the site's own page as a sandboxed
+#     ``?pawbar=sniff`` scene; preview-tokens and preview-config render a draft
+#     and write nothing. preview-config returns the frame config subset built by
+#     the frame's own code path (equal to the preview frame's boot config for an
+#     empty draft), applies the branding entitlement to ``poweredBy`` and refuses
+#     a draft the settings PATCH would refuse (422).
+#   * Role gates: reads on ``paw_bar.read``, mutations (PATCH, preview-config,
+#     widget DELETE, widget spec) on ``paw_bar.manage``; a member is refused with
+#     nothing written, even holding the per-widget owner token.
+#   * PATCH /paw-bar/admin/site/{id}/widget/spec, the session-authed Catalog &
+#     Actions save (revision archived, identity keys pinned to the resolved
+#     widget, 404 cross-tenant / no widget, 422 invalid spec).
+#   * ``embed_snippet`` on GET/PATCH: built on PAW_CAPTURE_API_BASE, and "" when
+#     the concierge is off, the plan lacks it, the snippet raises, or the caller
+#     cannot read the site's pocket.
 
 from __future__ import annotations
 
@@ -334,9 +316,13 @@ async def test_the_preview_frames_the_site_itself(client):
     assert res.status_code == 200, res.text
     assert 'class="pawbar-scene"' in res.text
     assert "https://s1.paw-sites.test" in res.text
-    # The page auto-embeds the PUBLIC bar. Without this the owner sees two, and
-    # the one that answers the controls is the one behind.
-    assert "pawbar=off" in res.text
+    # The page auto-embeds the PUBLIC bar. ``sniff`` keeps it down (or the owner
+    # sees two, and the one behind answers the controls) and has its loader post
+    # the site's theme to the preview instead.
+    assert "pawbar=sniff" in res.text
+    assert "pawbar=off" not in res.text
+    assert 'class="pawbar-scene"' in res.text
+    assert 'sandbox="allow-scripts allow-popups allow-forms"' in res.text
 
 
 @pytest.mark.asyncio
@@ -527,6 +513,142 @@ async def test_preview_tokens_cross_tenant_is_404(client):
     assert res.status_code == 404
 
 
+# --------------------------------------------------------------------------- #
+# preview-config — a draft rendered to the frame config it would boot
+# --------------------------------------------------------------------------- #
+
+_ENTITLED = "pocketpaw_ee.sites.service.badge_removal_entitled"
+_PREVIEW_CONFIG_KEYS = {
+    "tokens",
+    "tokensDark",
+    "scheme",
+    "launcher",
+    "side",
+    "barSize",
+    "logo",
+    "launcherLabel",
+    "disclosure",
+    "privacyHref",
+    "consentRequired",
+    "voice",
+    "poweredBy",
+    "expandable",
+}
+
+
+def _boot_config(html: str) -> dict[str, Any]:
+    import json
+
+    raw = html.split("window.__PAWBAR__ = ", 1)[1].split(";</script>", 1)[0]
+    return json.loads(raw)
+
+
+@pytest.mark.asyncio
+async def test_preview_config_renders_the_draft_over_the_stored_settings(client):
+    """Fields the draft carries win; the rest are the Site's. Nothing is written."""
+    from unittest.mock import AsyncMock, patch
+
+    c, _store = client
+    site = await _site(concierge_disclosure="Stored line", concierge_voice=False)
+
+    with patch(_ENTITLED, new=AsyncMock(return_value=False)):
+        res = await c.post(
+            f"/paw-bar/admin/site/{site.id}/preview-config",
+            json={
+                "concierge_appearance": {"accent": "#ff5a36", "size": "md", "radius": 99},
+                "concierge_disclosure": "Draft line",
+                "concierge_consent_required": True,
+            },
+        )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    config = body["config"]
+    assert set(config) == _PREVIEW_CONFIG_KEYS
+    assert config["tokens"]["--pawbar-accent"] == "#ff5a36"
+    assert config["tokens"]["--pawbar-radius"] == "32px"
+    assert config["barSize"] == "md"
+    assert config["disclosure"] == "Draft line"
+    assert config["consentRequired"] is True
+    # Not in the draft: the stored value.
+    assert config["voice"] is False
+    # The validated echo shows the clamp.
+    assert body["concierge_appearance"]["radius"] == 32
+
+    got = (await c.get(f"/paw-bar/admin/site/{site.id}/settings")).json()
+    assert got["concierge_disclosure"] == "Stored line"
+    assert got["concierge_consent_required"] is False
+    assert got["concierge_appearance"]["accent"] == ""
+
+
+@pytest.mark.asyncio
+async def test_preview_config_of_no_draft_is_the_preview_frame_config(client):
+    """One builder: with nothing in the draft, the keys equal what the owner
+    preview frame boots with, value for value."""
+    from unittest.mock import AsyncMock, patch
+
+    c, store = client
+    site = await _site(
+        concierge_disclosure="Hello",
+        concierge_privacy_url="https://brewco.com/privacy",
+        concierge_expandable=False,
+    )
+    site.concierge_appearance.colors.surface = "#f7f7fb"
+    site.concierge_appearance.launcher.style = "icon"
+    await site.save()
+    await store.create_widget(_widget())
+
+    with patch(_ENTITLED, new=AsyncMock(return_value=True)):
+        res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json={})
+        frame = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert frame.status_code == 200, frame.text
+    boot = _boot_config(frame.text)
+    assert res.json()["config"] == {k: boot[k] for k in _PREVIEW_CONFIG_KEYS}
+    assert boot["tokens"]["--pawbar-bg"] == "rgba(247, 247, 251, 0.78)"
+
+
+@pytest.mark.asyncio
+async def test_preview_config_shows_the_credit_a_non_entitled_site_cannot_hide(client):
+    from unittest.mock import AsyncMock, patch
+
+    c, _store = client
+    site = await _site()
+    draft = {"concierge_appearance": {"show_branding": False}}
+
+    with patch(_ENTITLED, new=AsyncMock(return_value=False)):
+        refused = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json=draft)
+    with patch(_ENTITLED, new=AsyncMock(return_value=True)):
+        allowed = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json=draft)
+
+    assert refused.json()["config"]["poweredBy"] is True
+    assert allowed.json()["config"]["poweredBy"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "draft",
+    [
+        {"concierge_disclosure": "x" * 141},
+        {"concierge_privacy_url": "http://brewco.com/privacy"},
+    ],
+)
+async def test_preview_config_refuses_what_a_save_would_refuse(client, draft):
+    c, _store = client
+    site = await _site()
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json=draft)
+    assert res.status_code == 422, res.text
+
+
+@pytest.mark.asyncio
+async def test_preview_config_cross_tenant_is_404(client):
+    c, _store = client
+    site = await _site(workspace="ws-other")
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json={})
+    assert res.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_settings_cross_tenant_is_404(client):
     """A site owned by another workspace 404s for the ws-1 admin session."""
@@ -706,6 +828,15 @@ async def test_admin_role_can_read_the_settings(client):
     res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
     assert res.status_code == 200, res.text
     assert res.json()["concierge_greeting"] == "Back at 9am"
+
+
+@pytest.mark.asyncio
+async def test_member_role_cannot_render_a_preview_config(member_client, mongo_db):
+    """preview-config sits on the manage gate, like the settings PATCH."""
+    c, _store = member_client
+    site = await _site()
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json={})
+    assert res.status_code == 403
 
 
 @pytest.mark.asyncio

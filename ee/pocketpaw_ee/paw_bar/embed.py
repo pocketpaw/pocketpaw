@@ -37,6 +37,11 @@
 # the API base the site's own capture endpoint already uses, never a CDN host — a
 # locally served site gets a working localhost URL, and there is no second place
 # to keep in sync when the deploy moves.
+#
+# ``build_actions_snippet`` is the owner's copy-paste tag for the opt-in
+# page-actions script (``GET /paw-bar/actions.js``). It is never injected at
+# publish; the settings response shows it only where ``concierge_snippet`` would
+# give the site a bar, on the same API base.
 
 from __future__ import annotations
 
@@ -53,6 +58,8 @@ EMBED_MARKER = "data-paw-bar-embed"
 # mounted under /api/v1, and ``_capture_base()`` already carries that mount, so
 # joining the two yields the real URL wherever the API is hosted).
 WIDGET_JS_PATH = "/paw-bar/widget.js"
+# The page-actions host script, relative to the same API base.
+ACTIONS_JS_PATH = "/paw-bar/actions.js"
 
 # Page suffixes the injection walks. Deliberately just HTML: the snippet is a
 # ``<script>`` tag and belongs in a document, not in a JSON/asset file.
@@ -83,6 +90,21 @@ def build_embed_snippet(*, api_base: str, site_key: str, widget_id: str) -> str:
         f'data-widget-id="{escape(widget_id, quote=True)}" '
         f'data-endpoint="{escape(api_base.rstrip("/"), quote=True)}" '
         "async></script>"
+    )
+
+
+def build_actions_snippet(*, api_base: str) -> str:
+    """The tag an owner pastes to let the concierge act on their pages.
+
+    The script reads only ``data-endpoint`` (falling back to its own ``src``) and
+    obeys frames from that origin alone, so the base is passed explicitly for the
+    same reason ``build_embed_snippet`` passes it. ``defer`` so it never blocks
+    the owner's page wherever they paste it.
+    """
+    base = api_base.rstrip("/")
+    return (
+        f'<script src="{escape(base + ACTIONS_JS_PATH, quote=True)}" defer '
+        f'data-endpoint="{escape(base, quote=True)}"></script>'
     )
 
 
@@ -213,8 +235,10 @@ def deployed_host(url: str) -> str:
 
 
 __all__ = [
+    "ACTIONS_JS_PATH",
     "EMBED_MARKER",
     "WIDGET_JS_PATH",
+    "build_actions_snippet",
     "build_embed_snippet",
     "concierge_snippet",
     "deployed_host",

@@ -8,7 +8,9 @@ False, so the rows written before it must be classified before the first request
 or every live bar goes dark. Running it at boot ties it to the model by
 construction, whatever the deploy config does. Best-effort like its neighbours.
 After it, ``sites.migrate_concierge_v2.migrate_on_boot`` moves legacy concierges
-to the v2 runtime, a no-op unless the v2 eval gate is open.
+to the v2 runtime, a no-op unless the v2 eval gate is open. Beside them,
+``sites.migrate_appearance_follow_site.migrate_on_boot`` moves appearances stored
+under the old look defaults to "follow the site", once per row.
 
 2026-09-04 (fix/pool-and-body-ceilings, backend-perf H6): the client is built
 with explicit timeouts. It had none, so it ran on PyMongo's defaults, and two of
@@ -359,6 +361,15 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     )
 
     await migrate_concierge_marker_on_boot()
+
+    # Appearances saved under the old look defaults (#3b6fe0 / system / 20) are
+    # moved to "follow the site", once per row (``concierge_appearance_version``).
+    # Never raises.
+    from pocketpaw_ee.sites.migrate_appearance_follow_site import (
+        migrate_on_boot as migrate_appearance_follow_site_on_boot,
+    )
+
+    await migrate_appearance_follow_site_on_boot()
 
     # Move legacy concierges v2 can serve to v2, only while the eval gate is open.
     # Runs after the marker backfill (it selects on the marker). Never raises.
