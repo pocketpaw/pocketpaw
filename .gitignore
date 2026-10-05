@@ -126,3 +126,6 @@ tests/harness/engine_cost/evidence/
 # Local scratch / backup — e.g. .tmp/livekit-meetings-backup-*.json (operator
 # backups pulled before a LiveKit migration). Never committable.
 .tmp/
+
+# Flake census output (scripts/flake_census.sh)
+.flake-census/
