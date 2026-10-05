@@ -658,7 +658,8 @@ async def _planned_tasks(
     workspace_id: str, plan_ids: list[str], runs: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Every task of the given ``belt_plan`` Actions with its outcome, oldest
-    shift first: ``{shift_no, title, evidence_refs, status, error, run_id}``.
+    shift first: ``{shift_no, title, evidence_refs, status, in_flight, error,
+    run_id}``.
 
     A task's run is the newest run row carrying its ``(plan_action_id,
     task_index)``; ``task_index`` is 1-based into the plan's CURRENT tasks (the
@@ -687,14 +688,18 @@ async def _planned_tasks(
         plan_status = str(getattr(getattr(action, "status", None), "value", "") or "")
         for i, task in enumerate((blob.get("plan") or {}).get("tasks") or [], start=1):
             run = newest.get((plan_id, i))
+            status = (
+                _task_status(run)
+                if run
+                else _PLAN_STATUS.get(plan_status, plan_status or "unknown")
+            )
             out.append(
                 {
                     "shift_no": int(blob.get("shift_no") or 0),
                     "title": str(task.get("title") or ""),
                     "evidence_refs": [str(ref) for ref in task.get("evidence_refs") or []],
-                    "status": _task_status(run)
-                    if run
-                    else _PLAN_STATUS.get(plan_status, plan_status or "unknown"),
+                    "status": status,
+                    "in_flight": status in _IN_FLIGHT,
                     "error": (run or {}).get("error"),
                     "run_id": (run or {}).get("action_id"),
                 }
@@ -726,7 +731,8 @@ async def _backlog(
     in_flight, tasks}``, where ``new`` means filed after ``since`` and ``tasks``
     lists the citing tasks (``{shift_no, title, status}``); ``tasks`` covers the
     plans behind this mandate's runs plus ``history_plan_ids``; ``teaching`` is
-    the gate teaching sightings (shift history, never backlog)."""
+    the gate teaching sightings as ``{shift_no, note}`` (shift history, never
+    backlog)."""
     sightings = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
@@ -743,13 +749,16 @@ async def _backlog(
                 landed_by.setdefault(ref, str(t["run_id"]))
 
     open_docs: list[SightingDoc] = []
-    teaching: list[SightingDoc] = []
+    teaching: list[dict[str, Any]] = []
     for s in sightings:
         sid = str(s.id)
         if s.resolved_by_run:
             continue
         if _is_gate_teaching(s):
-            teaching.append(s)
+            ev = s.evidence
+            title = f' "{ev["task_title"]}"' if ev.get("task_title") else ""
+            note = f"{ev.get('kind', 'note')}{title}: {ev.get('reason') or s.summary}"
+            teaching.append({"shift_no": int(ev["shift_no"]), "note": note})
             continue
         if sid in landed_by:
             if persist:
@@ -871,7 +880,16 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         history_plan_ids=tuple(h.plan_action_id for h in history_docs if h.plan_action_id),
         persist=True,
     )
-    history = [{"no": h.no, "state": h.state, "outcome": h.outcome} for h in reversed(history_docs)]
+    history = [
+        {
+            "no": h.no,
+            "state": h.state,
+            "outcome": h.outcome,
+            "tasks": [t for t in backlog["tasks"] if t["shift_no"] == h.no],
+            "gate": [g["note"] for g in backlog["teaching"] if g["shift_no"] == h.no],
+        }
+        for h in reversed(history_docs)
+    ]
     soul_context = await soul_link.recall_for_planning(
         doc.soul_path, f"{doc.name} {doc.charter.goal}"
     )

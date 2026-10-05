@@ -1181,9 +1181,24 @@ async def test_backlog_carries_open_sightings_and_resolves_landed_ones(
     ]
     assert not open2[ids["buy"]]["in_flight"]
     assert open2[ids["tabs"]]["tasks"] == []
-    assert ids["customer"] not in call.prompt
+    assert f"id={ids['customer']}" not in call.prompt
     assert f"id={ids['tabs']} patrol=feedback severity=3 [carried over]" in call.prompt
     assert 'shift 1 "Address: buy button does nothing" failed' in call.prompt
+    # The history carries each task's run result, with the failure reason.
+    (h1,) = call.context.history
+    assert [(t["title"], t["status"], t["error"]) for t in h1["tasks"]] == [
+        ("Address: can't add a customer", "landed", None),
+        (
+            "Address: buy button does nothing",
+            "failed",
+            "diff did not apply cleanly (conflict)",
+        ),
+    ]
+    assert (
+        f'- task "Address: buy button does nothing" (cites {ids["buy"]}): failed'
+        " — reason: diff did not apply cleanly (conflict)"
+    ) in call.prompt
+    assert f"(cites {ids['customer']}): landed" in call.prompt
 
     # The landed task's sighting is recorded resolved; the failed one is not.
     resolved = await SightingDoc.get(_oid(ids["customer"]))
@@ -1214,6 +1229,14 @@ async def test_backlog_carries_open_sightings_and_resolves_landed_ones(
     assert not open3["pay page is slow"]["in_flight"]
     assert open3["logo blurry"]["new"] and not open3["pay page is slow"]["new"]
     assert "IN FLIGHT" in call.prompt and "7. A task that is IN FLIGHT" in call.prompt
+    # Shift 2's tasks read as in flight in the history too.
+    h2 = call.context.history[-1]
+    assert h2["no"] == 2
+    assert [(t["status"], t["in_flight"]) for t in h2["tasks"]] == [
+        ("developing", True),
+        ("pending at gate", True),
+    ]
+    assert f"(cites {ids['tabs']}): pending at gate (IN FLIGHT)" in call.prompt
 
     # The mock skips in-flight work: shift 3 plans only pay + the new sighting.
     plan3 = (await store.get_action(shift3["plan_action_id"])).parameters["_belt_plan"]
@@ -1256,3 +1279,52 @@ async def _patch_run(store: InstinctStore, action_id: str, **blob_changes) -> No
     params = dict(action.parameters)
     params["_code_change"] = {**params["_code_change"], **blob_changes}
     await store.update_parameters(action_id, params)
+
+
+async def test_gate_rejection_is_shift_history_not_backlog(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch, foreman_calls
+):
+    """A task rejected at the plan gate leaves its sighting open; the human's
+    reason shows under that shift's history, and the teaching sighting it was
+    filed as is not backlog work. A plan still waiting at the gate is in
+    flight."""
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "station")
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo, budget=2)
+    for text in ("export is broken", "dark mode please"):
+        client.post(
+            f"/belt/mandates/{mandate_id}/feedback",
+            json={"text": text, "severity": 3, "source": "support"},
+        )
+    shift1 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/plan/resolve",
+        json={
+            "shift_no": shift1["no"],
+            "decisions": [
+                {"index": 0, "decision": "approve"},
+                {"index": 1, "decision": "reject", "reason": "not this quarter"},
+            ],
+        },
+    )
+    assert res.status_code == 200, res.text
+
+    shift2 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    call = foreman_calls[-1]
+    summaries = {s["summary"]: s for s in call.context.sightings}
+    assert set(summaries) == {"export is broken", "dark mode please"}
+    assert summaries["export is broken"]["in_flight"]  # its station run is queued
+    assert summaries["dark mode please"]["tasks"] == []  # the rejected task was dropped
+    (h1,) = call.context.history
+    assert h1["gate"] == ['reject "Address: dark mode please": not this quarter']
+    assert '- at the gate: reject "Address: dark mode please": not this quarter' in call.prompt
+
+    # Shift 3 while shift 2's plan still waits at the plan gate: its task is in flight.
+    client.post(f"/belt/mandates/{mandate_id}/shift")
+    call = foreman_calls[-1]
+    h2 = call.context.history[-1]
+    assert h2["no"] == shift2["no"] and h2["state"] == "in_gate"
+    assert [(t["status"], t["in_flight"]) for t in h2["tasks"]] == [("pending at plan gate", True)]
+    assert all(s["in_flight"] for s in call.context.sightings)

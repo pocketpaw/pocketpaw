@@ -2,11 +2,13 @@
 #
 # Once per SHIFT it reads the charter, the OPEN sightings (the backlog: every
 # sighting no landed task has resolved, capped, each marked new or carried over
-# and annotated with the tasks that cite it), the last 3 shifts' outcomes, and
-# (when a soul is bound) the soul recall, then makes EXACTLY ONE LLM call that
-# returns a strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an
-# explicit empty plan with a reason. A task may name a charter ``recipe`` (a
-# deterministic command) instead of LLM develop work.
+# and annotated with the tasks that cite it), the last 3 shifts' outcomes (each
+# task's run result: landed, failed with its reason, rejected, or in flight; and
+# what a human said at the gate), and (when a soul is bound) the soul recall,
+# then makes EXACTLY ONE LLM call that returns a strict-JSON PlanProposal: a FEW
+# tasks (≤ the charter's budget) or an explicit empty plan with a reason. A task
+# may name a charter ``recipe`` (a deterministic command) instead of LLM develop
+# work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
@@ -102,8 +104,10 @@ class ForemanContext:
     sightings: list[dict[str, Any]] = field(default_factory=list)
     # How many sightings were open before the cap (0 = same as ``sightings``).
     open_total: int = 0
-    # Last 3 shifts, oldest-first: {no, state, outcome} — outcome is the
-    # free-text result of the shift (what landed / failed / stood down).
+    # Last 3 shifts, oldest-first: {no, state, outcome, tasks, gate} — outcome
+    # is the free-text result of the shift; tasks are its planned tasks with
+    # their run results ({title, evidence_refs, status, in_flight, error});
+    # gate is what a human said when rejecting or editing its plan.
     history: list[dict[str, Any]] = field(default_factory=list)
     # Soul recall lines (empty when no soul bound).
     soul_context: list[str] = field(default_factory=list)
@@ -296,6 +300,22 @@ def _sighting_line(s: dict[str, Any]) -> str:
     )
 
 
+def _history_lines(h: dict[str, Any]) -> str:
+    """One past shift: its outcome, each planned task's run result (with the
+    failure reason), and any gate note."""
+    lines = [f"- shift {h.get('no')}: state={h.get('state')} outcome={h.get('outcome') or 'n/a'}"]
+    for t in h.get("tasks") or []:
+        refs = ", ".join(t.get("evidence_refs") or []) or "none"
+        line = f'    - task "{t.get("title")}" (cites {refs}): {t.get("status")}'
+        if t.get("error"):
+            line += f" — reason: {str(t['error'])[:300]}"
+        if t.get("in_flight"):
+            line += " (IN FLIGHT)"
+        lines.append(line)
+    lines += [f"    - at the gate: {note}" for note in h.get("gate") or []]
+    return "\n".join(lines)
+
+
 def build_prompt(context: ForemanContext) -> str:
     """Assemble the single judgment prompt. Charter rides VERBATIM (as JSON)
     with the BOUNDARIES block pulled out and stated first — boundaries override
@@ -314,13 +334,7 @@ def build_prompt(context: ForemanContext) -> str:
             f"\n(showing {len(context.sightings)} of {context.open_total} open sightings: "
             "highest severity first, then oldest)"
         )
-    history_lines = (
-        "\n".join(
-            f"- shift {h.get('no')}: state={h.get('state')} outcome={h.get('outcome') or 'n/a'}"
-            for h in context.history
-        )
-        or "(no prior shifts)"
-    )
+    history_lines = "\n".join(_history_lines(h) for h in context.history) or "(no prior shifts)"
     soul_lines = "\n".join(f"- {line}" for line in context.soul_context) or "(none)"
     recipe_names = sorted((charter.get("recipes") or {}).keys())
     recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
