@@ -1,27 +1,18 @@
-# ee/pocketpaw_ee/cloud/mandates/dto.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/dto.py — MANDATE request/response schemas.
 #
-# Request/Response schemas for the MANDATE primitive. Separate Request and
-# Response models per the cloud entity rule (never reuse one model for both
-# directions). The Request models are the ``body`` the service ``model_validate``s
-# at entry; the Response models are the wire dicts the service returns.
-#
-# Updated: 2026-06-11 (slice 2 — patrols) — added FeedbackRequest /
-# SightingResponse / SightingsListResponse for the feedback-intake patrol and
-# the sightings read.
-# Updated: 2026-06-11 (slice 4 — plan gate) — added ShiftResponse for the
-# manual-shift trigger.
-# Updated: 2026-06-11 (slice 5 — pawprints) — added PawprintResponse /
-# PawprintsListResponse for the past-tense event feed.
-# Updated: 2026-06-11 (feat/belt-autopilot) — added AutopilotRequest (the
-# start/stop body) + AutopilotState (the persisted on/users wire object) and
-# wired ``autopilot`` onto the detail + summary responses.
+# Separate Request and Response models per the cloud entity rule (never reuse one
+# model for both directions). Request models are the ``body`` the service
+# ``model_validate``s at entry; Response models are the wire dicts the service
+# returns. Covers mandate create/read (charter incl. checks + recipes), feedback
+# intake + sightings, the shift trigger, plan resolution, pawprints, and the
+# autopilot toggle.
 
 from __future__ import annotations
 
+import shlex
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw_ee.cloud.mandates.domain import (
     Cadence,
@@ -57,6 +48,37 @@ class CharterRequest(BaseModel):
     boundaries: list[str] = Field(default_factory=list)
     budget: BudgetRequest = Field(default_factory=BudgetRequest)
     cadence: Cadence = "weekly"
+    # Factory hooks — argv strings (shlex-split, never a shell). ``checks`` must
+    # pass before a headless diff is attached; ``recipes`` are named
+    # deterministic commands a plan task can run instead of an LLM develop.
+    checks: list[str] = Field(default_factory=list)
+    recipes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("checks")
+    @classmethod
+    def _checks_parse(cls, v: list[str]) -> list[str]:
+        for cmd in v:
+            _require_argv(cmd)
+        return v
+
+    @field_validator("recipes")
+    @classmethod
+    def _recipes_parse(cls, v: dict[str, str]) -> dict[str, str]:
+        for name, cmd in v.items():
+            if not name.strip():
+                raise ValueError("recipe names must be non-empty")
+            _require_argv(cmd)
+        return v
+
+
+def _require_argv(cmd: str) -> None:
+    """A check/recipe command must split into a non-empty argv."""
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as exc:
+        raise ValueError(f"command {cmd!r} does not parse: {exc}") from None
+    if not argv:
+        raise ValueError("commands must be non-empty")
 
 
 # ---------------------------------------------------------------------------

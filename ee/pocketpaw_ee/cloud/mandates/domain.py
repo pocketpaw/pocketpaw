@@ -1,28 +1,24 @@
-# ee/pocketpaw_ee/cloud/mandates/domain.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/domain.py — MANDATE persistence + value objects.
 #
-# Updated: 2026-06-11 (feat/belt-autopilot) — added the ``Autopilot`` embedded
-# value object + the ``autopilot`` field on ``MandateDoc``. Autopilot runs
-# Foresight-seeded simulated users against the mandate's surface on a background
-# cycle, emitting structured feedback sightings the next shift's foreman cites.
-# The persisted state is ``{on: bool, users: int}``; the background asyncio task
-# itself is process-local (the ``autopilot`` module's registry), never persisted.
-#
-# The MANDATE primitive's persistence + value objects. A MANDATE is a standing
-# JOB the Belt holds over time (an FDE retainer): it senses its surface via
+# A MANDATE is a standing JOB the Belt holds over time: it senses its surface via
 # PATROLS, plans a FEW tasks per SHIFT via a FOREMAN (LLM judgment), routes the
 # plan through a PLAN GATE (Instinct ``belt_plan`` proposal), and dispatches
 # approved tasks as normal Belt runs.
 #
-# This module holds BOTH the Beanie documents (MandateDoc / ShiftDoc /
-# SightingDoc) AND the frozen domain/charter value objects. Per the 4-file
-# entity rule, ONLY ``mandates/service.py`` imports the Beanie doc classes; the
-# router/dto layers see only the frozen domain objects the service maps to.
+# The CHARTER is the standing brief: goal, KPIs, says_no + boundaries (hard
+# constraints), budget, cadence (``daily`` / ``weekly`` / ``manual``), and the
+# factory's deterministic hooks — ``checks`` (commands that must pass before a
+# headless develop run's diff is attached) and ``recipes`` (named commands a plan
+# task can run instead of an LLM develop). Checks and recipes are argv strings
+# split with ``shlex`` and never run through a shell; only ``belt.manage``
+# (admin) can write a charter.
 #
-# The docs live here (not in cloud/models/) so the entity is self-contained;
-# they are registered into ``init_beanie`` via a lazy import in
-# ``cloud/models/__init__.get_all_documents`` (same out-of-models pattern the
-# calendar docs use). Every doc carries the ``workspace`` tenancy key, indexed.
+# This module holds BOTH the Beanie documents (MandateDoc / ShiftDoc /
+# SightingDoc) AND the frozen value objects. Per the 4-file entity rule, ONLY
+# ``mandates/service.py`` imports the Beanie doc classes. The docs are registered
+# into ``init_beanie`` via a lazy import in ``cloud/models/__init__``. Every doc
+# carries the ``workspace`` tenancy key, indexed. ``Autopilot`` is persisted
+# ``{on, users}``; its background task is process-local (``autopilot`` module).
 
 from __future__ import annotations
 
@@ -40,7 +36,7 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 # ---------------------------------------------------------------------------
 
 KpiDirection = Literal["up", "down"]
-Cadence = Literal["weekly", "manual"]
+Cadence = Literal["daily", "weekly", "manual"]
 MandateStatus = Literal["active", "paused"]
 ShiftState = Literal["planning", "in_gate", "executing", "done", "stood_down"]
 
@@ -83,8 +79,14 @@ class Charter(BaseModel):
     ``goal`` is the one-line job. ``kpis`` are the tracked outcomes.
     ``says_no`` + ``boundaries`` are hard constraints the foreman must honor
     (a boundary OVERRIDES a KPI opportunity). ``budget`` caps the per-shift
-    task count + weekly gate minutes. ``cadence`` is ``"weekly"`` or
-    ``"manual"`` (demo bar triggers shifts manually).
+    task count + weekly gate minutes. ``cadence`` is ``"daily"``, ``"weekly"``
+    or ``"manual"`` (the scheduler never fires a manual mandate).
+
+    ``checks`` are commands that must pass before a headless develop run's diff
+    is attached (e.g. ``uv run pytest -q``). ``recipes`` maps a name to a
+    deterministic command a plan task can run instead of an LLM develop (e.g.
+    ``{"bump-photo": "node scripts/bump-craft-engine.mjs photo"}``). Both are
+    argv strings split with ``shlex`` — never run through a shell.
     """
 
     goal: str
@@ -93,6 +95,8 @@ class Charter(BaseModel):
     boundaries: list[str] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
     cadence: Cadence = "weekly"
+    checks: list[str] = Field(default_factory=list)
+    recipes: dict[str, str] = Field(default_factory=dict)
 
 
 class Surface(BaseModel):

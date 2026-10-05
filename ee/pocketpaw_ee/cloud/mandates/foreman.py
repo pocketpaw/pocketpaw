@@ -1,36 +1,31 @@
-# ee/pocketpaw_ee/cloud/mandates/foreman.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 3 — foreman).
+# ee/pocketpaw_ee/cloud/mandates/foreman.py — the FOREMAN, a mandate's LLM seat.
 #
-# The FOREMAN — the LLM judgment seat of a mandate. Once per SHIFT it reads the
-# charter, the sighting digest since the last shift, the last 3 shifts'
-# outcomes, and (when a soul is bound) the soul recall, then makes EXACTLY ONE
-# LLM call that returns a strict-JSON PlanProposal: a FEW tasks (≤ the
-# charter's budget) or an explicit empty plan with a reason.
+# Once per SHIFT it reads the charter, the sighting digest since the last shift,
+# the last 3 shifts' outcomes, and (when a soul is bound) the soul recall, then
+# makes EXACTLY ONE LLM call that returns a strict-JSON PlanProposal: a FEW tasks
+# (≤ the charter's budget) or an explicit empty plan with a reason. A task may
+# name a charter ``recipe`` (a deterministic command) instead of LLM develop work.
 #
-# Pluggable LLM layer (env ``POCKETPAW_MANDATE_LLM=claude|mock``):
-#   * ``claude`` (default) — shells the ``claude`` CLI:
-#       ``claude -p <prompt> --output-format json``
-#     and reads the ``result`` field off the JSON envelope. DEMO-BAR: the CLI
-#     shell-out is the LLM transport; a later PR can swap an SDK transport in
-#     behind the same ``PlanLlm`` protocol. The prompt is passed as ONE argv
-#     element — never interpolated into a shell string.
-#   * ``mock`` — deterministic: plans one task per sighting (highest severity
-#     first) up to the budget, or a no_action plan when the digest is empty.
-#     Tests can override the scripted response via ``set_mock_plan()``.
+# LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
+# shells the SYSTEM Claude Code CLI (``claude -p <prompt> --output-format json``)
+# and reads the envelope's ``result``; ``mock`` is deterministic (one task per
+# sighting, highest severity first; ``set_mock_plan()`` overrides it in tests).
+# ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
+# resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
+# and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
+# set); the develop station uses them too. Prompts ride argv/stdin, never a shell.
 #
-# Validation discipline (proven in sim — encoded here, do not weaken):
-#   * machine validation runs on ACTION fields (title, expected_outcome) and
-#     structural fields (task count vs budget, evidence_refs non-empty) ONLY.
-#   * the ``why`` narration is NEVER scanned — a well-behaved foreman names
-#     forbidden things precisely when REFUSING them; scanning why would punish
-#     the refusal.
+# Validation discipline (sim-proven — do not weaken): machine validation runs on
+# ACTION fields (title, expected_outcome) and structural fields (task count vs
+# budget, evidence_refs non-empty, recipe names exist in the charter) ONLY. The
+# ``why`` narration is NEVER scanned — a well-behaved foreman names forbidden
+# things precisely when REFUSING them.
 #
-# Prompt requirements (all sim-validated — keep them in ``build_prompt``):
-#   charter verbatim with BOUNDARIES prominent; ≤ budget tasks; every task
-#   cites sighting ids + names an expected KPI direction; an EMPTY plan with a
-#   reason is correct when signals are quiet and KPIs healthy; boundaries
-#   override KPI opportunities; never repeat a failed approach without stating
-#   what changed; output strict JSON only.
+# Prompt rules (sim-validated — keep them in ``build_prompt``): charter verbatim
+# with BOUNDARIES first; ≤ budget tasks; every task cites sighting ids + names an
+# expected KPI direction; an EMPTY plan with a reason is correct when signals are
+# quiet; boundaries override KPI opportunities; never repeat a failed approach
+# without saying what changed; strict JSON only.
 
 from __future__ import annotations
 
@@ -39,6 +34,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -64,6 +60,9 @@ class PlannedTask(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     expected_outcome: str
     est_cost_hours: float = 1.0
+    # A charter recipe name: the develop station runs that command instead of
+    # an LLM develop (checks still gate it). ``None`` = ordinary develop work.
+    recipe: str | None = None
 
 
 class PlanProposal(BaseModel):
@@ -109,20 +108,42 @@ class PlanLlm(Protocol):
     async def plan(self, *, prompt: str, context: ForemanContext) -> str: ...
 
 
-class ClaudeCliLlm:
-    """Default transport — shells the ``claude`` CLI (demo bar).
+def claude_cli_argv(*args: str) -> list[str]:
+    """argv for one headless call to the SYSTEM Claude Code CLI.
 
-    ``claude -p <prompt> --output-format json`` prints a JSON envelope whose
-    ``result`` field carries the model's text. The prompt is a single argv
-    element (the CLI does its own auth); nothing is shell-interpolated."""
+    Every factory LLM seat (foreman, develop, fix, review) builds its command
+    here: ``<bin> -p <args...> --output-format json [--model M]``. The binary is
+    ``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``claude`` on PATH — never the SDK's
+    bundled copy, which goes stale. Resolved per call so env changes apply."""
+    binary = os.environ.get("POCKETPAW_FACTORY_CLAUDE_BIN") or shutil.which("claude") or "claude"
+    argv = [binary, "-p", *args, "--output-format", "json"]
+    model = (os.environ.get("POCKETPAW_FACTORY_CLAUDE_MODEL") or "").strip()
+    if model:
+        argv += ["--model", model]
+    return argv
+
+
+def claude_result_text(stdout: str) -> str:
+    """The model text from a ``--output-format json`` envelope (its ``result``
+    field); a bare-text stdout (older CLI) is returned as-is."""
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout
+    if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+        return envelope["result"]
+    return stdout
+
+
+class ClaudeCliLlm:
+    """Default transport — one ``claude -p <prompt> --output-format json`` call.
+
+    The prompt is a single argv element (the CLI does its own auth); nothing is
+    shell-interpolated."""
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
         proc = await asyncio.create_subprocess_exec(
-            "claude",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
+            *claude_cli_argv(prompt),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -136,15 +157,7 @@ class ClaudeCliLlm:
         if proc.returncode != 0:
             err = err_b.decode("utf-8", "replace")
             raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err.strip()[:300]}")
-        # The envelope is JSON with a ``result`` field; tolerate a bare-text
-        # response (older CLI / plain output) by falling back to stdout.
-        try:
-            envelope = json.loads(out)
-        except json.JSONDecodeError:
-            return out
-        if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
-            return envelope["result"]
-        return out
+        return claude_result_text(out)
 
 
 # Test hook — when set, MockLlm returns this verbatim (a dict is dumped to
@@ -242,6 +255,8 @@ def build_prompt(context: ForemanContext) -> str:
         or "(no prior shifts)"
     )
     soul_lines = "\n".join(f"- {line}" for line in context.soul_context) or "(none)"
+    recipe_names = sorted((charter.get("recipes") or {}).keys())
+    recipe_lines = "\n".join(f"- {name}" for name in recipe_names) or "(none)"
 
     return f"""You are the FOREMAN of a standing engineering mandate. Once per shift you decide \
 what FEW tasks (if any) the crew should run. You are judged on judgment, not output volume.
@@ -267,6 +282,11 @@ Never repeat an approach that already failed above without explicitly stating in
 == SOUL CONTEXT (long-lived memory of this mandate) ==
 {soul_lines}
 
+== RECIPES (named deterministic commands the crew can run) ==
+{recipe_lines}
+When a task is exactly what a recipe does, set its "recipe" to that name and the crew runs \
+the command instead of writing code. Use ONLY a name listed above; otherwise "recipe": null.
+
 == YOUR RULES ==
 1. Plan AT MOST {budget} task(s) this shift. Fewer is better. Pick only what moves a KPI.
 2. Every task MUST cite at least one sighting id in "evidence_refs" and MUST name an \
@@ -281,7 +301,7 @@ Do not invent work.
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:
 {{"shift_no": {context.shift_no}, "no_action": false, "no_action_reason": null, "tasks": \
 [{{"title": "...", "why": "...", "evidence_refs": ["<sighting id>"], "expected_outcome": \
-"<kpi> <up|down>; ...", "est_cost_hours": 1.0}}]}}"""
+"<kpi> <up|down>; ...", "est_cost_hours": 1.0, "recipe": null}}]}}"""
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +356,13 @@ def validate_plan(plan: PlanProposal, charter: dict[str, Any]) -> list[str]:
         for p in [*(charter.get("says_no") or []), *(charter.get("boundaries") or [])]
         if isinstance(p, str) and p.strip()
     ]
+    recipes = charter.get("recipes") or {}
     for i, task in enumerate(plan.tasks):
+        if task.recipe and task.recipe not in recipes:
+            violations.append(
+                f"task {i + 1} ({task.title[:40]!r}) names recipe {task.recipe!r}, "
+                "which the charter does not declare"
+            )
         if not task.evidence_refs:
             violations.append(f"task {i + 1} ({task.title[:40]!r}) cites no sighting ids")
         action_text = f"{task.title} {task.expected_outcome}".lower()
@@ -384,6 +410,8 @@ __all__ = [
     "PlanProposal",
     "PlannedTask",
     "build_prompt",
+    "claude_cli_argv",
+    "claude_result_text",
     "parse_plan",
     "plan_shift",
     "resolve_llm",

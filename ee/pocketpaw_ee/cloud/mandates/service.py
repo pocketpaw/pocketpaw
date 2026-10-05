@@ -1,42 +1,28 @@
-# ee/pocketpaw_ee/cloud/mandates/service.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/service.py — MANDATE business logic.
 #
-# Updated: 2026-06-13 (feat/patrol-engine) — added ``list_cadence_due(now)``, the
-#   cadence scheduler's read: all ACTIVE mandates whose charter cadence interval
-#   has elapsed since their last shift (or that never shifted). "manual" mandates
-#   are never returned. Also: ``run_patrols`` now passes ``workspace_id`` to any
-#   patrol whose signature accepts it (the LIVE ``issues`` patrol needs it to
-#   reach its connector) via signature inspection — the legacy ``deps_patrol``
-#   ``(repo_id)`` shape is unchanged. Additive only.
-# Updated: 2026-06-13 (PR #1463 review) — ``run_patrols`` also threads ``user_id``
-#   to patrols that accept it (audit attribution); the sighting dedup key is
-#   generalized to ``_dedup_signal`` (issues key on ``evidence.iid``, deps on
-#   ``evidence.package``, else summary) so a retitled issue no longer
-#   double-persists; ``list_cadence_due`` carries an explicit N+1 demo-bar
-#   concession note (TODO: single aggregation pipeline).
-#
-# Business logic for the MANDATE primitive — the standing Belt JOB. Sole owner
-# of writes to MandateDoc / ShiftDoc / SightingDoc (the only module that imports
-# those Beanie classes, per the 4-file entity rule).
+# Sole owner of writes to MandateDoc / ShiftDoc / SightingDoc (the only module
+# that imports those Beanie classes, per the 4-file entity rule).
 #
 # Public API (module-level ``async def op(workspace_id, user_id, body) -> dict``):
-#   slice 1: create_mandate, list_mandates, get_mandate
-#   slice 2: file_feedback, list_sightings, run_patrols (deps patrol)
-#   slice 4: trigger_shift (foreman → plan gate)
-#   slice 5: get_pawprints
-#   autopilot (feat/belt-autopilot): set_autopilot (start/stop Foresight-seeded
-#     simulated users feeding the feedback patrol; the loop starts only where
-#     ``autopilot.runs_here()``, and every change is announced to the other web
-#     processes) + repo_for_mandate (the dispatcher/autopilot surface read).
+# create/list/get mandates; file_feedback, list_sightings, run_patrols (patrols
+# that accept ``workspace_id`` / ``user_id`` get them via signature inspection;
+# sightings dedup on ``_dedup_signal``); trigger_shift (sense → foreman → plan
+# gate); prepare_plan_resolution; get_pawprints; set_autopilot.
+#
+# System/executor reads (no Beanie leaks out): repo_for_mandate,
+# charter_for_mandate (the develop station's checks/recipes/goal read),
+# list_autopilot_enabled, executor_revalidate, mark_shift, and list_cadence_due —
+# the cadence scheduler's cross-workspace read of ACTIVE mandates whose cadence
+# interval (daily = 1 day, weekly = 7 days; manual never) has elapsed since their
+# last shift. ``list_cadence_due`` is N+1 (one shift read per mandate), fine at
+# current mandate counts.
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
-# find; emit an event on every write (or ``# no-event: <reason>``); errors via
-# ``_core.errors`` CloudError subclasses (never HTTPException).
-#
-# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
-#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
-#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
+# request-path find; emit an event on every write (or ``# no-event: <reason>``);
+# errors via ``_core.errors`` CloudError subclasses (never HTTPException). The
+# Action-blob back-write goes through ``InstinctStore.update_parameters`` via the
+# shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -83,6 +69,8 @@ def _charter_from_request(req: CreateMandateRequest) -> Charter:
             gate_minutes_per_week=req.charter.budget.gate_minutes_per_week,
         ),
         cadence=req.charter.cadence,
+        checks=list(req.charter.checks),
+        recipes=dict(req.charter.recipes),
     )
 
 
@@ -99,6 +87,8 @@ def _charter_to_wire(charter: Charter) -> dict[str, Any]:
             "gate_minutes_per_week": charter.budget.gate_minutes_per_week,
         },
         "cadence": charter.cadence,
+        "checks": list(charter.checks),
+        "recipes": dict(charter.recipes),
     }
 
 
@@ -1369,6 +1359,24 @@ async def repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
     return doc.surface.repo_id if doc is not None else None
 
 
+async def charter_for_mandate(workspace_id: str, mandate_id: str) -> dict[str, Any] | None:
+    """Read a mandate's charter (wire dict) plus its bound repo, tenant-scoped.
+
+    The headless develop station's read: it needs the charter's ``checks``,
+    ``recipes``, ``goal``, ``boundaries`` and ``says_no``. Returns
+    ``{"repo": ..., "charter": {...}}`` or ``None`` on a miss / cross-tenant id."""
+    # no-event: read-only path; emit only on writes.
+    try:
+        doc = await MandateDoc.find_one(
+            MandateDoc.workspace == workspace_id, MandateDoc.id == _as_object_id(mandate_id)
+        )
+    except Exception:  # noqa: BLE001 — malformed id == miss
+        doc = None
+    if doc is None:
+        return None
+    return {"repo": doc.surface.repo_id, "charter": _charter_to_wire(doc.charter)}
+
+
 async def list_autopilot_enabled() -> list[dict[str, Any]]:
     """All ACTIVE mandates whose persisted ``autopilot.on`` is True — the
     startup reconciler's read (``autopilot.reconcile_autopilot_tasks``).
@@ -1396,10 +1404,12 @@ async def list_autopilot_enabled() -> list[dict[str, Any]]:
     ]
 
 
-# Cadence → due-interval. A "weekly" mandate is due once its last shift is older
-# than this; "manual" mandates are never scheduled (no entry → not due). Kept as a
-# table so a later cadence value ("daily", etc.) only adds a row here.
-_CADENCE_INTERVALS: dict[str, timedelta] = {"weekly": timedelta(days=7)}
+# Cadence → due-interval. A mandate is due once its last shift is older than its
+# interval; "manual" mandates are never scheduled (no entry → not due).
+_CADENCE_INTERVALS: dict[str, timedelta] = {
+    "daily": timedelta(days=1),
+    "weekly": timedelta(days=7),
+}
 
 # The SYSTEM actor a scheduled shift runs as (no human user_id on a cadence fire).
 _SCHEDULER_ACTOR = "system:scheduler"
@@ -1409,8 +1419,8 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     """All ACTIVE mandates whose charter cadence is DUE at ``now`` — the cadence
     scheduler's read (``scheduler.run_scheduler_tick``).
 
-    A mandate is DUE when its cadence has a scheduling interval (currently only
-    ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
+    A mandate is DUE when its cadence has a scheduling interval (``"daily"`` → 1
+    day, ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
     that interval before ``now`` (a mandate that has NEVER shifted is always due).
     ``"manual"`` mandates have no interval, so they are never returned — the demo
     bar's manual-trigger path is untouched.
@@ -1518,12 +1528,14 @@ def _utcnow() -> datetime:
 
 
 __all__ = [
+    "charter_for_mandate",
     "create_mandate",
     "executor_revalidate",
     "file_feedback",
     "get_mandate",
     "get_pawprints",
     "list_autopilot_enabled",
+    "list_cadence_due",
     "list_mandates",
     "list_sightings",
     "mark_shift",

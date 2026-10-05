@@ -1,55 +1,30 @@
 # ee/pocketpaw_ee/cloud/belt/headless.py — the HEADLESS develop runner.
-# Created: 2026-06-13 (feat/belt-headless-exec).
 #
-# Updated: 2026-06-13 (PR #1464 review) — store the produced diff VERBATIM (only
-#   normalizing a single trailing newline) instead of the leading/trailing-
-#   stripped value: stripping a real diff's trailing newline corrupts it for
-#   ``git apply``. Emptiness is still decided on the stripped value, so a
-#   whitespace-only diff stays safely queued. Also: dropped the dead ``_calls``
-#   field, and added a best-effort ``headless_diff_attached`` audit-log entry at
-#   diff attachment — the first point LLM-produced content enters the Instinct
-#   store without a human typing it, so an operator trail is worth keeping.
+# An approved mandate plan task becomes a QUEUED ``code_change`` Instinct Action
+# (``station_pending=True``, no diff) via ``mandates.executor.
+# StationTaskDispatcher``. This module removes the human from PRODUCING the diff —
+# and only from that: the produced diff stays PENDING the per-diff Instinct gate,
+# exactly as a human-driven ``belt_propose_change`` would.
 #
-# WHAT THIS CLOSES — the mandate→belt path was NOT autonomous. An approved
-# mandate plan task became a QUEUED ``code_change`` Instinct Action
-# (``station_pending=True``, NO diff) filed by ``mandates.executor.
-# StationTaskDispatcher``, and a HUMAN then had to open the interactive ``/belt``
-# chat surface to PRODUCE the diff. This module removes the human from PRODUCING
-# the diff — and ONLY from that. The per-diff human approval gate is preserved:
-# the runner leaves the action PENDING, carrying a real diff awaiting the
-# Instinct gate exactly as a human-driven ``belt_propose_change`` would.
+#   * ``DevelopFn`` — injectable async ``(DevelopRequest) -> DevelopResult``; the
+#     LLM develop loop is the external boundary. Production wires
+#     ``belt/develop_station.ClaudeCodeDevelop`` via ``set_production_develop_fn``
+#     at app startup (``POCKETPAW_MANDATE_DISPATCHER=headless`` +
+#     ``POCKETPAW_FACTORY_DEVELOP=claude``); tests inject a canned-diff fake.
+#   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued blob (task,
+#     summary, repo, base, mandate provenance, ``recipe``), calls the DevelopFn,
+#     then back-writes diff + base_branch onto the SAME action, clears
+#     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
+#     raises: a DevelopFn error (or empty diff / no base) leaves the run queued
+#     and records the reason as ``headless_error`` on the blob, where the console
+#     and digest read it. The diff is stored verbatim (only a trailing newline is
+#     ensured — stripping corrupts it for ``git apply``). A best-effort
+#     ``headless_diff_attached`` audit entry marks LLM content entering the store.
+#   * ``HeadlessTaskDispatcher`` — the mandates ``TaskDispatcher`` that files the
+#     queued run via ``StationTaskDispatcher`` then runs the runner on it.
 #
-# THE SHAPE:
-#   * ``DevelopFn`` — an injectable async callable ``(DevelopRequest) ->
-#     DevelopResult``. It is the LLM develop loop (the genuine external boundary,
-#     the analogue of ``GhCliPrOpener`` / ``PrOpener`` in ``belt/executor.py``).
-#     Tests inject a deterministic fake that returns a canned diff — code under
-#     test NEVER calls a real LLM or spawns a real agent. Production wires the
-#     real develop loop here (a follow-up; the runner is agnostic to it).
-#   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued ``code_change``
-#     blob, calls the ``DevelopFn`` for a diff, then back-writes the diff +
-#     base_branch onto the blob, CLEARS ``station_pending``, and mints a
-#     Decision-Graph ``correlation_id`` so the gate closes the chain on approve.
-#     The action stays PENDING. NEVER raises — a ``DevelopFn`` failure (or an
-#     empty diff) leaves the run SAFE (still queued, no diff) and records a note.
-#   * ``HeadlessTaskDispatcher`` — a ``TaskDispatcher`` (the mandates seam) that
-#     files the queued run via the existing ``StationTaskDispatcher`` and then
-#     runs the headless runner on it, so one dispatch turns an approved plan task
-#     into a real pending diff. Additive + selectable via
-#     ``POCKETPAW_MANDATE_DISPATCHER=headless`` — the interactive ``station`` and
-#     announce-only ``bus`` dispatchers are untouched.
-#
-# WHY back-write the SAME action rather than file a fresh one: the queued run is
-# already the row the console Runs tab reads and the belt gate would execute.
-# Populating its diff in place keeps one durable run record per task (provenance
-# to the mandate shift stays on the blob) and reuses the EXACT applyable shape
-# the belt executor expects (``base_branch`` + ``diff`` + cleared
-# ``station_pending`` — see ``belt/executor.py`` schema-2 guard). The store-API
-# blob update mirrors ``belt/executor.py::_persist_run_result`` and the MCP
-# server's ``persist_chain_ids`` — the same pattern, no new store method.
-#
-# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
-#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
+# Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
+# ``belt/executor.py::_persist_run_result``).
 
 from __future__ import annotations
 
@@ -84,6 +59,9 @@ class DevelopRequest:
     workspace_id: str
     mandate_id: str = ""
     shift_no: int = 0
+    # A charter recipe name: run that deterministic command instead of an LLM
+    # develop. "" = ordinary develop work.
+    recipe: str = ""
 
 
 @dataclass(frozen=True)
@@ -162,6 +140,7 @@ class HeadlessDevelopRunner:
             workspace_id=str(blob.get("workspace_id") or ""),
             mandate_id=str(blob.get("mandate_id") or ""),
             shift_no=int(blob.get("shift_no") or 0),
+            recipe=str(blob.get("recipe") or ""),
         )
 
         try:
