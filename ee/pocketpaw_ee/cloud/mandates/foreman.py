@@ -16,7 +16,9 @@
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
 # set), and they pin every seat to no settings files, no MCP and no hooks; the
-# develop station uses them too. Prompts ride stdin, never argv or a shell.
+# develop station uses them too. ``run_claude_no_tools`` is the sandboxed
+# tool-less call the foreman and the autopilot personas share. Prompts ride
+# stdin, never argv or a shell.
 #
 # Validation discipline (sim-proven — do not weaken): machine validation runs on
 # ACTION fields (title, expected_outcome) and structural fields (task count vs
@@ -156,33 +158,42 @@ def claude_result_text(stdout: str) -> str:
     return stdout
 
 
+async def run_claude_no_tools(
+    prompt: str, *, timeout: float, run: Any = None, prefix: str = "belt-foreman-"
+) -> str:
+    """One tool-less ``claude -p`` call for a seat that reads third-party text.
+
+    No tools (``--tools ""``), a fresh empty temp dir as cwd (nothing on disk
+    to read even if a tool slipped through), the prompt on stdin, and the
+    develop station's runner, which passes only the scrubbed env. ``run`` is
+    injectable for tests. Returns the model text; a non-zero exit raises
+    ``RuntimeError`` with the output redacted."""
+    from pocketpaw.security.redact import redact_output
+    from pocketpaw_ee.cloud.belt.develop_station import run_subprocess
+
+    with tempfile.TemporaryDirectory(prefix=prefix) as cwd:
+        code, out, err = await (run or run_subprocess)(
+            claude_cli_argv("--tools", ""),
+            cwd=Path(cwd),
+            timeout=timeout,
+            stdin=prompt,
+        )
+    if code != 0:
+        detail = redact_output((err or out).strip())[:300]
+        raise RuntimeError(f"claude CLI failed (exit {code}): {detail}")
+    return claude_result_text(out)
+
+
 @dataclass
 class ClaudeCliLlm:
-    """Default transport — one ``claude -p --tools "" --output-format json``
-    call with the prompt on stdin.
-
-    The foreman reads third-party text (sightings), so it gets no tools at all,
-    runs in a fresh empty temp dir (nothing on disk to read even if a tool
-    slipped through) and sees only the factory's scrubbed env. ``run`` is the
-    develop station's subprocess runner (injectable for tests)."""
+    """Default transport — the foreman reads third-party text (sightings), so
+    it runs through ``run_claude_no_tools``. ``run`` is the develop station's
+    subprocess runner (injectable for tests)."""
 
     run: Any = None
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
-        from pocketpaw.security.redact import redact_output
-        from pocketpaw_ee.cloud.belt.develop_station import run_subprocess
-
-        with tempfile.TemporaryDirectory(prefix="belt-foreman-") as cwd:
-            code, out, err = await (self.run or run_subprocess)(
-                claude_cli_argv("--tools", ""),
-                cwd=Path(cwd),
-                timeout=_CLI_TIMEOUT,
-                stdin=prompt,
-            )
-        if code != 0:
-            detail = redact_output((err or out).strip())[:300]
-            raise RuntimeError(f"claude CLI failed (exit {code}): {detail}")
-        return claude_result_text(out)
+        return await run_claude_no_tools(prompt, timeout=_CLI_TIMEOUT, run=self.run)
 
 
 # Test hook — when set, MockLlm returns this verbatim (a dict is dumped to
@@ -444,6 +455,7 @@ __all__ = [
     "parse_plan",
     "plan_shift",
     "resolve_llm",
+    "run_claude_no_tools",
     "set_mock_plan",
     "validate_plan",
 ]

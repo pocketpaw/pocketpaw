@@ -52,5 +52,23 @@
     "tests": [
       "tests/cloud/test_belt_headless.py::test_headless_diff_applies_after_human_approval"
     ]
+  },
+  {
+    "label": "the sandboxed claude call keeps the default tools (autopilot personas included)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "            claude_cli_argv(\"--tools\", \"\"),\n            cwd=Path(cwd),",
+    "replace": "            claude_cli_argv(),\n            cwd=Path(cwd),",
+    "tests": [
+      "tests/cloud/test_belt_autopilot.py::test_claude_persona_call_is_sandboxed_like_the_foreman"
+    ]
+  },
+  {
+    "label": "the foreman prompt drops the independent-tasks rule",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "6. Tasks in one shift must be INDEPENDENT of each other.",
+    "replace": "6. Tasks in one shift may depend on each other.",
+    "tests": [
+      "tests/cloud/test_belt_develop_station.py::test_foreman_validates_recipe_names_and_lists_them"
+    ]
   }
 ]
