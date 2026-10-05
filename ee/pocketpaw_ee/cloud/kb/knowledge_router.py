@@ -657,8 +657,8 @@ async def reingest_article(
          surfaces) → read ``raw/{article_id}.json`` directly.
 
     The ingest itself goes through
-    :meth:`KnowledgeService.ingest_text_to_scope` — agent-backend compile on
-    keyless boxes, verbatim-fallback rejection, subprocess off the loop.
+    :meth:`KnowledgeService.ingest_text_to_scope` — agent-backend compile,
+    verbatim-fallback rejection, subprocess off the loop.
     """
     resolved = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     _contained_article_id(body.article_id)

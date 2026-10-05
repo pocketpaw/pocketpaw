@@ -1,0 +1,38 @@
+[
+  {
+    "label": "the kb wrapper lets kb-go compile again — build/recompile/watch reach kb's own LLM call",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "_KB_COMPILE_COMMANDS = frozenset({\"build\", \"recompile\", \"watch\"})",
+    "replace": "_KB_COMPILE_COMMANDS = frozenset()",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_never_kb_compile.py"
+    ]
+  },
+  {
+    "label": "plain kb ingest is allowed again — kb-go compiles the raw text with its own LLM call",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "        or (command == \"ingest\" and \"--article-json\" not in args and \"--vec\" not in args)",
+    "replace": "        or (command == \"ingest\" and False)",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_never_kb_compile.py"
+    ]
+  },
+  {
+    "label": "lint --llm is allowed again — kb-go runs an LLM lint pass",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "        or (command == \"lint\" and \"--llm\" in args)",
+    "replace": "        or (command == \"lint\" and False)",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_never_kb_compile.py"
+    ]
+  },
+  {
+    "label": "the discovery tripwire lets kb recompile run — tenant text goes to kb's own LLM call",
+    "file": "ee/pocketpaw_ee/discovery/kb_compile.py",
+    "find": "_FORBIDDEN_KB_COMMANDS = frozenset({\"ingest\", \"build\", \"recompile\", \"watch\"})",
+    "replace": "_FORBIDDEN_KB_COMMANDS = frozenset({\"ingest\", \"build\"})",
+    "tests": [
+      "tests/cloud/agents/test_knowledge_never_kb_compile.py"
+    ]
+  }
+]
