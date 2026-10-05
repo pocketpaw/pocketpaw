@@ -1,0 +1,134 @@
+{
+  "_comment": [
+    "The /studio/design op vocabulary: the wire contract between the edit_design",
+    "MCP tool (pocketpaw, server pocketpaw_craft) and the layout editor's op",
+    "applier (paw-enterprise). Page layout for print: cards, flyers, letterheads.",
+    "",
+    "Committed BYTE-IDENTICAL in both repos:",
+    "  pocketpaw/ee/pocketpaw_ee/agent/mcp_servers/design_ops.contract.json",
+    "  paw-enterprise/src/lib/core/studio/craft/contracts/design_ops.contract.json",
+    "",
+    "Shape and rules are the vector contract's (see vector_ops.contract.json),",
+    "plus: index (whole number >= 0), int1 (whole number >= 1) and `oneOf`: a",
+    "list of param groups; exactly one group must be complete and no param of",
+    "another group may appear. ids/id name frames from the page's projection.",
+    "`engine` names the designcraft command(s) the applier runs.",
+    "",
+    "UNITS: every position and size is MILLIMETRES measured from the TRIM",
+    "top-left of the page (`page`, 0-based; omitted = the page in view), y down.",
+    "Bleed is mm. strokeWidth and text size are points (the print convention).",
+    "The applier converts: pt = mm x 72 / 25.4, and spread coords = the page's",
+    "spread origin + pt. designcraft's object.color reads each CMYK channel <= 1",
+    "as a fraction, so the applier passes the 0..1 paint values unchanged (x100",
+    "would turn 1% into 1, read as 100%). designcraft runs an `ids` command only",
+    "while something is selected, so ops naming ids select them first. type.char's",
+    "fill takes only an existing swatch NAME: a text colour that is not a swatch",
+    "yet is added with swatch.create first (whole CMYK percents).",
+    "",
+    "Paint: as vector: {c,m,y,k} 0..1 (preferred), \"#rrggbb\", \"none\", [r,g,b]",
+    "0..1, {gray} 0..1 or {swatch: name}.",
+    "",
+    "runCommand is the escape hatch, with the same stricter block as photo."
+  ],
+  "version": 1,
+  "maxOpsPerBatch": 50,
+  "ops": {
+    "new_document": {
+      "engine": "file.close, then file.new {width, height (pt; size from the presets A4 210x297, A5 148x210, A3 297x420, card 90x54, dl 99x210 mm, Letter 612x792 pt), bleed (pt, default 3 mm), pages, facingPages: false, margins: 12.7 mm}",
+      "params": {
+        "size": "enum:A4|A5|A3|card|dl|Letter",
+        "width": "number+", "height": "number+", "bleed": "number0", "pages": "int1"
+      },
+      "oneOf": [["size"], ["width", "height"]]
+    },
+    "add_page": {
+      "engine": "layout.pages.insert {count, after}",
+      "params": {"after": "index", "count": "int1"}
+    },
+    "delete_page": {
+      "engine": "layout.pages.delete {pages: [page]}",
+      "params": {"page": "index"},
+      "required": ["page"]
+    },
+    "add_text_frame": {
+      "engine": "frame.create {spread, rect: [x0,y0,x1,y1] spread pt, content: \"text\", text}, text.exitToFrame (frame.create leaves a caret), then type.char {attrs: {fontFamily: font, size, fill: swatch name of color}}, type.para {attrs: {align (justify -> leftJustified)}}",
+      "params": {
+        "page": "index", "x": "number", "y": "number", "width": "number+", "height": "number+",
+        "text": "text", "size": "number+", "font": "text", "color": "paint",
+        "align": "enum:left|center|right|justify"
+      },
+      "required": ["text", "x", "y", "width", "height"]
+    },
+    "add_shape": {
+      "engine": "frame.create {spread, rect, shape: rectangle|ellipse, content: \"unassigned\"} or line.create {spread, a: [x1,y1], b: [x2,y2]}, then object.color / object.fill / object.stroke as set_paint",
+      "params": {
+        "page": "index", "shape": "enum:rectangle|ellipse|line",
+        "x": "number", "y": "number", "width": "number+", "height": "number+",
+        "x1": "number", "y1": "number", "x2": "number", "y2": "number",
+        "fill": "paint", "stroke": "paint", "strokeWidth": "number0"
+      },
+      "required": ["shape"],
+      "requiredWhen": {
+        "shape": {
+          "rectangle": ["x", "y", "width", "height"],
+          "ellipse": ["x", "y", "width", "height"],
+          "line": ["x1", "y1", "x2", "y2"]
+        }
+      }
+    },
+    "set_text": {
+      "engine": "story.setText {story of frame id, text}; selection.set {ids: [id]}, type.char {attrs: {fontFamily: font, size, fill: swatch name of color}}, type.para {attrs: {align (justify -> leftJustified)}}",
+      "params": {
+        "id": "id", "text": "text", "size": "number+", "font": "text", "color": "paint",
+        "align": "enum:left|center|right|justify"
+      },
+      "required": ["id"],
+      "anyOf": ["text", "size", "font", "color", "align"]
+    },
+    "set_paint": {
+      "engine": "selection.set {ids}; object.color {color (CMYK 0..1 as sent, [r,g,b] x 255, gray g -> K g), target: fill|stroke, ids}; \"none\" -> object.fill|object.stroke {swatch: \"[None]\", ids}; {swatch} -> object.fill|object.stroke {swatch, ids}; strokeWidth -> object.stroke {weight, ids}",
+      "params": {"ids": "ids", "fill": "paint", "stroke": "paint", "strokeWidth": "number0"},
+      "anyOf": ["fill", "stroke", "strokeWidth"]
+    },
+    "transform": {
+      "engine": "selection.set {ids}; transform.move {dx, dy (pt), ids}; transform.rotate {angle, ids}; transform.scale {sx: scale / 100, sy: scale / 100, ids} (factors); transform.set {width, height (pt, the visible box: stroke included), ref: 0}",
+      "params": {
+        "ids": "ids", "dx": "number", "dy": "number", "rotate": "number",
+        "scale": "number+", "width": "number+", "height": "number+"
+      },
+      "anyOf": ["dx", "dy", "rotate", "scale", "width", "height"]
+    },
+    "align": {
+      "engine": "selection.set {ids}, object.align {edge: left|hcenter|right|top|vcenter|bottom (center -> hcenter, middle -> vcenter), to, ids}",
+      "params": {
+        "ids": "ids",
+        "align": "enum:left|center|right|top|middle|bottom",
+        "to": "enum:selection|page|margins"
+      },
+      "required": ["align"]
+    },
+    "arrange": {
+      "engine": "selection.set {ids}, object.arrange {to: order}",
+      "params": {"ids": "ids", "order": "enum:front|back|forward|backward"},
+      "required": ["order"]
+    },
+    "delete": {"engine": "edit.clear {ids}", "params": {"ids": "ids"}, "required": ["ids"]},
+    "set_bleed": {
+      "engine": "layout.documentSetup {bleed (pt)}",
+      "params": {"bleed": "number0"},
+      "required": ["bleed"]
+    },
+    "run_command": {
+      "engine": "Session::execute(command, params)",
+      "params": {"command": "command", "params": "object"},
+      "required": ["command"]
+    }
+  },
+  "runCommand": {
+    "pattern": "^[a-z][A-Za-z0-9]*(\\.[A-Za-z][A-Za-z0-9]*){1,3}$",
+    "deniedNamespaces": [
+      "app", "book", "clipboard", "color", "command", "document", "file", "help", "links", "prefs", "tool", "view", "window"
+    ],
+    "deniedSegmentPattern": "^(open|save|saveAs|saveAsTemplate|export|exportSelection|exportForScreens|serialize|load|loadProfile|import|importSvg|close|closeAll|quit|preferences|keyboardShortcuts|batch)$|^(save|export|import|open|load|relink|quickExport)[A-Z]"
+  }
+}

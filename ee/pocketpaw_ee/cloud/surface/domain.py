@@ -1,116 +1,27 @@
 # domain.py — Surface context value objects.
 #
-# Changes: 2026-09-27 (fix/concierge-web-tool-deny) — ``SurfaceProfile`` and its
-# ``PocketSurfaceProfile`` mirror gained ``exclusive_tools``: the run is offered
-# ONLY the MCP tools in ``allow_mcp_tool_ids``, with no universal grant and none
-# of a backend's bundled PocketPaw builtins. Set by the public concierge, where a
-# deny list could never keep up with the builtins an anonymous visitor reached.
-#
-# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — added
-# ``SurfaceKind.BROWSER`` (the /browser agentic-browser surface).
-#
-# Created: 2026-05-24 — Surface-aware chat preamble entity. The cloud
-# chat agent today only sees scope / participants / current-pocket-id
-# (three lines of dynamic context). Paw-enterprise is chat-first and
-# every route will eventually have a chat bar — the agent should know
-# which SURFACE the user is on and what's actually visible there. This
-# module owns the value objects ``SurfaceKind`` (enumerates every chat-
-# bearing surface), ``SurfaceMeta`` (client-supplied hints) and
-# ``SurfaceContext`` (resolved snapshot + rendered preamble). Per the
-# 11 entity rules, tenancy is enforced at construction — ``workspace_id``
-# and ``user_id`` are required on ``SurfaceContext``.
-#
-# Updated: 2026-06-04 (feat/sites-refine-surface) — ``SurfaceMeta`` grows a
-# ``site_id`` hint. The /sites/[siteId] refine chat stamps the published
-# site id (and the underlying pocket_id) so the sites handler can branch onto
-# a LANDING-AWARE REFINE preamble instead of the create-a-new-site one.
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — ``SurfaceMeta`` grows an
-# ``engine`` hint ("ripple" | "svelte"). The /sites create UI's "Use Svelte
-# pages" toggle stamps it so the sites handler routes the CREATE preamble to
-# the svelte-track authoring skill (engine="svelte") instead of the
-# ripple/default marketing brain. Persisted setting is pocket.engine; this is
-# only the per-turn routing signal.
-# Changes: 2026-06-05 (feat/surface-profile-bias-kill) — added the typed
-# ``SurfaceProfile`` descriptor, the per-surface POLICY object (the data
-# backbone of the "ripple-default bias" fix). Its ``ripple_mode`` drives
-# whether ``build_behavior_instructions`` includes the ~20k-char
-# INLINE_RIPPLE_SYSTEM_PROMPT ("default to ui-spec" LAW); ``off`` omits it
-# so the /sites svelte-create surface stops defaulting to a ripple ui-spec
-# instead of hand-authored Svelte.
-# Changes: 2026-06-05 (feat/sites-svelte-engine) — ``deny_mcp_tool_ids`` is now
-# ENFORCED end-to-end: the resolver's set is threaded to the OSS backend's
-# ``run`` as a plain ``frozenset[str]`` and subtracted from the SDK allowlist
-# (replacing the deleted prompt-sniffing tool gate in ``claude_sdk.py``).
-# ``skill_names`` / ``allowed_sdk_tools`` / ``system_message_override`` remain
-# DECLARED-but-inert tested DATA for later passes. The resolver lives in
-# ``service.py`` and is META-AWARE on /sites (three modes).
-# Changes: 2026-06-07 (feat/entity-pocket-profile-field) — relocated
-# ``PocketSurfaceProfile`` here from ``models/pocket.py``. It is the JSON-
-# friendly mirror of ``SurfaceProfile`` embedded on a Pocket; living it in the
-# leaf domain module lets both ``models.pocket`` (the Beanie doc) and
-# ``pockets.dto`` (the wire layer) import it WITHOUT ``pockets.dto`` reaching
-# into ``models.*`` — which the OSS-EE boundary contract forbids. The surface
-# package is models-free at import time, so ``models.pocket`` can import this
-# without a cycle.
-# Changes: 2026-06-10 (feat/studio-code-migration) — added two new chat-bearing
-# surfaces to ``SurfaceKind``: ``STUDIO`` (/studio — describe→generate media,
-# image + video) and ``CODE`` (/code — the agent edits + runs code). Both get
-# ``ripple_mode="off"`` profiles in ``service.py`` so the agent generates media /
-# edits code instead of defaulting to a ripple ui-spec dashboard.
-# Changes: 2026-06-10 (feat/belt-surface, BS-2 Belt & Pulley stations thin
-# slice) — added the ``BELT`` surface (/belt — the develop station). Its
-# ``ripple_mode="off"`` profile in ``service.py`` scopes the agent to the loom
-# orientation tools + the Instinct gate tool so it orients first, develops in a
-# station worktree, and proposes the diff through the gate — never applying to the
-# user's branches directly.
-# Changes: 2026-06-10 (feat/belt-console-backend, SC-1) — ``SurfaceMeta`` grows
-# two Belt console hints: ``repo`` (the git repo path the /belt user bound for
-# this run) and ``base_branch`` (the branch to base the change off). When the
-# /belt page has the user pick a repo + branch up front, the client stamps both
-# so the belt handler's ``build_preamble`` injects them into the preamble and
-# tells the agent NOT to ask for the repo (and to pass exactly these into
-# ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
-# Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — added the ``SHIP``
-# surface (/ship — the managed-deploy control plane). Its ripple-OFF profile in
-# ``surface_registry`` scopes the agent to the ``pocketpaw_ship`` MCP verbs so it
-# drives managed deploys (provision boxes, deploy apps, route domains, attach
-# DBs, read logs/metrics) instead of building a dashboard — and every teardown
-# only files a proposal for human approval. SHIP carries no surface-specific
-# ``SurfaceMeta`` fields (the ship tools resolve tenancy from the chat session).
-# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — added
-# ``SurfacePreamble``, the value object every ``build_preamble`` handler now
-# returns: the rendered text AND the ``cache_key`` that says what the handler
-# read to render it. ``SurfaceContext`` carries that key through as
-# ``preamble_cache_key``. The preamble became a real prompt LAYER on the OSS
-# side (``pocketpaw.prompt.surface``), and a layer's key is what a backend
-# caching an agent object folds into its own key — so the question "what does
-# this preamble depend on" now has to be answered, per handler, by the handler.
-# It is deliberately NOT derived centrally from ``(kind, pocket_id, intent)``,
-# which every dispatcher has to hand: a pocket preamble lists the first 12 of N
-# widgets under a 1500-char cap, so editing widget 13 leaves all three
-# identical while the pocket the agent is being told about has changed.
-# ``cache_key`` has NO DEFAULT and rejects ``""`` for the same reason
-# ``LayerOutput`` does — ``""`` reads as "stable forever" and is what someone
-# types when they mean "nothing".
-# Changes: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — added the
-# ``OTHER_HAND`` surface (/other-hand — the notebook page the user handwrites on
-# and the agent writes/draws back onto). ``SurfaceMeta`` grows two hints the
-# page stamps per turn: ``snapshot_path`` (the absolute path the snapshot
-# endpoint wrote the page PNG to, which the agent ``Read``s to SEE the page) and
-# ``free_y`` (the y below which the page is empty, so the agent never draws over
-# the user's ink). Its profile (``surface_registry._OTHER_HAND_*``) is ripple-OFF
-# and DENIES the two pocket-creation tool ids: an allow-list cannot strip them
-# (``POCKET_CREATION_GRANT`` is unioned back and ``ALWAYS_ALLOWED_MCP_SERVERS``
-# keeps the servers alive), so without the deny "draw me a mitosis diagram"
-# builds a POCKET instead of drawing. Deny is applied BEFORE the grant union in
-# ``claude_sdk._build_options``, so a denied id cannot come back.
-# Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added the ``CONCIERGE``
-# surface (/paw-bar — the public, origin-bound concierge widget). Its handler
-# (``handlers/concierge.build_preamble``) and its ripple-OFF, PUBLIC-SAFE profile
-# (``surface_registry._concierge_profile``: deny web + code/write/subagent tools,
-# lock the MCP surface) live beside the other rows. The run rides
-# ``chat.agent_service.ScopeKind.CONCIERGE``, which locks the KB read to the
-# Site's pocket.
+# The chat agent should know which SURFACE the user is on and what is visible
+# there. This module owns the value objects:
+#   - ``SurfaceKind``: every chat-bearing surface (home, pockets, sites, studio,
+#     the studio editors incl. the craft studios vector / photo / design, code,
+#     belt, ship, browser, other-hand, concierge, ...). The route contract is
+#     ``"/" + value`` (surface_registry._route_for).
+#   - ``SurfaceMeta``: client-supplied per-turn hints (pocket / site ids, the
+#     sites ``engine``, belt ``repo`` / ``base_branch``, other-hand
+#     ``snapshot_path`` / ``free_y``, and LIVE editor documents the page projects
+#     because the document lives in the browser: ``timeline``, ``vector``,
+#     ``photo``, ``design``).
+#   - ``SurfaceProfile``: the per-surface POLICY (``ripple_mode``, tool deny /
+#     allow lists, ``exclusive_tools`` for the public concierge, skills,
+#     system-message override); ``PocketSurfaceProfile`` is its JSON mirror
+#     embedded on a Pocket (it lives here so pockets.dto never reaches models.*).
+#   - ``SurfacePreamble``: a handler's rendered text plus the ``cache_key`` saying
+#     what it read. ``cache_key`` has no default and rejects ``""``, which would
+#     read as "stable forever".
+#   - ``SurfaceContext``: the resolved snapshot; tenancy (``workspace_id``,
+#     ``user_id``) is required at construction.
+# Deny is applied before the pocket-creation grant union in claude_sdk, so a
+# denied id cannot come back through the grant.
 
 from __future__ import annotations
 
@@ -150,6 +61,9 @@ class SurfaceKind(StrEnum):
     SITES = "sites"  # /sites — describe-to-create + manage published Paw Sites
     STUDIO = "studio"  # /studio — describe→generate media (image + video)
     STUDIO_EDITOR = "studio_editor"  # /studio/editor — arrange clips on a timeline
+    STUDIO_VECTOR = "studio_vector"  # /studio/vector — print-ready vector design
+    STUDIO_PHOTO = "studio_photo"  # /studio/photo — retouch photos, passport photos
+    STUDIO_DESIGN = "studio_design"  # /studio/design — page layout for print
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
     SHIP = "ship"  # /ship — the managed-deploy control plane (drive deploys via ship MCP verbs)
@@ -291,6 +205,14 @@ class SurfaceMeta:
     # server validates ops against, so the tool can only accept ids the agent was
     # actually shown. Absent = no editor open.
     timeline: dict[str, Any] | None = None
+    # Craft studio hints — the open document of /studio/vector, /studio/photo or
+    # /studio/design, projected by the page (shapes documented in
+    # handlers/studio_craft.py). Same role as ``timeline``: the document lives in
+    # the browser, the preamble renders this, and ``run_core`` binds it so
+    # ``edit_<app>`` validates ids against it. Absent = no such editor open.
+    vector: dict[str, Any] | None = None
+    photo: dict[str, Any] | None = None
+    design: dict[str, Any] | None = None
     # Otherhand hints — stamped by the /other-hand page on EVERY turn (the page
     # changes every time the user lifts the pen, so neither hint is stable).
     #

@@ -45,7 +45,16 @@ def text(result: dict) -> str:
 def test_tool_ids() -> None:
     assert OPEN_SURFACE_TOOL_ID == "mcp__pocketpaw_surfaces__open_surface"
     assert SURFACES_TOOL_IDS == (OPEN_SURFACE_TOOL_ID,)
-    assert set(allowed_routes()) == {"/files", "/studio/editor", "/chat", "/pockets", "/knowledge"}
+    assert set(allowed_routes()) == {
+        "/files",
+        "/studio/editor",
+        "/studio/vector",
+        "/studio/photo",
+        "/studio/design",
+        "/chat",
+        "/pockets",
+        "/knowledge",
+    }
 
 
 def _swap_atlas(monkeypatch: pytest.MonkeyPatch, openable: dict[str, bool]) -> None:

@@ -1,0 +1,92 @@
+[
+  {
+    "label": "run_command deny list skipped: file.save / document.export reach the browser",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "    if segments[0] in c.denied_namespaces or any(c.denied_segment_re.match(s) for s in segments):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "invented ids pass validation",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "        if obj not in summary.ids:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "unknown params ride through to the applier",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "            if key != \"op\" and key not in params:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "tool dispatches off a studio surface (no projection bound)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "    if not summary.has_document:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "batch cap not enforced",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "    if len(ops) > c.max_ops:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "range params accept out-of-range values (photo levels, opacity)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "    ok = _is_num(value) and lo <= value <= hi",
+    "replace": "    ok = _is_num(value)",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "oneOf lets a crop mix preset and box params",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft_ops.py",
+    "find": "    if len(complete) > 1 or stray:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "a tool reads another app's projection",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    return (craft or {}).get(app)",
+    "replace": "    return next(iter((craft or {}).values()), None)",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "craft_edit envelope never promoted to an SSE frame",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "_EDITOR_ENVELOPE_MARKERS = (\"timeline_edit\", \"timeline_export\", \"motion_graphic\", \"craft_edit\")",
+    "replace": "_EDITOR_ENVELOPE_MARKERS = (\"timeline_edit\", \"timeline_export\", \"motion_graphic\")",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  },
+  {
+    "label": "tool schema falls back to the SDK shorthand: ops becomes a bare string",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/craft.py",
+    "find": "    return {\"type\": \"object\", \"properties\": {\"ops\": ops}, \"required\": [\"ops\"]}",
+    "replace": "    return {\"ops\": ops}",
+    "tests": [
+      "tests/ee/agent/test_craft_mcp.py"
+    ]
+  }
+]

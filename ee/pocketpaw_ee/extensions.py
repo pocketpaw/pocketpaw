@@ -17,29 +17,14 @@ Heavy `pocketpaw_ee` imports happen lazily inside methods, so loading this
 module (which the registry does on first access) stays cheap and cycle-free.
 
 `CloudLifecycleHook.on_startup` opens the cloud DB, seeds admin/workspace and
-the default + code agents, then starts the loops that cannot wait for
-`mount_cloud`'s lifespan: meeting-job recovery, the pocket interval-refresh
-scheduler (`POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED`), the temporal trigger
-sweep (`POCKETPAW_TEMPORAL_SWEEP_ENABLED`), the 5-minute sweeper (see
-`_sweeps`), the xproc consumer, local-site re-serve and the dev-server reaper.
-With several web processes (`POCKETPAW_REALTIME_BUS=redis-streams`) the
-scheduled ones run under a Redis lease (`cloud/_core/lease.py`): once per
-cluster, and the jail GC once per host. `on_shutdown` stops what it started.
-
-Changes (2026-10-03, dashboard ws ticket): ``CloudAuthProvider`` gains
-``redeem_dashboard_ws_ticket`` so the OSS dashboard socket can redeem a
-first-frame ws_ticket (active superusers only) without importing EE.
-
-Changes (2026-10-02, PH-15): ``_sweeps`` runs ``sweep_partner_tiers``.
-
-Changes (2026-10-01, CN-4): `on_shutdown` closes the shared arq pool via
-`_core.redis_client.close_arq_pool` (was the chat-runs-only `close_pool`), then
-the shared and blocking Redis clients via `close_redis` (never called before).
-
-CN-6 (2026-10-01): `on_startup` also fires a one-shot background backfill of the
-Fabric read model (`default_journal_store().sync_read_model()`), so objects
-written to the journal before the read-model wiring reach the per-workspace
-FabricStore that agents read. Idempotent and cancel-safe; never on a read path.
+the default + code agents, fires a one-shot Fabric read-model backfill, then
+starts the loops that cannot wait for `mount_cloud`'s lifespan: meeting-job
+recovery, the pocket refresh scheduler, the temporal sweep, the 5-minute
+sweeper (`_sweeps`, incl. partner tiers), the xproc consumer, local-site
+re-serve and the dev-server reaper; with several web processes the scheduled
+ones run under a Redis lease. `on_shutdown` stops them and closes the arq pool
+and Redis clients. `CloudAuthProvider.redeem_dashboard_ws_ticket` lets the OSS
+dashboard socket redeem a first-frame ws_ticket without importing EE.
 """
 
 from __future__ import annotations
@@ -919,6 +904,28 @@ class CloudTimelineMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.timeline import TIMELINE_TOOL_IDS
 
         return list(TIMELINE_TOOL_IDS)
+
+
+class CloudCraftMcpProvider:
+    """`pocketpaw.mcp_servers` — the craft studio server (``pocketpaw_craft``).
+    Hosts ``edit_vector`` / ``edit_photo`` / ``edit_design``. Ambient and inert
+    off-surface exactly like the timeline provider: each tool refuses when its
+    app's projection is not bound, and each STUDIO_<APP> profile scopes its one
+    tool onto its surface.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.craft import build_craft_server
+
+            return build_craft_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.craft import CRAFT_TOOL_IDS
+
+        return list(CRAFT_TOOL_IDS)
 
 
 class CloudSurfacesMcpProvider:

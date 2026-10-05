@@ -1,59 +1,38 @@
 """Agent-run core: the loop the executor invokes for every chat run.
 
-``execute_run(spec)`` rebuilds the scope context from the ``RunSpec``, runs the
-run-start gates (jail quota, off the event loop; daily turn cap; guest budget;
-credit quota; own-key rules), wins the ``queued -> running`` transition (a run
-the stale-run sweeper already interrupted is dropped, not driven), then drives
-``_drive_agent_loop`` and appends every frame it yields to the run's stream
-transport. A heartbeat task stamps ``last_heartbeat_at`` while the run is
-driven so the sweeper can tell a slow run from a dead one.
+``execute_run(spec)`` rebuilds the scope context, runs the run-start gates (jail
+quota, daily turn cap via ``metering.service.try_spend``, guest budget, credit
+quota, own-key rules), wins ``queued -> running`` (a run the sweeper already
+interrupted is dropped), then drives ``_drive_agent_loop`` and appends every
+frame to the run's stream transport while a heartbeat stamps the run doc.
 
-Warm-client turn state: the agent runs under ``warm_session_key_for(ctx)`` (the
-conversation key plus the user), so members of one scope never share a warm CLI
-process. ``_prewarm_session`` connects under that key's turn slot
-(``enter_turn_slot``) and ``_drive_agent_loop`` fills the slot with this turn's
-``TurnBinding`` (identity, pocket, Paw Bar run, timeline, SSE queue, artifact
-collector) before ``pool.run`` and clears it in its finally, because the
-client's in-process MCP tools keep the context they were connected in. History
-still loads and persists under ``session_key_for``.
+The agent runs under ``warm_session_key_for(ctx)``, so members never share a warm
+CLI process. ``_prewarm_session`` connects under that key's turn slot and
+``_drive_agent_loop`` fills it with this turn's ``TurnBinding`` (identity,
+pocket, Paw Bar run, timeline, craft projections, SSE queue, artifacts) before
+``pool.run``, because in-process MCP tools keep the context they connected in.
 
-A supervised turn that ends without the backend's ``done`` (a crash, a user
-stop, a host cancel, a closed stream) demotes its session with ``mark_crashed``,
-because its leased client is still mid-reply. ``_prewarm_session`` warms with the
-turn's model pick and tool switch so the warmed client's key matches the turn's.
+``_drive_agent_loop`` resolves the entity-aware ``SurfaceProfile``, BYOK, model
+override, preamble and attachments, calls ``AgentPool.run`` and maps backend
+events to SSE frames: chunks, thinking, tool chips, plan updates, ripple /
+artifact / studio frames, editor envelopes (``_EDITOR_ENVELOPE_MARKERS``:
+timeline and ``craft_edit``), ``open_surface``, usage. A rate-limited provider
+gets ``agent.provider_busy``; other backend errors ``agent.backend_error``.
 
-``_drive_agent_loop`` resolves the entity-aware ``SurfaceProfile`` (tool deny /
-allow, skills, system-message override), BYOK credentials, the per-send model
-override, surface preamble and attachments, then calls ``AgentPool.run`` and maps
-backend events to SSE frames (chunks, thinking, tool chips with narration, plan
-updates, ripple / artifact / studio frames, ``open_surface`` frames, token
-usage). Behind
-``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI session and
-can lease a warm client. A backend ``error`` event becomes a terminal ``error``
-frame; a rate-limited or overloaded provider gets the stable code
-``agent.provider_busy`` and a plain message, with the raw text kept to the
-server log. Every other backend error keeps ``agent.backend_error``.
+Behind ``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI
+session and can lease a warm client.
 
-Every terminal path (completed, failed, cancelled, host-interrupted) persists
-the text already streamed as an assistant ``Message`` with its tool/thinking
-``steps``, records the run's token ``usage`` on the run doc (latest-wins,
-floored) so metering can bill it, and sets the stream TTL. A concierge run
-never trains the agent's soul. Invariants worth keeping:
-
-- the cancel check keeps the chunk it holds in ``full_text`` but does not append
-  it, so the client stream stops exactly where it did;
-- ``mark_cloud_chat_run`` and the artifact collector are bound before the
-  prewarm task is created, so both are inherited by it;
-- the host-cancel cleanup is shielded and tracked, and the worker drains it
-  (``drain_pending_cleanups``) before closing the database.
-- every step of the backend's generator (and its final ``aclose``) runs in
-  one Context, so spans it holds across ``yield`` attach and detach cleanly.
-  That ``aclose`` is time-bounded and a cancel during it is deferred, so it
-  never skips the sink/turn/supervisor bookkeeping after it.
-
-Changes: 2026-10-01 (CN-3, fix/canon-daily-caps) — the daily turn cap claims
-through ``metering.service.try_spend`` (the one daily usage primitive) instead
-of ``turn_budget``, which is gone. Same cap, same env, same fail-open.
+Every terminal path persists the streamed text as an assistant ``Message`` with
+its steps, records token usage (latest-wins), and sets the stream TTL; a
+concierge run never trains the agent's soul. Invariants: the cancel check keeps
+its held chunk in ``full_text`` without appending it; ``mark_cloud_chat_run`` and
+the artifact collector are bound before the prewarm task exists; the host-cancel
+cleanup is shielded and drained (``drain_pending_cleanups``) before DB close; a
+supervised turn that ends without ``done`` demotes its session (``mark_crashed``);
+every step of the backend's generator (and its final ``aclose``) runs in one
+Context so spans held across ``yield`` attach and detach cleanly, and that
+``aclose`` is time-bounded with a cancel during it deferred, so it never skips
+the sink/turn/supervisor bookkeeping after it.
 """
 
 from __future__ import annotations
@@ -92,6 +71,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     TurnBinding,
     attach_agent_identity,
     attach_sse_event_sink,
+    bind_craft,
     bind_pawbar_run,
     bind_timeline,
     bind_turn,
@@ -109,6 +89,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_turn_images,
     resolve_user_content,
     session_key_for,
+    unbind_craft,
     unbind_pawbar_run,
     unbind_timeline,
     unbind_turn,
@@ -575,6 +556,22 @@ def _timeline_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
     return timeline if isinstance(timeline, dict) else None
 
 
+def _craft_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """The open craft studio projections as ``{app: projection}``, or None.
+
+    Same contract as ``_timeline_from_ctx``: the page stamps ``surface_meta.<app>``
+    (vector / photo / design) on every send, and binding it lets ``edit_<app>``
+    validate ids against what the agent saw.
+    """
+    from pocketpaw_ee.agent.mcp_servers.craft_ops import APPS
+
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    craft = {app: proj for app in APPS if isinstance(proj := getattr(sc.meta, app, None), dict)}
+    return craft or None
+
+
 async def _persist_assistant_message(
     ctx: ScopeContext,
     content: str,
@@ -870,8 +867,13 @@ def _first_json_object(text: str) -> Any:
     return None
 
 
+# Studio editor tool envelopes promoted to their own SSE frame (event name =
+# marker): /studio/editor's timeline tools and the craft studios' edit_<app>.
+_EDITOR_ENVELOPE_MARKERS = ("timeline_edit", "timeline_export", "motion_graphic", "craft_edit")
+
+
 def _timeline_payload(output: Any, marker: str) -> dict[str, Any] | None:
-    """Extract a ``timeline_edit`` / ``timeline_export`` / ``motion_graphic`` envelope.
+    """Extract a studio editor envelope (``timeline_edit`` / ``craft_edit`` / ...).
 
     Same job as ``_studio_flow_payload`` and the same reason: ``tool_result``
     fans to the client as a 200-char chip, which a 50-op batch does not fit in.
@@ -1356,6 +1358,7 @@ async def _prewarm_session(
         # same pawbar_actions tool set turn 1 will resolve (None for every other run).
         pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
         timeline_token = bind_timeline(_timeline_from_ctx(ctx))
+        craft_token = bind_craft(_craft_from_ctx(ctx))
         # The warm client's MCP tools keep the context they are connected in, so
         # connect them under the session's turn slot: each turn then fills it
         # with its own identity/collector (``bind_turn`` in _drive_agent_loop).
@@ -1393,6 +1396,7 @@ async def _prewarm_session(
             )
         finally:
             exit_turn_slot(slot_token)
+            unbind_craft(craft_token)
             unbind_timeline(timeline_token)
             unbind_pawbar_run(pawbar_token)
             detach_agent_identity(identity_tokens)
@@ -1706,6 +1710,8 @@ async def _drive_agent_loop(
     # Same lifetime as the pawbar context: bound here, reset in the same finally.
     timeline = _timeline_from_ctx(ctx)
     timeline_token = bind_timeline(timeline)
+    craft = _craft_from_ctx(ctx)
+    craft_token = bind_craft(craft)
     # This turn's values for the warm client's in-process MCP tools, which read
     # the session's turn slot rather than the context they were connected in.
     # Bound inside the try (a process-level slot must not outlive a raise).
@@ -1781,6 +1787,7 @@ async def _drive_agent_loop(
                 pocket_id=ctx.pocket_id,
                 pawbar_run=pawbar_run,
                 timeline=timeline,
+                craft=craft,
                 sse_sink=side_channel_queue,
                 artifacts=current_delivered_artifacts(),
             ),
@@ -2326,7 +2333,7 @@ async def _drive_agent_loop(
                 # Same treatment for the /studio/editor tools: the op batch is
                 # far past the tool_result chip's 200 chars, and the browser tab
                 # holding the document is the only thing that can apply it.
-                for _marker in ("timeline_edit", "timeline_export", "motion_graphic"):
+                for _marker in _EDITOR_ENVELOPE_MARKERS:
                     _tl_payload = _timeline_payload(output, _marker)
                     if _tl_payload is not None:
                         yield (_marker, _tl_payload)
@@ -2489,6 +2496,10 @@ async def _drive_agent_loop(
                 unbind_turn(turn_handle)
             except Exception:
                 pass
+        try:
+            unbind_craft(craft_token)
+        except Exception:
+            pass
         try:
             unbind_timeline(timeline_token)
         except Exception:

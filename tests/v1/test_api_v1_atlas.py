@@ -10,7 +10,8 @@
 # Live tie fix: navigational queries land on their surface with a clear margin
 # over every verb ("show me my files" used to tie files / file-delete /
 # file-download at 0.656), and the action words still pick their verb.
-# Updated 2026-10-02 (feat/discover-index): the overlay counts gain surface:discover (29/30).
+# The overlay surface counts are pinned (34 for an owner, 33 for a member), so an
+# added surface is a deliberate pin bump.
 
 from __future__ import annotations
 
@@ -283,12 +284,12 @@ class TestOverlay:
     def test_owner_sees_owner_gated_surface(self, client, monkeypatch):
         _with_role(monkeypatch, "owner")
         ids = _surface_ids(client)
-        assert "surface:security" in ids and len(ids) == 31
+        assert "surface:security" in ids and len(ids) == 34
 
     def test_member_does_not(self, client, monkeypatch):
         _with_role(monkeypatch, "member")
         ids = _surface_ids(client)
-        assert "surface:security" not in ids and len(ids) == 30
+        assert "surface:security" not in ids and len(ids) == 33
 
     @pytest.mark.parametrize("kw", [{"role": None}, {"role": "owner", "prime_raises": True}])
     def test_unresolved_role_fails_closed(self, client, monkeypatch, kw):

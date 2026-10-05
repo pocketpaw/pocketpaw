@@ -1,45 +1,13 @@
-# tests/atlas/test_store.py — AtlasStore loader / search / describe (AT-1).
-# Updated 2026-10-02 (feat/discover-index, review): surface:discover (/discover)
-# joins the expected surfaces.
-# Created: 2026-07-02 (feat/atlas-core). Proves the packaged seed validates
-# against paw.atlas/v1 with all 10 primitive entries, intent search ranks
-# the right primitive into the top results ("approve agent actions" →
-# Instinct, "build an app dashboard" → Pocket), describe returns the full
-# narrative, unknown ids return None, and the seed round-trips the schema.
-# Updated: 2026-07-02 (feat/atlas-surface, AT-3) — the seed now also carries
-# kind="surface" entries (paw-enterprise routes). Loader tests split into
-# per-kind completeness checks (every surface entry must carry a route in
-# its ``surface`` field); new search/describe tests pin "publish a website"
-# → sites with the /sites route populated, and primitives cross-linked to
-# their home surfaces.
-# Updated: 2026-07-02 (feat/atlas-compiler, AT-4) — the data file is now the
-# COMPILED artifact carrying extracted ``connector`` and ``sense`` entries
-# next to the authored ones, with ``generated: true``. Loader assertions
-# updated: authored ids are a subset (still exact per authored kind), every
-# entry kind is one of the four compiled kinds, and search-ranking pins are
-# unchanged (they must survive the 41 new entries).
-# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — the artifact now also
-# carries extracted ``widget`` (ripple catalog) and ``skill`` (bundled
-# skills) entries; COMPILED_KINDS widened to six. Search-ranking pins are
-# otherwise unchanged and must survive the ~165 new entries (widget/skill
-# specific pins live in tests/atlas/test_widgets_skills.py).
-# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — the artifact now also
-# carries hand-authored ``capability`` cards (the workspace-admin tools, one per
-# tool, each role-gated); COMPILED_KINDS widened to seven so the
-# seed-completeness check accepts them.
-# Updated: 2026-07-05 (fix/atlas-relevance-round2, Finding A) — new coverage for
-# the kind-priority bias: a real-store governance-paraphrase pin (Instinct #1,
-# not the /agents surface) and a synthetic-model ``TestKindPriorityBias`` proving
-# the primitive edges a same-overlap surface but a genuine margin still wins.
-# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — two authored
-# primitives joined the seed (primitive:source-truth, primitive:verify-loop);
-# EXPECTED_PRIMITIVE_IDS pins the twelve.
-# Updated: 2026-10-01 (feat/atlas-canonical) — COMPILED_KINDS gains "verb"; the
-# two hand-built surface fixtures carry the now-required presentation /
-# agent_openable fields. Live tie fix: TestVerbRankingSafety pins the verb
-# object-noun damper and the deterministic tie order (surface before verb, then
-# name hits, then id). Review pass: five surfaces the composer's slash menu
-# offers (/agents/activity, /fabric, /ship, /growth, /browser) join the set.
+# tests/atlas/test_store.py — AtlasStore loader / search / describe.
+# Proves the compiled artifact validates against paw.atlas/v1; authored ids are
+# an exact set per authored kind (the twelve primitives and every surface,
+# including the craft studios) and every entry kind is one of COMPILED_KINDS;
+# every surface carries its route. Search pins: "approve agent actions" ->
+# Instinct, "build an app dashboard" -> Pocket, "publish a website" -> /sites,
+# a governance paraphrase -> Instinct over /agents (TestKindPriorityBias), and
+# TestVerbRankingSafety (the verb object-noun damper and the deterministic tie
+# order: surface before verb, then name hits, then id). Describe returns the
+# full narrative; unknown ids return None; the seed round-trips the schema.
 
 import json
 
@@ -93,6 +61,9 @@ EXPECTED_SURFACE_IDS = {
     "surface:files",
     "surface:studio",
     "surface:studio_editor",
+    "surface:studio_vector",
+    "surface:studio_photo",
+    "surface:studio_design",
     "surface:code",
     "surface:foresight",
     "surface:calendar",
