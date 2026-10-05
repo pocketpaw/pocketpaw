@@ -42,22 +42,18 @@ os.environ.setdefault("POCKETPAW_REDIS_URL", "redis://test:6379/0")
 
 import pytest
 
-# Every test under ``tests/cloud/`` exercises ``ee.cloud.*``, which pulls
-# ``beanie`` (the cloud-extras stack) on import. Skip the whole tree with
-# a clear reason when those extras aren't installed, instead of letting
-# pytest emit a per-file collection error that's easy to miss in a
-# verbose log. CI installs everything via ``uv sync --dev --all-extras``
-# so this is a no-op there; locally it just makes the contract explicit.
-pytest.importorskip(
-    "beanie",
-    reason="ee/cloud tests require the cloud extras — install with `uv sync --dev --all-extras`",
-)
-pytest.importorskip("mongomock_motor", reason="mongomock-motor is required for cloud tests")
+# Every test under ``tests/cloud/`` exercises ``pocketpaw_ee.cloud.*``. When the
+# enterprise install is missing this FAILS collection with the install command
+# (tests/conftest.py); it used to skip the whole tree, and that silent skip read
+# as a green run.
+from tests.conftest import require_enterprise_install
 
-import pytest_asyncio
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.cloud._core.realtime.events import Event
+require_enterprise_install("tests/cloud")
+
+import pytest_asyncio  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from pocketpaw_ee.cloud._core.realtime.events import Event  # noqa: E402
 
 
 class RecordingBus:

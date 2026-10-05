@@ -1,76 +1,27 @@
-# CI — runs tests and lint on every PR targeting dev/main or an
-# RFC integration branch (pattern: feat/*-integration).
-# Created: 2026-02-26
-# Updated: 2026-10-03 (fix/paw-key-scopes) — the EE test job runs
-# tests/cloud/auth/test_api_keys.py (workspace paw_ key scope enforcement),
-# which otherwise sits in the tests/cloud blind spot.
-# Updated: 2026-10-03 (fix/paw-bar-frame-headers) — the EE test job runs
-# tests/cloud/test_paw_bar_frame.py (frame CSP + dashboard header middleware),
-# which otherwise sits in the tests/cloud blind spot.
-# Updated: 2026-10-03 (feat/dashboard-ws-ticket-auth) — the EE test job runs
-# tests/cloud/auth/test_dashboard_ws_ticket.py (first-frame ws_ticket auth on
-# /api/v1/ws), which otherwise sits in the tests/cloud blind spot.
-# Updated: 2026-10-02 (fix/canon-cross-repo-pins) — the EE test job runs
-# tests/cloud/test_paw_bar_widget_js.py (vendored loader hash pin), which otherwise
-# sits in the tests/cloud blind spot.
-# Updated: 2026-09-27 (fix/concierge-web-tool-deny) — the EE test job runs the two
-# public concierge tool-lockdown files, which otherwise sit in the tests/cloud
-# blind spot.
-# Updated: 2026-03-11 — Added Python version matrix (3.11, 3.12, 3.13) for
-# the test job. Lint job pinned to 3.12 only.
-# Updated: 2026-05-21 — OSS-EE split (Phase 4). `pocketpaw` (OSS core) and
-# `pocketpaw-ee` (enterprise) are now two packages. CI verifies both the
-# OSS-only install and the full (core + EE) install, builds both wheels,
-# and runs the import-linter contracts for each package.
-# Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
-# sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
-# Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
-# Updated: 2026-09-28 (feat/concierge-spend-cap) — the v2 concierge step also runs
-# test_paw_bar_concierge_v2_degrade.py (spend cap and leave-a-message degrade).
-# Updated: 2026-09-28 (feat/concierge-manual-create) — the EE test job runs the
-# concierge manual-create, marker-backfill and foreign-bind tests (tests/cloud).
-# Updated: 2026-09-27 (feat/concierge-v2-runner) — the EE test job runs the v2
-# Paw Bar concierge runner tests, which otherwise sit in the tests/cloud blind spot.
-# Updated: 2026-09-28 (feat/concierge-v2-output) — the same step also runs the v2
-# output pipeline tests (code-fence filter, card hydration, paw-bar parity).
-# Updated: 2026-06-10 — deploy-coolify job: pushes to dev that pass every CI
-# job now fire the Coolify deploy hook for the cloud backend stack (defined
-# in qbtrix/paw-workspace deploy/coolify/, which clones this repo's dev at
-# image-build time). Lives in this workflow (not workflow_run) because the
-# repo's default branch is main — workflow_run triggers only fire from the
-# default branch's file, and main lags dev.
-# Updated: 2026-06-27 — CI speed: the `test` job now runs the full 3.11/3.12/
-# 3.13 matrix only on push to dev/main; PRs test 3.12 alone (the prod version,
-# per the Dockerfile), so version-specific breaks are still caught at the merge
-# gate. The duplicate full-suite run in tests.yaml was removed in the same pass.
-# Updated: 2026-07-02 — lint job gains the `atlas build --check` freshness
-# gate (AT-4): the compiled atlas artifact (src/pocketpaw/atlas/data/
-# atlas.json) must match a fresh compile of authored entries + connector/
-# senses extraction, or the step fails with a diff summary.
-# Updated: 2026-08-10 — new `mutation-anchors` job (#1903). Nineteen mutation
-# plans lived under tests/mutations/ with nothing in this directory running any
-# of them, so a plan whose anchor had rotted applied ZERO mutations while still
-# reading as covered — two were found in that state on the same day. The job
-# runs `mutate.py --validate`, which counts substrings and exits: no mutation
-# applied, no tests run, no dependency install. A full sweep is deliberately
-# NOT here; see the job's own comment for why.
-# Updated: 2026-10-01 (CN-3) — the test job runs the daily cap and run-start
-# gate tests (metering primitive, per-meter characterization, abuse budgets,
-# comprehension, transcription, guest gates, illustration budget, the chat
-# route's billing leg) with the same addopts escape.
-# Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_faqs.py
-# (concierge pinned FAQs) with the same addopts escape as the v2 runner step.
-# Updated: 2026-09-28 — the test job runs tests/cloud/test_paw_bar_concierge_sources.py
-# (concierge knowledge uploads and links) with the same addopts escape.
-# Updated: 2026-09-28 — the v2 concierge step also runs
-# test_paw_bar_concierge_guided_fields.py (CR-4, owner guided fields).
-# Updated: 2026-09-28 — and test_paw_bar_concierge_page.py (CR-3, page-aware
-# answers: the page's origin check, the crawl index, sources = retrieved).
-# Updated: 2026-09-28 (feat/concierge-eval-gate, CR-6) — the v2 concierge step
-# also runs the eval scorer and rollout-gate tests, then the recorded eval
-# (``python -m tests.evals.concierge.run --recorded``), which replays committed
-# model outputs through the real runner and fails on any code leak, frame leak,
-# invalid card, turn error or missing recording.
+# CI for pocketpaw: lint, wheel build and separation, tests and the OSS-EE
+# boundary on every PR to dev/main or a feat/*-integration branch, and on push.
+#
+# Jobs:
+#   lint              ruff check + format, header-dates check (PRs only, diffs the
+#                     merge commit against its first parent), atlas build --check.
+#   build             core and EE wheels; asserts no EE file leaks into the core wheel.
+#   test-oss          OSS core only (no pocketpaw_ee): the import boundary script and
+#                     the core suite with tests/ee ignored. Proves pip install pocketpaw
+#                     is self-sufficient.
+#   test              core + EE. PRs run 3.12 (the prod version); pushes run the
+#                     3.11/3.12/3.13 matrix. The pyproject addopts hide tests/cloud, so
+#                     this job collects the whole tree once (--co) and runs the
+#                     hand-listed tests/cloud files with -o addopts="". A new test under
+#                     tests/cloud needs its own step here or it never runs in CI.
+#   mutation-anchors  python scripts/mutate.py --validate (anchors only, no sweep;
+#                     see the job comment). Not in deploy's needs on purpose.
+#   import-linter     the core and the ee/pyproject.toml contracts.
+#   deploy-coolify    on push to dev with every job green, fires the Coolify deploy
+#                     hook for the cloud stack (defined in paw-workspace deploy/coolify/).
+#                     Lives here, not in workflow_run, because the default branch is main
+#                     and workflow_run only fires from the default branch's file.
+#
+# The flag-mode isolation lane (POCKETPAW_REQUIRE_WORKSPACE_SCOPE=1) is in tests.yaml.
 name: CI
 
 on:
@@ -89,6 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Two commits so the header-dates check can diff the PR merge
+          # commit against its first parent (the base branch).
+          fetch-depth: 2
+
+      - name: No dated change entries in file headers
+        # Headers describe the file's current state; history is git's job
+        # (CLAUDE.md § File header comments). Only fires on ADDED lines, so
+        # existing entries are not a failure until someone appends another.
+        if: github.event_name == 'pull_request'
+        run: scripts/check_header_dates.sh HEAD^1 HEAD
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -249,6 +211,18 @@ jobs:
           --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
           --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
           -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Collect every tests/cloud test
+        # The pyproject addopts hide tests/cloud from "Run tests" above, and the
+        # hand-listed steps below reach a fraction of its ~900 files. Collecting
+        # the whole tree catches what rots unseen: a missing enterprise install
+        # (tests/cloud/conftest.py now fails instead of skipping), a dropped extra
+        # (pypdf, 2026-10-01), or an import left behind by a move. Collection
+        # only, not a run: tests/cloud is not green on dev today.
+        run: uv run pytest tests/cloud -o addopts="" --co -q
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

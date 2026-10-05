@@ -110,18 +110,32 @@ class TestService:
         mock_api_instance.__aenter__ = AsyncMock(return_value=mock_api_instance)
         mock_api_instance.__aexit__ = AsyncMock(return_value=False)
 
-        # Patch at the import site in the service module
-        patcher = patch(
-            "pocketpaw_ee.cloud.livekit.service.LiveKitAPI", return_value=mock_api_instance
-        )
-        patcher.start()
+        # Patch at the import site in the service module. The agent spawn is
+        # patched too: unpatched, create_room() launches the real
+        # ``python -m pocketpaw_ee.cloud.livekit.agent`` child, which never exits
+        # under pytest (tests/conftest.py refuses that spawn outright).
+        patchers = [
+            patch("pocketpaw_ee.cloud.livekit.service.LiveKitAPI", return_value=mock_api_instance),
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._spawn_agent_process",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._reap_agent_process",
+                new_callable=AsyncMock,
+            ),
+        ]
+        for p in patchers:
+            p.start()
 
         yield mock_room_svc
 
         # Clean up any agents / spawn locks created during the test
         _active_agents.clear()
         _spawn_locks.clear()
-        patcher.stop()
+        for p in reversed(patchers):
+            p.stop()
 
     @pytest.mark.asyncio
     @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")

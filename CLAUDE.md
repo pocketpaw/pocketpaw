@@ -106,8 +106,12 @@ uv run pocketpaw errors                     # Show recent errors (--limit, --sea
 uv run pocketpaw logs                       # Show audit log (--follow to tail)
 uv run pocketpaw update                     # Update to latest version via uv
 
-# Run all tests (excluding E2E tests) — needs the full install: uv sync --dev --group ee
+# Run all tests (excluding E2E tests) — needs the full install:
+#   uv sync --group ee --group dev --extra knowledge
+# Without pocketpaw_ee, tests/ee and tests/cloud FAIL collection (they used to skip).
+# The pyproject addopts hide tests/cloud: run it explicitly with -o addopts="".
 uv run pytest --ignore=tests/e2e
+uv run pytest tests/cloud -o addopts=""
 
 # Run only the OSS-core test scope (passes on an OSS-only `uv sync --dev`)
 uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee
