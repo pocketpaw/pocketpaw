@@ -649,3 +649,47 @@ def test_wire_from_env_refuses_a_multi_tenant_process(monkeypatch, caplog):
         assert resolve_headless_dispatcher() is not None
     finally:
         set_production_develop_fn(None)
+
+
+# ---------------------------------------------------------------------------
+# hardening — secrets
+# ---------------------------------------------------------------------------
+
+GH_TOKEN = "ghp_" + "A1b2C3d4E5" * 4  # matches security.redact's GitHub pattern
+
+
+async def test_secret_looking_diff_is_refused(repo):
+    def develop(cwd: Path) -> None:
+        (cwd / "feature.txt").write_text("ok\n")
+        (cwd / "settings.py").write_text(f'TOKEN = "{GH_TOKEN}"\n')
+
+    fake = FakeClaude(develop=[develop])
+    with pytest.raises(ds.DevelopStationError, match=r"^DONE: diff contains a secret") as exc:
+        await _station(fake, repo)(_request(repo))
+    assert GH_TOKEN not in str(exc.value)
+    _assert_clean(repo, fake)
+
+
+async def test_check_output_is_redacted_in_prompts_and_errors(repo):
+    leaky = f"{PY} -c \"print('token: ' + 'ghp_' + 'A1b2C3d4E5' * 4); raise SystemExit(1)\""
+    fake = FakeClaude(develop=[_write("ok")] * 3)
+    with pytest.raises(ds.DevelopStationError) as exc:
+        await _station(fake, repo, checks=(leaky,))(_request(repo))
+    assert GH_TOKEN not in str(exc.value) and "[REDACTED]" in str(exc.value)
+    fix_prompts = [p for seat, p in fake.claude_calls if seat == "fix"]
+    assert fix_prompts and all(GH_TOKEN not in p for p in fix_prompts)
+
+
+async def test_headless_error_on_the_blob_is_redacted(repo, tmp_path, monkeypatch):
+    from pocketpaw.instinct.store import InstinctStore
+
+    store = InstinctStore(tmp_path / "instinct.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    action_id = await _queue_run(monkeypatch, repo, recipe="")
+
+    async def leaky(req: DevelopRequest) -> DevelopResult:
+        raise RuntimeError(f"REVIEW: model echoed {GH_TOKEN}")
+
+    await HeadlessDevelopRunner(develop_fn=leaky).run(action_id)
+    blob = (await store.get_action(action_id)).parameters["_code_change"]
+    assert GH_TOKEN not in blob["headless_error"] and "[REDACTED]" in blob["headless_error"]

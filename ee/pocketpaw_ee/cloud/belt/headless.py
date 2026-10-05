@@ -16,10 +16,11 @@
 #     then back-writes diff + base_branch onto the SAME action, clears
 #     ``station_pending`` and mints a Decision-Graph ``correlation_id``. Never
 #     raises: a DevelopFn error (or empty diff / no base) leaves the run queued
-#     and records the reason as ``headless_error`` on the blob, where the console
-#     and digest read it. The diff is stored verbatim (only a trailing newline is
-#     ensured — stripping corrupts it for ``git apply``). A best-effort
-#     ``headless_diff_attached`` audit entry marks LLM content entering the store.
+#     and records the reason (secrets redacted) as ``headless_error`` on the
+#     blob, where the console and digest read it. The diff is stored verbatim
+#     (only a trailing newline is ensured — stripping corrupts it for
+#     ``git apply``). A best-effort ``headless_diff_attached`` audit entry marks
+#     LLM content entering the store.
 #   * ``HeadlessTaskDispatcher`` — the mandates ``TaskDispatcher`` that files the
 #     queued run via ``StationTaskDispatcher`` then runs the runner on it. The
 #     production dispatcher (``resolve_headless_dispatcher``) runs the develop in
@@ -310,7 +311,10 @@ class HeadlessDevelopRunner:
         """Record a headless-develop failure ON the blob WITHOUT making the run
         applyable. The run STAYS queued (``station_pending=True``, no diff) so a
         human can still drive the station or the dispatcher can retry — we never
-        approve or fail the Action out from under the human gate. Best-effort."""
+        approve or fail the Action out from under the human gate. The reason is
+        redacted (``security.redact``): it can quote check or model output, and
+        the blob is readable by anyone who can read the run. Best-effort."""
+        from pocketpaw.security.redact import redact_output
 
         try:
             action = await store.get_action(action_id)
@@ -324,7 +328,7 @@ class HeadlessDevelopRunner:
             # Keep the run SAFE: still queued, no diff. Only annotate the failure.
             blob["station_pending"] = True
             blob["diff"] = ""
-            blob["headless_error"] = reason
+            blob["headless_error"] = redact_output(reason)
             params[_CODE_CHANGE_PARAM_KEY] = blob
             await store.update_parameters(action_id, params)
         except Exception:  # noqa: BLE001 — never crash on the failure-note path

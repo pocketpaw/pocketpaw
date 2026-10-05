@@ -17,10 +17,11 @@
 #            task against ``git diff``: strict ``{"verdict", "notes"}`` JSON.
 #   DONE     ``git add -A`` + ``git diff --cached --binary <base sha>``; refused
 #            when it touches ``.claude/``, ``.mcp.json``, ``.git`` or
-#            ``.gitmodules``.
+#            ``.gitmodules``, or adds a line matching a credential pattern.
 #   CLEANUP  always: remove the temp dir, then ``git worktree prune`` (finally).
 # Any dead end raises ``DevelopStationError`` naming the step; the runner records
-# it as ``headless_error`` on the queued run's blob.
+# it as ``headless_error`` on the queued run's blob. Output tails that reach a
+# prompt or an error are run through ``security.redact`` first.
 #
 # Safety: every subprocess goes through ONE injectable ``Runner`` with an argv
 # list (never a shell); charter commands are ``shlex.split`` and refused unless
@@ -56,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from pocketpaw.security.redact import REDACT_PATTERNS, redact_output
 from pocketpaw_ee.cloud.belt.headless import DevelopRequest, DevelopResult
 from pocketpaw_ee.cloud.mandates.dto import command_refusal
 from pocketpaw_ee.cloud.mandates.foreman import claude_cli_argv, claude_result_text
@@ -154,8 +156,18 @@ class CheckResult:
 
 
 def _tail(text: str) -> str:
+    """The last lines of some output, secrets redacted — every tail ends up in
+    a prompt or on the stored blob."""
     lines = text.strip().splitlines()[-_TAIL_LINES:]
-    return "\n".join(lines)[-_TAIL_CHARS:]
+    return redact_output("\n".join(lines))[-_TAIL_CHARS:]
+
+
+def _adds_secret(diff: str) -> bool:
+    """Whether the diff ADDS a line matching a known credential pattern
+    (``security.redact``). Removed and context lines are already in the repo."""
+    lines = diff.splitlines()
+    added = "\n".join(x[1:] for x in lines if x.startswith("+") and not x.startswith("+++"))
+    return any(pattern.search(added) for _, pattern in REDACT_PATTERNS)
 
 
 async def _default_charter_for(workspace_id: str, mandate_id: str) -> dict[str, Any] | None:
@@ -279,6 +291,10 @@ class ClaudeCodeDevelop:
                 raise DevelopStationError(
                     f"DONE: the change touches protected paths ({', '.join(protected[:5])}); "
                     "refusing to attach"
+                )
+            if _adds_secret(diff):
+                raise DevelopStationError(
+                    "DONE: diff contains a secret-looking value; refusing to attach"
                 )
             files_changed = len(changed)
 
