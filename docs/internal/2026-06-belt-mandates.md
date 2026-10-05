@@ -1,7 +1,8 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes),
-     patrols (incl. upstream), the headless develop station, endpoints (incl.
-     the digest), env vars, and the remaining demo-bar concessions. -->
+     patrols (incl. upstream), the headless develop station and its security
+     posture, endpoints (incl. the digest), env vars, and the remaining
+     demo-bar concessions. -->
 
 # Belt Mandates — the standing JOB primitive
 
@@ -71,8 +72,14 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   station then runs that command instead of an LLM develop, and the checks
   still gate it.
 
-Checks and recipes are argv strings split with `shlex` (the create DTO rejects
-one that does not split) and never run through a shell. Only `belt.manage`
+Checks and recipes are argv strings split with `shlex` and never run through a
+shell. The create DTO rejects (422) one that does not split, or whose program
+(argv[0]) is not on `POCKETPAW_FACTORY_ALLOWED_COMMANDS`: by basename for a bare
+name or an absolute path, and never a relative path, which would resolve into
+the agent's worktree. The default list is `uv, uvx, bun, bunx, node, npm, pnpm,
+python, python3, pytest, cargo, make, go`: no shells, `env`, `sudo`, `curl`,
+`wget` or `git`. Create also rejects (422) a `surface.repo_id` that does not
+resolve inside the workspace's belt allowlist roots. Only `belt.manage`
 (admin) can write a charter.
 
 ### Decision chains (RFC 09)
@@ -95,9 +102,10 @@ best-effort and never break the approve response.
 `ee/pocketpaw_ee/cloud/mandates/foreman.py`. One judgment call per shift
 through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
 
-- `claude` (default) — shells the **system** Claude Code CLI
-  (`claude -p <prompt> --output-format json`, an argv list), parses the envelope's
-  `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
+- `claude` (default) — runs the **system** Claude Code CLI
+  (`claude -p --tools "" --output-format json`, prompt on stdin) in a fresh
+  empty temp dir with the scrubbed env, since the prompt carries third-party
+  sighting text; parses the envelope's `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
   else `claude` on PATH (never the SDK's bundled copy, which goes stale); the
   model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default.
 - `mock` — deterministic (one task per sighting, severity-ranked, budget-capped;
@@ -278,30 +286,97 @@ sweeper, so pytest runs never spawn background loops that outlive the test.
   synthetic run id); no run record.
 
 The develop loop for `headless` is `belt/develop_station.ClaudeCodeDevelop`,
-wired at startup when `POCKETPAW_MANDATE_DISPATCHER=headless` **and**
-`POCKETPAW_FACTORY_DEVELOP=claude`. One run walks a fixed sequence:
+wired by a cloud startup hook when `POCKETPAW_MANDATE_DISPATCHER=headless`
+**and** `POCKETPAW_FACTORY_DEVELOP=claude` (and, in a process serving cloud
+tenants, `POCKETPAW_FACTORY_DEDICATED_HOST=1`; see Security posture). One run
+walks a fixed sequence:
 
 ```
-PREPARE  git worktree add --detach of the bound repo at origin/<base> (after a
-         fetch) when an origin exists, else the local <base>
+PREPARE  screen the task text (InjectionScanner, HIGH refuses); refuse any
+         charter check whose program is not allowed; resolve the bound repo
+         inside POCKETPAW_BELT_REPO_ALLOWLIST (empty = refuse); git worktree
+         add --detach at origin/<base> (after a fetch) when an origin exists,
+         else the local <base>; snapshot the worktree's .git file
 WORK     a recipe task runs the charter's recipe command; otherwise
-         `claude -p` develops (Read/Edit/Write/Glob/Grep + Bash limited to the
-         charter's check commands, --permission-mode acceptEdits)
+         `claude -p` develops (--permission-mode acceptEdits)
 CHECK    run every charter check
 FIX ≤2   a red check, or a failed review, sends the failure back to
          `claude -p`, then CHECK again; at most 2 attempts (recipes get none)
 REVIEW   an independent read-only `claude -p` judges the diff against the task:
          strict {"verdict": "pass"|"fail", "notes": [...]}
-DONE     git add -A; git diff --cached --binary against the base sha
-CLEANUP  git worktree remove --force, always
+DONE     git add -A; git diff --cached --binary against the base sha; refused
+         if it touches .claude/, .mcp.json, .git or .gitmodules, or adds a
+         line matching a credential pattern
+CLEANUP  remove the temp dir, then git worktree prune, always
 ```
 
-Every subprocess is an argv list (never a shell) and prompts go on stdin. A
-dead end raises with the failing step's name; the runner leaves the run queued
-and records the reason as `headless_error` on the blob, where the console and
-the digest show it. The station never commits to a branch, pushes or merges.
-Background develops are process-local: a restart mid-develop leaves the run
-queued with no error note, and nothing re-drives it yet.
+After every agent step the worktree's `.git` file must match its snapshot, or
+the run fails with `INTEGRITY: worktree .git changed`. A dead end raises with
+the failing step's name; the runner leaves the run queued and records the
+reason (secrets redacted) as `headless_error` on the blob, where the console
+and the digest show it. The station never commits to a branch, pushes or
+merges. Background develops are process-local: the dispatcher marks each run
+`headless_state: "queued"` until it attaches or fails, so a run a restart
+dropped stays visible as stuck in the digest (nothing re-drives it yet), and a
+background task that crashes is logged at ERROR.
+
+## Security posture
+
+The develop station runs code the agent wrote, on the host, **before** a human
+sees the diff: the charter checks execute the worktree's own test files,
+Makefile and package scripts. The per-diff Instinct gate decides what lands; it
+does not contain what runs. So the station is for **a dedicated single-tenant
+host running trusted repos**, and it refuses to wire in a process serving cloud
+tenants unless the operator sets `POCKETPAW_FACTORY_DEDICATED_HOST=1`.
+
+What the station scrubs or blocks:
+
+- **Env.** Every subprocess (claude, checks, recipes, git) sees only `PATH`,
+  `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `SHELL`. The
+  Mongo URI, tokens, API keys and `POCKETPAW_*` secrets never reach it.
+- **Programs.** Check and recipe argv[0] must be on
+  `POCKETPAW_FACTORY_ALLOWED_COMMANDS`, enforced at create (422) and again
+  before exec. No shells, `env`, `sudo`, downloaders, `git`, or relative paths.
+- **Claude seats.** Every call (foreman, develop, fix, review) loads no
+  settings files (`--setting-sources ""`), no MCP servers
+  (`--strict-mcp-config`) and no hooks (`disableAllHooks`), so a `.claude/` or
+  `.mcp.json` planted in the worktree never loads. Auth is the CLI's
+  keychain/OAuth login; never `--bare`, which forces API-key auth. Tools are
+  limited with `--tools` and the allow rules are scoped to the worktree
+  (`Read(./**)`, `Edit(./**)`, `Write(./**)`, plus `Bash(<check>:*)` on the
+  edit seats); WebFetch, WebSearch and Task are denied. The foreman gets no
+  tools at all and an empty temp dir as its cwd.
+- **Git.** Station git calls run with `core.fsmonitor=false` and
+  `core.hooksPath=/dev/null`; the worktree `.git` file is snapshotted and
+  re-checked after every agent step.
+- **The diff.** Refused if it touches `.claude/`, `.mcp.json`, `.git` or
+  `.gitmodules`, or if an added line matches a `security.redact` credential
+  pattern (the error never echoes the value).
+- **Text.** Output tails, prompts' failure text and `headless_error` go through
+  `security.redact`. Task text, check output and the diff sit in `<untrusted>`
+  blocks the prompts tell the model to treat as data, and task text the
+  heuristic InjectionScanner rates HIGH refuses the run.
+- **Processes.** Each subprocess gets its own session; a timeout or a cancelled
+  run kills the whole process group.
+- **Repos.** Mandates bind only repos inside the workspace's allowlist roots;
+  the station also requires an explicit `POCKETPAW_BELT_REPO_ALLOWLIST`.
+
+Residual risks:
+
+- Checks and recipes still execute agent-editable repo code with the host
+  user's privileges: `HOME` (and with it `~/.ssh`, caches under `~/.cargo`,
+  `~/.cache/uv`, `~/.bun`), the network, and anything else that user can reach.
+  An allowed program like `python`, `npm` or `make` runs whatever the worktree
+  tells it to. There is no OS sandbox yet; the next step is a container or
+  `sandbox-exec` runner for checks and recipes.
+- The worktree's `CLAUDE.md` files still load (memory files are not a setting
+  source), so text written in DEVELOP can steer FIX and REVIEW. That is not
+  host exec, and the human gate sees the hunk.
+- The secret scan is pattern-based: it misses unknown formats and can refuse a
+  diff with fixture values such as `password="..."` or a URL with basic auth.
+- The allowlist roots are global settings plus per-workspace console roots; a
+  workspace can bind any repo under a shared root.
+- A process that daemonizes out of its session survives the group kill.
 
 ## Digest — the morning report
 
@@ -314,15 +389,17 @@ reads as UTC) returns:
              sightings: {count, top: [{title, severity, patrol}]},   # top 5
              shifts: [{no, state, outcome, task_count}],             # since
              runs:   [{action_id, status, title, pr_url, branch,
-                       commit_sha, headless_error}],                 # since
+                       commit_sha, headless_error, headless_state}], # since
              gates:  {plans: [{shift_no, plan_action_id, task_count}],
                       diffs: [<run row>]},                           # any age
-             stuck:  [<run row>]}],      # queued with headless_error, any age
+             stuck:  [<run row>]}],      # queued with headless_error or a
+                                         # leftover headless_state, any age
  totals: {mandates, new_sightings, shifts, runs, landed, failed, gates_waiting}}
 ```
 
 Gates and stuck runs are listed whatever their age: an in-gate plan, a diff at
-`proposed` or a failed headless develop from last week still needs a human. The digest is composed from the existing
+`proposed`, or a headless develop from last week that failed or never finished
+still needs a human. The digest is composed from the existing
 reads (`list_mandates`, `get_mandate`, `shift_wire`, `list_sightings`, the belt
 runs list), so it cannot disagree with the console; shifts come from the
 detail's 10 most recent.
@@ -342,6 +419,9 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 |---|---|---|
 | `POCKETPAW_MANDATE_DISPATCHER` | `station` | `station` / `headless` / `bus` (above) |
 | `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`) |
+| `POCKETPAW_FACTORY_DEDICATED_HOST` | unset | `1` lets the station wire in a process serving cloud tenants; set it only on a dedicated single-tenant host |
+| `POCKETPAW_FACTORY_ALLOWED_COMMANDS` | `uv,uvx,bun,bunx,node,npm,pnpm,python,python3,pytest,cargo,make,go` | Comma-separated program basenames a charter check or recipe may start |
+| `POCKETPAW_BELT_REPO_ALLOWLIST` | empty | JSON list of repo roots; the develop station refuses to run while it is empty |
 | `POCKETPAW_FACTORY_CLAUDE_BIN` | `claude` on PATH | The Claude Code CLI every factory LLM seat shells (foreman, develop, fix, review) |
 | `POCKETPAW_FACTORY_CLAUDE_MODEL` | CLI default | Passed as `--model` when set |
 | `POCKETPAW_FACTORY_DEVELOP_TIMEOUT` | `900` | Seconds per `claude -p` call (develop, fix, review) |
@@ -352,9 +432,10 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_CLOUD_SCHEDULER_ENABLED` | off | Starts the cadence scheduler and autopilot loops |
 
 A local unattended factory runs with `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`,
-`POCKETPAW_MANDATE_DISPATCHER=headless` and `POCKETPAW_FACTORY_DEVELOP=claude`,
-on a box where the bound repos are checked out and `claude` and `gh` are
-authenticated.
+`POCKETPAW_MANDATE_DISPATCHER=headless`, `POCKETPAW_FACTORY_DEVELOP=claude`,
+`POCKETPAW_FACTORY_DEDICATED_HOST=1` and a `POCKETPAW_BELT_REPO_ALLOWLIST`
+covering the bound repos, on a dedicated box where those repos are checked out
+and `claude` and `gh` are authenticated.
 
 ## Demo-bar concessions (each marked in code)
 
@@ -368,7 +449,7 @@ authenticated.
    ShiftDoc states and the plan Action's status/blob, the same facts the chain
    folded from; a journal-walking narrator can replace it later.
 4. **Headless develops are process-local** (see above): a restart mid-develop
-   leaves a queued run nothing re-drives.
+   leaves a queued run nothing re-drives; the digest lists it as stuck.
 
 ## Tests
 
@@ -386,7 +467,11 @@ tmp repo's Cargo.toml with a fake `gh`: summary and area sightings, the
 severity scale, every failure path as one severity-1 sighting, DTO validation,
 and dedup on the upstream head through `run_patrols`.
 `tests/cloud/test_belt_develop_station.py` drives the develop station against a
-real tmp git repo with real check commands and a faked `claude`;
+real tmp git repo with real check commands and a faked `claude`, including the
+hardening: claude argv flags, the scrubbed env, refused programs, the
+multi-tenant wiring refusal, `.git` tampering, protected paths, secret diffs,
+redaction, untrusted fencing, the injection screen, process-group kills and
+logged background crashes;
 `test_belt_headless.py` and `test_belt_scheduler.py` cover the runner and the
 cadence scheduler. CI runs these in the "Belt mandates and the craft factory
 develop station" step (`tests/cloud` is outside the default addopts).
