@@ -240,6 +240,20 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Belt mandates and the craft factory develop station
+        # The mandate shift loop, the headless develop runner, the cadence
+        # scheduler and the develop station (real tmp git repo, real check
+        # commands, a faked claude binary). tests/cloud is excluded by the
+        # pyproject addopts; mongomock stands in for Mongo.
+        run: >-
+          uv run pytest tests/cloud/test_belt_develop_station.py
+          tests/cloud/test_belt_headless.py
+          tests/cloud/test_belt_mandates.py
+          tests/cloud/test_belt_scheduler.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
       - name: Craft studio preambles (tests/cloud blind spot)
         # The /studio/vector, /studio/photo and /studio/design preambles render
         # the page's document projection; tests/cloud is excluded by the
