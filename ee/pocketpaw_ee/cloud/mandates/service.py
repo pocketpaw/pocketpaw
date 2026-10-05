@@ -1386,8 +1386,9 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
     """The workspace's mandate digest since ``since`` (default 24 hours ago).
 
     Per mandate: new sightings (count + top 5 by severity), shifts and runs
-    created since, and the gates still waiting on a human (in-gate plans and
-    per-diff runs at ``proposed``, whatever their age). Built only from the
+    created since, the gates still waiting on a human (in-gate plans and
+    per-diff runs at ``proposed``) and ``stuck`` runs (queued with a
+    ``headless_error``) — those two whatever their age. Built only from the
     existing read models — ``list_mandates``, ``get_mandate``, ``shift_wire``,
     ``list_sightings`` and the belt runs list — so the digest can never disagree
     with the console. ``totals`` sums the workspace."""
@@ -1445,6 +1446,13 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
         mine = [r for r in runs if r.get("mandate_id") == mandate_id]
         new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
         diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
+        # A headless develop that failed leaves its run queued for a human, so
+        # it is reported whatever its age, like a gate.
+        stuck = [
+            _run_digest_row(r)
+            for r in mine
+            if r.get("status") == "queued" and r.get("headless_error")
+        ]
 
         totals["new_sightings"] += len(fresh)
         totals["shifts"] += len(shifts)
@@ -1470,6 +1478,7 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
                 "shifts": shifts,
                 "runs": new_runs,
                 "gates": {"plans": plan_gates, "diffs": diff_gates},
+                "stuck": stuck,
             }
         )
     return {

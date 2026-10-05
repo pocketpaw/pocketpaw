@@ -916,6 +916,7 @@ async def test_digest_reports_activity_and_waiting_gates(
     assert runs["bump deps"]["status"] == "landed"
     assert runs["bump deps"]["pr_url"] == "https://x/pull/7"
     assert runs["bump deps"]["branch"] == "b/7"
+    assert [r["title"] for r in row["stuck"]] == ["fix the sso login"]
 
     assert rows[quiet]["sightings"]["count"] == 0
     assert rows[quiet]["runs"] == [] and rows[quiet]["shifts"] == []
@@ -951,6 +952,7 @@ async def test_digest_reports_activity_and_waiting_gates(
     assert late["sightings"]["count"] == 0
     assert late["shifts"] == [] and late["runs"] == []
     assert len(late["gates"]["plans"]) == 1 and len(late["gates"]["diffs"]) == 1
+    assert [r["title"] for r in late["stuck"]] == ["fix the sso login"]
     assert later.json()["totals"]["gates_waiting"] == 2
 
     assert client.get("/belt/mandates/digest", params={"since": "yesterday"}).status_code == 422

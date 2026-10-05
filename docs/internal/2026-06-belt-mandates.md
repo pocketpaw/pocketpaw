@@ -316,12 +316,13 @@ reads as UTC) returns:
              runs:   [{action_id, status, title, pr_url, branch,
                        commit_sha, headless_error}],                 # since
              gates:  {plans: [{shift_no, plan_action_id, task_count}],
-                      diffs: [<run row>]}}],                         # any age
+                      diffs: [<run row>]},                           # any age
+             stuck:  [<run row>]}],      # queued with headless_error, any age
  totals: {mandates, new_sightings, shifts, runs, landed, failed, gates_waiting}}
 ```
 
-Gates are listed whatever their age: an in-gate plan or a diff at `proposed`
-from last week still needs a human. The digest is composed from the existing
+Gates and stuck runs are listed whatever their age: an in-gate plan, a diff at
+`proposed` or a failed headless develop from last week still needs a human. The digest is composed from the existing
 reads (`list_mandates`, `get_mandate`, `shift_wire`, `list_sightings`, the belt
 runs list), so it cannot disagree with the console; shifts come from the
 detail's 10 most recent.

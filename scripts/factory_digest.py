@@ -3,8 +3,8 @@
 #
 # Calls GET /api/v1/belt/mandates/digest on a running backend and renders the
 # result as markdown: one table of mandates, then what needs a human (plan and
-# diff gates), then failures (headless develop errors, failed runs, shifts whose
-# plan never reached the gate), then what landed.
+# diff gates), then failures (stuck headless develops of any age, failed runs,
+# shifts whose plan never reached the gate), then what landed.
 #
 # Stdlib only (urllib). The bearer token comes from --token-file or $PAW_TOKEN
 # and is never printed.
@@ -86,10 +86,10 @@ def render(digest: dict[str, Any]) -> str:
         for s in m["shifts"]:
             if s["state"] == "planning" and s.get("outcome"):
                 failures.append(f"- {name}: shift {s['no']} never reached the gate: {s['outcome']}")
+        for r in m.get("stuck") or []:
+            failures.append(f"- {name}: {r['title']}: {r['headless_error']}")
         for r in m["runs"]:
-            if r.get("headless_error"):
-                failures.append(f"- {name}: {r['title']}: {r['headless_error']}")
-            elif r["status"] == "failed":
+            if r["status"] == "failed":
                 failures.append(f"- {name}: {r['title']}: run failed")
             elif r["status"] == "landed":
                 where = r.get("pr_url") or r.get("branch") or r.get("commit_sha") or ""
