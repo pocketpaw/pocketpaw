@@ -51,7 +51,13 @@ htmlcov/
 
 # Internal drafts
 idocs/
-.claude 
+# Local Claude Code state stays out; the tracked verification skill is the exception.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/verify-pocketpaw/
+# Proof artifacts written by .claude/skills/verify-pocketpaw (screenshots, page text, server logs)
+.verify-evidence/
 
 # Config (contains secrets)
 .env
