@@ -474,3 +474,131 @@ async def test_develop_request_aims_at_the_expected_outcome(store: InstinctStore
     blob = (await store.get_action(action_id)).parameters["_code_change"]
     assert blob["summary"] == "REPORT" and blob["title"] == "Add a hello file"
     assert seen[0].summary == "hello.txt exists"
+
+
+# ---------------------------------------------------------------------------
+# RE-DEVELOP — two runs of one shift developed from the same base touch the
+# same lines. The first lands and a human merges it, so the base moves; the
+# second no longer applies. It goes back through the develop station once and
+# returns to the per-diff gate; a second conflict fails with the reason.
+# ---------------------------------------------------------------------------
+
+
+def _diff_against_head(repo: Path, body: str) -> str:
+    """A real ``git diff`` of app.py rewritten to ``body`` (index lines carry
+    real blob ids, so ``--3way`` behaves as it does on station output)."""
+    (repo / "app.py").write_text(body, encoding="utf-8")
+    diff = _git(repo, "diff")
+    _git(repo, "checkout", "--", "app.py")
+    return diff
+
+
+async def _second_run_on_a_moved_base(store: InstinctStore, repo: Path) -> tuple[str, str]:
+    """Develop two runs from the same base, land the first and merge its branch
+    into main (a local-only landing only makes a branch; the base moves when a
+    human merges it). Returns the second run's id and its now-stale diff."""
+    from pocketpaw_ee.cloud.belt.executor import execute_approved_change
+
+    diff_one = _diff_against_head(repo, "def hello():\n    return 'one'\n")
+    diff_two = _diff_against_head(repo, "def hello():\n    return 'two'\n")
+    first = await _queue_station_run(store, repo=str(repo))
+    second = await _queue_station_run(store, repo=str(repo))
+    for run_id, diff in ((first, diff_one), (second, diff_two)):
+
+        async def develop(req: DevelopRequest, diff: str = diff) -> DevelopResult:
+            return DevelopResult(diff=diff, base_branch="main", summary="report")
+
+        await HeadlessDevelopRunner(develop_fn=develop).run(run_id)
+
+    await execute_approved_change(await store.approve(first))
+    landed = await store.get_action(first)
+    assert landed.status == ActionStatus.EXECUTED, landed.error
+    _git(repo, "merge", "--ff-only", landed.parameters["_code_change"]["branch"])
+    return second, diff_two
+
+
+async def _approve_and_drain(store: InstinctStore, action_id: str) -> None:
+    import asyncio
+
+    import pocketpaw_ee.cloud.belt.headless as headless
+    from pocketpaw_ee.cloud.belt.executor import execute_approved_change
+
+    await execute_approved_change(await store.approve(action_id))
+    await asyncio.gather(*headless._BACKGROUND_DEVELOPS)
+
+
+async def test_moved_base_redevelops_and_returns_to_the_gate(
+    store: InstinctStore, local_repo: Path, allowlist, monkeypatch
+):
+    import pocketpaw_ee.cloud.belt.headless as headless
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.belt.executor import _short_id, execute_approved_change
+
+    second, _stale = await _second_run_on_a_moved_base(store, local_repo)
+    fresh = _diff_against_head(local_repo, "def hello():\n    return 'one and two'\n")
+    calls: list[DevelopRequest] = []
+
+    async def redevelop(req: DevelopRequest) -> DevelopResult:
+        calls.append(req)
+        return DevelopResult(diff=fresh, base_branch="main", summary="report 2")
+
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", redevelop)
+    await _approve_and_drain(store, second)
+
+    # Back through the develop station once, aimed at the task's expected outcome.
+    assert len(calls) == 1 and calls[0].summary == "hello.txt exists"
+    action = await store.get_action(second)
+    blob = action.parameters["_code_change"]
+    # Back at the per-diff gate with the regenerated diff, for a FRESH approval.
+    assert action.status == ActionStatus.PENDING, action.error
+    assert blob["station_pending"] is False and blob["diff"] == fresh
+    assert blob["redevelop"] == 1
+    row = await belt_service.get_run(WS, second)
+    assert (row["status"], row["error"]) == ("proposed", None)
+    # The failed attempt left no belt branch behind.
+    assert f"feat/belt-{_short_id(second)}" not in _git(local_repo, "branch")
+
+    await execute_approved_change(await store.approve(second))
+    landed = await store.get_action(second)
+    assert landed.status == ActionStatus.EXECUTED, landed.error
+    branch = landed.parameters["_code_change"]["branch"]
+    assert "one and two" in _git(local_repo, "show", f"{branch}:app.py")
+
+
+async def test_a_second_moved_base_fails_with_the_reason(
+    store: InstinctStore, local_repo: Path, allowlist, monkeypatch
+):
+    import pocketpaw_ee.cloud.belt.headless as headless
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    second, stale = await _second_run_on_a_moved_base(store, local_repo)
+    calls: list[DevelopRequest] = []
+
+    async def stale_again(req: DevelopRequest) -> DevelopResult:
+        calls.append(req)
+        return DevelopResult(diff=stale, base_branch="main", summary="report 2")
+
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", stale_again)
+    await _approve_and_drain(store, second)
+    assert (await store.get_action(second)).status == ActionStatus.PENDING
+    await _approve_and_drain(store, second)
+
+    assert len(calls) == 1, "a run re-develops at most once"
+    failed = await store.get_action(second)
+    assert failed.status == ActionStatus.FAILED
+    assert "base moved twice" in failed.error
+    assert "base moved twice" in (await belt_service.get_run(WS, second))["error"]
+
+
+async def test_moved_base_without_a_develop_loop_fails_with_the_reason(
+    store: InstinctStore, local_repo: Path, allowlist, monkeypatch
+):
+    import pocketpaw_ee.cloud.belt.headless as headless
+
+    second, _stale = await _second_run_on_a_moved_base(store, local_repo)
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", None)
+    await _approve_and_drain(store, second)
+
+    failed = await store.get_action(second)
+    assert failed.status == ActionStatus.FAILED
+    assert "not wired" in failed.error and "moved main" in failed.error

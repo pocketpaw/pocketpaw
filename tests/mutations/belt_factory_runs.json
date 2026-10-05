@@ -1,0 +1,56 @@
+[
+  {
+    "label": "a headless run whose base moved is failed instead of re-developed",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if code != 0 and check_code != 0 and blob.get(\"headless\"):",
+    "replace": "if code != 0 and check_code != 0 and False:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_moved_base_redevelops_and_returns_to_the_gate"
+    ]
+  },
+  {
+    "label": "a run re-develops on every conflict instead of failing the second time",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if int(blob.get(\"redevelop\") or 0) >= 1:",
+    "replace": "if int(blob.get(\"redevelop\") or 0) >= 99:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_a_second_moved_base_fails_with_the_reason"
+    ]
+  },
+  {
+    "label": "a failed run leaves feat/belt-<id> behind, so its retry cannot branch",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "if branch_created and not landed:",
+    "replace": "if branch_created and not landed and False:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_moved_base_redevelops_and_returns_to_the_gate"
+    ]
+  },
+  {
+    "label": "files_changed stays 0 when the DevelopFn reports no count",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "files_changed=result.files_changed or _diff_file_count(diff),",
+    "replace": "files_changed=result.files_changed,",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_headless_runner_produces_pending_diff"
+    ]
+  },
+  {
+    "label": "a run failed by the executor shows no error on the runs read model",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "\"error\": str(getattr(action, \"error\", None) or blob.get(\"headless_error\") or \"\") or None,",
+    "replace": "\"error\": str(blob.get(\"headless_error\") or \"\") or None,",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_a_second_moved_base_fails_with_the_reason"
+    ]
+  },
+  {
+    "label": "the commit subject is built from the develop report, not the task title",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "commit_title = _commit_title(task, summary, title=title)",
+    "replace": "commit_title = _commit_title(task, summary)",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_headless_diff_applies_after_human_approval"
+    ]
+  }
+]

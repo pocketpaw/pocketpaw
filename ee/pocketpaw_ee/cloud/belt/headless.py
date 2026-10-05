@@ -31,6 +31,9 @@
 #     construct it inline (``background=False``). A background run is marked
 #     ``headless_state="queued"`` until it attaches or fails, so one orphaned
 #     by a restart shows in the digest; a crashed task is logged at ERROR.
+#     ``develop(run_ref)`` is the same step for an existing run: the belt
+#     executor re-queues an approved headless run whose diff no longer applies
+#     on the moved base and hands it back here (once; see ``belt/executor.py``).
 #
 # Blob writes go through ``InstinctStore.update_parameters`` (same pattern as
 # ``belt/executor.py::_persist_run_result``).
@@ -413,11 +416,20 @@ class HeadlessTaskDispatcher:
         )
         # 2. Produce the diff headlessly and attach it (the run becomes a real
         #    pending diff). Never raises — a miss leaves the queued run for a
-        #    human to drive. Thread the workspace so the runner's store is scoped
-        #    to the tenant (no ContextVar on this background path — ISO).
+        #    human to drive.
+        await self.develop(run_ref, workspace_id=workspace_id)
+        return run_ref
+
+    async def develop(self, run_ref: str, *, workspace_id: str) -> None:
+        """Develop an already-queued run: a fresh dispatch, or a run the belt
+        executor re-queued because its diff no longer applies on the moved base.
+        Inline, or (``background``) in a task serialized by ``_DEVELOP_LOCK``
+        and marked ``headless_state="queued"`` until it attaches or fails. The
+        workspace is threaded so the runner's store is scoped to the tenant (no
+        ContextVar on this path — ISO)."""
         if not self.background:
             await self.runner.run(run_ref, workspace_id=workspace_id)
-            return run_ref
+            return
 
         async def _develop() -> None:
             # ponytail: one develop at a time per process (16 GB box, heavy
@@ -431,7 +443,6 @@ class HeadlessTaskDispatcher:
         _BACKGROUND_DEVELOPS.add(task)
         task.add_done_callback(_BACKGROUND_DEVELOPS.discard)
         task.add_done_callback(_log_develop_crash)
-        return run_ref
 
 
 def _log_develop_crash(task: asyncio.Task[None]) -> None:

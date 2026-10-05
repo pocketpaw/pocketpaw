@@ -22,6 +22,15 @@
 # ``failed`` run event). The worktree is always removed, and the belt branch is
 # deleted when the run did not land, so a retry of the same action starts clean.
 #
+# RE-DEVELOP: a headless run (blob ``headless``) whose patch no longer applies on
+# the current base (``git apply --check`` and ``--3way`` both fail: an earlier
+# run landed on it) is not failed. ``_requeue_for_redevelop`` clears its diff,
+# counts ``redevelop`` and sends it back to pending; after cleanup the headless
+# dispatcher's ``develop`` regenerates the diff against the current base, and
+# it waits at the per-diff gate for a fresh approval. No chain close: it is not
+# a terminal. A second conflict on the same run fails with "base moved twice";
+# with no develop loop wired it fails with that reason.
+#
 # Security: argv-only subprocesses (never a shell); the diff is data in a temp
 # file, never on a command line or in a log; destructive git ops stay inside
 # the throwaway worktree.
@@ -495,6 +504,7 @@ async def execute_approved_change(
     worktree_created = False
     branch_created = False
     landed = False
+    redevelop_with: Any = None
 
     try:
         # 0. LOCAL-ONLY DETECTION — does the repo have an ``origin`` remote? A
@@ -564,6 +574,11 @@ async def execute_approved_change(
         fd_path = worktree_dir / ".belt-change.diff"
         fd_path.write_text(diff, encoding="utf-8")
         diff_file = fd_path
+        # ``--check`` on the still-clean tree says whether the patch fits this
+        # base as written (``--3way`` leaves conflict markers when it fails).
+        check_code, _out, _err = await _run(
+            ["git", "apply", "--check", "--whitespace=nowarn", str(fd_path)], cwd=worktree_dir
+        )
         code, _out, err = await _run(
             ["git", "apply", "--3way", "--whitespace=nowarn", str(fd_path)], cwd=worktree_dir
         )
@@ -571,6 +586,42 @@ async def execute_approved_change(
         with _suppress():
             fd_path.unlink()
             diff_file = None
+        if code != 0 and check_code != 0 and blob.get("headless"):
+            # The base moved under a headless run (an earlier run landed on
+            # it): re-develop it against the current base, once.
+            if int(blob.get("redevelop") or 0) >= 1:
+                await _fail(
+                    f"base moved twice: the re-developed diff no longer applies on "
+                    f"{base_branch} either. Re-run the shift. git apply: {err.strip()[:300]}",
+                    error_class="BaseMovedTwice",
+                )
+                return
+            redeveloper = _headless_redeveloper()
+            if redeveloper is None:
+                await _fail(
+                    f"diff no longer applies on the moved {base_branch} and the headless "
+                    "develop station is not wired to re-develop it. Re-run the shift. "
+                    f"git apply: {err.strip()[:300]}",
+                    error_class="ApplyConflict",
+                )
+                return
+            requeue_err = await _requeue_for_redevelop(store, str(action.id))
+            if requeue_err:
+                await _fail(requeue_err, error_class="RedevelopFailed")
+                return
+            await _emit_run_updated(
+                workspace_id=workspace_id,
+                action_id=str(action.id),
+                status="queued",
+                stage="station",
+            )
+            redevelop_with = redeveloper  # handed off after the cleanup below
+            logger.info(
+                "belt: action %s no longer applies on the moved %s; re-developing",
+                action.id,
+                base_branch,
+            )
+            return
         if code != 0:
             await _fail(
                 "diff did not apply cleanly (conflict or stale base) — "
@@ -731,6 +782,13 @@ async def execute_approved_change(
         if branch_created and not landed:
             with _suppress():
                 await _run(["git", "branch", "-D", branch], cwd=repo_path)
+        # A re-queued run develops only after this worktree and branch are gone
+        # (the develop station adds its own worktree in the same repo).
+        if redevelop_with is not None:
+            try:
+                await redevelop_with.develop(str(action.id), workspace_id=workspace_id)
+            except Exception:  # noqa: BLE001 — the run stays queued, visible in the digest
+                logger.warning("belt: re-develop hand-off failed for %s", action.id, exc_info=True)
 
 
 async def _changed_files(worktree_dir: Path) -> list[str]:
@@ -845,6 +903,46 @@ async def _land_local_only(
         n_files,
         commit_sha[:12] or "unknown",
     )
+
+
+def _headless_redeveloper() -> Any | None:
+    """The production headless dispatcher (it has ``develop(run_ref)``), or
+    ``None`` when no develop loop is wired in this process."""
+    from pocketpaw_ee.cloud.belt.headless import resolve_headless_dispatcher
+
+    return resolve_headless_dispatcher()
+
+
+async def _requeue_for_redevelop(store: Any, action_id: str) -> str | None:
+    """Turn an APPROVED headless run whose diff no longer applies back into a
+    queued station run: the blob drops its diff (``station_pending``, counted
+    in ``redevelop``), THEN the status goes back to pending, so no pending row
+    ever carries the stale diff. The re-developed diff waits at the per-diff
+    gate for a fresh human approval. Returns an error, or ``None``."""
+    from pocketpaw.instinct.models import ActionStatus
+
+    action = await store.get_action(action_id)
+    params = dict(getattr(action, "parameters", None) or {})
+    blob = dict(params.get(_CODE_CHANGE_PARAM_KEY) or {})
+    blob.update(station_pending=True, diff="", redevelop=int(blob.get("redevelop") or 0) + 1)
+    for key in ("headless_error", "files_changed"):
+        blob.pop(key, None)
+    params[_CODE_CHANGE_PARAM_KEY] = blob
+    await store.update_parameters(action_id, params)
+    # The store has no public "back to the gate" verb; ``_update_status`` is
+    # the canonical status write (CLAUDE.md, canonical primitives), and
+    # ``require_status`` makes the flip atomic against a concurrent decision.
+    reopened = await store._update_status(
+        action_id,
+        ActionStatus.PENDING,
+        event="action_redevelop",
+        actor="system",
+        extra_desc=" — the diff no longer applies on the moved base; re-developing",
+        require_status=ActionStatus.APPROVED,
+    )
+    if reopened is None:
+        return "could not send the run back to the develop station (no longer approved)"
+    return None
 
 
 async def _promote_branch(repo_path: Path, branch: str, commit_sha: str) -> str | None:
