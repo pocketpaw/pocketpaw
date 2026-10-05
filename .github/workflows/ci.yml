@@ -89,6 +89,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Two commits so the header-dates check can diff the PR merge
+          # commit against its first parent (the base branch).
+          fetch-depth: 2
+
+      - name: No dated change entries in file headers
+        # Headers describe the file's current state; history is git's job
+        # (CLAUDE.md § File header comments). Only fires on ADDED lines, so
+        # existing entries are not a failure until someone appends another.
+        if: github.event_name == 'pull_request'
+        run: scripts/check_header_dates.sh HEAD^1 HEAD
 
       - uses: astral-sh/setup-uv@v5
         with:
