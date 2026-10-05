@@ -78,7 +78,7 @@ run_pytest() {
 	start=$(date +%s)
 	set +e
 	perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$RUN_TIMEOUT" \
-		uv run --with "pytest-randomly>=3.15,<5" pytest "${BASE[@]}" --randomly-seed="$seed" --junitxml="$WORK/$label.xml" "$@" "${EXTRA[@]}" \
+		uv run --with "pytest-randomly>=3.15,<5" pytest "${BASE[@]}" --randomly-seed="$seed" --junitxml="$WORK/$label.xml" "$@" ${EXTRA[@]+"${EXTRA[@]}"} \
 		>"$WORK/$label.log" 2>&1
 	rc=$?
 	set -e
