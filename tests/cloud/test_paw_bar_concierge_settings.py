@@ -12,8 +12,9 @@
 #     is independent of the kill switch.
 #   * The owner preview: preview-frame frames the site's own page as a sandboxed
 #     ``?pawbar=sniff`` scene (hosted: its url; connected: the verified origin,
-#     else the first allowed origin; never markup or a scheme from stored data); preview-tokens and preview-config render a draft
-#     and write nothing. preview-config returns the frame config subset built by
+#     else the first allowed origin; never markup or a scheme from stored
+#     data); preview-tokens and preview-config render a draft and write
+#     nothing. preview-config returns the frame config subset built by
 #     the frame's own code path (equal to the preview frame's boot config for an
 #     empty draft), applies the branding entitlement to ``poweredBy`` and refuses
 #     a draft the settings PATCH would refuse (422).
