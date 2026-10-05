@@ -1269,11 +1269,18 @@ async def prepare_plan_resolution(
     reject_reason?}`` — ``parameters`` (approve mode) is the full edited
     parameters dict for ``ApproveRequest``; ``edited`` says whether any task
     was edited/dropped (drives the corrections path)."""
+    from pydantic import ValidationError as PydanticValidationError
+
     from pocketpaw.stores import get_instinct_store
     from pocketpaw_ee.cloud.mandates.dto import ResolvePlanRequest
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
-    body = ResolvePlanRequest.model_validate(body)
+    # A bad body (e.g. an empty decisions list) is a 422, not a 500: the cloud
+    # error handler only maps CloudError.
+    try:
+        body = ResolvePlanRequest.model_validate(body)
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.plan_resolve_invalid", _first_pydantic_msg(exc)) from exc
     await _fetch_mandate(workspace_id, mandate_id)
 
     shift = await ShiftDoc.find_one(

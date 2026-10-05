@@ -823,6 +823,14 @@ async def test_resolve_requires_complete_decisions(
     final = await store.get_action(shift["plan_action_id"])
     assert final.status == ActionStatus.PENDING
 
+    # An empty decisions list fails schema validation: still a 422, never a 500.
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/plan/resolve",
+        json={"shift_no": shift["no"], "decisions": []},
+    )
+    assert res.status_code == 422, res.text
+    assert res.json()["error"]["code"] == "mandate.plan_resolve_invalid"
+
 
 # ---------------------------------------------------------------------------
 # digest — the morning report over the existing read models
