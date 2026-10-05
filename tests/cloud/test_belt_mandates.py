@@ -938,7 +938,22 @@ async def test_digest_reports_activity_and_waiting_gates(
         "landed": 1,
         "failed": 2,
         "gates_waiting": 2,
+        "open_backlog": 2,
     }
+    # Both sightings are still open; the plan citing them waits at the gate.
+    assert row["backlog"] == {
+        "count": 2,
+        "top": [
+            {
+                "title": "login 500s for SSO users",
+                "severity": 5,
+                "patrol": "feedback",
+                "in_flight": True,
+            },
+            {"title": "checkout is slow", "severity": 2, "patrol": "feedback", "in_flight": True},
+        ],
+    }
+    assert rows[quiet]["backlog"] == {"count": 0, "top": []}
 
     # scripts/factory_digest.py renders this exact wire shape.
     import importlib.util
@@ -948,7 +963,8 @@ async def test_digest_reports_activity_and_waiting_gates(
     factory_digest = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(factory_digest)
     report = factory_digest.render(body)
-    assert "| deps freshness | manual | 2 · sev 5 login 500s for SSO users |" in report
+    assert "| deps freshness | manual | 2 · sev 5 login 500s for SSO users | 2 |" in report
+    assert "- deps freshness: sev 5 login 500s for SSO users (in flight)" in report
     assert "plan gate, shift 1" in report
     assert "diff gate, speed up checkout" in report
     assert "fix the sso login: headless develop failed: CHECK: pytest exited 1" in report
@@ -961,6 +977,7 @@ async def test_digest_reports_activity_and_waiting_gates(
     assert later.status_code == 200, later.text
     late = {m["id"]: m for m in later.json()["mandates"]}[busy]
     assert late["sightings"]["count"] == 0
+    assert late["backlog"]["count"] == 2  # the backlog is any age
     assert late["shifts"] == [] and late["runs"] == []
     assert len(late["gates"]["plans"]) == 1 and len(late["gates"]["diffs"]) == 1
     assert [r["title"] for r in late["stuck"]] == ["fix the sso login"]
@@ -1242,6 +1259,17 @@ async def test_backlog_carries_open_sightings_and_resolves_landed_ones(
     plan3 = (await store.get_action(shift3["plan_action_id"])).parameters["_belt_plan"]
     cited = {ref for t in plan3["plan"]["tasks"] for ref in t["evidence_refs"]}
     assert cited == {ids["pay"], open3["logo blurry"]["id"]}
+
+    # The morning report counts the same backlog: four open, the landed one
+    # gone, all in flight now (shift 3's plan waits at the plan gate).
+    row = client.get("/belt/mandates/digest").json()["mandates"][0]
+    assert row["backlog"]["count"] == 4
+    assert [(b["title"], b["in_flight"]) for b in row["backlog"]["top"]] == [
+        ("buy button does nothing", True),
+        ("tabs reset on reload", True),
+        ("logo blurry", True),
+        ("pay page is slow", True),
+    ]
 
 
 async def test_backlog_is_capped_highest_severity_then_oldest(

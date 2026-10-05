@@ -730,14 +730,20 @@ async def _backlog(
     (highest severity, then oldest) are ``{id, patrol, severity, summary, new,
     in_flight, tasks}``, where ``new`` means filed after ``since`` and ``tasks``
     lists the citing tasks (``{shift_no, title, status}``); ``tasks`` covers the
-    plans behind this mandate's runs plus ``history_plan_ids``; ``teaching`` is
+    plans behind this mandate's runs, every plan still at the plan gate (in
+    flight, however many shifts ago), and ``history_plan_ids``; ``teaching`` is
     the gate teaching sightings as ``{shift_no, note}`` (shift history, never
     backlog)."""
     sightings = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
+    gated = await ShiftDoc.find(
+        ShiftDoc.workspace == workspace_id,
+        ShiftDoc.mandate_id == mandate_id,
+        ShiftDoc.state == "in_gate",
+    ).to_list()
     plan_ids = {str(r["plan_action_id"]) for r in runs if r.get("plan_action_id")}
-    plan_ids.update(p for p in history_plan_ids if p)
+    plan_ids.update(p for p in (*history_plan_ids, *(g.plan_action_id for g in gated)) if p)
     tasks = await _planned_tasks(workspace_id, sorted(plan_ids), runs)
 
     landed_by: dict[str, str] = {}
@@ -1615,14 +1621,17 @@ def _run_digest_row(run: dict[str, Any]) -> dict[str, Any]:
 async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str, Any]:
     """The workspace's mandate digest since ``since`` (default 24 hours ago).
 
-    Per mandate: new sightings (count + top 5 by severity), shifts and runs
+    Per mandate: new sightings (count + top 5 by severity), the open backlog
+    (every sighting no landed task has resolved, any age: count + top 5 by
+    severity then age, each flagged ``in_flight``), shifts and runs
     created since, the gates still waiting on a human (in-gate plans and
     per-diff runs at ``proposed``) and ``stuck`` runs (queued with a
     ``headless_error``, or still marked ``headless_state`` by a background
     develop that never finished) — those two whatever their age. Built only from the
     existing read models — ``list_mandates``, ``get_mandate``, ``shift_wire``,
     ``list_sightings`` and the belt runs list — so the digest can never disagree
-    with the console. ``totals`` sums the workspace."""
+    with the console, plus ``_backlog`` (read-only here), so it agrees with what
+    the next shift's foreman sees. ``totals`` sums the workspace."""
     # no-event: read-only path; emit only on writes.
     from pydantic import ValidationError as PydanticValidationError
 
@@ -1648,6 +1657,7 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
         "landed": 0,
         "failed": 0,
         "gates_waiting": 0,
+        "open_backlog": 0,
     }
     for m in mandates:
         mandate_id = m["id"]
@@ -1675,6 +1685,7 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
                 )
 
         mine = [r for r in runs if r.get("mandate_id") == mandate_id]
+        backlog = (await _backlog(workspace_id, mandate_id, mine))["open"]
         new_runs = [_run_digest_row(r) for r in mine if _since(r.get("created_at"), since)]
         diff_gates = [_run_digest_row(r) for r in mine if r.get("status") == "proposed"]
         # A headless develop that failed (or never finished: a restart drops
@@ -1694,6 +1705,7 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
             1 for r in new_runs if r["status"] == "failed" or r["headless_error"]
         )
         totals["gates_waiting"] += len(plan_gates) + len(diff_gates)
+        totals["open_backlog"] += len(backlog)
         out.append(
             {
                 "id": mandate_id,
@@ -1705,6 +1717,18 @@ async def digest(workspace_id: str, user_id: str, body: Any = None) -> dict[str,
                     "top": [
                         {"title": s["summary"], "severity": s["severity"], "patrol": s["patrol"]}
                         for s in top
+                    ],
+                },
+                "backlog": {
+                    "count": len(backlog),
+                    "top": [
+                        {
+                            "title": s["summary"],
+                            "severity": s["severity"],
+                            "patrol": s["patrol"],
+                            "in_flight": s["in_flight"],
+                        }
+                        for s in backlog[:_DIGEST_TOP_SIGHTINGS]
                     ],
                 },
                 "shifts": shifts,

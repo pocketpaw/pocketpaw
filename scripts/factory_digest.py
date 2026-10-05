@@ -4,7 +4,8 @@
 # Calls GET /api/v1/belt/mandates/digest on a running backend and renders the
 # result as markdown: one table of mandates, then what needs a human (plan and
 # diff gates), then failures with their reason (stuck headless develops of any
-# age, failed runs, shifts whose plan never reached the gate), then what landed.
+# age, failed runs, shifts whose plan never reached the gate), then what landed,
+# then the open backlog (sightings no landed task has resolved, any age).
 #
 # Stdlib only (urllib). The bearer token comes from --token-file or $PAW_TOKEN
 # and is never printed.
@@ -58,14 +59,16 @@ def render(digest: dict[str, Any]) -> str:
         f"{totals.get('mandates', 0)} mandates · {totals.get('new_sightings', 0)} new sightings"
         f" · {totals.get('shifts', 0)} shifts · {totals.get('runs', 0)} runs"
         f" ({totals.get('landed', 0)} landed, {totals.get('failed', 0)} failed)"
-        f" · {totals.get('gates_waiting', 0)} gates waiting",
+        f" · {totals.get('gates_waiting', 0)} gates waiting"
+        f" · {totals.get('open_backlog', 0)} open in the backlog",
         "",
-        "| Mandate | Cadence | Sightings | Shifts | Runs | Gates |",
-        "|---|---|---|---|---|---|",
+        "| Mandate | Cadence | Sightings | Backlog | Shifts | Runs | Gates |",
+        "|---|---|---|---|---|---|---|",
     ]
     needs: list[str] = []
     failures: list[str] = []
     landed: list[str] = []
+    backlog: list[str] = []
     for m in mandates:
         name = m["name"]
         sight = m["sightings"]
@@ -75,10 +78,16 @@ def render(digest: dict[str, Any]) -> str:
             sight_cell += f" · sev {top['severity']} {_cell(top['title'])[:60]}"
         gates = m["gates"]
         n_gates = len(gates["plans"]) + len(gates["diffs"])
+        open_ = m.get("backlog") or {"count": 0, "top": []}
         lines.append(
-            f"| {_cell(name)} | {m['cadence']} | {sight_cell} | {_shifts_cell(m['shifts'])}"
-            f" | {_runs_cell(m['runs'])} | {n_gates or '-'} |"
+            f"| {_cell(name)} | {m['cadence']} | {sight_cell} | {open_['count'] or '-'}"
+            f" | {_shifts_cell(m['shifts'])} | {_runs_cell(m['runs'])} | {n_gates or '-'} |"
         )
+        for b in open_["top"]:
+            flight = " (in flight)" if b.get("in_flight") else ""
+            backlog.append(f"- {name}: sev {b['severity']} {_cell(b['title'])[:80]}{flight}")
+        if open_["count"] > len(open_["top"]):
+            backlog.append(f"- {name}: and {open_['count'] - len(open_['top'])} more")
         for g in gates["plans"]:
             needs.append(f"- {name}: plan gate, shift {g['shift_no']} ({g['task_count']} tasks)")
         for g in gates["diffs"]:
@@ -96,8 +105,14 @@ def render(digest: dict[str, Any]) -> str:
                 where = r.get("pr_url") or r.get("branch") or r.get("commit_sha") or ""
                 landed.append(f"- {name}: {r['title']}" + (f" ({where})" if where else ""))
     if not mandates:
-        lines.append("| (no mandates) | | | | | |")
-    for title, items in (("Needs you", needs), ("Failures", failures), ("Landed", landed)):
+        lines.append("| (no mandates) | | | | | | |")
+    sections = (
+        ("Needs you", needs),
+        ("Failures", failures),
+        ("Landed", landed),
+        ("Backlog", backlog),
+    )
+    for title, items in sections:
         lines += ["", f"## {title}", ""]
         lines += items or ["- nothing"]
     return "\n".join(lines) + "\n"

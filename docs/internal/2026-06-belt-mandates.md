@@ -35,8 +35,12 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
    └── SHIFT (manual trigger, or the cadence scheduler: daily / weekly)
          1. sense   — run patrols, persist new sightings (deduped)
          2. judge   — the FOREMAN makes ONE LLM call over:
-                      charter (verbatim, BOUNDARIES first) + sighting digest
-                      since last shift + last 3 shifts' outcomes + soul recall
+                      charter (verbatim, BOUNDARIES first) + the OPEN
+                      sightings (the backlog: any sighting no landed task has
+                      resolved; capped at 30; new vs carried over; the tasks
+                      citing each, in-flight ones flagged) + last 3 shifts'
+                      outcomes with each task's run result and failure
+                      reason + soul recall
          3. validate — machine checks on ACTION fields ONLY
                       (budget cap, evidence refs, boundary phrases in
                       title/expected_outcome — the `why` narration is NEVER
@@ -109,8 +113,9 @@ through a pluggable `PlanLlm` protocol, selected by `POCKETPAW_MANDATE_LLM`:
   share); parses the envelope's `result`, tolerates fenced JSON. The binary is `POCKETPAW_FACTORY_CLAUDE_BIN`,
   else `claude` on PATH (never the SDK's bundled copy, which goes stale); the
   model is `POCKETPAW_FACTORY_CLAUDE_MODEL`, else the CLI's default.
-- `mock` — deterministic (one task per sighting, severity-ranked, budget-capped;
-  `no_action` on a quiet digest). Tests script it via `foreman.set_mock_plan`.
+- `mock` — deterministic (one task per open sighting that is not in flight,
+  severity-ranked, budget-capped; `no_action` when nothing is left to plan).
+  Tests script it via `foreman.set_mock_plan`.
 
 The prompt encodes every sim-validated rule: charter verbatim with BOUNDARIES
 prominent; at most `budget.max_tasks_per_shift` tasks; every task cites
@@ -119,8 +124,52 @@ is correct and respected; boundaries override KPI opportunities; never repeat
 a failed approach without stating what changed; tasks in one shift are
 independent of each other (they develop from the same base and land
 separately, so dependent follow-up work waits for a later shift; plan
-validation cannot detect a dependency, so only the prompt says it); strict
-JSON only.
+validation cannot detect a dependency, so only the prompt says it); a task in
+flight is never planned again; strict JSON only.
+
+#### What the foreman reads: the backlog and the run outcomes
+
+A sighting is **open** until a task that cites it (its `evidence_refs`)
+**lands**. A failed, rejected or still-running task leaves it open. The
+foreman gets every open sighting, not just the ones filed since the last
+shift, so work it skipped or that failed comes back on the next shift:
+
+- **Order and cap.** Highest severity first, then oldest; at most 30
+  (`_BACKLOG_CAP` in `mandates/service.py`). Past the cap the prompt says
+  `(showing 30 of N open sightings: ...)`.
+- **Per sighting.** `new` (filed since the last shift) or `carried over`, the
+  tasks that cited it (`shift N "<title>" <status>`), and `IN FLIGHT` when one
+  of them is still being worked.
+- **Task status.** From the task's run row: `landed`, `failed`, `rejected`,
+  `pending at gate` (diff waiting on a human), `approved` (landing),
+  `developing` (headless develop running), `queued` (waiting for the develop
+  station), or `develop failed` (headless develop failed; waits for a human
+  and is not in flight). A task with no run takes the plan Action's status:
+  `pending at plan gate` (in flight), `plan rejected`, `plan failed`,
+  `dispatched` (announce-only dispatcher). In flight = queued, developing,
+  approved, pending at gate, pending at plan gate.
+- **History.** Each of the last 3 shifts lists its planned tasks with that
+  status, the cited sighting ids and, on failure, the run's `error`. Prompt
+  rule 7 says an in-flight task is never planned again, and the existing rule
+  says a failed approach is not repeated without stating what changed.
+- **Gate teaching.** A rejection or edit at the plan gate is filed as a
+  feedback sighting with `evidence.source == "gate"`. Those with a `shift_no`
+  are history, not backlog: they show under that shift as
+  `at the gate: reject "<task>": <reason>` and never count as open. A rejected
+  task is dropped from the plan, so this note is the only record of it.
+
+**Resolution.** The run rows carry `plan_action_id` and `task_index` (1-based
+into the plan's tasks as dispatched). `_backlog` joins the mandate's runs to
+their plan tasks' `evidence_refs`; a sighting cited by a `landed` run is
+resolved. The shift trigger writes `resolved_by_run` / `resolved_at` on the
+sighting the first time it sees that, and resolved sightings stay out of the
+backlog for good. Computing at shift time was chosen over a hook on the belt
+executor's land path for two reasons: it also resolves runs that landed
+before the join existed, and the belt stays mandate-agnostic. Persisting is
+still needed, because the runs list reads only the workspace's newest 200
+actions, and an old landed run would otherwise drop out and reopen its
+sightings. Plans read per shift: those behind the mandate's runs, every plan
+still at the plan gate, and the last 3 shifts'.
 
 ## Endpoints (`/api/v1/belt/mandates`, RBAC mirrors the belt console)
 
@@ -373,9 +422,10 @@ fails. The status flip uses the store's `_update_status` with
 status, stage and the landing fields: `title` (the task title, `null` on a
 hand-driven run), `files_changed` (from the attached diff, replaced by the
 staged count on landing), `redevelop` (how many times the run went back to the
-develop station on a moved base: 0 or 1), and `error`: why the run failed, which is the
-executor's reason (`Action.error`) or, for a develop that failed, the
-`headless_error`. `null` when nothing failed.
+develop station on a moved base: 0 or 1), `plan_action_id` / `task_index` (the
+mandate plan task it works, `null` on a hand-driven run), and `error`: why the
+run failed, which is the executor's reason (`Action.error`) or, for a develop
+that failed, the `headless_error`. `null` when nothing failed.
 
 ## Security posture
 
@@ -444,6 +494,8 @@ reads as UTC) returns:
 {since, generated_at,
  mandates: [{id, name, status, cadence,
              sightings: {count, top: [{title, severity, patrol}]},   # top 5
+             backlog:   {count, top: [{title, severity, patrol,
+                                       in_flight}]},     # open, any age, top 5
              shifts: [{no, state, outcome, task_count}],             # since
              runs:   [{action_id, status, title, pr_url, branch,
                        commit_sha, headless_error, headless_state,
@@ -452,18 +504,23 @@ reads as UTC) returns:
                       diffs: [<run row>]},                           # any age
              stuck:  [<run row>]}],      # queued with headless_error or a
                                          # leftover headless_state, any age
- totals: {mandates, new_sightings, shifts, runs, landed, failed, gates_waiting}}
+ totals: {mandates, new_sightings, shifts, runs, landed, failed, gates_waiting,
+          open_backlog}}
 ```
 
-Gates and stuck runs are listed whatever their age: an in-gate plan, a diff at
-`proposed`, or a headless develop from last week that failed or never finished
-still needs a human. The digest is composed from the existing
+Gates, stuck runs and the backlog are listed whatever their age: an in-gate
+plan, a diff at `proposed`, or a headless develop from last week that failed or
+never finished still needs a human, and an open sighting is still waiting. The
+backlog is the foreman's (same `_backlog` read, same order), so the report and
+the next shift agree on what is open; the digest never writes resolution. The digest is composed from the existing
 reads (`list_mandates`, `get_mandate`, `shift_wire`, `list_sightings`, the belt
 runs list), so it cannot disagree with the console; shifts come from the
 detail's 10 most recent.
 
-`scripts/factory_digest.py` prints it as markdown (a mandates table, then
-*Needs you*, *Failures* with each run's `error` or `headless_error`, *Landed*). Stdlib only; the token comes from
+`scripts/factory_digest.py` prints it as markdown (a mandates table with a
+Backlog count, then *Needs you*, *Failures* with each run's `error` or
+`headless_error`, *Landed*, *Backlog* with the top open items, in flight
+marked). Stdlib only; the token comes from
 `--token-file` or `PAW_TOKEN` and is never printed:
 
 ```bash
@@ -521,8 +578,13 @@ real-instinct-router approve → dispatch and asserts EXACTLY ONE
 `decision.completed` (this repo's documented chain-doubling seam). Also pinned:
 stood_down, budget cap, boundary-check-ignores-`why`, patrol intake, deps
 patrol + dedup, tenant isolation, reject-closes-once, and the digest route
-(sightings, shifts, runs, waiting gates, totals, the `since` window, tenant
-scope; it also renders `scripts/factory_digest.py` against the real wire shape).
+(sightings, backlog, shifts, runs, waiting gates, totals, the `since` window,
+tenant scope; it also renders `scripts/factory_digest.py` against the real wire
+shape). The backlog tests replay the live run's gap through the real station
+dispatcher: unaddressed and failed sightings carry into the next shift's
+prompt, a landed task resolves (and persists) its sightings, a failed task's
+reason shows in the history, in-flight runs and an in-gate plan are flagged,
+a gate rejection lands in history not backlog, and the 30 cap.
 
 `tests/cloud/test_belt_upstream_patrol.py` runs the upstream patrol against a
 tmp repo's Cargo.toml with a fake `gh`: summary and area sightings, the
