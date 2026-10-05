@@ -24,7 +24,9 @@
 # boundary check reads ACTION fields only (a ``why`` that names the forbidden
 # thing passes — that's a refusal, not a violation); patrol intake → sighting;
 # deps patrol against a real manifest; tenant isolation on every read; the
-# digest route (sightings, shifts, runs and waiting gates per mandate).
+# digest route (sightings, shifts, runs and waiting gates per mandate); the
+# foreman's backlog (open sightings carry over across shifts, a landed task
+# resolves its sightings, in-flight work is marked, the list is capped).
 
 from __future__ import annotations
 
@@ -1086,3 +1088,171 @@ async def test_create_refuses_repo_outside_the_workspace_roots(
         res = create(outside)
         assert res.status_code == 422, (outside, res.text)
         assert "allowed repo roots" in res.text
+
+
+# ---------------------------------------------------------------------------
+# backlog — the foreman reads every open sighting, not only the new ones
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def foreman_calls(monkeypatch) -> list:
+    """Record what the mock foreman receives (prompt + context) each shift."""
+    calls: list = []
+    original = foreman.MockLlm.plan
+
+    async def _plan(self, *, prompt, context):
+        calls.append(SimpleNamespace(prompt=prompt, context=context))
+        return await original(self, prompt=prompt, context=context)
+
+    monkeypatch.setattr(foreman.MockLlm, "plan", _plan)
+    return calls
+
+
+def _resolve_all(client: TestClient, mandate_id: str, shift: dict) -> None:
+    n = shift["task_count"]
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/plan/resolve",
+        json={
+            "shift_no": shift["no"],
+            "decisions": [{"index": i, "decision": "approve"} for i in range(n)],
+        },
+    )
+    assert res.status_code == 200, res.text
+
+
+async def _shift_runs(shift_no: int) -> list[dict]:
+    """The shift's station runs, in plan order."""
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    runs = (await belt_service.list_runs(WS))["runs"]
+    return sorted((r for r in runs if r["shift_no"] == shift_no), key=lambda r: r["task_index"])
+
+
+async def test_backlog_carries_open_sightings_and_resolves_landed_ones(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch, foreman_calls
+):
+    """The live run's gap: shift 1 of 4 sightings plans 2 tasks; one lands, one
+    fails. Shift 2 must still see the 2 unaddressed sightings AND the failed
+    task's sighting (with its attempt), and not the landed one, which is
+    recorded resolved. Shift 3 sees shift 2's still-running tasks as IN FLIGHT
+    and the mock plans only what is not."""
+    from pocketpaw_ee.cloud.mandates.domain import SightingDoc
+
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "station")
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "toy"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo, budget=2)
+    ids = {}
+    for key, text, sev in (
+        ("customer", "can't add a customer", 5),
+        ("buy", "buy button does nothing", 4),
+        ("tabs", "tabs reset on reload", 3),
+        ("pay", "pay page is slow", 2),
+    ):
+        res = client.post(
+            f"/belt/mandates/{mandate_id}/feedback",
+            json={"text": text, "severity": sev, "source": "support"},
+        )
+        ids[key] = res.json()["id"]
+
+    # Shift 1 — everything is new; the mock plans customer + buy.
+    shift1 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    ctx1 = foreman_calls[-1].context
+    assert [s["id"] for s in ctx1.sightings] == [ids[k] for k in ("customer", "buy", "tabs", "pay")]
+    assert all(s["new"] and not s["tasks"] for s in ctx1.sightings)
+    _resolve_all(client, mandate_id, shift1)
+    customer_run, buy_run = await _shift_runs(1)
+    await store.approve(customer_run["action_id"])
+    await store.mark_executed(customer_run["action_id"], "landed on feat/belt-1")
+    await store.approve(buy_run["action_id"])
+    await store.mark_failed(buy_run["action_id"], "diff did not apply cleanly (conflict)")
+
+    # Shift 2 — no new sightings, but three are still open.
+    shift2 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    assert shift2["state"] == "in_gate", "the foreman must not stand down on an open backlog"
+    call = foreman_calls[-1]
+    open2 = {s["id"]: s for s in call.context.sightings}
+    assert set(open2) == {ids["buy"], ids["tabs"], ids["pay"]}
+    assert not any(s["new"] for s in open2.values())
+    assert open2[ids["buy"]]["tasks"] == [
+        {"shift_no": 1, "title": "Address: buy button does nothing", "status": "failed"}
+    ]
+    assert not open2[ids["buy"]]["in_flight"]
+    assert open2[ids["tabs"]]["tasks"] == []
+    assert ids["customer"] not in call.prompt
+    assert f"id={ids['tabs']} patrol=feedback severity=3 [carried over]" in call.prompt
+    assert 'shift 1 "Address: buy button does nothing" failed' in call.prompt
+
+    # The landed task's sighting is recorded resolved; the failed one is not.
+    resolved = await SightingDoc.get(_oid(ids["customer"]))
+    assert resolved.resolved_by_run == customer_run["action_id"]
+    assert resolved.resolved_at is not None
+    assert (await SightingDoc.get(_oid(ids["buy"]))).resolved_by_run is None
+
+    # Shift 2 replans buy + tabs. Leave them running: buy developing in the
+    # background, tabs's diff waiting at the per-diff gate.
+    _resolve_all(client, mandate_id, shift2)
+    buy2, tabs2 = await _shift_runs(2)
+    await _patch_run(store, buy2["action_id"], headless_state="queued")
+    await _patch_run(store, tabs2["action_id"], station_pending=False, diff="--- a/x\n+++ b/x\n")
+
+    client.post(
+        f"/belt/mandates/{mandate_id}/feedback", json={"text": "logo blurry", "source": "support"}
+    )
+    shift3 = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    call = foreman_calls[-1]
+    open3 = {s["summary"]: s for s in call.context.sightings}
+    assert open3["buy button does nothing"]["in_flight"]
+    assert [t["status"] for t in open3["buy button does nothing"]["tasks"]] == [
+        "failed",
+        "developing",
+    ]
+    assert open3["tabs reset on reload"]["in_flight"]
+    assert open3["tabs reset on reload"]["tasks"][0]["status"] == "pending at gate"
+    assert not open3["pay page is slow"]["in_flight"]
+    assert open3["logo blurry"]["new"] and not open3["pay page is slow"]["new"]
+    assert "IN FLIGHT" in call.prompt and "7. A task that is IN FLIGHT" in call.prompt
+
+    # The mock skips in-flight work: shift 3 plans only pay + the new sighting.
+    plan3 = (await store.get_action(shift3["plan_action_id"])).parameters["_belt_plan"]
+    cited = {ref for t in plan3["plan"]["tasks"] for ref in t["evidence_refs"]}
+    assert cited == {ids["pay"], open3["logo blurry"]["id"]}
+
+
+async def test_backlog_is_capped_highest_severity_then_oldest(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch, foreman_calls
+):
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    for i in range(32):
+        await mandate_service.file_feedback(
+            WS,
+            USER,
+            mandate_id,
+            {"text": f"item {i}", "severity": 5 if i < 3 else 2, "source": "t"},
+        )
+    client.post(f"/belt/mandates/{mandate_id}/shift")
+    call = foreman_calls[-1]
+    summaries = [s["summary"] for s in call.context.sightings]
+    assert call.context.open_total == 32 and len(summaries) == 30
+    # Severity first, then oldest: the two newest low-severity items drop.
+    assert summaries[:4] == ["item 0", "item 1", "item 2", "item 3"]
+    assert "item 30" not in summaries and "item 31" not in summaries
+    assert "(showing 30 of 32 open sightings: highest severity first, then oldest)" in call.prompt
+
+
+def _oid(raw: str):
+    from bson import ObjectId
+
+    return ObjectId(raw)
+
+
+async def _patch_run(store: InstinctStore, action_id: str, **blob_changes) -> None:
+    action = await store.get_action(action_id)
+    params = dict(action.parameters)
+    params["_code_change"] = {**params["_code_change"], **blob_changes}
+    await store.update_parameters(action_id, params)

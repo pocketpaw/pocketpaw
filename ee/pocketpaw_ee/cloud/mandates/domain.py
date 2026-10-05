@@ -195,7 +195,9 @@ class SightingDoc(TimestampedDocument):
     ``patrol`` is the producing patrol name (``"deps"`` / ``"feedback"``).
     ``severity`` is 1-5 (5 = most urgent). ``summary`` is the one-line headline;
     ``evidence`` carries patrol-specific detail (package name, CVE id, feedback
-    source). Sightings are the foreman's input signal between shifts.
+    source). A sighting stays OPEN, in the foreman's backlog, until a task that
+    cites it lands; the shift that first sees that landed run records it on
+    ``resolved_by_run`` / ``resolved_at``.
     """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
@@ -205,6 +207,8 @@ class SightingDoc(TimestampedDocument):
     summary: str
     evidence: dict = Field(default_factory=dict)
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    resolved_by_run: str | None = None
+    resolved_at: datetime | None = None
 
     class Settings:
         name = "mandate_sightings"

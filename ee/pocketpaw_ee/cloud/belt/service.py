@@ -686,6 +686,10 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         # Mandate provenance (None on a hand-driven run).
         "mandate_id": str(blob.get("mandate_id") or "") or None,
         "shift_no": blob.get("shift_no"),
+        # Which plan task this run works (1-based into the plan's tasks): the
+        # foreman's backlog joins on it to read the task's evidence refs.
+        "plan_action_id": str(blob.get("plan_action_id") or "") or None,
+        "task_index": blob.get("task_index"),
         "headless_error": str(blob.get("headless_error") or "") or None,
         # "queued" while a background develop owns the run; left behind = orphan.
         "headless_state": str(blob.get("headless_state") or "") or None,

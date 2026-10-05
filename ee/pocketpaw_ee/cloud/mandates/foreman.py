@@ -1,17 +1,19 @@
 # ee/pocketpaw_ee/cloud/mandates/foreman.py — the FOREMAN, a mandate's LLM seat.
 #
-# Once per SHIFT it reads the charter, the sighting digest since the last shift,
-# the last 3 shifts' outcomes, and (when a soul is bound) the soul recall, then
-# makes EXACTLY ONE LLM call that returns a strict-JSON PlanProposal: a FEW tasks
-# (≤ the charter's budget) or an explicit empty plan with a reason. A task may
-# name a charter ``recipe`` (a deterministic command) instead of LLM develop work.
+# Once per SHIFT it reads the charter, the OPEN sightings (the backlog: every
+# sighting no landed task has resolved, capped, each marked new or carried over
+# and annotated with the tasks that cite it), the last 3 shifts' outcomes, and
+# (when a soul is bound) the soul recall, then makes EXACTLY ONE LLM call that
+# returns a strict-JSON PlanProposal: a FEW tasks (≤ the charter's budget) or an
+# explicit empty plan with a reason. A task may name a charter ``recipe`` (a
+# deterministic command) instead of LLM develop work.
 #
 # LLM transport (env ``POCKETPAW_MANDATE_LLM=claude|mock``): ``claude`` (default)
 # runs the SYSTEM Claude Code CLI (``claude -p --tools "" --output-format json``,
 # prompt on stdin, in an empty temp dir with the factory's scrubbed env — the
 # prompt carries third-party sighting text) and reads the envelope's
-# ``result``; ``mock`` is deterministic (one task per sighting, highest severity
-# first; ``set_mock_plan()`` overrides it in tests).
+# ``result``; ``mock`` is deterministic (one task per open sighting not already
+# in flight, highest severity first; ``set_mock_plan()`` overrides it in tests).
 # ``claude_cli_argv`` / ``claude_result_text`` are the ONE place the factory
 # resolves the binary (``POCKETPAW_FACTORY_CLAUDE_BIN``, else ``which claude``)
 # and model (``POCKETPAW_FACTORY_CLAUDE_MODEL``, passed as ``--model`` only when
@@ -29,10 +31,11 @@
 # Prompt rules (sim-validated — keep them in ``build_prompt``): charter verbatim
 # with BOUNDARIES first; ≤ budget tasks; every task cites sighting ids + names an
 # expected KPI direction; an EMPTY plan with a reason is correct when signals are
-# quiet; boundaries override KPI opportunities; never repeat a failed approach
-# without saying what changed; tasks in one shift are independent of each other
-# (they develop from the same base and land separately; dependent follow-up
-# waits for a later shift, which validation cannot detect); strict JSON only.
+# quiet or all in flight; boundaries override KPI opportunities; never repeat a
+# failed approach without saying what changed; tasks in one shift are independent
+# of each other (they develop from the same base and land separately; dependent
+# follow-up waits for a later shift, which validation cannot detect); an
+# in-flight task is never planned again; strict JSON only.
 
 from __future__ import annotations
 
@@ -93,8 +96,12 @@ class ForemanContext:
 
     shift_no: int
     charter: dict[str, Any]
-    # Each digest entry: {id, patrol, severity, summary}
+    # The open backlog, capped: {id, patrol, severity, summary, new, in_flight,
+    # tasks: [{shift_no, title, status}]} — ``new`` = filed since the last
+    # shift; ``tasks`` are the planned tasks citing the sighting.
     sightings: list[dict[str, Any]] = field(default_factory=list)
+    # How many sightings were open before the cap (0 = same as ``sightings``).
+    open_total: int = 0
     # Last 3 shifts, oldest-first: {no, state, outcome} — outcome is the
     # free-text result of the shift (what landed / failed / stood down).
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -211,8 +218,9 @@ def set_mock_plan(plan: dict[str, Any] | str | None) -> None:
 class MockLlm:
     """Deterministic foreman for tests + offline demos.
 
-    Default behavior: one task per sighting (highest severity first) capped at
-    the charter budget; an explicit no_action plan when the digest is empty.
+    Default behavior: one task per open sighting that is not already in flight
+    (highest severity first) capped at the charter budget; an explicit no_action
+    plan when nothing is left to plan.
     ``set_mock_plan`` overrides the response entirely."""
 
     async def plan(self, *, prompt: str, context: ForemanContext) -> str:
@@ -222,7 +230,11 @@ class MockLlm:
         budget = int((context.charter.get("budget") or {}).get("max_tasks_per_shift") or 3)
         kpis = context.charter.get("kpis") or []
         kpi_hint = f"{kpis[0]['name']} {kpis[0]['direction']}" if kpis else "surface health up"
-        ranked = sorted(context.sightings, key=lambda s: int(s.get("severity") or 0), reverse=True)
+        ranked = sorted(
+            (s for s in context.sightings if not s.get("in_flight")),
+            key=lambda s: int(s.get("severity") or 0),
+            reverse=True,
+        )
         if not ranked:
             return json.dumps(
                 {
@@ -266,6 +278,24 @@ def resolve_llm() -> PlanLlm:
 # ---------------------------------------------------------------------------
 
 
+def _sighting_line(s: dict[str, Any]) -> str:
+    """One open sighting: new or carried over, plus every task that cited it
+    (``IN FLIGHT`` when one is still being worked)."""
+    tags = ["new" if s.get("new") else "carried over"]
+    tasks = s.get("tasks") or []
+    if tasks:
+        tags.append(
+            "tasks: "
+            + "; ".join(f'shift {t["shift_no"]} "{t["title"]}" {t["status"]}' for t in tasks)
+        )
+    if s.get("in_flight"):
+        tags.append("IN FLIGHT")
+    return (
+        f"- id={s['id']} patrol={s.get('patrol')} severity={s.get('severity')} "
+        f"[{' | '.join(tags)}]: {s.get('summary')}"
+    )
+
+
 def build_prompt(context: ForemanContext) -> str:
     """Assemble the single judgment prompt. Charter rides VERBATIM (as JSON)
     with the BOUNDARIES block pulled out and stated first — boundaries override
@@ -276,13 +306,14 @@ def build_prompt(context: ForemanContext) -> str:
     budget = (charter.get("budget") or {}).get("max_tasks_per_shift", 3)
 
     sighting_lines = (
-        "\n".join(
-            f"- id={s['id']} patrol={s.get('patrol')} severity={s.get('severity')}: "
-            f"{s.get('summary')}"
-            for s in context.sightings
-        )
-        or "(none — the surface has been quiet since the last shift)"
+        "\n".join(_sighting_line(s) for s in context.sightings)
+        or "(none — every sighting is resolved by a landed task, or the surface is quiet)"
     )
+    if context.open_total > len(context.sightings):
+        sighting_lines += (
+            f"\n(showing {len(context.sightings)} of {context.open_total} open sightings: "
+            "highest severity first, then oldest)"
+        )
     history_lines = (
         "\n".join(
             f"- shift {h.get('no')}: state={h.get('state')} outcome={h.get('outcome') or 'n/a'}"
@@ -307,8 +338,11 @@ forbidden thing in your reasoning — that is correct behavior.
 == CHARTER (verbatim) ==
 {json.dumps(charter, indent=2)}
 
-== SIGHTINGS since the last shift ==
+== OPEN SIGHTINGS (the backlog: no landed task has resolved these yet) ==
 {sighting_lines}
+A sighting stays open until a task citing it LANDS. "new" arrived since the last shift; \
+"carried over" is older and still unresolved. A task marked failed, develop failed or \
+rejected did not resolve its sighting.
 
 == LAST SHIFTS' OUTCOMES (oldest first) ==
 {history_lines}
@@ -327,15 +361,18 @@ the command instead of writing code. Use ONLY a name listed above; otherwise "re
 1. Plan AT MOST {budget} task(s) this shift. Fewer is better. Pick only what moves a KPI.
 2. Every task MUST cite at least one sighting id in "evidence_refs" and MUST name an \
 expected KPI and its direction in "expected_outcome" (e.g. "open_cves down").
-3. An EMPTY plan is a correct, respected outcome: if the signals are quiet and the KPIs are \
-healthy, set "no_action": true with a short "no_action_reason" and an empty "tasks" list. \
-Do not invent work.
+3. An EMPTY plan is a correct, respected outcome: if the signals are quiet (or every open \
+sighting is already IN FLIGHT) and the KPIs are healthy, set "no_action": true with a short \
+"no_action_reason" and an empty "tasks" list. Do not invent work.
 4. Boundaries override KPI opportunities — a boundary-crossing task is never worth it.
 5. This is shift number {context.shift_no}; set "shift_no" to exactly {context.shift_no}.
 6. Tasks in one shift must be INDEPENDENT of each other. Each is developed from the same \
 starting code and lands on its own, so a task never sees another task's change from this \
 shift. Never plan a task that builds on, extends, or needs another task in this shift; \
 plan the first step now and leave the dependent follow-up for a later shift.
+7. A task that is IN FLIGHT (queued, developing, approved, or pending at a gate) is already \
+being worked. Never plan the same work again, even under a new title; its sighting stays \
+open until it lands, and that is expected.
 
 == OUTPUT (STRICT) ==
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:
